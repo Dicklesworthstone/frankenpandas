@@ -45,15 +45,15 @@ pub fn groupby_sum(
         .column()
         .reindex_by_positions(&plan.right_positions)?;
 
-    let mut ordering = Vec::<String>::new();
-    let mut slot = HashMap::<String, (Scalar, f64)>::new();
+    let mut ordering = Vec::<GroupKeyRef<'_>>::new();
+    let mut slot = HashMap::<GroupKeyRef<'_>, (Scalar, f64)>::new();
 
     for (key, value) in aligned_keys.values().iter().zip(aligned_values.values()) {
         if options.dropna && key.is_missing() {
             continue;
         }
 
-        let key_id = key_identity(key);
+        let key_id = GroupKeyRef::from_scalar(key);
         let entry = slot.entry(key_id.clone()).or_insert_with(|| {
             ordering.push(key_id.clone());
             (key.clone(), 0.0)
@@ -91,13 +91,28 @@ pub fn groupby_sum(
     Ok(Series::new("sum", Index::new(out_index), out_column)?)
 }
 
-fn key_identity(key: &Scalar) -> String {
-    match key {
-        Scalar::Bool(v) => format!("bool:{v}"),
-        Scalar::Int64(v) => format!("i64:{v}"),
-        Scalar::Float64(v) => format!("f64:{v}"),
-        Scalar::Utf8(v) => format!("str:{v}"),
-        Scalar::Null(kind) => format!("null:{kind:?}"),
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+enum GroupKeyRef<'a> {
+    Bool(bool),
+    Int64(i64),
+    FloatBits(u64),
+    Utf8(&'a str),
+    Null(NullKind),
+}
+
+impl<'a> GroupKeyRef<'a> {
+    fn from_scalar(key: &'a Scalar) -> Self {
+        match key {
+            Scalar::Bool(v) => Self::Bool(*v),
+            Scalar::Int64(v) => Self::Int64(*v),
+            Scalar::Float64(v) => Self::FloatBits(if v.is_nan() {
+                f64::NAN.to_bits()
+            } else {
+                v.to_bits()
+            }),
+            Scalar::Utf8(v) => Self::Utf8(v.as_str()),
+            Scalar::Null(kind) => Self::Null(*kind),
+        }
     }
 }
 

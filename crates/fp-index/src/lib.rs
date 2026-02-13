@@ -100,6 +100,14 @@ impl Index {
         }
         positions
     }
+
+    fn position_map_first_ref(&self) -> HashMap<&IndexLabel, usize> {
+        let mut positions = HashMap::with_capacity(self.labels.len());
+        for (idx, label) in self.labels.iter().enumerate() {
+            positions.entry(label).or_insert(idx);
+        }
+        positions
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -116,24 +124,25 @@ pub enum IndexError {
 }
 
 pub fn align_union(left: &Index, right: &Index) -> AlignmentPlan {
-    let left_positions_map = left.position_map_first();
-    let right_positions_map = right.position_map_first();
+    let left_positions_map = left.position_map_first_ref();
+    let right_positions_map = right.position_map_first_ref();
 
-    let mut union_labels = left.labels.clone();
+    let mut union_labels = Vec::with_capacity(left.labels.len() + right.labels.len());
+    union_labels.extend(left.labels.iter().cloned());
     for label in &right.labels {
-        if !left_positions_map.contains_key(label) {
+        if !left_positions_map.contains_key(&label) {
             union_labels.push(label.clone());
         }
     }
 
     let left_positions = union_labels
         .iter()
-        .map(|label| left_positions_map.get(label).copied())
+        .map(|label| left_positions_map.get(&label).copied())
         .collect();
 
     let right_positions = union_labels
         .iter()
-        .map(|label| right_positions_map.get(label).copied())
+        .map(|label| right_positions_map.get(&label).copied())
         .collect();
 
     AlignmentPlan {
