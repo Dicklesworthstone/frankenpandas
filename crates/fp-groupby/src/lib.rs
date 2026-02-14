@@ -438,6 +438,402 @@ fn try_groupby_sum_dense_int64_arena(
     Some((out_index, out_values))
 }
 
+// ---------------------------------------------------------------------------
+// AG-12: Sketching / Streaming Aggregation Data Structures
+// ---------------------------------------------------------------------------
+
+/// Hash function for sketching. Uses SplitMix64 finalizer for good avalanche.
+fn sketch_hash(value: u64, seed: u64) -> u64 {
+    let mut h = value.wrapping_add(seed);
+    h = (h ^ (h >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    h = (h ^ (h >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    h ^ (h >> 31)
+}
+
+/// Hash a Scalar value to u64 for sketching purposes.
+fn scalar_to_hash_bits(value: &Scalar) -> u64 {
+    match value {
+        Scalar::Int64(v) => *v as u64,
+        Scalar::Float64(v) => {
+            if v.is_nan() {
+                return 0xDEAD_BEEF_CAFE_BABE;
+            }
+            v.to_bits()
+        }
+        Scalar::Bool(v) => u64::from(*v),
+        Scalar::Utf8(s) => {
+            let mut h = 0xcbf2_9ce4_8422_2325_u64;
+            for b in s.bytes() {
+                h ^= u64::from(b);
+                h = h.wrapping_mul(0x0100_0000_01b3);
+            }
+            h
+        }
+        Scalar::Null(_) => 0,
+    }
+}
+
+// --- HyperLogLog ---
+
+/// HyperLogLog sketch for approximate distinct-count estimation.
+///
+/// Uses 2^p registers (p=14 → 16384 registers → 16KB).
+/// Standard error: 1.04 / sqrt(m) ≈ 0.81% for p=14.
+pub struct HyperLogLog {
+    registers: Vec<u8>,
+    p: u32,
+}
+
+impl HyperLogLog {
+    /// Create a new HLL sketch with precision `p` (6..=18).
+    /// Memory usage: 2^p bytes.
+    #[must_use]
+    pub fn new(p: u32) -> Self {
+        let p = p.clamp(6, 18);
+        let m = 1_usize << p;
+        Self {
+            registers: vec![0_u8; m],
+            p,
+        }
+    }
+
+    /// Default precision: p=14 → 16384 registers → 16KB, ~0.81% error.
+    #[must_use]
+    pub fn default_precision() -> Self {
+        Self::new(14)
+    }
+
+    /// Insert a pre-hashed value.
+    pub fn insert_hash(&mut self, hash: u64) {
+        let m = self.registers.len();
+        let idx = (hash >> (64 - self.p)) as usize;
+        let remaining = if self.p >= 64 {
+            0
+        } else {
+            (hash << self.p) | (1_u64 << (self.p - 1))
+        };
+        let rho = remaining.leading_zeros() as u8 + 1;
+        if rho > self.registers[idx % m] {
+            self.registers[idx % m] = rho;
+        }
+    }
+
+    /// Insert a Scalar value.
+    pub fn insert(&mut self, value: &Scalar) {
+        let raw = scalar_to_hash_bits(value);
+        let hash = sketch_hash(raw, 0x1234_5678);
+        self.insert_hash(hash);
+    }
+
+    /// Estimate the number of distinct elements.
+    #[must_use]
+    pub fn estimate(&self) -> f64 {
+        let m = self.registers.len() as f64;
+
+        // Alpha constant for bias correction.
+        let alpha = match self.registers.len() {
+            16 => 0.673,
+            32 => 0.697,
+            64 => 0.709,
+            _ => 0.7213 / (1.0 + 1.079 / m),
+        };
+
+        let raw_estimate = alpha * m * m
+            / self
+                .registers
+                .iter()
+                .map(|&r| f64::from(2_u32.pow(u32::from(r))).recip())
+                .sum::<f64>();
+
+        // Small range correction (linear counting).
+        let zeros = self.registers.iter().filter(|&&r| r == 0).count();
+        if raw_estimate <= 2.5 * m && zeros > 0 {
+            m * (m / zeros as f64).ln()
+        } else {
+            raw_estimate
+        }
+    }
+
+    /// Memory usage in bytes.
+    #[must_use]
+    pub fn memory_bytes(&self) -> usize {
+        self.registers.len()
+    }
+}
+
+// --- KLL Sketch ---
+
+/// KLL sketch for approximate quantile estimation.
+///
+/// Maintains sorted compactor levels. When a level exceeds capacity,
+/// half its elements are promoted (compacted) to the next level.
+pub struct KllSketch {
+    compactors: Vec<Vec<f64>>,
+    k: usize,
+    size: usize,
+    compact_count: usize,
+}
+
+impl KllSketch {
+    /// Create with target capacity `k`. Higher k = more accuracy, more memory.
+    /// Error bound: ~1/k.
+    #[must_use]
+    pub fn new(k: usize) -> Self {
+        let k = k.max(8);
+        Self {
+            compactors: vec![Vec::with_capacity(k * 2)],
+            k,
+            size: 0,
+            compact_count: 0,
+        }
+    }
+
+    /// Default: k=256 → ~0.4% error.
+    #[must_use]
+    pub fn default_accuracy() -> Self {
+        Self::new(256)
+    }
+
+    /// Insert a value into the sketch.
+    pub fn insert(&mut self, value: f64) {
+        self.compactors[0].push(value);
+        self.size += 1;
+
+        // Compact if level 0 exceeds capacity.
+        if self.compactors[0].len() >= self.capacity_at_level(0) {
+            self.compact(0);
+        }
+    }
+
+    fn capacity_at_level(&self, _level: usize) -> usize {
+        // Uniform capacity across all levels (simplified KLL).
+        // Levels are cleared on compaction; only fresh/promoted items remain.
+        2 * self.k
+    }
+
+    fn compact(&mut self, level: usize) {
+        self.compactors[level]
+            .sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Use compact_count + level to alternate which half gets promoted,
+        // avoiding systematic bias across levels and time.
+        let offset = (self.compact_count + level) % 2;
+        self.compact_count = self.compact_count.wrapping_add(1);
+
+        // Promote every other element to the next level; discard the rest.
+        // Standard KLL: compactor is cleared after compaction.
+        let promoted: Vec<f64> = self.compactors[level]
+            .iter()
+            .copied()
+            .enumerate()
+            .filter_map(|(i, v)| if i % 2 == offset { Some(v) } else { None })
+            .collect();
+
+        self.compactors[level].clear();
+
+        // Ensure next level exists.
+        if level + 1 >= self.compactors.len() {
+            self.compactors.push(Vec::with_capacity(self.k * 2));
+        }
+        self.compactors[level + 1].extend(promoted);
+
+        // Recursively compact if next level overflows.
+        if self.compactors[level + 1].len() >= self.capacity_at_level(level + 1) {
+            self.compact(level + 1);
+        }
+    }
+
+    /// Estimate the quantile at rank `q` (0.0 = min, 1.0 = max).
+    /// Returns `None` if the sketch is empty.
+    #[must_use]
+    pub fn quantile(&self, q: f64) -> Option<f64> {
+        if self.size == 0 {
+            return None;
+        }
+
+        let q = q.clamp(0.0, 1.0);
+
+        // Collect all items with their weights.
+        let mut weighted: Vec<(f64, u64)> = Vec::new();
+        for (level, compactor) in self.compactors.iter().enumerate() {
+            let weight = 1_u64.checked_shl(level as u32).unwrap_or(u64::MAX);
+            for &value in compactor {
+                weighted.push((value, weight));
+            }
+        }
+
+        weighted
+            .sort_unstable_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+        let total_weight: u64 = weighted
+            .iter()
+            .map(|(_, w)| w)
+            .fold(0_u64, |acc, &w| acc.saturating_add(w));
+        let target = (q * total_weight as f64).ceil() as u64;
+        let target = target.max(1).min(total_weight);
+
+        let mut cumulative = 0_u64;
+        for &(value, weight) in &weighted {
+            cumulative += weight;
+            if cumulative >= target {
+                return Some(value);
+            }
+        }
+
+        weighted.last().map(|&(v, _)| v)
+    }
+
+    /// Number of elements inserted.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.size
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.size == 0
+    }
+}
+
+// --- Count-Min Sketch ---
+
+/// Count-Min sketch for approximate frequency estimation.
+///
+/// Uses `depth` independent hash functions and `width` counters per function.
+/// For eps=width factor, delta=depth factor:
+/// - Overestimates by at most eps*N with probability 1-delta.
+/// - Never underestimates.
+pub struct CountMinSketch {
+    counters: Vec<Vec<u64>>,
+    width: usize,
+    seeds: Vec<u64>,
+}
+
+impl CountMinSketch {
+    /// Create with specified width and depth.
+    /// Error <= N/width with probability >= 1 - 2^(-depth).
+    #[must_use]
+    pub fn new(width: usize, depth: usize) -> Self {
+        let width = width.max(16);
+        let depth = depth.max(2);
+        let seeds: Vec<u64> = (0..depth)
+            .map(|i| sketch_hash(i as u64, 0xBEEF_CAFE))
+            .collect();
+        Self {
+            counters: vec![vec![0_u64; width]; depth],
+            width,
+            seeds,
+        }
+    }
+
+    /// Default: width=1024, depth=5 → error <= N/1024 with prob >= 96.9%.
+    #[must_use]
+    pub fn default_accuracy() -> Self {
+        Self::new(1024, 5)
+    }
+
+    /// Increment the count for a Scalar value.
+    pub fn insert(&mut self, value: &Scalar) {
+        let raw = scalar_to_hash_bits(value);
+        for (d, seed) in self.seeds.iter().enumerate() {
+            let h = sketch_hash(raw, *seed) as usize % self.width;
+            self.counters[d][h] = self.counters[d][h].saturating_add(1);
+        }
+    }
+
+    /// Estimate the frequency of a Scalar value.
+    /// Returns the minimum count across all hash functions (never underestimates).
+    #[must_use]
+    pub fn estimate(&self, value: &Scalar) -> u64 {
+        let raw = scalar_to_hash_bits(value);
+        self.seeds
+            .iter()
+            .enumerate()
+            .map(|(d, seed)| {
+                let h = sketch_hash(raw, *seed) as usize % self.width;
+                self.counters[d][h]
+            })
+            .min()
+            .unwrap_or(0)
+    }
+}
+
+/// Result type for approximate aggregation methods.
+#[derive(Debug, Clone)]
+pub struct SketchResult {
+    /// The approximate value.
+    pub value: f64,
+    /// The error bound (absolute or relative depending on method).
+    pub error_bound: f64,
+    /// Memory used by the sketch in bytes.
+    pub memory_bytes: usize,
+}
+
+/// Approximate distinct count (nunique) using HyperLogLog.
+///
+/// Returns a `SketchResult` with the estimated cardinality and error bound.
+/// Memory: ~16KB regardless of input size (p=14).
+pub fn approx_nunique(values: &[Scalar]) -> SketchResult {
+    let mut hll = HyperLogLog::default_precision();
+    for v in values {
+        if !v.is_missing() {
+            hll.insert(v);
+        }
+    }
+    let estimate = hll.estimate();
+    let m = hll.registers.len() as f64;
+    let std_error = 1.04 / m.sqrt();
+    SketchResult {
+        value: estimate,
+        error_bound: std_error * estimate, // absolute error bound
+        memory_bytes: hll.memory_bytes(),
+    }
+}
+
+/// Approximate quantile estimation using KLL sketch.
+///
+/// `q` in [0.0, 1.0]: 0.0 = min, 0.5 = median, 1.0 = max.
+/// Returns `None` if no valid (non-missing) numeric values exist.
+pub fn approx_quantile(values: &[Scalar], q: f64) -> Option<SketchResult> {
+    let mut kll = KllSketch::default_accuracy();
+    for v in values {
+        if let Ok(f) = v.to_f64() {
+            kll.insert(f);
+        }
+    }
+    kll.quantile(q).map(|value| SketchResult {
+        value,
+        error_bound: 1.0 / kll.k as f64, // relative rank error
+        memory_bytes: kll.compactors.iter().map(|c| c.len() * 8).sum(),
+    })
+}
+
+/// Approximate value_counts using Count-Min sketch.
+///
+/// Returns estimated frequencies for each unique value in the input.
+/// Frequencies are guaranteed to never underestimate actual counts.
+pub fn approx_value_counts(values: &[Scalar]) -> Vec<(Scalar, u64)> {
+    let mut cm = CountMinSketch::default_accuracy();
+    let mut seen = Vec::<Scalar>::new();
+
+    for v in values {
+        if v.is_missing() {
+            continue;
+        }
+        cm.insert(v);
+        if !seen.iter().any(|s| s == v) {
+            seen.push(v.clone());
+        }
+    }
+
+    seen.into_iter()
+        .map(|v| {
+            let freq = cm.estimate(&v);
+            (v, freq)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use fp_index::IndexLabel;
@@ -1064,6 +1460,276 @@ mod tests {
                 out.values(),
                 &[Scalar::Float64(10.0), Scalar::Float64(20.0)]
             );
+        }
+    }
+
+    // === AG-12: Sketching / Streaming Aggregation Tests ===
+
+    mod sketch_tests {
+        use super::super::*;
+        use fp_types::{NullKind, Scalar};
+
+        // --- HyperLogLog Tests ---
+
+        #[test]
+        fn hll_empty_estimate_is_zero() {
+            let hll = HyperLogLog::default_precision();
+            assert!(hll.estimate() < 1.0, "empty HLL should estimate ~0");
+        }
+
+        #[test]
+        fn hll_single_element() {
+            let mut hll = HyperLogLog::default_precision();
+            hll.insert(&Scalar::Int64(42));
+            let est = hll.estimate();
+            assert!((0.5..=2.0).contains(&est), "single element estimate={est}");
+        }
+
+        #[test]
+        fn hll_distinct_count_within_error_bound() {
+            let mut hll = HyperLogLog::default_precision();
+            let n = 10_000;
+            for i in 0..n {
+                hll.insert(&Scalar::Int64(i));
+            }
+            let est = hll.estimate();
+            let error = (est - n as f64).abs() / n as f64;
+            assert!(
+                error < 0.05,
+                "HLL estimate={est}, expected={n}, relative_error={error}"
+            );
+        }
+
+        #[test]
+        fn hll_duplicates_do_not_inflate_count() {
+            let mut hll = HyperLogLog::default_precision();
+            // Insert same 100 values 100 times each
+            for _ in 0..100 {
+                for i in 0..100 {
+                    hll.insert(&Scalar::Int64(i));
+                }
+            }
+            let est = hll.estimate();
+            // Should estimate ~100, not ~10000
+            assert!(
+                est < 200.0,
+                "duplicates inflated HLL: estimate={est}, expected ~100"
+            );
+        }
+
+        #[test]
+        fn hll_utf8_values() {
+            let mut hll = HyperLogLog::default_precision();
+            for i in 0..1000 {
+                hll.insert(&Scalar::Utf8(format!("key_{i}")));
+            }
+            let est = hll.estimate();
+            let error = (est - 1000.0).abs() / 1000.0;
+            assert!(
+                error < 0.1,
+                "HLL Utf8 estimate={est}, expected=1000, error={error}"
+            );
+        }
+
+        #[test]
+        fn hll_memory_usage() {
+            let hll = HyperLogLog::default_precision();
+            assert_eq!(hll.memory_bytes(), 16384, "p=14 -> 2^14 = 16384 bytes");
+        }
+
+        // --- KLL Sketch Tests ---
+
+        #[test]
+        fn kll_empty_returns_none() {
+            let kll = KllSketch::default_accuracy();
+            assert!(kll.quantile(0.5).is_none());
+            assert!(kll.is_empty());
+        }
+
+        #[test]
+        fn kll_single_element_returns_it() {
+            let mut kll = KllSketch::new(64);
+            kll.insert(42.0);
+            assert_eq!(kll.quantile(0.0), Some(42.0));
+            assert_eq!(kll.quantile(0.5), Some(42.0));
+            assert_eq!(kll.quantile(1.0), Some(42.0));
+        }
+
+        #[test]
+        fn kll_median_within_error() {
+            let mut kll = KllSketch::default_accuracy();
+            let n = 10_000;
+            for i in 0..n {
+                kll.insert(i as f64);
+            }
+            assert_eq!(kll.len(), n);
+
+            let median = kll.quantile(0.5).expect("non-empty");
+            // True median of 0..9999 is 4999.5
+            let error = (median - 4999.5).abs() / 10_000.0;
+            assert!(
+                error < 0.02,
+                "KLL median={median}, expected ~4999.5, rank_error={error}"
+            );
+        }
+
+        #[test]
+        fn kll_min_max_endpoints() {
+            let mut kll = KllSketch::default_accuracy();
+            for i in 0..1000 {
+                kll.insert(i as f64);
+            }
+
+            let min = kll.quantile(0.0).expect("min");
+            let max = kll.quantile(1.0).expect("max");
+            assert!(min <= 10.0, "KLL min={min}, expected near 0");
+            assert!(max >= 990.0, "KLL max={max}, expected near 999");
+        }
+
+        #[test]
+        fn kll_monotonic_quantiles() {
+            let mut kll = KllSketch::default_accuracy();
+            for i in 0..5000 {
+                kll.insert(i as f64);
+            }
+
+            let q25 = kll.quantile(0.25).expect("q25");
+            let q50 = kll.quantile(0.50).expect("q50");
+            let q75 = kll.quantile(0.75).expect("q75");
+            assert!(
+                q25 <= q50 && q50 <= q75,
+                "quantiles not monotonic: q25={q25}, q50={q50}, q75={q75}"
+            );
+        }
+
+        // --- Count-Min Sketch Tests ---
+
+        #[test]
+        fn cm_empty_estimate_is_zero() {
+            let cm = CountMinSketch::default_accuracy();
+            assert_eq!(cm.estimate(&Scalar::Int64(42)), 0);
+        }
+
+        #[test]
+        fn cm_single_element_exact() {
+            let mut cm = CountMinSketch::default_accuracy();
+            cm.insert(&Scalar::Int64(42));
+            assert_eq!(cm.estimate(&Scalar::Int64(42)), 1);
+        }
+
+        #[test]
+        fn cm_never_underestimates() {
+            let mut cm = CountMinSketch::default_accuracy();
+            for _ in 0..100 {
+                cm.insert(&Scalar::Utf8("a".into()));
+            }
+            for _ in 0..50 {
+                cm.insert(&Scalar::Utf8("b".into()));
+            }
+            assert!(
+                cm.estimate(&Scalar::Utf8("a".into())) >= 100,
+                "CM underestimated 'a'"
+            );
+            assert!(
+                cm.estimate(&Scalar::Utf8("b".into())) >= 50,
+                "CM underestimated 'b'"
+            );
+        }
+
+        #[test]
+        fn cm_overestimate_bounded() {
+            let mut cm = CountMinSketch::default_accuracy();
+            let n = 10_000;
+            for i in 0..n {
+                cm.insert(&Scalar::Int64(i));
+            }
+            // Error <= N/width ≈ 9.77; allow 2x margin for hash variance.
+            let max_overestimate = 2 * n as u64 / 1024 + 1;
+            for i in 0..100 {
+                let est = cm.estimate(&Scalar::Int64(i));
+                assert!(
+                    est <= 1 + max_overestimate,
+                    "CM overestimate too high for key={i}: est={est}, max={max_overestimate}"
+                );
+            }
+        }
+
+        // --- Integration Tests: Public API ---
+
+        #[test]
+        fn approx_nunique_basic() {
+            let values: Vec<Scalar> = (0..1000).map(Scalar::Int64).collect();
+            let result = approx_nunique(&values);
+            let error = (result.value - 1000.0).abs() / 1000.0;
+            assert!(
+                error < 0.1,
+                "approx_nunique={}, expected=1000, error={error}",
+                result.value
+            );
+        }
+
+        #[test]
+        fn approx_nunique_skips_nulls() {
+            let values = vec![
+                Scalar::Int64(1),
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(2),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Int64(1),
+            ];
+            let result = approx_nunique(&values);
+            assert!(
+                result.value >= 1.0 && result.value <= 4.0,
+                "approx_nunique={}, expected ~2",
+                result.value
+            );
+        }
+
+        #[test]
+        fn approx_quantile_basic() {
+            let values: Vec<Scalar> = (0..1000).map(|i| Scalar::Float64(i as f64)).collect();
+            let result = approx_quantile(&values, 0.5).expect("non-empty");
+            assert!(
+                (result.value - 499.5).abs() < 50.0,
+                "approx_quantile median={}, expected ~499.5",
+                result.value
+            );
+        }
+
+        #[test]
+        fn approx_quantile_empty_returns_none() {
+            let values: Vec<Scalar> = vec![Scalar::Null(NullKind::Null)];
+            assert!(approx_quantile(&values, 0.5).is_none());
+        }
+
+        #[test]
+        fn approx_value_counts_basic() {
+            let values = vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(1),
+                Scalar::Int64(3),
+                Scalar::Int64(1),
+            ];
+            let counts = approx_value_counts(&values);
+            assert_eq!(counts.len(), 3, "3 distinct values");
+            let count_1 = counts
+                .iter()
+                .find(|(k, _)| k == &Scalar::Int64(1))
+                .map(|(_, c)| *c)
+                .expect("key 1 present");
+            assert!(count_1 >= 3, "count for 1 should be >= 3, got {count_1}");
+        }
+
+        #[test]
+        fn approx_value_counts_skips_nulls() {
+            let values = vec![
+                Scalar::Int64(1),
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(1),
+            ];
+            let counts = approx_value_counts(&values);
+            assert_eq!(counts.len(), 1, "only non-null values counted");
         }
     }
 }

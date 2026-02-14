@@ -200,7 +200,13 @@ impl ColumnData {
                     .map(|v| match v {
                         Scalar::Float64(f) => *f,
                         Scalar::Int64(i) => *i as f64,
-                        Scalar::Bool(b) => if *b { 1.0 } else { 0.0 },
+                        Scalar::Bool(b) => {
+                            if *b {
+                                1.0
+                            } else {
+                                0.0
+                            }
+                        }
                         _ => 0.0, // sentinel for invalid positions
                     })
                     .collect();
@@ -320,40 +326,28 @@ fn vectorized_binary_f64(
     right_validity: &ValidityMask,
     op: ArithmeticOp,
 ) -> (Vec<f64>, ValidityMask) {
-    let len = left.len();
     let combined = left_validity.and_mask(right_validity);
-    let mut out = vec![0.0_f64; len];
 
-    // Tight loop over contiguous slices — the compiler can auto-vectorize this.
-    match op {
-        ArithmeticOp::Add => {
-            for i in 0..len {
-                out[i] = left[i] + right[i];
-            }
-        }
-        ArithmeticOp::Sub => {
-            for i in 0..len {
-                out[i] = left[i] - right[i];
-            }
-        }
-        ArithmeticOp::Mul => {
-            for i in 0..len {
-                out[i] = left[i] * right[i];
-            }
-        }
-        ArithmeticOp::Div => {
-            for i in 0..len {
-                out[i] = left[i] / right[i];
-            }
-        }
-    }
+    // Zip iterators over contiguous slices — auto-vectorizable by LLVM.
+    let apply: fn(f64, f64) -> f64 = match op {
+        ArithmeticOp::Add => |a, b| a + b,
+        ArithmeticOp::Sub => |a, b| a - b,
+        ArithmeticOp::Mul => |a, b| a * b,
+        ArithmeticOp::Div => |a, b| a / b,
+    };
 
-    // Zero out invalid positions so they don't carry garbage.
-    for i in 0..len {
-        if !combined.get(i) {
-            out[i] = 0.0;
-        }
-    }
+    let out: Vec<f64> = left
+        .iter()
+        .zip(right.iter())
+        .enumerate()
+        .map(|(i, (&l, &r))| {
+            if combined.get(i) {
+                apply(l, r)
+            } else {
+                0.0 // sentinel for invalid positions
+            }
+        })
+        .collect();
 
     (out, combined)
 }
@@ -374,34 +368,27 @@ fn vectorized_binary_i64(
         return None;
     }
 
-    let len = left.len();
     let combined = left_validity.and_mask(right_validity);
-    let mut out = vec![0_i64; len];
 
-    match op {
-        ArithmeticOp::Add => {
-            for i in 0..len {
-                out[i] = left[i].wrapping_add(right[i]);
-            }
-        }
-        ArithmeticOp::Sub => {
-            for i in 0..len {
-                out[i] = left[i].wrapping_sub(right[i]);
-            }
-        }
-        ArithmeticOp::Mul => {
-            for i in 0..len {
-                out[i] = left[i].wrapping_mul(right[i]);
-            }
-        }
+    let apply: fn(i64, i64) -> i64 = match op {
+        ArithmeticOp::Add => |a, b| a.wrapping_add(b),
+        ArithmeticOp::Sub => |a, b| a.wrapping_sub(b),
+        ArithmeticOp::Mul => |a, b| a.wrapping_mul(b),
         ArithmeticOp::Div => unreachable!(),
-    }
+    };
 
-    for i in 0..len {
-        if !combined.get(i) {
-            out[i] = 0;
-        }
-    }
+    let out: Vec<i64> = left
+        .iter()
+        .zip(right.iter())
+        .enumerate()
+        .map(|(i, (&l, &r))| {
+            if combined.get(i) {
+                apply(l, r)
+            } else {
+                0 // sentinel for invalid positions
+            }
+        })
+        .collect();
 
     Some((out, combined))
 }
@@ -575,8 +562,7 @@ impl Column {
                 }
                 let left_data = ColumnData::from_scalars(&self.values, DType::Int64);
                 let right_data = ColumnData::from_scalars(&right.values, DType::Int64);
-                let (ColumnData::Int64(l), ColumnData::Int64(r)) = (&left_data, &right_data)
-                else {
+                let (ColumnData::Int64(l), ColumnData::Int64(r)) = (&left_data, &right_data) else {
                     return None;
                 };
 
@@ -615,9 +601,7 @@ impl Column {
 
     /// Check if position `i` holds a NaN-class missing value.
     fn is_nan_at(&self, i: usize) -> bool {
-        self.values
-            .get(i)
-            .is_some_and(|v| v.is_nan())
+        self.values.get(i).is_some_and(|v| v.is_nan())
     }
 
     pub fn binary_numeric(&self, right: &Self, op: ArithmeticOp) -> Result<Self, ColumnError> {
@@ -689,6 +673,189 @@ impl Column {
                 .iter()
                 .zip(&other.values)
                 .all(|(left, right)| left.semantic_eq(right))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AG-14: Database Cracking — Adaptive Column Sorting
+// ---------------------------------------------------------------------------
+
+/// Adaptive crack index for progressive column partitioning.
+///
+/// Maintains a permutation of row indices and a sorted set of crack points.
+/// Each filter operation partitions the relevant region around the predicate
+/// pivot, progressively sorting the column across repeated queries.
+///
+/// Only works with numeric columns (values convertible to f64).
+///
+/// # Example
+/// ```ignore
+/// let mut crack = CrackIndex::new(column.len());
+/// let gt5 = crack.filter_gt(&column, 5.0);  // partitions around 5.0
+/// let gt3 = crack.filter_gt(&column, 3.0);  // refines: only re-scans [0, 5.0] region
+/// ```
+pub struct CrackIndex {
+    /// Permuted row indices. Between consecutive crack points,
+    /// elements are unsorted but bounded by the crack values.
+    perm: Vec<usize>,
+    /// Sorted crack points: (pivot_value, split_position_in_perm).
+    /// All perm[..split] map to values <= pivot, perm[split..] map to values > pivot
+    /// (within the containing region).
+    cracks: Vec<(f64, usize)>,
+}
+
+impl CrackIndex {
+    /// Create a new crack index for a column of `len` rows.
+    #[must_use]
+    pub fn new(len: usize) -> Self {
+        Self {
+            perm: (0..len).collect(),
+            cracks: Vec::new(),
+        }
+    }
+
+    /// Number of crack points recorded so far.
+    #[must_use]
+    pub fn num_cracks(&self) -> usize {
+        self.cracks.len()
+    }
+
+    /// Return row indices where `column[row] > value`.
+    pub fn filter_gt(&mut self, column: &Column, value: f64) -> Vec<usize> {
+        let split = self.crack_at(column, value);
+        self.perm[split..].to_vec()
+    }
+
+    /// Return row indices where `column[row] <= value`.
+    pub fn filter_lte(&mut self, column: &Column, value: f64) -> Vec<usize> {
+        let split = self.crack_at(column, value);
+        self.perm[..split].to_vec()
+    }
+
+    /// Return row indices where `column[row] >= value`.
+    pub fn filter_gte(&mut self, column: &Column, value: f64) -> Vec<usize> {
+        // Crack just below value: use value - epsilon conceptually.
+        // We crack at value, then scan the <= region for exact matches.
+        let split = self.crack_at(column, value);
+        // Everything in perm[split..] is > value.
+        // Also include exact matches from perm[..split].
+        let mut result: Vec<usize> = self.perm[split..].to_vec();
+        for &idx in &self.perm[..split] {
+            if let Some(v) = column.value(idx)
+                && let Ok(f) = v.to_f64()
+                && f == value
+            {
+                result.push(idx);
+            }
+        }
+        result
+    }
+
+    /// Return row indices where `column[row] < value`.
+    pub fn filter_lt(&mut self, column: &Column, value: f64) -> Vec<usize> {
+        let split = self.crack_at(column, value);
+        // perm[..split] has values <= value. Filter out exact matches.
+        self.perm[..split]
+            .iter()
+            .copied()
+            .filter(|&idx| {
+                column
+                    .value(idx)
+                    .and_then(|v| v.to_f64().ok())
+                    .is_some_and(|f| f < value)
+            })
+            .collect()
+    }
+
+    /// Return row indices where `column[row] == value`.
+    pub fn filter_eq(&mut self, column: &Column, value: f64) -> Vec<usize> {
+        let split = self.crack_at(column, value);
+        // Exact matches are all in perm[..split] (the <= region).
+        self.perm[..split]
+            .iter()
+            .copied()
+            .filter(|&idx| {
+                column
+                    .value(idx)
+                    .and_then(|v| v.to_f64().ok())
+                    .is_some_and(|f| f == value)
+            })
+            .collect()
+    }
+
+    /// Ensure a crack point exists at `value`. Returns the split position
+    /// such that perm[..split] are all <= value and perm[split..] are all > value.
+    fn crack_at(&mut self, column: &Column, value: f64) -> usize {
+        // Check if we already have this exact crack point.
+        if let Ok(pos) = self.cracks.binary_search_by(|probe| {
+            probe
+                .0
+                .partial_cmp(&value)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        }) {
+            return self.cracks[pos].1;
+        }
+
+        // Find the region to partition: between the nearest crack points.
+        let (region_start, region_end) = self.find_region(value);
+
+        // Partition perm[region_start..region_end] around `value`.
+        // Move indices with column[idx] <= value to the left, > value to the right.
+        let split = self.partition_region(column, region_start, region_end, value);
+
+        // Insert the new crack point, maintaining sorted order.
+        let insert_pos = self
+            .cracks
+            .binary_search_by(|probe| {
+                probe
+                    .0
+                    .partial_cmp(&value)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .unwrap_or_else(|pos| pos);
+        self.cracks.insert(insert_pos, (value, split));
+
+        split
+    }
+
+    /// Find the region [start, end) in `perm` that contains `value`.
+    fn find_region(&self, value: f64) -> (usize, usize) {
+        let mut start = 0;
+        let mut end = self.perm.len();
+
+        for &(crack_val, crack_pos) in &self.cracks {
+            if crack_val < value {
+                start = start.max(crack_pos);
+            } else {
+                end = end.min(crack_pos);
+                break;
+            }
+        }
+
+        (start, end)
+    }
+
+    /// Partition perm[start..end] so that indices with column values <= pivot
+    /// come first. Returns the split position (absolute index in perm).
+    fn partition_region(&mut self, column: &Column, start: usize, end: usize, pivot: f64) -> usize {
+        // Simple two-pointer partition (like quicksort partition).
+        let region = &mut self.perm[start..end];
+        let mut write = 0;
+
+        for read in 0..region.len() {
+            let idx = region[read];
+            let val = column
+                .value(idx)
+                .and_then(|v| v.to_f64().ok())
+                .unwrap_or(f64::NEG_INFINITY); // missing values sort to left
+
+            if val <= pivot {
+                region.swap(write, read);
+                write += 1;
+            }
+        }
+
+        start + write
     }
 }
 
@@ -915,7 +1082,11 @@ mod tests {
 
     #[test]
     fn column_data_float64_roundtrip() {
-        let values = vec![Scalar::Float64(1.5), Scalar::Null(NullKind::NaN), Scalar::Float64(3.0)];
+        let values = vec![
+            Scalar::Float64(1.5),
+            Scalar::Null(NullKind::NaN),
+            Scalar::Float64(3.0),
+        ];
         let validity = ValidityMask::from_values(&values);
         let data = super::ColumnData::from_scalars(&values, fp_types::DType::Float64);
         let back = data.to_scalars(fp_types::DType::Float64, &validity);
@@ -927,7 +1098,11 @@ mod tests {
 
     #[test]
     fn column_data_int64_roundtrip() {
-        let values = vec![Scalar::Int64(10), Scalar::Null(NullKind::Null), Scalar::Int64(30)];
+        let values = vec![
+            Scalar::Int64(10),
+            Scalar::Null(NullKind::Null),
+            Scalar::Int64(30),
+        ];
         let validity = ValidityMask::from_values(&values);
         let data = super::ColumnData::from_scalars(&values, fp_types::DType::Int64);
         assert_eq!(data.len(), 3);
@@ -952,9 +1127,7 @@ mod tests {
         ])
         .expect("right");
 
-        let result = left
-            .binary_numeric(&right, ArithmeticOp::Add)
-            .expect("add");
+        let result = left.binary_numeric(&right, ArithmeticOp::Add).expect("add");
         assert_eq!(result.values()[0], Scalar::Float64(11.0));
         assert_eq!(result.values()[1], Scalar::Float64(22.0));
         assert_eq!(result.values()[2], Scalar::Float64(33.0));
@@ -962,12 +1135,8 @@ mod tests {
 
     #[test]
     fn vectorized_i64_addition_matches_scalar() {
-        let left = Column::from_values(vec![
-            Scalar::Int64(1),
-            Scalar::Int64(2),
-            Scalar::Int64(3),
-        ])
-        .expect("left");
+        let left = Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)])
+            .expect("left");
         let right = Column::from_values(vec![
             Scalar::Int64(10),
             Scalar::Int64(20),
@@ -975,9 +1144,7 @@ mod tests {
         ])
         .expect("right");
 
-        let result = left
-            .binary_numeric(&right, ArithmeticOp::Add)
-            .expect("add");
+        let result = left.binary_numeric(&right, ArithmeticOp::Add).expect("add");
         assert_eq!(result.values()[0], Scalar::Int64(11));
         assert_eq!(result.values()[1], Scalar::Int64(22));
         assert_eq!(result.values()[2], Scalar::Int64(33));
@@ -998,9 +1165,7 @@ mod tests {
         ])
         .expect("right");
 
-        let result = left
-            .binary_numeric(&right, ArithmeticOp::Add)
-            .expect("add");
+        let result = left.binary_numeric(&right, ArithmeticOp::Add).expect("add");
         assert_eq!(result.values()[0], Scalar::Float64(11.0));
         assert!(result.values()[1].is_nan(), "null+valid should be NaN");
         assert!(result.values()[2].is_nan(), "valid+null should be NaN");
@@ -1021,9 +1186,7 @@ mod tests {
         ])
         .expect("right");
 
-        let result = left
-            .binary_numeric(&right, ArithmeticOp::Add)
-            .expect("add");
+        let result = left.binary_numeric(&right, ArithmeticOp::Add).expect("add");
         assert_eq!(result.values()[0], Scalar::Int64(11));
         assert!(result.values()[1].is_missing());
         assert!(result.values()[2].is_missing());
@@ -1031,14 +1194,10 @@ mod tests {
 
     #[test]
     fn vectorized_division_promotes_to_float64() {
-        let left = Column::from_values(vec![Scalar::Int64(10), Scalar::Int64(21)])
-            .expect("left");
-        let right = Column::from_values(vec![Scalar::Int64(3), Scalar::Int64(7)])
-            .expect("right");
+        let left = Column::from_values(vec![Scalar::Int64(10), Scalar::Int64(21)]).expect("left");
+        let right = Column::from_values(vec![Scalar::Int64(3), Scalar::Int64(7)]).expect("right");
 
-        let result = left
-            .binary_numeric(&right, ArithmeticOp::Div)
-            .expect("div");
+        let result = left.binary_numeric(&right, ArithmeticOp::Div).expect("div");
         // Division always promotes to Float64.
         assert_eq!(result.dtype(), fp_types::DType::Float64);
         assert!(matches!(result.values()[0], Scalar::Float64(v) if (v - 10.0/3.0).abs() < 1e-10));
@@ -1081,37 +1240,24 @@ mod tests {
         let left = Column::from_values(left_values).expect("left");
         let right = Column::from_values(right_values).expect("right");
 
-        let result = left
-            .binary_numeric(&right, ArithmeticOp::Add)
-            .expect("add");
+        let result = left.binary_numeric(&right, ArithmeticOp::Add).expect("add");
 
         // Every position should sum to n.
         for (i, v) in result.values().iter().enumerate() {
-            assert_eq!(
-                *v,
-                Scalar::Float64(n as f64),
-                "position {i} should be {n}"
-            );
+            assert_eq!(*v, Scalar::Float64(n as f64), "position {i} should be {n}");
         }
     }
 
     #[test]
     fn vectorized_nan_vs_null_distinction_preserved() {
         // Float64 column: NaN is a specific kind of missing.
-        let left = Column::from_values(vec![
-            Scalar::Float64(f64::NAN),
-            Scalar::Null(NullKind::NaN),
-        ])
-        .expect("left");
-        let right = Column::from_values(vec![
-            Scalar::Float64(1.0),
-            Scalar::Float64(2.0),
-        ])
-        .expect("right");
+        let left =
+            Column::from_values(vec![Scalar::Float64(f64::NAN), Scalar::Null(NullKind::NaN)])
+                .expect("left");
+        let right =
+            Column::from_values(vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]).expect("right");
 
-        let result = left
-            .binary_numeric(&right, ArithmeticOp::Add)
-            .expect("add");
+        let result = left.binary_numeric(&right, ArithmeticOp::Add).expect("add");
         // Both positions should be NaN-missing (not generic Null).
         assert!(result.values()[0].is_nan(), "NaN + valid = NaN");
         assert!(result.values()[1].is_nan(), "NaN-null + valid = NaN");
@@ -1120,14 +1266,11 @@ mod tests {
     #[test]
     fn vectorized_mixed_type_falls_back_to_scalar() {
         // Int64 + Float64 promotes to Float64 — vectorized path handles this.
-        let left = Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2)])
-            .expect("left");
-        let right = Column::from_values(vec![Scalar::Float64(0.5), Scalar::Float64(1.5)])
-            .expect("right");
+        let left = Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2)]).expect("left");
+        let right =
+            Column::from_values(vec![Scalar::Float64(0.5), Scalar::Float64(1.5)]).expect("right");
 
-        let result = left
-            .binary_numeric(&right, ArithmeticOp::Add)
-            .expect("add");
+        let result = left.binary_numeric(&right, ArithmeticOp::Add).expect("add");
         assert_eq!(result.dtype(), fp_types::DType::Float64);
         assert_eq!(result.values()[0], Scalar::Float64(1.5));
         assert_eq!(result.values()[1], Scalar::Float64(3.5));
@@ -1135,10 +1278,8 @@ mod tests {
 
     #[test]
     fn vectorized_i64_sub_and_mul() {
-        let left = Column::from_values(vec![Scalar::Int64(10), Scalar::Int64(20)])
-            .expect("left");
-        let right = Column::from_values(vec![Scalar::Int64(3), Scalar::Int64(5)])
-            .expect("right");
+        let left = Column::from_values(vec![Scalar::Int64(10), Scalar::Int64(20)]).expect("left");
+        let right = Column::from_values(vec![Scalar::Int64(3), Scalar::Int64(5)]).expect("right");
 
         let sub = left.binary_numeric(&right, ArithmeticOp::Sub).expect("sub");
         assert_eq!(sub.values()[0], Scalar::Int64(7));
@@ -1147,5 +1288,218 @@ mod tests {
         let mul = left.binary_numeric(&right, ArithmeticOp::Mul).expect("mul");
         assert_eq!(mul.values()[0], Scalar::Int64(30));
         assert_eq!(mul.values()[1], Scalar::Int64(100));
+    }
+
+    // === AG-14: Database Cracking Tests ===
+
+    mod crack_tests {
+        use super::super::*;
+        use fp_types::Scalar;
+
+        fn make_column(values: &[f64]) -> Column {
+            Column::from_values(values.iter().map(|&v| Scalar::Float64(v)).collect()).expect("col")
+        }
+
+        #[test]
+        fn crack_filter_gt_basic() {
+            let col = make_column(&[1.0, 5.0, 3.0, 7.0, 2.0]);
+            let mut crack = CrackIndex::new(col.len());
+
+            let gt3 = crack.filter_gt(&col, 3.0);
+            let mut gt3_vals: Vec<f64> = gt3
+                .iter()
+                .map(|&i| col.values()[i].to_f64().unwrap())
+                .collect();
+            gt3_vals.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+            assert_eq!(gt3_vals, vec![5.0, 7.0]);
+            assert_eq!(crack.num_cracks(), 1);
+        }
+
+        #[test]
+        fn crack_filter_lte_basic() {
+            let col = make_column(&[1.0, 5.0, 3.0, 7.0, 2.0]);
+            let mut crack = CrackIndex::new(col.len());
+
+            let lte3 = crack.filter_lte(&col, 3.0);
+            let mut lte3_vals: Vec<f64> = lte3
+                .iter()
+                .map(|&i| col.values()[i].to_f64().unwrap())
+                .collect();
+            lte3_vals.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+            assert_eq!(lte3_vals, vec![1.0, 2.0, 3.0]);
+        }
+
+        #[test]
+        fn crack_filter_eq() {
+            let col = make_column(&[1.0, 3.0, 3.0, 7.0, 3.0]);
+            let mut crack = CrackIndex::new(col.len());
+
+            let eq3 = crack.filter_eq(&col, 3.0);
+            assert_eq!(eq3.len(), 3, "three values equal to 3.0");
+            for &idx in &eq3 {
+                assert_eq!(col.values()[idx].to_f64().unwrap(), 3.0);
+            }
+        }
+
+        #[test]
+        fn crack_filter_lt() {
+            let col = make_column(&[1.0, 5.0, 3.0, 7.0, 2.0]);
+            let mut crack = CrackIndex::new(col.len());
+
+            let lt3 = crack.filter_lt(&col, 3.0);
+            let mut lt3_vals: Vec<f64> = lt3
+                .iter()
+                .map(|&i| col.values()[i].to_f64().unwrap())
+                .collect();
+            lt3_vals.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+            assert_eq!(lt3_vals, vec![1.0, 2.0]);
+        }
+
+        #[test]
+        fn crack_filter_gte() {
+            let col = make_column(&[1.0, 5.0, 3.0, 7.0, 2.0]);
+            let mut crack = CrackIndex::new(col.len());
+
+            let gte3 = crack.filter_gte(&col, 3.0);
+            let mut gte3_vals: Vec<f64> = gte3
+                .iter()
+                .map(|&i| col.values()[i].to_f64().unwrap())
+                .collect();
+            gte3_vals.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+            assert_eq!(gte3_vals, vec![3.0, 5.0, 7.0]);
+        }
+
+        #[test]
+        fn crack_progressive_refinement() {
+            let col = make_column(&[10.0, 2.0, 8.0, 4.0, 6.0, 1.0, 9.0, 3.0, 7.0, 5.0]);
+            let mut crack = CrackIndex::new(col.len());
+
+            // First crack at 5.0
+            let gt5 = crack.filter_gt(&col, 5.0);
+            assert_eq!(gt5.len(), 5);
+            assert_eq!(crack.num_cracks(), 1);
+
+            // Second crack at 3.0 — only re-partitions the [<=5.0] region
+            let gt3 = crack.filter_gt(&col, 3.0);
+            assert_eq!(gt3.len(), 7); // 4,5,6,7,8,9,10
+            assert_eq!(crack.num_cracks(), 2);
+
+            // Third crack at 7.0 — only re-partitions the [>5.0] region
+            let gt7 = crack.filter_gt(&col, 7.0);
+            assert_eq!(gt7.len(), 3); // 8,9,10
+            assert_eq!(crack.num_cracks(), 3);
+        }
+
+        #[test]
+        fn crack_duplicate_crack_point_is_idempotent() {
+            let col = make_column(&[1.0, 5.0, 3.0, 7.0, 2.0]);
+            let mut crack = CrackIndex::new(col.len());
+
+            let gt3_first = crack.filter_gt(&col, 3.0);
+            let gt3_second = crack.filter_gt(&col, 3.0);
+
+            // Same results both times
+            let mut a: Vec<usize> = gt3_first;
+            let mut b: Vec<usize> = gt3_second;
+            a.sort_unstable();
+            b.sort_unstable();
+            assert_eq!(a, b);
+            assert_eq!(crack.num_cracks(), 1, "no duplicate crack point");
+        }
+
+        #[test]
+        fn crack_empty_column() {
+            let col = make_column(&[]);
+            let mut crack = CrackIndex::new(col.len());
+
+            assert!(crack.filter_gt(&col, 5.0).is_empty());
+            assert!(crack.filter_lte(&col, 5.0).is_empty());
+        }
+
+        #[test]
+        fn crack_single_element() {
+            let col = make_column(&[42.0]);
+            let mut crack = CrackIndex::new(col.len());
+
+            assert!(crack.filter_gt(&col, 42.0).is_empty());
+            assert_eq!(crack.filter_lte(&col, 42.0).len(), 1);
+            assert_eq!(crack.filter_eq(&col, 42.0).len(), 1);
+        }
+
+        #[test]
+        fn crack_all_same_values() {
+            let col = make_column(&[5.0, 5.0, 5.0, 5.0]);
+            let mut crack = CrackIndex::new(col.len());
+
+            assert!(crack.filter_gt(&col, 5.0).is_empty());
+            assert_eq!(crack.filter_lte(&col, 5.0).len(), 4);
+            assert_eq!(crack.filter_eq(&col, 5.0).len(), 4);
+        }
+
+        #[test]
+        fn crack_isomorphism_with_full_scan() {
+            // Cracked filter must return identical results to naive full scan.
+            let col = make_column(&[10.0, 2.0, 8.0, 4.0, 6.0, 1.0, 9.0, 3.0, 7.0, 5.0]);
+            let mut crack = CrackIndex::new(col.len());
+
+            for pivot in [1.0, 3.0, 5.0, 7.0, 9.0, 0.0, 11.0] {
+                let mut cracked: Vec<usize> = crack.filter_gt(&col, pivot);
+                cracked.sort_unstable();
+
+                let mut naive: Vec<usize> = (0..col.len())
+                    .filter(|&i| col.values()[i].to_f64().unwrap() > pivot)
+                    .collect();
+                naive.sort_unstable();
+
+                assert_eq!(
+                    cracked, naive,
+                    "cracked vs naive mismatch for pivot={pivot}"
+                );
+            }
+        }
+
+        #[test]
+        fn crack_int64_column() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(10),
+                Scalar::Int64(5),
+                Scalar::Int64(3),
+                Scalar::Int64(8),
+                Scalar::Int64(1),
+            ])
+            .expect("col");
+            let mut crack = CrackIndex::new(col.len());
+
+            let gt5 = crack.filter_gt(&col, 5.0);
+            let mut gt5_vals: Vec<i64> = gt5
+                .iter()
+                .map(|&i| match &col.values()[i] {
+                    Scalar::Int64(v) => *v,
+                    _ => panic!("expected Int64"),
+                })
+                .collect();
+            gt5_vals.sort_unstable();
+            assert_eq!(gt5_vals, vec![8, 10]);
+        }
+
+        #[test]
+        fn crack_large_column_correctness() {
+            let n = 1000;
+            let values: Vec<f64> = (0..n).map(|i| ((i * 7 + 13) % n) as f64).collect();
+            let col = make_column(&values);
+            let mut crack = CrackIndex::new(col.len());
+
+            // Multiple cracks at different points
+            for pivot in [100.0, 500.0, 250.0, 750.0, 50.0, 900.0] {
+                let mut cracked: Vec<usize> = crack.filter_gt(&col, pivot);
+                cracked.sort_unstable();
+
+                let mut naive: Vec<usize> =
+                    (0..n as usize).filter(|&i| values[i] > pivot).collect();
+                naive.sort_unstable();
+
+                assert_eq!(cracked, naive, "large column mismatch for pivot={pivot}");
+            }
+        }
     }
 }
