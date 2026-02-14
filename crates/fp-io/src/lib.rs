@@ -157,9 +157,7 @@ mod tests {
             frame.column("charlie").unwrap().values()[1],
             Scalar::Int64(6)
         );
-        eprintln!(
-            "[TEST] test_csv_vec_based_column_order | rows=2 cols=3 parse_ok=true | PASS"
-        );
+        eprintln!("[TEST] test_csv_vec_based_column_order | rows=2 cols=3 parse_ok=true | PASS");
     }
 
     #[test]
@@ -198,9 +196,7 @@ mod tests {
         for col in frame.columns().values() {
             assert!(col.is_empty());
         }
-        eprintln!(
-            "[TEST] test_csv_empty_columns | rows=0 cols=3 parse_ok=true | PASS"
-        );
+        eprintln!("[TEST] test_csv_empty_columns | rows=0 cols=3 parse_ok=true | PASS");
     }
 
     #[test]
@@ -217,9 +213,7 @@ mod tests {
             frame.column("value").unwrap().values()[499],
             Scalar::Int64(499)
         );
-        eprintln!(
-            "[TEST] test_csv_single_column | rows=500 cols=1 parse_ok=true | PASS"
-        );
+        eprintln!("[TEST] test_csv_single_column | rows=500 cols=1 parse_ok=true | PASS");
     }
 
     #[test]
@@ -231,8 +225,9 @@ mod tests {
         csv.push('\n');
         // 3 data rows
         for row in 0..3 {
-            let vals: Vec<String> =
-                (0..col_count).map(|c| format!("{}", row * 1000 + c)).collect();
+            let vals: Vec<String> = (0..col_count)
+                .map(|c| format!("{}", row * 1000 + c))
+                .collect();
             csv.push_str(&vals.join(","));
             csv.push('\n');
         }
@@ -240,17 +235,12 @@ mod tests {
         assert_eq!(frame.columns().len(), col_count);
         assert_eq!(frame.index().len(), 3);
         // Spot-check: c000 row 0 = 0, c119 row 2 = 2119
-        assert_eq!(
-            frame.column("c000").unwrap().values()[0],
-            Scalar::Int64(0)
-        );
+        assert_eq!(frame.column("c000").unwrap().values()[0], Scalar::Int64(0));
         assert_eq!(
             frame.column("c119").unwrap().values()[2],
             Scalar::Int64(2119)
         );
-        eprintln!(
-            "[TEST] test_csv_many_columns | rows=3 cols={col_count} parse_ok=true | PASS"
-        );
+        eprintln!("[TEST] test_csv_many_columns | rows=3 cols={col_count} parse_ok=true | PASS");
     }
 
     #[test]
@@ -269,10 +259,7 @@ mod tests {
         assert_eq!(floats.values()[1], Scalar::Float64(2.7));
 
         let strings = frame.column("strings").unwrap();
-        assert_eq!(
-            strings.values()[2],
-            Scalar::Utf8("foo".to_owned())
-        );
+        assert_eq!(strings.values()[2], Scalar::Utf8("foo".to_owned()));
 
         let bools = frame.column("bools").unwrap();
         assert_eq!(bools.values()[0], Scalar::Bool(true));
@@ -300,15 +287,14 @@ mod tests {
             frame.column("名前").unwrap().values()[0],
             Scalar::Utf8("Alice".to_owned())
         );
-        eprintln!(
-            "[TEST] test_csv_unicode_headers | rows=2 cols=3 parse_ok=true | PASS"
-        );
+        eprintln!("[TEST] test_csv_unicode_headers | rows=2 cols=3 parse_ok=true | PASS");
     }
 
     #[test]
     fn test_csv_quoted_fields() {
         // CSV with quoted fields containing commas and newlines -> correct parsing.
-        let input = "name,address\n\"Smith, John\",\"123 Main St\nApt 4\"\nJane,\"456 Oak, Suite 1\"\n";
+        let input =
+            "name,address\n\"Smith, John\",\"123 Main St\nApt 4\"\nJane,\"456 Oak, Suite 1\"\n";
         let frame = read_csv_str(input).expect("parse");
         assert_eq!(frame.index().len(), 2);
         assert_eq!(
@@ -321,9 +307,7 @@ mod tests {
             Scalar::Utf8(s) => assert!(s.contains('\n'), "should contain embedded newline"),
             other => panic!("expected Utf8, got {:?}", other),
         }
-        eprintln!(
-            "[TEST] test_csv_quoted_fields | rows=2 cols=2 parse_ok=true | PASS"
-        );
+        eprintln!("[TEST] test_csv_quoted_fields | rows=2 cols=2 parse_ok=true | PASS");
     }
 
     #[test]
@@ -341,9 +325,7 @@ mod tests {
             let c2 = f2.column(key).unwrap();
             assert_eq!(c1.values(), c2.values(), "column {key} mismatch");
         }
-        eprintln!(
-            "[TEST] test_csv_trailing_newline | rows=2 cols=2 parse_ok=true | PASS"
-        );
+        eprintln!("[TEST] test_csv_trailing_newline | rows=2 cols=2 parse_ok=true | PASS");
     }
 
     #[test]
@@ -358,11 +340,12 @@ mod tests {
         for key in frame.columns().keys() {
             let c1 = frame.column(key).unwrap();
             let c2 = frame2.column(key).unwrap();
-            assert!(c1.semantic_eq(c2), "column {key} not semantically equal after round-trip");
+            assert!(
+                c1.semantic_eq(c2),
+                "column {key} not semantically equal after round-trip"
+            );
         }
-        eprintln!(
-            "[TEST] test_csv_round_trip_unchanged | rows=3 cols=3 parse_ok=true | PASS"
-        );
+        eprintln!("[TEST] test_csv_round_trip_unchanged | rows=3 cols=3 parse_ok=true | PASS");
     }
 
     #[test]
@@ -388,10 +371,7 @@ mod tests {
         assert_eq!(frame.index().len(), row_count);
         assert_eq!(frame.columns().len(), col_count);
         // Spot-check first and last rows
-        assert_eq!(
-            frame.column("col0").unwrap().values()[0],
-            Scalar::Int64(0)
-        );
+        assert_eq!(frame.column("col0").unwrap().values()[0], Scalar::Int64(0));
         assert_eq!(
             frame.column("col9").unwrap().values()[row_count - 1],
             Scalar::Int64(((row_count - 1) * col_count + 9) as i64)
@@ -415,8 +395,6 @@ mod tests {
             output, expected,
             "output does not match golden reference.\nGot:\n{output}\nExpected:\n{expected}"
         );
-        eprintln!(
-            "[TEST] test_csv_golden_output | golden_match=true | PASS"
-        );
+        eprintln!("[TEST] test_csv_golden_output | golden_match=true | PASS");
     }
 }

@@ -694,8 +694,10 @@ pub fn build_differential_report(
     results: Vec<DifferentialResult>,
 ) -> DifferentialReport {
     let drift_summary = summarize_drift(&results);
-    let case_results: Vec<CaseResult> =
-        results.iter().map(DifferentialResult::to_case_result).collect();
+    let case_results: Vec<CaseResult> = results
+        .iter()
+        .map(DifferentialResult::to_case_result)
+        .collect();
     let failed = case_results
         .iter()
         .filter(|r| matches!(r.status, CaseStatus::Fail))
@@ -1194,13 +1196,15 @@ pub fn verify_packet_sidecar_integrity(
     result.decode_proof_exists = proof_path.exists();
 
     if !result.parity_report_exists {
-        result.errors.push(format!("{packet_id}: missing parity_report.json"));
+        result
+            .errors
+            .push(format!("{packet_id}: missing parity_report.json"));
         return result;
     }
     if !result.sidecar_exists {
-        result
-            .errors
-            .push(format!("{packet_id}: missing parity_report.raptorq.json (Rule T5)"));
+        result.errors.push(format!(
+            "{packet_id}: missing parity_report.raptorq.json (Rule T5)"
+        ));
     }
     if !result.decode_proof_exists {
         result.errors.push(format!(
@@ -1541,10 +1545,7 @@ pub fn evaluate_ci_gate(gate: CiGate, config: &CiPipelineConfig) -> CiGateResult
                         }
                         (
                             false,
-                            format!(
-                                "{}/{} fixtures failed",
-                                report.failed, report.fixture_count
-                            ),
+                            format!("{}/{} fixtures failed", report.failed, report.fixture_count),
                             errs,
                         )
                     }
@@ -1576,9 +1577,7 @@ pub fn evaluate_ci_gate(gate: CiGate, config: &CiPipelineConfig) -> CiGateResult
                                 .gate_results
                                 .iter()
                                 .filter(|g| !g.pass)
-                                .map(|g| {
-                                    format!("{}: {}", g.packet_id, g.reasons.join(", "))
-                                })
+                                .map(|g| format!("{}: {}", g.packet_id, g.reasons.join(", ")))
                                 .collect(),
                         )
                     }
@@ -1633,10 +1632,7 @@ pub fn evaluate_ci_gate(gate: CiGate, config: &CiPipelineConfig) -> CiGateResult
         }
     };
 
-    let elapsed_ms = start
-        .elapsed()
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
+    let elapsed_ms = start.elapsed().map(|d| d.as_millis() as u64).unwrap_or(0);
 
     CiGateResult {
         gate,
@@ -1672,10 +1668,7 @@ pub fn run_ci_pipeline(config: &CiPipelineConfig) -> CiPipelineResult {
     if config.verify_sidecars && first_failure.is_none() {
         let artifact_root = config.harness_config.repo_root.join("artifacts");
         if let Err(failures) = verify_all_sidecars_ci(&artifact_root) {
-            let errs: Vec<String> = failures
-                .iter()
-                .flat_map(|f| f.errors.clone())
-                .collect();
+            let errs: Vec<String> = failures.iter().flat_map(|f| f.errors.clone()).collect();
             gates.push(CiGateResult {
                 gate: CiGate::G6Conformance,
                 passed: false,
@@ -1690,10 +1683,7 @@ pub fn run_ci_pipeline(config: &CiPipelineConfig) -> CiPipelineResult {
     }
 
     let all_passed = first_failure.is_none();
-    let elapsed_ms = start
-        .elapsed()
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
+    let elapsed_ms = start.elapsed().map(|d| d.as_millis() as u64).unwrap_or(0);
 
     CiPipelineResult {
         gates,
@@ -2298,12 +2288,10 @@ fn run_differential_fixture(
         RuntimeMode::Hardened => RuntimePolicy::hardened(Some(100_000)),
     };
     let mut ledger = EvidenceLedger::new();
-    let oracle_source = fixture
-        .oracle_source
-        .unwrap_or(match options.oracle_mode {
-            OracleMode::FixtureExpected => FixtureOracleSource::Fixture,
-            OracleMode::LiveLegacyPandas => FixtureOracleSource::LiveLegacyPandas,
-        });
+    let oracle_source = fixture.oracle_source.unwrap_or(match options.oracle_mode {
+        OracleMode::FixtureExpected => FixtureOracleSource::Fixture,
+        OracleMode::LiveLegacyPandas => FixtureOracleSource::LiveLegacyPandas,
+    });
 
     let drift_records = match execute_and_compare_differential(
         config,
@@ -2432,9 +2420,7 @@ fn execute_and_compare_differential(
             let expected = match expected {
                 ResolvedExpected::Positions(p) => p,
                 _ => {
-                    return Err(
-                        "expected_positions required for index_first_positions".to_owned(),
-                    );
+                    return Err("expected_positions required for index_first_positions".to_owned());
                 }
             };
             Ok(diff_positions(&actual, &expected))
@@ -2472,14 +2458,16 @@ fn diff_series(actual: &Series, expected: &FixtureExpectedSeries) -> Vec<DriftRe
         return drifts;
     }
 
-    diff_value_vectors(actual.values(), &expected.values, "series.values", &mut drifts);
+    diff_value_vectors(
+        actual.values(),
+        &expected.values,
+        "series.values",
+        &mut drifts,
+    );
     drifts
 }
 
-fn diff_join(
-    actual: &fp_join::JoinedSeries,
-    expected: &FixtureExpectedJoin,
-) -> Vec<DriftRecord> {
+fn diff_join(actual: &fp_join::JoinedSeries, expected: &FixtureExpectedJoin) -> Vec<DriftRecord> {
     let mut drifts = Vec::new();
 
     if actual.index.labels() != expected.index {
@@ -2538,10 +2526,7 @@ fn diff_join(
     drifts
 }
 
-fn diff_alignment(
-    actual: &AlignmentPlan,
-    expected: &FixtureExpectedAlignment,
-) -> Vec<DriftRecord> {
+fn diff_alignment(actual: &AlignmentPlan, expected: &FixtureExpectedAlignment) -> Vec<DriftRecord> {
     let mut drifts = Vec::new();
 
     if actual.union_index.labels() != expected.union_index {
@@ -3104,7 +3089,10 @@ impl ArtifactId {
     /// Generate a short deterministic hash for display.
     #[must_use]
     pub fn short_hash(&self) -> String {
-        let input = format!("{}:{}:{}", self.packet_id, self.artifact_kind, self.run_ts_unix_ms);
+        let input = format!(
+            "{}:{}:{}",
+            self.packet_id, self.artifact_kind, self.run_ts_unix_ms
+        );
         let hash = Sha256::digest(input.as_bytes());
         format!("{:x}", hash)[..8].to_owned()
     }
@@ -3115,7 +3103,9 @@ impl std::fmt::Display for ArtifactId {
         write!(
             f,
             "{}:{}@{}",
-            self.packet_id, self.artifact_kind, self.short_hash()
+            self.packet_id,
+            self.artifact_kind,
+            self.short_hash()
         )
     }
 }
@@ -3134,7 +3124,9 @@ pub struct FailureDigest {
 
 impl std::fmt::Display for FailureDigest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "FAIL {packet}::{case} [{op:?}/{mode:?}]",
+        writeln!(
+            f,
+            "FAIL {packet}::{case} [{op:?}/{mode:?}]",
             packet = self.packet_id,
             case = self.case_id,
             op = self.operation,
@@ -3170,12 +3162,17 @@ impl FailureForensicsReport {
 impl std::fmt::Display for FailureForensicsReport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if self.is_clean() {
-            writeln!(f, "ALL GREEN: {}/{} fixtures passed",
-                self.total_passed, self.total_fixtures)?;
+            writeln!(
+                f,
+                "ALL GREEN: {}/{} fixtures passed",
+                self.total_passed, self.total_fixtures
+            )?;
             return Ok(());
         }
 
-        writeln!(f, "FAILURES: {failed}/{total} fixtures failed",
+        writeln!(
+            f,
+            "FAILURES: {failed}/{total} fixtures failed",
             failed = self.total_failed,
             total = self.total_fixtures,
         )?;
@@ -3269,18 +3266,17 @@ mod tests {
     use std::fs;
 
     use super::{
-        ArtifactId, CaseResult, CaseStatus, ComparisonCategory, DifferentialResult, DriftLevel,
-        DriftRecord, E2eConfig, FailureDigest, FailureForensicsReport, ForensicEventKind,
-        ForensicLog, FixtureExpectedAlignment, FixtureOracleSource, FixtureOperation,
-        HarnessConfig, LifecycleHooks, NoopHooks, OracleMode, PacketParityReport,
-        CiGate, CiGateResult, CiPipelineConfig, CiPipelineResult, DecodeProofArtifact, DecodeProofStatus,
-        RaptorQSidecarArtifact, SuiteOptions, append_phase2c_drift_history,
-        build_differential_report, build_failure_forensics, enforce_packet_gates,
-        evaluate_ci_gate, evaluate_parity_gate, generate_raptorq_sidecar, run_ci_pipeline,
-        run_differential_by_id, run_differential_suite, run_e2e_suite, run_packet_by_id,
-        run_packet_suite, run_packet_suite_with_options, run_packets_grouped,
-        run_raptorq_decode_recovery_drill, run_smoke, verify_all_sidecars_ci,
-        verify_packet_sidecar_integrity,
+        ArtifactId, CaseResult, CaseStatus, CiGate, CiGateResult, CiPipelineConfig,
+        CiPipelineResult, ComparisonCategory, DecodeProofArtifact, DecodeProofStatus,
+        DifferentialResult, DriftLevel, DriftRecord, E2eConfig, FailureDigest,
+        FailureForensicsReport, FixtureExpectedAlignment, FixtureOperation, FixtureOracleSource,
+        ForensicEventKind, ForensicLog, HarnessConfig, LifecycleHooks, NoopHooks, OracleMode,
+        PacketParityReport, RaptorQSidecarArtifact, SuiteOptions, append_phase2c_drift_history,
+        build_differential_report, build_failure_forensics, enforce_packet_gates, evaluate_ci_gate,
+        evaluate_parity_gate, generate_raptorq_sidecar, run_ci_pipeline, run_differential_by_id,
+        run_differential_suite, run_e2e_suite, run_packet_by_id, run_packet_suite,
+        run_packet_suite_with_options, run_packets_grouped, run_raptorq_decode_recovery_drill,
+        run_smoke, verify_all_sidecars_ci, verify_packet_sidecar_integrity,
     };
     use fp_runtime::RuntimeMode;
 
@@ -3503,9 +3499,8 @@ mod tests {
         let cfg = HarnessConfig::default_paths();
         let legacy_report =
             run_packet_by_id(&cfg, "FP-P2C-001", OracleMode::FixtureExpected).expect("legacy");
-        let diff_report =
-            run_differential_by_id(&cfg, "FP-P2C-001", OracleMode::FixtureExpected)
-                .expect("differential");
+        let diff_report = run_differential_by_id(&cfg, "FP-P2C-001", OracleMode::FixtureExpected)
+            .expect("differential");
         assert_eq!(
             diff_report.report.fixture_count,
             legacy_report.fixture_count
@@ -3650,9 +3645,8 @@ mod tests {
     #[test]
     fn differential_report_serializes_to_json() {
         let cfg = HarnessConfig::default_paths();
-        let diff_report =
-            run_differential_by_id(&cfg, "FP-P2C-001", OracleMode::FixtureExpected)
-                .expect("differential");
+        let diff_report = run_differential_by_id(&cfg, "FP-P2C-001", OracleMode::FixtureExpected)
+            .expect("differential");
         let json = serde_json::to_string_pretty(&diff_report).expect("serialize");
         assert!(json.contains("differential_results"));
         assert!(json.contains("drift_summary"));
@@ -3668,9 +3662,8 @@ mod tests {
             "FP-P2C-004",
             "FP-P2C-005",
         ] {
-            let diff_report =
-                run_differential_by_id(&cfg, packet_id, OracleMode::FixtureExpected)
-                    .expect(packet_id);
+            let diff_report = run_differential_by_id(&cfg, packet_id, OracleMode::FixtureExpected)
+                .expect(packet_id);
             assert!(
                 diff_report.report.is_green(),
                 "{packet_id} differential not green: {:?}",
@@ -3726,8 +3719,7 @@ mod tests {
 
         // Each line is valid JSON
         for line in &lines {
-            let _: serde_json::Value =
-                serde_json::from_str(line).expect("valid JSON");
+            let _: serde_json::Value = serde_json::from_str(line).expect("valid JSON");
         }
         assert!(lines[0].contains("packet_start"));
         assert!(lines[1].contains("case_end"));
@@ -3759,8 +3751,7 @@ mod tests {
 
         for event in &events {
             let json = serde_json::to_string(event).expect("serialize");
-            let back: ForensicEventKind =
-                serde_json::from_str(&json).expect("deserialize");
+            let back: ForensicEventKind = serde_json::from_str(&json).expect("deserialize");
             assert_eq!(*event, back);
         }
     }
@@ -3770,8 +3761,8 @@ mod tests {
         let config = E2eConfig {
             harness: HarnessConfig::default_paths(),
             options: SuiteOptions::default(),
-            write_artifacts: false, // skip artifact writes in test
-            enforce_gates: false,   // skip enforcement in test
+            write_artifacts: false,      // skip artifact writes in test
+            enforce_gates: false,        // skip enforcement in test
             append_drift_history: false, // skip drift history in test
             forensic_log_path: None,
         };
@@ -3780,7 +3771,10 @@ mod tests {
         let report = run_e2e_suite(&config, &mut hooks).expect("e2e");
 
         // Should have run all 5 packets
-        assert!(report.packet_reports.len() >= 5, "expected 5+ packet reports");
+        assert!(
+            report.packet_reports.len() >= 5,
+            "expected 5+ packet reports"
+        );
         assert!(report.total_fixtures > 0, "should have fixtures");
         assert_eq!(report.total_failed, 0, "no failures expected");
         assert!(report.is_green(), "e2e should be green");
@@ -3917,8 +3911,7 @@ mod tests {
 
         // Verify every line is valid JSON
         for line in content.lines() {
-            let parsed: serde_json::Value =
-                serde_json::from_str(line).expect("valid JSON line");
+            let parsed: serde_json::Value = serde_json::from_str(line).expect("valid JSON line");
             assert!(parsed.get("ts_unix_ms").is_some());
             assert!(parsed.get("event").is_some());
         }
@@ -3950,8 +3943,8 @@ mod tests {
             operation: FixtureOperation::SeriesAdd,
             mode: RuntimeMode::Strict,
             mismatch_summary: "expected Int64(10), got Float64(10.0)".to_owned(),
-            replay_command:
-                "cargo test -p fp-conformance -- series_add_strict --nocapture".to_owned(),
+            replay_command: "cargo test -p fp-conformance -- series_add_strict --nocapture"
+                .to_owned(),
             artifact_path: Some("artifacts/phase2c/FP-P2C-001/mismatch.json".to_owned()),
         };
 
@@ -4031,8 +4024,7 @@ mod tests {
             gate_failures: Vec::new(),
         };
         let json = serde_json::to_string(&report).expect("serialize");
-        let back: FailureForensicsReport =
-            serde_json::from_str(&json).expect("deserialize");
+        let back: FailureForensicsReport = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(report, back);
     }
 
@@ -4178,7 +4170,10 @@ mod tests {
         let full = CiGate::pipeline();
         let commit = CiGate::commit_pipeline();
         for gate in &commit {
-            assert!(full.contains(gate), "{gate:?} in commit but not full pipeline");
+            assert!(
+                full.contains(gate),
+                "{gate:?} in commit but not full pipeline"
+            );
         }
     }
 

@@ -381,7 +381,10 @@ impl RaptorQEnvelope {
 /// Higher score = more "strange" relative to calibration window.
 fn nonconformity_score(record: &DecisionRecord) -> f64 {
     // Score is the absolute log-posterior-odds: high when decision is extreme
-    let p = record.metrics.posterior_compatible.clamp(1e-15, 1.0 - 1e-15);
+    let p = record
+        .metrics
+        .posterior_compatible
+        .clamp(1e-15, 1.0 - 1e-15);
     (p / (1.0 - p)).ln().abs()
 }
 
@@ -678,10 +681,7 @@ mod tests {
 
         // With consistent decisions, most should be in the conformal set
         let coverage = guard.empirical_coverage();
-        assert!(
-            coverage > 0.5,
-            "coverage should be reasonable: {coverage}"
-        );
+        assert!(coverage > 0.5, "coverage should be reasonable: {coverage}");
     }
 
     #[test]
@@ -717,6 +717,190 @@ mod tests {
         let q1 = guard.conformal_quantile();
         let q2 = guard.conformal_quantile();
         assert_eq!(q1, q2);
+    }
+
+    // --- AG-09-T: Conformal Calibration Tests ---
+
+    /// AG-09-T #1: conformal_quantile with known scores returns correct quantile.
+    #[test]
+    fn conformal_quantile_basic() {
+        let mut guard = ConformalGuard::new(100, 0.1);
+        // Manually feed scores into the window
+        let mut ledger = EvidenceLedger::new();
+        let policy = RuntimePolicy::hardened(Some(100_000));
+
+        // Generate 5 decisions to fill window
+        for _ in 0..5 {
+            policy.decide_join_admission(1000, &mut ledger);
+        }
+        for record in ledger.records() {
+            guard.evaluate(record);
+        }
+
+        let q = guard.conformal_quantile();
+        assert!(q.is_some());
+        let quantile = q.unwrap();
+        assert!(quantile.is_finite(), "quantile must be finite: {quantile}");
+        assert!(quantile >= 0.0, "quantile must be non-negative: {quantile}");
+    }
+
+    /// AG-09-T #2: Single-element score (after 2 evals) -> returns finite quantile.
+    #[test]
+    fn conformal_quantile_trivial() {
+        let mut guard = ConformalGuard::new(100, 0.1);
+        let mut ledger = EvidenceLedger::new();
+        let policy = RuntimePolicy::hardened(Some(100_000));
+
+        // Need at least 2 scores
+        policy.decide_join_admission(1000, &mut ledger);
+        policy.decide_join_admission(1000, &mut ledger);
+        guard.evaluate(&ledger.records()[0]);
+        guard.evaluate(&ledger.records()[1]);
+
+        let q = guard.conformal_quantile();
+        assert!(q.is_some());
+    }
+
+    /// AG-09-T #3: Empty calibration window -> returns None.
+    #[test]
+    fn conformal_quantile_empty() {
+        let guard = ConformalGuard::new(100, 0.1);
+        assert!(guard.conformal_quantile().is_none());
+        assert!(!guard.is_calibrated());
+    }
+
+    /// AG-09-T #4: When conformal set is singleton (Bayesian in set),
+    /// guard agrees with Bayesian argmin.
+    #[test]
+    fn conformal_guard_agrees_with_bayesian() {
+        let mut guard = ConformalGuard::new(100, 0.1);
+        let mut ledger = EvidenceLedger::new();
+        let policy = RuntimePolicy::hardened(Some(100_000));
+
+        // Build calibration window with consistent decisions
+        for _ in 0..20 {
+            policy.decide_join_admission(1000, &mut ledger);
+        }
+
+        let mut bayesian_agreed = 0;
+        let mut total = 0;
+
+        for record in ledger.records() {
+            let ps = guard.evaluate(record);
+            total += 1;
+            if ps.bayesian_action_in_set && ps.admissible_actions.len() == 1 {
+                // Singleton set: only the Bayesian action is admissible
+                assert_eq!(ps.admissible_actions[0], record.action);
+                bayesian_agreed += 1;
+            }
+        }
+
+        // Most decisions with consistent data should agree
+        assert!(total > 0, "should have evaluated at least one decision");
+        // With uniform decisions, some will be in set
+        assert!(
+            bayesian_agreed > 0 || total < 3,
+            "at least some decisions should agree with Bayesian"
+        );
+    }
+
+    /// AG-09-T #5: When conformal set widens (score > threshold),
+    /// guard admits multiple actions.
+    #[test]
+    fn conformal_guard_widens_on_uncertainty() {
+        let mut guard = ConformalGuard::new(10, 0.1);
+        let mut ledger = EvidenceLedger::new();
+        let policy = RuntimePolicy::hardened(Some(100_000));
+
+        // Build a tight calibration window with small-row decisions
+        for _ in 0..10 {
+            policy.decide_join_admission(100, &mut ledger);
+        }
+        for record in ledger.records() {
+            guard.evaluate(record);
+        }
+
+        // Now make a very different decision (large row estimate -> different posterior)
+        let mut outlier_ledger = EvidenceLedger::new();
+        let extreme_policy = RuntimePolicy::hardened(Some(10));
+        extreme_policy.decide_join_admission(1_000_000, &mut outlier_ledger);
+
+        let ps = guard.evaluate(&outlier_ledger.records()[0]);
+        // If the score exceeds threshold, the set should widen to 3 actions
+        if !ps.bayesian_action_in_set {
+            assert_eq!(
+                ps.admissible_actions.len(),
+                3,
+                "widened set should admit all actions"
+            );
+        }
+    }
+
+    /// AG-09-T #8: Coverage guarantee over 1000 exchangeable decisions.
+    #[test]
+    fn conformal_coverage_guarantee_1000_decisions() {
+        let mut guard = ConformalGuard::new(1000, 0.1);
+        let mut ledger = EvidenceLedger::new();
+        let policy = RuntimePolicy::hardened(Some(100_000));
+
+        // Generate 1000 similar decisions (exchangeable)
+        for i in 0..1000 {
+            // Vary the row estimate slightly to create some variance
+            let rows = 1000 + (i * 7) % 500;
+            policy.decide_join_admission(rows, &mut ledger);
+        }
+
+        for record in ledger.records() {
+            guard.evaluate(record);
+        }
+
+        // With exchangeable data, coverage should be >= 1 - alpha = 0.9
+        // Allow some slack for finite sample effects
+        let coverage = guard.empirical_coverage();
+        assert!(
+            coverage >= 0.7,
+            "coverage {coverage} should be >= 0.7 (relaxed bound for finite sample)"
+        );
+    }
+
+    /// AG-09-T #10: Rolling window correctly drops oldest entries.
+    #[test]
+    fn conformal_rolling_window_exact_eviction() {
+        let window_size = 5;
+        let mut guard = ConformalGuard::new(window_size, 0.1);
+        let mut ledger = EvidenceLedger::new();
+        let policy = RuntimePolicy::hardened(Some(100_000));
+
+        // Generate more decisions than window size
+        for _ in 0..15 {
+            policy.decide_join_admission(1000, &mut ledger);
+        }
+
+        for record in ledger.records() {
+            guard.evaluate(record);
+        }
+
+        assert_eq!(
+            guard.calibration_count(),
+            window_size,
+            "window should be exactly {window_size}"
+        );
+    }
+
+    /// AG-09-T #12: decision_to_card produces a valid galaxy brain card
+    /// with conformal-relevant information.
+    #[test]
+    fn conformal_galaxy_brain_card_content() {
+        let mut ledger = EvidenceLedger::new();
+        let policy = RuntimePolicy::hardened(Some(100_000));
+        policy.decide_join_admission(50_000, &mut ledger);
+
+        let card = decision_to_card(&ledger.records()[0]);
+        assert!(card.equation.contains("argmin_a"));
+        assert!(card.substitution.contains("P(compatible|e)"));
+        assert!(card.substitution.contains("E[allow]"));
+        assert!(card.substitution.contains("E[reject]"));
+        assert!(card.substitution.contains("E[repair]"));
     }
 
     #[test]

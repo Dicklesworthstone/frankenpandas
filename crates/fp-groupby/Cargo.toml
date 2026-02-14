@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+bumpalo = { workspace = true }
 fp-columnar = { path = "../fp-columnar" }
 fp-frame = { path = "../fp-frame" }
 fp-index = { path = "../fp-index" }

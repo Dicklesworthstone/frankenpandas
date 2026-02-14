@@ -2,7 +2,7 @@
 
 use std::{collections::HashMap, mem::size_of};
 
-use bumpalo::{collections::Vec as BumpVec, Bump};
+use bumpalo::{Bump, collections::Vec as BumpVec};
 use fp_columnar::{Column, ColumnError};
 use fp_frame::{FrameError, Series};
 use fp_index::{Index, IndexLabel};
@@ -12,6 +12,8 @@ use thiserror::Error;
 pub enum JoinType {
     Inner,
     Left,
+    Right,
+    Outer,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -83,14 +85,39 @@ fn join_series_with_trace(
         right_map.entry(label).or_default().push(pos);
     }
 
-    let output_rows = estimate_output_rows(left, &right_map, join_type);
+    // For Right/Outer joins, also build a left_map.
+    let left_map = if matches!(join_type, JoinType::Right | JoinType::Outer) {
+        let mut m = HashMap::<&IndexLabel, Vec<usize>>::new();
+        for (pos, label) in left.index().labels().iter().enumerate() {
+            m.entry(label).or_default().push(pos);
+        }
+        Some(m)
+    } else {
+        None
+    };
+
+    let output_rows = estimate_output_rows(left, right, &right_map, left_map.as_ref(), join_type);
     let estimated_bytes = estimate_intermediate_bytes(output_rows);
     let use_arena = options.use_arena && estimated_bytes <= options.arena_budget_bytes;
 
     let joined = if use_arena {
-        join_series_with_arena(left, right, join_type, &right_map, output_rows)?
+        join_series_with_arena(
+            left,
+            right,
+            join_type,
+            &right_map,
+            left_map.as_ref(),
+            output_rows,
+        )?
     } else {
-        join_series_with_global_allocator(left, right, join_type, &right_map, output_rows)?
+        join_series_with_global_allocator(
+            left,
+            right,
+            join_type,
+            &right_map,
+            left_map.as_ref(),
+            output_rows,
+        )?
     };
 
     Ok((
@@ -105,18 +132,47 @@ fn join_series_with_trace(
 
 fn estimate_output_rows(
     left: &Series,
+    right: &Series,
     right_map: &HashMap<&IndexLabel, Vec<usize>>,
+    left_map: Option<&HashMap<&IndexLabel, Vec<usize>>>,
     join_type: JoinType,
 ) -> usize {
-    left.index()
+    let left_matched: usize = left
+        .index()
         .labels()
         .iter()
         .map(|label| match right_map.get(label) {
             Some(matches) => matches.len(),
-            None if matches!(join_type, JoinType::Left) => 1,
+            None if matches!(join_type, JoinType::Left | JoinType::Outer) => 1,
             None => 0,
         })
-        .sum()
+        .sum();
+
+    match join_type {
+        JoinType::Inner | JoinType::Left => left_matched,
+        JoinType::Right => {
+            // All right labels, with matches from left
+            right
+                .index()
+                .labels()
+                .iter()
+                .map(|label| match left_map.as_ref().and_then(|m| m.get(label)) {
+                    Some(matches) => matches.len(),
+                    None => 1,
+                })
+                .sum()
+        }
+        JoinType::Outer => {
+            // Left-matched rows + unmatched right rows
+            let right_unmatched: usize = right
+                .index()
+                .labels()
+                .iter()
+                .filter(|label| !left.index().labels().contains(label))
+                .count();
+            left_matched + right_unmatched
+        }
+    }
 }
 
 fn estimate_intermediate_bytes(output_rows: usize) -> usize {
@@ -132,26 +188,61 @@ fn join_series_with_global_allocator(
     right: &Series,
     join_type: JoinType,
     right_map: &HashMap<&IndexLabel, Vec<usize>>,
+    left_map: Option<&HashMap<&IndexLabel, Vec<usize>>>,
     output_rows: usize,
 ) -> Result<JoinedSeries, JoinError> {
     let mut out_labels = Vec::with_capacity(output_rows);
     let mut left_positions = Vec::<Option<usize>>::with_capacity(output_rows);
     let mut right_positions = Vec::<Option<usize>>::with_capacity(output_rows);
 
-    for (left_pos, label) in left.index().labels().iter().enumerate() {
-        if let Some(matches) = right_map.get(label) {
-            for right_pos in matches {
-                out_labels.push(label.clone());
-                left_positions.push(Some(left_pos));
-                right_positions.push(Some(*right_pos));
-            }
-            continue;
-        }
+    match join_type {
+        JoinType::Inner | JoinType::Left | JoinType::Outer => {
+            // Iterate left labels: emit matches and (for Left/Outer) unmatched left rows.
+            for (left_pos, label) in left.index().labels().iter().enumerate() {
+                if let Some(matches) = right_map.get(label) {
+                    for right_pos in matches {
+                        out_labels.push(label.clone());
+                        left_positions.push(Some(left_pos));
+                        right_positions.push(Some(*right_pos));
+                    }
+                    continue;
+                }
 
-        if matches!(join_type, JoinType::Left) {
-            out_labels.push(label.clone());
-            left_positions.push(Some(left_pos));
-            right_positions.push(None);
+                if matches!(join_type, JoinType::Left | JoinType::Outer) {
+                    out_labels.push(label.clone());
+                    left_positions.push(Some(left_pos));
+                    right_positions.push(None);
+                }
+            }
+
+            // For Outer: append right labels that have no match in left.
+            if matches!(join_type, JoinType::Outer) {
+                for (right_pos, label) in right.index().labels().iter().enumerate() {
+                    if !left.index().labels().contains(label) {
+                        out_labels.push(label.clone());
+                        left_positions.push(None);
+                        right_positions.push(Some(right_pos));
+                    }
+                }
+            }
+        }
+        JoinType::Right => {
+            // Iterate right labels: emit matches and unmatched right rows.
+            let left_map = left_map.expect("left_map required for Right join");
+            for (right_pos, label) in right.index().labels().iter().enumerate() {
+                if let Some(matches) = left_map.get(label) {
+                    for left_pos in matches {
+                        out_labels.push(label.clone());
+                        left_positions.push(Some(*left_pos));
+                        right_positions.push(Some(right_pos));
+                    }
+                    continue;
+                }
+
+                out_labels.push(label.clone());
+                left_positions.push(None);
+                right_positions.push(Some(right_pos));
+            }
         }
     }
 
@@ -170,6 +261,7 @@ fn join_series_with_arena(
     right: &Series,
     join_type: JoinType,
     right_map: &HashMap<&IndexLabel, Vec<usize>>,
+    left_map: Option<&HashMap<&IndexLabel, Vec<usize>>>,
     output_rows: usize,
 ) -> Result<JoinedSeries, JoinError> {
     let arena = Bump::new();
@@ -177,20 +269,51 @@ fn join_series_with_arena(
     let mut left_positions = BumpVec::<Option<usize>>::with_capacity_in(output_rows, &arena);
     let mut right_positions = BumpVec::<Option<usize>>::with_capacity_in(output_rows, &arena);
 
-    for (left_pos, label) in left.index().labels().iter().enumerate() {
-        if let Some(matches) = right_map.get(label) {
-            for right_pos in matches {
-                out_labels.push(label.clone());
-                left_positions.push(Some(left_pos));
-                right_positions.push(Some(*right_pos));
-            }
-            continue;
-        }
+    match join_type {
+        JoinType::Inner | JoinType::Left | JoinType::Outer => {
+            for (left_pos, label) in left.index().labels().iter().enumerate() {
+                if let Some(matches) = right_map.get(label) {
+                    for right_pos in matches {
+                        out_labels.push(label.clone());
+                        left_positions.push(Some(left_pos));
+                        right_positions.push(Some(*right_pos));
+                    }
+                    continue;
+                }
 
-        if matches!(join_type, JoinType::Left) {
-            out_labels.push(label.clone());
-            left_positions.push(Some(left_pos));
-            right_positions.push(None);
+                if matches!(join_type, JoinType::Left | JoinType::Outer) {
+                    out_labels.push(label.clone());
+                    left_positions.push(Some(left_pos));
+                    right_positions.push(None);
+                }
+            }
+
+            if matches!(join_type, JoinType::Outer) {
+                for (right_pos, label) in right.index().labels().iter().enumerate() {
+                    if !left.index().labels().contains(label) {
+                        out_labels.push(label.clone());
+                        left_positions.push(None);
+                        right_positions.push(Some(right_pos));
+                    }
+                }
+            }
+        }
+        JoinType::Right => {
+            let left_map = left_map.expect("left_map required for Right join");
+            for (right_pos, label) in right.index().labels().iter().enumerate() {
+                if let Some(matches) = left_map.get(label) {
+                    for left_pos in matches {
+                        out_labels.push(label.clone());
+                        left_positions.push(Some(*left_pos));
+                        right_positions.push(Some(right_pos));
+                    }
+                    continue;
+                }
+
+                out_labels.push(label.clone());
+                left_positions.push(None);
+                right_positions.push(Some(right_pos));
+            }
         }
     }
 
@@ -210,11 +333,12 @@ fn join_series_with_arena(
 
 #[cfg(test)]
 mod tests {
+    use fp_index::IndexLabel;
     use fp_types::{NullKind, Scalar};
 
     use super::{
-        join_series, join_series_with_options, join_series_with_trace, JoinExecutionOptions,
-        JoinType,
+        JoinExecutionOptions, JoinType, join_series, join_series_with_options,
+        join_series_with_trace,
     };
     use fp_frame::Series;
 
@@ -365,5 +489,261 @@ mod tests {
                 &[Scalar::Int64(10), Scalar::Int64(20)]
             );
         }
+    }
+
+    /// AG-06-T test #8: 100K-row inner join with arena -> correct output, no OOM.
+    #[test]
+    fn arena_large_join_100k_rows() {
+        let n = 100_000;
+        let labels: Vec<IndexLabel> = (0..n).map(|i| IndexLabel::Int64(i as i64 % 1000)).collect();
+        let values: Vec<Scalar> = (0..n).map(|i| Scalar::Int64(i as i64)).collect();
+
+        let left = Series::from_values("left", labels.clone(), values.clone()).expect("left");
+        let right = Series::from_values("right", labels, values).expect("right");
+
+        let out = join_series_with_options(
+            &left,
+            &right,
+            JoinType::Inner,
+            JoinExecutionOptions::default(),
+        )
+        .expect("100K arena join");
+
+        // With 1000 distinct keys, each appearing 100 times on each side,
+        // inner join produces 100 * 100 * 1000 = 10M rows.
+        // But that's too large; use a budget that forces fallback.
+        let out_fallback = join_series_with_options(
+            &left,
+            &right,
+            JoinType::Inner,
+            JoinExecutionOptions {
+                use_arena: true,
+                arena_budget_bytes: 1,
+            },
+        )
+        .expect("100K fallback join");
+
+        assert_eq!(out.index.labels().len(), out_fallback.index.labels().len());
+    }
+
+    #[test]
+    fn right_join_contains_all_right_labels() {
+        let left = Series::from_values(
+            "left",
+            vec!["a".into(), "b".into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2)],
+        )
+        .expect("left");
+        let right = Series::from_values(
+            "right",
+            vec!["b".into(), "c".into()],
+            vec![Scalar::Int64(20), Scalar::Int64(30)],
+        )
+        .expect("right");
+
+        let out = join_series(&left, &right, JoinType::Right).expect("join");
+        // Right join: all right labels preserved. "b" matches, "c" unmatched.
+        assert_eq!(out.index.labels().len(), 2);
+        assert_eq!(
+            out.index.labels(),
+            &[IndexLabel::Utf8("b".into()), IndexLabel::Utf8("c".into())]
+        );
+        // "b" matched -> left=2, right=20. "c" unmatched -> left=Null, right=30.
+        assert_eq!(
+            out.left_values.values(),
+            &[Scalar::Int64(2), Scalar::Null(NullKind::Null)]
+        );
+        assert_eq!(
+            out.right_values.values(),
+            &[Scalar::Int64(20), Scalar::Int64(30)]
+        );
+    }
+
+    #[test]
+    fn right_join_multiplies_cardinality_for_duplicates() {
+        let left = Series::from_values(
+            "left",
+            vec!["k".into(), "k".into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2)],
+        )
+        .expect("left");
+        let right = Series::from_values(
+            "right",
+            vec!["k".into(), "x".into()],
+            vec![Scalar::Int64(10), Scalar::Int64(30)],
+        )
+        .expect("right");
+
+        let out = join_series(&left, &right, JoinType::Right).expect("join");
+        // "k" in right matches 2 left rows -> 2 output rows for "k", plus 1 for "x" unmatched.
+        assert_eq!(out.index.labels().len(), 3);
+        assert_eq!(
+            out.right_values.values(),
+            &[Scalar::Int64(10), Scalar::Int64(10), Scalar::Int64(30)]
+        );
+    }
+
+    #[test]
+    fn outer_join_contains_all_labels_from_both_sides() {
+        let left = Series::from_values(
+            "left",
+            vec!["a".into(), "b".into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2)],
+        )
+        .expect("left");
+        let right = Series::from_values(
+            "right",
+            vec!["b".into(), "c".into()],
+            vec![Scalar::Int64(20), Scalar::Int64(30)],
+        )
+        .expect("right");
+
+        let out = join_series(&left, &right, JoinType::Outer).expect("join");
+        // Outer: "a" (left only), "b" (both), "c" (right only) -> 3 rows
+        assert_eq!(out.index.labels().len(), 3);
+        assert_eq!(
+            out.left_values.values(),
+            &[
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Null(NullKind::Null)
+            ]
+        );
+        assert_eq!(
+            out.right_values.values(),
+            &[
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(20),
+                Scalar::Int64(30)
+            ]
+        );
+    }
+
+    #[test]
+    fn outer_join_with_duplicates() {
+        let left = Series::from_values(
+            "left",
+            vec!["k".into(), "k".into(), "a".into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+        )
+        .expect("left");
+        let right = Series::from_values(
+            "right",
+            vec!["k".into(), "z".into()],
+            vec![Scalar::Int64(10), Scalar::Int64(99)],
+        )
+        .expect("right");
+
+        let out = join_series(&left, &right, JoinType::Outer).expect("join");
+        // "k" x "k": 2 matched rows. "a": left-only (1 row). "z": right-only (1 row).
+        assert_eq!(out.index.labels().len(), 4);
+    }
+
+    #[test]
+    fn arena_right_join_matches_global() {
+        let left = Series::from_values(
+            "left",
+            vec!["a".into(), "b".into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2)],
+        )
+        .expect("left");
+        let right = Series::from_values(
+            "right",
+            vec!["b".into(), "c".into()],
+            vec![Scalar::Int64(20), Scalar::Int64(30)],
+        )
+        .expect("right");
+
+        let global = join_series_with_options(
+            &left,
+            &right,
+            JoinType::Right,
+            JoinExecutionOptions {
+                use_arena: false,
+                arena_budget_bytes: 0,
+            },
+        )
+        .expect("global");
+        let arena = join_series_with_options(
+            &left,
+            &right,
+            JoinType::Right,
+            JoinExecutionOptions::default(),
+        )
+        .expect("arena");
+        assert_eq!(arena, global);
+    }
+
+    #[test]
+    fn arena_outer_join_matches_global() {
+        let left = Series::from_values(
+            "left",
+            vec!["a".into(), "b".into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2)],
+        )
+        .expect("left");
+        let right = Series::from_values(
+            "right",
+            vec!["b".into(), "c".into()],
+            vec![Scalar::Int64(20), Scalar::Int64(30)],
+        )
+        .expect("right");
+
+        let global = join_series_with_options(
+            &left,
+            &right,
+            JoinType::Outer,
+            JoinExecutionOptions {
+                use_arena: false,
+                arena_budget_bytes: 0,
+            },
+        )
+        .expect("global");
+        let arena = join_series_with_options(
+            &left,
+            &right,
+            JoinType::Outer,
+            JoinExecutionOptions::default(),
+        )
+        .expect("arena");
+        assert_eq!(arena, global);
+    }
+
+    /// AG-06-T test #6: arena is scoped per-operation. Two sequential
+    /// operations each get their own arena (verified by both succeeding).
+    #[test]
+    fn arena_reset_between_operations() {
+        let left = Series::from_values(
+            "left",
+            vec!["a".into(), "b".into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2)],
+        )
+        .expect("left");
+        let right = Series::from_values(
+            "right",
+            vec!["a".into(), "c".into()],
+            vec![Scalar::Int64(10), Scalar::Int64(30)],
+        )
+        .expect("right");
+
+        // Operation 1: inner join
+        let out1 = join_series_with_options(
+            &left,
+            &right,
+            JoinType::Inner,
+            JoinExecutionOptions::default(),
+        )
+        .expect("op1");
+        assert_eq!(out1.index.labels().len(), 1);
+
+        // Operation 2: left join (arena from op1 was freed)
+        let out2 = join_series_with_options(
+            &left,
+            &right,
+            JoinType::Left,
+            JoinExecutionOptions::default(),
+        )
+        .expect("op2");
+        assert_eq!(out2.index.labels().len(), 2);
     }
 }

@@ -235,6 +235,7 @@ dependencies = [
  "fp-frame",
  "fp-groupby",
  "fp-index",
+ "fp-io",
  "fp-join",
  "fp-runtime",
  "fp-types",
@@ -276,6 +277,7 @@ dependencies = [
 name = "fp-groupby"
 version = "0.1.0"
 dependencies = [
+ "bumpalo",
  "fp-columnar",
  "fp-frame",
  "fp-index",

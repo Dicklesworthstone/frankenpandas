@@ -10,9 +10,9 @@
 use proptest::prelude::*;
 
 use fp_frame::Series;
-use fp_groupby::{GroupByOptions, groupby_sum};
+use fp_groupby::{GroupByExecutionOptions, GroupByOptions, groupby_sum, groupby_sum_with_options};
 use fp_index::{Index, IndexLabel, align_union, validate_alignment_plan};
-use fp_join::{JoinType, join_series};
+use fp_join::{JoinExecutionOptions, JoinType, join_series, join_series_with_options};
 use fp_runtime::{EvidenceLedger, RuntimePolicy};
 use fp_types::{NullKind, Scalar};
 
@@ -330,11 +330,11 @@ proptest! {
     /// Join output lengths are consistent (index, left_values, right_values all same length).
     #[test]
     fn prop_join_output_lengths_consistent((left, right) in arb_series_pair(10)) {
-        for join_type in [JoinType::Inner, JoinType::Left] {
+        for join_type in [JoinType::Inner, JoinType::Left, JoinType::Right, JoinType::Outer] {
             if let Ok(joined) = join_series(&left, &right, join_type) {
                 let n = joined.index.len();
-                prop_assert_eq!(joined.left_values.len(), n, "left_values length mismatch");
-                prop_assert_eq!(joined.right_values.len(), n, "right_values length mismatch");
+                prop_assert_eq!(joined.left_values.len(), n, "left_values length mismatch for {:?}", join_type);
+                prop_assert_eq!(joined.right_values.len(), n, "right_values length mismatch for {:?}", join_type);
             }
         }
     }
@@ -349,6 +349,54 @@ proptest! {
                 inner.index.len() <= left_j.index.len(),
                 "inner join ({}) must be <= left join ({})",
                 inner.index.len(), left_j.index.len()
+            );
+        }
+    }
+
+    /// Right join output contains all right labels.
+    #[test]
+    fn prop_right_join_contains_all_right_labels((left, right) in arb_series_pair(10)) {
+        if let Ok(joined) = join_series(&left, &right, JoinType::Right) {
+            let joined_labels = joined.index.labels();
+            for label in right.index().labels() {
+                prop_assert!(
+                    joined_labels.contains(label),
+                    "right join must contain right label {:?}", label
+                );
+            }
+        }
+    }
+
+    /// Outer join output contains all labels from both sides.
+    #[test]
+    fn prop_outer_join_contains_all_labels((left, right) in arb_series_pair(10)) {
+        if let Ok(joined) = join_series(&left, &right, JoinType::Outer) {
+            let joined_labels = joined.index.labels();
+            for label in left.index().labels() {
+                prop_assert!(
+                    joined_labels.contains(label),
+                    "outer join must contain left label {:?}", label
+                );
+            }
+            for label in right.index().labels() {
+                prop_assert!(
+                    joined_labels.contains(label),
+                    "outer join must contain right label {:?}", label
+                );
+            }
+        }
+    }
+
+    /// Inner join is a subset of outer join (in terms of output size).
+    #[test]
+    fn prop_inner_join_subset_of_outer_join((left, right) in arb_series_pair(10)) {
+        let inner = join_series(&left, &right, JoinType::Inner);
+        let outer = join_series(&left, &right, JoinType::Outer);
+        if let (Ok(inner), Ok(outer)) = (inner, outer) {
+            prop_assert!(
+                inner.index.len() <= outer.index.len(),
+                "inner join ({}) must be <= outer join ({})",
+                inner.index.len(), outer.index.len()
             );
         }
     }
@@ -561,5 +609,151 @@ proptest! {
         let mask = fp_columnar::ValidityMask::from_values(&values);
         let iter_count = mask.bits().filter(|b| *b).count();
         prop_assert_eq!(mask.count_valid(), iter_count);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Property: AG-06 Arena/Region Memory Isomorphism (bd-2t5e.6.1)
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(200))]
+
+    /// Arena-backed join produces identical output to global-allocator join
+    /// for arbitrary series pairs and both join types.
+    #[test]
+    fn prop_arena_join_isomorphic_to_global(
+        (left, right) in arb_series_pair(15),
+        join_type in prop_oneof![Just(JoinType::Inner), Just(JoinType::Left), Just(JoinType::Right), Just(JoinType::Outer)],
+    ) {
+        let global = join_series_with_options(
+            &left, &right, join_type,
+            JoinExecutionOptions { use_arena: false, arena_budget_bytes: 0 },
+        );
+        let arena = join_series_with_options(
+            &left, &right, join_type,
+            JoinExecutionOptions::default(),
+        );
+
+        match (global, arena) {
+            (Ok(g), Ok(a)) => {
+                prop_assert_eq!(
+                    g.index.labels(), a.index.labels(),
+                    "arena join index must match global"
+                );
+                prop_assert_eq!(
+                    g.left_values.len(), a.left_values.len(),
+                    "arena join left_values length must match"
+                );
+                prop_assert_eq!(
+                    g.right_values.len(), a.right_values.len(),
+                    "arena join right_values length must match"
+                );
+            }
+            (Err(_), Err(_)) => { /* both error: ok */ }
+            (Ok(_), Err(e)) => {
+                prop_assert!(false, "arena errored but global succeeded: {e}");
+            }
+            (Err(e), Ok(_)) => {
+                prop_assert!(false, "global errored but arena succeeded: {e}");
+            }
+        }
+    }
+
+    /// Arena-backed groupby_sum produces identical output to global-allocator
+    /// groupby_sum for arbitrary key/value pairs.
+    #[test]
+    fn prop_arena_groupby_isomorphic_to_global(
+        (keys, values) in arb_groupby_pair(15),
+        dropna in proptest::bool::ANY,
+    ) {
+        let policy = RuntimePolicy::hardened(Some(100_000));
+        let mut ledger = EvidenceLedger::new();
+        let opts = GroupByOptions { dropna };
+
+        let global = groupby_sum_with_options(
+            &keys, &values, opts, &policy, &mut ledger,
+            GroupByExecutionOptions { use_arena: false, arena_budget_bytes: 0 },
+        );
+        let arena = groupby_sum_with_options(
+            &keys, &values, opts, &policy, &mut ledger,
+            GroupByExecutionOptions::default(),
+        );
+
+        match (global, arena) {
+            (Ok(g), Ok(a)) => {
+                prop_assert_eq!(
+                    g.index().labels(), a.index().labels(),
+                    "arena groupby index must match global"
+                );
+                prop_assert_eq!(
+                    g.values(), a.values(),
+                    "arena groupby values must match global"
+                );
+            }
+            (Err(_), Err(_)) => { /* both error: ok */ }
+            (Ok(_), Err(e)) => {
+                prop_assert!(false, "arena errored but global succeeded: {e}");
+            }
+            (Err(e), Ok(_)) => {
+                prop_assert!(false, "global errored but arena succeeded: {e}");
+            }
+        }
+    }
+
+    /// Join with a tiny arena budget falls back to global allocator and still
+    /// produces correct results.
+    #[test]
+    fn prop_arena_join_fallback_correct(
+        (left, right) in arb_series_pair(15),
+        join_type in prop_oneof![Just(JoinType::Inner), Just(JoinType::Left), Just(JoinType::Right), Just(JoinType::Outer)],
+    ) {
+        let fallback = join_series_with_options(
+            &left, &right, join_type,
+            JoinExecutionOptions { use_arena: true, arena_budget_bytes: 1 },
+        );
+        let global = join_series_with_options(
+            &left, &right, join_type,
+            JoinExecutionOptions { use_arena: false, arena_budget_bytes: 0 },
+        );
+
+        match (fallback, global) {
+            (Ok(f), Ok(g)) => {
+                prop_assert_eq!(f.index.labels(), g.index.labels());
+                prop_assert_eq!(f.left_values.len(), g.left_values.len());
+                prop_assert_eq!(f.right_values.len(), g.right_values.len());
+            }
+            (Err(_), Err(_)) => {}
+            _ => prop_assert!(false, "fallback/global mismatch in error status"),
+        }
+    }
+
+    /// Groupby with a tiny arena budget falls back and still produces
+    /// correct results.
+    #[test]
+    fn prop_arena_groupby_fallback_correct(
+        (keys, values) in arb_groupby_pair(15),
+    ) {
+        let policy = RuntimePolicy::hardened(Some(100_000));
+        let mut ledger = EvidenceLedger::new();
+        let opts = GroupByOptions::default();
+
+        let fallback = groupby_sum_with_options(
+            &keys, &values, opts, &policy, &mut ledger,
+            GroupByExecutionOptions { use_arena: true, arena_budget_bytes: 1 },
+        );
+        let global = groupby_sum_with_options(
+            &keys, &values, opts, &policy, &mut ledger,
+            GroupByExecutionOptions { use_arena: false, arena_budget_bytes: 0 },
+        );
+
+        match (fallback, global) {
+            (Ok(f), Ok(g)) => {
+                prop_assert_eq!(f.index().labels(), g.index().labels());
+                prop_assert_eq!(f.values(), g.values());
+            }
+            (Err(_), Err(_)) => {}
+            _ => prop_assert!(false, "fallback/global mismatch in error status"),
+        }
     }
 }

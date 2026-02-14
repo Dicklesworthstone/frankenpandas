@@ -121,6 +121,47 @@ impl Series {
         let mut ledger = EvidenceLedger::new();
         self.add_with_policy(other, &RuntimePolicy::strict(), &mut ledger)
     }
+
+    /// Return the number of elements in this Series.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.index.len()
+    }
+
+    /// Return true if this Series has zero elements.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.index.is_empty()
+    }
+}
+
+/// Concatenate multiple Series along axis 0 (row-wise).
+///
+/// Matches `pd.concat([s1, s2, ...])` semantics:
+/// - Index labels are concatenated in order (duplicates preserved).
+/// - Values are type-coerced to a common dtype.
+/// - Empty input returns an empty Series named "concat".
+pub fn concat_series(series_list: &[&Series]) -> Result<Series, FrameError> {
+    if series_list.is_empty() {
+        return Series::from_values("concat", Vec::new(), Vec::new());
+    }
+
+    let total_len: usize = series_list.iter().map(|s| s.len()).sum();
+    let mut labels = Vec::with_capacity(total_len);
+    let mut values = Vec::with_capacity(total_len);
+
+    for s in series_list {
+        labels.extend_from_slice(s.index().labels());
+        values.extend_from_slice(s.values());
+    }
+
+    let name = if series_list.len() == 1 {
+        series_list[0].name().to_owned()
+    } else {
+        "concat".to_owned()
+    };
+
+    Series::from_values(name, labels, values)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -248,6 +289,120 @@ mod tests {
 
         let err = left.add(&right).expect_err("strict mode should reject");
         assert!(matches!(err, FrameError::DuplicateIndexUnsupported));
+    }
+
+    #[test]
+    fn concat_series_basic() {
+        use super::concat_series;
+
+        let s1 = Series::from_values(
+            "a",
+            vec![1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(10), Scalar::Int64(20)],
+        )
+        .expect("s1");
+
+        let s2 = Series::from_values(
+            "b",
+            vec![3_i64.into(), 4_i64.into()],
+            vec![Scalar::Int64(30), Scalar::Int64(40)],
+        )
+        .expect("s2");
+
+        let result = concat_series(&[&s1, &s2]).expect("concat");
+        assert_eq!(result.len(), 4);
+        assert_eq!(
+            result.index().labels(),
+            &[1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()]
+        );
+        assert_eq!(
+            result.values(),
+            &[
+                Scalar::Int64(10),
+                Scalar::Int64(20),
+                Scalar::Int64(30),
+                Scalar::Int64(40)
+            ]
+        );
+    }
+
+    #[test]
+    fn concat_series_preserves_duplicates() {
+        use super::concat_series;
+
+        let s1 = Series::from_values(
+            "a",
+            vec!["x".into(), "y".into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2)],
+        )
+        .expect("s1");
+
+        let s2 = Series::from_values(
+            "b",
+            vec!["x".into(), "z".into()],
+            vec![Scalar::Int64(3), Scalar::Int64(4)],
+        )
+        .expect("s2");
+
+        let result = concat_series(&[&s1, &s2]).expect("concat");
+        assert_eq!(result.len(), 4);
+        // "x" appears twice (from both series)
+        assert_eq!(
+            result.index().labels(),
+            &["x".into(), "y".into(), "x".into(), "z".into()]
+        );
+    }
+
+    #[test]
+    fn concat_series_empty_input() {
+        use super::concat_series;
+        let result = concat_series(&[]).expect("empty concat");
+        assert_eq!(result.len(), 0);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn concat_series_single_input() {
+        use super::concat_series;
+
+        let s =
+            Series::from_values("only", vec![1_i64.into()], vec![Scalar::Int64(42)]).expect("s");
+
+        let result = concat_series(&[&s]).expect("single concat");
+        assert_eq!(result.len(), 1);
+        assert_eq!(result.name(), "only"); // preserves name for single input
+        assert_eq!(result.values(), &[Scalar::Int64(42)]);
+    }
+
+    #[test]
+    fn concat_series_with_nulls() {
+        use super::concat_series;
+
+        let s1 = Series::from_values("a", vec![1_i64.into()], vec![Scalar::Null(NullKind::Null)])
+            .expect("s1");
+
+        let s2 = Series::from_values("b", vec![2_i64.into()], vec![Scalar::Int64(10)]).expect("s2");
+
+        let result = concat_series(&[&s1, &s2]).expect("concat with nulls");
+        assert_eq!(result.len(), 2);
+        assert!(result.values()[0].is_missing());
+        assert_eq!(result.values()[1], Scalar::Int64(10));
+    }
+
+    #[test]
+    fn concat_series_three_series() {
+        use super::concat_series;
+
+        let s1 = Series::from_values("a", vec![1_i64.into()], vec![Scalar::Int64(1)]).expect("s1");
+        let s2 = Series::from_values("b", vec![2_i64.into()], vec![Scalar::Int64(2)]).expect("s2");
+        let s3 = Series::from_values("c", vec![3_i64.into()], vec![Scalar::Int64(3)]).expect("s3");
+
+        let result = concat_series(&[&s1, &s2, &s3]).expect("triple concat");
+        assert_eq!(result.len(), 3);
+        assert_eq!(
+            result.values(),
+            &[Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]
+        );
     }
 
     #[test]

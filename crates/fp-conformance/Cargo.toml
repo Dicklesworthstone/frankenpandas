@@ -19,5 +19,6 @@ sha2 = "0.10.9"
 thiserror = { workspace = true }
 
 [dev-dependencies]
+fp-io = { path = "../fp-io" }
 proptest = "1.10.0"
 tempfile = "3.14.0"
