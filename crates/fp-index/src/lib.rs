@@ -1461,4 +1461,143 @@ mod tests {
         // Intersection is 800..999 (all 5 overlap)
         assert_eq!(intersection.len(), 200);
     }
+
+    // === AG-11-T: Full test plan (bd-2t5e.17) ===
+
+    #[test]
+    fn ag11t_two_sorted_identical() {
+        let a = Index::from_i64(vec![1, 2, 3]);
+        let b = Index::from_i64(vec![1, 2, 3]);
+        let result = leapfrog_union(&[&a, &b]);
+        assert_eq!(
+            result.labels(),
+            &[IndexLabel::Int64(1), IndexLabel::Int64(2), IndexLabel::Int64(3)]
+        );
+        let plan = multi_way_align(&[&a, &b]);
+        // Both map to identity positions
+        assert_eq!(plan.positions[0], vec![Some(0), Some(1), Some(2)]);
+        assert_eq!(plan.positions[1], vec![Some(0), Some(1), Some(2)]);
+        eprintln!("[AG-11-T] two_sorted_identical | in=[3,3] out=3 | PASS");
+    }
+
+    #[test]
+    fn ag11t_two_sorted_disjoint() {
+        let a = Index::from_i64(vec![1, 2, 3]);
+        let b = Index::from_i64(vec![4, 5, 6]);
+        let result = leapfrog_union(&[&a, &b]);
+        assert_eq!(result.len(), 6);
+        assert_eq!(result.labels()[0], IndexLabel::Int64(1));
+        assert_eq!(result.labels()[5], IndexLabel::Int64(6));
+        eprintln!("[AG-11-T] two_sorted_disjoint | in=[3,3] out=6 | PASS");
+    }
+
+    #[test]
+    fn ag11t_two_sorted_overlapping_with_positions() {
+        let a = Index::from_i64(vec![1, 3, 5]);
+        let b = Index::from_i64(vec![2, 3, 4]);
+        let plan = multi_way_align(&[&a, &b]);
+        assert_eq!(
+            plan.union_index.labels(),
+            &[
+                IndexLabel::Int64(1),
+                IndexLabel::Int64(2),
+                IndexLabel::Int64(3),
+                IndexLabel::Int64(4),
+                IndexLabel::Int64(5),
+            ]
+        );
+        assert_eq!(plan.positions[0], vec![Some(0), None, Some(1), None, Some(2)]);
+        assert_eq!(plan.positions[1], vec![None, Some(0), Some(1), Some(2), None]);
+        eprintln!("[AG-11-T] two_sorted_overlapping | in=[3,3] out=5 | PASS");
+    }
+
+    #[test]
+    fn ag11t_five_way_union_vs_pairwise() {
+        let indexes: Vec<Index> = (0..5)
+            .map(|i| Index::from_i64(vec![i * 10, i * 10 + 1, i * 10 + 2]))
+            .collect();
+        let refs: Vec<&Index> = indexes.iter().collect();
+
+        let leapfrog = leapfrog_union(&refs);
+
+        // Iterative pairwise
+        let mut pairwise = indexes[0].clone();
+        for idx in &indexes[1..] {
+            pairwise = pairwise.union_with(idx);
+        }
+        let pairwise = pairwise.sort_values();
+
+        assert_eq!(leapfrog.labels(), pairwise.labels());
+        eprintln!(
+            "[AG-11-T] five_way_union_vs_pairwise | in=[3x5] out={} | PASS",
+            leapfrog.len()
+        );
+    }
+
+    #[test]
+    fn ag11t_single_element_indexes() {
+        let indexes: Vec<Index> = (0..10)
+            .map(|i| Index::from_i64(vec![i]))
+            .collect();
+        let refs: Vec<&Index> = indexes.iter().collect();
+        let result = leapfrog_union(&refs);
+        assert_eq!(result.len(), 10);
+        for (i, label) in result.labels().iter().enumerate() {
+            assert_eq!(*label, IndexLabel::Int64(i as i64));
+        }
+        eprintln!("[AG-11-T] single_element_indexes | in=[1x10] out=10 | PASS");
+    }
+
+    #[test]
+    fn ag11t_all_same_labels() {
+        let base = Index::from_i64(vec![1, 2, 3]);
+        let refs: Vec<&Index> = (0..5).map(|_| &base).collect();
+        let plan = multi_way_align(&refs);
+        assert_eq!(
+            plan.union_index.labels(),
+            &[IndexLabel::Int64(1), IndexLabel::Int64(2), IndexLabel::Int64(3)]
+        );
+        // All 5 inputs should have identity positions
+        for pos_vec in &plan.positions {
+            assert_eq!(*pos_vec, vec![Some(0), Some(1), Some(2)]);
+        }
+        eprintln!("[AG-11-T] all_same_labels | in=[3x5] out=3 | PASS");
+    }
+
+    #[test]
+    fn ag11t_iso_associativity() {
+        let a = Index::from_i64(vec![1, 4, 7, 10]);
+        let b = Index::from_i64(vec![2, 4, 8, 10]);
+        let c = Index::from_i64(vec![3, 7, 8, 10]);
+
+        let leapfrog_result = leapfrog_union(&[&a, &b, &c]);
+
+        // union(A, union(B, C))
+        let bc = b.union_with(&c).sort_values();
+        let a_bc = a.union_with(&bc).sort_values();
+
+        // union(union(A, B), C)
+        let ab = a.union_with(&b).sort_values();
+        let ab_c = ab.union_with(&c).sort_values();
+
+        assert_eq!(leapfrog_result.labels(), a_bc.labels());
+        assert_eq!(leapfrog_result.labels(), ab_c.labels());
+        eprintln!("[AG-11-T] iso_associativity | verified | PASS");
+    }
+
+    #[test]
+    fn ag11t_iso_commutativity() {
+        let a = Index::from_i64(vec![1, 5, 9]);
+        let b = Index::from_i64(vec![2, 5, 8]);
+        let c = Index::from_i64(vec![3, 5, 7]);
+
+        let abc = leapfrog_union(&[&a, &b, &c]);
+        let cab = leapfrog_union(&[&c, &a, &b]);
+        let bca = leapfrog_union(&[&b, &c, &a]);
+
+        // All orderings produce same sorted output
+        assert_eq!(abc.labels(), cab.labels());
+        assert_eq!(abc.labels(), bca.labels());
+        eprintln!("[AG-11-T] iso_commutativity | verified | PASS");
+    }
 }
