@@ -439,6 +439,223 @@ fn try_groupby_sum_dense_int64_arena(
 }
 
 // ---------------------------------------------------------------------------
+// bd-2gi.16: Generic GroupBy Aggregation
+// ---------------------------------------------------------------------------
+
+/// Aggregation function selector for groupby operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AggFunc {
+    Sum,
+    Mean,
+    Count,
+    Min,
+    Max,
+    First,
+    Last,
+}
+
+/// Generic groupby aggregation supporting all standard aggregation functions.
+///
+/// Matches `df.groupby(keys).agg(func)` semantics:
+/// - Groups by key values, preserving first-seen key order.
+/// - Applies the specified aggregation to each group's values.
+/// - Respects `dropna` option for null keys.
+///
+/// For Sum, the optimized `groupby_sum()` with dense Int64 and arena paths
+/// is preferred; this function uses the generic HashMap path for all ops.
+pub fn groupby_agg(
+    keys: &Series,
+    values: &Series,
+    func: AggFunc,
+    options: GroupByOptions,
+    _policy: &RuntimePolicy,
+    _ledger: &mut EvidenceLedger,
+) -> Result<Series, GroupByError> {
+    // Alignment: if indexes differ, align to union.
+    let aligned_storage = if keys.index() == values.index() && !keys.index().has_duplicates() {
+        None
+    } else {
+        let plan = align_union(keys.index(), values.index());
+        validate_alignment_plan(&plan)?;
+        let aligned_keys = keys.column().reindex_by_positions(&plan.left_positions)?;
+        let aligned_values = values
+            .column()
+            .reindex_by_positions(&plan.right_positions)?;
+        Some((aligned_keys, aligned_values))
+    };
+
+    let (key_vals, val_vals): (&[Scalar], &[Scalar]) =
+        if let Some((ref ak, ref av)) = aligned_storage {
+            (ak.values(), av.values())
+        } else {
+            (keys.values(), values.values())
+        };
+
+    // Collect groups: key_ref -> (source_idx, accumulated values as f64 vec).
+    let mut ordering = Vec::<GroupKeyRef<'_>>::new();
+    let mut groups = HashMap::<GroupKeyRef<'_>, (usize, Vec<f64>)>::new();
+
+    for (pos, (key, value)) in key_vals.iter().zip(val_vals.iter()).enumerate() {
+        if options.dropna && key.is_missing() {
+            continue;
+        }
+
+        let key_id = GroupKeyRef::from_scalar(key);
+        let entry = groups.entry(key_id.clone()).or_insert_with(|| {
+            ordering.push(key_id.clone());
+            (pos, Vec::new())
+        });
+
+        if !value.is_missing()
+            && let Ok(v) = value.to_f64()
+        {
+            entry.1.push(v);
+        }
+    }
+
+    // Apply aggregation function to each group.
+    let agg_name = match func {
+        AggFunc::Sum => "sum",
+        AggFunc::Mean => "mean",
+        AggFunc::Count => "count",
+        AggFunc::Min => "min",
+        AggFunc::Max => "max",
+        AggFunc::First => "first",
+        AggFunc::Last => "last",
+    };
+
+    let mut out_index = Vec::with_capacity(ordering.len());
+    let mut out_values = Vec::with_capacity(ordering.len());
+
+    for key in &ordering {
+        let (source_idx, vals) = groups
+            .get(key)
+            .expect("ordering references only inserted keys");
+        let label = &key_vals[*source_idx];
+        out_index.push(match label {
+            Scalar::Int64(v) => IndexLabel::Int64(*v),
+            Scalar::Utf8(v) => IndexLabel::Utf8(v.clone()),
+            Scalar::Bool(v) => IndexLabel::Utf8(v.to_string()),
+            Scalar::Null(NullKind::NaN | NullKind::NaT | NullKind::Null) => {
+                IndexLabel::Utf8("<null>".to_owned())
+            }
+            Scalar::Float64(v) => IndexLabel::Utf8(v.to_string()),
+        });
+
+        let agg_value = match func {
+            AggFunc::Sum => Scalar::Float64(vals.iter().sum()),
+            AggFunc::Mean => {
+                if vals.is_empty() {
+                    Scalar::Null(NullKind::Null)
+                } else {
+                    Scalar::Float64(vals.iter().sum::<f64>() / vals.len() as f64)
+                }
+            }
+            AggFunc::Count => Scalar::Int64(vals.len() as i64),
+            AggFunc::Min => {
+                if vals.is_empty() {
+                    Scalar::Null(NullKind::Null)
+                } else {
+                    Scalar::Float64(vals.iter().copied().fold(f64::INFINITY, f64::min))
+                }
+            }
+            AggFunc::Max => {
+                if vals.is_empty() {
+                    Scalar::Null(NullKind::Null)
+                } else {
+                    Scalar::Float64(vals.iter().copied().fold(f64::NEG_INFINITY, f64::max))
+                }
+            }
+            AggFunc::First => {
+                if vals.is_empty() {
+                    Scalar::Null(NullKind::Null)
+                } else {
+                    Scalar::Float64(vals[0])
+                }
+            }
+            AggFunc::Last => {
+                if vals.is_empty() {
+                    Scalar::Null(NullKind::Null)
+                } else {
+                    Scalar::Float64(vals[vals.len() - 1])
+                }
+            }
+        };
+
+        out_values.push(agg_value);
+    }
+
+    let out_column = Column::from_values(out_values)?;
+    Ok(Series::new(agg_name, Index::new(out_index), out_column)?)
+}
+
+/// Convenience: `groupby_mean`.
+pub fn groupby_mean(
+    keys: &Series,
+    values: &Series,
+    options: GroupByOptions,
+    policy: &RuntimePolicy,
+    ledger: &mut EvidenceLedger,
+) -> Result<Series, GroupByError> {
+    groupby_agg(keys, values, AggFunc::Mean, options, policy, ledger)
+}
+
+/// Convenience: `groupby_count` (count of non-null values per group).
+pub fn groupby_count(
+    keys: &Series,
+    values: &Series,
+    options: GroupByOptions,
+    policy: &RuntimePolicy,
+    ledger: &mut EvidenceLedger,
+) -> Result<Series, GroupByError> {
+    groupby_agg(keys, values, AggFunc::Count, options, policy, ledger)
+}
+
+/// Convenience: `groupby_min`.
+pub fn groupby_min(
+    keys: &Series,
+    values: &Series,
+    options: GroupByOptions,
+    policy: &RuntimePolicy,
+    ledger: &mut EvidenceLedger,
+) -> Result<Series, GroupByError> {
+    groupby_agg(keys, values, AggFunc::Min, options, policy, ledger)
+}
+
+/// Convenience: `groupby_max`.
+pub fn groupby_max(
+    keys: &Series,
+    values: &Series,
+    options: GroupByOptions,
+    policy: &RuntimePolicy,
+    ledger: &mut EvidenceLedger,
+) -> Result<Series, GroupByError> {
+    groupby_agg(keys, values, AggFunc::Max, options, policy, ledger)
+}
+
+/// Convenience: `groupby_first` (first non-null value per group).
+pub fn groupby_first(
+    keys: &Series,
+    values: &Series,
+    options: GroupByOptions,
+    policy: &RuntimePolicy,
+    ledger: &mut EvidenceLedger,
+) -> Result<Series, GroupByError> {
+    groupby_agg(keys, values, AggFunc::First, options, policy, ledger)
+}
+
+/// Convenience: `groupby_last` (last non-null value per group).
+pub fn groupby_last(
+    keys: &Series,
+    values: &Series,
+    options: GroupByOptions,
+    policy: &RuntimePolicy,
+    ledger: &mut EvidenceLedger,
+) -> Result<Series, GroupByError> {
+    groupby_agg(keys, values, AggFunc::Last, options, policy, ledger)
+}
+
+// ---------------------------------------------------------------------------
 // AG-12: Sketching / Streaming Aggregation Data Structures
 // ---------------------------------------------------------------------------
 
@@ -1461,6 +1678,362 @@ mod tests {
                 &[Scalar::Float64(10.0), Scalar::Float64(20.0)]
             );
         }
+    }
+
+    // === bd-2gi.16: Generic GroupBy Aggregation Tests ===
+
+    use super::{
+        AggFunc, groupby_agg, groupby_count, groupby_first, groupby_last, groupby_max,
+        groupby_mean, groupby_min,
+    };
+
+    fn make_grouped_data() -> (Series, Series) {
+        let keys = Series::from_values(
+            "key",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+            ],
+        )
+        .unwrap();
+        let values = Series::from_values(
+            "val",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Int64(10),
+                Scalar::Int64(20),
+                Scalar::Int64(30),
+                Scalar::Int64(40),
+            ],
+        )
+        .unwrap();
+        (keys, values)
+    }
+
+    #[test]
+    fn groupby_mean_basic() {
+        let (keys, values) = make_grouped_data();
+        let mut ledger = EvidenceLedger::new();
+        let out = groupby_mean(
+            &keys,
+            &values,
+            GroupByOptions::default(),
+            &RuntimePolicy::strict(),
+            &mut ledger,
+        )
+        .unwrap();
+
+        assert_eq!(out.index().labels(), &["a".into(), "b".into()]);
+        // a: (10+30)/2 = 20.0, b: (20+40)/2 = 30.0
+        assert_eq!(
+            out.values(),
+            &[Scalar::Float64(20.0), Scalar::Float64(30.0)]
+        );
+        assert_eq!(out.name(), "mean");
+    }
+
+    #[test]
+    fn groupby_count_basic() {
+        let (keys, values) = make_grouped_data();
+        let mut ledger = EvidenceLedger::new();
+        let out = groupby_count(
+            &keys,
+            &values,
+            GroupByOptions::default(),
+            &RuntimePolicy::strict(),
+            &mut ledger,
+        )
+        .unwrap();
+
+        assert_eq!(out.index().labels(), &["a".into(), "b".into()]);
+        assert_eq!(out.values(), &[Scalar::Int64(2), Scalar::Int64(2)]);
+        assert_eq!(out.name(), "count");
+    }
+
+    #[test]
+    fn groupby_min_basic() {
+        let (keys, values) = make_grouped_data();
+        let mut ledger = EvidenceLedger::new();
+        let out = groupby_min(
+            &keys,
+            &values,
+            GroupByOptions::default(),
+            &RuntimePolicy::strict(),
+            &mut ledger,
+        )
+        .unwrap();
+
+        assert_eq!(out.index().labels(), &["a".into(), "b".into()]);
+        assert_eq!(
+            out.values(),
+            &[Scalar::Float64(10.0), Scalar::Float64(20.0)]
+        );
+        assert_eq!(out.name(), "min");
+    }
+
+    #[test]
+    fn groupby_max_basic() {
+        let (keys, values) = make_grouped_data();
+        let mut ledger = EvidenceLedger::new();
+        let out = groupby_max(
+            &keys,
+            &values,
+            GroupByOptions::default(),
+            &RuntimePolicy::strict(),
+            &mut ledger,
+        )
+        .unwrap();
+
+        assert_eq!(out.index().labels(), &["a".into(), "b".into()]);
+        assert_eq!(
+            out.values(),
+            &[Scalar::Float64(30.0), Scalar::Float64(40.0)]
+        );
+        assert_eq!(out.name(), "max");
+    }
+
+    #[test]
+    fn groupby_first_basic() {
+        let (keys, values) = make_grouped_data();
+        let mut ledger = EvidenceLedger::new();
+        let out = groupby_first(
+            &keys,
+            &values,
+            GroupByOptions::default(),
+            &RuntimePolicy::strict(),
+            &mut ledger,
+        )
+        .unwrap();
+
+        assert_eq!(out.index().labels(), &["a".into(), "b".into()]);
+        assert_eq!(
+            out.values(),
+            &[Scalar::Float64(10.0), Scalar::Float64(20.0)]
+        );
+        assert_eq!(out.name(), "first");
+    }
+
+    #[test]
+    fn groupby_last_basic() {
+        let (keys, values) = make_grouped_data();
+        let mut ledger = EvidenceLedger::new();
+        let out = groupby_last(
+            &keys,
+            &values,
+            GroupByOptions::default(),
+            &RuntimePolicy::strict(),
+            &mut ledger,
+        )
+        .unwrap();
+
+        assert_eq!(out.index().labels(), &["a".into(), "b".into()]);
+        assert_eq!(
+            out.values(),
+            &[Scalar::Float64(30.0), Scalar::Float64(40.0)]
+        );
+        assert_eq!(out.name(), "last");
+    }
+
+    #[test]
+    fn groupby_agg_sum_matches_dedicated_sum() {
+        let (keys, values) = make_grouped_data();
+        let mut ledger = EvidenceLedger::new();
+        let agg = groupby_agg(
+            &keys,
+            &values,
+            AggFunc::Sum,
+            GroupByOptions::default(),
+            &RuntimePolicy::strict(),
+            &mut ledger,
+        )
+        .unwrap();
+        let dedicated = groupby_sum(
+            &keys,
+            &values,
+            GroupByOptions::default(),
+            &RuntimePolicy::strict(),
+            &mut ledger,
+        )
+        .unwrap();
+
+        assert_eq!(agg.index().labels(), dedicated.index().labels());
+        assert_eq!(agg.values(), dedicated.values());
+    }
+
+    #[test]
+    fn groupby_mean_with_nulls_skips_missing() {
+        let keys = Series::from_values(
+            "key",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("a".into()),
+            ],
+        )
+        .unwrap();
+        let values = Series::from_values(
+            "val",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Int64(10),
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(30),
+            ],
+        )
+        .unwrap();
+
+        let mut ledger = EvidenceLedger::new();
+        let out = groupby_mean(
+            &keys,
+            &values,
+            GroupByOptions::default(),
+            &RuntimePolicy::strict(),
+            &mut ledger,
+        )
+        .unwrap();
+
+        // Mean of [10, 30] (null skipped) = 20.0
+        assert_eq!(out.values(), &[Scalar::Float64(20.0)]);
+    }
+
+    #[test]
+    fn groupby_count_excludes_nulls() {
+        let keys = Series::from_values(
+            "key",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("a".into()),
+            ],
+        )
+        .unwrap();
+        let values = Series::from_values(
+            "val",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Int64(10),
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(30),
+            ],
+        )
+        .unwrap();
+
+        let mut ledger = EvidenceLedger::new();
+        let out = groupby_count(
+            &keys,
+            &values,
+            GroupByOptions::default(),
+            &RuntimePolicy::strict(),
+            &mut ledger,
+        )
+        .unwrap();
+
+        assert_eq!(out.values(), &[Scalar::Int64(2)]); // 2 non-null
+    }
+
+    #[test]
+    fn groupby_min_all_nulls_returns_null() {
+        let keys = Series::from_values(
+            "key",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Utf8("a".into()), Scalar::Utf8("a".into())],
+        )
+        .unwrap();
+        let values = Series::from_values(
+            "val",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Null(NullKind::Null), Scalar::Null(NullKind::Null)],
+        )
+        .unwrap();
+
+        let mut ledger = EvidenceLedger::new();
+        let out = groupby_min(
+            &keys,
+            &values,
+            GroupByOptions::default(),
+            &RuntimePolicy::strict(),
+            &mut ledger,
+        )
+        .unwrap();
+
+        assert!(out.values()[0].is_missing());
+    }
+
+    #[test]
+    fn groupby_agg_empty_input() {
+        let keys =
+            Series::from_values("key", Vec::<IndexLabel>::new(), Vec::<Scalar>::new()).unwrap();
+        let values =
+            Series::from_values("val", Vec::<IndexLabel>::new(), Vec::<Scalar>::new()).unwrap();
+
+        let mut ledger = EvidenceLedger::new();
+        for func in [
+            AggFunc::Sum,
+            AggFunc::Mean,
+            AggFunc::Count,
+            AggFunc::Min,
+            AggFunc::Max,
+            AggFunc::First,
+            AggFunc::Last,
+        ] {
+            let out = groupby_agg(
+                &keys,
+                &values,
+                func,
+                GroupByOptions::default(),
+                &RuntimePolicy::strict(),
+                &mut ledger,
+            )
+            .unwrap();
+            assert!(
+                out.is_empty(),
+                "empty input should give empty output for {func:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn groupby_agg_preserves_first_seen_order() {
+        let keys = Series::from_values(
+            "key",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Utf8("c".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("a".into()),
+            ],
+        )
+        .unwrap();
+        let values = Series::from_values(
+            "val",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+                Scalar::Int64(4),
+            ],
+        )
+        .unwrap();
+
+        let mut ledger = EvidenceLedger::new();
+        let out = groupby_mean(
+            &keys,
+            &values,
+            GroupByOptions::default(),
+            &RuntimePolicy::strict(),
+            &mut ledger,
+        )
+        .unwrap();
+
+        // First-seen order: c, a, b
+        assert_eq!(out.index().labels(), &["c".into(), "a".into(), "b".into()]);
     }
 
     // === AG-12: Sketching / Streaming Aggregation Tests ===
