@@ -14,3 +14,12 @@ Mitigations:
 - tie-breaking preserved: yes for implemented first-hit behavior
 - null/NaN/NaT behavior preserved: missing propagation on non-overlap paths is covered
 - fixture checksum verification: tracked by `artifacts/perf/golden_checksums.txt`
+
+## Invariant Ledger Hooks
+
+- `FP-I1` (alignment homomorphism):
+  - evidence: `artifacts/phase2c/FP-P2C-003/legacy_anchor_map.md`, `artifacts/phase2c/FP-P2C-003/contract_table.md`
+- `FP-I2` (missingness monotonicity):
+  - evidence: `artifacts/phase2c/FP-P2C-003/contract_table.md`, `crates/fp-conformance/fixtures/packets/fp_p2c_003_*`
+- `FP-I4` (index determinism):
+  - evidence: `artifacts/phase2c/FP-P2C-003/parity_gate.yaml`, packet differential report outputs

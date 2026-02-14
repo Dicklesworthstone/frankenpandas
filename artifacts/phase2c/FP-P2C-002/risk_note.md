@@ -15,3 +15,11 @@ Mitigations:
 - tie-breaking preserved: first occurrence wins; full pandas tie behavior deferred
 - null/NaN/NaT behavior preserved: not applicable at index-only layer
 - fixture checksum verification: complete (`artifacts/perf/golden_checksums.txt`)
+
+## Invariant Ledger Hooks
+
+- `FP-I4` (index determinism):
+  - evidence: `artifacts/phase2c/FP-P2C-002/legacy_anchor_map.md`, `artifacts/phase2c/FP-P2C-002/contract_table.md`
+  - fixtures: `crates/fp-conformance/fixtures/packets/fp_p2c_002_*`
+- scoped duplicate-label gate behavior:
+  - evidence: `artifacts/phase2c/FP-P2C-002/parity_gate.yaml` and strict/hardened drift counters in packet reports

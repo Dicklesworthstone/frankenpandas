@@ -90,6 +90,7 @@ Gate law:
 ## 8. Packet Artifact Topology (Normative)
 
 Directory template for each packet:
+- `artifacts/phase2c/ESSENCE_EXTRACTION_LEDGER.md` (cross-packet canonical foundation ledger; must be updated whenever packet essence changes)
 - `artifacts/phase2c/FP-P2C-00X/legacy_anchor_map.md`
 - `artifacts/phase2c/FP-P2C-00X/contract_table.md`
 - `artifacts/phase2c/FP-P2C-00X/fixture_manifest.json`

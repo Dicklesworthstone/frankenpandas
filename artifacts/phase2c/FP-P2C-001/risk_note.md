@@ -15,3 +15,12 @@ Mitigations:
 - tie-breaking preserved: yes within current strategy; full pandas tie behavior deferred
 - null/NaN/NaT behavior preserved: yes for implemented arithmetic + missing propagation slice
 - fixture checksum verification: complete (`artifacts/perf/golden_checksums.txt`)
+
+## Invariant Ledger Hooks
+
+- `FP-I1` (alignment homomorphism):
+  - evidence: `artifacts/phase2c/FP-P2C-001/legacy_anchor_map.md`, `artifacts/phase2c/FP-P2C-001/contract_table.md`
+- `FP-I2` (missingness monotonicity):
+  - evidence: `artifacts/phase2c/FP-P2C-001/contract_table.md`, `crates/fp-conformance/fixtures/packets/fp_p2c_001_*`
+- `FP-I4` (index determinism):
+  - evidence: `artifacts/phase2c/FP-P2C-001/parity_gate.yaml`, packet differential report outputs

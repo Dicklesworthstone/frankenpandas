@@ -210,6 +210,7 @@ Each `FP-P2C-*` ticket MUST produce all of the following extraction payloads:
 10. RaptorQ note: artifact set requiring sidecars.
 
 Artifact location (normative):
+- `artifacts/phase2c/ESSENCE_EXTRACTION_LEDGER.md` (cross-packet canonical essence ledger for invariants/assumptions/undefined edges/divergence/non-goals)
 - `artifacts/phase2c/FP-P2C-00X/legacy_anchor_map.md`
 - `artifacts/phase2c/FP-P2C-00X/contract_table.md`
 - `artifacts/phase2c/FP-P2C-00X/fixture_manifest.json`
