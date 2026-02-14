@@ -192,6 +192,37 @@ Status legend:
 - [ ] O7. Add release-grade artifact manifests with RaptorQ sidecars for conformance + benchmark bundles.
 - [ ] O8. Add reproducibility ledger (`env`, `manifest`, lockfiles) for deterministic reruns.
 
+## P. Method-Stack Saturation Pass (Current Session)
+
+### P1. Skill and source activation
+- [x] P1.1. Load and apply `extreme-software-optimization` workflow loop.
+- [x] P1.2. Load and apply `alien-artifact-coding` decision/evidence contract requirements.
+- [x] P1.3. Load and apply `alien-graveyard` canonical-source and recommendation-contract workflow.
+- [x] P1.4. Scan canonical graveyard sources for high-EV FrankenPandas-relevant levers.
+
+### P2. Open-bead quality saturation (`br`/`bv` only)
+- [x] P2.1. Diagnose open-bead gaps via `br list --status open --json` marker checks.
+- [x] P2.2. Bulk-append missing `Differential/Adversarial Validation Contract v2` sections with `br update`.
+- [x] P2.3. Bulk-append missing `Optimization/Isomorphism Contract v2` sections with `br update`.
+- [x] P2.4. Bulk-append missing `Final Evidence/RaptorQ Contract v2` sections with `br update`.
+- [x] P2.5. Re-check marker coverage (`missing_diff=0`, `missing_opt=0`, `missing_final=0`).
+- [x] P2.6. Re-validate graph health (`br dep cycles --json` => `count=0`; `bv --robot-triage` rechecked).
+
+### P3. Round-4 optimization cycle
+- [x] P3.1. Capture pre-change baseline/profile artifacts (`round4_*_before`).
+- [x] P3.2. Implement one lever: dense Int64 bucket path in `fp-groupby::groupby_sum` with bounded fallback.
+- [x] P3.3. Add regression tests for first-seen order and null-group fallback behavior.
+- [x] P3.4. Verify conformance and golden checks after lever.
+- [x] P3.5. Emit `ROUND4_*` artifact docs.
+
+### P4. Round-5 optimization cycle
+- [x] P4.1. Re-profile and identify duplicate-detection hashing as dominant bottleneck.
+- [x] P4.2. Implement one lever: lazy `Index::has_duplicates` memoization via `OnceCell<bool>`.
+- [x] P4.3. Guard semantic parity by making `Index` equality label-only and adding cache-state equality regression test.
+- [x] P4.4. Rebuild release benchmark target and capture post-change benchmark artifacts (`round5_*`).
+- [x] P4.5. Verify no semantic drift (`fp-index`, `fp-groupby`, `fp-conformance`, conformance CLI, golden checksum).
+- [x] P4.6. Emit `ROUND5_*` artifact docs and update README with round-5 evidence.
+
 ## Evidence Ledger (Session)
 
 - Validation commands passed:
@@ -202,6 +233,12 @@ Status legend:
   - `cargo test -p fp-conformance -- --nocapture`
   - `cargo bench`
   - `./scripts/phase2c_gate_check.sh`
+  - `(cd artifacts/perf && sha256sum -c golden_checksums.txt)`
+  - `cargo run -p fp-conformance --bin fp-conformance-cli -- --write-artifacts --require-green`
+- Bead graph and contract saturation checks passed:
+  - `br dep cycles --json` => `count=0`
+  - `br list --status open --json` marker scan => `missing_diff=0 missing_opt=0 missing_final=0`
+  - `bv --robot-plan | jq '.plan.summary'` => highest-impact bottleneck remains `bd-2gi.3`
 - Fail-closed behavior check:
   - `cargo run -p fp-conformance --bin fp-conformance-cli -- --packet-id FP-P2C-001 --oracle live --require-green` exits non-zero with gate drift reasons.
 - Conformance packet artifacts regenerated:
@@ -220,3 +257,27 @@ Status legend:
   - `artifacts/perf/round1_packet_strace.txt`
   - `artifacts/perf/golden_checksums.txt`
   - `artifacts/perf/ROUND1_ISOMORPHISM_PROOF.md`
+  - `artifacts/perf/ROUND3_BASELINE.md`
+  - `artifacts/perf/ROUND3_OPPORTUNITY_MATRIX.md`
+  - `artifacts/perf/ROUND3_ISOMORPHISM_PROOF.md`
+  - `artifacts/perf/ROUND3_RECOMMENDATION_CONTRACT.md`
+  - `artifacts/perf/ROUND4_BASELINE.md`
+  - `artifacts/perf/ROUND4_OPPORTUNITY_MATRIX.md`
+  - `artifacts/perf/ROUND4_ISOMORPHISM_PROOF.md`
+  - `artifacts/perf/ROUND4_RECOMMENDATION_CONTRACT.md`
+  - `artifacts/perf/ROUND5_BASELINE.md`
+  - `artifacts/perf/ROUND5_OPPORTUNITY_MATRIX.md`
+  - `artifacts/perf/ROUND5_ISOMORPHISM_PROOF.md`
+  - `artifacts/perf/ROUND5_RECOMMENDATION_CONTRACT.md`
+  - `artifacts/perf/round4_groupby_hyperfine_before.json`
+  - `artifacts/perf/round4_groupby_hyperfine_after.json`
+  - `artifacts/perf/round5_groupby_hyperfine_before.json`
+  - `artifacts/perf/round5_groupby_hyperfine_after.json`
+  - `artifacts/perf/round4_groupby_strace_before.txt`
+  - `artifacts/perf/round4_groupby_strace_after.txt`
+  - `artifacts/perf/round5_groupby_strace_before.txt`
+  - `artifacts/perf/round5_groupby_strace_after.txt`
+  - `artifacts/perf/round4_groupby_flamegraph_before.svg`
+  - `artifacts/perf/round4_groupby_flamegraph_after.svg`
+  - `artifacts/perf/round5_groupby_flamegraph_before.svg`
+  - `artifacts/perf/round5_groupby_flamegraph_after.svg`

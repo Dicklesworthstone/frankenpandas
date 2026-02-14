@@ -53,6 +53,25 @@ This project uses four pervasive disciplines:
   - `artifacts/perf/ROUND2_OPPORTUNITY_MATRIX.md`
   - `artifacts/perf/ROUND2_ISOMORPHISM_PROOF.md`
   - `artifacts/perf/ROUND2_RECOMMENDATION_CONTRACT.md`
+- Round-3 optimization evidence landed:
+  - `fp-groupby::groupby_sum` guarded identity-alignment fast path (duplicate-safe)
+  - `artifacts/perf/ROUND3_BASELINE.md`
+  - `artifacts/perf/ROUND3_OPPORTUNITY_MATRIX.md`
+  - `artifacts/perf/ROUND3_ISOMORPHISM_PROOF.md`
+  - `artifacts/perf/ROUND3_RECOMMENDATION_CONTRACT.md`
+- Round-4 optimization evidence landed:
+  - `fp-groupby::groupby_sum` dense Int64 aggregation path with bounded fallback
+  - `artifacts/perf/ROUND4_BASELINE.md`
+  - `artifacts/perf/ROUND4_OPPORTUNITY_MATRIX.md`
+  - `artifacts/perf/ROUND4_ISOMORPHISM_PROOF.md`
+  - `artifacts/perf/ROUND4_RECOMMENDATION_CONTRACT.md`
+- Round-5 optimization evidence landed:
+  - `fp-index::has_duplicates` lazy memoization (`OnceCell`) with labels-only equality guarantee
+  - benchmark delta: `0.2906s -> 0.0372s` mean on groupby benchmark command (`~87.2%` faster)
+  - `artifacts/perf/ROUND5_BASELINE.md`
+  - `artifacts/perf/ROUND5_OPPORTUNITY_MATRIX.md`
+  - `artifacts/perf/ROUND5_ISOMORPHISM_PROOF.md`
+  - `artifacts/perf/ROUND5_RECOMMENDATION_CONTRACT.md`
 
 ## V1 Scope
 
@@ -83,7 +102,7 @@ Maintain deterministic null propagation, NaN handling, dtype promotion, and outp
 ## Next Steps
 
 1. Expand packet families beyond current alignment/join/groupby slices into filter and IO error parity.
-2. Extend kernel-level p50/p95/p99 baselines from current groupby slice to join/filter workloads.
+2. Extend kernel-level p50/p95/p99 baselines from current groupby slice to join/filter workloads and track post-Round-5 bottleneck shift.
 3. Add adversarial + fuzz suites for high-risk parse and coercion paths in strict/hardened split.
 4. Increase live-oracle coverage and environment reproducibility for deterministic replay.
 5. Expand drift-history analysis tooling (alerts/threshold trend summaries).
