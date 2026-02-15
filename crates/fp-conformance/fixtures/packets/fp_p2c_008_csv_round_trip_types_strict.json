@@ -1,0 +1,8 @@
+{
+  "packet_id": "FP-P2C-008",
+  "case_id": "csv_round_trip_types_strict",
+  "mode": "strict",
+  "operation": "csv_round_trip",
+  "csv_input": "id,score,pass\n1,95.5,true\n2,87.0,false\n3,92.3,true\n",
+  "expected_bool": true
+}

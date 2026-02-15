@@ -1,0 +1,20 @@
+{
+  "packet_id": "FP-P2C-007",
+  "fixtures": [
+    {
+      "id": "nansum_with_nulls_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2c_007_nansum_with_nulls_strict.json",
+      "class": "nanops_null_skipping"
+    },
+    {
+      "id": "fillna_basic_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2c_007_fillna_basic_strict.json",
+      "class": "fillna_scalar_replacement"
+    },
+    {
+      "id": "dropna_basic_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2c_007_dropna_basic_strict.json",
+      "class": "dropna_missing_removal"
+    }
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "packet_id": "FP-P2C-007",
+  "case_id": "nansum_with_nulls_strict",
+  "mode": "strict",
+  "operation": "nan_sum",
+  "left": {
+    "name": "values",
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 3 }
+    ],
+    "values": [
+      { "kind": "int64", "value": 10 },
+      { "kind": "null", "value": "null" },
+      { "kind": "int64", "value": 20 },
+      { "kind": "int64", "value": 30 }
+    ]
+  },
+  "expected_scalar": { "kind": "float64", "value": 60.0 }
+}

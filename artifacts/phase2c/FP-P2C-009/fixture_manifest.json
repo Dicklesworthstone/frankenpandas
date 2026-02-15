@@ -1,0 +1,15 @@
+{
+  "packet_id": "FP-P2C-009",
+  "fixtures": [
+    {
+      "id": "dtype_int64_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2c_009_dtype_int64_strict.json",
+      "class": "dtype_invariant_int64"
+    },
+    {
+      "id": "dtype_float64_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2c_009_dtype_float64_strict.json",
+      "class": "dtype_invariant_float64"
+    }
+  ]
+}

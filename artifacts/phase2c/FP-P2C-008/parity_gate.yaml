@@ -1,0 +1,12 @@
+packet_id: FP-P2C-008
+strict:
+  critical_drift_budget: 0
+  non_critical_drift_budget_percent: 0.10
+hardened:
+  divergence_budget_percent: 1.00
+  allowlisted_divergence_categories:
+    - float_representation
+machine_check:
+  suite: phase2c_packets
+  require_fixture_count_at_least: 2
+  require_failed: 0

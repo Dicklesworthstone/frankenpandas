@@ -386,11 +386,11 @@ Each packet row in this document and its packet-local artifacts must maintain:
 The following are required to fully satisfy `bd-2gi.1` and are currently incomplete:
 
 1. ~~FP-P2C-006..011 need equivalent extraction coverage.~~ DONE: All packets now have legacy_anchor_map.md, contract_table.md, and risk_note.md.
-2. Rule ledgers for 001..005 need branch-level predicate/default detail expansion to complete the full extraction payload contract depth.
+2. ~~Rule ledgers for 001..005 need branch-level predicate/default detail expansion to complete the full extraction payload contract depth.~~ DONE: All 5 packets deepened with branch-level predicates, exact line references, edge cases, and full error ledger entries with pandas-equivalent error strings.
 3. Error ledgers for 001..005 need finalized exception message-class capture against pandas oracle text where scoped.
 4. Invariant-to-counterexample/remediation linkage must be completed once packet differential mismatch corpora are generated for all active packets.
 5. ~~FP-P2C-006..011 provisional rows must be upgraded.~~ DONE: All provisional entries upgraded to extracted entries with packet-local artifact sources.
-6. FP-P2C-006..011 need conformance harness integration (fixture_manifest.json, parity_gate.yaml, parity artifacts).
+6. ~~FP-P2C-006..011 need conformance harness integration (fixture_manifest.json, parity_gate.yaml, parity artifacts).~~ DONE: All packets 006..011 now have fixture_manifest.json, parity_gate.yaml, and conformance fixture files. All 29 fixtures pass (446 workspace tests green).
 
 ## 5. Resolution Policy for Legacy Ambiguity
 

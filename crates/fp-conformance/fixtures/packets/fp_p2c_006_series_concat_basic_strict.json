@@ -1,0 +1,42 @@
+{
+  "packet_id": "FP-P2C-006",
+  "case_id": "series_concat_basic_strict",
+  "mode": "strict",
+  "operation": "series_concat",
+  "left": {
+    "name": "s1",
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 }
+    ],
+    "values": [
+      { "kind": "int64", "value": 10 },
+      { "kind": "int64", "value": 20 }
+    ]
+  },
+  "right": {
+    "name": "s2",
+    "index": [
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 3 }
+    ],
+    "values": [
+      { "kind": "int64", "value": 30 },
+      { "kind": "int64", "value": 40 }
+    ]
+  },
+  "expected_series": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 3 }
+    ],
+    "values": [
+      { "kind": "int64", "value": 10 },
+      { "kind": "int64", "value": 20 },
+      { "kind": "int64", "value": 30 },
+      { "kind": "int64", "value": 40 }
+    ]
+  }
+}

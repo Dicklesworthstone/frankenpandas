@@ -1,0 +1,15 @@
+{
+  "packet_id": "FP-P2C-008",
+  "fixtures": [
+    {
+      "id": "csv_round_trip_basic_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2c_008_csv_round_trip_basic_strict.json",
+      "class": "csv_round_trip_basic"
+    },
+    {
+      "id": "csv_round_trip_types_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2c_008_csv_round_trip_types_strict.json",
+      "class": "csv_round_trip_mixed_types"
+    }
+  ]
+}

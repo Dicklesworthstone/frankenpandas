@@ -1,0 +1,15 @@
+{
+  "packet_id": "FP-P2C-006",
+  "fixtures": [
+    {
+      "id": "series_concat_basic_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2c_006_series_concat_basic_strict.json",
+      "class": "happy_path_concat"
+    },
+    {
+      "id": "series_concat_overlap_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2c_006_series_concat_overlap_strict.json",
+      "class": "overlapping_index_concat"
+    }
+  ]
+}

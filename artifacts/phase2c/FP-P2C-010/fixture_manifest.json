@@ -1,0 +1,15 @@
+{
+  "packet_id": "FP-P2C-010",
+  "fixtures": [
+    {
+      "id": "series_filter_basic_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2c_010_series_filter_basic_strict.json",
+      "class": "boolean_mask_filter"
+    },
+    {
+      "id": "series_head_basic_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2c_010_series_head_basic_strict.json",
+      "class": "head_n_slice"
+    }
+  ]
+}
