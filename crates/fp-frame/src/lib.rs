@@ -780,6 +780,14 @@ impl DataFrame {
         &self.columns
     }
 
+    /// Return the column names as a sorted vector.
+    ///
+    /// Matches `pd.DataFrame.columns` (returns the column labels).
+    #[must_use]
+    pub fn column_names(&self) -> Vec<&String> {
+        self.columns.keys().collect()
+    }
+
     #[must_use]
     pub fn column(&self, name: &str) -> Option<&Column> {
         self.columns.get(name)

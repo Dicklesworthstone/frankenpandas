@@ -2272,6 +2272,9 @@ fn capture_live_oracle_expected(
         right: fixture.right.clone(),
         index: fixture.index.clone(),
         join_type: fixture.join_type,
+        fill_value: fixture.fill_value.clone(),
+        head_n: fixture.head_n,
+        csv_input: fixture.csv_input.clone(),
     };
     let input = serde_json::to_vec(&payload)?;
 
@@ -2716,6 +2719,192 @@ fn execute_and_compare_differential(
             };
             Ok(diff_positions(&actual, &expected))
         }
+        FixtureOperation::SeriesConcat => {
+            let left = require_left_series(fixture)?;
+            let right = require_right_series(fixture)?;
+            let left_s = build_series(left).map_err(|err| format!("left build: {err}"))?;
+            let right_s = build_series(right).map_err(|err| format!("right build: {err}"))?;
+            let actual =
+                concat_series(&[&left_s, &right_s]).map_err(|err| err.to_string())?;
+            let expected = match expected {
+                ResolvedExpected::Series(s) => s,
+                _ => return Err("expected_series required for series_concat".to_owned()),
+            };
+            Ok(diff_series(&actual, &expected))
+        }
+        FixtureOperation::NanSum => {
+            let left = require_left_series(fixture)?;
+            let actual = nansum(&left.values);
+            let expected = match expected {
+                ResolvedExpected::Scalar(scalar) => scalar,
+                _ => return Err("expected_scalar required for nan_sum".to_owned()),
+            };
+            Ok(diff_scalar(&actual, &expected, "nan_sum"))
+        }
+        FixtureOperation::FillNa => {
+            let left = require_left_series(fixture)?;
+            let fill = fixture
+                .fill_value
+                .as_ref()
+                .ok_or_else(|| "fill_value is required for fill_na".to_owned())?;
+            let actual_values = fill_na(&left.values, fill);
+            let expected = match expected {
+                ResolvedExpected::Series(series) => series,
+                _ => return Err("expected_series required for fill_na".to_owned()),
+            };
+            Ok(diff_values(&actual_values, &expected.values, "fill_na"))
+        }
+        FixtureOperation::DropNa => {
+            let left = require_left_series(fixture)?;
+            let actual_values = dropna(&left.values);
+            let expected = match expected {
+                ResolvedExpected::Series(series) => series,
+                _ => return Err("expected_series required for drop_na".to_owned()),
+            };
+            Ok(diff_values(&actual_values, &expected.values, "drop_na"))
+        }
+        FixtureOperation::CsvRoundTrip => {
+            let csv_input = fixture
+                .csv_input
+                .as_ref()
+                .ok_or_else(|| "csv_input is required for csv_round_trip".to_owned())?;
+            let df = read_csv_str(csv_input).map_err(|err| err.to_string())?;
+            let output = write_csv_string(&df).map_err(|err| err.to_string())?;
+            let df2 = read_csv_str(&output).map_err(|err| err.to_string())?;
+            let expected = match expected {
+                ResolvedExpected::Bool(value) => value,
+                _ => return Err("expected_bool required for csv_round_trip".to_owned()),
+            };
+            let round_trip_ok = df.column_names() == df2.column_names() && df.len() == df2.len();
+            Ok(diff_bool(round_trip_ok, expected, "csv_round_trip"))
+        }
+        FixtureOperation::ColumnDtypeCheck => {
+            let left = require_left_series(fixture)?;
+            let series = build_series(left)?;
+            let actual_dtype = format!("{:?}", series.column().dtype());
+            let expected = match expected {
+                ResolvedExpected::Dtype(dtype) => dtype,
+                _ => return Err("expected_dtype required for column_dtype_check".to_owned()),
+            };
+            Ok(diff_string(&actual_dtype, &expected, "column_dtype"))
+        }
+        FixtureOperation::SeriesFilter => {
+            let left = require_left_series(fixture)?;
+            let right = require_right_series(fixture)?;
+            let data = build_series(left)?;
+            let mask = build_series(right)?;
+            let actual = data.filter(&mask).map_err(|err| err.to_string())?;
+            let expected = match expected {
+                ResolvedExpected::Series(s) => s,
+                _ => return Err("expected_series required for series_filter".to_owned()),
+            };
+            Ok(diff_series(&actual, &expected))
+        }
+        FixtureOperation::SeriesHead => {
+            let left = require_left_series(fixture)?;
+            let n = fixture
+                .head_n
+                .ok_or_else(|| "head_n is required for series_head".to_owned())?;
+            let series = build_series(left)?;
+            let take = n.min(series.len());
+            let labels = series.index().labels()[..take].to_vec();
+            let values = series.values()[..take].to_vec();
+            let actual =
+                Series::from_values(series.name(), labels, values).map_err(|e| e.to_string())?;
+            let expected = match expected {
+                ResolvedExpected::Series(s) => s,
+                _ => return Err("expected_series required for series_head".to_owned()),
+            };
+            Ok(diff_series(&actual, &expected))
+        }
+        FixtureOperation::GroupByMean => {
+            let keys = require_left_series(fixture)?;
+            let values = require_right_series(fixture)?;
+            let actual = groupby_mean(
+                &build_series(keys).map_err(|err| format!("keys build: {err}"))?,
+                &build_series(values).map_err(|err| format!("values build: {err}"))?,
+                GroupByOptions::default(),
+                policy,
+                ledger,
+            )
+            .map_err(|err| err.to_string())?;
+            let expected = match expected {
+                ResolvedExpected::Series(s) => s,
+                _ => return Err("expected_series required for groupby_mean".to_owned()),
+            };
+            Ok(diff_series(&actual, &expected))
+        }
+        FixtureOperation::GroupByCount => {
+            let keys = require_left_series(fixture)?;
+            let values = require_right_series(fixture)?;
+            let actual = groupby_count(
+                &build_series(keys).map_err(|err| format!("keys build: {err}"))?,
+                &build_series(values).map_err(|err| format!("values build: {err}"))?,
+                GroupByOptions::default(),
+                policy,
+                ledger,
+            )
+            .map_err(|err| err.to_string())?;
+            let expected = match expected {
+                ResolvedExpected::Series(s) => s,
+                _ => return Err("expected_series required for groupby_count".to_owned()),
+            };
+            Ok(diff_series(&actual, &expected))
+        }
+    }
+}
+
+fn diff_scalar(actual: &Scalar, expected: &Scalar, name: &str) -> Vec<DriftRecord> {
+    if actual.semantic_eq(expected) {
+        Vec::new()
+    } else {
+        vec![DriftRecord {
+            category: ComparisonCategory::Value,
+            level: DriftLevel::Critical,
+            location: format!("{name}.scalar"),
+            message: format!("scalar mismatch: actual={actual:?}, expected={expected:?}"),
+        }]
+    }
+}
+
+fn diff_values(actual: &[Scalar], expected: &[Scalar], name: &str) -> Vec<DriftRecord> {
+    let mut drifts = Vec::new();
+    if actual.len() != expected.len() {
+        drifts.push(DriftRecord {
+            category: ComparisonCategory::Shape,
+            level: DriftLevel::Critical,
+            location: format!("{name}.len"),
+            message: format!(
+                "length mismatch: actual={}, expected={}",
+                actual.len(),
+                expected.len()
+            ),
+        });
+        return drifts;
+    }
+    for (i, (a, e)) in actual.iter().zip(expected.iter()).enumerate() {
+        if !a.semantic_eq(e) {
+            drifts.push(DriftRecord {
+                category: ComparisonCategory::Value,
+                level: DriftLevel::Critical,
+                location: format!("{name}[{i}]"),
+                message: format!("value mismatch: actual={a:?}, expected={e:?}"),
+            });
+        }
+    }
+    drifts
+}
+
+fn diff_string(actual: &str, expected: &str, name: &str) -> Vec<DriftRecord> {
+    if actual == expected {
+        Vec::new()
+    } else {
+        vec![DriftRecord {
+            category: ComparisonCategory::Type,
+            level: DriftLevel::Critical,
+            location: format!("{name}.value"),
+            message: format!("string mismatch: actual={actual:?}, expected={expected:?}"),
+        }]
     }
 }
 
