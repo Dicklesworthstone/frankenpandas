@@ -15,6 +15,7 @@ struct CliArgs {
     repo_root: PathBuf,
     packet: Option<String>,
     show_governance: bool,
+    show_final_evidence: bool,
     forensic_log: Option<PathBuf>,
     run_e2e_matrix: bool,
 }
@@ -71,6 +72,13 @@ fn run() -> Result<(), String> {
         }
     }
 
+    if args.show_final_evidence {
+        let evidence = source
+            .load_final_evidence_pack()
+            .map_err(|error| error.to_string())?;
+        println!("{}", evidence.render_plain());
+    }
+
     if let Some(path) = args.forensic_log.as_deref() {
         let forensic = source
             .load_forensic_log(path)
@@ -111,6 +119,7 @@ fn parse_args() -> Result<CliArgs, String> {
     let mut repo_root = default_repo_root();
     let mut packet = None;
     let mut show_governance = false;
+    let mut show_final_evidence = false;
     let mut forensic_log = None;
     let mut run_e2e_matrix = false;
 
@@ -131,6 +140,9 @@ fn parse_args() -> Result<CliArgs, String> {
             }
             "--show-governance" => {
                 show_governance = true;
+            }
+            "--show-final-evidence" => {
+                show_final_evidence = true;
             }
             "--forensic-log" => {
                 let value = args
@@ -153,6 +165,7 @@ fn parse_args() -> Result<CliArgs, String> {
         repo_root,
         packet,
         show_governance,
+        show_final_evidence,
         forensic_log,
         run_e2e_matrix,
     })
@@ -167,11 +180,12 @@ fn print_help() {
     println!(
         "fp-frankentui-cli\n\
          Usage:\n\
-         \tfp-frankentui-cli [--repo-root <path>] [--packet <FP-P2C-NNN>] [--show-governance] [--forensic-log <path>] [--run-e2e-matrix]\n\
+         \tfp-frankentui-cli [--repo-root <path>] [--packet <FP-P2C-NNN>] [--show-governance] [--show-final-evidence] [--forensic-log <path>] [--run-e2e-matrix]\n\
          Options:\n\
          \t--repo-root <path>       repository root (default: crate root/{DEFAULT_REPO_ROOT})\n\
          \t--packet <packet_id>     show a single packet snapshot instead of full dashboard summary\n\
          \t--show-governance        include governance gate report summary (if present)\n\
+         \t--show-final-evidence    include final evidence pack summary (parity + sidecar/decode integrity + risk notes)\n\
          \t--forensic-log <path>    parse forensic JSONL and print event/malformed counts\n\
          \t--run-e2e-matrix         execute FRANKENTUI E2E golden/regression/failure-injection scenario matrix\n\
          \t-h, --help               show this help"
