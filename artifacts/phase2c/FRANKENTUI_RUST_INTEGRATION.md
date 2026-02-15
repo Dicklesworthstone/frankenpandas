@@ -27,6 +27,22 @@ The current `fp-frankentui` crate already provides a read-only foundation:
 This plan defines the next decomposition so `bd-2gi.28.5` onward can implement
 unit/property/differential/e2e evidence against stable module seams.
 
+**Status update (2026-02-15, SwiftTiger):** `bd-2gi.28.8` landed a single-lever
+replay-bundle optimization in `crates/fp-frankentui/src/lib.rs`:
+`build_frankentui_e2e_replay_bundles()` now resolves fallback case mode via an
+indexed lookup table (`HashMap<(&str, &str), RuntimeMode>`) instead of repeated
+linear scans over packet results for every forensic `CaseEnd` event. The change
+is locked by two proofs:
+- `e2e_replay_bundle_optimized_path_is_isomorphic_to_baseline`
+- `e2e_replay_bundle_profile_snapshot_reports_lookup_delta`
+
+Snapshot metrics from
+`rch exec -- cargo test -p fp-frankentui --lib e2e_replay_bundle_profile_snapshot_reports_lookup_delta -- --nocapture`:
+- Baseline `p50/p95/p99` (ns): `20614447 / 24878999 / 26117420`
+- Optimized `p50/p95/p99` (ns): `7511826 / 8672051 / 9427574`
+- Fallback mode-lookup steps (64 iterations, amplified workload):
+  `33718464 -> 65664`
+
 ---
 
 ## 2. Current State (Implemented)
