@@ -630,3 +630,84 @@ Strict/hardened admission note:
 2. If a table row conflicts with a gate result, gate evidence supersedes prose and the row must be revised.
 3. Temporary deferments are valid only with explicit follow-on bead IDs and replay evidence expectations.
 4. Any strict/hardened divergence must be observable in decision logs or gate artifacts; implicit divergence is treated as regression risk.
+
+## 28. Risk/Perf/Test Specialist Deep Pass (Pass-C)
+
+### 28.1 Risk Priority and Mitigation Matrix
+
+| Priority | Risk class | Trigger signal | Mandatory mitigation | Evidence artifact |
+|---|---|---|---|---|
+| `P0` | cardinality blowup / memory exhaustion (join/groupby/ingest) | estimator exceeds budget or runaway fixture growth | bounded admission policy + adversarial fixture suite + fail-closed gate | gate result + mismatch corpus + drift history row |
+| `P0` | silent strict/hardened divergence | hardened pass with unexplained strict mismatch class | allowlist-scoped divergence only, otherwise hard fail | packet gate reasons + decision ledger |
+| `P1` | dtype/coercion drift | unexpected cast behavior vs oracle | explicit typed error mapping + differential category tagging | drift taxonomy records (`type`, `value`, `nullness`) |
+| `P1` | replay incompleteness | failure case without deterministic replay command | failure digest generation and artifact pointer enforcement | forensics report + replay command |
+| `P2` | perf regression without semantic drift | p95/p99 exceeds envelope post-change | one-lever optimization loop + rollback trigger | baseline/re-baseline delta report |
+| `P3` | observability gaps (missing latency, sparse context) | logs omit key fields or use placeholder values | schema-complete structured logs and gap ledger tracking | logging crosswalk conformance report |
+
+Primary anchors:
+- runtime policy decisions: `crates/fp-runtime/src/lib.rs:175`, `crates/fp-runtime/src/lib.rs:209`
+- gate enforcement: `crates/fp-conformance/src/lib.rs:846`
+- forensic replay: `crates/fp-conformance/src/lib.rs:3697`
+
+### 28.2 Performance Proof Obligations (Non-Optional)
+
+Each optimization-related change must provide all of:
+
+1. baseline snapshot (`p50/p95/p99`, throughput, peak memory/allocation),
+2. hotspot profile evidence tied to code path,
+3. exactly one optimization lever per step,
+4. behavior isomorphism proof (ordering, nullness, dtype, tie-breaking),
+5. re-baseline delta with explicit pass/fail threshold,
+6. rollback trigger command and fallback behavior.
+
+Current workload anchors to preserve:
+- alignment-heavy arithmetic paths (`fp-frame` + `fp-index`)
+- skew-sensitive join paths (`fp-join`)
+- dense and sparse groupby paths (`fp-groupby`)
+- null-dense reduction paths (`fp-types`/`fp-columnar`)
+
+### 28.3 Unit/Property/Differential/E2E Mapping Table
+
+| Contract family | Unit/property minimum | Differential minimum | E2E/logging minimum | Gap status |
+|---|---|---|---|---|
+| alignment/index | duplicate-label, first-match, vector-length invariants | category-tagged index mismatch checks | case-level logs with mode + evidence count | partial (expanded, still needs broader duplicate families) |
+| join cardinality | duplicate-key multiplicity + unmatched-row semantics | strict/hardened drift split across join types | gate + mismatch corpus + replay command | partial (needs adversarial scale envelopes) |
+| groupby ordering/null keys | dropna, ordering, dense-fast-path fallback | ordering/nullness mismatch classes | deterministic case events and packet summaries | partial (latency field still retrospective zero) |
+| dtype/null/NaN/NaT | cast error typing + nanops branch coverage | nullness/type/value drift categories | structured logs for coercion and reduction failures | partial (broader live-oracle coverage required) |
+| IO malformed inputs | parser failure classes and schema drift paths | fixture/live-oracle parse mismatch capture | forensics artifact pointer + replay command | partial (resource-envelope budgets pending) |
+
+### 28.4 Explicit Unresolved Gap Ledger (Bounded)
+
+| Gap ID | Current state | Risk if ignored | Bound/next action |
+|---|---|---|---|
+| `GAP-LAT-001` | `CaseEnd.elapsed_us` is retrospective `0` in run-level emission | weak timing forensics and perf diagnosis | instrument per-case elapsed timings in run loop |
+| `GAP-IO-002` | CSV read loop lacks explicit max-row/max-bytes enforcement | ingest-based resource exhaustion risk | introduce bounded ingest options + adversarial tests |
+| `GAP-ORC-003` | live-oracle breadth does not yet match target API envelope | under-detected behavior drift | expand packet families and oracle-mode coverage |
+| `GAP-DUP-004` | duplicate-label edge corpus still thin vs target breadth | hidden alignment/indexing divergence risk | add dedicated duplicate-index packet fixtures |
+
+### 28.5 Acceptance Gate for This Pass
+
+This pass is considered valid only when:
+1. risk classes are prioritized and mapped to concrete mitigations,
+2. performance obligations are explicit and testable,
+3. test/e2e/logging mappings include explicit gap status,
+4. unresolved gaps are bounded with deterministic next actions.
+
+## 29. Final Integrated Sign-Off (Doc-Pass-13)
+
+Sign-off date: 2026-02-15  
+Sign-off bead: `bd-2gi.23.14`
+
+Integration result:
+1. base expansion pass complete (`sections 18-25`),
+2. contradiction/completeness pass integrated (`section 26`),
+3. behavior specialist annex integrated (`section 27`),
+4. risk/perf/test specialist annex integrated (`section 28`).
+
+Consistency checks completed:
+- no active \"Exclude for V1\" execution guidance remains in the canonical structure document,
+- packet payload contract uses deferment wording (not permanent exclusion wording),
+- structural claims in companion doc bind to behavior/risk/test annexes,
+- bounded unresolved gaps are explicit and traceable.
+
+Remaining open items are only bounded gaps with explicit next actions (section 28.4), not unresolved contradictions.
