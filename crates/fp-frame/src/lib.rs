@@ -2616,11 +2616,19 @@ mod tests {
         );
         assert_eq!(
             selected.column("a").unwrap().values(),
-            &[Scalar::Int64(1300), Scalar::Int64(1100), Scalar::Int64(1300)]
+            &[
+                Scalar::Int64(1300),
+                Scalar::Int64(1100),
+                Scalar::Int64(1300)
+            ]
         );
         assert_eq!(
             selected.column("b").unwrap().values(),
-            &[Scalar::Int64(2300), Scalar::Int64(2100), Scalar::Int64(2300)]
+            &[
+                Scalar::Int64(2300),
+                Scalar::Int64(2100),
+                Scalar::Int64(2300)
+            ]
         );
     }
 
