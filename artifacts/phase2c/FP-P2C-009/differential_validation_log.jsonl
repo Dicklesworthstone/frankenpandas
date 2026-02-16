@@ -1,0 +1,2 @@
+{"packet_id":"FP-P2C-009","case_id":"dtype_float64_strict","mode":"strict","trace_id":"FP-P2C-009:dtype_float64_strict:strict","oracle_source":"fixture","mismatch_class":"none","replay_key":"FP-P2C-009/dtype_float64_strict/strict"}
+{"packet_id":"FP-P2C-009","case_id":"dtype_int64_strict","mode":"strict","trace_id":"FP-P2C-009:dtype_int64_strict:strict","oracle_source":"fixture","mismatch_class":"none","replay_key":"FP-P2C-009/dtype_int64_strict/strict"}

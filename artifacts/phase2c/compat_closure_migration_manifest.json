@@ -1,7 +1,7 @@
 {
   "manifest_version": "1.0.0",
   "packet_ids": [
-    "FP-P2C-001"
+    "FP-P2C-010"
   ],
   "compatibility_guarantees": [
     "strict mode enforces fail-closed compatibility boundaries",

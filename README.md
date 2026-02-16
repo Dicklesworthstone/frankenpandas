@@ -33,7 +33,8 @@ This project uses five pervasive disciplines:
   - FTUI-ready galaxy-brain decision cards for transparency surfaces
   - initial `fp-frankentui` foundation crate with read-only phase2c artifact ingestion, drift-history tolerance for malformed JSONL lines, and dashboard snapshot primitives
 - Phase-2C conformance packet harness landed:
-  - packet-scoped suite execution (`FP-P2C-001`, `FP-P2C-002`, `FP-P2C-003`, `FP-P2C-004`, `FP-P2C-005`)
+  - packet-scoped suite execution (`FP-P2C-001` through `FP-P2C-011`)
+  - expanded packet coverage now includes concat, missingness/nanops, CSV round-trip, dtype invariants, filter/head, and groupby mean/count core slices
   - packet gates from `parity_gate.yaml` with machine-readable gate results
   - mismatch corpus emission (`parity_mismatch_corpus.json`) per packet
 - live pandas oracle path landed:
@@ -103,7 +104,7 @@ Maintain deterministic null propagation, NaN handling, dtype promotion, and outp
 
 ## Next Steps
 
-1. Expand packet families beyond current alignment/join/groupby slices into filter and IO error parity.
+1. Expand packet families beyond current alignment/join/groupby/filter/IO core slices into full DataFrame-level and IO-error parity matrices.
 2. Extend kernel-level p50/p95/p99 baselines from current groupby slice to join/filter workloads and track post-Round-5 bottleneck shift.
 3. Add adversarial + fuzz suites for high-risk parse and coercion paths in strict/hardened split.
 4. Increase live-oracle coverage and environment reproducibility for deterministic replay.

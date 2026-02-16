@@ -1,0 +1,3 @@
+{"packet_id":"FP-P2C-007","case_id":"dropna_basic_strict","mode":"strict","trace_id":"FP-P2C-007:dropna_basic_strict:strict","oracle_source":"fixture","mismatch_class":"none","replay_key":"FP-P2C-007/dropna_basic_strict/strict"}
+{"packet_id":"FP-P2C-007","case_id":"fillna_basic_strict","mode":"strict","trace_id":"FP-P2C-007:fillna_basic_strict:strict","oracle_source":"fixture","mismatch_class":"none","replay_key":"FP-P2C-007/fillna_basic_strict/strict"}
+{"packet_id":"FP-P2C-007","case_id":"nansum_with_nulls_strict","mode":"strict","trace_id":"FP-P2C-007:nansum_with_nulls_strict:strict","oracle_source":"fixture","mismatch_class":"none","replay_key":"FP-P2C-007/nansum_with_nulls_strict/strict"}

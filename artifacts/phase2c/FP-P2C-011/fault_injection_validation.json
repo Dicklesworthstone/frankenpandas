@@ -1,0 +1,48 @@
+{
+  "packet_id": "FP-P2C-011",
+  "entry_count": 4,
+  "strict_violation_count": 2,
+  "hardened_allowlisted_count": 2,
+  "entries": [
+    {
+      "packet_id": "FP-P2C-011",
+      "case_id": "groupby_count_basic_strict",
+      "mode": "hardened",
+      "trace_id": "FP-P2C-011:groupby_count_basic_strict:hardened",
+      "oracle_source": "fixture",
+      "mismatch_class": "fault_injected_hardened_allowlist",
+      "replay_key": "FP-P2C-011/groupby_count_basic_strict/hardened",
+      "classification": "hardened_allowlisted"
+    },
+    {
+      "packet_id": "FP-P2C-011",
+      "case_id": "groupby_count_basic_strict",
+      "mode": "strict",
+      "trace_id": "FP-P2C-011:groupby_count_basic_strict:strict",
+      "oracle_source": "fixture",
+      "mismatch_class": "fault_injected_strict_violation",
+      "replay_key": "FP-P2C-011/groupby_count_basic_strict/strict",
+      "classification": "strict_violation"
+    },
+    {
+      "packet_id": "FP-P2C-011",
+      "case_id": "groupby_mean_basic_strict",
+      "mode": "hardened",
+      "trace_id": "FP-P2C-011:groupby_mean_basic_strict:hardened",
+      "oracle_source": "fixture",
+      "mismatch_class": "fault_injected_hardened_allowlist",
+      "replay_key": "FP-P2C-011/groupby_mean_basic_strict/hardened",
+      "classification": "hardened_allowlisted"
+    },
+    {
+      "packet_id": "FP-P2C-011",
+      "case_id": "groupby_mean_basic_strict",
+      "mode": "strict",
+      "trace_id": "FP-P2C-011:groupby_mean_basic_strict:strict",
+      "oracle_source": "fixture",
+      "mismatch_class": "fault_injected_strict_violation",
+      "replay_key": "FP-P2C-011/groupby_mean_basic_strict/strict",
+      "classification": "strict_violation"
+    }
+  ]
+}
