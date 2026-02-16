@@ -401,6 +401,10 @@ fn deterministic_scenario_id(suite: &str, packet_id: &str) -> String {
     format!("{suite}:{packet_id}")
 }
 
+fn parity_report_artifact_id(packet_id: &str) -> String {
+    format!("{packet_id}/parity_report")
+}
+
 fn deterministic_step_id(case_id: &str) -> String {
     format!("case:{case_id}")
 }
@@ -1398,7 +1402,7 @@ pub fn write_packet_artifacts(
 
     let report_bytes = fs::read(&parity_report_path)?;
     let mut sidecar = generate_raptorq_sidecar(
-        &format!("{packet_id}/parity_report"),
+        &parity_report_artifact_id(packet_id),
         "conformance",
         &report_bytes,
         8,
@@ -2020,6 +2024,15 @@ pub fn verify_packet_sidecar_integrity(
         result.errors.push(format!(
             "{packet_id}: decode proof artifact exceeds cap {MAX_DECODE_PROOFS} (found {})",
             proof.decode_proofs.len()
+        ));
+        return result;
+    }
+    let expected_artifact_id = parity_report_artifact_id(packet_id);
+    if sidecar.envelope.artifact_id != expected_artifact_id {
+        result.decode_proof_valid = false;
+        result.errors.push(format!(
+            "{packet_id}: sidecar artifact_id mismatch (expected {expected_artifact_id}, found {})",
+            sidecar.envelope.artifact_id
         ));
         return result;
     }
@@ -7770,6 +7783,51 @@ mod tests {
                 .iter()
                 .any(|entry| entry.contains("decode_proofs exceeds cap")),
             "expected decode proof cap error, got {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn sidecar_integrity_fails_when_sidecar_artifact_id_mismatches_packet() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let packet_id = "FP-P2C-099";
+
+        let report_bytes = br#"{"suite":"test","passed":1,"failed":0}"#;
+        fs::write(dir.path().join("parity_report.json"), report_bytes).expect("write report");
+
+        let mut sidecar =
+            generate_raptorq_sidecar("FP-P2C-007/parity_report", "conformance", report_bytes, 8)
+                .expect("sidecar");
+        let proof =
+            run_raptorq_decode_recovery_drill(&sidecar, report_bytes).expect("decode drill");
+        sidecar.envelope.push_decode_proof_capped(proof.clone());
+        sidecar.envelope.scrub.status = "ok".to_owned();
+        fs::write(
+            dir.path().join("parity_report.raptorq.json"),
+            serde_json::to_string_pretty(&sidecar).expect("serialize sidecar"),
+        )
+        .expect("write sidecar");
+
+        let decode_artifact = DecodeProofArtifact {
+            packet_id: packet_id.to_owned(),
+            decode_proofs: vec![proof],
+            status: DecodeProofStatus::Recovered,
+        };
+        fs::write(
+            dir.path().join("parity_report.decode_proof.json"),
+            serde_json::to_string_pretty(&decode_artifact).expect("serialize decode artifact"),
+        )
+        .expect("write decode artifact");
+
+        let result = verify_packet_sidecar_integrity(dir.path(), packet_id);
+        assert!(!result.is_ok());
+        assert!(!result.decode_proof_valid);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|entry| entry.contains("artifact_id mismatch")),
+            "expected artifact_id mismatch error, got {:?}",
             result.errors
         );
     }
