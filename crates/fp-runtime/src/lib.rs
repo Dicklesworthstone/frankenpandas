@@ -405,7 +405,7 @@ impl RaptorQEnvelope {
             },
             scrub: ScrubStatus {
                 last_ok_unix_ms: 0,
-                status: "ok".to_owned(),
+                status: "placeholder".to_owned(),
             },
             decode_proofs: Vec::new(),
         }
@@ -1004,7 +1004,7 @@ mod tests {
         let envelope = RaptorQEnvelope::placeholder("packet-001", "conformance");
         assert_eq!(envelope.artifact_id, "packet-001");
         assert_eq!(envelope.artifact_type, "conformance");
-        assert_eq!(envelope.scrub.status, "ok");
+        assert_eq!(envelope.scrub.status, "placeholder");
     }
 
     #[test]
