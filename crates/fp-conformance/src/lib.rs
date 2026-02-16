@@ -3086,7 +3086,15 @@ fn resolve_expected(
 
     match requested_mode {
         OracleMode::FixtureExpected => fixture_expected(fixture),
-        OracleMode::LiveLegacyPandas => capture_live_oracle_expected(config, fixture),
+        OracleMode::LiveLegacyPandas => match capture_live_oracle_expected(config, fixture) {
+            Ok(expected) => Ok(expected),
+            Err(HarnessError::OracleUnavailable(_)) if config.allow_system_pandas_fallback => {
+                // Environment guard: if neither legacy nor system pandas is usable,
+                // fall back to fixture-backed expectations when explicitly allowed.
+                fixture_expected(fixture)
+            }
+            Err(err) => Err(err),
+        },
     }
 }
 
@@ -6025,6 +6033,53 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn live_oracle_unavailable_propagates_without_fallback() {
+        let mut cfg = HarnessConfig::default_paths();
+        cfg.oracle_root = "/__fp_missing_legacy_oracle__/pandas".into();
+        cfg.allow_system_pandas_fallback = false;
+
+        let err = run_packet_by_id(&cfg, "FP-P2C-001", OracleMode::LiveLegacyPandas)
+            .expect_err("expected live oracle failure when fallback is disabled");
+        assert!(
+            matches!(
+                &err,
+                super::HarnessError::OracleUnavailable(message)
+                    if message.contains("legacy oracle root does not exist")
+            ),
+            "expected OracleUnavailable legacy-root error, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn live_oracle_unavailable_falls_back_to_fixture_when_enabled() {
+        let mut cfg = HarnessConfig::default_paths();
+        cfg.oracle_root = "/__fp_missing_legacy_oracle__/pandas".into();
+        cfg.allow_system_pandas_fallback = true;
+
+        let report = run_packet_by_id(&cfg, "FP-P2C-001", OracleMode::LiveLegacyPandas)
+            .expect("fixture fallback should recover live-oracle unavailability");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2C-001"));
+        assert!(
+            report.is_green(),
+            "expected green fallback report: {report:?}"
+        );
+    }
+
+    #[test]
+    fn live_oracle_non_oracle_unavailable_errors_still_propagate() {
+        let mut cfg = HarnessConfig::default_paths();
+        cfg.allow_system_pandas_fallback = true;
+        cfg.python_bin = "/__fp_missing_python__/python3".to_owned();
+
+        let err = run_packet_by_id(&cfg, "FP-P2C-001", OracleMode::LiveLegacyPandas)
+            .expect_err("expected command-spawn failure for missing python binary");
+        assert!(
+            matches!(&err, super::HarnessError::Io(_)),
+            "expected Io error to propagate, got {err:?}"
+        );
     }
 
     #[test]
