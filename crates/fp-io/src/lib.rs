@@ -14,6 +14,8 @@ use thiserror::Error;
 pub enum IoError {
     #[error("csv input has no headers")]
     MissingHeaders,
+    #[error("csv index column '{0}' not found in headers")]
+    MissingIndexColumn(String),
     #[error("json format error: {0}")]
     JsonFormat(String),
     #[error(transparent)]
@@ -204,7 +206,7 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
         let idx_pos = headers
             .iter()
             .position(|h| h == idx_col_name)
-            .ok_or_else(|| IoError::JsonFormat(format!("index_col '{idx_col_name}' not found")))?;
+            .ok_or_else(|| IoError::MissingIndexColumn(idx_col_name.clone()))?;
 
         let index_values = columns.remove(idx_pos);
         let index_labels: Vec<fp_index::IndexLabel> = index_values
@@ -764,7 +766,8 @@ mod tests {
     // === bd-2gi.19: IO Complete Contract Tests ===
 
     use super::{
-        CsvReadOptions, JsonOrient, read_csv_with_options, read_json_str, write_json_string,
+        CsvReadOptions, IoError, JsonOrient, read_csv_with_options, read_json_str,
+        write_json_string,
     };
 
     #[test]
@@ -808,6 +811,33 @@ mod tests {
         );
         assert!(frame.column("id").is_none());
         assert_eq!(frame.column("val").unwrap().values()[0], Scalar::Int64(10));
+    }
+
+    #[test]
+    fn csv_with_missing_index_col_errors() {
+        let input = "id,val\na,10\nb,20\n";
+        let opts = CsvReadOptions {
+            index_col: Some("missing".into()),
+            ..Default::default()
+        };
+
+        let err = read_csv_with_options(input, &opts).expect_err("missing index_col should error");
+        assert!(
+            matches!(&err, IoError::MissingIndexColumn(name) if name == "missing"),
+            "expected MissingIndexColumn(\"missing\"), got {err:?}"
+        );
+    }
+
+    #[test]
+    fn csv_with_malformed_row_errors() {
+        let input = "a,b\n1,2\n3\n";
+        let opts = CsvReadOptions::default();
+
+        let err = read_csv_with_options(input, &opts).expect_err("malformed CSV row should error");
+        assert!(
+            matches!(&err, IoError::Csv(_)),
+            "expected CSV parser error for ragged row, got {err:?}"
+        );
     }
 
     #[test]
