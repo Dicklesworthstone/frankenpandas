@@ -7,6 +7,7 @@ Mitigations:
 2. Dense-int fast path has isomorphism proof against generic path.
 3. Arena-backed path has behavioral equivalence proof against global allocator path.
 4. std/var use ddof=1 (sample statistics) matching pandas default.
+5. Hardened packet fixtures cover null-key exclusion and null-value skipping parity for `mean` and `count`.
 
 ## Isomorphism Proof Hook
 

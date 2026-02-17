@@ -7,9 +7,19 @@
       "class": "groupby_mean_aggregation"
     },
     {
+      "id": "groupby_mean_null_hardened",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2c_011_groupby_mean_hardened.json",
+      "class": "groupby_mean_aggregation_hardened"
+    },
+    {
       "id": "groupby_count_basic_strict",
       "path": "crates/fp-conformance/fixtures/packets/fp_p2c_011_groupby_count_basic_strict.json",
       "class": "groupby_count_aggregation"
+    },
+    {
+      "id": "groupby_count_null_hardened",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2c_011_groupby_count_hardened.json",
+      "class": "groupby_count_aggregation_hardened"
     }
   ]
 }
