@@ -34,7 +34,7 @@ This project uses five pervasive disciplines:
   - initial `fp-frankentui` foundation crate with read-only phase2c artifact ingestion, drift-history tolerance for malformed JSONL lines, and dashboard snapshot primitives
 - Phase-2C conformance packet harness landed:
   - packet-scoped suite execution (`FP-P2C-001` through `FP-P2C-011`)
-  - expanded packet coverage now includes concat, missingness/nanops, CSV round-trip, dtype invariants, filter/head, and groupby mean/count core slices
+  - expanded packet coverage now includes concat, missingness/nanops, CSV round-trip, dtype invariants, filter/head, and groupby mean/count/min/max/first/last core slices
   - packet gates from `parity_gate.yaml` with machine-readable gate results
   - mismatch corpus emission (`parity_mismatch_corpus.json`) per packet
 - live pandas oracle path landed:

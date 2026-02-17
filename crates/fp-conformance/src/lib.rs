@@ -8,7 +8,10 @@ use std::process::{Command, Stdio};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use fp_frame::{DataFrame, FrameError, Series, concat_series};
-use fp_groupby::{GroupByOptions, groupby_count, groupby_mean, groupby_sum};
+use fp_groupby::{
+    GroupByOptions, groupby_count, groupby_first, groupby_last, groupby_max, groupby_mean,
+    groupby_min, groupby_sum,
+};
 use fp_index::{AlignmentPlan, Index, IndexLabel, align_union, validate_alignment_plan};
 use fp_io::{read_csv_str, write_csv_string};
 use fp_join::{JoinType, join_series};
@@ -159,6 +162,14 @@ pub enum FixtureOperation {
     GroupByMean,
     #[serde(rename = "groupby_count", alias = "group_by_count")]
     GroupByCount,
+    #[serde(rename = "groupby_min", alias = "group_by_min")]
+    GroupByMin,
+    #[serde(rename = "groupby_max", alias = "group_by_max")]
+    GroupByMax,
+    #[serde(rename = "groupby_first", alias = "group_by_first")]
+    GroupByFirst,
+    #[serde(rename = "groupby_last", alias = "group_by_last")]
+    GroupByLast,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -453,7 +464,11 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         FixtureOperation::SeriesJoin | FixtureOperation::SeriesConcat => &["CC-006"],
         FixtureOperation::GroupBySum
         | FixtureOperation::GroupByMean
-        | FixtureOperation::GroupByCount => &["CC-007"],
+        | FixtureOperation::GroupByCount
+        | FixtureOperation::GroupByMin
+        | FixtureOperation::GroupByMax
+        | FixtureOperation::GroupByFirst
+        | FixtureOperation::GroupByLast => &["CC-007"],
         FixtureOperation::IndexAlignUnion
         | FixtureOperation::IndexHasDuplicates
         | FixtureOperation::IndexFirstPositions => &["CC-003"],
@@ -3168,6 +3183,78 @@ fn run_fixture_operation(
             };
             compare_series_expected(&actual, &expected)
         }
+        FixtureOperation::GroupByMin => {
+            let keys = require_left_series(fixture)?;
+            let values = require_right_series(fixture)?;
+            let actual = groupby_min(
+                &build_series(keys).map_err(|err| format!("keys series build failed: {err}"))?,
+                &build_series(values)
+                    .map_err(|err| format!("values series build failed: {err}"))?,
+                GroupByOptions::default(),
+                policy,
+                ledger,
+            )
+            .map_err(|err| err.to_string())?;
+            let expected = match expected {
+                ResolvedExpected::Series(series) => series,
+                _ => return Err("expected_series is required for groupby_min".to_owned()),
+            };
+            compare_series_expected(&actual, &expected)
+        }
+        FixtureOperation::GroupByMax => {
+            let keys = require_left_series(fixture)?;
+            let values = require_right_series(fixture)?;
+            let actual = groupby_max(
+                &build_series(keys).map_err(|err| format!("keys series build failed: {err}"))?,
+                &build_series(values)
+                    .map_err(|err| format!("values series build failed: {err}"))?,
+                GroupByOptions::default(),
+                policy,
+                ledger,
+            )
+            .map_err(|err| err.to_string())?;
+            let expected = match expected {
+                ResolvedExpected::Series(series) => series,
+                _ => return Err("expected_series is required for groupby_max".to_owned()),
+            };
+            compare_series_expected(&actual, &expected)
+        }
+        FixtureOperation::GroupByFirst => {
+            let keys = require_left_series(fixture)?;
+            let values = require_right_series(fixture)?;
+            let actual = groupby_first(
+                &build_series(keys).map_err(|err| format!("keys series build failed: {err}"))?,
+                &build_series(values)
+                    .map_err(|err| format!("values series build failed: {err}"))?,
+                GroupByOptions::default(),
+                policy,
+                ledger,
+            )
+            .map_err(|err| err.to_string())?;
+            let expected = match expected {
+                ResolvedExpected::Series(series) => series,
+                _ => return Err("expected_series is required for groupby_first".to_owned()),
+            };
+            compare_series_expected(&actual, &expected)
+        }
+        FixtureOperation::GroupByLast => {
+            let keys = require_left_series(fixture)?;
+            let values = require_right_series(fixture)?;
+            let actual = groupby_last(
+                &build_series(keys).map_err(|err| format!("keys series build failed: {err}"))?,
+                &build_series(values)
+                    .map_err(|err| format!("values series build failed: {err}"))?,
+                GroupByOptions::default(),
+                policy,
+                ledger,
+            )
+            .map_err(|err| err.to_string())?;
+            let expected = match expected {
+                ResolvedExpected::Series(series) => series,
+                _ => return Err("expected_series is required for groupby_last".to_owned()),
+            };
+            compare_series_expected(&actual, &expected)
+        }
     }
 }
 
@@ -3271,7 +3358,11 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::SeriesLoc
         | FixtureOperation::SeriesIloc
         | FixtureOperation::GroupByMean
-        | FixtureOperation::GroupByCount => fixture
+        | FixtureOperation::GroupByCount
+        | FixtureOperation::GroupByMin
+        | FixtureOperation::GroupByMax
+        | FixtureOperation::GroupByFirst
+        | FixtureOperation::GroupByLast => fixture
             .expected_series
             .clone()
             .map(ResolvedExpected::Series)
@@ -3456,7 +3547,11 @@ fn capture_live_oracle_expected(
         | FixtureOperation::SeriesLoc
         | FixtureOperation::SeriesIloc
         | FixtureOperation::GroupByMean
-        | FixtureOperation::GroupByCount => response
+        | FixtureOperation::GroupByCount
+        | FixtureOperation::GroupByMin
+        | FixtureOperation::GroupByMax
+        | FixtureOperation::GroupByFirst
+        | FixtureOperation::GroupByLast => response
             .expected_series
             .map(ResolvedExpected::Series)
             .ok_or_else(|| {
@@ -4193,6 +4288,74 @@ fn execute_and_compare_differential(
             let expected = match expected {
                 ResolvedExpected::Series(s) => s,
                 _ => return Err("expected_series required for groupby_count".to_owned()),
+            };
+            Ok(diff_series(&actual, &expected))
+        }
+        FixtureOperation::GroupByMin => {
+            let keys = require_left_series(fixture)?;
+            let values = require_right_series(fixture)?;
+            let actual = groupby_min(
+                &build_series(keys).map_err(|err| format!("keys build: {err}"))?,
+                &build_series(values).map_err(|err| format!("values build: {err}"))?,
+                GroupByOptions::default(),
+                policy,
+                ledger,
+            )
+            .map_err(|err| err.to_string())?;
+            let expected = match expected {
+                ResolvedExpected::Series(s) => s,
+                _ => return Err("expected_series required for groupby_min".to_owned()),
+            };
+            Ok(diff_series(&actual, &expected))
+        }
+        FixtureOperation::GroupByMax => {
+            let keys = require_left_series(fixture)?;
+            let values = require_right_series(fixture)?;
+            let actual = groupby_max(
+                &build_series(keys).map_err(|err| format!("keys build: {err}"))?,
+                &build_series(values).map_err(|err| format!("values build: {err}"))?,
+                GroupByOptions::default(),
+                policy,
+                ledger,
+            )
+            .map_err(|err| err.to_string())?;
+            let expected = match expected {
+                ResolvedExpected::Series(s) => s,
+                _ => return Err("expected_series required for groupby_max".to_owned()),
+            };
+            Ok(diff_series(&actual, &expected))
+        }
+        FixtureOperation::GroupByFirst => {
+            let keys = require_left_series(fixture)?;
+            let values = require_right_series(fixture)?;
+            let actual = groupby_first(
+                &build_series(keys).map_err(|err| format!("keys build: {err}"))?,
+                &build_series(values).map_err(|err| format!("values build: {err}"))?,
+                GroupByOptions::default(),
+                policy,
+                ledger,
+            )
+            .map_err(|err| err.to_string())?;
+            let expected = match expected {
+                ResolvedExpected::Series(s) => s,
+                _ => return Err("expected_series required for groupby_first".to_owned()),
+            };
+            Ok(diff_series(&actual, &expected))
+        }
+        FixtureOperation::GroupByLast => {
+            let keys = require_left_series(fixture)?;
+            let values = require_right_series(fixture)?;
+            let actual = groupby_last(
+                &build_series(keys).map_err(|err| format!("keys build: {err}"))?,
+                &build_series(values).map_err(|err| format!("values build: {err}"))?,
+                GroupByOptions::default(),
+                policy,
+                ledger,
+            )
+            .map_err(|err| err.to_string())?;
+            let expected = match expected {
+                ResolvedExpected::Series(s) => s,
+                _ => return Err("expected_series required for groupby_last".to_owned()),
             };
             Ok(diff_series(&actual, &expected))
         }
@@ -6067,6 +6230,19 @@ mod tests {
             "expected groupby packet fixtures"
         );
         assert!(report.is_green());
+    }
+
+    #[test]
+    fn packet_filter_runs_groupby_aggregate_matrix_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2C-011", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2C-011"));
+        assert!(
+            report.fixture_count >= 12,
+            "expected FP-P2C-011 aggregate matrix fixtures"
+        );
+        assert!(report.is_green(), "expected report green: {report:?}");
     }
 
     #[test]

@@ -11,7 +11,7 @@
 | strict_mode_policy | zero critical drift tolerated |
 | hardened_mode_policy | divergence only in explicit allowlisted defensive classes |
 | excluded_scope | multi-key DataFrame groupby, transform/filter/apply, categorical observed parameter, rolling/expanding |
-| oracle_tests | pandas `groupby().mean/count` via oracle adapter (strict + hardened fixtures) |
+| oracle_tests | pandas `groupby().mean/count/min/max/first/last` via oracle adapter (strict + hardened fixtures) |
 | performance_sentinels | group cardinality skew, dense-int path eligibility, arena budget overflow |
-| compatibility_risks | aggregate empty/all-null group semantics, std/var ddof handling, first-seen order stability |
+| compatibility_risks | aggregate empty/all-null group semantics, first/last null-skipping semantics, std/var ddof handling, first-seen order stability |
 | raptorq_artifacts | parity report, RaptorQ sidecar, and decode proof emitted per packet run |

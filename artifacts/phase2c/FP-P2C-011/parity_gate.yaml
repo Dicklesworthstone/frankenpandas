@@ -8,5 +8,5 @@ hardened:
     - aggregate_null_policy
 machine_check:
   suite: phase2c_packets
-  require_fixture_count_at_least: 4
+  require_fixture_count_at_least: 12
   require_failed: 0

@@ -112,6 +112,11 @@ def scalar_from_json(value: dict[str, Any]) -> Any:
 
 
 def scalar_to_json(value: Any) -> dict[str, Any]:
+    if hasattr(value, "item") and callable(value.item):
+        try:
+            value = value.item()
+        except Exception:
+            pass
     if value is None:
         return {"kind": "null", "value": "null"}
     if isinstance(value, bool):
@@ -195,11 +200,11 @@ def op_series_join(pd, payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def op_groupby_sum(pd, payload: dict[str, Any]) -> dict[str, Any]:
+def op_groupby_agg(pd, payload: dict[str, Any], agg: str, op_name: str) -> dict[str, Any]:
     left = payload.get("left")
     right = payload.get("right")
     if left is None or right is None:
-        raise OracleError("groupby_sum requires left(keys) and right(values) payloads")
+        raise OracleError(f"{op_name} requires left(keys) and right(values) payloads")
 
     key_index = [label_from_json(item) for item in left["index"]]
     value_index = [label_from_json(item) for item in right["index"]]
@@ -219,18 +224,60 @@ def op_groupby_sum(pd, payload: dict[str, Any]) -> dict[str, Any]:
     aligned_keys = key_series.reindex(union_index)
     aligned_values = value_series.reindex(union_index)
 
-    grouped = (
-        pd.DataFrame({"key": aligned_keys, "value": aligned_values})
-        .groupby("key", sort=False, dropna=True)["value"]
-        .sum()
-    )
+    grouped = pd.DataFrame({"key": aligned_keys, "value": aligned_values}).groupby(
+        "key", sort=False, dropna=True
+    )["value"]
+    if agg == "sum":
+        out = grouped.sum()
+    elif agg == "mean":
+        out = grouped.mean()
+    elif agg == "count":
+        out = grouped.count()
+    elif agg == "min":
+        out = grouped.min()
+    elif agg == "max":
+        out = grouped.max()
+    elif agg == "first":
+        out = grouped.first()
+    elif agg == "last":
+        out = grouped.last()
+    else:
+        raise OracleError(f"unsupported groupby aggregation: {agg!r}")
 
     return {
         "expected_series": {
-            "index": [label_to_json(v) for v in grouped.index.tolist()],
-            "values": [scalar_to_json(v) for v in grouped.tolist()],
+            "index": [label_to_json(v) for v in out.index.tolist()],
+            "values": [scalar_to_json(v) for v in out.tolist()],
         }
     }
+
+
+def op_groupby_sum(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return op_groupby_agg(pd, payload, "sum", "groupby_sum")
+
+
+def op_groupby_mean(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return op_groupby_agg(pd, payload, "mean", "groupby_mean")
+
+
+def op_groupby_count(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return op_groupby_agg(pd, payload, "count", "groupby_count")
+
+
+def op_groupby_min(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return op_groupby_agg(pd, payload, "min", "groupby_min")
+
+
+def op_groupby_max(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return op_groupby_agg(pd, payload, "max", "groupby_max")
+
+
+def op_groupby_first(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return op_groupby_agg(pd, payload, "first", "groupby_first")
+
+
+def op_groupby_last(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return op_groupby_agg(pd, payload, "last", "groupby_last")
 
 
 def op_index_align_union(pd, payload: dict[str, Any]) -> dict[str, Any]:
@@ -480,6 +527,18 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_series_join(pd, payload)
     if op in {"groupby_sum", "group_by_sum"}:
         return op_groupby_sum(pd, payload)
+    if op in {"groupby_mean", "group_by_mean"}:
+        return op_groupby_mean(pd, payload)
+    if op in {"groupby_count", "group_by_count"}:
+        return op_groupby_count(pd, payload)
+    if op in {"groupby_min", "group_by_min"}:
+        return op_groupby_min(pd, payload)
+    if op in {"groupby_max", "group_by_max"}:
+        return op_groupby_max(pd, payload)
+    if op in {"groupby_first", "group_by_first"}:
+        return op_groupby_first(pd, payload)
+    if op in {"groupby_last", "group_by_last"}:
+        return op_groupby_last(pd, payload)
     if op == "index_align_union":
         return op_index_align_union(pd, payload)
     if op == "index_has_duplicates":

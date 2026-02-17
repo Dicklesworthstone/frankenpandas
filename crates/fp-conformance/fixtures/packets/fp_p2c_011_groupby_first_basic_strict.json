@@ -1,0 +1,46 @@
+{
+  "packet_id": "FP-P2C-011",
+  "case_id": "groupby_first_basic_strict",
+  "mode": "strict",
+  "operation": "groupby_first",
+  "left": {
+    "name": "key",
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 3 }
+    ],
+    "values": [
+      { "kind": "utf8", "value": "x" },
+      { "kind": "utf8", "value": "y" },
+      { "kind": "utf8", "value": "x" },
+      { "kind": "utf8", "value": "y" }
+    ]
+  },
+  "right": {
+    "name": "value",
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 3 }
+    ],
+    "values": [
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 3 },
+      { "kind": "int64", "value": 4 }
+    ]
+  },
+  "expected_series": {
+    "index": [
+      { "kind": "utf8", "value": "x" },
+      { "kind": "utf8", "value": "y" }
+    ],
+    "values": [
+      { "kind": "float64", "value": 1.0 },
+      { "kind": "float64", "value": 2.0 }
+    ]
+  }
+}

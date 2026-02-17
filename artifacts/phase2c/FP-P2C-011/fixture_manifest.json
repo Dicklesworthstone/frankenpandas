@@ -20,6 +20,46 @@
       "id": "groupby_count_null_hardened",
       "path": "crates/fp-conformance/fixtures/packets/fp_p2c_011_groupby_count_hardened.json",
       "class": "groupby_count_aggregation_hardened"
+    },
+    {
+      "id": "groupby_min_basic_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2c_011_groupby_min_basic_strict.json",
+      "class": "groupby_min_aggregation"
+    },
+    {
+      "id": "groupby_min_null_hardened",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2c_011_groupby_min_hardened.json",
+      "class": "groupby_min_aggregation_hardened"
+    },
+    {
+      "id": "groupby_max_basic_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2c_011_groupby_max_basic_strict.json",
+      "class": "groupby_max_aggregation"
+    },
+    {
+      "id": "groupby_max_null_hardened",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2c_011_groupby_max_hardened.json",
+      "class": "groupby_max_aggregation_hardened"
+    },
+    {
+      "id": "groupby_first_basic_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2c_011_groupby_first_basic_strict.json",
+      "class": "groupby_first_aggregation"
+    },
+    {
+      "id": "groupby_first_null_hardened",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2c_011_groupby_first_hardened.json",
+      "class": "groupby_first_aggregation_hardened"
+    },
+    {
+      "id": "groupby_last_basic_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2c_011_groupby_last_basic_strict.json",
+      "class": "groupby_last_aggregation"
+    },
+    {
+      "id": "groupby_last_null_hardened",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2c_011_groupby_last_hardened.json",
+      "class": "groupby_last_aggregation_hardened"
     }
   ]
 }
