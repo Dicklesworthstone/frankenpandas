@@ -136,6 +136,10 @@ impl Default for SuiteOptions {
 pub enum FixtureOperation {
     SeriesAdd,
     SeriesJoin,
+    #[serde(rename = "series_constructor", alias = "series_from_values")]
+    SeriesConstructor,
+    #[serde(rename = "dataframe_from_series", alias = "data_frame_from_series")]
+    DataFrameFromSeries,
     #[serde(rename = "groupby_sum", alias = "group_by_sum")]
     GroupBySum,
     IndexAlignUnion,
@@ -200,6 +204,8 @@ impl FixtureOperation {
         match self {
             Self::SeriesAdd => "series_add",
             Self::SeriesJoin => "series_join",
+            Self::SeriesConstructor => "series_constructor",
+            Self::DataFrameFromSeries => "dataframe_from_series",
             Self::GroupBySum => "groupby_sum",
             Self::IndexAlignUnion => "index_align_union",
             Self::IndexHasDuplicates => "index_has_duplicates",
@@ -537,11 +543,13 @@ const COMPAT_CLOSURE_REQUIRED_ROWS: [&str; 9] = [
 fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [&'static str] {
     match operation {
         FixtureOperation::SeriesAdd => &["CC-004", "CC-005"],
+        FixtureOperation::SeriesConstructor => &["CC-001", "CC-005"],
         FixtureOperation::SeriesJoin
         | FixtureOperation::SeriesConcat
         | FixtureOperation::DataFrameMerge
         | FixtureOperation::DataFrameMergeIndex
         | FixtureOperation::DataFrameConcat => &["CC-006"],
+        FixtureOperation::DataFrameFromSeries => &["CC-003", "CC-005", "CC-006"],
         FixtureOperation::GroupBySum
         | FixtureOperation::GroupByMean
         | FixtureOperation::GroupByCount
@@ -2911,6 +2919,51 @@ fn run_fixture_operation(
             };
             compare_join_expected(&joined, &expected)
         }
+        FixtureOperation::SeriesConstructor => {
+            let left = require_left_series(fixture)?;
+            let actual = build_series(left);
+            match expected {
+                ResolvedExpected::Series(series) => compare_series_expected(&actual?, &series),
+                ResolvedExpected::ErrorContains(substr) => match actual {
+                    Err(message) if message.contains(&substr) => Ok(()),
+                    Err(message) => Err(format!(
+                        "expected series_constructor error containing '{substr}', got '{message}'"
+                    )),
+                    Ok(_) => Err(format!(
+                        "expected series_constructor to fail with error containing '{substr}'"
+                    )),
+                },
+                ResolvedExpected::ErrorAny => match actual {
+                    Err(_) => Ok(()),
+                    Ok(_) => Err("expected series_constructor to fail".to_owned()),
+                },
+                _ => {
+                    Err("expected_series or expected_error is required for series_constructor".to_owned())
+                }
+            }
+        }
+        FixtureOperation::DataFrameFromSeries => {
+            let actual = execute_dataframe_from_series_fixture_operation(fixture);
+            match expected {
+                ResolvedExpected::Frame(frame) => compare_dataframe_expected(&actual?, &frame),
+                ResolvedExpected::ErrorContains(substr) => match actual {
+                    Err(message) if message.contains(&substr) => Ok(()),
+                    Err(message) => Err(format!(
+                        "expected dataframe_from_series error containing '{substr}', got '{message}'"
+                    )),
+                    Ok(_) => Err(format!(
+                        "expected dataframe_from_series to fail with error containing '{substr}'"
+                    )),
+                },
+                ResolvedExpected::ErrorAny => match actual {
+                    Err(_) => Ok(()),
+                    Ok(_) => Err("expected dataframe_from_series to fail".to_owned()),
+                },
+                _ => {
+                    Err("expected_frame or expected_error is required for dataframe_from_series".to_owned())
+                }
+            }
+        }
         FixtureOperation::GroupBySum => {
             let actual =
                 execute_groupby_fixture_operation(fixture, fixture.operation, policy, ledger)?;
@@ -3387,6 +3440,7 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
                 ))
             }),
         FixtureOperation::SeriesConcat
+        | FixtureOperation::SeriesConstructor
         | FixtureOperation::FillNa
         | FixtureOperation::DropNa
         | FixtureOperation::SeriesFilter
@@ -3413,6 +3467,7 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
             }),
         FixtureOperation::DataFrameLoc
         | FixtureOperation::DataFrameIloc
+        | FixtureOperation::DataFrameFromSeries
         | FixtureOperation::DataFrameMerge
         | FixtureOperation::DataFrameMergeIndex
         | FixtureOperation::DataFrameConcat => fixture
@@ -3592,6 +3647,7 @@ fn capture_live_oracle_expected(
                 HarnessError::FixtureFormat("oracle omitted expected_positions".to_owned())
             }),
         FixtureOperation::SeriesConcat
+        | FixtureOperation::SeriesConstructor
         | FixtureOperation::FillNa
         | FixtureOperation::DropNa
         | FixtureOperation::SeriesFilter
@@ -3614,6 +3670,7 @@ fn capture_live_oracle_expected(
             }),
         FixtureOperation::DataFrameLoc
         | FixtureOperation::DataFrameIloc
+        | FixtureOperation::DataFrameFromSeries
         | FixtureOperation::DataFrameMerge
         | FixtureOperation::DataFrameMergeIndex
         | FixtureOperation::DataFrameConcat => response
@@ -3705,6 +3762,26 @@ fn require_iloc_positions(fixture: &PacketFixture) -> Result<&Vec<i64>, String> 
         .ok_or_else(|| "iloc_positions is required for iloc operations".to_owned())
 }
 
+fn collect_constructor_series_payloads(fixture: &PacketFixture) -> Result<Vec<FixtureSeries>, String> {
+    let mut payloads = Vec::new();
+    if let Some(left) = fixture.left.clone() {
+        payloads.push(left);
+    }
+    if let Some(right) = fixture.right.clone() {
+        payloads.push(right);
+    }
+    if let Some(extra) = fixture.groupby_keys.clone() {
+        payloads.extend(extra);
+    }
+    if payloads.is_empty() {
+        return Err(
+            "dataframe_from_series requires at least one series payload (left/right/groupby_keys)"
+                .to_owned(),
+        );
+    }
+    Ok(payloads)
+}
+
 fn execute_nanop_fixture_operation(
     fixture: &PacketFixture,
     operation: FixtureOperation,
@@ -3724,6 +3801,17 @@ fn execute_nanop_fixture_operation(
             ));
         }
     })
+}
+
+fn execute_dataframe_from_series_fixture_operation(
+    fixture: &PacketFixture,
+) -> Result<DataFrame, String> {
+    let payloads = collect_constructor_series_payloads(fixture)?;
+    let mut series_list = Vec::with_capacity(payloads.len());
+    for payload in payloads {
+        series_list.push(build_series(&payload).map_err(|err| format!("series build failed: {err}"))?);
+    }
+    DataFrame::from_series(series_list).map_err(|err| err.to_string())
 }
 
 fn execute_csv_round_trip_fixture_operation(fixture: &PacketFixture) -> Result<bool, String> {
@@ -4288,6 +4376,77 @@ fn execute_and_compare_differential(
                 _ => return Err("expected_join required for series_join".to_owned()),
             };
             Ok(diff_join(&joined, &expected))
+        }
+        FixtureOperation::SeriesConstructor => {
+            let left = require_left_series(fixture)?;
+            let actual = build_series(left);
+            match expected {
+                ResolvedExpected::Series(series) => Ok(diff_series(&actual?, &series)),
+                ResolvedExpected::ErrorContains(substr) => Ok(match actual {
+                    Err(message) if message.contains(&substr) => Vec::new(),
+                    Err(message) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_constructor.error",
+                        format!(
+                            "expected series_constructor error containing '{substr}', got '{message}'"
+                        ),
+                    )],
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_constructor.error",
+                        "expected series_constructor to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                ResolvedExpected::ErrorAny => Ok(match actual {
+                    Err(_) => Vec::new(),
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_constructor.error",
+                        "expected series_constructor to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                _ => {
+                    Err("expected_series or expected_error required for series_constructor".to_owned())
+                }
+            }
+        }
+        FixtureOperation::DataFrameFromSeries => {
+            let actual = execute_dataframe_from_series_fixture_operation(fixture);
+            match expected {
+                ResolvedExpected::Frame(frame) => Ok(diff_dataframe(&actual?, &frame)),
+                ResolvedExpected::ErrorContains(substr) => Ok(match actual {
+                    Err(message) if message.contains(&substr) => Vec::new(),
+                    Err(message) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "dataframe_from_series.error",
+                        format!(
+                            "expected dataframe_from_series error containing '{substr}', got '{message}'"
+                        ),
+                    )],
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "dataframe_from_series.error",
+                        "expected dataframe_from_series to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                ResolvedExpected::ErrorAny => Ok(match actual {
+                    Err(_) => Vec::new(),
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "dataframe_from_series.error",
+                        "expected dataframe_from_series to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                _ => {
+                    Err("expected_frame or expected_error required for dataframe_from_series".to_owned())
+                }
+            }
         }
         FixtureOperation::GroupBySum => {
             let actual =
