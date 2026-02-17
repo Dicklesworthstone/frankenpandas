@@ -1,0 +1,36 @@
+{
+  "packet_id": "FP-P2D-020",
+  "case_id": "dataframe_constructor_dict_of_series_duplicate_name_last_wins_hardened",
+  "mode": "hardened",
+  "operation": "dataframe_constructor_dict_of_series",
+  "left": {
+    "name": "dup",
+    "index": [
+      { "kind": "int64", "value": 1 }
+    ],
+    "values": [
+      { "kind": "int64", "value": 1 }
+    ]
+  },
+  "right": {
+    "name": "dup",
+    "index": [
+      { "kind": "int64", "value": 2 }
+    ],
+    "values": [
+      { "kind": "int64", "value": 2 }
+    ]
+  },
+  "expected_frame": {
+    "index": [
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 }
+    ],
+    "columns": {
+      "dup": [
+        { "kind": "null", "value": "null" },
+        { "kind": "int64", "value": 2 }
+      ]
+    }
+  }
+}

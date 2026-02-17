@@ -1,0 +1,27 @@
+{
+  "packet_id": "FP-P2D-019",
+  "case_id": "dataframe_constructor_kwargs_empty_target_index_strict",
+  "mode": "strict",
+  "operation": "dataframe_constructor_kwargs",
+  "index": [],
+  "column_order": ["a", "z"],
+  "frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 }
+    ],
+    "columns": {
+      "a": [
+        { "kind": "int64", "value": 7 },
+        { "kind": "int64", "value": 8 }
+      ]
+    }
+  },
+  "expected_frame": {
+    "index": [],
+    "columns": {
+      "a": [],
+      "z": []
+    }
+  }
+}

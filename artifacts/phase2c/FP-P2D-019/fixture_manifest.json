@@ -1,0 +1,75 @@
+{
+  "packet_id": "FP-P2D-019",
+  "fixtures": [
+    {
+      "id": "dataframe_constructor_kwargs_passthrough_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_019_dataframe_constructor_kwargs_passthrough_strict.json",
+      "class": "constructor_kwargs_passthrough"
+    },
+    {
+      "id": "dataframe_constructor_kwargs_column_subset_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_019_dataframe_constructor_kwargs_column_subset_strict.json",
+      "class": "constructor_kwargs_column_subset"
+    },
+    {
+      "id": "dataframe_constructor_kwargs_column_missing_null_hardened",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_019_dataframe_constructor_kwargs_column_missing_null_hardened.json",
+      "class": "constructor_kwargs_missing_column_null_fill"
+    },
+    {
+      "id": "dataframe_constructor_kwargs_row_reindex_with_missing_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_019_dataframe_constructor_kwargs_row_reindex_with_missing_strict.json",
+      "class": "constructor_kwargs_row_reindex_missing"
+    },
+    {
+      "id": "dataframe_constructor_kwargs_row_and_column_projection_hardened",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_019_dataframe_constructor_kwargs_row_and_column_projection_hardened.json",
+      "class": "constructor_kwargs_row_column_projection"
+    },
+    {
+      "id": "dataframe_constructor_kwargs_utf8_index_reindex_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_019_dataframe_constructor_kwargs_utf8_index_reindex_strict.json",
+      "class": "constructor_kwargs_utf8_index_reindex"
+    },
+    {
+      "id": "dataframe_constructor_kwargs_columns_empty_hardened",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_019_dataframe_constructor_kwargs_columns_empty_hardened.json",
+      "class": "constructor_kwargs_empty_columns"
+    },
+    {
+      "id": "dataframe_constructor_kwargs_frame_missing_error_hardened",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_019_dataframe_constructor_kwargs_frame_missing_error_hardened.json",
+      "class": "constructor_kwargs_missing_frame_error"
+    },
+    {
+      "id": "dataframe_constructor_kwargs_empty_frame_with_index_columns_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_019_dataframe_constructor_kwargs_empty_frame_with_index_columns_strict.json",
+      "class": "constructor_kwargs_empty_source_expand"
+    },
+    {
+      "id": "dataframe_constructor_kwargs_mixed_numeric_preserves_float_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_019_dataframe_constructor_kwargs_mixed_numeric_preserves_float_strict.json",
+      "class": "constructor_kwargs_dtype_float_promotion"
+    },
+    {
+      "id": "dataframe_constructor_kwargs_index_only_hardened",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_019_dataframe_constructor_kwargs_index_only_hardened.json",
+      "class": "constructor_kwargs_index_only"
+    },
+    {
+      "id": "dataframe_constructor_kwargs_columns_only_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_019_dataframe_constructor_kwargs_columns_only_strict.json",
+      "class": "constructor_kwargs_columns_only"
+    },
+    {
+      "id": "dataframe_constructor_kwargs_empty_frame_passthrough_hardened",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_019_dataframe_constructor_kwargs_empty_frame_passthrough_hardened.json",
+      "class": "constructor_kwargs_empty_passthrough"
+    },
+    {
+      "id": "dataframe_constructor_kwargs_empty_target_index_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_019_dataframe_constructor_kwargs_empty_target_index_strict.json",
+      "class": "constructor_kwargs_empty_target_index"
+    }
+  ]
+}

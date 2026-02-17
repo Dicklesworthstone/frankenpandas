@@ -1,0 +1,29 @@
+{
+  "packet_id": "FP-P2D-021",
+  "case_id": "dataframe_constructor_list_like_extra_columns_null_fill_hardened",
+  "mode": "hardened",
+  "operation": "dataframe_constructor_list_like",
+  "matrix_rows": [
+    [
+      { "kind": "int64", "value": 5 },
+      { "kind": "int64", "value": 6 }
+    ]
+  ],
+  "column_order": ["a", "b", "c"],
+  "expected_frame": {
+    "index": [
+      { "kind": "int64", "value": 0 }
+    ],
+    "columns": {
+      "a": [
+        { "kind": "int64", "value": 5 }
+      ],
+      "b": [
+        { "kind": "int64", "value": 6 }
+      ],
+      "c": [
+        { "kind": "null", "value": "null" }
+      ]
+    }
+  }
+}

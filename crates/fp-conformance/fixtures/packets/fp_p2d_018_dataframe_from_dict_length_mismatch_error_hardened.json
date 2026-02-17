@@ -1,0 +1,16 @@
+{
+  "packet_id": "FP-P2D-018",
+  "case_id": "dataframe_from_dict_length_mismatch_error_hardened",
+  "mode": "hardened",
+  "operation": "dataframe_from_dict",
+  "dict_columns": {
+    "a": [
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 }
+    ],
+    "b": [
+      { "kind": "int64", "value": 3 }
+    ]
+  },
+  "expected_error_contains": "index length (2) does not match column length (1)"
+}

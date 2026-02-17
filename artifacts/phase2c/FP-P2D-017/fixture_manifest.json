@@ -1,0 +1,75 @@
+{
+  "packet_id": "FP-P2D-017",
+  "fixtures": [
+    {
+      "id": "series_constructor_int64_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_017_series_constructor_int64_strict.json",
+      "class": "series_constructor_int64"
+    },
+    {
+      "id": "series_constructor_mixed_numeric_coerces_float_hardened",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_017_series_constructor_mixed_numeric_coerces_float_hardened.json",
+      "class": "series_constructor_numeric_float_coercion"
+    },
+    {
+      "id": "series_constructor_bool_numeric_coerces_int_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_017_series_constructor_bool_numeric_coerces_int_strict.json",
+      "class": "series_constructor_bool_int_coercion"
+    },
+    {
+      "id": "series_constructor_utf8_numeric_error_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_017_series_constructor_utf8_numeric_error_strict.json",
+      "class": "series_constructor_incompatible_dtype_error"
+    },
+    {
+      "id": "column_dtype_check_bool_float_promotes_float_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_017_column_dtype_check_bool_float_promotes_float_strict.json",
+      "class": "dtype_bool_float_promotes_float"
+    },
+    {
+      "id": "column_dtype_check_utf8_only_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_017_column_dtype_check_utf8_only_strict.json",
+      "class": "dtype_utf8_only"
+    },
+    {
+      "id": "column_dtype_check_int_only_hardened",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_017_column_dtype_check_int_only_hardened.json",
+      "class": "dtype_int_only_nullable"
+    },
+    {
+      "id": "dataframe_from_series_union_align_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_017_dataframe_from_series_union_align_strict.json",
+      "class": "dataframe_from_series_union_alignment"
+    },
+    {
+      "id": "dataframe_from_series_three_inputs_alignment_hardened",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_017_dataframe_from_series_three_inputs_alignment_hardened.json",
+      "class": "dataframe_from_series_multi_input_alignment"
+    },
+    {
+      "id": "dataframe_from_series_duplicate_name_last_wins_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_017_dataframe_from_series_duplicate_name_last_wins_strict.json",
+      "class": "dataframe_from_series_duplicate_column_name_resolution"
+    },
+    {
+      "id": "dataframe_from_series_no_payload_error_hardened",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_017_dataframe_from_series_no_payload_error_hardened.json",
+      "class": "dataframe_from_series_missing_payload_error"
+    },
+    {
+      "id": "dataframe_from_series_utf8_numeric_error_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_017_dataframe_from_series_utf8_numeric_error_strict.json",
+      "class": "dataframe_from_series_incompatible_dtype_error"
+    },
+    {
+      "id": "dataframe_from_series_nullable_float_alignment_hardened",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_017_dataframe_from_series_nullable_float_alignment_hardened.json",
+      "class": "dataframe_from_series_nullable_float_alignment"
+    },
+    {
+      "id": "series_constructor_empty_index_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_017_series_constructor_empty_index_strict.json",
+      "class": "series_constructor_empty"
+    }
+  ]
+}

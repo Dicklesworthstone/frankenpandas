@@ -1,0 +1,53 @@
+{
+  "packet_id": "FP-P2D-020",
+  "case_id": "dataframe_constructor_dict_of_series_row_and_column_projection_strict",
+  "mode": "strict",
+  "operation": "dataframe_constructor_dict_of_series",
+  "left": {
+    "name": "a",
+    "index": [
+      { "kind": "utf8", "value": "x" },
+      { "kind": "utf8", "value": "y" }
+    ],
+    "values": [
+      { "kind": "int64", "value": 5 },
+      { "kind": "int64", "value": 6 }
+    ]
+  },
+  "right": {
+    "name": "b",
+    "index": [
+      { "kind": "utf8", "value": "y" },
+      { "kind": "utf8", "value": "z" }
+    ],
+    "values": [
+      { "kind": "int64", "value": 7 },
+      { "kind": "int64", "value": 8 }
+    ]
+  },
+  "index": [
+    { "kind": "utf8", "value": "z" },
+    { "kind": "utf8", "value": "x" }
+  ],
+  "column_order": ["b", "a", "m"],
+  "expected_frame": {
+    "index": [
+      { "kind": "utf8", "value": "z" },
+      { "kind": "utf8", "value": "x" }
+    ],
+    "columns": {
+      "a": [
+        { "kind": "null", "value": "null" },
+        { "kind": "int64", "value": 5 }
+      ],
+      "b": [
+        { "kind": "int64", "value": 8 },
+        { "kind": "null", "value": "null" }
+      ],
+      "m": [
+        { "kind": "null", "value": "null" },
+        { "kind": "null", "value": "null" }
+      ]
+    }
+  }
+}

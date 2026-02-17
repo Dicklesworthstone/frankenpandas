@@ -1,0 +1,75 @@
+{
+  "packet_id": "FP-P2D-018",
+  "fixtures": [
+    {
+      "id": "dataframe_from_dict_basic_infer_index_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_018_dataframe_from_dict_basic_infer_index_strict.json",
+      "class": "dataframe_from_dict_basic"
+    },
+    {
+      "id": "dataframe_from_dict_explicit_index_utf8_hardened",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_018_dataframe_from_dict_explicit_index_utf8_hardened.json",
+      "class": "dataframe_from_dict_explicit_index"
+    },
+    {
+      "id": "dataframe_from_dict_column_order_subset_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_018_dataframe_from_dict_column_order_subset_strict.json",
+      "class": "dataframe_from_dict_column_subset"
+    },
+    {
+      "id": "dataframe_from_dict_column_order_missing_error_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_018_dataframe_from_dict_column_order_missing_error_strict.json",
+      "class": "dataframe_from_dict_missing_column_error"
+    },
+    {
+      "id": "dataframe_from_dict_length_mismatch_error_hardened",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_018_dataframe_from_dict_length_mismatch_error_hardened.json",
+      "class": "dataframe_from_dict_length_mismatch_error"
+    },
+    {
+      "id": "dataframe_from_dict_mixed_numeric_promotes_float_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_018_dataframe_from_dict_mixed_numeric_promotes_float_strict.json",
+      "class": "dataframe_from_dict_numeric_coercion"
+    },
+    {
+      "id": "dataframe_from_dict_explicit_index_mismatch_error_hardened",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_018_dataframe_from_dict_explicit_index_mismatch_error_hardened.json",
+      "class": "dataframe_from_dict_index_length_error"
+    },
+    {
+      "id": "dataframe_from_records_basic_infer_index_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_018_dataframe_from_records_basic_infer_index_strict.json",
+      "class": "dataframe_from_records_basic"
+    },
+    {
+      "id": "dataframe_from_records_sparse_keys_null_fill_hardened",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_018_dataframe_from_records_sparse_keys_null_fill_hardened.json",
+      "class": "dataframe_from_records_sparse_null_fill"
+    },
+    {
+      "id": "dataframe_from_records_column_order_subset_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_018_dataframe_from_records_column_order_subset_strict.json",
+      "class": "dataframe_from_records_column_subset"
+    },
+    {
+      "id": "dataframe_from_records_column_order_new_column_null_hardened",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_018_dataframe_from_records_column_order_new_column_null_hardened.json",
+      "class": "dataframe_from_records_new_column_null_fill"
+    },
+    {
+      "id": "dataframe_from_records_explicit_index_utf8_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_018_dataframe_from_records_explicit_index_utf8_strict.json",
+      "class": "dataframe_from_records_explicit_index"
+    },
+    {
+      "id": "dataframe_from_records_explicit_index_mismatch_error_hardened",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_018_dataframe_from_records_explicit_index_mismatch_error_hardened.json",
+      "class": "dataframe_from_records_index_length_error"
+    },
+    {
+      "id": "dataframe_from_records_empty_records_with_columns_hardened",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_018_dataframe_from_records_empty_records_with_columns_hardened.json",
+      "class": "dataframe_from_records_empty_rows_with_declared_columns"
+    }
+  ]
+}

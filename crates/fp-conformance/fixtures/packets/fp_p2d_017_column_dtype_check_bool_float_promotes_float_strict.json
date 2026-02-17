@@ -1,0 +1,20 @@
+{
+  "packet_id": "FP-P2D-017",
+  "case_id": "column_dtype_check_bool_float_promotes_float_strict",
+  "mode": "strict",
+  "operation": "column_dtype_check",
+  "left": {
+    "name": "dtype_probe",
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 }
+    ],
+    "values": [
+      { "kind": "bool", "value": true },
+      { "kind": "float64", "value": 1.5 },
+      { "kind": "bool", "value": false }
+    ]
+  },
+  "expected_dtype": "Float64"
+}

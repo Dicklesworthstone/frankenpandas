@@ -1,0 +1,30 @@
+{
+  "packet_id": "FP-P2D-019",
+  "case_id": "dataframe_constructor_kwargs_mixed_numeric_preserves_float_strict",
+  "mode": "strict",
+  "operation": "dataframe_constructor_kwargs",
+  "frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 }
+    ],
+    "columns": {
+      "mix": [
+        { "kind": "int64", "value": 1 },
+        { "kind": "float64", "value": 2.5 }
+      ]
+    }
+  },
+  "expected_frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 }
+    ],
+    "columns": {
+      "mix": [
+        { "kind": "float64", "value": 1.0 },
+        { "kind": "float64", "value": 2.5 }
+      ]
+    }
+  }
+}

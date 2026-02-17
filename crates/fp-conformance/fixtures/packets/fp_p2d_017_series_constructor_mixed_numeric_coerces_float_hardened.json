@@ -1,0 +1,31 @@
+{
+  "packet_id": "FP-P2D-017",
+  "case_id": "series_constructor_mixed_numeric_coerces_float_hardened",
+  "mode": "hardened",
+  "operation": "series_constructor",
+  "left": {
+    "name": "mixed",
+    "index": [
+      { "kind": "int64", "value": 10 },
+      { "kind": "int64", "value": 11 },
+      { "kind": "int64", "value": 12 }
+    ],
+    "values": [
+      { "kind": "int64", "value": 1 },
+      { "kind": "float64", "value": 2.5 },
+      { "kind": "null", "value": "null" }
+    ]
+  },
+  "expected_series": {
+    "index": [
+      { "kind": "int64", "value": 10 },
+      { "kind": "int64", "value": 11 },
+      { "kind": "int64", "value": 12 }
+    ],
+    "values": [
+      { "kind": "float64", "value": 1.0 },
+      { "kind": "float64", "value": 2.5 },
+      { "kind": "null", "value": "na_n" }
+    ]
+  }
+}

@@ -1,0 +1,46 @@
+{
+  "packet_id": "FP-P2D-019",
+  "case_id": "dataframe_constructor_kwargs_row_reindex_with_missing_strict",
+  "mode": "strict",
+  "operation": "dataframe_constructor_kwargs",
+  "index": [
+    { "kind": "int64", "value": 1 },
+    { "kind": "int64", "value": 0 },
+    { "kind": "int64", "value": 2 }
+  ],
+  "frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 }
+    ],
+    "columns": {
+      "a": [
+        { "kind": "int64", "value": 10 },
+        { "kind": "int64", "value": 20 }
+      ],
+      "b": [
+        { "kind": "int64", "value": 30 },
+        { "kind": "int64", "value": 40 }
+      ]
+    }
+  },
+  "expected_frame": {
+    "index": [
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 2 }
+    ],
+    "columns": {
+      "a": [
+        { "kind": "int64", "value": 20 },
+        { "kind": "int64", "value": 10 },
+        { "kind": "null", "value": "null" }
+      ],
+      "b": [
+        { "kind": "int64", "value": 40 },
+        { "kind": "int64", "value": 30 },
+        { "kind": "null", "value": "null" }
+      ]
+    }
+  }
+}

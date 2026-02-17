@@ -1,0 +1,7 @@
+{
+  "packet_id": "FP-P2D-020",
+  "case_id": "dataframe_constructor_dict_of_series_no_payload_error_hardened",
+  "mode": "hardened",
+  "operation": "dataframe_constructor_dict_of_series",
+  "expected_error_contains": "requires at least one series payload"
+}

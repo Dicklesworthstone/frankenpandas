@@ -1,0 +1,15 @@
+{
+  "packet_id": "FP-P2D-021",
+  "case_id": "dataframe_constructor_list_like_row_width_exceeds_columns_error_hardened",
+  "mode": "hardened",
+  "operation": "dataframe_constructor_list_like",
+  "matrix_rows": [
+    [
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 3 }
+    ]
+  ],
+  "column_order": ["a", "b"],
+  "expected_error_contains": "row width 3 exceeds columns length 2"
+}

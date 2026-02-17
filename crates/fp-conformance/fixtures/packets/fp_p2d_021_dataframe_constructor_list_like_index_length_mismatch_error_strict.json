@@ -1,0 +1,18 @@
+{
+  "packet_id": "FP-P2D-021",
+  "case_id": "dataframe_constructor_list_like_index_length_mismatch_error_strict",
+  "mode": "strict",
+  "operation": "dataframe_constructor_list_like",
+  "matrix_rows": [
+    [
+      { "kind": "int64", "value": 1 }
+    ],
+    [
+      { "kind": "int64", "value": 2 }
+    ]
+  ],
+  "index": [
+    { "kind": "int64", "value": 0 }
+  ],
+  "expected_error_contains": "index length 1 does not match row count 2"
+}

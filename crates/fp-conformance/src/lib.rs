@@ -140,6 +140,32 @@ pub enum FixtureOperation {
     SeriesConstructor,
     #[serde(rename = "dataframe_from_series", alias = "data_frame_from_series")]
     DataFrameFromSeries,
+    #[serde(rename = "dataframe_from_dict", alias = "data_frame_from_dict")]
+    DataFrameFromDict,
+    #[serde(rename = "dataframe_from_records", alias = "data_frame_from_records")]
+    DataFrameFromRecords,
+    #[serde(
+        rename = "dataframe_constructor_kwargs",
+        alias = "data_frame_constructor_kwargs"
+    )]
+    DataFrameConstructorKwargs,
+    #[serde(
+        rename = "dataframe_constructor_scalar",
+        alias = "data_frame_constructor_scalar"
+    )]
+    DataFrameConstructorScalar,
+    #[serde(
+        rename = "dataframe_constructor_dict_of_series",
+        alias = "data_frame_constructor_dict_of_series"
+    )]
+    DataFrameConstructorDictOfSeries,
+    #[serde(
+        rename = "dataframe_constructor_list_like",
+        alias = "data_frame_constructor_list_like",
+        alias = "dataframe_constructor_2d",
+        alias = "data_frame_constructor_2d"
+    )]
+    DataFrameConstructorListLike,
     #[serde(rename = "groupby_sum", alias = "group_by_sum")]
     GroupBySum,
     IndexAlignUnion,
@@ -206,6 +232,12 @@ impl FixtureOperation {
             Self::SeriesJoin => "series_join",
             Self::SeriesConstructor => "series_constructor",
             Self::DataFrameFromSeries => "dataframe_from_series",
+            Self::DataFrameFromDict => "dataframe_from_dict",
+            Self::DataFrameFromRecords => "dataframe_from_records",
+            Self::DataFrameConstructorKwargs => "dataframe_constructor_kwargs",
+            Self::DataFrameConstructorScalar => "dataframe_constructor_scalar",
+            Self::DataFrameConstructorDictOfSeries => "dataframe_constructor_dict_of_series",
+            Self::DataFrameConstructorListLike => "dataframe_constructor_list_like",
             Self::GroupBySum => "groupby_sum",
             Self::IndexAlignUnion => "index_align_union",
             Self::IndexHasDuplicates => "index_has_duplicates",
@@ -329,6 +361,14 @@ pub struct PacketFixture {
     pub frame: Option<FixtureDataFrame>,
     #[serde(default)]
     pub frame_right: Option<FixtureDataFrame>,
+    #[serde(default)]
+    pub dict_columns: Option<BTreeMap<String, Vec<Scalar>>>,
+    #[serde(default)]
+    pub column_order: Option<Vec<String>>,
+    #[serde(default)]
+    pub records: Option<Vec<BTreeMap<String, Scalar>>>,
+    #[serde(default)]
+    pub matrix_rows: Option<Vec<Vec<Scalar>>>,
     #[serde(default)]
     pub index: Option<Vec<IndexLabel>>,
     #[serde(default)]
@@ -543,7 +583,13 @@ const COMPAT_CLOSURE_REQUIRED_ROWS: [&str; 9] = [
 fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [&'static str] {
     match operation {
         FixtureOperation::SeriesAdd => &["CC-004", "CC-005"],
-        FixtureOperation::SeriesConstructor => &["CC-001", "CC-005"],
+        FixtureOperation::SeriesConstructor
+        | FixtureOperation::DataFrameFromDict
+        | FixtureOperation::DataFrameFromRecords
+        | FixtureOperation::DataFrameConstructorKwargs
+        | FixtureOperation::DataFrameConstructorScalar
+        | FixtureOperation::DataFrameConstructorDictOfSeries
+        | FixtureOperation::DataFrameConstructorListLike => &["CC-001", "CC-003", "CC-005"],
         FixtureOperation::SeriesJoin
         | FixtureOperation::SeriesConcat
         | FixtureOperation::DataFrameMerge
@@ -1034,6 +1080,14 @@ struct OracleRequest {
     groupby_keys: Option<Vec<FixtureSeries>>,
     frame: Option<FixtureDataFrame>,
     frame_right: Option<FixtureDataFrame>,
+    #[serde(default)]
+    dict_columns: Option<BTreeMap<String, Vec<Scalar>>>,
+    #[serde(default)]
+    column_order: Option<Vec<String>>,
+    #[serde(default)]
+    records: Option<Vec<BTreeMap<String, Scalar>>>,
+    #[serde(default)]
+    matrix_rows: Option<Vec<Vec<Scalar>>>,
     index: Option<Vec<IndexLabel>>,
     join_type: Option<FixtureJoinType>,
     merge_on: Option<String>,
@@ -2937,9 +2991,10 @@ fn run_fixture_operation(
                     Err(_) => Ok(()),
                     Ok(_) => Err("expected series_constructor to fail".to_owned()),
                 },
-                _ => {
-                    Err("expected_series or expected_error is required for series_constructor".to_owned())
-                }
+                _ => Err(
+                    "expected_series or expected_error is required for series_constructor"
+                        .to_owned(),
+                ),
             }
         }
         FixtureOperation::DataFrameFromSeries => {
@@ -2959,9 +3014,150 @@ fn run_fixture_operation(
                     Err(_) => Ok(()),
                     Ok(_) => Err("expected dataframe_from_series to fail".to_owned()),
                 },
-                _ => {
-                    Err("expected_frame or expected_error is required for dataframe_from_series".to_owned())
-                }
+                _ => Err(
+                    "expected_frame or expected_error is required for dataframe_from_series"
+                        .to_owned(),
+                ),
+            }
+        }
+        FixtureOperation::DataFrameFromDict => {
+            let actual = execute_dataframe_from_dict_fixture_operation(fixture);
+            match expected {
+                ResolvedExpected::Frame(frame) => compare_dataframe_expected(&actual?, &frame),
+                ResolvedExpected::ErrorContains(substr) => match actual {
+                    Err(message) if message.contains(&substr) => Ok(()),
+                    Err(message) => Err(format!(
+                        "expected dataframe_from_dict error containing '{substr}', got '{message}'"
+                    )),
+                    Ok(_) => Err(format!(
+                        "expected dataframe_from_dict to fail with error containing '{substr}'"
+                    )),
+                },
+                ResolvedExpected::ErrorAny => match actual {
+                    Err(_) => Ok(()),
+                    Ok(_) => Err("expected dataframe_from_dict to fail".to_owned()),
+                },
+                _ => Err(
+                    "expected_frame or expected_error is required for dataframe_from_dict"
+                        .to_owned(),
+                ),
+            }
+        }
+        FixtureOperation::DataFrameFromRecords => {
+            let actual = execute_dataframe_from_records_fixture_operation(fixture);
+            match expected {
+                ResolvedExpected::Frame(frame) => compare_dataframe_expected(&actual?, &frame),
+                ResolvedExpected::ErrorContains(substr) => match actual {
+                    Err(message) if message.contains(&substr) => Ok(()),
+                    Err(message) => Err(format!(
+                        "expected dataframe_from_records error containing '{substr}', got '{message}'"
+                    )),
+                    Ok(_) => Err(format!(
+                        "expected dataframe_from_records to fail with error containing '{substr}'"
+                    )),
+                },
+                ResolvedExpected::ErrorAny => match actual {
+                    Err(_) => Ok(()),
+                    Ok(_) => Err("expected dataframe_from_records to fail".to_owned()),
+                },
+                _ => Err(
+                    "expected_frame or expected_error is required for dataframe_from_records"
+                        .to_owned(),
+                ),
+            }
+        }
+        FixtureOperation::DataFrameConstructorKwargs => {
+            let actual = execute_dataframe_constructor_kwargs_fixture_operation(fixture);
+            match expected {
+                ResolvedExpected::Frame(frame) => compare_dataframe_expected(&actual?, &frame),
+                ResolvedExpected::ErrorContains(substr) => match actual {
+                    Err(message) if message.contains(&substr) => Ok(()),
+                    Err(message) => Err(format!(
+                        "expected dataframe_constructor_kwargs error containing '{substr}', got '{message}'"
+                    )),
+                    Ok(_) => Err(format!(
+                        "expected dataframe_constructor_kwargs to fail with error containing '{substr}'"
+                    )),
+                },
+                ResolvedExpected::ErrorAny => match actual {
+                    Err(_) => Ok(()),
+                    Ok(_) => Err("expected dataframe_constructor_kwargs to fail".to_owned()),
+                },
+                _ => Err(
+                    "expected_frame or expected_error is required for dataframe_constructor_kwargs"
+                        .to_owned(),
+                ),
+            }
+        }
+        FixtureOperation::DataFrameConstructorScalar => {
+            let actual = execute_dataframe_constructor_scalar_fixture_operation(fixture);
+            match expected {
+                ResolvedExpected::Frame(frame) => compare_dataframe_expected(&actual?, &frame),
+                ResolvedExpected::ErrorContains(substr) => match actual {
+                    Err(message) if message.contains(&substr) => Ok(()),
+                    Err(message) => Err(format!(
+                        "expected dataframe_constructor_scalar error containing '{substr}', got '{message}'"
+                    )),
+                    Ok(_) => Err(format!(
+                        "expected dataframe_constructor_scalar to fail with error containing '{substr}'"
+                    )),
+                },
+                ResolvedExpected::ErrorAny => match actual {
+                    Err(_) => Ok(()),
+                    Ok(_) => Err("expected dataframe_constructor_scalar to fail".to_owned()),
+                },
+                _ => Err(
+                    "expected_frame or expected_error is required for dataframe_constructor_scalar"
+                        .to_owned(),
+                ),
+            }
+        }
+        FixtureOperation::DataFrameConstructorDictOfSeries => {
+            let actual = execute_dataframe_constructor_dict_of_series_fixture_operation(fixture);
+            match expected {
+                ResolvedExpected::Frame(frame) => compare_dataframe_expected(&actual?, &frame),
+                ResolvedExpected::ErrorContains(substr) => match actual {
+                    Err(message) if message.contains(&substr) => Ok(()),
+                    Err(message) => Err(format!(
+                        "expected dataframe_constructor_dict_of_series error containing '{substr}', got '{message}'"
+                    )),
+                    Ok(_) => Err(format!(
+                        "expected dataframe_constructor_dict_of_series to fail with error containing '{substr}'"
+                    )),
+                },
+                ResolvedExpected::ErrorAny => match actual {
+                    Err(_) => Ok(()),
+                    Ok(_) => {
+                        Err("expected dataframe_constructor_dict_of_series to fail".to_owned())
+                    }
+                },
+                _ => Err(
+                    "expected_frame or expected_error is required for dataframe_constructor_dict_of_series"
+                        .to_owned(),
+                ),
+            }
+        }
+        FixtureOperation::DataFrameConstructorListLike => {
+            let actual = execute_dataframe_constructor_list_like_fixture_operation(fixture);
+            match expected {
+                ResolvedExpected::Frame(frame) => compare_dataframe_expected(&actual?, &frame),
+                ResolvedExpected::ErrorContains(substr) => match actual {
+                    Err(message) if message.contains(&substr) => Ok(()),
+                    Err(message) => Err(format!(
+                        "expected dataframe_constructor_list_like error containing '{substr}', got '{message}'"
+                    )),
+                    Ok(_) => Err(format!(
+                        "expected dataframe_constructor_list_like to fail with error containing '{substr}'"
+                    )),
+                },
+                ResolvedExpected::ErrorAny => match actual {
+                    Err(_) => Ok(()),
+                    Ok(_) => Err("expected dataframe_constructor_list_like to fail".to_owned()),
+                },
+                _ => Err(
+                    "expected_frame or expected_error is required for dataframe_constructor_list_like"
+                        .to_owned(),
+                ),
             }
         }
         FixtureOperation::GroupBySum => {
@@ -3468,6 +3664,12 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         FixtureOperation::DataFrameLoc
         | FixtureOperation::DataFrameIloc
         | FixtureOperation::DataFrameFromSeries
+        | FixtureOperation::DataFrameFromDict
+        | FixtureOperation::DataFrameFromRecords
+        | FixtureOperation::DataFrameConstructorKwargs
+        | FixtureOperation::DataFrameConstructorScalar
+        | FixtureOperation::DataFrameConstructorDictOfSeries
+        | FixtureOperation::DataFrameConstructorListLike
         | FixtureOperation::DataFrameMerge
         | FixtureOperation::DataFrameMergeIndex
         | FixtureOperation::DataFrameConcat => fixture
@@ -3545,6 +3747,10 @@ fn capture_live_oracle_expected(
         groupby_keys: fixture.groupby_keys.clone(),
         frame: fixture.frame.clone(),
         frame_right: fixture.frame_right.clone(),
+        dict_columns: fixture.dict_columns.clone(),
+        column_order: fixture.column_order.clone(),
+        records: fixture.records.clone(),
+        matrix_rows: fixture.matrix_rows.clone(),
         index: fixture.index.clone(),
         join_type: fixture.join_type,
         merge_on: fixture.merge_on.clone(),
@@ -3671,6 +3877,12 @@ fn capture_live_oracle_expected(
         FixtureOperation::DataFrameLoc
         | FixtureOperation::DataFrameIloc
         | FixtureOperation::DataFrameFromSeries
+        | FixtureOperation::DataFrameFromDict
+        | FixtureOperation::DataFrameFromRecords
+        | FixtureOperation::DataFrameConstructorKwargs
+        | FixtureOperation::DataFrameConstructorScalar
+        | FixtureOperation::DataFrameConstructorDictOfSeries
+        | FixtureOperation::DataFrameConstructorListLike
         | FixtureOperation::DataFrameMerge
         | FixtureOperation::DataFrameMergeIndex
         | FixtureOperation::DataFrameConcat => response
@@ -3728,6 +3940,27 @@ fn require_frame_right(fixture: &PacketFixture) -> Result<&FixtureDataFrame, Str
         .ok_or_else(|| "missing frame_right fixture payload".to_owned())
 }
 
+fn require_dict_columns(fixture: &PacketFixture) -> Result<&BTreeMap<String, Vec<Scalar>>, String> {
+    fixture
+        .dict_columns
+        .as_ref()
+        .ok_or_else(|| "missing dict_columns fixture payload".to_owned())
+}
+
+fn require_records(fixture: &PacketFixture) -> Result<&Vec<BTreeMap<String, Scalar>>, String> {
+    fixture
+        .records
+        .as_ref()
+        .ok_or_else(|| "missing records fixture payload".to_owned())
+}
+
+fn require_matrix_rows(fixture: &PacketFixture) -> Result<&Vec<Vec<Scalar>>, String> {
+    fixture
+        .matrix_rows
+        .as_ref()
+        .ok_or_else(|| "missing matrix_rows fixture payload".to_owned())
+}
+
 fn require_index(fixture: &PacketFixture) -> Result<&Vec<IndexLabel>, String> {
     fixture
         .index
@@ -3762,7 +3995,10 @@ fn require_iloc_positions(fixture: &PacketFixture) -> Result<&Vec<i64>, String> 
         .ok_or_else(|| "iloc_positions is required for iloc operations".to_owned())
 }
 
-fn collect_constructor_series_payloads(fixture: &PacketFixture) -> Result<Vec<FixtureSeries>, String> {
+fn collect_constructor_series_payloads(
+    fixture: &PacketFixture,
+    op_name: &str,
+) -> Result<Vec<FixtureSeries>, String> {
     let mut payloads = Vec::new();
     if let Some(left) = fixture.left.clone() {
         payloads.push(left);
@@ -3774,12 +4010,42 @@ fn collect_constructor_series_payloads(fixture: &PacketFixture) -> Result<Vec<Fi
         payloads.extend(extra);
     }
     if payloads.is_empty() {
-        return Err(
-            "dataframe_from_series requires at least one series payload (left/right/groupby_keys)"
-                .to_owned(),
-        );
+        return Err(format!(
+            "{op_name} requires at least one series payload (left/right/groupby_keys)"
+        ));
     }
     Ok(payloads)
+}
+
+type DictConstructorPayloads<'a> = (Vec<(&'a str, Vec<Scalar>)>, Vec<&'a str>);
+
+fn collect_dict_constructor_payloads<'a>(
+    dict_columns: &'a BTreeMap<String, Vec<Scalar>>,
+    column_order: Option<&[String]>,
+    op_name: &str,
+) -> Result<DictConstructorPayloads<'a>, String> {
+    if let Some(order) = column_order
+        && !order.is_empty()
+    {
+        let mut payloads = Vec::with_capacity(order.len());
+        let mut selected_columns = Vec::with_capacity(order.len());
+        for requested in order {
+            let (name, values) = dict_columns
+                .get_key_value(requested)
+                .ok_or_else(|| format!("{op_name} column '{requested}' not found in data"))?;
+            payloads.push((name.as_str(), values.clone()));
+            selected_columns.push(name.as_str());
+        }
+        return Ok((payloads, selected_columns));
+    }
+
+    Ok((
+        dict_columns
+            .iter()
+            .map(|(name, values)| (name.as_str(), values.clone()))
+            .collect(),
+        Vec::new(),
+    ))
 }
 
 fn execute_nanop_fixture_operation(
@@ -3806,12 +4072,233 @@ fn execute_nanop_fixture_operation(
 fn execute_dataframe_from_series_fixture_operation(
     fixture: &PacketFixture,
 ) -> Result<DataFrame, String> {
-    let payloads = collect_constructor_series_payloads(fixture)?;
+    let payloads = collect_constructor_series_payloads(fixture, "dataframe_from_series")?;
     let mut series_list = Vec::with_capacity(payloads.len());
     for payload in payloads {
-        series_list.push(build_series(&payload).map_err(|err| format!("series build failed: {err}"))?);
+        series_list
+            .push(build_series(&payload).map_err(|err| format!("series build failed: {err}"))?);
     }
     DataFrame::from_series(series_list).map_err(|err| err.to_string())
+}
+
+fn execute_dataframe_from_dict_fixture_operation(
+    fixture: &PacketFixture,
+) -> Result<DataFrame, String> {
+    let dict_columns = require_dict_columns(fixture)?;
+    let (columns, selected_columns) = collect_dict_constructor_payloads(
+        dict_columns,
+        fixture.column_order.as_deref(),
+        "dataframe_from_dict",
+    )?;
+    if let Some(index) = fixture.index.clone() {
+        return DataFrame::from_dict_with_index(columns, index).map_err(|err| err.to_string());
+    }
+    DataFrame::from_dict(&selected_columns, columns).map_err(|err| err.to_string())
+}
+
+fn execute_dataframe_from_records_fixture_operation(
+    fixture: &PacketFixture,
+) -> Result<DataFrame, String> {
+    let records = require_records(fixture)?;
+
+    let selected_columns: Vec<String> = if let Some(column_order) = fixture.column_order.clone() {
+        column_order
+    } else {
+        records
+            .iter()
+            .flat_map(|record| record.keys().cloned())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    };
+
+    let mut dict_columns = BTreeMap::new();
+    for column in &selected_columns {
+        let values = records
+            .iter()
+            .map(|record| {
+                record
+                    .get(column)
+                    .cloned()
+                    .unwrap_or(Scalar::Null(NullKind::Null))
+            })
+            .collect::<Vec<_>>();
+        dict_columns.insert(column.clone(), values);
+    }
+
+    let (columns, selected_columns) = collect_dict_constructor_payloads(
+        &dict_columns,
+        Some(&selected_columns),
+        "dataframe_from_records",
+    )?;
+
+    if let Some(index) = fixture.index.clone() {
+        if index.len() != records.len() {
+            return Err(format!(
+                "dataframe_from_records index length {} does not match records length {}",
+                index.len(),
+                records.len()
+            ));
+        }
+        return DataFrame::from_dict_with_index(columns, index).map_err(|err| err.to_string());
+    }
+
+    if columns.is_empty() && !records.is_empty() {
+        let default_index = (0..records.len() as i64).map(IndexLabel::from).collect();
+        return DataFrame::from_dict_with_index(Vec::new(), default_index)
+            .map_err(|err| err.to_string());
+    }
+
+    DataFrame::from_dict(&selected_columns, columns).map_err(|err| err.to_string())
+}
+
+fn execute_dataframe_constructor_kwargs_fixture_operation(
+    fixture: &PacketFixture,
+) -> Result<DataFrame, String> {
+    let frame = build_dataframe(require_frame(fixture)?)
+        .map_err(|err| format!("frame build failed: {err}"))?;
+    materialize_dataframe_constructor_projection(
+        &frame,
+        fixture.index.clone(),
+        fixture.column_order.clone(),
+    )
+}
+
+fn materialize_dataframe_constructor_projection(
+    frame: &DataFrame,
+    index: Option<Vec<IndexLabel>>,
+    column_order: Option<Vec<String>>,
+) -> Result<DataFrame, String> {
+    let target_index = index.unwrap_or_else(|| frame.index().labels().to_vec());
+    let target_columns = column_order.unwrap_or_else(|| {
+        frame
+            .column_names()
+            .iter()
+            .map(|name| (*name).clone())
+            .collect()
+    });
+
+    let mut first_position = HashMap::new();
+    for (position, label) in frame.index().labels().iter().enumerate() {
+        first_position.entry(label.clone()).or_insert(position);
+    }
+
+    let mut columns = BTreeMap::new();
+    for name in target_columns {
+        let values = if let Some(source_column) = frame.column(&name) {
+            target_index
+                .iter()
+                .map(|label| {
+                    first_position
+                        .get(label)
+                        .map(|&position| source_column.values()[position].clone())
+                        .unwrap_or(Scalar::Null(NullKind::Null))
+                })
+                .collect()
+        } else {
+            vec![Scalar::Null(NullKind::Null); target_index.len()]
+        };
+        let column = Column::from_values(values).map_err(|err| err.to_string())?;
+        columns.insert(name, column);
+    }
+
+    DataFrame::new(Index::new(target_index), columns).map_err(|err| err.to_string())
+}
+
+fn execute_dataframe_constructor_scalar_fixture_operation(
+    fixture: &PacketFixture,
+) -> Result<DataFrame, String> {
+    let fill_value = fixture
+        .fill_value
+        .clone()
+        .ok_or_else(|| "fill_value is required for dataframe_constructor_scalar".to_owned())?;
+    let target_index = fixture
+        .index
+        .clone()
+        .ok_or_else(|| "index is required for dataframe_constructor_scalar".to_owned())?;
+    let target_columns = fixture
+        .column_order
+        .clone()
+        .ok_or_else(|| "column_order is required for dataframe_constructor_scalar".to_owned())?;
+
+    let mut columns = BTreeMap::new();
+    for name in target_columns {
+        let values = vec![fill_value.clone(); target_index.len()];
+        let column = Column::from_values(values).map_err(|err| err.to_string())?;
+        columns.insert(name, column);
+    }
+
+    DataFrame::new(Index::new(target_index), columns).map_err(|err| err.to_string())
+}
+
+fn execute_dataframe_constructor_dict_of_series_fixture_operation(
+    fixture: &PacketFixture,
+) -> Result<DataFrame, String> {
+    let payloads =
+        collect_constructor_series_payloads(fixture, "dataframe_constructor_dict_of_series")?;
+    let mut series_list = Vec::with_capacity(payloads.len());
+    for payload in payloads {
+        series_list
+            .push(build_series(&payload).map_err(|err| format!("series build failed: {err}"))?);
+    }
+    let frame = DataFrame::from_series(series_list).map_err(|err| err.to_string())?;
+    materialize_dataframe_constructor_projection(
+        &frame,
+        fixture.index.clone(),
+        fixture.column_order.clone(),
+    )
+}
+
+fn execute_dataframe_constructor_list_like_fixture_operation(
+    fixture: &PacketFixture,
+) -> Result<DataFrame, String> {
+    let matrix_rows = require_matrix_rows(fixture)?;
+    let row_count = matrix_rows.len();
+    let max_row_width = matrix_rows.iter().map(std::vec::Vec::len).max().unwrap_or(0);
+
+    let selected_columns: Vec<String> = if let Some(column_order) = fixture.column_order.clone() {
+        if max_row_width > column_order.len() {
+            return Err(format!(
+                "dataframe_constructor_list_like row width {max_row_width} exceeds columns length {}",
+                column_order.len()
+            ));
+        }
+        column_order
+    } else {
+        (0..max_row_width).map(|idx| idx.to_string()).collect()
+    };
+
+    let index_labels = if let Some(index) = fixture.index.clone() {
+        if index.len() != row_count {
+            return Err(format!(
+                "dataframe_constructor_list_like index length {} does not match row count {row_count}",
+                index.len()
+            ));
+        }
+        index
+    } else {
+        (0..row_count as i64).map(IndexLabel::from).collect()
+    };
+
+    let mut dict_columns = BTreeMap::new();
+    for (column_offset, column_name) in selected_columns.iter().enumerate() {
+        let values = matrix_rows
+            .iter()
+            .map(|row| {
+                row.get(column_offset)
+                    .cloned()
+                    .unwrap_or(Scalar::Null(NullKind::Null))
+            })
+            .collect::<Vec<_>>();
+        dict_columns.insert(column_name.clone(), values);
+    }
+
+    let (columns, _) = collect_dict_constructor_payloads(
+        &dict_columns,
+        Some(&selected_columns),
+        "dataframe_constructor_list_like",
+    )?;
+    DataFrame::from_dict_with_index(columns, index_labels).map_err(|err| err.to_string())
 }
 
 fn execute_csv_round_trip_fixture_operation(fixture: &PacketFixture) -> Result<bool, String> {
@@ -4408,9 +4895,9 @@ fn execute_and_compare_differential(
                         "expected series_constructor to fail but operation succeeded".to_owned(),
                     )],
                 }),
-                _ => {
-                    Err("expected_series or expected_error required for series_constructor".to_owned())
-                }
+                _ => Err(
+                    "expected_series or expected_error required for series_constructor".to_owned(),
+                ),
             }
         }
         FixtureOperation::DataFrameFromSeries => {
@@ -4443,9 +4930,235 @@ fn execute_and_compare_differential(
                         "expected dataframe_from_series to fail but operation succeeded".to_owned(),
                     )],
                 }),
-                _ => {
-                    Err("expected_frame or expected_error required for dataframe_from_series".to_owned())
-                }
+                _ => Err(
+                    "expected_frame or expected_error required for dataframe_from_series"
+                        .to_owned(),
+                ),
+            }
+        }
+        FixtureOperation::DataFrameFromDict => {
+            let actual = execute_dataframe_from_dict_fixture_operation(fixture);
+            match expected {
+                ResolvedExpected::Frame(frame) => Ok(diff_dataframe(&actual?, &frame)),
+                ResolvedExpected::ErrorContains(substr) => Ok(match actual {
+                    Err(message) if message.contains(&substr) => Vec::new(),
+                    Err(message) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "dataframe_from_dict.error",
+                        format!(
+                            "expected dataframe_from_dict error containing '{substr}', got '{message}'"
+                        ),
+                    )],
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "dataframe_from_dict.error",
+                        "expected dataframe_from_dict to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                ResolvedExpected::ErrorAny => Ok(match actual {
+                    Err(_) => Vec::new(),
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "dataframe_from_dict.error",
+                        "expected dataframe_from_dict to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                _ => Err(
+                    "expected_frame or expected_error required for dataframe_from_dict".to_owned(),
+                ),
+            }
+        }
+        FixtureOperation::DataFrameFromRecords => {
+            let actual = execute_dataframe_from_records_fixture_operation(fixture);
+            match expected {
+                ResolvedExpected::Frame(frame) => Ok(diff_dataframe(&actual?, &frame)),
+                ResolvedExpected::ErrorContains(substr) => Ok(match actual {
+                    Err(message) if message.contains(&substr) => Vec::new(),
+                    Err(message) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "dataframe_from_records.error",
+                        format!(
+                            "expected dataframe_from_records error containing '{substr}', got '{message}'"
+                        ),
+                    )],
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "dataframe_from_records.error",
+                        "expected dataframe_from_records to fail but operation succeeded"
+                            .to_owned(),
+                    )],
+                }),
+                ResolvedExpected::ErrorAny => Ok(match actual {
+                    Err(_) => Vec::new(),
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "dataframe_from_records.error",
+                        "expected dataframe_from_records to fail but operation succeeded"
+                            .to_owned(),
+                    )],
+                }),
+                _ => Err(
+                    "expected_frame or expected_error required for dataframe_from_records"
+                        .to_owned(),
+                ),
+            }
+        }
+        FixtureOperation::DataFrameConstructorKwargs => {
+            let actual = execute_dataframe_constructor_kwargs_fixture_operation(fixture);
+            match expected {
+                ResolvedExpected::Frame(frame) => Ok(diff_dataframe(&actual?, &frame)),
+                ResolvedExpected::ErrorContains(substr) => Ok(match actual {
+                    Err(message) if message.contains(&substr) => Vec::new(),
+                    Err(message) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "dataframe_constructor_kwargs.error",
+                        format!(
+                            "expected dataframe_constructor_kwargs error containing '{substr}', got '{message}'"
+                        ),
+                    )],
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "dataframe_constructor_kwargs.error",
+                        "expected dataframe_constructor_kwargs to fail but operation succeeded"
+                            .to_owned(),
+                    )],
+                }),
+                ResolvedExpected::ErrorAny => Ok(match actual {
+                    Err(_) => Vec::new(),
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "dataframe_constructor_kwargs.error",
+                        "expected dataframe_constructor_kwargs to fail but operation succeeded"
+                            .to_owned(),
+                    )],
+                }),
+                _ => Err(
+                    "expected_frame or expected_error required for dataframe_constructor_kwargs"
+                        .to_owned(),
+                ),
+            }
+        }
+        FixtureOperation::DataFrameConstructorScalar => {
+            let actual = execute_dataframe_constructor_scalar_fixture_operation(fixture);
+            match expected {
+                ResolvedExpected::Frame(frame) => Ok(diff_dataframe(&actual?, &frame)),
+                ResolvedExpected::ErrorContains(substr) => Ok(match actual {
+                    Err(message) if message.contains(&substr) => Vec::new(),
+                    Err(message) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "dataframe_constructor_scalar.error",
+                        format!(
+                            "expected dataframe_constructor_scalar error containing '{substr}', got '{message}'"
+                        ),
+                    )],
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "dataframe_constructor_scalar.error",
+                        "expected dataframe_constructor_scalar to fail but operation succeeded"
+                            .to_owned(),
+                    )],
+                }),
+                ResolvedExpected::ErrorAny => Ok(match actual {
+                    Err(_) => Vec::new(),
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "dataframe_constructor_scalar.error",
+                        "expected dataframe_constructor_scalar to fail but operation succeeded"
+                            .to_owned(),
+                    )],
+                }),
+                _ => Err(
+                    "expected_frame or expected_error required for dataframe_constructor_scalar"
+                        .to_owned(),
+                ),
+            }
+        }
+        FixtureOperation::DataFrameConstructorDictOfSeries => {
+            let actual = execute_dataframe_constructor_dict_of_series_fixture_operation(fixture);
+            match expected {
+                ResolvedExpected::Frame(frame) => Ok(diff_dataframe(&actual?, &frame)),
+                ResolvedExpected::ErrorContains(substr) => Ok(match actual {
+                    Err(message) if message.contains(&substr) => Vec::new(),
+                    Err(message) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "dataframe_constructor_dict_of_series.error",
+                        format!(
+                            "expected dataframe_constructor_dict_of_series error containing '{substr}', got '{message}'"
+                        ),
+                    )],
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "dataframe_constructor_dict_of_series.error",
+                        "expected dataframe_constructor_dict_of_series to fail but operation succeeded"
+                            .to_owned(),
+                    )],
+                }),
+                ResolvedExpected::ErrorAny => Ok(match actual {
+                    Err(_) => Vec::new(),
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "dataframe_constructor_dict_of_series.error",
+                        "expected dataframe_constructor_dict_of_series to fail but operation succeeded"
+                            .to_owned(),
+                    )],
+                }),
+                _ => Err(
+                    "expected_frame or expected_error required for dataframe_constructor_dict_of_series"
+                        .to_owned(),
+                ),
+            }
+        }
+        FixtureOperation::DataFrameConstructorListLike => {
+            let actual = execute_dataframe_constructor_list_like_fixture_operation(fixture);
+            match expected {
+                ResolvedExpected::Frame(frame) => Ok(diff_dataframe(&actual?, &frame)),
+                ResolvedExpected::ErrorContains(substr) => Ok(match actual {
+                    Err(message) if message.contains(&substr) => Vec::new(),
+                    Err(message) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "dataframe_constructor_list_like.error",
+                        format!(
+                            "expected dataframe_constructor_list_like error containing '{substr}', got '{message}'"
+                        ),
+                    )],
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "dataframe_constructor_list_like.error",
+                        "expected dataframe_constructor_list_like to fail but operation succeeded"
+                            .to_owned(),
+                    )],
+                }),
+                ResolvedExpected::ErrorAny => Ok(match actual {
+                    Err(_) => Vec::new(),
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "dataframe_constructor_list_like.error",
+                        "expected dataframe_constructor_list_like to fail but operation succeeded"
+                            .to_owned(),
+                    )],
+                }),
+                _ => Err(
+                    "expected_frame or expected_error required for dataframe_constructor_list_like"
+                        .to_owned(),
+                ),
             }
         }
         FixtureOperation::GroupBySum => {
@@ -6777,6 +7490,71 @@ mod tests {
         assert!(
             report.fixture_count >= 14,
             "expected FP-P2D-016 csv edge-case fixtures"
+        );
+        assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
+    fn packet_filter_runs_constructor_dtype_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2D-017", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-017"));
+        assert!(
+            report.fixture_count >= 14,
+            "expected FP-P2D-017 constructor+dtype fixtures"
+        );
+        assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
+    fn packet_filter_runs_dataframe_constructor_matrix_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2D-018", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-018"));
+        assert!(
+            report.fixture_count >= 14,
+            "expected FP-P2D-018 dataframe constructor fixtures"
+        );
+        assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
+    fn packet_filter_runs_constructor_kwargs_matrix_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2D-019", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-019"));
+        assert!(
+            report.fixture_count >= 14,
+            "expected FP-P2D-019 constructor kwargs fixtures"
+        );
+        assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
+    fn packet_filter_runs_constructor_scalar_and_dict_series_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2D-020", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-020"));
+        assert!(
+            report.fixture_count >= 14,
+            "expected FP-P2D-020 constructor scalar+dict-of-series fixtures"
+        );
+        assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
+    fn packet_filter_runs_constructor_list_like_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2D-021", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-021"));
+        assert!(
+            report.fixture_count >= 14,
+            "expected FP-P2D-021 constructor list-like fixtures"
         );
         assert!(report.is_green(), "expected report green: {report:?}");
     }

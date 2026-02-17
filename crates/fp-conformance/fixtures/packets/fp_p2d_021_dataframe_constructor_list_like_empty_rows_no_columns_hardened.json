@@ -1,0 +1,11 @@
+{
+  "packet_id": "FP-P2D-021",
+  "case_id": "dataframe_constructor_list_like_empty_rows_no_columns_hardened",
+  "mode": "hardened",
+  "operation": "dataframe_constructor_list_like",
+  "matrix_rows": [],
+  "expected_frame": {
+    "index": [],
+    "columns": {}
+  }
+}

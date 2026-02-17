@@ -1,0 +1,7 @@
+{
+  "packet_id": "FP-P2D-021",
+  "case_id": "dataframe_constructor_list_like_missing_matrix_rows_error_hardened",
+  "mode": "hardened",
+  "operation": "dataframe_constructor_list_like",
+  "expected_error_contains": "missing matrix_rows fixture payload"
+}

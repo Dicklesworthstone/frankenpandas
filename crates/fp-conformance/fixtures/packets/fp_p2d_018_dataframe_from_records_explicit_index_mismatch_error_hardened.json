@@ -1,0 +1,18 @@
+{
+  "packet_id": "FP-P2D-018",
+  "case_id": "dataframe_from_records_explicit_index_mismatch_error_hardened",
+  "mode": "hardened",
+  "operation": "dataframe_from_records",
+  "index": [
+    { "kind": "utf8", "value": "only-one" }
+  ],
+  "records": [
+    {
+      "a": { "kind": "int64", "value": 1 }
+    },
+    {
+      "a": { "kind": "int64", "value": 2 }
+    }
+  ],
+  "expected_error_contains": "index length 1 does not match records length 2"
+}

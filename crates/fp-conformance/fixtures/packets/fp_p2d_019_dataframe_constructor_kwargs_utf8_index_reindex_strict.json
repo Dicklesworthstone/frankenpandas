@@ -1,0 +1,42 @@
+{
+  "packet_id": "FP-P2D-019",
+  "case_id": "dataframe_constructor_kwargs_utf8_index_reindex_strict",
+  "mode": "strict",
+  "operation": "dataframe_constructor_kwargs",
+  "index": [
+    { "kind": "utf8", "value": "r2" },
+    { "kind": "utf8", "value": "r3" }
+  ],
+  "frame": {
+    "index": [
+      { "kind": "utf8", "value": "r1" },
+      { "kind": "utf8", "value": "r2" }
+    ],
+    "columns": {
+      "city": [
+        { "kind": "utf8", "value": "ny" },
+        { "kind": "utf8", "value": "la" }
+      ],
+      "score": [
+        { "kind": "int64", "value": 10 },
+        { "kind": "int64", "value": 20 }
+      ]
+    }
+  },
+  "expected_frame": {
+    "index": [
+      { "kind": "utf8", "value": "r2" },
+      { "kind": "utf8", "value": "r3" }
+    ],
+    "columns": {
+      "city": [
+        { "kind": "utf8", "value": "la" },
+        { "kind": "null", "value": "null" }
+      ],
+      "score": [
+        { "kind": "int64", "value": 20 },
+        { "kind": "null", "value": "null" }
+      ]
+    }
+  }
+}

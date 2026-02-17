@@ -545,6 +545,227 @@ def op_index_first_positions(pd, payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def fixture_series_from_payload(pd, payload: dict[str, Any], op_name: str):
+    if payload is None:
+        raise OracleError(f"{op_name} requires series payload")
+    index = [label_from_json(item) for item in payload["index"]]
+    values = [scalar_from_json(item) for item in payload["values"]]
+    return pd.Series(values, index=index, name=payload.get("name", "series"))
+
+
+def series_to_expected(series) -> dict[str, Any]:
+    return {
+        "index": [label_to_json(v) for v in series.index.tolist()],
+        "values": [scalar_to_json(v) for v in series.tolist()],
+    }
+
+
+def op_series_constructor(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    series = fixture_series_from_payload(pd, left, "series_constructor")
+    return {"expected_series": series_to_expected(series)}
+
+
+def op_dataframe_from_series(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    payloads = collect_constructor_series_payloads(payload, "dataframe_from_series")
+    series_list = [
+        fixture_series_from_payload(pd, series_payload, "dataframe_from_series")
+        for series_payload in payloads
+    ]
+    frame = pd.concat(series_list, axis=1, sort=False)
+    return {"expected_frame": dataframe_to_json(frame)}
+
+
+def collect_constructor_series_payloads(
+    payload: dict[str, Any], op_name: str
+) -> list[dict[str, Any]]:
+    payloads: list[dict[str, Any]] = []
+    left = payload.get("left")
+    right = payload.get("right")
+    if isinstance(left, dict):
+        payloads.append(left)
+    if isinstance(right, dict):
+        payloads.append(right)
+    extra = payload.get("groupby_keys")
+    if isinstance(extra, list):
+        payloads.extend(item for item in extra if isinstance(item, dict))
+
+    if not payloads:
+        raise OracleError(
+            f"{op_name} requires at least one series payload (left/right/groupby_keys)"
+        )
+    return payloads
+
+
+def parse_constructor_dict_columns(
+    payload: dict[str, Any], op_name: str
+) -> dict[str, list[Any]]:
+    raw = payload.get("dict_columns")
+    if not isinstance(raw, dict):
+        raise OracleError(f"{op_name} requires dict_columns object payload")
+
+    parsed: dict[str, list[Any]] = {}
+    for name, values in raw.items():
+        if not isinstance(values, list):
+            raise OracleError(f"{op_name} column {name!r} must be a list")
+        parsed[str(name)] = [scalar_from_json(item) for item in values]
+    return parsed
+
+
+def parse_constructor_column_order(payload: dict[str, Any], op_name: str) -> list[str] | None:
+    raw = payload.get("column_order")
+    if raw is None:
+        return None
+    if not isinstance(raw, list):
+        raise OracleError(f"{op_name} column_order must be a list when provided")
+    return [str(item) for item in raw]
+
+
+def parse_constructor_index(payload: dict[str, Any], op_name: str) -> list[Any] | None:
+    raw = payload.get("index")
+    if raw is None:
+        return None
+    if not isinstance(raw, list):
+        raise OracleError(f"{op_name} index must be a list when provided")
+    return [label_from_json(item) for item in raw]
+
+
+def parse_constructor_matrix_rows(
+    payload: dict[str, Any], op_name: str
+) -> list[list[Any]]:
+    raw = payload.get("matrix_rows")
+    if not isinstance(raw, list):
+        raise OracleError(f"{op_name} requires matrix_rows list payload")
+
+    matrix_rows: list[list[Any]] = []
+    for row in raw:
+        if not isinstance(row, list):
+            raise OracleError(f"{op_name} requires each matrix row to be a list")
+        matrix_rows.append([scalar_from_json(item) for item in row])
+    return matrix_rows
+
+
+def op_dataframe_from_dict(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    data = parse_constructor_dict_columns(payload, "dataframe_from_dict")
+    column_order = parse_constructor_column_order(payload, "dataframe_from_dict")
+    index = parse_constructor_index(payload, "dataframe_from_dict")
+
+    if column_order is not None and len(column_order) > 0:
+        selected: dict[str, list[Any]] = {}
+        for name in column_order:
+            if name not in data:
+                raise OracleError(f"dataframe_from_dict column '{name}' not found in data")
+            selected[name] = data[name]
+        data = selected
+
+    try:
+        frame = pd.DataFrame(data, index=index)
+    except Exception as exc:
+        raise OracleError(f"dataframe_from_dict failed: {exc}") from exc
+
+    return {"expected_frame": dataframe_to_json(frame)}
+
+
+def op_dataframe_from_records(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    raw_records = payload.get("records")
+    if not isinstance(raw_records, list):
+        raise OracleError("dataframe_from_records requires records list payload")
+
+    records: list[dict[str, Any]] = []
+    for row in raw_records:
+        if not isinstance(row, dict):
+            raise OracleError(
+                "dataframe_from_records requires each record to be an object"
+            )
+        parsed_row: dict[str, Any] = {}
+        for key, value in row.items():
+            parsed_row[str(key)] = scalar_from_json(value)
+        records.append(parsed_row)
+
+    column_order = parse_constructor_column_order(payload, "dataframe_from_records")
+    index = parse_constructor_index(payload, "dataframe_from_records")
+
+    try:
+        frame = pd.DataFrame(records, columns=column_order, index=index)
+    except Exception as exc:
+        raise OracleError(f"dataframe_from_records failed: {exc}") from exc
+
+    return {"expected_frame": dataframe_to_json(frame)}
+
+
+def op_dataframe_constructor_kwargs(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    if frame_payload is None:
+        raise OracleError("dataframe_constructor_kwargs requires frame payload")
+
+    frame = dataframe_from_json(pd, frame_payload)
+    column_order = parse_constructor_column_order(payload, "dataframe_constructor_kwargs")
+    index = parse_constructor_index(payload, "dataframe_constructor_kwargs")
+
+    try:
+        out = pd.DataFrame(frame, index=index, columns=column_order)
+    except Exception as exc:
+        raise OracleError(f"dataframe_constructor_kwargs failed: {exc}") from exc
+
+    return {"expected_frame": dataframe_to_json(out)}
+
+
+def op_dataframe_constructor_scalar(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    fill_value_raw = payload.get("fill_value")
+    if fill_value_raw is None:
+        raise OracleError("dataframe_constructor_scalar requires fill_value payload")
+    fill_value = scalar_from_json(fill_value_raw)
+
+    column_order = parse_constructor_column_order(payload, "dataframe_constructor_scalar")
+    index = parse_constructor_index(payload, "dataframe_constructor_scalar")
+
+    try:
+        out = pd.DataFrame(fill_value, index=index, columns=column_order)
+    except Exception as exc:
+        raise OracleError(f"dataframe_constructor_scalar failed: {exc}") from exc
+
+    return {"expected_frame": dataframe_to_json(out)}
+
+
+def op_dataframe_constructor_dict_of_series(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    payloads = collect_constructor_series_payloads(
+        payload, "dataframe_constructor_dict_of_series"
+    )
+    column_order = parse_constructor_column_order(
+        payload, "dataframe_constructor_dict_of_series"
+    )
+    index = parse_constructor_index(payload, "dataframe_constructor_dict_of_series")
+
+    data: dict[str, Any] = {}
+    for series_payload in payloads:
+        series = fixture_series_from_payload(
+            pd, series_payload, "dataframe_constructor_dict_of_series"
+        )
+        data[str(series.name)] = series
+
+    try:
+        out = pd.DataFrame(data, index=index, columns=column_order)
+    except Exception as exc:
+        raise OracleError(
+            f"dataframe_constructor_dict_of_series failed: {exc}"
+        ) from exc
+
+    return {"expected_frame": dataframe_to_json(out)}
+
+
+def op_dataframe_constructor_list_like(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    matrix_rows = parse_constructor_matrix_rows(payload, "dataframe_constructor_list_like")
+    column_order = parse_constructor_column_order(payload, "dataframe_constructor_list_like")
+    index = parse_constructor_index(payload, "dataframe_constructor_list_like")
+
+    try:
+        out = pd.DataFrame(matrix_rows, index=index, columns=column_order)
+    except Exception as exc:
+        raise OracleError(f"dataframe_constructor_list_like failed: {exc}") from exc
+
+    return {"expected_frame": dataframe_to_json(out)}
+
+
 def op_series_loc(pd, payload: dict[str, Any]) -> dict[str, Any]:
     left = payload.get("left")
     loc_labels = payload.get("loc_labels")
@@ -813,6 +1034,30 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_series_add(pd, payload)
     if op == "series_join":
         return op_series_join(pd, payload)
+    if op == "series_constructor":
+        return op_series_constructor(pd, payload)
+    if op in {"dataframe_from_series", "data_frame_from_series"}:
+        return op_dataframe_from_series(pd, payload)
+    if op in {"dataframe_from_dict", "data_frame_from_dict"}:
+        return op_dataframe_from_dict(pd, payload)
+    if op in {"dataframe_from_records", "data_frame_from_records"}:
+        return op_dataframe_from_records(pd, payload)
+    if op in {"dataframe_constructor_kwargs", "data_frame_constructor_kwargs"}:
+        return op_dataframe_constructor_kwargs(pd, payload)
+    if op in {"dataframe_constructor_scalar", "data_frame_constructor_scalar"}:
+        return op_dataframe_constructor_scalar(pd, payload)
+    if op in {
+        "dataframe_constructor_dict_of_series",
+        "data_frame_constructor_dict_of_series",
+    }:
+        return op_dataframe_constructor_dict_of_series(pd, payload)
+    if op in {
+        "dataframe_constructor_list_like",
+        "data_frame_constructor_list_like",
+        "dataframe_constructor_2d",
+        "data_frame_constructor_2d",
+    }:
+        return op_dataframe_constructor_list_like(pd, payload)
     if op in {"groupby_sum", "group_by_sum"}:
         return op_groupby_sum(pd, payload)
     if op in {"groupby_mean", "group_by_mean"}:
