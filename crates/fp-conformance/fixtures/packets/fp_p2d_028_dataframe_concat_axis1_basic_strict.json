@@ -1,0 +1,50 @@
+{
+  "packet_id": "FP-P2D-028",
+  "case_id": "dataframe_concat_axis1_basic_strict",
+  "mode": "strict",
+  "operation": "dataframe_concat",
+  "concat_axis": 1,
+  "frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 }
+    ],
+    "columns": {
+      "a": [
+        { "kind": "int64", "value": 1 },
+        { "kind": "int64", "value": 2 }
+      ]
+    }
+  },
+  "frame_right": {
+    "index": [
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 }
+    ],
+    "columns": {
+      "b": [
+        { "kind": "int64", "value": 10 },
+        { "kind": "int64", "value": 20 }
+      ]
+    }
+  },
+  "expected_frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 }
+    ],
+    "columns": {
+      "a": [
+        { "kind": "int64", "value": 1 },
+        { "kind": "int64", "value": 2 },
+        { "kind": "null", "value": "null" }
+      ],
+      "b": [
+        { "kind": "null", "value": "null" },
+        { "kind": "int64", "value": 10 },
+        { "kind": "int64", "value": 20 }
+      ]
+    }
+  }
+}

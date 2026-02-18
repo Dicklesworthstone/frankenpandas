@@ -1,0 +1,51 @@
+{
+  "packet_id": "FP-P2D-028",
+  "case_id": "dataframe_concat_axis1_utf8_index_strict",
+  "mode": "strict",
+  "operation": "dataframe_concat",
+  "concat_axis": 1,
+  "frame": {
+    "index": [
+      { "kind": "utf8", "value": "b" },
+      { "kind": "utf8", "value": "a" }
+    ],
+    "columns": {
+      "left_col": [
+        { "kind": "int64", "value": 1 },
+        { "kind": "int64", "value": 2 }
+      ]
+    }
+  },
+  "frame_right": {
+    "index": [
+      { "kind": "utf8", "value": "c" },
+      { "kind": "utf8", "value": "a" }
+    ],
+    "columns": {
+      "right_col": [
+        { "kind": "int64", "value": 30 },
+        { "kind": "int64", "value": 10 }
+      ]
+    }
+  },
+  "expected_frame": {
+    "index": [
+      { "kind": "utf8", "value": "b" },
+      { "kind": "utf8", "value": "a" },
+      { "kind": "utf8", "value": "c" }
+    ],
+    "columns": {
+      "left_col": [
+        { "kind": "int64", "value": 1 },
+        { "kind": "int64", "value": 2 },
+        { "kind": "null", "value": "null" }
+      ],
+      "right_col": [
+        { "kind": "null", "value": "null" },
+        { "kind": "int64", "value": 10 },
+        { "kind": "int64", "value": 30 }
+      ]
+    }
+  }
+}
+

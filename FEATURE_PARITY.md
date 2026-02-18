@@ -14,7 +14,7 @@
 | DataFrame/Series constructors | in_progress | `Series::from_values` + `DataFrame::from_series` MVP implemented; `FP-P2C-003` extends arithmetic fixture coverage; broader constructor parity pending |
 | Index alignment and selection | in_progress | `FP-P2C-001`/`FP-P2C-002` packet suites green with gate validation and RaptorQ sidecars; `FP-P2C-010` adds series/dataframe filter-head-loc-iloc basics; `FP-P2D-025` extends DataFrame loc/iloc row+column selector parity; `FP-P2D-026` adds DataFrame head/tail parity; `FP-P2D-027` adds DataFrame head/tail negative-`n` parity; full selector matrix still pending |
 | GroupBy core aggregates | in_progress | `FP-P2C-005` and `FP-P2C-011` suites green (`sum`/`mean`/`count` core semantics); broader aggregate matrix still pending |
-| Join/merge/concat core | in_progress | `FP-P2C-004` and `FP-P2C-006` suites green for series-level join/concat semantics; full DataFrame merge/concat contracts pending |
+| Join/merge/concat core | in_progress | `FP-P2C-004` and `FP-P2C-006` suites green for series-level join/concat semantics; `FP-P2D-014` covers DataFrame merge + axis=0 concat matrix; `FP-P2D-028` adds DataFrame concat axis=1 alignment parity; full DataFrame merge/concat contracts still pending |
 | Null/NaN semantics | in_progress | `FP-P2C-007` suite green for `dropna`/`fillna`/`nansum`; full nanops matrix still pending |
 | Core CSV ingest/export | in_progress | `FP-P2C-008` suite green for CSV round-trip core cases; parser/formatter parity matrix pending |
 | Storage/dtype invariants | in_progress | `FP-P2C-009` suite green for dtype invariant checks; broader dtype coercion/storage matrix pending |
@@ -37,6 +37,7 @@
 | FP-P2D-025 | parity_green | `artifacts/phase2c/FP-P2D-025/parity_report.json`, `artifacts/phase2c/FP-P2D-025/parity_gate_result.json`, `artifacts/phase2c/FP-P2D-025/parity_report.raptorq.json` |
 | FP-P2D-026 | parity_green | `artifacts/phase2c/FP-P2D-026/parity_report.json`, `artifacts/phase2c/FP-P2D-026/parity_gate_result.json`, `artifacts/phase2c/FP-P2D-026/parity_report.raptorq.json` |
 | FP-P2D-027 | parity_green | `artifacts/phase2c/FP-P2D-027/parity_report.json`, `artifacts/phase2c/FP-P2D-027/parity_gate_result.json`, `artifacts/phase2c/FP-P2D-027/parity_report.raptorq.json` |
+| FP-P2D-028 | parity_green | `artifacts/phase2c/FP-P2D-028/parity_report.json`, `artifacts/phase2c/FP-P2D-028/parity_gate_result.json`, `artifacts/phase2c/FP-P2D-028/parity_report.raptorq.json` |
 
 Gate enforcement and trend history:
 

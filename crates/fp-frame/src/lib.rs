@@ -7,7 +7,7 @@ use fp_index::{
     AlignMode, Index, IndexError, IndexLabel, align, align_union, validate_alignment_plan,
 };
 use fp_runtime::{DecisionAction, EvidenceLedger, RuntimeMode, RuntimePolicy};
-use fp_types::Scalar;
+use fp_types::{NullKind, Scalar};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -724,6 +724,78 @@ pub fn concat_dataframes(frames: &[&DataFrame]) -> Result<DataFrame, FrameError>
     }
 
     DataFrame::new(index, columns)
+}
+
+/// Concatenate DataFrames along the requested axis.
+///
+/// Supported axes:
+/// - `0`: row-wise concatenation (`concat_dataframes`)
+/// - `1`: column-wise concatenation with outer index alignment
+pub fn concat_dataframes_with_axis(
+    frames: &[&DataFrame],
+    axis: i64,
+) -> Result<DataFrame, FrameError> {
+    match axis {
+        0 => concat_dataframes(frames),
+        1 => concat_dataframes_axis1(frames),
+        _ => Err(FrameError::CompatibilityRejected(format!(
+            "unsupported concat axis {axis}; expected 0 or 1"
+        ))),
+    }
+}
+
+/// Column-wise DataFrame concat with deterministic outer index alignment.
+///
+/// Matches `pd.concat([df1, df2, ...], axis=1, join="outer", sort=False)` for
+/// the currently supported subset:
+/// - Union index preserves left-then-unseen label order.
+/// - Missing rows in each input column materialize as `Scalar::Null`.
+/// - Duplicate output column names are rejected (fail-closed for MVP storage model).
+/// - Duplicate input index labels are rejected in this MVP slice.
+fn concat_dataframes_axis1(frames: &[&DataFrame]) -> Result<DataFrame, FrameError> {
+    if frames.is_empty() {
+        return DataFrame::new(Index::new(Vec::new()), BTreeMap::new());
+    }
+
+    if frames.iter().any(|frame| frame.index().has_duplicates()) {
+        return Err(FrameError::CompatibilityRejected(
+            "concat(axis=1) does not yet support duplicate index labels".to_owned(),
+        ));
+    }
+
+    let mut union_index = frames[0].index().clone();
+    for frame in frames.iter().skip(1) {
+        let plan = align_union(&union_index, frame.index());
+        validate_alignment_plan(&plan)?;
+        union_index = plan.union_index;
+    }
+
+    let mut columns = BTreeMap::new();
+    for frame in frames {
+        let plan = align(&union_index, frame.index(), AlignMode::Left);
+        validate_alignment_plan(&plan)?;
+
+        for (name, column) in frame.columns() {
+            if columns.contains_key(name) {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "duplicate column '{name}' in concat(axis=1) output"
+                )));
+            }
+
+            let values = plan
+                .right_positions
+                .iter()
+                .map(|position| match position {
+                    Some(pos) => column.values()[*pos].clone(),
+                    None => Scalar::Null(NullKind::Null),
+                })
+                .collect::<Vec<_>>();
+
+            columns.insert(name.clone(), Column::from_values(values)?);
+        }
+    }
+
+    DataFrame::new(union_index, columns)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1833,7 +1905,7 @@ mod tests {
 
     // ---- DataFrame concat tests (bd-2gi.17) ----
 
-    use super::concat_dataframes;
+    use super::{concat_dataframes, concat_dataframes_with_axis};
 
     #[test]
     fn concat_dataframes_basic() {
@@ -1905,6 +1977,86 @@ mod tests {
             result.column("col").unwrap().values(),
             &[Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]
         );
+    }
+
+    #[test]
+    fn concat_dataframes_axis1_aligns_and_fills_nulls() {
+        let left = DataFrame::from_dict_with_index(
+            vec![("a", vec![Scalar::Int64(1), Scalar::Int64(2)])],
+            vec![0_i64.into(), 1_i64.into()],
+        )
+        .unwrap();
+        let right = DataFrame::from_dict_with_index(
+            vec![("b", vec![Scalar::Int64(10), Scalar::Int64(20)])],
+            vec![1_i64.into(), 2_i64.into()],
+        )
+        .unwrap();
+
+        let out = concat_dataframes_with_axis(&[&left, &right], 1).unwrap();
+        assert_eq!(
+            out.index().labels(),
+            &[0_i64.into(), 1_i64.into(), 2_i64.into()]
+        );
+        assert_eq!(
+            out.column("a").unwrap().values(),
+            &[
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Null(NullKind::Null)
+            ]
+        );
+        assert_eq!(
+            out.column("b").unwrap().values(),
+            &[
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(10),
+                Scalar::Int64(20)
+            ]
+        );
+    }
+
+    #[test]
+    fn concat_dataframes_axis1_duplicate_columns_rejects() {
+        let left = DataFrame::from_dict_with_index(
+            vec![("x", vec![Scalar::Int64(1)])],
+            vec![0_i64.into()],
+        )
+        .unwrap();
+        let right = DataFrame::from_dict_with_index(
+            vec![("x", vec![Scalar::Int64(2)])],
+            vec![0_i64.into()],
+        )
+        .unwrap();
+
+        let err = concat_dataframes_with_axis(&[&left, &right], 1).expect_err("should reject");
+        assert!(matches!(err, FrameError::CompatibilityRejected(_)));
+        assert!(err.to_string().contains("duplicate column"));
+    }
+
+    #[test]
+    fn concat_dataframes_axis1_duplicate_index_rejects() {
+        let left = DataFrame::from_dict_with_index(
+            vec![("x", vec![Scalar::Int64(1), Scalar::Int64(2)])],
+            vec![0_i64.into(), 0_i64.into()],
+        )
+        .unwrap();
+        let right = DataFrame::from_dict_with_index(
+            vec![("y", vec![Scalar::Int64(3)])],
+            vec![0_i64.into()],
+        )
+        .unwrap();
+
+        let err = concat_dataframes_with_axis(&[&left, &right], 1).expect_err("should reject");
+        assert!(matches!(err, FrameError::CompatibilityRejected(_)));
+        assert!(err.to_string().contains("duplicate index"));
+    }
+
+    #[test]
+    fn concat_dataframes_with_axis_rejects_unknown_axis() {
+        let frame = DataFrame::from_dict(&["x"], vec![("x", vec![Scalar::Int64(1)])]).unwrap();
+        let err = concat_dataframes_with_axis(&[&frame], 2).expect_err("should reject");
+        assert!(matches!(err, FrameError::CompatibilityRejected(_)));
+        assert!(err.to_string().contains("unsupported concat axis"));
     }
 
     // ---- Series.align() tests (bd-2gi.15) ----

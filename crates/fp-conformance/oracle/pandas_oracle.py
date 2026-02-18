@@ -1054,13 +1054,30 @@ def op_dataframe_concat(pd, payload: dict[str, Any]) -> dict[str, Any]:
 
     left = dataframe_from_json(pd, frame_payload)
     right = dataframe_from_json(pd, frame_right_payload)
-
-    if sorted(left.columns.tolist()) != sorted(right.columns.tolist()):
+    axis_raw = payload.get("concat_axis", 0)
+    try:
+        axis = int(axis_raw)
+    except (TypeError, ValueError) as exc:
         raise OracleError(
-            "dataframe_concat column mismatch: right frame columns do not match left frame"
-        )
+            f"dataframe_concat concat_axis must be an integer: {exc}"
+        ) from exc
+    if axis not in (0, 1):
+        raise OracleError(f"dataframe_concat concat_axis must be 0 or 1, got {axis}")
 
-    out = pd.concat([left, right], axis=0, sort=False)
+    if axis == 0:
+        if sorted(left.columns.tolist()) != sorted(right.columns.tolist()):
+            raise OracleError(
+                "dataframe_concat column mismatch: right frame columns do not match left frame"
+            )
+        out = pd.concat([left, right], axis=0, sort=False)
+    else:
+        overlapping = sorted(set(left.columns.tolist()) & set(right.columns.tolist()))
+        if overlapping:
+            joined = ", ".join(map(str, overlapping))
+            raise OracleError(
+                f"dataframe_concat axis=1 duplicate columns unsupported: {joined}"
+            )
+        out = pd.concat([left, right], axis=1, sort=False)
     return {"expected_frame": dataframe_to_json(out)}
 
 

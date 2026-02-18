@@ -1,0 +1,31 @@
+{
+  "packet_id": "FP-P2D-028",
+  "case_id": "dataframe_concat_axis1_duplicate_index_right_error_hardened",
+  "mode": "hardened",
+  "operation": "dataframe_concat",
+  "concat_axis": 1,
+  "frame": {
+    "index": [
+      { "kind": "int64", "value": 0 }
+    ],
+    "columns": {
+      "left_col": [
+        { "kind": "int64", "value": 1 }
+      ]
+    }
+  },
+  "frame_right": {
+    "index": [
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 1 }
+    ],
+    "columns": {
+      "right_col": [
+        { "kind": "int64", "value": 2 },
+        { "kind": "int64", "value": 3 }
+      ]
+    }
+  },
+  "expected_error_contains": "duplicate index"
+}
+
