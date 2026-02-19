@@ -298,6 +298,26 @@ fn scalar_to_json(scalar: &Scalar) -> serde_json::Value {
     }
 }
 
+fn json_value_to_index_label(value: &serde_json::Value) -> IndexLabel {
+    match value {
+        serde_json::Value::Number(n) => n
+            .as_i64()
+            .map(IndexLabel::Int64)
+            .unwrap_or_else(|| IndexLabel::Utf8(n.to_string())),
+        serde_json::Value::String(s) => IndexLabel::Utf8(s.clone()),
+        serde_json::Value::Bool(b) => IndexLabel::Utf8(b.to_string()),
+        serde_json::Value::Null => IndexLabel::Utf8("null".to_owned()),
+        other => IndexLabel::Utf8(other.to_string()),
+    }
+}
+
+fn index_label_to_json(label: &IndexLabel) -> serde_json::Value {
+    match label {
+        IndexLabel::Int64(v) => serde_json::json!(*v),
+        IndexLabel::Utf8(v) => serde_json::Value::String(v.clone()),
+    }
+}
+
 pub fn read_json_str(input: &str, orient: JsonOrient) -> Result<DataFrame, IoError> {
     let parsed: serde_json::Value = serde_json::from_str(input)?;
 
@@ -438,6 +458,21 @@ pub fn read_json_str(input: &str, orient: JsonOrient) -> Result<DataFrame, IoErr
                 .and_then(|v| v.as_array())
                 .ok_or_else(|| IoError::JsonFormat("split orient needs 'data' array".into()))?;
 
+            let explicit_index = obj
+                .get("index")
+                .map(|v| {
+                    v.as_array()
+                        .ok_or_else(|| {
+                            IoError::JsonFormat("split orient 'index' must be an array".into())
+                        })
+                        .map(|arr| {
+                            arr.iter()
+                                .map(json_value_to_index_label)
+                                .collect::<Vec<_>>()
+                        })
+                })
+                .transpose()?;
+
             let mut columns: BTreeMap<String, Vec<Scalar>> = BTreeMap::new();
             for name in &col_names {
                 columns.insert(name.clone(), Vec::with_capacity(data.len()));
@@ -461,7 +496,18 @@ pub fn read_json_str(input: &str, orient: JsonOrient) -> Result<DataFrame, IoErr
             for (name, vals) in columns {
                 out.insert(name, Column::from_values(vals)?);
             }
-            let index = Index::from_i64((0..row_count).collect());
+            let index = match explicit_index {
+                Some(labels) => {
+                    if labels.len() != row_count as usize {
+                        return Err(IoError::JsonFormat(format!(
+                            "split orient index length ({}) must match data row count ({row_count})",
+                            labels.len()
+                        )));
+                    }
+                    Index::new(labels)
+                }
+                None => Index::from_i64((0..row_count).collect()),
+            };
             Ok(DataFrame::new(index, out)?)
         }
     }
@@ -531,6 +577,12 @@ pub fn write_json_string(frame: &DataFrame, orient: JsonOrient) -> Result<String
                 .iter()
                 .map(|h| serde_json::Value::String(h.clone()))
                 .collect();
+            let index_array: Vec<serde_json::Value> = frame
+                .index()
+                .labels()
+                .iter()
+                .map(index_label_to_json)
+                .collect();
 
             let mut data = Vec::with_capacity(row_count);
             for row_idx in 0..row_count {
@@ -549,6 +601,7 @@ pub fn write_json_string(frame: &DataFrame, orient: JsonOrient) -> Result<String
 
             let mut obj = serde_json::Map::new();
             obj.insert("columns".into(), serde_json::Value::Array(col_array));
+            obj.insert("index".into(), serde_json::Value::Array(index_array));
             obj.insert("data".into(), serde_json::Value::Array(data));
             Ok(serde_json::to_string(&serde_json::Value::Object(obj))?)
         }
@@ -754,10 +807,10 @@ mod tests {
         );
         // Quoted field with embedded newline
         let addr0 = &frame.column("address").unwrap().values()[0];
-        match addr0 {
-            Scalar::Utf8(s) => assert!(s.contains('\n'), "should contain embedded newline"),
-            other => panic!("expected Utf8, got {:?}", other),
-        }
+        assert!(
+            matches!(addr0, Scalar::Utf8(s) if s.contains('\n')),
+            "expected Utf8 containing embedded newline, got {addr0:?}"
+        );
         eprintln!("[TEST] test_csv_quoted_fields | rows=2 cols=2 parse_ok=true | PASS");
     }
 
@@ -955,15 +1008,39 @@ mod tests {
 
     #[test]
     fn json_split_read_write_roundtrip() {
-        let input = r#"{"columns":["x","y"],"data":[[1,4],[2,5],[3,6]]}"#;
+        let input = r#"{"columns":["x","y"],"index":["r1","r2","r3"],"data":[[1,4],[2,5],[3,6]]}"#;
         let frame = read_json_str(input, JsonOrient::Split).expect("read json split");
         assert_eq!(frame.index().len(), 3);
+        assert_eq!(
+            frame.index().labels()[0],
+            fp_index::IndexLabel::Utf8("r1".into())
+        );
         assert_eq!(frame.column("x").unwrap().values()[0], Scalar::Int64(1));
         assert_eq!(frame.column("y").unwrap().values()[2], Scalar::Int64(6));
 
         let output = write_json_string(&frame, JsonOrient::Split).expect("write");
         let frame2 = read_json_str(&output, JsonOrient::Split).expect("re-read");
         assert_eq!(frame2.index().len(), 3);
+        assert_eq!(frame2.index().labels(), frame.index().labels());
+    }
+
+    #[test]
+    fn json_split_without_index_defaults_to_range_index() {
+        let input = r#"{"columns":["x"],"data":[[10],[20]]}"#;
+        let frame = read_json_str(input, JsonOrient::Split).expect("read json split");
+        assert_eq!(frame.index().labels()[0], fp_index::IndexLabel::Int64(0));
+        assert_eq!(frame.index().labels()[1], fp_index::IndexLabel::Int64(1));
+    }
+
+    #[test]
+    fn json_split_index_length_mismatch_errors() {
+        let input = r#"{"columns":["x"],"index":[0],"data":[[1],[2]]}"#;
+        let err = read_json_str(input, JsonOrient::Split)
+            .expect_err("split orient index/data length mismatch should error");
+        assert!(
+            matches!(&err, IoError::JsonFormat(msg) if msg.contains("index length")),
+            "expected split index length error, got {err:?}"
+        );
     }
 
     #[test]
