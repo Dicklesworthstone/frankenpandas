@@ -1,0 +1,53 @@
+{
+  "packet_id": "FP-P2D-038",
+  "case_id": "dataframe_merge_index_sort_true_inner_strict",
+  "mode": "strict",
+  "operation": "dataframe_merge_index",
+  "join_type": "inner",
+  "merge_on": "ix",
+  "merge_sort": true,
+  "frame": {
+    "index": [
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 1 }
+    ],
+    "columns": {
+      "left_v": [
+        { "kind": "int64", "value": 20 },
+        { "kind": "int64", "value": 10 }
+      ]
+    }
+  },
+  "frame_right": {
+    "index": [
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 }
+    ],
+    "columns": {
+      "right_v": [
+        { "kind": "int64", "value": 100 },
+        { "kind": "int64", "value": 200 }
+      ]
+    }
+  },
+  "expected_frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 }
+    ],
+    "columns": {
+      "ix": [
+        { "kind": "int64", "value": 1 },
+        { "kind": "int64", "value": 2 }
+      ],
+      "left_v": [
+        { "kind": "int64", "value": 10 },
+        { "kind": "int64", "value": 20 }
+      ],
+      "right_v": [
+        { "kind": "int64", "value": 100 },
+        { "kind": "int64", "value": 200 }
+      ]
+    }
+  }
+}
