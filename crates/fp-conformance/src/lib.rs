@@ -295,6 +295,7 @@ pub enum FixtureJoinType {
     Left,
     Right,
     Outer,
+    Cross,
 }
 
 impl FixtureJoinType {
@@ -305,6 +306,7 @@ impl FixtureJoinType {
             Self::Left => JoinType::Left,
             Self::Right => JoinType::Right,
             Self::Outer => JoinType::Outer,
+            Self::Cross => JoinType::Cross,
         }
     }
 }
@@ -4284,6 +4286,36 @@ fn resolve_merge_sort(merge_sort: Option<bool>) -> bool {
     merge_sort.unwrap_or(false)
 }
 
+fn validate_cross_merge_configuration(
+    fixture: &PacketFixture,
+    operation_name: &str,
+    merge_on_index: bool,
+) -> Result<(), String> {
+    if merge_on_index {
+        return Err(format!(
+            "{operation_name} does not support join_type='cross'"
+        ));
+    }
+
+    if fixture.merge_on.is_some()
+        || fixture.merge_on_keys.is_some()
+        || fixture.left_on_keys.is_some()
+        || fixture.right_on_keys.is_some()
+    {
+        return Err(format!(
+            "{operation_name} join_type='cross' does not allow merge_on/merge_on_keys/left_on_keys/right_on_keys"
+        ));
+    }
+
+    if matches!(fixture.left_index, Some(true)) || matches!(fixture.right_index, Some(true)) {
+        return Err(format!(
+            "{operation_name} join_type='cross' does not allow left_index/right_index"
+        ));
+    }
+
+    Ok(())
+}
+
 fn normalize_concat_axis(fixture: &PacketFixture) -> Result<i64, String> {
     let axis = fixture.concat_axis.unwrap_or(0);
     match axis {
@@ -4721,16 +4753,24 @@ fn execute_dataframe_merge_fixture_operation(
             "dataframe_merge",
         )
     };
-    let default_index_key = (left_use_index && right_use_index).then_some(INDEX_MERGE_KEY_COLUMN);
+    if matches!(join_type, JoinType::Cross) {
+        validate_cross_merge_configuration(fixture, operation_name, merge_on_index)?;
+    }
 
-    let (left_merge_keys, right_merge_keys) = resolve_merge_key_pairs(
-        fixture.merge_on.as_deref(),
-        fixture.merge_on_keys.as_deref(),
-        fixture.left_on_keys.as_deref(),
-        fixture.right_on_keys.as_deref(),
-        operation_name,
-        default_index_key,
-    )?;
+    let (left_merge_keys, right_merge_keys) = if matches!(join_type, JoinType::Cross) {
+        (Vec::new(), Vec::new())
+    } else {
+        let default_index_key =
+            (left_use_index && right_use_index).then_some(INDEX_MERGE_KEY_COLUMN);
+        resolve_merge_key_pairs(
+            fixture.merge_on.as_deref(),
+            fixture.merge_on_keys.as_deref(),
+            fixture.left_on_keys.as_deref(),
+            fixture.right_on_keys.as_deref(),
+            operation_name,
+            default_index_key,
+        )?
+    };
     let indicator_name = resolve_merge_indicator_name(
         fixture.merge_indicator,
         fixture.merge_indicator_name.as_deref(),
@@ -8291,6 +8331,19 @@ mod tests {
         assert!(
             report.fixture_count >= 4,
             "expected FP-P2D-038 dataframe merge sort index/alias fixtures"
+        );
+        assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
+    fn packet_filter_runs_dataframe_merge_cross_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2D-039", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-039"));
+        assert!(
+            report.fixture_count >= 5,
+            "expected FP-P2D-039 dataframe merge cross-join fixtures"
         );
         assert!(report.is_green(), "expected report green: {report:?}");
     }

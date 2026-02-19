@@ -1,0 +1,29 @@
+{
+  "packet_id": "FP-P2D-039",
+  "case_id": "dataframe_merge_cross_rejects_keys_strict",
+  "mode": "strict",
+  "operation": "dataframe_merge",
+  "join_type": "cross",
+  "merge_on": "id",
+  "frame": {
+    "index": [
+      { "kind": "int64", "value": 0 }
+    ],
+    "columns": {
+      "id": [
+        { "kind": "int64", "value": 1 }
+      ]
+    }
+  },
+  "frame_right": {
+    "index": [
+      { "kind": "int64", "value": 0 }
+    ],
+    "columns": {
+      "id": [
+        { "kind": "int64", "value": 2 }
+      ]
+    }
+  },
+  "expected_error_contains": "join_type='cross' does not allow merge_on/merge_on_keys/left_on_keys/right_on_keys"
+}

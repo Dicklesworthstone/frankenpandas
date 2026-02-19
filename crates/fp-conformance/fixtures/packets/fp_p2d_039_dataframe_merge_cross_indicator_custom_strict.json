@@ -1,0 +1,51 @@
+{
+  "packet_id": "FP-P2D-039",
+  "case_id": "dataframe_merge_cross_indicator_custom_strict",
+  "mode": "strict",
+  "operation": "dataframe_merge",
+  "join_type": "cross",
+  "merge_indicator": true,
+  "merge_indicator_name": "origin",
+  "frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 }
+    ],
+    "columns": {
+      "left_id": [
+        { "kind": "int64", "value": 10 },
+        { "kind": "int64", "value": 11 }
+      ]
+    }
+  },
+  "frame_right": {
+    "index": [
+      { "kind": "int64", "value": 7 }
+    ],
+    "columns": {
+      "right_id": [
+        { "kind": "utf8", "value": "r" }
+      ]
+    }
+  },
+  "expected_frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 }
+    ],
+    "columns": {
+      "left_id": [
+        { "kind": "int64", "value": 10 },
+        { "kind": "int64", "value": 11 }
+      ],
+      "origin": [
+        { "kind": "utf8", "value": "both" },
+        { "kind": "utf8", "value": "both" }
+      ],
+      "right_id": [
+        { "kind": "utf8", "value": "r" },
+        { "kind": "utf8", "value": "r" }
+      ]
+    }
+  }
+}

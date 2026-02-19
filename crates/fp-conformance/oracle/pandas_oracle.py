@@ -1012,9 +1012,16 @@ def op_dataframe_tail(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return {"expected_frame": dataframe_to_json(out)}
 
 
-def require_join_type(payload: dict[str, Any], op_name: str) -> str:
+def require_join_type(payload: dict[str, Any], op_name: str, *, allow_cross: bool = False) -> str:
     join_type = payload.get("join_type")
-    if join_type not in {"inner", "left", "right", "outer"}:
+    allowed = {"inner", "left", "right", "outer"}
+    if allow_cross:
+        allowed.add("cross")
+    if join_type not in allowed:
+        if allow_cross:
+            raise OracleError(
+                f"{op_name} requires join_type=inner|left|right|outer|cross, got {join_type!r}"
+            )
         raise OracleError(
             f"{op_name} requires join_type=inner|left|right|outer, got {join_type!r}"
         )
@@ -1148,6 +1155,32 @@ def resolve_merge_sort(payload: dict[str, Any], op_name: str) -> bool:
     return sort_raw
 
 
+def validate_cross_merge_payload(
+    payload: dict[str, Any], op_name: str, *, use_index_keys: bool
+) -> None:
+    if use_index_keys:
+        raise OracleError(f"{op_name} does not support join_type='cross'")
+
+    if (
+        payload.get("merge_on") is not None
+        or payload.get("merge_on_keys") is not None
+        or payload.get("left_on_keys") is not None
+        or payload.get("right_on_keys") is not None
+    ):
+        raise OracleError(
+            f"{op_name} join_type='cross' does not allow merge_on/merge_on_keys/left_on_keys/right_on_keys"
+        )
+
+    left_index_raw = payload.get("left_index")
+    right_index_raw = payload.get("right_index")
+    if left_index_raw is not None and not isinstance(left_index_raw, bool):
+        raise OracleError(f"{op_name} left_index must be a boolean when provided")
+    if right_index_raw is not None and not isinstance(right_index_raw, bool):
+        raise OracleError(f"{op_name} right_index must be a boolean when provided")
+    if bool(left_index_raw) or bool(right_index_raw):
+        raise OracleError(f"{op_name} join_type='cross' does not allow left_index/right_index")
+
+
 def dataframe_with_index_keys(frame, key_names: list[str]):
     out = frame.copy()
     for key_name in key_names:
@@ -1164,19 +1197,27 @@ def op_dataframe_merge(
         raise OracleError("dataframe_merge requires frame and frame_right payloads")
 
     op_name = "dataframe_merge_index" if use_index_keys else "dataframe_merge"
-    how = require_join_type(payload, op_name)
+    how = require_join_type(payload, op_name, allow_cross=True)
 
-    left_use_index = _resolve_index_flag(payload, "left_index", op_name, use_index_keys)
-    right_use_index = _resolve_index_flag(payload, "right_index", op_name, use_index_keys)
+    if how == "cross":
+        validate_cross_merge_payload(payload, op_name, use_index_keys=use_index_keys)
+        left_use_index = False
+        right_use_index = False
+    else:
+        left_use_index = _resolve_index_flag(payload, "left_index", op_name, use_index_keys)
+        right_use_index = _resolve_index_flag(payload, "right_index", op_name, use_index_keys)
 
     left = dataframe_from_json(pd, frame_payload)
     right = dataframe_from_json(pd, frame_right_payload)
 
-    left_merge_keys, right_merge_keys = resolve_merge_key_pairs(
-        payload,
-        op_name,
-        default_key="__index_key" if left_use_index and right_use_index else None,
-    )
+    if how == "cross":
+        left_merge_keys, right_merge_keys = [], []
+    else:
+        left_merge_keys, right_merge_keys = resolve_merge_key_pairs(
+            payload,
+            op_name,
+            default_key="__index_key" if left_use_index and right_use_index else None,
+        )
     indicator = resolve_merge_indicator(payload, op_name)
     validate_mode = resolve_merge_validate(payload, op_name)
     suffixes = resolve_merge_suffixes(payload, op_name)
@@ -1198,7 +1239,9 @@ def op_dataframe_merge(
     if validate_mode is not None:
         merge_kwargs["validate"] = validate_mode
 
-    if left_merge_keys == right_merge_keys:
+    if how == "cross":
+        out = left.merge(right, **merge_kwargs)
+    elif left_merge_keys == right_merge_keys:
         out = left.merge(right, on=left_merge_keys, **merge_kwargs)
     else:
         out = left.merge(

@@ -1,0 +1,29 @@
+{
+  "packet_id": "FP-P2D-039",
+  "case_id": "dataframe_merge_cross_rejects_index_flags_hardened",
+  "mode": "hardened",
+  "operation": "dataframe_merge",
+  "join_type": "cross",
+  "left_index": true,
+  "frame": {
+    "index": [
+      { "kind": "utf8", "value": "a" }
+    ],
+    "columns": {
+      "left_v": [
+        { "kind": "int64", "value": 10 }
+      ]
+    }
+  },
+  "frame_right": {
+    "index": [
+      { "kind": "utf8", "value": "b" }
+    ],
+    "columns": {
+      "right_v": [
+        { "kind": "int64", "value": 20 }
+      ]
+    }
+  },
+  "expected_error_contains": "join_type='cross' does not allow left_index/right_index"
+}

@@ -1,0 +1,61 @@
+{
+  "packet_id": "FP-P2D-039",
+  "case_id": "dataframe_merge_cross_suffixes_hardened",
+  "mode": "hardened",
+  "operation": "dataframe_merge",
+  "join_type": "cross",
+  "merge_suffixes": ["_L", "_R"],
+  "frame": {
+    "index": [
+      { "kind": "int64", "value": 0 }
+    ],
+    "columns": {
+      "shared": [
+        { "kind": "utf8", "value": "left" }
+      ],
+      "value": [
+        { "kind": "int64", "value": 100 }
+      ]
+    }
+  },
+  "frame_right": {
+    "index": [
+      { "kind": "int64", "value": 4 },
+      { "kind": "int64", "value": 5 }
+    ],
+    "columns": {
+      "shared": [
+        { "kind": "utf8", "value": "right-a" },
+        { "kind": "utf8", "value": "right-b" }
+      ],
+      "value": [
+        { "kind": "int64", "value": 200 },
+        { "kind": "int64", "value": 300 }
+      ]
+    }
+  },
+  "expected_frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 }
+    ],
+    "columns": {
+      "shared_L": [
+        { "kind": "utf8", "value": "left" },
+        { "kind": "utf8", "value": "left" }
+      ],
+      "shared_R": [
+        { "kind": "utf8", "value": "right-a" },
+        { "kind": "utf8", "value": "right-b" }
+      ],
+      "value_L": [
+        { "kind": "int64", "value": 100 },
+        { "kind": "int64", "value": 100 }
+      ],
+      "value_R": [
+        { "kind": "int64", "value": 200 },
+        { "kind": "int64", "value": 300 }
+      ]
+    }
+  }
+}
