@@ -8,7 +8,7 @@ use fp_index::{
     AlignMode, Index, IndexError, IndexLabel, align, align_union, validate_alignment_plan,
 };
 use fp_runtime::{DecisionAction, EvidenceLedger, RuntimeMode, RuntimePolicy};
-use fp_types::{NullKind, Scalar};
+use fp_types::{DType, NullKind, Scalar};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -758,6 +758,14 @@ impl Series {
     #[must_use]
     pub fn count(&self) -> usize {
         self.column.validity().count_valid()
+    }
+
+    /// Cast values to a target dtype.
+    ///
+    /// Matches `series.astype(dtype)` for scalar dtypes.
+    pub fn astype(&self, dtype: DType) -> Result<Self, FrameError> {
+        let column = Column::new(dtype, self.values().to_vec())?;
+        Self::new(self.name.clone(), self.index.clone(), column)
     }
 
     // --- Descriptive Statistics ---
@@ -2151,6 +2159,20 @@ impl DataFrame {
         Self::new_with_column_order(self.index.clone(), columns, column_order)
     }
 
+    /// Cast a single column to a target dtype.
+    ///
+    /// Matches `df.astype({\"col\": dtype})` for single-column mapping.
+    pub fn astype_column(&self, name: &str, dtype: DType) -> Result<Self, FrameError> {
+        let source = self.columns.get(name).ok_or_else(|| {
+            FrameError::CompatibilityRejected(format!("column '{name}' not found"))
+        })?;
+
+        let casted = Column::new(dtype, source.values().to_vec())?;
+        let mut columns = self.columns.clone();
+        columns.insert(name.to_owned(), casted);
+        Self::new_with_column_order(self.index.clone(), columns, self.column_order.clone())
+    }
+
     /// Remove a column by name, returning the modified DataFrame.
     ///
     /// Matches `df.drop(columns=['col'])`.
@@ -2197,7 +2219,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use fp_runtime::{EvidenceLedger, RuntimePolicy};
-    use fp_types::{NullKind, Scalar};
+    use fp_types::{DType, NullKind, Scalar};
 
     use super::{DataFrame, DropNaHow, FrameError, IndexLabel, Series};
 
@@ -3954,6 +3976,40 @@ mod tests {
     }
 
     #[test]
+    fn series_astype_casts_and_preserves_index() {
+        let s = Series::from_values(
+            "vals",
+            vec![IndexLabel::from("r1"), IndexLabel::from("r2")],
+            vec![Scalar::Int64(1), Scalar::Null(NullKind::Null)],
+        )
+        .unwrap();
+
+        let casted = s.astype(DType::Float64).unwrap();
+        assert_eq!(
+            casted.index().labels(),
+            &[IndexLabel::from("r1"), IndexLabel::from("r2")]
+        );
+        assert_eq!(casted.column().dtype(), DType::Float64);
+        assert_eq!(
+            casted.values(),
+            &[Scalar::Float64(1.0), Scalar::Null(NullKind::NaN)]
+        );
+    }
+
+    #[test]
+    fn series_astype_rejects_invalid_cast() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Utf8("a".to_owned()), Scalar::Utf8("b".to_owned())],
+        )
+        .unwrap();
+
+        let err = s.astype(DType::Int64).unwrap_err();
+        assert!(matches!(err, FrameError::Column(_)));
+    }
+
+    #[test]
     fn series_min_max_basic() {
         let s = Series::from_values(
             "vals",
@@ -5561,6 +5617,58 @@ mod tests {
             result.column("b").unwrap().values(),
             &[Scalar::Float64(10.0), Scalar::Float64(20.0)]
         );
+    }
+
+    #[test]
+    fn dataframe_astype_column_casts_selected_column_and_preserves_order() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                (
+                    "b",
+                    vec![Scalar::Utf8("x".to_owned()), Scalar::Utf8("y".to_owned())],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let casted = df.astype_column("a", DType::Float64).unwrap();
+        let names = casted
+            .column_names()
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["a".to_owned(), "b".to_owned()]);
+        assert_eq!(casted.column("a").unwrap().dtype(), DType::Float64);
+        assert_eq!(
+            casted.column("a").unwrap().values(),
+            &[Scalar::Float64(1.0), Scalar::Float64(2.0)]
+        );
+        assert_eq!(
+            casted.column("b").unwrap().values(),
+            &[Scalar::Utf8("x".to_owned()), Scalar::Utf8("y".to_owned())]
+        );
+    }
+
+    #[test]
+    fn dataframe_astype_column_rejects_missing_or_invalid_cast() {
+        let df = DataFrame::from_dict(
+            &["a"],
+            vec![(
+                "a",
+                vec![Scalar::Utf8("x".to_owned()), Scalar::Utf8("y".to_owned())],
+            )],
+        )
+        .unwrap();
+
+        let err = df.astype_column("missing", DType::Int64).unwrap_err();
+        assert!(
+            matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("column 'missing' not found"))
+        );
+
+        let err = df.astype_column("a", DType::Int64).unwrap_err();
+        assert!(matches!(err, FrameError::Column(_)));
     }
 
     #[test]
