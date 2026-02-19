@@ -1146,6 +1146,24 @@ pub enum DropNaHow {
     All,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum DataFrameColumnInput {
+    Values(Vec<Scalar>),
+    Scalar(Scalar),
+}
+
+impl From<Vec<Scalar>> for DataFrameColumnInput {
+    fn from(values: Vec<Scalar>) -> Self {
+        Self::Values(values)
+    }
+}
+
+impl From<Scalar> for DataFrameColumnInput {
+    fn from(value: Scalar) -> Self {
+        Self::Scalar(value)
+    }
+}
+
 impl DataFrame {
     fn validate_column_lengths(
         index: &Index,
@@ -1450,6 +1468,53 @@ impl DataFrame {
         Self::new_with_column_order(index, columns, output_order)
     }
 
+    /// Construct a DataFrame from mixed dict inputs (`Vec<Scalar>` and scalar).
+    ///
+    /// Scalar values are broadcast to the row count inferred from the first
+    /// non-scalar column. If all inputs are scalar, an explicit index is
+    /// required and this constructor rejects the operation.
+    pub fn from_dict_mixed(
+        column_order: &[&str],
+        data: Vec<(&str, DataFrameColumnInput)>,
+    ) -> Result<Self, FrameError> {
+        if data.is_empty() {
+            return Self::new(Index::new(Vec::new()), BTreeMap::new());
+        }
+
+        let row_count = data
+            .iter()
+            .find_map(|(_, input)| match input {
+                DataFrameColumnInput::Values(values) => Some(values.len()),
+                DataFrameColumnInput::Scalar(_) => None,
+            })
+            .ok_or_else(|| {
+                FrameError::CompatibilityRejected(
+                    "dataframe_from_dict with all-scalar values requires explicit index".to_owned(),
+                )
+            })?;
+
+        let expanded = data
+            .into_iter()
+            .map(|(name, input)| {
+                let values = match input {
+                    DataFrameColumnInput::Values(values) => {
+                        if values.len() != row_count {
+                            return Err(FrameError::LengthMismatch {
+                                index_len: row_count,
+                                column_len: values.len(),
+                            });
+                        }
+                        values
+                    }
+                    DataFrameColumnInput::Scalar(value) => vec![value; row_count],
+                };
+                Ok((name, values))
+            })
+            .collect::<Result<Vec<_>, FrameError>>()?;
+
+        Self::from_dict(column_order, expanded)
+    }
+
     /// Construct a DataFrame from row records.
     ///
     /// Matches `pd.DataFrame.from_records(records, columns=..., index=...)`.
@@ -1545,6 +1610,36 @@ impl DataFrame {
         }
 
         Self::new_with_column_order(index, columns, input_order)
+    }
+
+    /// Construct a DataFrame from mixed dict inputs with an explicit index.
+    ///
+    /// Scalar values are broadcast to the explicit index length.
+    pub fn from_dict_with_index_mixed(
+        data: Vec<(&str, DataFrameColumnInput)>,
+        index_labels: Vec<IndexLabel>,
+    ) -> Result<Self, FrameError> {
+        let row_count = index_labels.len();
+        let expanded = data
+            .into_iter()
+            .map(|(name, input)| {
+                let values = match input {
+                    DataFrameColumnInput::Values(values) => {
+                        if values.len() != row_count {
+                            return Err(FrameError::LengthMismatch {
+                                index_len: row_count,
+                                column_len: values.len(),
+                            });
+                        }
+                        values
+                    }
+                    DataFrameColumnInput::Scalar(value) => vec![value; row_count],
+                };
+                Ok((name, values))
+            })
+            .collect::<Result<Vec<_>, FrameError>>()?;
+
+        Self::from_dict_with_index(expanded, index_labels)
     }
 
     /// Return a new DataFrame with only the specified columns, in order.
@@ -2339,7 +2434,9 @@ mod tests {
     use fp_runtime::{EvidenceLedger, RuntimePolicy};
     use fp_types::{DType, NullKind, Scalar};
 
-    use super::{DataFrame, DropNaHow, DuplicateKeep, FrameError, IndexLabel, Series};
+    use super::{
+        DataFrame, DataFrameColumnInput, DropNaHow, DuplicateKeep, FrameError, IndexLabel, Series,
+    };
 
     #[test]
     fn series_add_aligns_on_union_index() {
@@ -2916,6 +3013,47 @@ mod tests {
     }
 
     #[test]
+    fn dataframe_from_dict_mixed_broadcasts_scalar_against_vector_length() {
+        let df = DataFrame::from_dict_mixed(
+            &["a", "b"],
+            vec![
+                (
+                    "a",
+                    DataFrameColumnInput::from(vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                ),
+                ("b", DataFrameColumnInput::from(Scalar::Int64(9))),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(df.index().labels(), &[0_i64.into(), 1_i64.into()]);
+        assert_eq!(
+            df.column("a").unwrap().values(),
+            &[Scalar::Int64(1), Scalar::Int64(2)]
+        );
+        assert_eq!(
+            df.column("b").unwrap().values(),
+            &[Scalar::Int64(9), Scalar::Int64(9)]
+        );
+    }
+
+    #[test]
+    fn dataframe_from_dict_mixed_all_scalars_without_index_is_rejected() {
+        let err = DataFrame::from_dict_mixed(
+            &["a", "b"],
+            vec![
+                ("a", DataFrameColumnInput::from(Scalar::Int64(1))),
+                ("b", DataFrameColumnInput::from(Scalar::Int64(2))),
+            ],
+        )
+        .expect_err("all-scalar constructor without index should be rejected");
+        assert_eq!(
+            err.to_string(),
+            "compatibility gate rejected operation: dataframe_from_dict with all-scalar values requires explicit index"
+        );
+    }
+
+    #[test]
     fn dataframe_from_dict_with_index_custom_labels() {
         let df = DataFrame::from_dict_with_index(
             vec![("val", vec![Scalar::Int64(10), Scalar::Int64(20)])],
@@ -2938,6 +3076,43 @@ mod tests {
             vec!["x".into(), "y".into()],
         )
         .expect_err("should reject length mismatch");
+        assert!(matches!(err, FrameError::LengthMismatch { .. }));
+    }
+
+    #[test]
+    fn dataframe_from_dict_with_index_mixed_broadcasts_scalar() {
+        let df = DataFrame::from_dict_with_index_mixed(
+            vec![
+                (
+                    "a",
+                    DataFrameColumnInput::from(vec![Scalar::Int64(10), Scalar::Int64(20)]),
+                ),
+                (
+                    "b",
+                    DataFrameColumnInput::from(Scalar::Utf8("x".to_owned())),
+                ),
+            ],
+            vec!["r1".into(), "r2".into()],
+        )
+        .unwrap();
+
+        assert_eq!(df.index().labels(), &["r1".into(), "r2".into()]);
+        assert_eq!(
+            df.column("b").unwrap().values(),
+            &[Scalar::Utf8("x".to_owned()), Scalar::Utf8("x".to_owned())]
+        );
+    }
+
+    #[test]
+    fn dataframe_from_dict_with_index_mixed_rejects_shape_mismatch() {
+        let err = DataFrame::from_dict_with_index_mixed(
+            vec![
+                ("a", DataFrameColumnInput::from(vec![Scalar::Int64(1)])),
+                ("b", DataFrameColumnInput::from(Scalar::Int64(5))),
+            ],
+            vec!["x".into(), "y".into()],
+        )
+        .expect_err("constructor should reject non-scalar mismatched length");
         assert!(matches!(err, FrameError::LengthMismatch { .. }));
     }
 
