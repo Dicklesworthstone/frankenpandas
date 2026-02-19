@@ -2372,18 +2372,44 @@ impl DataFrame {
         Self::new_with_column_order(self.index.clone(), columns, column_order)
     }
 
+    /// Cast one or more columns to target dtypes.
+    ///
+    /// Matches mapping-style `df.astype({"a": dtype_a, "b": dtype_b})`.
+    /// Mapping order is processed deterministically and duplicate selectors
+    /// are rejected.
+    pub fn astype_columns(&self, mapping: &[(&str, DType)]) -> Result<Self, FrameError> {
+        let mut seen = BTreeSet::new();
+        for &(name, _) in mapping {
+            if !seen.insert(name) {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "duplicate astype selector: '{name}'"
+                )));
+            }
+
+            if !self.columns.contains_key(name) {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "column '{name}' not found"
+                )));
+            }
+        }
+
+        let mut columns = self.columns.clone();
+        for &(name, dtype) in mapping {
+            let source = self.columns.get(name).ok_or_else(|| {
+                FrameError::CompatibilityRejected(format!("column '{name}' not found"))
+            })?;
+            let casted = Column::new(dtype, source.values().to_vec())?;
+            columns.insert(name.to_owned(), casted);
+        }
+
+        Self::new_with_column_order(self.index.clone(), columns, self.column_order.clone())
+    }
+
     /// Cast a single column to a target dtype.
     ///
     /// Matches `df.astype({\"col\": dtype})` for single-column mapping.
     pub fn astype_column(&self, name: &str, dtype: DType) -> Result<Self, FrameError> {
-        let source = self.columns.get(name).ok_or_else(|| {
-            FrameError::CompatibilityRejected(format!("column '{name}' not found"))
-        })?;
-
-        let casted = Column::new(dtype, source.values().to_vec())?;
-        let mut columns = self.columns.clone();
-        columns.insert(name.to_owned(), casted);
-        Self::new_with_column_order(self.index.clone(), columns, self.column_order.clone())
+        self.astype_columns(&[(name, dtype)])
     }
 
     /// Remove a column by name, returning the modified DataFrame.
@@ -6208,6 +6234,64 @@ mod tests {
 
         let err = df.astype_column("a", DType::Int64).unwrap_err();
         assert!(matches!(err, FrameError::Column(_)));
+    }
+
+    #[test]
+    fn dataframe_astype_columns_casts_multiple_targets_and_preserves_order() {
+        let df = DataFrame::from_dict(
+            &["a", "b", "c"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                ("b", vec![Scalar::Int64(10), Scalar::Int64(20)]),
+                (
+                    "c",
+                    vec![Scalar::Utf8("x".to_owned()), Scalar::Utf8("y".to_owned())],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let casted = df
+            .astype_columns(&[("a", DType::Float64), ("b", DType::Float64)])
+            .unwrap();
+
+        let names = casted
+            .column_names()
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["a".to_owned(), "b".to_owned(), "c".to_owned()]);
+        assert_eq!(casted.column("a").unwrap().dtype(), DType::Float64);
+        assert_eq!(casted.column("b").unwrap().dtype(), DType::Float64);
+        assert_eq!(casted.column("c").unwrap().dtype(), DType::Utf8);
+        assert_eq!(
+            casted.column("b").unwrap().values(),
+            &[Scalar::Float64(10.0), Scalar::Float64(20.0)]
+        );
+    }
+
+    #[test]
+    fn dataframe_astype_columns_rejects_duplicate_or_missing_selectors() {
+        let df = DataFrame::from_dict(
+            &["a"],
+            vec![(
+                "a",
+                vec![Scalar::Utf8("1".to_owned()), Scalar::Utf8("2".to_owned())],
+            )],
+        )
+        .unwrap();
+
+        let duplicate = df
+            .astype_columns(&[("a", DType::Int64), ("a", DType::Float64)])
+            .unwrap_err();
+        assert!(
+            matches!(duplicate, FrameError::CompatibilityRejected(msg) if msg.contains("duplicate astype selector"))
+        );
+
+        let missing = df.astype_columns(&[("missing", DType::Int64)]).unwrap_err();
+        assert!(
+            matches!(missing, FrameError::CompatibilityRejected(msg) if msg.contains("column 'missing' not found"))
+        );
     }
 
     #[test]
