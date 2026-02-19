@@ -1676,6 +1676,43 @@ impl DataFrame {
         self.filter_rows(&mask)
     }
 
+    /// Drop rows by minimum non-missing value count.
+    ///
+    /// Matches `df.dropna(thresh=..., subset=...)` for row-wise mode (`axis=0`).
+    pub fn dropna_with_threshold(
+        &self,
+        thresh: usize,
+        subset: Option<&[String]>,
+    ) -> Result<Self, FrameError> {
+        if self.is_empty() || thresh == 0 {
+            return Ok(self.clone());
+        }
+
+        let selected_columns = self.resolve_column_selector(subset)?;
+        if selected_columns.is_empty() {
+            return Ok(self.clone());
+        }
+
+        let mut keep = Vec::with_capacity(self.len());
+        for row_position in 0..self.len() {
+            let mut non_missing_count = 0_usize;
+            for name in &selected_columns {
+                let column = self.columns.get(name).expect("selected column must exist");
+                if !column.values()[row_position].is_missing() {
+                    non_missing_count += 1;
+                }
+            }
+            keep.push(non_missing_count >= thresh);
+        }
+
+        let mask = Series::from_values(
+            "__dropna_thresh_mask__",
+            self.index.labels().to_vec(),
+            keep.into_iter().map(Scalar::Bool).collect::<Vec<_>>(),
+        )?;
+        self.filter_rows(&mask)
+    }
+
     /// Drop columns containing missing values in any row.
     ///
     /// Matches default `df.dropna(axis=1)` behavior (`how='any'`).
@@ -1716,6 +1753,50 @@ impl DataFrame {
                 DropNaHow::All => missing_count < selected_rows.len(),
             };
             if column_keep {
+                keep_columns.push(name.clone());
+            }
+        }
+
+        let mut columns = BTreeMap::new();
+        for name in &keep_columns {
+            let column = self
+                .columns
+                .get(name)
+                .expect("column name listed in order must exist");
+            columns.insert(name.clone(), column.clone());
+        }
+
+        Self::new_with_column_order(self.index.clone(), columns, keep_columns)
+    }
+
+    /// Drop columns by minimum non-missing value count.
+    ///
+    /// Matches `df.dropna(axis=1, thresh=..., subset=...)` where `subset`
+    /// selects row labels to consider.
+    pub fn dropna_columns_with_threshold(
+        &self,
+        thresh: usize,
+        subset: Option<&[IndexLabel]>,
+    ) -> Result<Self, FrameError> {
+        if self.column_order.is_empty() || thresh == 0 {
+            return Ok(self.clone());
+        }
+
+        let selected_rows = self.resolve_row_label_selector(subset)?;
+        if selected_rows.is_empty() {
+            return Ok(self.clone());
+        }
+
+        let mut keep_columns = Vec::with_capacity(self.column_order.len());
+        for name in &self.column_order {
+            let column = self.columns.get(name).expect("selected column must exist");
+            let mut non_missing_count = 0_usize;
+            for &row_position in &selected_rows {
+                if !column.values()[row_position].is_missing() {
+                    non_missing_count += 1;
+                }
+            }
+            if non_missing_count >= thresh {
                 keep_columns.push(name.clone());
             }
         }
@@ -4159,6 +4240,79 @@ mod tests {
     }
 
     #[test]
+    fn dataframe_dropna_with_threshold_keeps_rows_meeting_non_missing_count() {
+        let df = DataFrame::from_dict(
+            &["a", "b", "c"],
+            vec![
+                (
+                    "a",
+                    vec![
+                        Scalar::Int64(1),
+                        Scalar::Null(NullKind::Null),
+                        Scalar::Int64(3),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Null(NullKind::Null),
+                        Scalar::Null(NullKind::Null),
+                        Scalar::Int64(2),
+                    ],
+                ),
+                (
+                    "c",
+                    vec![Scalar::Int64(9), Scalar::Int64(8), Scalar::Int64(7)],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let dropped = df.dropna_with_threshold(2, None).unwrap();
+        assert_eq!(
+            dropped.index().labels(),
+            &[IndexLabel::from(0_i64), IndexLabel::from(2_i64)]
+        );
+    }
+
+    #[test]
+    fn dataframe_dropna_with_threshold_subset_scopes_column_checks() {
+        let df = DataFrame::from_dict(
+            &["a", "b", "c"],
+            vec![
+                (
+                    "a",
+                    vec![
+                        Scalar::Null(NullKind::Null),
+                        Scalar::Int64(1),
+                        Scalar::Null(NullKind::Null),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Null(NullKind::Null),
+                        Scalar::Null(NullKind::Null),
+                        Scalar::Int64(2),
+                    ],
+                ),
+                (
+                    "c",
+                    vec![Scalar::Int64(5), Scalar::Int64(6), Scalar::Int64(7)],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let subset = vec!["a".to_owned(), "b".to_owned()];
+        let dropped = df.dropna_with_threshold(1, Some(&subset)).unwrap();
+        assert_eq!(
+            dropped.index().labels(),
+            &[IndexLabel::from(1_i64), IndexLabel::from(2_i64)]
+        );
+    }
+
+    #[test]
     fn dataframe_dropna_columns_with_options_how_any_drops_columns_with_any_missing() {
         let df = DataFrame::from_dict(
             &["a", "b", "c", "d"],
@@ -4332,6 +4486,83 @@ mod tests {
             err,
             FrameError::CompatibilityRejected(msg) if msg.contains("index label 'missing' not found")
         ));
+    }
+
+    #[test]
+    fn dataframe_dropna_columns_with_threshold_keeps_columns_meeting_non_missing_count() {
+        let df = DataFrame::from_dict(
+            &["a", "b", "c"],
+            vec![
+                (
+                    "a",
+                    vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Null(NullKind::Null),
+                        Scalar::Null(NullKind::Null),
+                        Scalar::Int64(3),
+                    ],
+                ),
+                (
+                    "c",
+                    vec![
+                        Scalar::Int64(1),
+                        Scalar::Null(NullKind::Null),
+                        Scalar::Int64(3),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let dropped = df.dropna_columns_with_threshold(2, None).unwrap();
+        let column_names = dropped
+            .column_names()
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(column_names, vec!["a".to_owned(), "c".to_owned()]);
+    }
+
+    #[test]
+    fn dataframe_dropna_columns_with_threshold_subset_scopes_row_checks() {
+        let df = DataFrame::from_dict_with_index(
+            vec![
+                (
+                    "a",
+                    vec![
+                        Scalar::Int64(1),
+                        Scalar::Null(NullKind::Null),
+                        Scalar::Null(NullKind::Null),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Null(NullKind::Null),
+                        Scalar::Int64(2),
+                        Scalar::Int64(2),
+                    ],
+                ),
+                (
+                    "c",
+                    vec![Scalar::Int64(3), Scalar::Int64(3), Scalar::Int64(3)],
+                ),
+            ],
+            vec!["r0".into(), "r1".into(), "r2".into()],
+        )
+        .unwrap();
+
+        let subset = vec![IndexLabel::from("r0"), IndexLabel::from("r1")];
+        let dropped = df.dropna_columns_with_threshold(2, Some(&subset)).unwrap();
+        let column_names = dropped
+            .column_names()
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(column_names, vec!["c".to_owned()]);
     }
 
     #[test]
