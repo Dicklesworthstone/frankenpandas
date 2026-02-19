@@ -34,6 +34,17 @@ pub enum Expr {
         left: Box<Expr>,
         right: Box<Expr>,
     },
+    And {
+        left: Box<Expr>,
+        right: Box<Expr>,
+    },
+    Or {
+        left: Box<Expr>,
+        right: Box<Expr>,
+    },
+    Not {
+        expr: Box<Expr>,
+    },
     Compare {
         left: Box<Expr>,
         right: Box<Expr>,
@@ -111,6 +122,20 @@ pub fn evaluate(
             let rhs = evaluate(right, context, policy, ledger)?;
             lhs.div_with_policy(&rhs, policy, ledger)
                 .map_err(ExprError::from)
+        }
+        Expr::And { left, right } => {
+            let lhs = evaluate(left, context, policy, ledger)?;
+            let rhs = evaluate(right, context, policy, ledger)?;
+            lhs.and(&rhs).map_err(ExprError::from)
+        }
+        Expr::Or { left, right } => {
+            let lhs = evaluate(left, context, policy, ledger)?;
+            let rhs = evaluate(right, context, policy, ledger)?;
+            lhs.or(&rhs).map_err(ExprError::from)
+        }
+        Expr::Not { expr } => {
+            let input = evaluate(expr, context, policy, ledger)?;
+            input.not().map_err(ExprError::from)
         }
         Expr::Compare { left, right, op } => {
             evaluate_comparison(left, right, *op, context, policy, ledger)
@@ -254,7 +279,10 @@ impl MaterializedView {
             Expr::Add { left, right }
             | Expr::Sub { left, right }
             | Expr::Mul { left, right }
-            | Expr::Div { left, right } => Self::is_linear(left) && Self::is_linear(right),
+            | Expr::Div { left, right }
+            | Expr::And { left, right }
+            | Expr::Or { left, right } => Self::is_linear(left) && Self::is_linear(right),
+            Expr::Not { expr } => Self::is_linear(expr),
             Expr::Compare { left, right, .. } => {
                 Self::is_linear_or_literal(left)
                     && Self::is_linear_or_literal(right)
@@ -276,8 +304,8 @@ impl MaterializedView {
 /// Evaluate only the delta rows of an expression.
 ///
 /// For `Expr::Series`, returns the delta rows for the named series.
-/// For arithmetic/comparison operators, recursively evaluates delta operands
-/// and applies the operation only on appended rows.
+/// For arithmetic/logical/comparison operators, recursively evaluates delta
+/// operands and applies the operation only on appended rows.
 fn evaluate_delta(
     expr: &Expr,
     delta_ctx: &EvalContext,
@@ -327,6 +355,20 @@ fn evaluate_delta(
             let rhs = evaluate_delta(right, delta_ctx, delta, policy, ledger)?;
             lhs.div_with_policy(&rhs, policy, ledger)
                 .map_err(ExprError::from)
+        }
+        Expr::And { left, right } => {
+            let lhs = evaluate_delta(left, delta_ctx, delta, policy, ledger)?;
+            let rhs = evaluate_delta(right, delta_ctx, delta, policy, ledger)?;
+            lhs.and(&rhs).map_err(ExprError::from)
+        }
+        Expr::Or { left, right } => {
+            let lhs = evaluate_delta(left, delta_ctx, delta, policy, ledger)?;
+            let rhs = evaluate_delta(right, delta_ctx, delta, policy, ledger)?;
+            lhs.or(&rhs).map_err(ExprError::from)
+        }
+        Expr::Not { expr } => {
+            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
+            input.not().map_err(ExprError::from)
         }
         Expr::Compare { left, right, op } => {
             evaluate_delta_comparison(left, right, *op, delta_ctx, delta, policy, ledger)
@@ -607,6 +649,91 @@ mod tests {
         );
     }
 
+    #[test]
+    fn expression_logical_ops_support_boolean_masks() {
+        let a = Series::from_values(
+            "a",
+            vec![1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Bool(true),
+                Scalar::Bool(false),
+                Scalar::Null(fp_types::NullKind::Null),
+            ],
+        )
+        .expect("a");
+        let b = Series::from_values(
+            "b",
+            vec![2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                Scalar::Bool(true),
+                Scalar::Null(fp_types::NullKind::Null),
+                Scalar::Bool(false),
+            ],
+        )
+        .expect("b");
+
+        let mut ctx = EvalContext::new();
+        ctx.insert_series(a);
+        ctx.insert_series(b);
+        let policy = RuntimePolicy::hardened(Some(10_000));
+
+        let and_expr = Expr::And {
+            left: Box::new(Expr::Series {
+                name: SeriesRef("a".to_owned()),
+            }),
+            right: Box::new(Expr::Series {
+                name: SeriesRef("b".to_owned()),
+            }),
+        };
+        let mut ledger = EvidenceLedger::new();
+        let and_out = evaluate(&and_expr, &ctx, &policy, &mut ledger).expect("and eval");
+        assert_eq!(
+            and_out.values(),
+            &[
+                Scalar::Null(fp_types::NullKind::Null),
+                Scalar::Bool(false),
+                Scalar::Null(fp_types::NullKind::Null),
+                Scalar::Bool(false)
+            ]
+        );
+
+        let or_expr = Expr::Or {
+            left: Box::new(Expr::Series {
+                name: SeriesRef("a".to_owned()),
+            }),
+            right: Box::new(Expr::Series {
+                name: SeriesRef("b".to_owned()),
+            }),
+        };
+        let mut ledger = EvidenceLedger::new();
+        let or_out = evaluate(&or_expr, &ctx, &policy, &mut ledger).expect("or eval");
+        assert_eq!(
+            or_out.values(),
+            &[
+                Scalar::Bool(true),
+                Scalar::Bool(true),
+                Scalar::Null(fp_types::NullKind::Null),
+                Scalar::Null(fp_types::NullKind::Null)
+            ]
+        );
+
+        let not_expr = Expr::Not {
+            expr: Box::new(Expr::Series {
+                name: SeriesRef("a".to_owned()),
+            }),
+        };
+        let mut ledger = EvidenceLedger::new();
+        let not_out = evaluate(&not_expr, &ctx, &policy, &mut ledger).expect("not eval");
+        assert_eq!(
+            not_out.values(),
+            &[
+                Scalar::Bool(false),
+                Scalar::Bool(true),
+                Scalar::Null(fp_types::NullKind::Null)
+            ]
+        );
+    }
+
     // === AG-15: Incremental View Maintenance Tests ===
 
     fn make_series(name: &str, labels: Vec<i64>, values: Vec<Scalar>) -> Series {
@@ -860,6 +987,66 @@ mod tests {
     }
 
     #[test]
+    fn ivm_append_delta_logical_expression() {
+        let a = make_series(
+            "a",
+            vec![0, 1],
+            vec![Scalar::Bool(false), Scalar::Bool(true)],
+        );
+        let b = make_series(
+            "b",
+            vec![0, 1],
+            vec![Scalar::Bool(true), Scalar::Bool(true)],
+        );
+        let mut ctx = EvalContext::new();
+        ctx.insert_series(a);
+        ctx.insert_series(b);
+
+        let expr = Expr::And {
+            left: Box::new(Expr::Series {
+                name: SeriesRef("a".into()),
+            }),
+            right: Box::new(Expr::Series {
+                name: SeriesRef("b".into()),
+            }),
+        };
+        let mut ledger = EvidenceLedger::new();
+        let policy = RuntimePolicy::hardened(Some(10_000));
+
+        let mut view =
+            MaterializedView::from_full_eval(&expr, &ctx, &policy, &mut ledger).expect("base");
+        assert_eq!(
+            view.result.values(),
+            &[Scalar::Bool(false), Scalar::Bool(true)]
+        );
+
+        let delta = Delta {
+            series_name: "a".into(),
+            new_labels: vec![2_i64.into()],
+            new_values: vec![Scalar::Bool(true)],
+        };
+        let a_full = make_series(
+            "a",
+            vec![0, 1, 2],
+            vec![Scalar::Bool(false), Scalar::Bool(true), Scalar::Bool(true)],
+        );
+        let b_full = make_series(
+            "b",
+            vec![0, 1, 2],
+            vec![Scalar::Bool(true), Scalar::Bool(true), Scalar::Bool(false)],
+        );
+        ctx.insert_series(a_full);
+        ctx.insert_series(b_full);
+
+        view.apply_delta(&delta, &ctx, &policy, &mut ledger)
+            .expect("delta");
+        assert_eq!(
+            view.result.values(),
+            &[Scalar::Bool(false), Scalar::Bool(true), Scalar::Bool(false)]
+        );
+    }
+
+    #[test]
     fn ivm_isomorphism_incremental_matches_full() {
         // The key correctness property: incremental result must equal full re-eval.
         let a = make_series("a", vec![0, 1], vec![Scalar::Int64(5), Scalar::Int64(10)]);
@@ -1014,6 +1201,27 @@ mod tests {
             }),
             right: Box::new(Expr::Series {
                 name: SeriesRef("b".into()),
+            }),
+        }));
+        assert!(MaterializedView::is_linear(&Expr::And {
+            left: Box::new(Expr::Series {
+                name: SeriesRef("a".into()),
+            }),
+            right: Box::new(Expr::Series {
+                name: SeriesRef("b".into()),
+            }),
+        }));
+        assert!(MaterializedView::is_linear(&Expr::Or {
+            left: Box::new(Expr::Series {
+                name: SeriesRef("a".into()),
+            }),
+            right: Box::new(Expr::Series {
+                name: SeriesRef("b".into()),
+            }),
+        }));
+        assert!(MaterializedView::is_linear(&Expr::Not {
+            expr: Box::new(Expr::Series {
+                name: SeriesRef("a".into()),
             }),
         }));
         assert!(MaterializedView::is_linear(&Expr::Compare {

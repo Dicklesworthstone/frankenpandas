@@ -429,6 +429,123 @@ impl Series {
         Self::new(self.name.clone(), self.index.clone(), column)
     }
 
+    // --- Logical Boolean Operators ---
+
+    fn ensure_boolean_series(&self, op_name: &str) -> Result<(), FrameError> {
+        if let Some(offending) = self
+            .values()
+            .iter()
+            .find(|value| !matches!(value, Scalar::Bool(_) | Scalar::Null(_)))
+        {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "boolean series required for {op_name}; found dtype {:?}",
+                offending.dtype()
+            )));
+        }
+        Ok(())
+    }
+
+    /// Element-wise boolean AND with outer index alignment.
+    ///
+    /// Uses three-valued logic compatible with nullable boolean semantics:
+    /// - `false & x == false`
+    /// - `true & true == true`
+    /// - `true & null == null`, `null & null == null`
+    pub fn and(&self, other: &Self) -> Result<Self, FrameError> {
+        self.ensure_boolean_series("and")?;
+        other.ensure_boolean_series("and")?;
+
+        let plan = align_union(&self.index, &other.index);
+        validate_alignment_plan(&plan)?;
+
+        let left = self.column.reindex_by_positions(&plan.left_positions)?;
+        let right = other.column.reindex_by_positions(&plan.right_positions)?;
+
+        let values: Vec<Scalar> = left
+            .values()
+            .iter()
+            .zip(right.values())
+            .map(|(lhs, rhs)| match (lhs, rhs) {
+                (Scalar::Bool(false), _) | (_, Scalar::Bool(false)) => Scalar::Bool(false),
+                (Scalar::Bool(true), Scalar::Bool(true)) => Scalar::Bool(true),
+                (Scalar::Bool(true), Scalar::Null(_))
+                | (Scalar::Null(_), Scalar::Bool(true))
+                | (Scalar::Null(_), Scalar::Null(_)) => Scalar::Null(NullKind::Null),
+                _ => Scalar::Null(NullKind::Null),
+            })
+            .collect();
+
+        let out_name = if self.name == other.name {
+            self.name.clone()
+        } else {
+            format!("{}&{}", self.name, other.name)
+        };
+
+        Self::new(out_name, plan.union_index, Column::from_values(values)?)
+    }
+
+    /// Element-wise boolean OR with outer index alignment.
+    ///
+    /// Uses three-valued logic compatible with nullable boolean semantics:
+    /// - `true | x == true`
+    /// - `false | false == false`
+    /// - `false | null == null`, `null | null == null`
+    pub fn or(&self, other: &Self) -> Result<Self, FrameError> {
+        self.ensure_boolean_series("or")?;
+        other.ensure_boolean_series("or")?;
+
+        let plan = align_union(&self.index, &other.index);
+        validate_alignment_plan(&plan)?;
+
+        let left = self.column.reindex_by_positions(&plan.left_positions)?;
+        let right = other.column.reindex_by_positions(&plan.right_positions)?;
+
+        let values: Vec<Scalar> = left
+            .values()
+            .iter()
+            .zip(right.values())
+            .map(|(lhs, rhs)| match (lhs, rhs) {
+                (Scalar::Bool(true), _) | (_, Scalar::Bool(true)) => Scalar::Bool(true),
+                (Scalar::Bool(false), Scalar::Bool(false)) => Scalar::Bool(false),
+                (Scalar::Bool(false), Scalar::Null(_))
+                | (Scalar::Null(_), Scalar::Bool(false))
+                | (Scalar::Null(_), Scalar::Null(_)) => Scalar::Null(NullKind::Null),
+                _ => Scalar::Null(NullKind::Null),
+            })
+            .collect();
+
+        let out_name = if self.name == other.name {
+            self.name.clone()
+        } else {
+            format!("{}|{}", self.name, other.name)
+        };
+
+        Self::new(out_name, plan.union_index, Column::from_values(values)?)
+    }
+
+    /// Element-wise boolean NOT.
+    ///
+    /// Missing values remain missing.
+    pub fn not(&self) -> Result<Self, FrameError> {
+        self.ensure_boolean_series("not")?;
+
+        let values: Vec<Scalar> = self
+            .values()
+            .iter()
+            .map(|value| match value {
+                Scalar::Bool(v) => Scalar::Bool(!v),
+                Scalar::Null(_) => Scalar::Null(NullKind::Null),
+                _ => Scalar::Null(NullKind::Null),
+            })
+            .collect();
+
+        Self::new(
+            format!("~{}", self.name),
+            self.index.clone(),
+            Column::from_values(values)?,
+        )
+    }
+
     // --- Filtering ---
 
     /// Select elements where `mask` is `True`.
@@ -1907,9 +2024,10 @@ mod tests {
         );
         assert!(out.values()[0].is_missing());
         assert_eq!(out.values()[1], Scalar::Float64(4.0));
+        assert!(matches!(out.values()[2], Scalar::Float64(_)));
         let v = match out.values()[2] {
             Scalar::Float64(f) => f,
-            _ => panic!("expected Float64"),
+            _ => 0.0,
         };
         assert!((v - 30.0 / 7.0).abs() < 1e-10);
         assert!(out.values()[3].is_missing());
@@ -1932,9 +2050,10 @@ mod tests {
         let right =
             Series::from_values("b", vec![1_i64.into()], vec![Scalar::Float64(0.0)]).unwrap();
         let out = hardened_div(&left, &right);
+        assert!(matches!(out.values()[0], Scalar::Float64(_)));
         let v = match out.values()[0] {
             Scalar::Float64(f) => f,
-            _ => panic!("expected Float64"),
+            _ => 0.0,
         };
         assert!(v.is_infinite() && v.is_sign_positive());
     }
@@ -1978,9 +2097,10 @@ mod tests {
             Series::from_values("b", vec![1_i64.into()], vec![Scalar::Float64(0.2)]).unwrap();
 
         let add = hardened_add(&left, &right);
+        assert!(matches!(add.values()[0], Scalar::Float64(_)));
         let v = match add.values()[0] {
             Scalar::Float64(f) => f,
-            _ => panic!("expected Float64"),
+            _ => 0.0,
         };
         // IEEE 754: 0.1 + 0.2 != 0.3 exactly
         assert!((v - 0.3).abs() < 1e-15);
@@ -2025,13 +2145,15 @@ mod tests {
         assert_eq!(mul.values(), &[Scalar::Int64(30), Scalar::Int64(80)]);
 
         let div = hardened_div(&left, &right);
+        assert!(matches!(div.values()[0], Scalar::Float64(_)));
+        assert!(matches!(div.values()[1], Scalar::Float64(_)));
         let v0 = match div.values()[0] {
             Scalar::Float64(f) => f,
-            _ => panic!("expected Float64"),
+            _ => 0.0,
         };
         let v1 = match div.values()[1] {
             Scalar::Float64(f) => f,
-            _ => panic!("expected Float64"),
+            _ => 0.0,
         };
         assert!((v0 - 10.0 / 3.0).abs() < 1e-10);
         assert!((v1 - 5.0).abs() < 1e-10);
@@ -3065,6 +3187,88 @@ mod tests {
         assert_eq!(ne.values()[1], Scalar::Bool(true));
     }
 
+    #[test]
+    fn series_logical_ops_with_alignment_and_nulls() {
+        let left = Series::from_values(
+            "m1",
+            vec![1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Bool(true),
+                Scalar::Bool(false),
+                Scalar::Null(NullKind::Null),
+            ],
+        )
+        .unwrap();
+        let right = Series::from_values(
+            "m2",
+            vec![2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                Scalar::Bool(true),
+                Scalar::Null(NullKind::Null),
+                Scalar::Bool(false),
+            ],
+        )
+        .unwrap();
+
+        let and = left.and(&right).unwrap();
+        assert_eq!(
+            and.values(),
+            &[
+                Scalar::Null(NullKind::Null),
+                Scalar::Bool(false),
+                Scalar::Null(NullKind::Null),
+                Scalar::Bool(false)
+            ]
+        );
+
+        let or = left.or(&right).unwrap();
+        assert_eq!(
+            or.values(),
+            &[
+                Scalar::Bool(true),
+                Scalar::Bool(true),
+                Scalar::Null(NullKind::Null),
+                Scalar::Null(NullKind::Null)
+            ]
+        );
+
+        let not_left = left.not().unwrap();
+        assert_eq!(
+            not_left.values(),
+            &[
+                Scalar::Bool(false),
+                Scalar::Bool(true),
+                Scalar::Null(NullKind::Null)
+            ]
+        );
+    }
+
+    #[test]
+    fn series_logical_ops_reject_non_boolean_input() {
+        let left = Series::from_values(
+            "left",
+            vec![1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Int64(0)],
+        )
+        .unwrap();
+        let right = Series::from_values(
+            "right",
+            vec![1_i64.into(), 2_i64.into()],
+            vec![Scalar::Bool(true), Scalar::Bool(false)],
+        )
+        .unwrap();
+
+        let and_err = left.and(&right).unwrap_err();
+        assert!(
+            matches!(and_err, FrameError::CompatibilityRejected(msg) if msg.contains("boolean series required for and"))
+        );
+
+        let not_err = left.not().unwrap_err();
+        assert!(
+            matches!(not_err, FrameError::CompatibilityRejected(msg) if msg.contains("boolean series required for not"))
+        );
+    }
+
     // ---- Series filter tests ----
 
     #[test]
@@ -3254,15 +3458,17 @@ mod tests {
         .unwrap();
 
         // var = ((2-3.5)^2 + (4-3.5)^2 + (4-3.5)^2 + (4-3.5)^2) / 3 = (2.25+0.25+0.25+0.25)/3 = 1.0
+        assert!(matches!(s.var().unwrap(), Scalar::Float64(_)));
         let var = match s.var().unwrap() {
             Scalar::Float64(v) => v,
-            _ => panic!("expected float"),
+            _ => 0.0,
         };
         assert!((var - 1.0).abs() < 1e-10);
 
+        assert!(matches!(s.std().unwrap(), Scalar::Float64(_)));
         let std = match s.std().unwrap() {
             Scalar::Float64(v) => v,
-            _ => panic!("expected float"),
+            _ => 0.0,
         };
         assert!((std - 1.0).abs() < 1e-10);
     }
@@ -3306,10 +3512,7 @@ mod tests {
 
         assert_eq!(s.sum().unwrap(), Scalar::Float64(0.0));
         assert_eq!(s.count(), 0);
-        match s.mean().unwrap() {
-            Scalar::Float64(v) => assert!(v.is_nan()),
-            _ => panic!("expected NaN"),
-        }
+        assert!(matches!(s.mean().unwrap(), Scalar::Float64(v) if v.is_nan()));
     }
 
     #[test]
