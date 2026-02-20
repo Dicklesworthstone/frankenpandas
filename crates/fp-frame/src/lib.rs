@@ -111,6 +111,13 @@ fn index_label_to_scalar(label: &IndexLabel) -> Scalar {
     }
 }
 
+fn index_label_to_utf8_scalar(label: &IndexLabel) -> Scalar {
+    match label {
+        IndexLabel::Int64(v) => Scalar::Utf8(v.to_string()),
+        IndexLabel::Utf8(v) => Scalar::Utf8(v.clone()),
+    }
+}
+
 fn range_index(len: usize) -> Result<Index, FrameError> {
     let len_i64 = i64::try_from(len).map_err(|_| {
         FrameError::CompatibilityRejected(format!(
@@ -2235,19 +2242,21 @@ impl DataFrame {
             .labels()
             .iter()
             .any(|label| matches!(label, IndexLabel::Utf8(_)));
-        if has_int && has_utf8 {
-            return Err(FrameError::CompatibilityRejected(
-                "reset_index does not yet support mixed Int64/Utf8 index labels".to_owned(),
-            ));
-        }
 
         let index_column_name = self.reset_index_column_name()?;
-        let index_values = self
-            .index
-            .labels()
-            .iter()
-            .map(index_label_to_scalar)
-            .collect::<Vec<_>>();
+        let index_values = if has_int && has_utf8 {
+            self.index
+                .labels()
+                .iter()
+                .map(index_label_to_utf8_scalar)
+                .collect::<Vec<_>>()
+        } else {
+            self.index
+                .labels()
+                .iter()
+                .map(index_label_to_scalar)
+                .collect::<Vec<_>>()
+        };
 
         let mut columns = self.columns.clone();
         columns.insert(
@@ -5830,16 +5839,25 @@ mod tests {
     }
 
     #[test]
-    fn dataframe_reset_index_rejects_mixed_index_label_types() {
+    fn dataframe_reset_index_supports_mixed_index_label_types() {
         let df = DataFrame::from_dict_with_index(
             vec![("v", vec![Scalar::Int64(1), Scalar::Int64(2)])],
             vec![IndexLabel::from("row-1"), IndexLabel::from(2_i64)],
         )
         .unwrap();
 
-        let err = df.reset_index(false).unwrap_err();
-        assert!(
-            matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("mixed Int64/Utf8"))
+        let out = df.reset_index(false).unwrap();
+        assert_eq!(
+            out.index().labels(),
+            &[IndexLabel::from(0_i64), IndexLabel::from(1_i64)]
+        );
+        assert_eq!(
+            out.column("index").unwrap().values(),
+            &[Scalar::Utf8("row-1".to_owned()), Scalar::Utf8("2".to_owned())]
+        );
+        assert_eq!(
+            out.column("v").unwrap().values(),
+            &[Scalar::Int64(1), Scalar::Int64(2)]
         );
     }
 
