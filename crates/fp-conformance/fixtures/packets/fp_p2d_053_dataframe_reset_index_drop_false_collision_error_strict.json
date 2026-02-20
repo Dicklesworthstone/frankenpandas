@@ -1,0 +1,28 @@
+{
+  "packet_id": "FP-P2D-053",
+  "case_id": "dataframe_reset_index_drop_false_collision_error_strict",
+  "mode": "strict",
+  "operation": "dataframe_reset_index",
+  "frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 }
+    ],
+    "columns": {
+      "index": [
+        { "kind": "int64", "value": 1 },
+        { "kind": "int64", "value": 2 }
+      ],
+      "level_0": [
+        { "kind": "int64", "value": 3 },
+        { "kind": "int64", "value": 4 }
+      ],
+      "v": [
+        { "kind": "int64", "value": 5 },
+        { "kind": "int64", "value": 6 }
+      ]
+    }
+  },
+  "reset_index_drop": false,
+  "expected_error_contains": "both 'index' and 'level_0'"
+}

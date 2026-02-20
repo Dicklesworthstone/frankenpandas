@@ -1,0 +1,41 @@
+{
+  "packet_id": "FP-P2D-053",
+  "case_id": "dataframe_set_index_drop_false_hardened",
+  "mode": "hardened",
+  "operation": "dataframe_set_index",
+  "frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 }
+    ],
+    "columns": {
+      "id": [
+        { "kind": "utf8", "value": "row-1" },
+        { "kind": "utf8", "value": "row-2" }
+      ],
+      "v": [
+        { "kind": "int64", "value": 3 },
+        { "kind": "int64", "value": 4 }
+      ]
+    }
+  },
+  "set_index_column": "id",
+  "set_index_drop": false,
+  "expected_frame": {
+    "index": [
+      { "kind": "utf8", "value": "row-1" },
+      { "kind": "utf8", "value": "row-2" }
+    ],
+    "column_order": ["id", "v"],
+    "columns": {
+      "id": [
+        { "kind": "utf8", "value": "row-1" },
+        { "kind": "utf8", "value": "row-2" }
+      ],
+      "v": [
+        { "kind": "int64", "value": 3 },
+        { "kind": "int64", "value": 4 }
+      ]
+    }
+  }
+}
