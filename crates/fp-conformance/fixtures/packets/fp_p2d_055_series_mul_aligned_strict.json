@@ -1,0 +1,38 @@
+{
+  "packet_id": "FP-P2D-055",
+  "case_id": "series_mul_aligned_strict",
+  "mode": "strict",
+  "operation": "series_mul",
+  "left": {
+    "name": "lhs",
+    "index": [
+      { "kind": "utf8", "value": "x" },
+      { "kind": "utf8", "value": "y" }
+    ],
+    "values": [
+      { "kind": "int64", "value": 3 },
+      { "kind": "int64", "value": 4 }
+    ]
+  },
+  "right": {
+    "name": "rhs",
+    "index": [
+      { "kind": "utf8", "value": "x" },
+      { "kind": "utf8", "value": "y" }
+    ],
+    "values": [
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 5 }
+    ]
+  },
+  "expected_series": {
+    "index": [
+      { "kind": "utf8", "value": "x" },
+      { "kind": "utf8", "value": "y" }
+    ],
+    "values": [
+      { "kind": "int64", "value": 6 },
+      { "kind": "int64", "value": 20 }
+    ]
+  }
+}

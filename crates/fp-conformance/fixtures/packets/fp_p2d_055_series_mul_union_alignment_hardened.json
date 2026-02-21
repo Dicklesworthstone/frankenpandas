@@ -1,0 +1,46 @@
+{
+  "packet_id": "FP-P2D-055",
+  "case_id": "series_mul_union_alignment_hardened",
+  "mode": "hardened",
+  "operation": "series_mul",
+  "left": {
+    "name": "lhs",
+    "index": [
+      { "kind": "utf8", "value": "a" },
+      { "kind": "utf8", "value": "b" },
+      { "kind": "utf8", "value": "c" }
+    ],
+    "values": [
+      { "kind": "int64", "value": 2 },
+      { "kind": "null", "value": "null" },
+      { "kind": "int64", "value": 4 }
+    ]
+  },
+  "right": {
+    "name": "rhs",
+    "index": [
+      { "kind": "utf8", "value": "c" },
+      { "kind": "utf8", "value": "a" },
+      { "kind": "utf8", "value": "d" }
+    ],
+    "values": [
+      { "kind": "int64", "value": 5 },
+      { "kind": "int64", "value": 3 },
+      { "kind": "int64", "value": 7 }
+    ]
+  },
+  "expected_series": {
+    "index": [
+      { "kind": "utf8", "value": "a" },
+      { "kind": "utf8", "value": "b" },
+      { "kind": "utf8", "value": "c" },
+      { "kind": "utf8", "value": "d" }
+    ],
+    "values": [
+      { "kind": "int64", "value": 6 },
+      { "kind": "null", "value": "null" },
+      { "kind": "int64", "value": 20 },
+      { "kind": "null", "value": "null" }
+    ]
+  }
+}

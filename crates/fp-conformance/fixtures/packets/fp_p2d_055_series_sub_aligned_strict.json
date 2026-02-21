@@ -1,0 +1,44 @@
+{
+  "packet_id": "FP-P2D-055",
+  "case_id": "series_sub_aligned_strict",
+  "mode": "strict",
+  "operation": "series_sub",
+  "left": {
+    "name": "lhs",
+    "index": [
+      { "kind": "utf8", "value": "x" },
+      { "kind": "utf8", "value": "y" },
+      { "kind": "utf8", "value": "z" }
+    ],
+    "values": [
+      { "kind": "int64", "value": 10 },
+      { "kind": "int64", "value": 20 },
+      { "kind": "int64", "value": 30 }
+    ]
+  },
+  "right": {
+    "name": "rhs",
+    "index": [
+      { "kind": "utf8", "value": "x" },
+      { "kind": "utf8", "value": "y" },
+      { "kind": "utf8", "value": "z" }
+    ],
+    "values": [
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 3 }
+    ]
+  },
+  "expected_series": {
+    "index": [
+      { "kind": "utf8", "value": "x" },
+      { "kind": "utf8", "value": "y" },
+      { "kind": "utf8", "value": "z" }
+    ],
+    "values": [
+      { "kind": "int64", "value": 9 },
+      { "kind": "int64", "value": 18 },
+      { "kind": "int64", "value": 27 }
+    ]
+  }
+}

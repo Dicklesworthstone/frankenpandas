@@ -15,7 +15,9 @@ use fp_groupby::{
     GroupByOptions, groupby_count, groupby_first, groupby_last, groupby_max, groupby_mean,
     groupby_median, groupby_min, groupby_std, groupby_sum, groupby_var,
 };
-use fp_index::{AlignmentPlan, Index, IndexLabel, align_union, validate_alignment_plan};
+use fp_index::{
+    AlignmentPlan, DuplicateKeep, Index, IndexLabel, align_union, validate_alignment_plan,
+};
 use fp_io::{read_csv_str, write_csv_string};
 use fp_join::{
     JoinType, MergeExecutionOptions, MergeValidateMode, join_series,
@@ -141,6 +143,9 @@ impl Default for SuiteOptions {
 #[serde(rename_all = "snake_case")]
 pub enum FixtureOperation {
     SeriesAdd,
+    SeriesSub,
+    SeriesMul,
+    SeriesDiv,
     SeriesJoin,
     #[serde(rename = "series_constructor", alias = "series_from_values")]
     SeriesConstructor,
@@ -253,6 +258,13 @@ pub enum FixtureOperation {
     DataFrameSetIndex,
     #[serde(rename = "dataframe_reset_index", alias = "data_frame_reset_index")]
     DataFrameResetIndex,
+    #[serde(rename = "dataframe_duplicated", alias = "data_frame_duplicated")]
+    DataFrameDuplicated,
+    #[serde(
+        rename = "dataframe_drop_duplicates",
+        alias = "data_frame_drop_duplicates"
+    )]
+    DataFrameDropDuplicates,
     // FP-P2D-040: DataFrame ordering parity matrix
     #[serde(rename = "dataframe_sort_index", alias = "data_frame_sort_index")]
     DataFrameSortIndex,
@@ -291,6 +303,9 @@ impl FixtureOperation {
     pub fn operation_name(self) -> &'static str {
         match self {
             Self::SeriesAdd => "series_add",
+            Self::SeriesSub => "series_sub",
+            Self::SeriesMul => "series_mul",
+            Self::SeriesDiv => "series_div",
             Self::SeriesJoin => "series_join",
             Self::SeriesConstructor => "series_constructor",
             Self::DataFrameFromSeries => "dataframe_from_series",
@@ -347,6 +362,8 @@ impl FixtureOperation {
             Self::DataFrameDropNaColumns => "dataframe_dropna_columns",
             Self::DataFrameSetIndex => "dataframe_set_index",
             Self::DataFrameResetIndex => "dataframe_reset_index",
+            Self::DataFrameDuplicated => "dataframe_duplicated",
+            Self::DataFrameDropDuplicates => "dataframe_drop_duplicates",
             Self::DataFrameSortIndex => "dataframe_sort_index",
             Self::DataFrameSortValues => "dataframe_sort_values",
             Self::DataFrameMerge => "dataframe_merge",
@@ -533,6 +550,12 @@ pub struct PacketFixture {
     #[serde(default)]
     pub reset_index_drop: Option<bool>,
     #[serde(default)]
+    pub subset: Option<Vec<String>>,
+    #[serde(default)]
+    pub keep: Option<String>,
+    #[serde(default)]
+    pub ignore_index: Option<bool>,
+    #[serde(default)]
     pub csv_input: Option<String>,
     #[serde(default)]
     pub loc_labels: Option<Vec<IndexLabel>>,
@@ -717,7 +740,10 @@ const COMPAT_CLOSURE_REQUIRED_ROWS: [&str; 9] = [
 
 fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [&'static str] {
     match operation {
-        FixtureOperation::SeriesAdd => &["CC-004", "CC-005"],
+        FixtureOperation::SeriesAdd
+        | FixtureOperation::SeriesSub
+        | FixtureOperation::SeriesMul
+        | FixtureOperation::SeriesDiv => &["CC-004", "CC-005"],
         FixtureOperation::SeriesConstructor
         | FixtureOperation::DataFrameFromDict
         | FixtureOperation::DataFrameFromRecords
@@ -786,6 +812,8 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::DataFrameTail
         | FixtureOperation::DataFrameSetIndex
         | FixtureOperation::DataFrameResetIndex
+        | FixtureOperation::DataFrameDuplicated
+        | FixtureOperation::DataFrameDropDuplicates
         | FixtureOperation::DataFrameSortIndex
         | FixtureOperation::DataFrameSortValues => &["CC-004"],
     }
@@ -1294,6 +1322,12 @@ struct OracleRequest {
     set_index_drop: Option<bool>,
     #[serde(default)]
     reset_index_drop: Option<bool>,
+    #[serde(default)]
+    subset: Option<Vec<String>>,
+    #[serde(default)]
+    keep: Option<String>,
+    #[serde(default)]
+    ignore_index: Option<bool>,
     #[serde(default)]
     csv_input: Option<String>,
     #[serde(default)]
@@ -3142,16 +3176,39 @@ fn run_fixture_operation(
         .map_err(|err| format!("expected resolution failed: {err}"))?;
 
     match fixture.operation {
-        FixtureOperation::SeriesAdd => {
+        FixtureOperation::SeriesAdd
+        | FixtureOperation::SeriesSub
+        | FixtureOperation::SeriesMul
+        | FixtureOperation::SeriesDiv => {
             let left = require_left_series(fixture)?;
             let right = require_right_series(fixture)?;
-            let actual = build_series(left)?
-                .add_with_policy(&build_series(right)?, policy, ledger)
-                .map_err(|err| err.to_string())?;
+            let left_series = build_series(left)?;
+            let right_series = build_series(right)?;
+            let actual = match fixture.operation {
+                FixtureOperation::SeriesAdd => {
+                    left_series.add_with_policy(&right_series, policy, ledger)
+                }
+                FixtureOperation::SeriesSub => {
+                    left_series.sub_with_policy(&right_series, policy, ledger)
+                }
+                FixtureOperation::SeriesMul => {
+                    left_series.mul_with_policy(&right_series, policy, ledger)
+                }
+                FixtureOperation::SeriesDiv => {
+                    left_series.div_with_policy(&right_series, policy, ledger)
+                }
+                _ => unreachable!("match arm constrained to series arithmetic operations"),
+            }
+            .map_err(|err| err.to_string())?;
 
             let expected = match expected {
                 ResolvedExpected::Series(series) => series,
-                _ => return Err("expected_series is required for series_add".to_owned()),
+                _ => {
+                    return Err(format!(
+                        "expected_series is required for {}",
+                        fixture.operation.operation_name()
+                    ));
+                }
             };
             compare_series_expected(&actual, &expected)
         }
@@ -3926,6 +3983,41 @@ fn run_fixture_operation(
                 ),
             }
         }
+        FixtureOperation::DataFrameDuplicated => {
+            let frame = build_dataframe(require_frame(fixture)?)
+                .map_err(|err| format!("frame build failed: {err}"))?;
+            let subset = resolve_duplicate_subset(fixture)?;
+            let keep = resolve_duplicate_keep(fixture)?;
+            let actual = frame
+                .duplicated(subset.as_deref(), keep)
+                .map_err(|err| err.to_string());
+            match expected {
+                ResolvedExpected::Series(series) => compare_series_expected(&actual?, &series),
+                ResolvedExpected::ErrorContains(substr) => match actual {
+                    Err(message) if message.contains(&substr) => Ok(()),
+                    Err(message) => Err(format!(
+                        "expected dataframe_duplicated error containing '{substr}', got '{message}'"
+                    )),
+                    Ok(_) => Err(format!(
+                        "expected dataframe_duplicated to fail with error containing '{substr}'"
+                    )),
+                },
+                ResolvedExpected::ErrorAny => {
+                    if actual.is_err() {
+                        Ok(())
+                    } else {
+                        Err(
+                            "expected dataframe_duplicated to fail but operation succeeded"
+                                .to_owned(),
+                        )
+                    }
+                }
+                _ => Err(
+                    "expected_series or expected_error is required for dataframe_duplicated"
+                        .to_owned(),
+                ),
+            }
+        }
         FixtureOperation::SeriesAny => {
             let left = require_left_series(fixture)?;
             let series = build_series(left)?;
@@ -4180,6 +4272,7 @@ fn run_fixture_operation(
         | FixtureOperation::DataFrameDropNaColumns
         | FixtureOperation::DataFrameSetIndex
         | FixtureOperation::DataFrameResetIndex
+        | FixtureOperation::DataFrameDropDuplicates
         | FixtureOperation::DataFrameSortIndex
         | FixtureOperation::DataFrameSortValues => {
             let actual = execute_dataframe_fixture_operation(fixture);
@@ -4266,7 +4359,10 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
     }
 
     match fixture.operation {
-        FixtureOperation::SeriesAdd => fixture
+        FixtureOperation::SeriesAdd
+        | FixtureOperation::SeriesSub
+        | FixtureOperation::SeriesMul
+        | FixtureOperation::SeriesDiv => fixture
             .expected_series
             .clone()
             .map(ResolvedExpected::Series)
@@ -4353,6 +4449,7 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::SeriesLoc
         | FixtureOperation::SeriesIloc
         | FixtureOperation::DataFrameCount
+        | FixtureOperation::DataFrameDuplicated
         | FixtureOperation::GroupByMean
         | FixtureOperation::GroupByCount
         | FixtureOperation::GroupByMin
@@ -4391,6 +4488,7 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::DataFrameDropNaColumns
         | FixtureOperation::DataFrameSetIndex
         | FixtureOperation::DataFrameResetIndex
+        | FixtureOperation::DataFrameDropDuplicates
         | FixtureOperation::DataFrameMerge
         | FixtureOperation::DataFrameMergeIndex
         | FixtureOperation::DataFrameConcat
@@ -4498,6 +4596,9 @@ fn capture_live_oracle_expected(
         set_index_column: fixture.set_index_column.clone(),
         set_index_drop: fixture.set_index_drop,
         reset_index_drop: fixture.reset_index_drop,
+        subset: fixture.subset.clone(),
+        keep: fixture.keep.clone(),
+        ignore_index: fixture.ignore_index,
         csv_input: fixture.csv_input.clone(),
         loc_labels: fixture.loc_labels.clone(),
         iloc_positions: fixture.iloc_positions.clone(),
@@ -4562,7 +4663,10 @@ fn capture_live_oracle_expected(
     }
 
     match fixture.operation {
-        FixtureOperation::SeriesAdd => response
+        FixtureOperation::SeriesAdd
+        | FixtureOperation::SeriesSub
+        | FixtureOperation::SeriesMul
+        | FixtureOperation::SeriesDiv => response
             .expected_series
             .map(ResolvedExpected::Series)
             .ok_or_else(|| {
@@ -4617,6 +4721,7 @@ fn capture_live_oracle_expected(
         | FixtureOperation::SeriesLoc
         | FixtureOperation::SeriesIloc
         | FixtureOperation::DataFrameCount
+        | FixtureOperation::DataFrameDuplicated
         | FixtureOperation::GroupByMean
         | FixtureOperation::GroupByCount
         | FixtureOperation::GroupByMin
@@ -4651,6 +4756,7 @@ fn capture_live_oracle_expected(
         | FixtureOperation::DataFrameDropNaColumns
         | FixtureOperation::DataFrameSetIndex
         | FixtureOperation::DataFrameResetIndex
+        | FixtureOperation::DataFrameDropDuplicates
         | FixtureOperation::DataFrameMerge
         | FixtureOperation::DataFrameMergeIndex
         | FixtureOperation::DataFrameConcat
@@ -5001,6 +5107,48 @@ fn require_reset_index_drop(fixture: &PacketFixture) -> Result<bool, String> {
     fixture
         .reset_index_drop
         .ok_or_else(|| "reset_index_drop is required for dataframe_reset_index".to_owned())
+}
+
+fn resolve_duplicate_subset(fixture: &PacketFixture) -> Result<Option<Vec<String>>, String> {
+    fixture
+        .subset
+        .as_ref()
+        .map(|subset| {
+            subset
+                .iter()
+                .map(|name| {
+                    let trimmed = name.trim();
+                    if trimmed.is_empty() {
+                        Err("subset entries must be non-empty strings".to_owned())
+                    } else {
+                        Ok(trimmed.to_owned())
+                    }
+                })
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .transpose()
+}
+
+fn resolve_duplicate_keep(fixture: &PacketFixture) -> Result<DuplicateKeep, String> {
+    let Some(keep) = fixture.keep.as_deref() else {
+        return Ok(DuplicateKeep::First);
+    };
+    let keep = keep.trim();
+    if keep.eq_ignore_ascii_case("first") {
+        Ok(DuplicateKeep::First)
+    } else if keep.eq_ignore_ascii_case("last") {
+        Ok(DuplicateKeep::Last)
+    } else if keep.eq_ignore_ascii_case("none") {
+        Ok(DuplicateKeep::None)
+    } else {
+        Err(format!(
+            "keep must be one of 'first', 'last', or 'none' (got '{keep}')"
+        ))
+    }
+}
+
+fn resolve_drop_duplicates_ignore_index(fixture: &PacketFixture) -> bool {
+    fixture.ignore_index.unwrap_or(false)
 }
 
 fn resolve_sort_ascending(fixture: &PacketFixture) -> bool {
@@ -5452,6 +5600,19 @@ fn execute_dataframe_fixture_operation(fixture: &PacketFixture) -> Result<DataFr
                 .map_err(|err| format!("frame build failed: {err}"))?;
             frame
                 .reset_index(require_reset_index_drop(fixture)?)
+                .map_err(|err| err.to_string())
+        }
+        FixtureOperation::DataFrameDropDuplicates => {
+            let frame = build_dataframe(require_frame(fixture)?)
+                .map_err(|err| format!("frame build failed: {err}"))?;
+            let subset = resolve_duplicate_subset(fixture)?;
+            let keep = resolve_duplicate_keep(fixture)?;
+            frame
+                .drop_duplicates(
+                    subset.as_deref(),
+                    keep,
+                    resolve_drop_duplicates_ignore_index(fixture),
+                )
                 .map_err(|err| err.to_string())
         }
         _ => Err(format!(
@@ -6038,15 +6199,38 @@ fn execute_and_compare_differential(
         .map_err(|err| format!("expected resolution failed: {err}"))?;
 
     match fixture.operation {
-        FixtureOperation::SeriesAdd => {
+        FixtureOperation::SeriesAdd
+        | FixtureOperation::SeriesSub
+        | FixtureOperation::SeriesMul
+        | FixtureOperation::SeriesDiv => {
             let left = require_left_series(fixture)?;
             let right = require_right_series(fixture)?;
-            let actual = build_series(left)?
-                .add_with_policy(&build_series(right)?, policy, ledger)
-                .map_err(|err| err.to_string())?;
+            let left_series = build_series(left)?;
+            let right_series = build_series(right)?;
+            let actual = match fixture.operation {
+                FixtureOperation::SeriesAdd => {
+                    left_series.add_with_policy(&right_series, policy, ledger)
+                }
+                FixtureOperation::SeriesSub => {
+                    left_series.sub_with_policy(&right_series, policy, ledger)
+                }
+                FixtureOperation::SeriesMul => {
+                    left_series.mul_with_policy(&right_series, policy, ledger)
+                }
+                FixtureOperation::SeriesDiv => {
+                    left_series.div_with_policy(&right_series, policy, ledger)
+                }
+                _ => unreachable!("match arm constrained to series arithmetic operations"),
+            }
+            .map_err(|err| err.to_string())?;
             let expected = match expected {
                 ResolvedExpected::Series(s) => s,
-                _ => return Err("expected_series required for series_add".to_owned()),
+                _ => {
+                    return Err(format!(
+                        "expected_series required for {}",
+                        fixture.operation.operation_name()
+                    ));
+                }
             };
             Ok(diff_series(&actual, &expected))
         }
@@ -7011,6 +7195,48 @@ fn execute_and_compare_differential(
                 }
             }
         }
+        FixtureOperation::DataFrameDuplicated => {
+            let frame = build_dataframe(require_frame(fixture)?)
+                .map_err(|err| format!("frame build failed: {err}"))?;
+            let subset = resolve_duplicate_subset(fixture)?;
+            let keep = resolve_duplicate_keep(fixture)?;
+            let actual = frame
+                .duplicated(subset.as_deref(), keep)
+                .map_err(|err| err.to_string());
+            match expected {
+                ResolvedExpected::Series(series) => Ok(diff_series(&actual?, &series)),
+                ResolvedExpected::ErrorContains(substr) => Ok(match actual {
+                    Err(message) if message.contains(&substr) => Vec::new(),
+                    Err(message) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "dataframe_duplicated.error",
+                        format!(
+                            "expected dataframe_duplicated error containing '{substr}', got '{message}'"
+                        ),
+                    )],
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "dataframe_duplicated.error",
+                        "expected dataframe_duplicated to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                ResolvedExpected::ErrorAny => Ok(match actual {
+                    Err(_) => Vec::new(),
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "dataframe_duplicated.error",
+                        "expected dataframe_duplicated to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                _ => Err(
+                    "expected_series or expected_error required for dataframe_duplicated"
+                        .to_owned(),
+                ),
+            }
+        }
         FixtureOperation::SeriesAny => {
             let left = require_left_series(fixture)?;
             let series = build_series(left)?;
@@ -7311,6 +7537,7 @@ fn execute_and_compare_differential(
         | FixtureOperation::DataFrameDropNaColumns
         | FixtureOperation::DataFrameSetIndex
         | FixtureOperation::DataFrameResetIndex
+        | FixtureOperation::DataFrameDropDuplicates
         | FixtureOperation::DataFrameSortIndex
         | FixtureOperation::DataFrameSortValues => {
             let actual = execute_dataframe_fixture_operation(fixture);
@@ -9775,6 +10002,32 @@ mod tests {
         assert!(
             report.fixture_count >= 6,
             "expected FP-P2D-053 dataframe set/reset index fixtures"
+        );
+        assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
+    fn packet_filter_runs_dataframe_duplicates_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2D-054", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-054"));
+        assert!(
+            report.fixture_count >= 6,
+            "expected FP-P2D-054 dataframe duplicated/drop_duplicates fixtures"
+        );
+        assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
+    fn packet_filter_runs_series_arithmetic_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2D-055", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-055"));
+        assert!(
+            report.fixture_count >= 6,
+            "expected FP-P2D-055 series sub/mul/div fixtures"
         );
         assert!(report.is_green(), "expected report green: {report:?}");
     }

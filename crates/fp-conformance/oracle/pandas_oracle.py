@@ -220,11 +220,13 @@ def build_groupby_composite_key_series(
     return key_series, combined_index
 
 
-def op_series_add(pd, payload: dict[str, Any]) -> dict[str, Any]:
+def op_series_binary_numeric(
+    payload: dict[str, Any], operation: str
+) -> dict[str, Any]:
     left = payload.get("left")
     right = payload.get("right")
     if left is None or right is None:
-        raise OracleError("series_add requires left and right payloads")
+        raise OracleError(f"{operation} requires left and right payloads")
 
     left_index = [label_from_json(item) for item in left["index"]]
     right_index = [label_from_json(item) for item in right["index"]]
@@ -233,7 +235,16 @@ def op_series_add(pd, payload: dict[str, Any]) -> dict[str, Any]:
 
     lhs = pd.Series(left_values, index=left_index, dtype="float64")
     rhs = pd.Series(right_values, index=right_index, dtype="float64")
-    out = lhs + rhs
+    if operation == "series_add":
+        out = lhs + rhs
+    elif operation == "series_sub":
+        out = lhs - rhs
+    elif operation == "series_mul":
+        out = lhs * rhs
+    elif operation == "series_div":
+        out = lhs / rhs
+    else:
+        raise OracleError(f"unsupported series arithmetic operation: {operation!r}")
 
     return {
         "expected_series": {
@@ -241,6 +252,22 @@ def op_series_add(pd, payload: dict[str, Any]) -> dict[str, Any]:
             "values": [scalar_to_json(v) for v in out.tolist()],
         }
     }
+
+
+def op_series_add(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return op_series_binary_numeric(payload, "series_add")
+
+
+def op_series_sub(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return op_series_binary_numeric(payload, "series_sub")
+
+
+def op_series_mul(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return op_series_binary_numeric(payload, "series_mul")
+
+
+def op_series_div(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return op_series_binary_numeric(payload, "series_div")
 
 
 def op_series_join(pd, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1337,6 +1364,83 @@ def op_dataframe_dropna_columns(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return {"expected_frame": dataframe_to_json(out)}
 
 
+def _resolve_duplicate_subset(payload: dict[str, Any], op_name: str):
+    raw_subset = payload.get("subset")
+    if raw_subset is None:
+        return None
+    if not isinstance(raw_subset, list):
+        raise OracleError(f"{op_name} subset must be an array of strings")
+
+    subset: list[str] = []
+    for value in raw_subset:
+        if not isinstance(value, str) or value.strip() == "":
+            raise OracleError(f"{op_name} subset entries must be non-empty strings")
+        subset.append(value.strip())
+    return subset
+
+
+def _resolve_duplicate_keep(payload: dict[str, Any], op_name: str):
+    raw_keep = payload.get("keep")
+    if raw_keep is None:
+        return "first"
+    if not isinstance(raw_keep, str):
+        raise OracleError(f"{op_name} keep must be a string")
+    keep = raw_keep.strip().lower()
+    if keep == "first":
+        return "first"
+    if keep == "last":
+        return "last"
+    if keep == "none":
+        return False
+    raise OracleError(
+        f"{op_name} keep must be one of 'first', 'last', or 'none' (got {raw_keep!r})"
+    )
+
+
+def _resolve_drop_duplicates_ignore_index(payload: dict[str, Any], op_name: str) -> bool:
+    raw = payload.get("ignore_index")
+    if raw is None:
+        return False
+    if isinstance(raw, bool):
+        return raw
+    raise OracleError(f"{op_name} ignore_index must be a boolean")
+
+
+def op_dataframe_duplicated(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    if frame_payload is None:
+        raise OracleError("dataframe_duplicated requires frame payload")
+
+    frame = dataframe_from_json(pd, frame_payload)
+    subset = _resolve_duplicate_subset(payload, "dataframe_duplicated")
+    keep = _resolve_duplicate_keep(payload, "dataframe_duplicated")
+    try:
+        out = frame.duplicated(subset=subset, keep=keep)
+    except Exception as exc:
+        raise OracleError(f"dataframe_duplicated failed: {exc}") from exc
+    return {"expected_series": series_to_json(out)}
+
+
+def op_dataframe_drop_duplicates(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    if frame_payload is None:
+        raise OracleError("dataframe_drop_duplicates requires frame payload")
+
+    frame = dataframe_from_json(pd, frame_payload)
+    subset = _resolve_duplicate_subset(payload, "dataframe_drop_duplicates")
+    keep = _resolve_duplicate_keep(payload, "dataframe_drop_duplicates")
+    ignore_index = _resolve_drop_duplicates_ignore_index(
+        payload, "dataframe_drop_duplicates"
+    )
+    try:
+        out = frame.drop_duplicates(
+            subset=subset, keep=keep, ignore_index=ignore_index
+        )
+    except Exception as exc:
+        raise OracleError(f"dataframe_drop_duplicates failed: {exc}") from exc
+    return {"expected_frame": dataframe_to_json(out)}
+
+
 def op_dataframe_set_index(pd, payload: dict[str, Any]) -> dict[str, Any]:
     frame_payload = payload.get("frame")
     if frame_payload is None:
@@ -1714,6 +1818,12 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
     op = payload.get("operation")
     if op == "series_add":
         return op_series_add(pd, payload)
+    if op == "series_sub":
+        return op_series_sub(pd, payload)
+    if op == "series_mul":
+        return op_series_mul(pd, payload)
+    if op == "series_div":
+        return op_series_div(pd, payload)
     if op == "series_join":
         return op_series_join(pd, payload)
     if op == "series_constructor":
@@ -1840,6 +1950,10 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_dataframe_dropna(pd, payload)
     if op in {"dataframe_dropna_columns", "data_frame_dropna_columns"}:
         return op_dataframe_dropna_columns(pd, payload)
+    if op in {"dataframe_duplicated", "data_frame_duplicated"}:
+        return op_dataframe_duplicated(pd, payload)
+    if op in {"dataframe_drop_duplicates", "data_frame_drop_duplicates"}:
+        return op_dataframe_drop_duplicates(pd, payload)
     if op in {"dataframe_set_index", "data_frame_set_index"}:
         return op_dataframe_set_index(pd, payload)
     if op in {"dataframe_reset_index", "data_frame_reset_index"}:
