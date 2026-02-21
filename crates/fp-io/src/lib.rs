@@ -89,19 +89,21 @@ pub fn read_csv_str(input: &str) -> Result<DataFrame, IoError> {
     }
 
     let mut out_columns = BTreeMap::new();
+    let mut column_order = Vec::with_capacity(header_count);
     for (idx, values) in columns.into_iter().enumerate() {
         let name = headers.get(idx).unwrap_or_default().to_owned();
-        out_columns.insert(name, Column::from_values(values)?);
+        out_columns.insert(name.clone(), Column::from_values(values)?);
+        column_order.push(name);
     }
 
     let index = Index::from_i64((0..row_count).collect());
-    Ok(DataFrame::new(index, out_columns)?)
+    Ok(DataFrame::new_with_column_order(index, out_columns, column_order)?)
 }
 
 pub fn write_csv_string(frame: &DataFrame) -> Result<String, IoError> {
     let mut writer = WriterBuilder::new().from_writer(Vec::new());
 
-    let headers = frame.columns().keys().cloned().collect::<Vec<_>>();
+    let headers = frame.column_names().into_iter().cloned().collect::<Vec<_>>();
     writer.write_record(&headers)?;
 
     for row_idx in 0..frame.index().len() {
@@ -215,30 +217,36 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
             .map(|s| match s {
                 Scalar::Int64(v) => fp_index::IndexLabel::Int64(v),
                 Scalar::Utf8(v) => fp_index::IndexLabel::Utf8(v),
-                other => fp_index::IndexLabel::Utf8(format!("{other:?}")),
+                Scalar::Float64(v) => fp_index::IndexLabel::Utf8(v.to_string()),
+                Scalar::Bool(v) => fp_index::IndexLabel::Utf8(v.to_string()),
+                Scalar::Null(_) => fp_index::IndexLabel::Utf8("<null>".to_owned()),
             })
             .collect();
         let index = Index::new(index_labels);
 
         let mut out_columns = BTreeMap::new();
+        let mut column_order = Vec::with_capacity(headers.len() - 1);
         let mut col_idx = 0;
         for (orig_idx, _) in headers.iter().enumerate() {
             if orig_idx == idx_pos {
                 continue;
             }
             let name = headers.get(orig_idx).unwrap_or_default().to_owned();
-            out_columns.insert(name, Column::from_values(columns[col_idx].clone())?);
+            out_columns.insert(name.clone(), Column::from_values(columns[col_idx].clone())?);
+            column_order.push(name);
             col_idx += 1;
         }
-        Ok(DataFrame::new(index, out_columns)?)
+        Ok(DataFrame::new_with_column_order(index, out_columns, column_order)?)
     } else {
         let mut out_columns = BTreeMap::new();
+        let mut column_order = Vec::with_capacity(header_count);
         for (idx, values) in columns.into_iter().enumerate() {
             let name = headers.get(idx).unwrap_or_default().to_owned();
-            out_columns.insert(name, Column::from_values(values)?);
+            out_columns.insert(name.clone(), Column::from_values(values)?);
+            column_order.push(name);
         }
         let index = Index::from_i64((0..row_count).collect());
-        Ok(DataFrame::new(index, out_columns)?)
+        Ok(DataFrame::new_with_column_order(index, out_columns, column_order)?)
     }
 }
 
@@ -360,7 +368,7 @@ pub fn read_json_str(input: &str, orient: JsonOrient) -> Result<DataFrame, IoErr
                 out.insert(name, Column::from_values(vals)?);
             }
             let index = Index::from_i64((0..row_count).collect());
-            Ok(DataFrame::new(index, out)?)
+            Ok(DataFrame::new_with_column_order(index, out, col_names)?)
         }
         JsonOrient::Columns => {
             let obj = parsed
@@ -508,13 +516,13 @@ pub fn read_json_str(input: &str, orient: JsonOrient) -> Result<DataFrame, IoErr
                 }
                 None => Index::from_i64((0..row_count).collect()),
             };
-            Ok(DataFrame::new(index, out)?)
+            Ok(DataFrame::new_with_column_order(index, out, col_names)?)
         }
     }
 }
 
 pub fn write_json_string(frame: &DataFrame, orient: JsonOrient) -> Result<String, IoError> {
-    let headers: Vec<String> = frame.columns().keys().cloned().collect();
+    let headers: Vec<String> = frame.column_names().into_iter().cloned().collect();
     let row_count = frame.index().len();
 
     match orient {

@@ -155,7 +155,7 @@ pub fn infer_dtype(values: &[Scalar]) -> Result<DType, TypeError> {
 /// when the value already has the correct type (AG-03: identity-cast skip).
 pub fn cast_scalar_owned(value: Scalar, target: DType) -> Result<Scalar, TypeError> {
     let from = value.dtype();
-    if matches!(value, Scalar::Null(_)) {
+    if value.is_missing() {
         return Ok(Scalar::missing_for_dtype(target));
     }
     if from == target {
@@ -189,7 +189,7 @@ pub fn cast_scalar_owned(value: Scalar, target: DType) -> Result<Scalar, TypeErr
                 if !v.is_finite() || *v != v.trunc() {
                     return Err(TypeError::LossyFloatToInt { value: *v });
                 }
-                if *v < i64::MIN as f64 || *v > i64::MAX as f64 {
+                if *v < i64::MIN as f64 || *v >= 9223372036854775808.0 {
                     return Err(TypeError::LossyFloatToInt { value: *v });
                 }
                 Ok(Scalar::Int64(*v as i64))
@@ -201,7 +201,12 @@ pub fn cast_scalar_owned(value: Scalar, target: DType) -> Result<Scalar, TypeErr
             Scalar::Int64(v) => Ok(Scalar::Float64(*v as f64)),
             _ => Err(TypeError::InvalidCast { from, to: target }),
         },
-        DType::Utf8 => Err(TypeError::InvalidCast { from, to: target }),
+        DType::Utf8 => match &value {
+            Scalar::Bool(v) => Ok(Scalar::Utf8(if *v { "True".to_owned() } else { "False".to_owned() })),
+            Scalar::Int64(v) => Ok(Scalar::Utf8(v.to_string())),
+            Scalar::Float64(v) => Ok(Scalar::Utf8(v.to_string())),
+            _ => Err(TypeError::InvalidCast { from, to: target }),
+        },
     }
 }
 
@@ -296,7 +301,7 @@ pub fn nanmedian(values: &[Scalar]) -> Scalar {
     }
     nums.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let mid = nums.len() / 2;
-    if nums.len().is_multiple_of(2) {
+    if nums.len() % 2 == 0 {
         Scalar::Float64((nums[mid - 1] + nums[mid]) / 2.0)
     } else {
         Scalar::Float64(nums[mid])

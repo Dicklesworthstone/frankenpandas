@@ -1069,7 +1069,7 @@ impl Series {
         }
         vals.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let mid = vals.len() / 2;
-        let result = if vals.len().is_multiple_of(2) {
+        let result = if vals.len() % 2 == 0 {
             (vals[mid - 1] + vals[mid]) / 2.0
         } else {
             vals[mid]
@@ -1346,15 +1346,7 @@ fn concat_dataframes_axis1(
                 )));
             }
 
-            let values = positions
-                .iter()
-                .map(|position| match position {
-                    Some(pos) => column.values()[*pos].clone(),
-                    None => Scalar::Null(NullKind::Null),
-                })
-                .collect::<Vec<_>>();
-
-            columns.insert(name.clone(), Column::from_values(values)?);
+            columns.insert(name.clone(), column.reindex_by_positions(&positions)?);
             output_column_order.push(name.clone());
         }
     }
@@ -1555,7 +1547,7 @@ impl DataFrame {
                 .iter()
                 .map(|&position| column.values()[position].clone())
                 .collect::<Vec<_>>();
-            columns.insert(name.clone(), Column::from_values(values)?);
+            columns.insert(name.clone(), Column::new(column.dtype(), values)?);
         }
 
         Self::new_with_column_order(Index::new(labels), columns, self.column_order.clone())
@@ -1982,7 +1974,7 @@ impl DataFrame {
                 .zip(&keep)
                 .filter_map(|(v, &k)| if k { Some(v.clone()) } else { None })
                 .collect();
-            new_columns.insert(name.clone(), Column::from_values(filtered_values)?);
+            new_columns.insert(name.clone(), Column::new(col.dtype(), filtered_values)?);
         }
 
         Self::new_with_column_order(
@@ -2367,7 +2359,7 @@ impl DataFrame {
                 .get(name)
                 .expect("column name listed in order must exist");
             let values = col.values()[..take].to_vec();
-            columns.insert(name.clone(), Column::from_values(values)?);
+            columns.insert(name.clone(), Column::new(col.dtype(), values)?);
         }
         Self::new_with_column_order(Index::new(labels), columns, self.column_order.clone())
     }
@@ -2386,7 +2378,7 @@ impl DataFrame {
                 .get(name)
                 .expect("column name listed in order must exist");
             let values = col.values()[start..].to_vec();
-            columns.insert(name.clone(), Column::from_values(values)?);
+            columns.insert(name.clone(), Column::new(col.dtype(), values)?);
         }
         Self::new_with_column_order(Index::new(labels), columns, self.column_order.clone())
     }
@@ -2556,7 +2548,7 @@ impl DataFrame {
             for &position in &positions {
                 values.push(column.values()[position].clone());
             }
-            columns.insert(name.clone(), Column::from_values(values)?);
+            columns.insert(name.clone(), Column::new(column.dtype(), values)?);
         }
 
         Self::new_with_column_order(Index::new(out_labels), columns, selected_columns)
@@ -2602,7 +2594,7 @@ impl DataFrame {
             for &position in &normalized_positions {
                 values.push(column.values()[position].clone());
             }
-            columns.insert(name.clone(), Column::from_values(values)?);
+            columns.insert(name.clone(), Column::new(column.dtype(), values)?);
         }
 
         Self::new_with_column_order(Index::new(out_labels), columns, selected_columns)
@@ -2702,6 +2694,13 @@ impl DataFrame {
                 .expect("column name listed in order must exist");
             let name_str = name.as_str();
             let new_name = rename_map.get(name_str).unwrap_or(&name_str);
+            
+            if columns.contains_key(*new_name) {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "duplicate column '{}' resulting from rename", new_name
+                )));
+            }
+            
             column_order.push((*new_name).to_owned());
             columns.insert((*new_name).to_owned(), col.clone());
         }

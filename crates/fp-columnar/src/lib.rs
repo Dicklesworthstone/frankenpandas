@@ -345,6 +345,18 @@ fn scalar_compare(left: &Scalar, right: &Scalar, op: ComparisonOp) -> Result<boo
         });
     }
 
+    // Handle Int64 comparisons to avoid precision loss in f64 cast.
+    if let (Scalar::Int64(a), Scalar::Int64(b)) = (left, right) {
+        return Ok(match op {
+            ComparisonOp::Gt => a > b,
+            ComparisonOp::Lt => a < b,
+            ComparisonOp::Eq => a == b,
+            ComparisonOp::Ne => a != b,
+            ComparisonOp::Ge => a >= b,
+            ComparisonOp::Le => a <= b,
+        });
+    }
+
     // Numeric: convert both to f64.
     let lhs = left.to_f64()?;
     let rhs = right.to_f64()?;
@@ -712,7 +724,7 @@ impl Column {
                     && result.is_finite()
                     && result == result.trunc()
                     && result >= i64::MIN as f64
-                    && result <= i64::MAX as f64
+                    && result < 9223372036854775808.0
                 {
                     Ok(Scalar::Int64(result as i64))
                 } else {
@@ -900,7 +912,16 @@ impl CrackIndex {
     /// Return row indices where `column[row] <= value`.
     pub fn filter_lte(&mut self, column: &Column, value: f64) -> Vec<usize> {
         let split = self.crack_at(column, value);
-        self.perm[..split].to_vec()
+        self.perm[..split]
+            .iter()
+            .copied()
+            .filter(|&idx| {
+                column
+                    .value(idx)
+                    .and_then(|v| v.to_f64().ok())
+                    .is_some_and(|f| f <= value)
+            })
+            .collect()
     }
 
     /// Return row indices where `column[row] >= value`.

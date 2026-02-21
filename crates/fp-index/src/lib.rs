@@ -404,8 +404,8 @@ impl Index {
 
     #[must_use]
     pub fn slice(&self, start: usize, len: usize) -> Self {
-        let end = (start + len).min(self.labels.len());
         let start = start.min(self.labels.len());
+        let end = start.saturating_add(len).min(self.labels.len());
         Self::new(self.labels[start..end].to_vec())
     }
 

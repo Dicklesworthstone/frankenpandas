@@ -204,7 +204,7 @@ fn estimate_output_rows(
                 .index()
                 .labels()
                 .iter()
-                .filter(|label| !left.index().labels().contains(label))
+                .filter(|label| !left_map.as_ref().expect("Outer needs left_map").contains_key(*label))
                 .count();
             left_matched + right_unmatched
         }
@@ -253,8 +253,9 @@ fn join_series_with_global_allocator(
 
             // For Outer: append right labels that have no match in left.
             if matches!(join_type, JoinType::Outer) {
+                let left_map = left_map.as_ref().expect("left_map required for Outer join");
                 for (right_pos, label) in right.index().labels().iter().enumerate() {
-                    if !left.index().labels().contains(label) {
+                    if !left_map.contains_key(label) {
                         out_labels.push(label.clone());
                         left_positions.push(None);
                         right_positions.push(Some(right_pos));
@@ -334,8 +335,9 @@ fn join_series_with_arena(
             }
 
             if matches!(join_type, JoinType::Outer) {
+                let left_map = left_map.as_ref().expect("left_map required for Outer join");
                 for (right_pos, label) in right.index().labels().iter().enumerate() {
-                    if !left.index().labels().contains(label) {
+                    if !left_map.contains_key(label) {
                         out_labels.push(label.clone());
                         left_positions.push(None);
                         right_positions.push(Some(right_pos));
@@ -781,10 +783,9 @@ pub fn merge_dataframes_on_with_options(
             }
 
             if matches!(join_type, JoinType::Outer) {
-                // Track which right keys already appeared via left.
-                let left_key_set: HashSet<&CompositeJoinKey> = left_keys.iter().collect();
+                let left_map = left_map.as_ref().expect("left_map required for Outer join");
                 for (right_pos, key) in right_keys.iter().enumerate() {
-                    if !left_key_set.contains(key) {
+                    if !left_map.contains_key(key) {
                         out_row_keys.push(key.clone());
                         left_positions.push(None);
                         right_positions.push(Some(right_pos));
