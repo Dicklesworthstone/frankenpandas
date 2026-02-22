@@ -928,12 +928,168 @@ impl Series {
         Self::from_values("count", labels, values)
     }
 
+    /// Return unique non-null values in first-seen order.
+    ///
+    /// Matches `pd.Series.unique()`.
+    #[must_use]
+    pub fn unique(&self) -> Vec<Scalar> {
+        let mut seen = Vec::<Scalar>::new();
+        for value in self.column.values() {
+            if value.is_missing() {
+                continue;
+            }
+            if !seen.iter().any(|existing| existing.semantic_eq(value)) {
+                seen.push(value.clone());
+            }
+        }
+        seen
+    }
+
+    /// Count of unique non-null values.
+    ///
+    /// Matches `pd.Series.nunique()`.
+    #[must_use]
+    pub fn nunique(&self) -> usize {
+        self.unique().len()
+    }
+
+    /// Map values using a dict-like mapping. Unmapped values become NaN.
+    ///
+    /// Matches `pd.Series.map(dict)`.
+    pub fn map(&self, mapping: &[(Scalar, Scalar)]) -> Result<Self, FrameError> {
+        let mut out = Vec::with_capacity(self.len());
+        for val in self.column.values() {
+            if val.is_missing() {
+                out.push(Scalar::Null(NullKind::NaN));
+                continue;
+            }
+            let mapped = mapping
+                .iter()
+                .find(|(k, _)| k.semantic_eq(val))
+                .map(|(_, v)| v.clone());
+            out.push(mapped.unwrap_or(Scalar::Null(NullKind::NaN)));
+        }
+        Self::from_values(self.name.clone(), self.index.labels().to_vec(), out)
+    }
+
+    /// Replace specific values with substitutions.
+    ///
+    /// Matches `pd.Series.replace(to_replace, value)` for scalar pairs.
+    pub fn replace(&self, replacements: &[(Scalar, Scalar)]) -> Result<Self, FrameError> {
+        let mut out = Vec::with_capacity(self.len());
+        for val in self.column.values() {
+            let replaced = replacements
+                .iter()
+                .find(|(old, _)| old.semantic_eq(val))
+                .map(|(_, new)| new.clone());
+            out.push(replaced.unwrap_or_else(|| val.clone()));
+        }
+        Self::from_values(self.name.clone(), self.index.labels().to_vec(), out)
+    }
+
+    /// Compute the q-th quantile (0.0 to 1.0) using linear interpolation.
+    ///
+    /// Matches `pd.Series.quantile(q)`.
+    pub fn quantile(&self, q: f64) -> Result<Scalar, FrameError> {
+        if !(0.0..=1.0).contains(&q) {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "quantile must be between 0 and 1, got {q}"
+            )));
+        }
+        let mut nums: Vec<f64> = Vec::new();
+        for val in self.column.values() {
+            if !val.is_missing() {
+                nums.push(val.to_f64().map_err(ColumnError::from)?);
+            }
+        }
+        if nums.is_empty() {
+            return Ok(Scalar::Float64(f64::NAN));
+        }
+        nums.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        Ok(Scalar::Float64(Self::percentile_linear_series(&nums, q)))
+    }
+
+    fn percentile_linear_series(sorted: &[f64], q: f64) -> f64 {
+        if sorted.len() == 1 {
+            return sorted[0];
+        }
+        let pos = q * (sorted.len() - 1) as f64;
+        let lower = pos.floor() as usize;
+        let upper = pos.ceil() as usize;
+        if lower == upper {
+            sorted[lower]
+        } else {
+            let frac = pos - lower as f64;
+            sorted[lower] * (1.0 - frac) + sorted[upper] * frac
+        }
+    }
+
     /// Cast values to a target dtype.
     ///
     /// Matches `series.astype(dtype)` for scalar dtypes.
     pub fn astype(&self, dtype: DType) -> Result<Self, FrameError> {
         let column = Column::new(dtype, self.values().to_vec())?;
         Self::new(self.name.clone(), self.index.clone(), column)
+    }
+
+    /// Clip values to `[lower, upper]`.
+    ///
+    /// Matches `pd.Series.clip(lower, upper)`. NaN values pass through unchanged.
+    pub fn clip(&self, lower: Option<f64>, upper: Option<f64>) -> Result<Self, FrameError> {
+        let mut out = Vec::with_capacity(self.len());
+        for val in self.column.values() {
+            if val.is_missing() {
+                out.push(val.clone());
+                continue;
+            }
+            let v = val.to_f64().map_err(ColumnError::from)?;
+            let mut clamped = v;
+            if let Some(lo) = lower {
+                if clamped < lo {
+                    clamped = lo;
+                }
+            }
+            if let Some(hi) = upper {
+                if clamped > hi {
+                    clamped = hi;
+                }
+            }
+            out.push(Scalar::Float64(clamped));
+        }
+        Self::from_values(self.name.clone(), self.index.labels().to_vec(), out)
+    }
+
+    /// Absolute value of each element.
+    ///
+    /// Matches `pd.Series.abs()`. NaN values pass through.
+    pub fn abs(&self) -> Result<Self, FrameError> {
+        let mut out = Vec::with_capacity(self.len());
+        for val in self.column.values() {
+            if val.is_missing() {
+                out.push(val.clone());
+            } else {
+                let v = val.to_f64().map_err(ColumnError::from)?;
+                out.push(Scalar::Float64(v.abs()));
+            }
+        }
+        Self::from_values(self.name.clone(), self.index.labels().to_vec(), out)
+    }
+
+    /// Round each element to `decimals` decimal places.
+    ///
+    /// Matches `pd.Series.round(decimals)`. NaN values pass through.
+    pub fn round(&self, decimals: i32) -> Result<Self, FrameError> {
+        let factor = 10.0_f64.powi(decimals);
+        let mut out = Vec::with_capacity(self.len());
+        for val in self.column.values() {
+            if val.is_missing() {
+                out.push(val.clone());
+            } else {
+                let v = val.to_f64().map_err(ColumnError::from)?;
+                out.push(Scalar::Float64((v * factor).round() / factor));
+            }
+        }
+        Self::from_values(self.name.clone(), self.index.labels().to_vec(), out)
     }
 
     // --- Descriptive Statistics ---
@@ -1069,7 +1225,7 @@ impl Series {
         }
         vals.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let mid = vals.len() / 2;
-        let result = if vals.len() % 2 == 0 {
+        let result = if vals.len().is_multiple_of(2) {
             (vals[mid - 1] + vals[mid]) / 2.0
         } else {
             vals[mid]
@@ -1105,6 +1261,147 @@ impl Series {
             }
         }
         Ok(true)
+    }
+
+    // --- Shift / Diff / Cumulative ---
+
+    /// Shift values by `periods` positions, filling with NaN.
+    ///
+    /// Matches `pd.Series.shift(periods)`. Positive shifts move values
+    /// downward (earlier positions become NaN); negative shifts move
+    /// values upward (later positions become NaN).
+    pub fn shift(&self, periods: i64) -> Result<Self, FrameError> {
+        let n = self.len();
+        let missing = Scalar::Null(NullKind::NaN);
+        let vals = self.column.values();
+        let mut out = Vec::with_capacity(n);
+
+        if periods >= 0 {
+            let p = periods as usize;
+            for _ in 0..p.min(n) {
+                out.push(missing.clone());
+            }
+            if p < n {
+                out.extend_from_slice(&vals[..n - p]);
+            }
+        } else {
+            let p = periods.unsigned_abs() as usize;
+            if p < n {
+                out.extend_from_slice(&vals[p..]);
+            }
+            for _ in 0..p.min(n) {
+                out.push(missing.clone());
+            }
+        }
+
+        Self::from_values(self.name.clone(), self.index.labels().to_vec(), out)
+    }
+
+    /// Element-wise difference with the previous element.
+    ///
+    /// Matches `pd.Series.diff(periods)`. Computes `value[i] - value[i - periods]`.
+    /// Produces NaN for positions without a valid predecessor and for nulls.
+    pub fn diff(&self, periods: i64) -> Result<Self, FrameError> {
+        let n = self.len();
+        let vals = self.column.values();
+        let mut out = Vec::with_capacity(n);
+
+        for i in 0..n {
+            let prev_idx = if periods >= 0 {
+                i.checked_sub(periods as usize)
+            } else {
+                let p = periods.unsigned_abs() as usize;
+                let j = i + p;
+                if j < n { Some(j) } else { None }
+            };
+
+            let result = match prev_idx {
+                Some(j) if !vals[i].is_missing() && !vals[j].is_missing() => {
+                    match (vals[i].to_f64(), vals[j].to_f64()) {
+                        (Ok(a), Ok(b)) => Scalar::Float64(a - b),
+                        _ => Scalar::Null(NullKind::NaN),
+                    }
+                }
+                _ => Scalar::Null(NullKind::NaN),
+            };
+            out.push(result);
+        }
+
+        Self::from_values(self.name.clone(), self.index.labels().to_vec(), out)
+    }
+
+    /// Cumulative sum, skipping NaN.
+    ///
+    /// Matches `pd.Series.cumsum(skipna=True)`.
+    pub fn cumsum(&self) -> Result<Self, FrameError> {
+        let mut acc = 0.0_f64;
+        let mut out = Vec::with_capacity(self.len());
+        for val in self.column.values() {
+            if val.is_missing() {
+                out.push(Scalar::Null(NullKind::NaN));
+            } else {
+                acc += val.to_f64().map_err(ColumnError::from)?;
+                out.push(Scalar::Float64(acc));
+            }
+        }
+        Self::from_values(self.name.clone(), self.index.labels().to_vec(), out)
+    }
+
+    /// Cumulative product, skipping NaN.
+    ///
+    /// Matches `pd.Series.cumprod(skipna=True)`.
+    pub fn cumprod(&self) -> Result<Self, FrameError> {
+        let mut acc = 1.0_f64;
+        let mut out = Vec::with_capacity(self.len());
+        for val in self.column.values() {
+            if val.is_missing() {
+                out.push(Scalar::Null(NullKind::NaN));
+            } else {
+                acc *= val.to_f64().map_err(ColumnError::from)?;
+                out.push(Scalar::Float64(acc));
+            }
+        }
+        Self::from_values(self.name.clone(), self.index.labels().to_vec(), out)
+    }
+
+    /// Cumulative minimum, skipping NaN.
+    ///
+    /// Matches `pd.Series.cummin(skipna=True)`.
+    pub fn cummin(&self) -> Result<Self, FrameError> {
+        let mut acc = f64::INFINITY;
+        let mut out = Vec::with_capacity(self.len());
+        for val in self.column.values() {
+            if val.is_missing() {
+                out.push(Scalar::Null(NullKind::NaN));
+            } else {
+                let v = val.to_f64().map_err(ColumnError::from)?;
+                if v < acc {
+                    acc = v;
+                }
+                out.push(Scalar::Float64(acc));
+            }
+        }
+        Self::from_values(self.name.clone(), self.index.labels().to_vec(), out)
+    }
+
+    /// Cumulative maximum, skipping NaN.
+    ///
+    /// Matches `pd.Series.cummax(skipna=True)`.
+    pub fn cummax(&self) -> Result<Self, FrameError> {
+        let mut acc = f64::NEG_INFINITY;
+        let mut out = Vec::with_capacity(self.len());
+        for val in self.column.values() {
+            if val.is_missing() {
+                out.push(Scalar::Null(NullKind::NaN));
+            } else {
+                let v = val.to_f64().map_err(ColumnError::from)?;
+                if v > acc {
+                    acc = v;
+                }
+                out.push(Scalar::Float64(acc));
+            }
+        }
+        Self::from_values(self.name.clone(), self.index.labels().to_vec(), out)
     }
 }
 
@@ -2694,17 +2991,301 @@ impl DataFrame {
                 .expect("column name listed in order must exist");
             let name_str = name.as_str();
             let new_name = rename_map.get(name_str).unwrap_or(&name_str);
-            
+
             if columns.contains_key(*new_name) {
                 return Err(FrameError::CompatibilityRejected(format!(
-                    "duplicate column '{}' resulting from rename", new_name
+                    "duplicate column '{}' resulting from rename",
+                    new_name
                 )));
             }
-            
+
             column_order.push((*new_name).to_owned());
             columns.insert((*new_name).to_owned(), col.clone());
         }
         Self::new_with_column_order(self.index.clone(), columns, column_order)
+    }
+
+    /// Summary statistics for numeric columns.
+    ///
+    /// Matches `df.describe()` — returns a DataFrame with index
+    /// `[count, mean, std, min, 25%, 50%, 75%, max]` and one column per
+    /// numeric input column.
+    pub fn describe(&self) -> Result<Self, FrameError> {
+        let stat_labels = vec![
+            IndexLabel::Utf8("count".to_owned()),
+            IndexLabel::Utf8("mean".to_owned()),
+            IndexLabel::Utf8("std".to_owned()),
+            IndexLabel::Utf8("min".to_owned()),
+            IndexLabel::Utf8("25%".to_owned()),
+            IndexLabel::Utf8("50%".to_owned()),
+            IndexLabel::Utf8("75%".to_owned()),
+            IndexLabel::Utf8("max".to_owned()),
+        ];
+        let out_index = Index::new(stat_labels);
+
+        let mut out_columns = BTreeMap::new();
+        let mut out_order = Vec::new();
+
+        for name in &self.column_order {
+            let col = self
+                .columns
+                .get(name)
+                .expect("column name listed in order must exist");
+
+            if col.dtype() != DType::Int64 && col.dtype() != DType::Float64 {
+                continue;
+            }
+
+            let mut nums: Vec<f64> = Vec::new();
+            for val in col.values() {
+                if !val.is_missing()
+                    && let Ok(v) = val.to_f64()
+                {
+                    nums.push(v);
+                }
+            }
+
+            let count = nums.len() as f64;
+            let (mean, std, min, q25, q50, q75, max) = if nums.is_empty() {
+                (
+                    f64::NAN,
+                    f64::NAN,
+                    f64::NAN,
+                    f64::NAN,
+                    f64::NAN,
+                    f64::NAN,
+                    f64::NAN,
+                )
+            } else {
+                let sum: f64 = nums.iter().sum();
+                let mean_val = sum / count;
+                let var = if nums.len() > 1 {
+                    nums.iter().map(|x| (x - mean_val).powi(2)).sum::<f64>() / (count - 1.0)
+                } else {
+                    f64::NAN
+                };
+                nums.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                let min_val = nums[0];
+                let max_val = nums[nums.len() - 1];
+                (
+                    mean_val,
+                    var.sqrt(),
+                    min_val,
+                    Self::percentile_linear(&nums, 0.25),
+                    Self::percentile_linear(&nums, 0.50),
+                    Self::percentile_linear(&nums, 0.75),
+                    max_val,
+                )
+            };
+
+            let stats = vec![
+                Scalar::Float64(count),
+                Scalar::Float64(mean),
+                Scalar::Float64(std),
+                Scalar::Float64(min),
+                Scalar::Float64(q25),
+                Scalar::Float64(q50),
+                Scalar::Float64(q75),
+                Scalar::Float64(max),
+            ];
+
+            out_columns.insert(name.clone(), Column::from_values(stats)?);
+            out_order.push(name.clone());
+        }
+
+        Self::new_with_column_order(out_index, out_columns, out_order)
+    }
+
+    /// Compute quantile(s) for each numeric column.
+    ///
+    /// Matches `df.quantile(q)` for a single quantile value.
+    /// Returns a Series indexed by column names.
+    pub fn quantile(&self, q: f64) -> Result<Series, FrameError> {
+        if !(0.0..=1.0).contains(&q) {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "quantile must be between 0 and 1, got {q}"
+            )));
+        }
+        let mut labels = Vec::new();
+        let mut values = Vec::new();
+        for name in &self.column_order {
+            let col = self
+                .columns
+                .get(name)
+                .expect("column name listed in order must exist");
+            if col.dtype() != DType::Int64 && col.dtype() != DType::Float64 {
+                continue;
+            }
+            let mut nums: Vec<f64> = Vec::new();
+            for val in col.values() {
+                if !val.is_missing()
+                    && let Ok(v) = val.to_f64()
+                {
+                    nums.push(v);
+                }
+            }
+            labels.push(IndexLabel::Utf8(name.clone()));
+            if nums.is_empty() {
+                values.push(Scalar::Float64(f64::NAN));
+            } else {
+                nums.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                values.push(Scalar::Float64(Self::percentile_linear(&nums, q)));
+            }
+        }
+        Series::from_values(format!("{q}"), labels, values)
+    }
+
+    /// Apply an aggregation function along an axis.
+    ///
+    /// `axis=0` (default): apply function to each column, returning a Series
+    /// indexed by column names.
+    /// `axis=1`: apply function to each row, returning a Series indexed by
+    /// the original DataFrame index.
+    ///
+    /// Matches `df.apply(func, axis=...)` for built-in aggregations.
+    pub fn apply(&self, func: &str, axis: usize) -> Result<Series, FrameError> {
+        if axis == 0 {
+            // Column-wise: aggregate each column
+            let mut labels = Vec::new();
+            let mut values = Vec::new();
+            for name in &self.column_order {
+                let col = self
+                    .columns
+                    .get(name)
+                    .expect("column name listed in order must exist");
+                labels.push(IndexLabel::Utf8(name.clone()));
+                let s = Series::new(name.clone(), self.index.clone(), col.clone())?;
+                let agg = match func {
+                    "sum" => s.sum()?,
+                    "mean" => s.mean()?,
+                    "min" => s.min()?,
+                    "max" => s.max()?,
+                    "std" => s.std()?,
+                    "var" => s.var()?,
+                    "median" => s.median()?,
+                    "count" => Scalar::Int64(s.count() as i64),
+                    other => {
+                        return Err(FrameError::CompatibilityRejected(format!(
+                            "unsupported apply function: '{other}'"
+                        )));
+                    }
+                };
+                values.push(agg);
+            }
+            Series::from_values(func, labels, values)
+        } else if axis == 1 {
+            // Row-wise: aggregate each row across columns
+            let mut values = Vec::with_capacity(self.len());
+            for row_idx in 0..self.len() {
+                let row_vals: Vec<f64> = self
+                    .column_order
+                    .iter()
+                    .filter_map(|name| {
+                        let col = self.columns.get(name)?;
+                        let val = &col.values()[row_idx];
+                        if val.is_missing() {
+                            None
+                        } else {
+                            val.to_f64().ok()
+                        }
+                    })
+                    .collect();
+                let result = match func {
+                    "sum" => row_vals.iter().sum::<f64>(),
+                    "mean" => {
+                        if row_vals.is_empty() {
+                            f64::NAN
+                        } else {
+                            row_vals.iter().sum::<f64>() / row_vals.len() as f64
+                        }
+                    }
+                    "min" => row_vals
+                        .iter()
+                        .copied()
+                        .reduce(f64::min)
+                        .unwrap_or(f64::NAN),
+                    "max" => row_vals
+                        .iter()
+                        .copied()
+                        .reduce(f64::max)
+                        .unwrap_or(f64::NAN),
+                    "count" => row_vals.len() as f64,
+                    other => {
+                        return Err(FrameError::CompatibilityRejected(format!(
+                            "unsupported apply function: '{other}'"
+                        )));
+                    }
+                };
+                values.push(Scalar::Float64(result));
+            }
+            Series::from_values(func, self.index.labels().to_vec(), values)
+        } else {
+            Err(FrameError::CompatibilityRejected(format!(
+                "axis must be 0 or 1, got {axis}"
+            )))
+        }
+    }
+
+    /// Transpose the DataFrame: rows become columns, columns become rows.
+    ///
+    /// Matches `df.T` / `df.transpose()`. Column names become the index
+    /// of the result, and the original index labels become column names
+    /// (converted to strings).
+    pub fn transpose(&self) -> Result<Self, FrameError> {
+        let n_rows = self.len();
+        let n_cols = self.num_columns();
+
+        // New index: original column names
+        let new_index_labels: Vec<IndexLabel> = self
+            .column_order
+            .iter()
+            .map(|name| IndexLabel::Utf8(name.clone()))
+            .collect();
+        let new_index = Index::new(new_index_labels);
+
+        // New columns: one per original row, named by index label
+        let mut new_columns = BTreeMap::new();
+        let mut new_order = Vec::with_capacity(n_rows);
+
+        for row_idx in 0..n_rows {
+            let col_name = match &self.index.labels()[row_idx] {
+                IndexLabel::Int64(v) => v.to_string(),
+                IndexLabel::Utf8(v) => v.clone(),
+            };
+
+            let mut row_values = Vec::with_capacity(n_cols);
+            for col_name_src in &self.column_order {
+                let col = self
+                    .columns
+                    .get(col_name_src)
+                    .expect("column name listed in order must exist");
+                row_values.push(col.values()[row_idx].clone());
+            }
+
+            new_columns.insert(col_name.clone(), Column::from_values(row_values)?);
+            new_order.push(col_name);
+        }
+
+        Self::new_with_column_order(new_index, new_columns, new_order)
+    }
+
+    /// Linear interpolation percentile (matching pandas default method).
+    fn percentile_linear(sorted: &[f64], q: f64) -> f64 {
+        if sorted.is_empty() {
+            return f64::NAN;
+        }
+        if sorted.len() == 1 {
+            return sorted[0];
+        }
+        let pos = q * (sorted.len() - 1) as f64;
+        let lower = pos.floor() as usize;
+        let upper = pos.ceil() as usize;
+        if lower == upper {
+            sorted[lower]
+        } else {
+            let frac = pos - lower as f64;
+            sorted[lower] * (1.0 - frac) + sorted[upper] * frac
+        }
     }
 }
 
@@ -4782,6 +5363,383 @@ mod tests {
         let out = s.value_counts().unwrap();
         assert!(out.index().labels().is_empty());
         assert!(out.values().is_empty());
+    }
+
+    #[test]
+    fn series_unique_returns_first_seen_order_skipping_nulls() {
+        let s = Series::from_values(
+            "vals",
+            vec![
+                IndexLabel::from("a"),
+                IndexLabel::from("b"),
+                IndexLabel::from("c"),
+                IndexLabel::from("d"),
+                IndexLabel::from("e"),
+            ],
+            vec![
+                Scalar::Int64(3),
+                Scalar::Int64(1),
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(3),
+                Scalar::Int64(2),
+            ],
+        )
+        .unwrap();
+
+        let uniq = s.unique();
+        assert_eq!(
+            uniq,
+            vec![Scalar::Int64(3), Scalar::Int64(1), Scalar::Int64(2)]
+        );
+    }
+
+    #[test]
+    fn series_unique_empty_series() {
+        let s = Series::from_values("empty", vec![], vec![]).unwrap();
+        assert!(s.unique().is_empty());
+        assert_eq!(s.nunique(), 0);
+    }
+
+    #[test]
+    fn series_nunique_counts_distinct_non_null() {
+        let s = Series::from_values(
+            "vals",
+            vec![
+                IndexLabel::from("a"),
+                IndexLabel::from("b"),
+                IndexLabel::from("c"),
+                IndexLabel::from("d"),
+            ],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(1.0),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(s.nunique(), 2);
+    }
+
+    #[test]
+    fn series_shift_positive() {
+        let s = Series::from_values(
+            "vals",
+            vec![
+                IndexLabel::from("a"),
+                IndexLabel::from("b"),
+                IndexLabel::from("c"),
+            ],
+            vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+        )
+        .unwrap();
+
+        let shifted = s.shift(1).unwrap();
+        assert!(shifted.values()[0].is_missing());
+        assert_eq!(shifted.values()[1], Scalar::Int64(10));
+        assert_eq!(shifted.values()[2], Scalar::Int64(20));
+    }
+
+    #[test]
+    fn series_shift_negative() {
+        let s = Series::from_values(
+            "vals",
+            vec![
+                IndexLabel::from("a"),
+                IndexLabel::from("b"),
+                IndexLabel::from("c"),
+            ],
+            vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+        )
+        .unwrap();
+
+        let shifted = s.shift(-1).unwrap();
+        assert_eq!(shifted.values()[0], Scalar::Int64(20));
+        assert_eq!(shifted.values()[1], Scalar::Int64(30));
+        assert!(shifted.values()[2].is_missing());
+    }
+
+    #[test]
+    fn series_diff_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![
+                IndexLabel::from("a"),
+                IndexLabel::from("b"),
+                IndexLabel::from("c"),
+            ],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(6.0),
+            ],
+        )
+        .unwrap();
+
+        let d = s.diff(1).unwrap();
+        assert!(d.values()[0].is_missing()); // no predecessor
+        assert_eq!(d.values()[1], Scalar::Float64(2.0));
+        assert_eq!(d.values()[2], Scalar::Float64(3.0));
+    }
+
+    #[test]
+    fn series_cumsum_skips_nan() {
+        let s = Series::from_values(
+            "vals",
+            vec![
+                IndexLabel::from("a"),
+                IndexLabel::from("b"),
+                IndexLabel::from("c"),
+                IndexLabel::from("d"),
+            ],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(3.0),
+                Scalar::Float64(5.0),
+            ],
+        )
+        .unwrap();
+
+        let cs = s.cumsum().unwrap();
+        assert_eq!(cs.values()[0], Scalar::Float64(1.0));
+        assert!(cs.values()[1].is_missing());
+        assert_eq!(cs.values()[2], Scalar::Float64(4.0));
+        assert_eq!(cs.values()[3], Scalar::Float64(9.0));
+    }
+
+    #[test]
+    fn series_cumprod_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![
+                IndexLabel::from("a"),
+                IndexLabel::from("b"),
+                IndexLabel::from("c"),
+            ],
+            vec![
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(4.0),
+            ],
+        )
+        .unwrap();
+
+        let cp = s.cumprod().unwrap();
+        assert_eq!(cp.values()[0], Scalar::Float64(2.0));
+        assert_eq!(cp.values()[1], Scalar::Float64(6.0));
+        assert_eq!(cp.values()[2], Scalar::Float64(24.0));
+    }
+
+    #[test]
+    fn series_cummin_cummax_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![
+                IndexLabel::from("a"),
+                IndexLabel::from("b"),
+                IndexLabel::from("c"),
+            ],
+            vec![
+                Scalar::Float64(3.0),
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+            ],
+        )
+        .unwrap();
+
+        let cmin = s.cummin().unwrap();
+        assert_eq!(cmin.values()[0], Scalar::Float64(3.0));
+        assert_eq!(cmin.values()[1], Scalar::Float64(1.0));
+        assert_eq!(cmin.values()[2], Scalar::Float64(1.0));
+
+        let cmax = s.cummax().unwrap();
+        assert_eq!(cmax.values()[0], Scalar::Float64(3.0));
+        assert_eq!(cmax.values()[1], Scalar::Float64(3.0));
+        assert_eq!(cmax.values()[2], Scalar::Float64(3.0));
+    }
+
+    #[test]
+    fn series_map_replaces_and_fills_nan() {
+        let s = Series::from_values(
+            "vals",
+            vec![
+                IndexLabel::from("a"),
+                IndexLabel::from("b"),
+                IndexLabel::from("c"),
+            ],
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+        )
+        .unwrap();
+
+        let mapped = s
+            .map(&[
+                (Scalar::Int64(1), Scalar::Utf8("one".to_owned())),
+                (Scalar::Int64(2), Scalar::Utf8("two".to_owned())),
+            ])
+            .unwrap();
+
+        assert_eq!(mapped.values()[0], Scalar::Utf8("one".to_owned()));
+        assert_eq!(mapped.values()[1], Scalar::Utf8("two".to_owned()));
+        assert!(mapped.values()[2].is_missing()); // 3 not in mapping
+    }
+
+    #[test]
+    fn series_replace_substitutes_values() {
+        let s = Series::from_values(
+            "vals",
+            vec![
+                IndexLabel::from("a"),
+                IndexLabel::from("b"),
+                IndexLabel::from("c"),
+            ],
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(1)],
+        )
+        .unwrap();
+
+        let replaced = s.replace(&[(Scalar::Int64(1), Scalar::Int64(99))]).unwrap();
+
+        assert_eq!(replaced.values()[0], Scalar::Int64(99));
+        assert_eq!(replaced.values()[1], Scalar::Int64(2)); // unchanged
+        assert_eq!(replaced.values()[2], Scalar::Int64(99));
+    }
+
+    #[test]
+    fn series_quantile_median() {
+        let s = Series::from_values(
+            "vals",
+            vec![
+                IndexLabel::from("a"),
+                IndexLabel::from("b"),
+                IndexLabel::from("c"),
+            ],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+            ],
+        )
+        .unwrap();
+
+        let q50 = s.quantile(0.5).unwrap();
+        assert_eq!(q50, Scalar::Float64(2.0));
+    }
+
+    #[test]
+    fn dataframe_quantile_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(30.0),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let q = df.quantile(0.5).unwrap();
+        assert_eq!(q.values()[0], Scalar::Float64(2.0)); // a median
+        assert_eq!(q.values()[1], Scalar::Float64(20.0)); // b median
+    }
+
+    #[test]
+    fn series_clip_bounds_values() {
+        let s = Series::from_values(
+            "vals",
+            vec![
+                IndexLabel::from("a"),
+                IndexLabel::from("b"),
+                IndexLabel::from("c"),
+            ],
+            vec![
+                Scalar::Float64(-5.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(10.0),
+            ],
+        )
+        .unwrap();
+
+        let clipped = s.clip(Some(0.0), Some(5.0)).unwrap();
+        assert_eq!(clipped.values()[0], Scalar::Float64(0.0));
+        assert_eq!(clipped.values()[1], Scalar::Float64(3.0));
+        assert_eq!(clipped.values()[2], Scalar::Float64(5.0));
+    }
+
+    #[test]
+    fn series_abs_and_round() {
+        let s = Series::from_values(
+            "vals",
+            vec![IndexLabel::from("a"), IndexLabel::from("b")],
+            vec![Scalar::Float64(-3.14159), Scalar::Float64(2.71828)],
+        )
+        .unwrap();
+
+        let a = s.abs().unwrap();
+        assert_eq!(a.values()[0], Scalar::Float64(3.14159));
+
+        let r = s.round(2).unwrap();
+        assert_eq!(r.values()[0], Scalar::Float64(-3.14));
+        assert_eq!(r.values()[1], Scalar::Float64(2.72));
+    }
+
+    #[test]
+    fn dataframe_apply_column_wise() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(4.0),
+                        Scalar::Float64(5.0),
+                        Scalar::Float64(6.0),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let sums = df.apply("sum", 0).unwrap();
+        assert_eq!(sums.values()[0], Scalar::Float64(6.0)); // sum(a)
+        assert_eq!(sums.values()[1], Scalar::Float64(15.0)); // sum(b)
+    }
+
+    #[test]
+    fn dataframe_apply_row_wise() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
+                ("b", vec![Scalar::Float64(3.0), Scalar::Float64(4.0)]),
+            ],
+        )
+        .unwrap();
+
+        let row_sums = df.apply("sum", 1).unwrap();
+        assert_eq!(row_sums.values()[0], Scalar::Float64(4.0)); // 1+3
+        assert_eq!(row_sums.values()[1], Scalar::Float64(6.0)); // 2+4
     }
 
     #[test]
@@ -7106,5 +8064,89 @@ mod tests {
         let result = df.rename_columns(&[("old_name", "new_name")]).unwrap();
         assert!(result.column("new_name").is_some());
         assert!(result.column("old_name").is_none());
+    }
+
+    #[test]
+    fn dataframe_describe_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(4.0),
+                        Scalar::Float64(5.0),
+                        Scalar::Float64(6.0),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let desc = df.describe().unwrap();
+        assert_eq!(desc.len(), 8); // count, mean, std, min, 25%, 50%, 75%, max
+        assert_eq!(desc.num_columns(), 2);
+
+        // Check count row for column "a"
+        let a_col = desc.column("a").unwrap();
+        assert_eq!(a_col.values()[0], Scalar::Float64(3.0)); // count
+        assert_eq!(a_col.values()[1], Scalar::Float64(2.0)); // mean
+        assert_eq!(a_col.values()[3], Scalar::Float64(1.0)); // min
+        assert_eq!(a_col.values()[7], Scalar::Float64(3.0)); // max
+    }
+
+    #[test]
+    fn dataframe_describe_skips_non_numeric() {
+        let df = DataFrame::from_dict(
+            &["nums", "strs"],
+            vec![
+                ("nums", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
+                (
+                    "strs",
+                    vec![Scalar::Utf8("a".to_owned()), Scalar::Utf8("b".to_owned())],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let desc = df.describe().unwrap();
+        assert_eq!(desc.num_columns(), 1); // only "nums"
+        assert!(desc.column("strs").is_none());
+    }
+
+    #[test]
+    fn dataframe_transpose_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                ("b", vec![Scalar::Int64(3), Scalar::Int64(4)]),
+            ],
+        )
+        .unwrap();
+
+        let t = df.transpose().unwrap();
+        // Original: 2 rows x 2 cols -> Transposed: 2 rows (a, b) x 2 cols (0, 1)
+        assert_eq!(t.len(), 2);
+        assert_eq!(t.num_columns(), 2);
+        assert_eq!(
+            t.index().labels(),
+            &[
+                IndexLabel::Utf8("a".to_owned()),
+                IndexLabel::Utf8("b".to_owned())
+            ]
+        );
+        let col0 = t.column("0").unwrap();
+        assert_eq!(col0.values(), &[Scalar::Int64(1), Scalar::Int64(3)]);
+        let col1 = t.column("1").unwrap();
+        assert_eq!(col1.values(), &[Scalar::Int64(2), Scalar::Int64(4)]);
     }
 }

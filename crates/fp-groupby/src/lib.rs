@@ -554,16 +554,24 @@ pub fn groupby_agg(
             AggFunc::Max => fp_types::nanmax(vals),
             AggFunc::First => {
                 if vals.is_empty() {
-                    Scalar::Null(NullKind::Null)
+                    Scalar::Null(NullKind::NaN)
                 } else {
-                    vals[0].clone()
+                    // Pandas promotes integer first() to Float64 for NaN compat.
+                    match &vals[0] {
+                        Scalar::Int64(v) => Scalar::Float64(*v as f64),
+                        other => other.clone(),
+                    }
                 }
             }
             AggFunc::Last => {
                 if vals.is_empty() {
-                    Scalar::Null(NullKind::Null)
+                    Scalar::Null(NullKind::NaN)
                 } else {
-                    vals[vals.len() - 1].clone()
+                    // Pandas promotes integer last() to Float64 for NaN compat.
+                    match &vals[vals.len() - 1] {
+                        Scalar::Int64(v) => Scalar::Float64(*v as f64),
+                        other => other.clone(),
+                    }
                 }
             }
             AggFunc::Var => fp_types::nanvar(vals, 1),
@@ -750,7 +758,11 @@ impl HyperLogLog {
         // If remaining is 0, leading_zeros is 64. But we only have 64 - p bits.
         // The maximum run of zeros before we hit the 'implicit' 1 is 64 - p.
         // We can place a sentinel 1 at the bit just below the remaining bits:
-        let sentinel = if self.p == 0 { 0 } else { 1_u64 << (self.p - 1) };
+        let sentinel = if self.p == 0 {
+            0
+        } else {
+            1_u64 << (self.p - 1)
+        };
         let rho = (remaining | sentinel).leading_zeros() as u8 + 1;
         if rho > self.registers[idx % m] {
             self.registers[idx % m] = rho;

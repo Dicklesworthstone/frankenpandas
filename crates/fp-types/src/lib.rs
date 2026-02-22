@@ -201,12 +201,7 @@ pub fn cast_scalar_owned(value: Scalar, target: DType) -> Result<Scalar, TypeErr
             Scalar::Int64(v) => Ok(Scalar::Float64(*v as f64)),
             _ => Err(TypeError::InvalidCast { from, to: target }),
         },
-        DType::Utf8 => match &value {
-            Scalar::Bool(v) => Ok(Scalar::Utf8(if *v { "True".to_owned() } else { "False".to_owned() })),
-            Scalar::Int64(v) => Ok(Scalar::Utf8(v.to_string())),
-            Scalar::Float64(v) => Ok(Scalar::Utf8(v.to_string())),
-            _ => Err(TypeError::InvalidCast { from, to: target }),
-        },
+        DType::Utf8 => Err(TypeError::InvalidCast { from, to: target }),
     }
 }
 
@@ -301,7 +296,7 @@ pub fn nanmedian(values: &[Scalar]) -> Scalar {
     }
     nums.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let mid = nums.len() / 2;
-    if nums.len() % 2 == 0 {
+    if nums.len().is_multiple_of(2) {
         Scalar::Float64((nums[mid - 1] + nums[mid]) / 2.0)
     } else {
         Scalar::Float64(nums[mid])

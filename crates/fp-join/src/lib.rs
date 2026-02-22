@@ -204,7 +204,12 @@ fn estimate_output_rows(
                 .index()
                 .labels()
                 .iter()
-                .filter(|label| !left_map.as_ref().expect("Outer needs left_map").contains_key(*label))
+                .filter(|label| {
+                    !left_map
+                        .as_ref()
+                        .expect("Outer needs left_map")
+                        .contains_key(*label)
+                })
                 .count();
             left_matched + right_unmatched
         }

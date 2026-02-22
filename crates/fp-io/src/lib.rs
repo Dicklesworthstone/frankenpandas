@@ -97,13 +97,21 @@ pub fn read_csv_str(input: &str) -> Result<DataFrame, IoError> {
     }
 
     let index = Index::from_i64((0..row_count).collect());
-    Ok(DataFrame::new_with_column_order(index, out_columns, column_order)?)
+    Ok(DataFrame::new_with_column_order(
+        index,
+        out_columns,
+        column_order,
+    )?)
 }
 
 pub fn write_csv_string(frame: &DataFrame) -> Result<String, IoError> {
     let mut writer = WriterBuilder::new().from_writer(Vec::new());
 
-    let headers = frame.column_names().into_iter().cloned().collect::<Vec<_>>();
+    let headers = frame
+        .column_names()
+        .into_iter()
+        .cloned()
+        .collect::<Vec<_>>();
     writer.write_record(&headers)?;
 
     for row_idx in 0..frame.index().len() {
@@ -236,7 +244,11 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
             column_order.push(name);
             col_idx += 1;
         }
-        Ok(DataFrame::new_with_column_order(index, out_columns, column_order)?)
+        Ok(DataFrame::new_with_column_order(
+            index,
+            out_columns,
+            column_order,
+        )?)
     } else {
         let mut out_columns = BTreeMap::new();
         let mut column_order = Vec::with_capacity(header_count);
@@ -246,7 +258,11 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
             column_order.push(name);
         }
         let index = Index::from_i64((0..row_count).collect());
-        Ok(DataFrame::new_with_column_order(index, out_columns, column_order)?)
+        Ok(DataFrame::new_with_column_order(
+            index,
+            out_columns,
+            column_order,
+        )?)
     }
 }
 
