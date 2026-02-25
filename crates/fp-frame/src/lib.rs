@@ -8951,4 +8951,257 @@ mod tests {
         assert_eq!(result.values()[1], Scalar::Bool(true));
         assert_eq!(result.values()[2], Scalar::Bool(false));
     }
+
+    // --- Series::idxmin / idxmax tests ---
+
+    #[test]
+    fn series_idxmin_basic() {
+        let s = Series::from_values(
+            "x",
+            vec!["a".into(), "b".into(), "c".into()],
+            vec![Scalar::Int64(3), Scalar::Int64(1), Scalar::Int64(2)],
+        )
+        .unwrap();
+        assert_eq!(s.idxmin().unwrap(), IndexLabel::Utf8("b".to_owned()));
+    }
+
+    #[test]
+    fn series_idxmax_basic() {
+        let s = Series::from_values(
+            "x",
+            vec!["a".into(), "b".into(), "c".into()],
+            vec![Scalar::Int64(3), Scalar::Int64(1), Scalar::Int64(2)],
+        )
+        .unwrap();
+        assert_eq!(s.idxmax().unwrap(), IndexLabel::Utf8("a".to_owned()));
+    }
+
+    #[test]
+    fn series_idxmin_skips_nulls() {
+        let s = Series::from_values(
+            "x",
+            vec!["a".into(), "b".into(), "c".into()],
+            vec![
+                Scalar::Null(NullKind::NaN),
+                Scalar::Int64(5),
+                Scalar::Int64(2),
+            ],
+        )
+        .unwrap();
+        assert_eq!(s.idxmin().unwrap(), IndexLabel::Utf8("c".to_owned()));
+    }
+
+    #[test]
+    fn series_idxmin_all_null() {
+        let s = Series::from_values(
+            "x",
+            vec!["a".into()],
+            vec![Scalar::Null(NullKind::NaN)],
+        )
+        .unwrap();
+        assert!(s.idxmin().is_err());
+    }
+
+    // --- Series::nlargest / nsmallest tests ---
+
+    #[test]
+    fn series_nlargest_basic() {
+        let s = Series::from_values(
+            "x",
+            vec!["a".into(), "b".into(), "c".into(), "d".into()],
+            vec![
+                Scalar::Int64(3),
+                Scalar::Int64(1),
+                Scalar::Int64(4),
+                Scalar::Int64(2),
+            ],
+        )
+        .unwrap();
+
+        let result = s.nlargest(2).unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result.values()[0], Scalar::Int64(4)); // largest
+        assert_eq!(result.values()[1], Scalar::Int64(3)); // second largest
+        assert_eq!(
+            result.index().labels()[0],
+            IndexLabel::Utf8("c".to_owned())
+        );
+        assert_eq!(
+            result.index().labels()[1],
+            IndexLabel::Utf8("a".to_owned())
+        );
+    }
+
+    #[test]
+    fn series_nsmallest_basic() {
+        let s = Series::from_values(
+            "x",
+            vec!["a".into(), "b".into(), "c".into(), "d".into()],
+            vec![
+                Scalar::Int64(3),
+                Scalar::Int64(1),
+                Scalar::Int64(4),
+                Scalar::Int64(2),
+            ],
+        )
+        .unwrap();
+
+        let result = s.nsmallest(2).unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result.values()[0], Scalar::Int64(1));
+        assert_eq!(result.values()[1], Scalar::Int64(2));
+    }
+
+    #[test]
+    fn series_nlargest_with_nulls() {
+        let s = Series::from_values(
+            "x",
+            vec!["a".into(), "b".into(), "c".into()],
+            vec![
+                Scalar::Null(NullKind::NaN),
+                Scalar::Int64(5),
+                Scalar::Int64(3),
+            ],
+        )
+        .unwrap();
+
+        let result = s.nlargest(2).unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result.values()[0], Scalar::Int64(5));
+        assert_eq!(result.values()[1], Scalar::Int64(3));
+    }
+
+    #[test]
+    fn series_nlargest_n_exceeds_length() {
+        let s = Series::from_values(
+            "x",
+            vec!["a".into(), "b".into()],
+            vec![Scalar::Int64(2), Scalar::Int64(1)],
+        )
+        .unwrap();
+
+        let result = s.nlargest(10).unwrap();
+        assert_eq!(result.len(), 2);
+    }
+
+    // --- Series::pct_change tests ---
+
+    #[test]
+    fn series_pct_change_basic() {
+        let s = Series::from_values(
+            "x",
+            vec!["a".into(), "b".into(), "c".into(), "d".into()],
+            vec![
+                Scalar::Float64(100.0),
+                Scalar::Float64(110.0),
+                Scalar::Float64(99.0),
+                Scalar::Float64(120.0),
+            ],
+        )
+        .unwrap();
+
+        let result = s.pct_change(1).unwrap();
+        assert!(result.values()[0].is_missing()); // first is NaN
+        let v1 = result.values()[1].to_f64().unwrap();
+        assert!((v1 - 0.1).abs() < 1e-10); // (110-100)/100 = 0.1
+        let v2 = result.values()[2].to_f64().unwrap();
+        assert!((v2 - (-0.1)).abs() < 1e-10); // (99-110)/110 = -0.1
+    }
+
+    #[test]
+    fn series_pct_change_periods_2() {
+        let s = Series::from_values(
+            "x",
+            vec!["a".into(), "b".into(), "c".into()],
+            vec![
+                Scalar::Float64(100.0),
+                Scalar::Float64(200.0),
+                Scalar::Float64(150.0),
+            ],
+        )
+        .unwrap();
+
+        let result = s.pct_change(2).unwrap();
+        assert!(result.values()[0].is_missing());
+        assert!(result.values()[1].is_missing());
+        let v2 = result.values()[2].to_f64().unwrap();
+        assert!((v2 - 0.5).abs() < 1e-10); // (150-100)/100 = 0.5
+    }
+
+    #[test]
+    fn series_pct_change_with_nulls() {
+        let s = Series::from_values(
+            "x",
+            vec!["a".into(), "b".into(), "c".into()],
+            vec![
+                Scalar::Float64(100.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(200.0),
+            ],
+        )
+        .unwrap();
+
+        let result = s.pct_change(1).unwrap();
+        assert!(result.values()[1].is_missing()); // null previous -> NaN
+        assert!(result.values()[2].is_missing()); // null at i-1 -> NaN
+    }
+
+    // --- Series::to_frame / to_list / to_dict tests ---
+
+    #[test]
+    fn series_to_frame() {
+        let s = Series::from_values(
+            "vals",
+            vec!["a".into(), "b".into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2)],
+        )
+        .unwrap();
+
+        let df = s.to_frame(None).unwrap();
+        assert_eq!(df.num_columns(), 1);
+        assert!(df.column("vals").is_some());
+        assert_eq!(df.column("vals").unwrap().values(), s.values());
+    }
+
+    #[test]
+    fn series_to_frame_custom_name() {
+        let s = Series::from_values(
+            "vals",
+            vec!["a".into()],
+            vec![Scalar::Int64(42)],
+        )
+        .unwrap();
+
+        let df = s.to_frame(Some("custom")).unwrap();
+        assert!(df.column("custom").is_some());
+        assert!(df.column("vals").is_none());
+    }
+
+    #[test]
+    fn series_to_list() {
+        let s = Series::from_values(
+            "x",
+            vec!["a".into(), "b".into()],
+            vec![Scalar::Int64(10), Scalar::Int64(20)],
+        )
+        .unwrap();
+
+        let list = s.to_list();
+        assert_eq!(list, vec![Scalar::Int64(10), Scalar::Int64(20)]);
+    }
+
+    #[test]
+    fn series_to_dict() {
+        let s = Series::from_values(
+            "x",
+            vec!["a".into(), "b".into()],
+            vec![Scalar::Int64(10), Scalar::Int64(20)],
+        )
+        .unwrap();
+
+        let dict = s.to_dict();
+        assert_eq!(dict.len(), 2);
+        assert_eq!(dict[0], (IndexLabel::Utf8("a".to_owned()), Scalar::Int64(10)));
+        assert_eq!(dict[1], (IndexLabel::Utf8("b".to_owned()), Scalar::Int64(20)));
+    }
 }
