@@ -1988,6 +1988,43 @@ impl Series {
     pub fn str(&self) -> StringAccessor<'_> {
         StringAccessor { series: self }
     }
+
+    /// Apply a closure element-wise to produce a new Series.
+    pub fn apply_fn<F>(&self, func: F) -> Result<Self, FrameError>
+    where
+        F: Fn(&Scalar) -> Scalar,
+    {
+        let new_vals: Vec<Scalar> = self.column().values().iter().map(func).collect();
+        Self::from_values(self.name(), self.index().labels().to_vec(), new_vals)
+    }
+
+    /// Map values using a dictionary (HashMap).
+    ///
+    /// Values not found in the map become NaN (like pandas `Series.map(dict)`).
+    pub fn map_values(
+        &self,
+        mapping: &std::collections::HashMap<String, Scalar>,
+    ) -> Result<Self, FrameError> {
+        let new_vals: Vec<Scalar> = self
+            .column()
+            .values()
+            .iter()
+            .map(|v| {
+                let key = match v {
+                    Scalar::Utf8(s) => s.clone(),
+                    Scalar::Int64(i) => i.to_string(),
+                    Scalar::Float64(f) => f.to_string(),
+                    Scalar::Bool(b) => b.to_string(),
+                    Scalar::Null(_) => return Scalar::Null(NullKind::NaN),
+                };
+                mapping
+                    .get(&key)
+                    .cloned()
+                    .unwrap_or(Scalar::Null(NullKind::NaN))
+            })
+            .collect();
+        Self::from_values(self.name(), self.index().labels().to_vec(), new_vals)
+    }
 }
 
 /// Rolling window aggregation over a Series.
@@ -5177,6 +5214,168 @@ impl DataFrame {
             column_order: self.column_order.clone(),
             index: Index::new(new_labels),
         })
+    }
+
+    /// Stack: pivot columns into rows (wide-to-long).
+    ///
+    /// Converts a DataFrame with columns [A, B, ...] into a two-column
+    /// DataFrame with a multi-level index (original_index, column_name)
+    /// and a single value column. Similar to pandas `DataFrame.stack()`.
+    pub fn stack(&self) -> Result<Self, FrameError> {
+        let n_rows = self.len();
+        let n_cols = self.column_order.len();
+        let total = n_rows * n_cols;
+
+        let mut new_labels = Vec::with_capacity(total);
+        let mut values = Vec::with_capacity(total);
+
+        for row in 0..n_rows {
+            let row_label = &self.index.labels()[row];
+            for col_name in &self.column_order {
+                // Create composite label: "row_label|col_name"
+                let label_str = match row_label {
+                    IndexLabel::Int64(v) => format!("{v}|{col_name}"),
+                    IndexLabel::Utf8(v) => format!("{v}|{col_name}"),
+                };
+                new_labels.push(IndexLabel::Utf8(label_str));
+                values.push(self.columns[col_name].values()[row].clone());
+            }
+        }
+
+        let value_col = Column::new(DType::Float64, values)?;
+        let mut cols = BTreeMap::new();
+        cols.insert("value".to_string(), value_col);
+
+        Ok(Self {
+            columns: cols,
+            column_order: vec!["value".to_string()],
+            index: Index::new(new_labels),
+        })
+    }
+
+    /// Unstack: pivot rows into columns (long-to-wide).
+    ///
+    /// Assumes the index contains composite labels in "row|col" format
+    /// (as produced by `stack()`). Produces a DataFrame with unique row
+    /// keys as index and unique column keys as columns.
+    pub fn unstack(&self) -> Result<Self, FrameError> {
+        if self.column_order.len() != 1 {
+            return Err(FrameError::CompatibilityRejected(
+                "unstack requires exactly one value column".to_string(),
+            ));
+        }
+        let val_col_name = &self.column_order[0];
+        let val_col = &self.columns[val_col_name];
+
+        // Parse composite keys
+        let mut row_order: Vec<String> = Vec::new();
+        let mut row_set = std::collections::HashSet::new();
+        let mut col_order: Vec<String> = Vec::new();
+        let mut col_set = std::collections::HashSet::new();
+        let mut entries: Vec<(String, String, Scalar)> = Vec::new();
+
+        for (i, label) in self.index.labels().iter().enumerate() {
+            let label_str = match label {
+                IndexLabel::Utf8(s) => s.clone(),
+                IndexLabel::Int64(v) => v.to_string(),
+            };
+            if let Some(sep_pos) = label_str.rfind('|') {
+                let row_key = label_str[..sep_pos].to_string();
+                let col_key = label_str[sep_pos + 1..].to_string();
+                if row_set.insert(row_key.clone()) {
+                    row_order.push(row_key.clone());
+                }
+                if col_set.insert(col_key.clone()) {
+                    col_order.push(col_key.clone());
+                }
+                entries.push((row_key, col_key, val_col.values()[i].clone()));
+            }
+        }
+
+        // Build lookup
+        let mut lookup: std::collections::HashMap<(String, String), Scalar> =
+            std::collections::HashMap::new();
+        for (rk, ck, val) in entries {
+            lookup.insert((rk, ck), val);
+        }
+
+        // Build result columns
+        let mut result_cols = BTreeMap::new();
+        for ck in &col_order {
+            let mut vals = Vec::with_capacity(row_order.len());
+            for rk in &row_order {
+                if let Some(val) = lookup.get(&(rk.clone(), ck.clone())) {
+                    vals.push(val.clone());
+                } else {
+                    vals.push(Scalar::Null(NullKind::NaN));
+                }
+            }
+            result_cols.insert(ck.clone(), Column::new(DType::Float64, vals)?);
+        }
+
+        let new_labels: Vec<IndexLabel> = row_order
+            .iter()
+            .map(|s| {
+                if let Ok(i) = s.parse::<i64>() {
+                    IndexLabel::Int64(i)
+                } else {
+                    IndexLabel::Utf8(s.clone())
+                }
+            })
+            .collect();
+
+        Ok(Self {
+            columns: result_cols,
+            column_order: col_order,
+            index: Index::new(new_labels),
+        })
+    }
+
+    /// Apply a closure to each column (axis=0) or each row (axis=1).
+    ///
+    /// Unlike the string-based `apply()`, this takes a Rust closure.
+    pub fn apply_fn<F>(&self, func: F, axis: usize) -> Result<Self, FrameError>
+    where
+        F: Fn(&[Scalar]) -> Scalar,
+    {
+        if axis == 0 {
+            // Column-wise: apply func to each column's values
+            let mut labels = Vec::new();
+            let mut values = Vec::new();
+            for name in &self.column_order {
+                let col = &self.columns[name];
+                labels.push(IndexLabel::Utf8(name.clone()));
+                values.push(func(col.values()));
+            }
+            let s = Series::from_values("result", labels, values)?;
+            // Return as single-column DataFrame
+            let mut cols = BTreeMap::new();
+            cols.insert("result".to_string(), s.column().clone());
+            Ok(Self {
+                columns: cols,
+                column_order: vec!["result".to_string()],
+                index: s.index().clone(),
+            })
+        } else {
+            // Row-wise: apply func to each row
+            let mut values = Vec::with_capacity(self.len());
+            for row_idx in 0..self.len() {
+                let row_vals: Vec<Scalar> = self
+                    .column_order
+                    .iter()
+                    .map(|name| self.columns[name].values()[row_idx].clone())
+                    .collect();
+                values.push(func(&row_vals));
+            }
+            let s = Series::from_values("result", self.index.labels().to_vec(), values)?;
+            let mut cols = BTreeMap::new();
+            cols.insert("result".to_string(), s.column().clone());
+            Ok(Self {
+                columns: cols,
+                column_order: vec!["result".to_string()],
+                index: self.index.clone(),
+            })
+        }
     }
 }
 
@@ -12478,5 +12677,160 @@ mod tests {
         assert!(info.contains("2 rows"));
         assert!(info.contains("1 columns"));
         assert!(info.contains("Float64"));
+    }
+
+    // ── stack/unstack tests ──
+
+    #[test]
+    fn dataframe_stack_unstack_roundtrip() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "a",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![Scalar::Float64(1.0), Scalar::Float64(2.0)],
+            )
+            .unwrap(),
+            Series::from_values(
+                "b",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![Scalar::Float64(3.0), Scalar::Float64(4.0)],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let stacked = df.stack().unwrap();
+        assert_eq!(stacked.len(), 4); // 2 rows * 2 cols
+        assert_eq!(stacked.column_order, vec!["value"]);
+
+        let unstacked = stacked.unstack().unwrap();
+        assert_eq!(unstacked.len(), 2);
+        assert_eq!(unstacked.column_order.len(), 2);
+        // Values should round-trip
+        assert_eq!(unstacked.columns["a"].values()[0], Scalar::Float64(1.0));
+        assert_eq!(unstacked.columns["a"].values()[1], Scalar::Float64(2.0));
+        assert_eq!(unstacked.columns["b"].values()[0], Scalar::Float64(3.0));
+        assert_eq!(unstacked.columns["b"].values()[1], Scalar::Float64(4.0));
+    }
+
+    // ── apply_fn tests ──
+
+    #[test]
+    fn series_apply_fn() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+            ],
+        )
+        .unwrap();
+        let result = s
+            .apply_fn(|v| match v.to_f64() {
+                Ok(f) => Scalar::Float64(f * f),
+                Err(_) => v.clone(),
+            })
+            .unwrap();
+        assert_eq!(result.values()[0], Scalar::Float64(1.0));
+        assert_eq!(result.values()[1], Scalar::Float64(4.0));
+        assert_eq!(result.values()[2], Scalar::Float64(9.0));
+    }
+
+    #[test]
+    fn dataframe_apply_fn_column_wise() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "a",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![Scalar::Float64(1.0), Scalar::Float64(3.0)],
+            )
+            .unwrap(),
+            Series::from_values(
+                "b",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![Scalar::Float64(10.0), Scalar::Float64(20.0)],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let result = df
+            .apply_fn(
+                |vals| {
+                    let sum: f64 = vals
+                        .iter()
+                        .filter_map(|v| v.to_f64().ok())
+                        .sum();
+                    Scalar::Float64(sum)
+                },
+                0,
+            )
+            .unwrap();
+        // Column "a" sum=4, column "b" sum=30
+        assert_eq!(result.columns["result"].values()[0], Scalar::Float64(4.0));
+        assert_eq!(result.columns["result"].values()[1], Scalar::Float64(30.0));
+    }
+
+    #[test]
+    fn dataframe_apply_fn_row_wise() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "a",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![Scalar::Float64(1.0), Scalar::Float64(3.0)],
+            )
+            .unwrap(),
+            Series::from_values(
+                "b",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![Scalar::Float64(10.0), Scalar::Float64(20.0)],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let result = df
+            .apply_fn(
+                |vals| {
+                    let sum: f64 = vals
+                        .iter()
+                        .filter_map(|v| v.to_f64().ok())
+                        .sum();
+                    Scalar::Float64(sum)
+                },
+                1,
+            )
+            .unwrap();
+        // Row 0: 1+10=11, Row 1: 3+20=23
+        assert_eq!(result.columns["result"].values()[0], Scalar::Float64(11.0));
+        assert_eq!(result.columns["result"].values()[1], Scalar::Float64(23.0));
+    }
+
+    // ── map_values test ──
+
+    #[test]
+    fn series_map_values() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("c".into()),
+            ],
+        )
+        .unwrap();
+
+        let mut mapping = std::collections::HashMap::new();
+        mapping.insert("a".to_string(), Scalar::Int64(1));
+        mapping.insert("b".to_string(), Scalar::Int64(2));
+        // "c" is not in mapping → should become NaN
+
+        let result = s.map_values(&mapping).unwrap();
+        assert_eq!(result.values()[0], Scalar::Int64(1));
+        assert_eq!(result.values()[1], Scalar::Int64(2));
+        assert!(result.values()[2].is_missing()); // unmapped → NaN
     }
 }
