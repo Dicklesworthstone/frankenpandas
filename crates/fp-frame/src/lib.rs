@@ -294,12 +294,15 @@ impl Series {
     #[must_use]
     pub fn to_string_repr(&self) -> String {
         let mut lines = Vec::with_capacity(self.len() + 2);
-        // Compute max label width
+        // Compute max label width using the same display format as rendering
         let label_width = self
             .index
             .labels()
             .iter()
-            .map(|l| format!("{l:?}").len())
+            .map(|l| match l {
+                IndexLabel::Int64(v) => v.to_string().len(),
+                IndexLabel::Utf8(s) => s.len(),
+            })
             .max()
             .unwrap_or(0);
 
@@ -3127,7 +3130,7 @@ impl Series {
         for i in 0..self.len() {
             let sv = &self.column.values()[i];
             let ov = &other.column.values()[i];
-            if sv != ov {
+            if !sv.semantic_eq(ov) {
                 has_diff = true;
                 self_vals.push(sv.clone());
                 other_vals.push(ov.clone());
@@ -6772,6 +6775,20 @@ impl DataFrame {
                     col.push(Scalar::Bool(false));
                 } else {
                     col.push(Scalar::Utf8(raw.to_owned()));
+                }
+            }
+        }
+
+        // Unify types per column: if a column has both Int64 and Float64,
+        // promote all Int64 values to Float64 for homogeneity.
+        for col in &mut col_data {
+            let has_float = col.iter().any(|v| matches!(v, Scalar::Float64(_)));
+            let has_int = col.iter().any(|v| matches!(v, Scalar::Int64(_)));
+            if has_float && has_int {
+                for val in col.iter_mut() {
+                    if let Scalar::Int64(i) = val {
+                        *val = Scalar::Float64(*i as f64);
+                    }
                 }
             }
         }
@@ -10944,37 +10961,56 @@ impl DataFrame {
         F: Fn(f64, f64) -> f64,
     {
         let (left, right) = self.align_on_index(other, AlignMode::Outer)?;
+        let n = left.len();
+
+        // Compute the union of columns from both sides, preserving left order first
+        let mut all_columns: Vec<String> = left.column_order.clone();
+        for col_name in &right.column_order {
+            if !all_columns.contains(col_name) {
+                all_columns.push(col_name.clone());
+            }
+        }
+
+        let nan_col = || -> Vec<Scalar> { vec![Scalar::Null(NullKind::NaN); n] };
 
         let mut result_cols = BTreeMap::new();
-        let all_columns = &left.column_order;
 
-        for col_name in all_columns {
-            let left_col = &left.columns[col_name];
-            let right_col = &right.columns[col_name];
-            let left_numeric =
-                left_col.dtype() == DType::Int64 || left_col.dtype() == DType::Float64;
-            let right_numeric =
-                right_col.dtype() == DType::Int64 || right_col.dtype() == DType::Float64;
+        for col_name in &all_columns {
+            let left_col = left.columns.get(col_name);
+            let right_col = right.columns.get(col_name);
 
-            if left_numeric && right_numeric {
-                let vals: Vec<Scalar> = left_col
-                    .values()
-                    .iter()
-                    .zip(right_col.values())
-                    .map(|(lv, rv)| match (lv.to_f64(), rv.to_f64()) {
-                        (Ok(l), Ok(r)) => Scalar::Float64(op(l, r)),
-                        _ => Scalar::Null(NullKind::NaN),
-                    })
-                    .collect();
-                result_cols.insert(col_name.clone(), Column::from_values(vals)?);
-            } else {
-                result_cols.insert(col_name.clone(), left_col.clone());
+            match (left_col, right_col) {
+                (Some(lc), Some(rc)) => {
+                    let left_numeric =
+                        lc.dtype() == DType::Int64 || lc.dtype() == DType::Float64;
+                    let right_numeric =
+                        rc.dtype() == DType::Int64 || rc.dtype() == DType::Float64;
+
+                    if left_numeric && right_numeric {
+                        let vals: Vec<Scalar> = lc
+                            .values()
+                            .iter()
+                            .zip(rc.values())
+                            .map(|(lv, rv)| match (lv.to_f64(), rv.to_f64()) {
+                                (Ok(l), Ok(r)) => Scalar::Float64(op(l, r)),
+                                _ => Scalar::Null(NullKind::NaN),
+                            })
+                            .collect();
+                        result_cols.insert(col_name.clone(), Column::from_values(vals)?);
+                    } else {
+                        result_cols.insert(col_name.clone(), lc.clone());
+                    }
+                }
+                // Column only in one side → result is all NaN
+                _ => {
+                    result_cols.insert(col_name.clone(), Column::from_values(nan_col())?);
+                }
             }
         }
 
         Ok(Self {
             columns: result_cols,
-            column_order: all_columns.clone(),
+            column_order: all_columns,
             index: left.index.clone(),
         })
     }
@@ -11122,10 +11158,10 @@ impl DataFrame {
                     for val in col.values() {
                         match val {
                             Scalar::Utf8(s) => {
-                                if let Ok(f) = s.trim().parse::<f64>() {
-                                    converted.push(Scalar::Float64(f));
-                                } else if let Ok(i) = s.trim().parse::<i64>() {
+                                if let Ok(i) = s.trim().parse::<i64>() {
                                     converted.push(Scalar::Int64(i));
+                                } else if let Ok(f) = s.trim().parse::<f64>() {
+                                    converted.push(Scalar::Float64(f));
                                 } else {
                                     all_numeric = false;
                                     break;
