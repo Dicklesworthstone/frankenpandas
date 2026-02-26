@@ -937,6 +937,52 @@ pub fn read_parquet(path: &Path) -> Result<DataFrame, IoError> {
     read_parquet_bytes(&data)
 }
 
+// ── Extension trait for DataFrame IO convenience methods ─────────────
+
+/// Extension trait that adds IO convenience methods to `DataFrame`.
+///
+/// Import this trait to call `df.to_parquet(path)`, `df.to_parquet_bytes()`,
+/// `DataFrame::from_parquet(path)`, etc. directly on DataFrame values.
+pub trait DataFrameIoExt {
+    /// Write this DataFrame to a Parquet file.
+    ///
+    /// Matches `pd.DataFrame.to_parquet(path)`.
+    fn to_parquet(&self, path: &Path) -> Result<(), IoError>;
+
+    /// Serialize this DataFrame to Parquet bytes in memory.
+    ///
+    /// Matches `pd.DataFrame.to_parquet()` with no path (returns bytes).
+    fn to_parquet_bytes(&self) -> Result<Vec<u8>, IoError>;
+
+    /// Write this DataFrame to a CSV file.
+    ///
+    /// Matches `pd.DataFrame.to_csv(path)`.
+    fn to_csv_file(&self, path: &Path) -> Result<(), IoError>;
+
+    /// Write this DataFrame to a JSON file.
+    ///
+    /// Matches `pd.DataFrame.to_json(path)`.
+    fn to_json_file(&self, path: &Path, orient: JsonOrient) -> Result<(), IoError>;
+}
+
+impl DataFrameIoExt for DataFrame {
+    fn to_parquet(&self, path: &Path) -> Result<(), IoError> {
+        write_parquet(self, path)
+    }
+
+    fn to_parquet_bytes(&self) -> Result<Vec<u8>, IoError> {
+        write_parquet_bytes(self)
+    }
+
+    fn to_csv_file(&self, path: &Path) -> Result<(), IoError> {
+        write_csv(self, path)
+    }
+
+    fn to_json_file(&self, path: &Path, orient: JsonOrient) -> Result<(), IoError> {
+        write_json(self, path, orient)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;

@@ -442,6 +442,178 @@ impl Index {
         }
         Self::new(labels)
     }
+
+    // ── Pandas Index Model: aggregation ──────────────────────────────
+
+    /// Minimum label.
+    ///
+    /// Matches `pd.Index.min()`.
+    #[must_use]
+    pub fn min(&self) -> Option<&IndexLabel> {
+        self.labels.iter().min()
+    }
+
+    /// Maximum label.
+    ///
+    /// Matches `pd.Index.max()`.
+    #[must_use]
+    pub fn max(&self) -> Option<&IndexLabel> {
+        self.labels.iter().max()
+    }
+
+    /// Position of the minimum label.
+    ///
+    /// Matches `pd.Index.argmin()`.
+    #[must_use]
+    pub fn argmin(&self) -> Option<usize> {
+        self.labels
+            .iter()
+            .enumerate()
+            .min_by(|(_, a), (_, b)| a.cmp(b))
+            .map(|(i, _)| i)
+    }
+
+    /// Position of the maximum label.
+    ///
+    /// Matches `pd.Index.argmax()`.
+    #[must_use]
+    pub fn argmax(&self) -> Option<usize> {
+        self.labels
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.cmp(b))
+            .map(|(i, _)| i)
+    }
+
+    /// Number of unique labels.
+    ///
+    /// Matches `pd.Index.nunique()`.
+    #[must_use]
+    pub fn nunique(&self) -> usize {
+        self.unique().len()
+    }
+
+    // ── Pandas Index Model: transformation ───────────────────────────
+
+    /// Apply a function to each label, producing a new Index.
+    ///
+    /// Matches `pd.Index.map(func)`.
+    #[must_use]
+    pub fn map<F>(&self, func: F) -> Self
+    where
+        F: Fn(&IndexLabel) -> IndexLabel,
+    {
+        Self::new(self.labels.iter().map(&func).collect())
+    }
+
+    /// Rename the index (create a copy with transformed labels).
+    ///
+    /// Matches `pd.Index.rename(name)` / `pd.Index.set_names(name)`.
+    /// Applies a function to each label.
+    #[must_use]
+    pub fn rename<F>(&self, func: F) -> Self
+    where
+        F: Fn(&IndexLabel) -> IndexLabel,
+    {
+        self.map(func)
+    }
+
+    /// Drop specific labels from the index.
+    ///
+    /// Matches `pd.Index.drop(labels)`.
+    #[must_use]
+    pub fn drop_labels(&self, labels_to_drop: &[IndexLabel]) -> Self {
+        Self::new(
+            self.labels
+                .iter()
+                .filter(|l| !labels_to_drop.contains(l))
+                .cloned()
+                .collect(),
+        )
+    }
+
+    /// Convert all labels to Int64 (if possible) or Utf8.
+    ///
+    /// Matches `pd.Index.astype(dtype)`. Returns a new Index with labels
+    /// converted to the target type representation.
+    #[must_use]
+    pub fn astype_int(&self) -> Self {
+        Self::new(
+            self.labels
+                .iter()
+                .map(|l| match l {
+                    IndexLabel::Int64(_) => l.clone(),
+                    IndexLabel::Utf8(s) => s
+                        .parse::<i64>()
+                        .map_or_else(|_| l.clone(), IndexLabel::Int64),
+                })
+                .collect(),
+        )
+    }
+
+    /// Convert all labels to Utf8 strings.
+    ///
+    /// Matches `pd.Index.astype(str)`.
+    #[must_use]
+    pub fn astype_str(&self) -> Self {
+        Self::new(
+            self.labels
+                .iter()
+                .map(|l| match l {
+                    IndexLabel::Int64(v) => IndexLabel::Utf8(v.to_string()),
+                    IndexLabel::Utf8(_) => l.clone(),
+                })
+                .collect(),
+        )
+    }
+
+    /// Fill missing-like labels (in our model, only Int64/Utf8 exist, so this
+    /// is a no-op). Provided for API parity with `pd.Index.fillna()`.
+    #[must_use]
+    pub fn fillna(&self, value: &IndexLabel) -> Self {
+        // IndexLabel has no null variant; this replaces placeholder-sentinel labels.
+        // Since we don't have null labels, return a clone. Provided for API parity.
+        let _ = value;
+        self.clone()
+    }
+
+    /// Check which positions have null-like labels. Since IndexLabel has no
+    /// null variant, this always returns all-false.
+    ///
+    /// Matches `pd.Index.isna()`.
+    #[must_use]
+    pub fn isna(&self) -> Vec<bool> {
+        vec![false; self.labels.len()]
+    }
+
+    /// Check which positions have non-null labels. Since IndexLabel has no
+    /// null variant, this always returns all-true.
+    ///
+    /// Matches `pd.Index.notna()`.
+    #[must_use]
+    pub fn notna(&self) -> Vec<bool> {
+        vec![true; self.labels.len()]
+    }
+
+    /// Where: replace labels at false positions with a fill value.
+    ///
+    /// Matches `pd.Index.where(cond, other)`.
+    #[must_use]
+    pub fn where_cond(&self, cond: &[bool], other: &IndexLabel) -> Self {
+        Self::new(
+            self.labels
+                .iter()
+                .enumerate()
+                .map(|(i, l)| {
+                    if cond.get(i).copied().unwrap_or(false) {
+                        l.clone()
+                    } else {
+                        other.clone()
+                    }
+                })
+                .collect(),
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1624,5 +1796,98 @@ mod tests {
         assert_eq!(abc.labels(), cab.labels());
         assert_eq!(abc.labels(), bca.labels());
         eprintln!("[AG-11-T] iso_commutativity | verified | PASS");
+    }
+
+    // ── Index: min/max/argmin/argmax ──
+
+    #[test]
+    fn index_min_max_int() {
+        let idx = Index::new(vec![3_i64.into(), 1_i64.into(), 2_i64.into()]);
+        assert_eq!(idx.min(), Some(&IndexLabel::Int64(1)));
+        assert_eq!(idx.max(), Some(&IndexLabel::Int64(3)));
+        assert_eq!(idx.argmin(), Some(1));
+        assert_eq!(idx.argmax(), Some(0));
+    }
+
+    #[test]
+    fn index_min_max_utf8() {
+        let idx = Index::new(vec!["c".into(), "a".into(), "b".into()]);
+        assert_eq!(idx.min(), Some(&IndexLabel::Utf8("a".into())));
+        assert_eq!(idx.max(), Some(&IndexLabel::Utf8("c".into())));
+        assert_eq!(idx.argmin(), Some(1));
+        assert_eq!(idx.argmax(), Some(0));
+    }
+
+    #[test]
+    fn index_min_max_empty() {
+        let idx = Index::new(vec![]);
+        assert_eq!(idx.min(), None);
+        assert_eq!(idx.max(), None);
+        assert_eq!(idx.argmin(), None);
+        assert_eq!(idx.argmax(), None);
+    }
+
+    #[test]
+    fn index_nunique() {
+        let idx = Index::new(vec![1_i64.into(), 2_i64.into(), 1_i64.into()]);
+        assert_eq!(idx.nunique(), 2);
+    }
+
+    // ── Index: map/rename/drop/astype ──
+
+    #[test]
+    fn index_map() {
+        let idx = Index::new(vec![1_i64.into(), 2_i64.into(), 3_i64.into()]);
+        let mapped = idx.map(|l| match l {
+            IndexLabel::Int64(v) => IndexLabel::Int64(v * 10),
+            other => other.clone(),
+        });
+        assert_eq!(mapped.labels()[0], IndexLabel::Int64(10));
+        assert_eq!(mapped.labels()[2], IndexLabel::Int64(30));
+    }
+
+    #[test]
+    fn index_drop_labels() {
+        let idx = Index::new(vec!["a".into(), "b".into(), "c".into()]);
+        let dropped = idx.drop_labels(&["b".into()]);
+        assert_eq!(dropped.len(), 2);
+        assert_eq!(dropped.labels()[0], IndexLabel::Utf8("a".into()));
+        assert_eq!(dropped.labels()[1], IndexLabel::Utf8("c".into()));
+    }
+
+    #[test]
+    fn index_astype_str() {
+        let idx = Index::new(vec![1_i64.into(), 2_i64.into()]);
+        let str_idx = idx.astype_str();
+        assert_eq!(str_idx.labels()[0], IndexLabel::Utf8("1".into()));
+        assert_eq!(str_idx.labels()[1], IndexLabel::Utf8("2".into()));
+    }
+
+    #[test]
+    fn index_astype_int() {
+        let idx = Index::new(vec![
+            IndexLabel::Utf8("10".into()),
+            IndexLabel::Utf8("20".into()),
+        ]);
+        let int_idx = idx.astype_int();
+        assert_eq!(int_idx.labels()[0], IndexLabel::Int64(10));
+        assert_eq!(int_idx.labels()[1], IndexLabel::Int64(20));
+    }
+
+    #[test]
+    fn index_isna_notna() {
+        let idx = Index::new(vec![1_i64.into(), 2_i64.into()]);
+        assert_eq!(idx.isna(), vec![false, false]);
+        assert_eq!(idx.notna(), vec![true, true]);
+    }
+
+    #[test]
+    fn index_where_cond() {
+        let idx = Index::new(vec!["a".into(), "b".into(), "c".into()]);
+        let cond = vec![true, false, true];
+        let result = idx.where_cond(&cond, &"X".into());
+        assert_eq!(result.labels()[0], IndexLabel::Utf8("a".into()));
+        assert_eq!(result.labels()[1], IndexLabel::Utf8("X".into()));
+        assert_eq!(result.labels()[2], IndexLabel::Utf8("c".into()));
     }
 }

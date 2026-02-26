@@ -3162,6 +3162,102 @@ impl Series {
         self.reindex(other.index.labels().to_vec())
     }
 
+    /// Convert dtypes to best-possible types.
+    ///
+    /// Matches `pd.Series.convert_dtypes()`. For Utf8 Series, attempts to
+    /// parse all values as integers or floats. If all values can be parsed,
+    /// returns a numeric Series; otherwise returns the original.
+    pub fn convert_dtypes(&self) -> Result<Self, FrameError> {
+        if self.column.dtype() != DType::Utf8 {
+            return Ok(self.clone());
+        }
+        let mut converted = Vec::with_capacity(self.len());
+        for val in self.column.values() {
+            match val {
+                Scalar::Utf8(s) => {
+                    let trimmed = s.trim();
+                    if let Ok(i) = trimmed.parse::<i64>() {
+                        converted.push(Scalar::Int64(i));
+                    } else if let Ok(f) = trimmed.parse::<f64>() {
+                        converted.push(Scalar::Float64(f));
+                    } else {
+                        // Not all numeric — return original Series unchanged
+                        return Ok(self.clone());
+                    }
+                }
+                _ => converted.push(val.clone()),
+            }
+        }
+        Self::from_values(self.name.clone(), self.index.labels().to_vec(), converted)
+    }
+
+    /// Map values with optional NaN skipping.
+    ///
+    /// Matches `pd.Series.map(mapping, na_action='ignore')`. When
+    /// `na_action_ignore` is true, NaN/Null values are passed through
+    /// without being looked up in the mapping.
+    pub fn map_with_na_action(
+        &self,
+        mapping: &[(Scalar, Scalar)],
+        na_action_ignore: bool,
+    ) -> Result<Self, FrameError> {
+        let mut out = Vec::with_capacity(self.len());
+        for val in self.column.values() {
+            if val.is_missing() {
+                if na_action_ignore {
+                    // Pass through NaN unchanged
+                    out.push(val.clone());
+                } else {
+                    out.push(Scalar::Null(NullKind::NaN));
+                }
+                continue;
+            }
+            let mapped = mapping
+                .iter()
+                .find(|(k, _)| k.semantic_eq(val))
+                .map(|(_, v)| v.clone());
+            out.push(mapped.unwrap_or(Scalar::Null(NullKind::NaN)));
+        }
+        Self::from_values(self.name.clone(), self.index.labels().to_vec(), out)
+    }
+
+    /// Conditional value assignment.
+    ///
+    /// Matches `pd.Series.case_when(caselist)`. Each case is a pair of
+    /// (condition_series, value_series). Conditions are evaluated in order;
+    /// the first matching condition sets the value. Unmatched positions
+    /// retain the original value.
+    pub fn case_when(&self, cases: &[(Self, Self)]) -> Result<Self, FrameError> {
+        let mut result: Vec<Scalar> = self.column.values().to_vec();
+        // Track which positions have been set (first match wins)
+        let mut set = vec![false; self.len()];
+
+        for (cond, value) in cases {
+            if cond.len() != self.len() || value.len() != self.len() {
+                return Err(FrameError::LengthMismatch {
+                    index_len: self.len(),
+                    column_len: cond.len(),
+                });
+            }
+            for i in 0..self.len() {
+                if set[i] {
+                    continue;
+                }
+                let is_true = match &cond.column.values()[i] {
+                    Scalar::Bool(b) => *b,
+                    Scalar::Int64(v) => *v != 0,
+                    Scalar::Float64(v) => *v != 0.0 && !v.is_nan(),
+                    _ => false,
+                };
+                if is_true {
+                    result[i] = value.column.values()[i].clone();
+                    set[i] = true;
+                }
+            }
+        }
+        Self::from_values(self.name.clone(), self.index.labels().to_vec(), result)
+    }
+
     /// Rename the Series (return a copy with a new name).
     ///
     /// Matches `pd.Series.rename(name)`.
@@ -10960,57 +11056,39 @@ impl DataFrame {
     where
         F: Fn(f64, f64) -> f64,
     {
+        // align_on_index with Outer gives both sides the union column set,
+        // filling missing columns with NaN (DType::Null).
         let (left, right) = self.align_on_index(other, AlignMode::Outer)?;
-        let n = left.len();
-
-        // Compute the union of columns from both sides, preserving left order first
-        let mut all_columns: Vec<String> = left.column_order.clone();
-        for col_name in &right.column_order {
-            if !all_columns.contains(col_name) {
-                all_columns.push(col_name.clone());
-            }
-        }
-
-        let nan_col = || -> Vec<Scalar> { vec![Scalar::Null(NullKind::NaN); n] };
 
         let mut result_cols = BTreeMap::new();
 
-        for col_name in &all_columns {
-            let left_col = left.columns.get(col_name);
-            let right_col = right.columns.get(col_name);
+        for col_name in &left.column_order {
+            let lc = &left.columns[col_name];
+            let rc = &right.columns[col_name];
+            let left_numlike = matches!(lc.dtype(), DType::Int64 | DType::Float64 | DType::Null);
+            let right_numlike =
+                matches!(rc.dtype(), DType::Int64 | DType::Float64 | DType::Null);
 
-            match (left_col, right_col) {
-                (Some(lc), Some(rc)) => {
-                    let left_numeric =
-                        lc.dtype() == DType::Int64 || lc.dtype() == DType::Float64;
-                    let right_numeric =
-                        rc.dtype() == DType::Int64 || rc.dtype() == DType::Float64;
-
-                    if left_numeric && right_numeric {
-                        let vals: Vec<Scalar> = lc
-                            .values()
-                            .iter()
-                            .zip(rc.values())
-                            .map(|(lv, rv)| match (lv.to_f64(), rv.to_f64()) {
-                                (Ok(l), Ok(r)) => Scalar::Float64(op(l, r)),
-                                _ => Scalar::Null(NullKind::NaN),
-                            })
-                            .collect();
-                        result_cols.insert(col_name.clone(), Column::from_values(vals)?);
-                    } else {
-                        result_cols.insert(col_name.clone(), lc.clone());
-                    }
-                }
-                // Column only in one side → result is all NaN
-                _ => {
-                    result_cols.insert(col_name.clone(), Column::from_values(nan_col())?);
-                }
+            if left_numlike && right_numlike {
+                // to_f64() returns Err for Null values, which maps to NaN
+                let vals: Vec<Scalar> = lc
+                    .values()
+                    .iter()
+                    .zip(rc.values())
+                    .map(|(lv, rv)| match (lv.to_f64(), rv.to_f64()) {
+                        (Ok(l), Ok(r)) => Scalar::Float64(op(l, r)),
+                        _ => Scalar::Null(NullKind::NaN),
+                    })
+                    .collect();
+                result_cols.insert(col_name.clone(), Column::from_values(vals)?);
+            } else {
+                result_cols.insert(col_name.clone(), lc.clone());
             }
         }
 
         Ok(Self {
             columns: result_cols,
-            column_order: all_columns,
+            column_order: left.column_order.clone(),
             index: left.index.clone(),
         })
     }
@@ -28036,6 +28114,212 @@ mod tests {
         // Row b: total=2, x=2/2=1.0, y=0/2=0.0
         assert_eq!(ct.columns()["x"].values()[1], Scalar::Float64(1.0));
         assert_eq!(ct.columns()["y"].values()[1], Scalar::Float64(0.0));
+    }
+
+    // ── Bug-fix regression tests ──
+
+    #[test]
+    fn compare_with_nan_equal() {
+        // NaN values should NOT appear as differences (pandas treats NaN == NaN)
+        let s1 = Series::from_values(
+            "a",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Null(NullKind::NaN), Scalar::Int64(3)],
+        )
+        .unwrap();
+        let s2 = Series::from_values(
+            "b",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Null(NullKind::NaN), Scalar::Int64(99)],
+        )
+        .unwrap();
+        let diff = s1.compare_with(&s2).unwrap();
+        // Only row 2 differs; row 1 (NaN vs NaN) should NOT be a difference
+        assert_eq!(diff.len(), 1);
+        assert_eq!(diff.columns()["self"].values()[0], Scalar::Int64(3));
+        assert_eq!(diff.columns()["other"].values()[0], Scalar::Int64(99));
+    }
+
+    #[test]
+    fn convert_dtypes_integers_stay_int() {
+        // Integer strings should parse as Int64, not Float64
+        let df = DataFrame::from_dict(
+            &["x"],
+            vec![("x", vec![Scalar::Utf8("1".into()), Scalar::Utf8("2".into())])],
+        )
+        .unwrap();
+        let result = df.convert_dtypes().unwrap();
+        assert_eq!(result.columns()["x"].values()[0], Scalar::Int64(1));
+        assert_eq!(result.columns()["x"].values()[1], Scalar::Int64(2));
+    }
+
+    #[test]
+    fn df_add_df_different_columns() {
+        // DataFrames with different columns should produce NaN for non-shared columns
+        let df1 = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0)]),
+                ("b", vec![Scalar::Float64(2.0)]),
+            ],
+        )
+        .unwrap();
+        let df2 = DataFrame::from_dict(
+            &["b", "c"],
+            vec![
+                ("b", vec![Scalar::Float64(10.0)]),
+                ("c", vec![Scalar::Float64(20.0)]),
+            ],
+        )
+        .unwrap();
+        let result = df1.add_df(&df2).unwrap();
+        // Column a: only in df1 → NaN
+        assert!(result.columns()["a"].values()[0].is_missing());
+        // Column b: shared → 2.0 + 10.0 = 12.0
+        assert_eq!(result.columns()["b"].values()[0], Scalar::Float64(12.0));
+        // Column c: only in df2 → NaN
+        assert!(result.columns()["c"].values()[0].is_missing());
+    }
+
+    #[test]
+    fn from_csv_mixed_int_float_promotes() {
+        // A column with mixed int/float values should be unified to Float64
+        let csv = "x\n1\n2.5\n3";
+        let df = DataFrame::from_csv(csv, ',').unwrap();
+        // All values promoted to Float64
+        assert_eq!(df.columns()["x"].values()[0], Scalar::Float64(1.0));
+        assert_eq!(df.columns()["x"].values()[1], Scalar::Float64(2.5));
+        assert_eq!(df.columns()["x"].values()[2], Scalar::Float64(3.0));
+    }
+
+    #[test]
+    fn to_string_repr_label_width() {
+        // Label width should be based on display format, not debug format
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(10), Scalar::Int64(20)],
+        )
+        .unwrap();
+        let repr = s.to_string_repr();
+        // With correct width, "0" and "1" each have length 1, so width should be 1
+        // The line should be "0    10" not "0         10" (from debug-format width)
+        let first_line = repr.lines().next().unwrap();
+        assert!(first_line.starts_with("0    10") || first_line.starts_with("0 "));
+        // Ensure it doesn't have excessive padding from debug format
+        assert!(first_line.len() < 20, "line too wide: '{first_line}'");
+    }
+
+    // ── Batch 13a: Series convert_dtypes / map_with_na_action / case_when ──
+
+    #[test]
+    fn series_convert_dtypes_int_strings() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Utf8("10".into()), Scalar::Utf8("20".into())],
+        )
+        .unwrap();
+        let result = s.convert_dtypes().unwrap();
+        assert_eq!(result.column().values()[0], Scalar::Int64(10));
+        assert_eq!(result.column().values()[1], Scalar::Int64(20));
+    }
+
+    #[test]
+    fn series_convert_dtypes_float_strings() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Utf8("1.5".into()), Scalar::Utf8("2.5".into())],
+        )
+        .unwrap();
+        let result = s.convert_dtypes().unwrap();
+        assert_eq!(result.column().values()[0], Scalar::Float64(1.5));
+        assert_eq!(result.column().values()[1], Scalar::Float64(2.5));
+    }
+
+    #[test]
+    fn series_convert_dtypes_non_numeric_unchanged() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Utf8("hello".into()), Scalar::Utf8("world".into())],
+        )
+        .unwrap();
+        let result = s.convert_dtypes().unwrap();
+        assert_eq!(result.column().values()[0], Scalar::Utf8("hello".into()));
+    }
+
+    #[test]
+    fn series_map_with_na_action_ignore() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Null(NullKind::NaN), Scalar::Int64(2)],
+        )
+        .unwrap();
+        let mapping = vec![
+            (Scalar::Int64(1), Scalar::Utf8("one".into())),
+            (Scalar::Int64(2), Scalar::Utf8("two".into())),
+        ];
+        let result = s.map_with_na_action(&mapping, true).unwrap();
+        assert_eq!(result.column().values()[0], Scalar::Utf8("one".into()));
+        // NaN preserved with na_action=ignore
+        assert!(result.column().values()[1].is_missing());
+        assert_eq!(result.column().values()[2], Scalar::Utf8("two".into()));
+    }
+
+    #[test]
+    fn series_map_with_na_action_none() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Null(NullKind::NaN)],
+        )
+        .unwrap();
+        let mapping = vec![(Scalar::Int64(1), Scalar::Utf8("one".into()))];
+        let result = s.map_with_na_action(&mapping, false).unwrap();
+        assert_eq!(result.column().values()[0], Scalar::Utf8("one".into()));
+        // NaN mapped to NaN (default behavior)
+        assert!(result.column().values()[1].is_missing());
+    }
+
+    #[test]
+    fn series_case_when() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(0), Scalar::Int64(0), Scalar::Int64(0)],
+        )
+        .unwrap();
+        let cond1 = Series::from_values(
+            "c1",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(false)],
+        )
+        .unwrap();
+        let val1 = Series::from_values(
+            "v1",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(10), Scalar::Int64(10), Scalar::Int64(10)],
+        )
+        .unwrap();
+        let cond2 = Series::from_values(
+            "c2",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Bool(false), Scalar::Bool(true), Scalar::Bool(false)],
+        )
+        .unwrap();
+        let val2 = Series::from_values(
+            "v2",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(20), Scalar::Int64(20), Scalar::Int64(20)],
+        )
+        .unwrap();
+        let result = s.case_when(&[(cond1, val1), (cond2, val2)]).unwrap();
+        assert_eq!(result.column().values()[0], Scalar::Int64(10)); // matched cond1
+        assert_eq!(result.column().values()[1], Scalar::Int64(20)); // matched cond2
+        assert_eq!(result.column().values()[2], Scalar::Int64(0));  // no match, original
     }
 
 }

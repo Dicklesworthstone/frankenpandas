@@ -215,6 +215,38 @@ pub fn query_str(
     filter_dataframe_on_expr(&expr, frame, policy, ledger)
 }
 
+// ── Extension trait for DataFrame eval/query convenience ─────────────
+
+/// Extension trait that adds `eval()` and `query()` methods directly to DataFrame.
+///
+/// Import this trait to call `df.eval("a + b")` and `df.query("a > 1")` directly.
+/// Uses a default hardened policy and fresh evidence ledger.
+pub trait DataFrameExprExt {
+    /// Evaluate an expression string in the context of this DataFrame.
+    ///
+    /// Matches `pd.DataFrame.eval(expr)`.
+    fn eval(&self, expr_str: &str) -> Result<Series, ExprError>;
+
+    /// Filter rows by a boolean expression string.
+    ///
+    /// Matches `pd.DataFrame.query(expr)`.
+    fn query(&self, expr_str: &str) -> Result<fp_frame::DataFrame, ExprError>;
+}
+
+impl DataFrameExprExt for fp_frame::DataFrame {
+    fn eval(&self, expr_str: &str) -> Result<Series, ExprError> {
+        let policy = RuntimePolicy::hardened(Some(100_000));
+        let mut ledger = EvidenceLedger::new();
+        eval_str(expr_str, self, &policy, &mut ledger)
+    }
+
+    fn query(&self, expr_str: &str) -> Result<fp_frame::DataFrame, ExprError> {
+        let policy = RuntimePolicy::hardened(Some(100_000));
+        let mut ledger = EvidenceLedger::new();
+        query_str(expr_str, self, &policy, &mut ledger)
+    }
+}
+
 fn apply_series_comparison(
     left: &Series,
     right: &Series,

@@ -3020,7 +3020,7 @@ mod tests {
 
     #[test]
     fn merge_asof_backward() {
-        use super::{AsofDirection, DataFrameMergeExt};
+        use super::DataFrameMergeExt;
 
         // Left: trades at times 1, 3, 5, 7
         let left = fp_frame::DataFrame::from_dict(
