@@ -174,6 +174,22 @@ impl Index {
             .get_or_init(|| detect_duplicates(&self.labels))
     }
 
+    /// Whether all index labels are unique.
+    ///
+    /// Matches `pd.Index.is_unique`.
+    #[must_use]
+    pub fn is_unique(&self) -> bool {
+        !self.has_duplicates()
+    }
+
+    /// Get the position (integer location) of a label.
+    ///
+    /// Matches `pd.Index.get_loc(label)`.
+    #[must_use]
+    pub fn get_loc(&self, label: &IndexLabel) -> Option<usize> {
+        self.position(label)
+    }
+
     /// AG-13: Lazily detect and cache the sort order of this index.
     #[must_use]
     fn sort_order(&self) -> SortOrder {

@@ -1045,6 +1045,158 @@ pub trait DataFrameMergeExt {
         other: &fp_frame::DataFrame,
         how: JoinType,
     ) -> Result<MergedDataFrame, JoinError>;
+
+    /// Perform an asof merge (nearest-match join) on a sorted key column.
+    ///
+    /// Matches `pd.merge_asof(left, right, on=key)`. Both DataFrames must
+    /// be sorted by the key column. For each row in `left`, finds the last
+    /// row in `right` where `right[on] <= left[on]` (backward direction)
+    /// or the nearest row in the specified direction.
+    ///
+    /// `direction`: "backward" (default), "forward", "nearest".
+    fn merge_asof(
+        &self,
+        other: &fp_frame::DataFrame,
+        on: &str,
+        direction: &str,
+    ) -> Result<MergedDataFrame, JoinError>;
+}
+
+/// Direction for asof merge matching.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AsofDirection {
+    Backward,
+    Forward,
+    Nearest,
+}
+
+/// Perform an asof merge between two DataFrames.
+pub fn merge_asof(
+    left: &fp_frame::DataFrame,
+    right: &fp_frame::DataFrame,
+    on: &str,
+    direction: AsofDirection,
+) -> Result<MergedDataFrame, JoinError> {
+    let left_key = left.columns().get(on).ok_or_else(|| {
+        JoinError::Frame(FrameError::CompatibilityRejected(format!(
+            "merge_asof: column '{on}' not found in left"
+        )))
+    })?;
+    let right_key = right.columns().get(on).ok_or_else(|| {
+        JoinError::Frame(FrameError::CompatibilityRejected(format!(
+            "merge_asof: column '{on}' not found in right"
+        )))
+    })?;
+
+    let left_vals: Vec<f64> = left_key
+        .values()
+        .iter()
+        .map(|v| v.to_f64().unwrap_or(f64::NAN))
+        .collect();
+    let right_vals: Vec<f64> = right_key
+        .values()
+        .iter()
+        .map(|v| v.to_f64().unwrap_or(f64::NAN))
+        .collect();
+
+    let right_n = right_vals.len();
+
+    // For each left row, find the matching right row index
+    let mut right_matches: Vec<Option<usize>> = Vec::with_capacity(left_vals.len());
+
+    for &lv in &left_vals {
+        if lv.is_nan() {
+            right_matches.push(None);
+            continue;
+        }
+
+        let matched = match direction {
+            AsofDirection::Backward => {
+                // Last right row where right_val <= left_val
+                let mut best: Option<usize> = None;
+                for (j, &rv) in right_vals.iter().enumerate() {
+                    if !rv.is_nan() && rv <= lv {
+                        best = Some(j);
+                    }
+                }
+                best
+            }
+            AsofDirection::Forward => {
+                // First right row where right_val >= left_val
+                right_vals
+                    .iter()
+                    .enumerate()
+                    .find(|&(_, rv)| !rv.is_nan() && *rv >= lv)
+                    .map(|(j, _)| j)
+            }
+            AsofDirection::Nearest => {
+                // Right row with smallest |right_val - left_val|
+                let mut best: Option<(usize, f64)> = None;
+                for (j, &rv) in right_vals.iter().enumerate() {
+                    if rv.is_nan() {
+                        continue;
+                    }
+                    let dist = (rv - lv).abs();
+                    if best.is_none() || dist < best.unwrap().1 {
+                        best = Some((j, dist));
+                    }
+                }
+                best.map(|(j, _)| j)
+            }
+        };
+
+        right_matches.push(matched);
+    }
+
+    // Build output columns
+    let left_col_names: Vec<String> = left.column_names().iter().map(|s| s.to_string()).collect();
+    let right_col_names: Vec<String> = right
+        .column_names()
+        .iter()
+        .filter(|c| c.as_str() != on)
+        .map(|s| s.to_string())
+        .collect();
+
+    let n_out = left_vals.len();
+    let mut out_columns = std::collections::BTreeMap::new();
+
+    // Left columns (all rows present)
+    for col_name in &left_col_names {
+        let col = left.columns().get(col_name).ok_or_else(|| {
+            JoinError::Frame(FrameError::CompatibilityRejected(format!(
+                "merge_asof: left column '{col_name}' not found"
+            )))
+        })?;
+        out_columns.insert(col_name.clone(), col.clone());
+    }
+
+    // Right columns (matched or null)
+    for col_name in &right_col_names {
+        let right_col = right.columns().get(col_name).ok_or_else(|| {
+            JoinError::Frame(FrameError::CompatibilityRejected(format!(
+                "merge_asof: right column '{col_name}' not found"
+            )))
+        })?;
+        let suffix_name = if left_col_names.contains(col_name) {
+            format!("{col_name}_y")
+        } else {
+            col_name.clone()
+        };
+
+        let mut vals = Vec::with_capacity(n_out);
+        for m in &right_matches {
+            match m {
+                Some(j) if *j < right_n => vals.push(right_col.values()[*j].clone()),
+                _ => vals.push(fp_types::Scalar::Null(fp_types::NullKind::NaN)),
+            }
+        }
+        out_columns.insert(suffix_name, Column::from_values(vals)?);
+    }
+
+    Ok(MergedDataFrame {
+        index: left.index().clone(),
+        columns: out_columns,
+    })
 }
 
 impl DataFrameMergeExt for fp_frame::DataFrame {
@@ -1073,11 +1225,23 @@ impl DataFrameMergeExt for fp_frame::DataFrame {
         other: &fp_frame::DataFrame,
         how: JoinType,
     ) -> Result<MergedDataFrame, JoinError> {
-        // Index-based join: materialize index as a column, merge, then return.
         let left = self.reset_index(false)?;
         let right = other.reset_index(false)?;
-        // reset_index(false) adds index as column "index"
         merge_dataframes_on(&left, &right, &["index"], how)
+    }
+
+    fn merge_asof(
+        &self,
+        other: &fp_frame::DataFrame,
+        on: &str,
+        direction: &str,
+    ) -> Result<MergedDataFrame, JoinError> {
+        let dir = match direction {
+            "forward" => AsofDirection::Forward,
+            "nearest" => AsofDirection::Nearest,
+            _ => AsofDirection::Backward,
+        };
+        crate::merge_asof(self, other, on, dir)
     }
 }
 
@@ -2850,5 +3014,117 @@ mod tests {
         // Standalone function should give same result
         let result2 = merge_dataframes_on(&left, &right, &["key"], JoinType::Inner).unwrap();
         assert_eq!(result.index.len(), result2.index.len());
+    }
+
+    // ── merge_asof tests ──
+
+    #[test]
+    fn merge_asof_backward() {
+        use super::{AsofDirection, DataFrameMergeExt};
+
+        // Left: trades at times 1, 3, 5, 7
+        let left = fp_frame::DataFrame::from_dict(
+            &["time", "price"],
+            vec![
+                ("time", vec![Scalar::Int64(1), Scalar::Int64(3), Scalar::Int64(5), Scalar::Int64(7)]),
+                ("price", vec![
+                    Scalar::Float64(100.0),
+                    Scalar::Float64(101.0),
+                    Scalar::Float64(102.0),
+                    Scalar::Float64(103.0),
+                ]),
+            ],
+        )
+        .unwrap();
+
+        // Right: quotes at times 2, 4, 6
+        let right = fp_frame::DataFrame::from_dict(
+            &["time", "bid"],
+            vec![
+                ("time", vec![Scalar::Int64(2), Scalar::Int64(4), Scalar::Int64(6)]),
+                ("bid", vec![
+                    Scalar::Float64(99.5),
+                    Scalar::Float64(100.5),
+                    Scalar::Float64(101.5),
+                ]),
+            ],
+        )
+        .unwrap();
+
+        let result = left.merge_asof(&right, "time", "backward").unwrap();
+        // For time=1: no right row <= 1, so bid=NaN
+        // For time=3: last right row <= 3 is time=2 → bid=99.5
+        // For time=5: last right row <= 5 is time=4 → bid=100.5
+        // For time=7: last right row <= 7 is time=6 → bid=101.5
+        let bid_col = result.columns.get("bid").unwrap();
+        assert!(bid_col.values()[0].is_missing());
+        assert_eq!(bid_col.values()[1], Scalar::Float64(99.5));
+        assert_eq!(bid_col.values()[2], Scalar::Float64(100.5));
+        assert_eq!(bid_col.values()[3], Scalar::Float64(101.5));
+    }
+
+    #[test]
+    fn merge_asof_forward() {
+        use super::AsofDirection;
+
+        let left = fp_frame::DataFrame::from_dict(
+            &["time", "val"],
+            vec![
+                ("time", vec![Scalar::Int64(1), Scalar::Int64(3)]),
+                ("val", vec![Scalar::Float64(10.0), Scalar::Float64(30.0)]),
+            ],
+        )
+        .unwrap();
+
+        let right = fp_frame::DataFrame::from_dict(
+            &["time", "quote"],
+            vec![
+                ("time", vec![Scalar::Int64(2), Scalar::Int64(5)]),
+                ("quote", vec![Scalar::Float64(20.0), Scalar::Float64(50.0)]),
+            ],
+        )
+        .unwrap();
+
+        let result = super::merge_asof(&left, &right, "time", AsofDirection::Forward).unwrap();
+        // time=1: first right >= 1 is time=2 → quote=20
+        // time=3: first right >= 3 is time=5 → quote=50
+        let quote_col = result.columns.get("quote").unwrap();
+        assert_eq!(quote_col.values()[0], Scalar::Float64(20.0));
+        assert_eq!(quote_col.values()[1], Scalar::Float64(50.0));
+    }
+
+    #[test]
+    fn merge_asof_nearest() {
+        use super::AsofDirection;
+
+        let left = fp_frame::DataFrame::from_dict(
+            &["time", "val"],
+            vec![
+                ("time", vec![Scalar::Int64(3), Scalar::Int64(7)]),
+                ("val", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
+            ],
+        )
+        .unwrap();
+
+        let right = fp_frame::DataFrame::from_dict(
+            &["time", "ref_val"],
+            vec![
+                ("time", vec![Scalar::Int64(1), Scalar::Int64(5), Scalar::Int64(10)]),
+                ("ref_val", vec![
+                    Scalar::Float64(100.0),
+                    Scalar::Float64(500.0),
+                    Scalar::Float64(1000.0),
+                ]),
+            ],
+        )
+        .unwrap();
+
+        let result = super::merge_asof(&left, &right, "time", AsofDirection::Nearest).unwrap();
+        // time=3: nearest is 1(dist=2) or 5(dist=2), first found = 1 → ref_val=100
+        // Actually: for nearest, it finds the one with smallest dist. dist(3,1)=2, dist(3,5)=2
+        // ties go to first found, so ref_val = 100
+        // time=7: nearest is 5(dist=2) or 10(dist=3) → ref_val=500
+        let ref_col = result.columns.get("ref_val").unwrap();
+        assert_eq!(ref_col.values()[1], Scalar::Float64(500.0)); // time=7 → 5 is nearest
     }
 }
