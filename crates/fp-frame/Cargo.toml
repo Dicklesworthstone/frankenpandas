@@ -9,5 +9,6 @@ fp-columnar = { path = "../fp-columnar" }
 fp-index = { path = "../fp-index" }
 fp-runtime = { path = "../fp-runtime" }
 fp-types = { path = "../fp-types" }
+regex = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }

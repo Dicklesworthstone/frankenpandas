@@ -3,6 +3,8 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
+use regex::Regex;
+
 use fp_columnar::{ArithmeticOp, Column, ColumnError, ComparisonOp};
 use fp_index::{
     AlignMode, DuplicateKeep, Index, IndexError, IndexLabel, align, align_union,
@@ -561,6 +563,64 @@ impl Series {
     pub fn compare_scalar(&self, scalar: &Scalar, op: ComparisonOp) -> Result<Self, FrameError> {
         let column = self.column.compare_scalar(scalar, op)?;
         Self::new(self.name.clone(), self.index.clone(), column)
+    }
+
+    /// Element-wise `== scalar`.
+    pub fn eq_scalar(&self, scalar: &Scalar) -> Result<Self, FrameError> {
+        self.compare_scalar(scalar, ComparisonOp::Eq)
+    }
+
+    /// Element-wise `!= scalar`.
+    pub fn ne_scalar(&self, scalar: &Scalar) -> Result<Self, FrameError> {
+        self.compare_scalar(scalar, ComparisonOp::Ne)
+    }
+
+    /// Element-wise `> scalar`.
+    pub fn gt_scalar(&self, scalar: &Scalar) -> Result<Self, FrameError> {
+        self.compare_scalar(scalar, ComparisonOp::Gt)
+    }
+
+    /// Element-wise `>= scalar`.
+    pub fn ge_scalar(&self, scalar: &Scalar) -> Result<Self, FrameError> {
+        self.compare_scalar(scalar, ComparisonOp::Ge)
+    }
+
+    /// Element-wise `< scalar`.
+    pub fn lt_scalar(&self, scalar: &Scalar) -> Result<Self, FrameError> {
+        self.compare_scalar(scalar, ComparisonOp::Lt)
+    }
+
+    /// Element-wise `<= scalar`.
+    pub fn le_scalar(&self, scalar: &Scalar) -> Result<Self, FrameError> {
+        self.compare_scalar(scalar, ComparisonOp::Le)
+    }
+
+    /// Test whether two Series are equal (same name, index, and values).
+    ///
+    /// Analogous to `pandas.Series.equals(other)`. Returns `true` only if
+    /// both Series have identical names, index labels, and values (including
+    /// NaN == NaN semantics for null positions).
+    pub fn equals(&self, other: &Self) -> bool {
+        if self.name != other.name {
+            return false;
+        }
+        if self.index.labels() != other.index.labels() {
+            return false;
+        }
+        let lv = self.values();
+        let rv = other.values();
+        if lv.len() != rv.len() {
+            return false;
+        }
+        for (a, b) in lv.iter().zip(rv.iter()) {
+            if a.is_missing() && b.is_missing() {
+                continue;
+            }
+            if a != b {
+                return false;
+            }
+        }
+        true
     }
 
     // --- Logical Boolean Operators ---
@@ -1980,6 +2040,146 @@ impl Series {
         Ok((cov, var_x, var_y, count))
     }
 
+    /// Compute the Spearman rank correlation with another Series.
+    ///
+    /// Ranks both Series and then computes Pearson correlation on the ranks.
+    pub fn corr_spearman(&self, other: &Self) -> Result<f64, FrameError> {
+        let a_vals = self.column().values();
+        let b_vals = other.column().values();
+        let len = a_vals.len().min(b_vals.len());
+
+        // Collect valid pairs
+        let mut pairs: Vec<(f64, f64)> = Vec::new();
+        for i in 0..len {
+            if let (Ok(x), Ok(y)) = (a_vals[i].to_f64(), b_vals[i].to_f64())
+                && !x.is_nan()
+                && !y.is_nan()
+            {
+                pairs.push((x, y));
+            }
+        }
+
+        let n = pairs.len();
+        if n < 2 {
+            return Ok(f64::NAN);
+        }
+
+        // Compute average ranks for x
+        let ranks_x = Self::average_ranks(&pairs.iter().map(|(x, _)| *x).collect::<Vec<_>>());
+        let ranks_y = Self::average_ranks(&pairs.iter().map(|(_, y)| *y).collect::<Vec<_>>());
+
+        // Pearson on ranks
+        Self::pearson_on_slices(&ranks_x, &ranks_y)
+    }
+
+    /// Compute the Kendall tau-b correlation with another Series.
+    pub fn corr_kendall(&self, other: &Self) -> Result<f64, FrameError> {
+        let a_vals = self.column().values();
+        let b_vals = other.column().values();
+        let len = a_vals.len().min(b_vals.len());
+
+        let mut pairs: Vec<(f64, f64)> = Vec::new();
+        for i in 0..len {
+            if let (Ok(x), Ok(y)) = (a_vals[i].to_f64(), b_vals[i].to_f64())
+                && !x.is_nan()
+                && !y.is_nan()
+            {
+                pairs.push((x, y));
+            }
+        }
+
+        let n = pairs.len();
+        if n < 2 {
+            return Ok(f64::NAN);
+        }
+
+        // Count concordant and discordant pairs, plus tied pairs
+        let mut concordant = 0_i64;
+        let mut discordant = 0_i64;
+        let mut tied_x = 0_i64;
+        let mut tied_y = 0_i64;
+
+        for i in 0..n {
+            for j in (i + 1)..n {
+                let dx = pairs[i].0 - pairs[j].0;
+                let dy = pairs[i].1 - pairs[j].1;
+
+                if dx.abs() < f64::EPSILON && dy.abs() < f64::EPSILON {
+                    tied_x += 1;
+                    tied_y += 1;
+                } else if dx.abs() < f64::EPSILON {
+                    tied_x += 1;
+                } else if dy.abs() < f64::EPSILON {
+                    tied_y += 1;
+                } else if (dx > 0.0 && dy > 0.0) || (dx < 0.0 && dy < 0.0) {
+                    concordant += 1;
+                } else {
+                    discordant += 1;
+                }
+            }
+        }
+
+        let n_pairs = (n * (n - 1)) as f64 / 2.0;
+        let denom = ((n_pairs - tied_x as f64) * (n_pairs - tied_y as f64)).sqrt();
+
+        if denom < f64::EPSILON {
+            Ok(f64::NAN)
+        } else {
+            Ok((concordant - discordant) as f64 / denom)
+        }
+    }
+
+    /// Compute average ranks for a slice of values (used by Spearman).
+    fn average_ranks(values: &[f64]) -> Vec<f64> {
+        let n = values.len();
+        let mut indexed: Vec<(usize, f64)> =
+            values.iter().copied().enumerate().collect();
+        indexed.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        let mut ranks = vec![0.0; n];
+        let mut i = 0;
+        while i < n {
+            let mut j = i;
+            // Find group of tied values
+            while j < n && (indexed[j].1 - indexed[i].1).abs() < f64::EPSILON {
+                j += 1;
+            }
+            // Average rank for tied group: (i+1 + j) / 2
+            let avg_rank = (i + 1 + j) as f64 / 2.0;
+            for item in &indexed[i..j] {
+                ranks[item.0] = avg_rank;
+            }
+            i = j;
+        }
+        ranks
+    }
+
+    /// Compute Pearson correlation on two f64 slices.
+    fn pearson_on_slices(x: &[f64], y: &[f64]) -> Result<f64, FrameError> {
+        let n = x.len() as f64;
+        let mean_x = x.iter().sum::<f64>() / n;
+        let mean_y = y.iter().sum::<f64>() / n;
+
+        let mut cov = 0.0;
+        let mut var_x = 0.0;
+        let mut var_y = 0.0;
+
+        for (&xi, &yi) in x.iter().zip(y.iter()) {
+            let dx = xi - mean_x;
+            let dy = yi - mean_y;
+            cov += dx * dy;
+            var_x += dx * dx;
+            var_y += dy * dy;
+        }
+
+        let denom = (var_x * var_y).sqrt();
+        if denom < f64::EPSILON {
+            Ok(f64::NAN)
+        } else {
+            Ok(cov / denom)
+        }
+    }
+
     /// Access string methods on a Utf8 Series (analogous to `pandas.Series.str`).
     pub fn str(&self) -> StringAccessor<'_> {
         StringAccessor { series: self }
@@ -2235,6 +2435,142 @@ impl Expanding<'_> {
     }
 }
 
+/// Rolling window aggregation over a DataFrame's numeric columns.
+///
+/// Created by `DataFrame::rolling()`. Applies the rolling window to each
+/// numeric column independently.
+pub struct DataFrameRolling<'a> {
+    df: &'a DataFrame,
+    window: usize,
+    min_periods: usize,
+}
+
+impl DataFrameRolling<'_> {
+    /// Apply rolling aggregation to each numeric column, returning a new DataFrame.
+    fn apply_rolling<F>(&self, agg: F) -> Result<DataFrame, FrameError>
+    where
+        F: Fn(&Series, usize, usize) -> Result<Series, FrameError>,
+    {
+        let mut result_cols = BTreeMap::new();
+        let mut col_order = Vec::new();
+
+        for col_name in &self.df.column_order {
+            let col = &self.df.columns[col_name];
+            let dt = col.dtype();
+            if dt != DType::Int64 && dt != DType::Float64 {
+                continue;
+            }
+
+            let series =
+                Series::new(col_name, self.df.index.clone(), col.clone())?;
+            let result = agg(&series, self.window, self.min_periods)?;
+            result_cols.insert(col_name.clone(), result.column().clone());
+            col_order.push(col_name.clone());
+        }
+
+        Ok(DataFrame {
+            columns: result_cols,
+            column_order: col_order,
+            index: self.df.index.clone(),
+        })
+    }
+
+    /// Rolling sum across all numeric columns.
+    pub fn sum(&self) -> Result<DataFrame, FrameError> {
+        self.apply_rolling(|s, w, mp| s.rolling(w, Some(mp)).sum())
+    }
+
+    /// Rolling mean across all numeric columns.
+    pub fn mean(&self) -> Result<DataFrame, FrameError> {
+        self.apply_rolling(|s, w, mp| s.rolling(w, Some(mp)).mean())
+    }
+
+    /// Rolling min across all numeric columns.
+    pub fn min(&self) -> Result<DataFrame, FrameError> {
+        self.apply_rolling(|s, w, mp| s.rolling(w, Some(mp)).min())
+    }
+
+    /// Rolling max across all numeric columns.
+    pub fn max(&self) -> Result<DataFrame, FrameError> {
+        self.apply_rolling(|s, w, mp| s.rolling(w, Some(mp)).max())
+    }
+
+    /// Rolling standard deviation across all numeric columns.
+    pub fn std(&self) -> Result<DataFrame, FrameError> {
+        self.apply_rolling(|s, w, mp| s.rolling(w, Some(mp)).std())
+    }
+
+    /// Rolling count of non-null values across all numeric columns.
+    pub fn count(&self) -> Result<DataFrame, FrameError> {
+        self.apply_rolling(|s, w, mp| s.rolling(w, Some(mp)).count())
+    }
+}
+
+/// Expanding window aggregation over a DataFrame's numeric columns.
+///
+/// Created by `DataFrame::expanding()`. Includes all prior elements
+/// in each computation for every numeric column.
+pub struct DataFrameExpanding<'a> {
+    df: &'a DataFrame,
+    min_periods: usize,
+}
+
+impl DataFrameExpanding<'_> {
+    /// Apply expanding aggregation to each numeric column, returning a new DataFrame.
+    fn apply_expanding<F>(&self, agg: F) -> Result<DataFrame, FrameError>
+    where
+        F: Fn(&Series, usize) -> Result<Series, FrameError>,
+    {
+        let mut result_cols = BTreeMap::new();
+        let mut col_order = Vec::new();
+
+        for col_name in &self.df.column_order {
+            let col = &self.df.columns[col_name];
+            let dt = col.dtype();
+            if dt != DType::Int64 && dt != DType::Float64 {
+                continue;
+            }
+
+            let series =
+                Series::new(col_name, self.df.index.clone(), col.clone())?;
+            let result = agg(&series, self.min_periods)?;
+            result_cols.insert(col_name.clone(), result.column().clone());
+            col_order.push(col_name.clone());
+        }
+
+        Ok(DataFrame {
+            columns: result_cols,
+            column_order: col_order,
+            index: self.df.index.clone(),
+        })
+    }
+
+    /// Expanding sum across all numeric columns.
+    pub fn sum(&self) -> Result<DataFrame, FrameError> {
+        self.apply_expanding(|s, mp| s.expanding(Some(mp)).sum())
+    }
+
+    /// Expanding mean across all numeric columns.
+    pub fn mean(&self) -> Result<DataFrame, FrameError> {
+        self.apply_expanding(|s, mp| s.expanding(Some(mp)).mean())
+    }
+
+    /// Expanding min across all numeric columns.
+    pub fn min(&self) -> Result<DataFrame, FrameError> {
+        self.apply_expanding(|s, mp| s.expanding(Some(mp)).min())
+    }
+
+    /// Expanding max across all numeric columns.
+    pub fn max(&self) -> Result<DataFrame, FrameError> {
+        self.apply_expanding(|s, mp| s.expanding(Some(mp)).max())
+    }
+
+    /// Expanding standard deviation across all numeric columns.
+    pub fn std(&self) -> Result<DataFrame, FrameError> {
+        self.apply_expanding(|s, mp| s.expanding(Some(mp)).std())
+    }
+}
+
 /// String accessor for Series containing Utf8 data.
 ///
 /// Created by `Series::str()`. Provides string manipulation methods
@@ -2435,6 +2771,152 @@ impl StringAccessor<'_> {
                         Scalar::Utf8(format!("{lpad}{s}{rpad}"))
                     }
                     _ => Scalar::Utf8(s.to_string()),
+                }
+            },
+            self.series.name(),
+        )
+    }
+
+    // ── Regex-based methods ──────────────────────────────────────────
+
+    /// Check whether each string matches a regex pattern.
+    ///
+    /// Analogous to `pandas.Series.str.contains(pat, regex=True)`.
+    pub fn contains_regex(&self, pat: &str) -> Result<Series, FrameError> {
+        let re = Regex::new(pat).map_err(|e| {
+            FrameError::CompatibilityRejected(format!("invalid regex pattern: {e}"))
+        })?;
+        self.apply_str(|s| Scalar::Bool(re.is_match(s)), self.series.name())
+    }
+
+    /// Replace first occurrence of a regex pattern with a replacement string.
+    ///
+    /// Analogous to `pandas.Series.str.replace(pat, repl, regex=True)`.
+    /// The replacement string supports backreferences (`$1`, `$2`, etc.).
+    pub fn replace_regex(&self, pat: &str, repl: &str) -> Result<Series, FrameError> {
+        let re = Regex::new(pat).map_err(|e| {
+            FrameError::CompatibilityRejected(format!("invalid regex pattern: {e}"))
+        })?;
+        let repl_owned = repl.to_string();
+        self.apply_str(
+            |s| Scalar::Utf8(re.replace(s, repl_owned.as_str()).into_owned()),
+            self.series.name(),
+        )
+    }
+
+    /// Replace all occurrences of a regex pattern with a replacement string.
+    ///
+    /// Analogous to `pandas.Series.str.replace(pat, repl, regex=True, n=-1)`.
+    pub fn replace_regex_all(&self, pat: &str, repl: &str) -> Result<Series, FrameError> {
+        let re = Regex::new(pat).map_err(|e| {
+            FrameError::CompatibilityRejected(format!("invalid regex pattern: {e}"))
+        })?;
+        let repl_owned = repl.to_string();
+        self.apply_str(
+            |s| Scalar::Utf8(re.replace_all(s, repl_owned.as_str()).into_owned()),
+            self.series.name(),
+        )
+    }
+
+    /// Extract the first match of a regex capture group.
+    ///
+    /// Analogous to `pandas.Series.str.extract(pat)`.
+    /// Returns the first capture group (group 1) if the pattern contains
+    /// a group, otherwise returns the full match (group 0).
+    /// Non-matching strings produce Null.
+    pub fn extract(&self, pat: &str) -> Result<Series, FrameError> {
+        let re = Regex::new(pat).map_err(|e| {
+            FrameError::CompatibilityRejected(format!("invalid regex pattern: {e}"))
+        })?;
+        let has_groups = re.captures_len() > 1;
+        self.apply_str(
+            |s| match re.captures(s) {
+                Some(caps) => {
+                    let group = if has_groups { 1 } else { 0 };
+                    match caps.get(group) {
+                        Some(m) => Scalar::Utf8(m.as_str().to_string()),
+                        None => Scalar::Null(NullKind::NaN),
+                    }
+                }
+                None => Scalar::Null(NullKind::NaN),
+            },
+            self.series.name(),
+        )
+    }
+
+    /// Count non-overlapping matches of a regex pattern in each string.
+    ///
+    /// Analogous to `pandas.Series.str.count(pat)`.
+    pub fn count_matches(&self, pat: &str) -> Result<Series, FrameError> {
+        let re = Regex::new(pat).map_err(|e| {
+            FrameError::CompatibilityRejected(format!("invalid regex pattern: {e}"))
+        })?;
+        self.apply_str(
+            |s| Scalar::Int64(re.find_iter(s).count() as i64),
+            self.series.name(),
+        )
+    }
+
+    /// Find all non-overlapping matches and return them joined by a separator.
+    ///
+    /// Since Series cannot hold list values, matches are joined with `sep`.
+    /// Non-matching strings produce Null.
+    pub fn findall(&self, pat: &str, sep: &str) -> Result<Series, FrameError> {
+        let re = Regex::new(pat).map_err(|e| {
+            FrameError::CompatibilityRejected(format!("invalid regex pattern: {e}"))
+        })?;
+        let sep_owned = sep.to_string();
+        self.apply_str(
+            |s| {
+                let matches: Vec<&str> = re.find_iter(s).map(|m| m.as_str()).collect();
+                if matches.is_empty() {
+                    Scalar::Null(NullKind::NaN)
+                } else {
+                    Scalar::Utf8(matches.join(&sep_owned))
+                }
+            },
+            self.series.name(),
+        )
+    }
+
+    /// Check whether each string fully matches a regex pattern.
+    ///
+    /// Unlike `contains_regex` which searches for a match anywhere,
+    /// this requires the entire string to match (anchored `^...$`).
+    pub fn fullmatch(&self, pat: &str) -> Result<Series, FrameError> {
+        let anchored = format!("^(?:{pat})$");
+        let re = Regex::new(&anchored).map_err(|e| {
+            FrameError::CompatibilityRejected(format!("invalid regex pattern: {e}"))
+        })?;
+        self.apply_str(|s| Scalar::Bool(re.is_match(s)), self.series.name())
+    }
+
+    /// Check whether each string matches a regex pattern at the start.
+    ///
+    /// Analogous to `pandas.Series.str.match(pat)` which uses Python's
+    /// `re.match()` (anchored at the beginning of the string).
+    pub fn match_regex(&self, pat: &str) -> Result<Series, FrameError> {
+        let anchored = format!("^(?:{pat})");
+        let re = Regex::new(&anchored).map_err(|e| {
+            FrameError::CompatibilityRejected(format!("invalid regex pattern: {e}"))
+        })?;
+        self.apply_str(|s| Scalar::Bool(re.is_match(s)), self.series.name())
+    }
+
+    /// Split each string by a regex pattern and return the n-th element.
+    ///
+    /// Analogous to `pandas.Series.str.split(pat, regex=True).str[n]`.
+    pub fn split_regex_get(&self, pat: &str, n: usize) -> Result<Series, FrameError> {
+        let re = Regex::new(pat).map_err(|e| {
+            FrameError::CompatibilityRejected(format!("invalid regex pattern: {e}"))
+        })?;
+        self.apply_str(
+            |s| {
+                let parts: Vec<&str> = re.split(s).collect();
+                if n < parts.len() {
+                    Scalar::Utf8(parts[n].to_string())
+                } else {
+                    Scalar::Null(NullKind::NaN)
                 }
             },
             self.series.name(),
@@ -4927,6 +5409,20 @@ impl DataFrame {
         self.pairwise_stat("corr")
     }
 
+    /// Compute correlation matrix using the specified method.
+    ///
+    /// Supported methods: "pearson", "spearman", "kendall".
+    pub fn corr_method(&self, method: &str) -> Result<Self, FrameError> {
+        match method {
+            "pearson" => self.pairwise_stat("corr"),
+            "spearman" => self.pairwise_rank_corr("spearman"),
+            "kendall" => self.pairwise_rank_corr("kendall"),
+            other => Err(FrameError::CompatibilityRejected(format!(
+                "unsupported correlation method: '{other}'"
+            ))),
+        }
+    }
+
     /// Compute the pairwise covariance matrix between numeric columns.
     pub fn cov(&self) -> Result<Self, FrameError> {
         self.pairwise_stat("cov")
@@ -5030,6 +5526,69 @@ impl DataFrame {
         })
     }
 
+    /// Compute pairwise Spearman or Kendall correlation matrix between numeric columns.
+    fn pairwise_rank_corr(&self, method: &str) -> Result<Self, FrameError> {
+        let len = self.index.len();
+
+        let numeric_cols: Vec<String> = self
+            .column_order
+            .iter()
+            .filter(|name| {
+                let dt = self.columns[name.as_str()].dtype();
+                dt == DType::Int64 || dt == DType::Float64
+            })
+            .cloned()
+            .collect();
+
+        let n = numeric_cols.len();
+
+        // Build Series for each numeric column
+        let series_list: Vec<Series> = numeric_cols
+            .iter()
+            .map(|name| {
+                let col = &self.columns[name];
+                let labels: Vec<IndexLabel> = (0..len).map(|i| (i as i64).into()).collect();
+                Series::new(name, Index::new(labels), col.clone())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut result_cols = BTreeMap::new();
+        for (j, col_j_name) in numeric_cols.iter().enumerate() {
+            let mut vals = Vec::with_capacity(n);
+            for (i, _) in numeric_cols.iter().enumerate() {
+                let val = if i == j {
+                    1.0 // Self-correlation is always 1
+                } else {
+                    match method {
+                        "spearman" => series_list[i]
+                            .corr_spearman(&series_list[j])
+                            .unwrap_or(f64::NAN),
+                        "kendall" => series_list[i]
+                            .corr_kendall(&series_list[j])
+                            .unwrap_or(f64::NAN),
+                        _ => f64::NAN,
+                    }
+                };
+                vals.push(Scalar::Float64(val));
+            }
+            result_cols.insert(
+                col_j_name.clone(),
+                Column::new(DType::Float64, vals)?,
+            );
+        }
+
+        let labels: Vec<IndexLabel> = numeric_cols
+            .iter()
+            .map(|s| IndexLabel::Utf8(s.clone()))
+            .collect();
+
+        Ok(Self {
+            columns: result_cols,
+            column_order: numeric_cols,
+            index: Index::new(labels),
+        })
+    }
+
     /// Compute the number of unique values per column.
     pub fn value_counts_per_column(&self) -> Result<Self, FrameError> {
         let mut labels = Vec::new();
@@ -5104,6 +5663,31 @@ impl DataFrame {
             column_order: self.column_order.clone(),
             index: Index::new(new_labels),
         })
+    }
+
+    /// Create a rolling window view over all numeric columns.
+    ///
+    /// Matches `df.rolling(window)` semantics.
+    pub fn rolling(
+        &self,
+        window: usize,
+        min_periods: Option<usize>,
+    ) -> DataFrameRolling<'_> {
+        DataFrameRolling {
+            df: self,
+            window,
+            min_periods: min_periods.unwrap_or(window),
+        }
+    }
+
+    /// Create an expanding window view over all numeric columns.
+    ///
+    /// Matches `df.expanding(min_periods)` semantics.
+    pub fn expanding(&self, min_periods: Option<usize>) -> DataFrameExpanding<'_> {
+        DataFrameExpanding {
+            df: self,
+            min_periods: min_periods.unwrap_or(1),
+        }
     }
 
     /// Group by one or more columns and aggregate.
@@ -5503,6 +6087,8 @@ impl DataFrameGroupBy<'_> {
                             group_vals[group_vals.len() - 1].clone()
                         }
                     }
+                    "nunique" => fp_types::nannunique(&group_vals),
+                    "prod" => fp_types::nanprod(&group_vals),
                     other => {
                         return Err(FrameError::CompatibilityRejected(format!(
                             "unsupported groupby aggregation: '{other}'"
@@ -5573,6 +6159,307 @@ impl DataFrameGroupBy<'_> {
         self.aggregate("last")
     }
 
+    /// GroupBy nunique (count of unique non-null values per group).
+    pub fn nunique(&self) -> Result<DataFrame, FrameError> {
+        self.aggregate("nunique")
+    }
+
+    /// GroupBy prod (product of non-null values per group).
+    pub fn prod(&self) -> Result<DataFrame, FrameError> {
+        self.aggregate("prod")
+    }
+
+    /// Aggregate with per-column function mapping.
+    ///
+    /// Matches `df.groupby(col).agg({'B': 'sum', 'C': 'mean'})` semantics.
+    ///
+    /// `func_map`: mapping of column_name → aggregation function name.
+    /// Only the specified columns are included in the output.
+    pub fn agg(
+        &self,
+        func_map: &std::collections::HashMap<String, String>,
+    ) -> Result<DataFrame, FrameError> {
+        let (group_order, groups) = self.build_groups();
+        let n_groups = group_order.len();
+
+        let mut labels = Vec::with_capacity(n_groups);
+        for gkey in &group_order {
+            let first_row = groups[gkey][0];
+            labels.push(self.group_key_label(first_row));
+        }
+
+        let mut result_cols = BTreeMap::new();
+        let mut col_order = Vec::new();
+
+        // Preserve original column order for columns present in func_map
+        for col_name in &self.df.column_order {
+            let func_name = match func_map.get(col_name) {
+                Some(f) => f.as_str(),
+                None => continue,
+            };
+
+            if self.by.contains(col_name) {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "cannot aggregate group-by key column: '{col_name}'"
+                )));
+            }
+
+            let col = &self.df.columns[col_name];
+            let mut agg_vals = Vec::with_capacity(n_groups);
+
+            for gkey in &group_order {
+                let row_indices = &groups[gkey];
+                let group_vals: Vec<Scalar> = row_indices
+                    .iter()
+                    .map(|&i| col.values()[i].clone())
+                    .collect();
+
+                let agg_val = Self::apply_agg_func(func_name, &group_vals)?;
+                agg_vals.push(agg_val);
+            }
+
+            result_cols.insert(col_name.clone(), Column::from_values(agg_vals)?);
+            col_order.push(col_name.clone());
+        }
+
+        Ok(DataFrame {
+            columns: result_cols,
+            column_order: col_order,
+            index: Index::new(labels),
+        })
+    }
+
+    /// Aggregate with multiple functions applied to all value columns.
+    ///
+    /// Matches `df.groupby(col).agg(['sum', 'mean'])` semantics.
+    ///
+    /// Returns a DataFrame where each original value column is expanded into
+    /// N columns (one per function), named `{col}_{func}`.
+    pub fn agg_list(&self, funcs: &[&str]) -> Result<DataFrame, FrameError> {
+        let (group_order, groups) = self.build_groups();
+        let n_groups = group_order.len();
+
+        let mut labels = Vec::with_capacity(n_groups);
+        for gkey in &group_order {
+            let first_row = groups[gkey][0];
+            labels.push(self.group_key_label(first_row));
+        }
+
+        let value_cols: Vec<String> = self
+            .df
+            .column_order
+            .iter()
+            .filter(|c| !self.by.contains(c))
+            .cloned()
+            .collect();
+
+        let mut result_cols = BTreeMap::new();
+        let mut col_order = Vec::new();
+
+        for col_name in &value_cols {
+            let col = &self.df.columns[col_name];
+
+            for &func_name in funcs {
+                let out_name = format!("{col_name}_{func_name}");
+                let mut agg_vals = Vec::with_capacity(n_groups);
+
+                for gkey in &group_order {
+                    let row_indices = &groups[gkey];
+                    let group_vals: Vec<Scalar> = row_indices
+                        .iter()
+                        .map(|&i| col.values()[i].clone())
+                        .collect();
+
+                    let agg_val = Self::apply_agg_func(func_name, &group_vals)?;
+                    agg_vals.push(agg_val);
+                }
+
+                result_cols.insert(out_name.clone(), Column::from_values(agg_vals)?);
+                col_order.push(out_name);
+            }
+        }
+
+        Ok(DataFrame {
+            columns: result_cols,
+            column_order: col_order,
+            index: Index::new(labels),
+        })
+    }
+
+    /// Apply a named aggregation function to a group's values.
+    fn apply_agg_func(func_name: &str, group_vals: &[Scalar]) -> Result<Scalar, FrameError> {
+        match func_name {
+            "sum" => Ok(fp_types::nansum(group_vals)),
+            "mean" => Ok(fp_types::nanmean(group_vals)),
+            "count" => Ok(fp_types::nancount(group_vals)),
+            "min" => Ok(fp_types::nanmin(group_vals)),
+            "max" => Ok(fp_types::nanmax(group_vals)),
+            "std" => Ok(fp_types::nanstd(group_vals, 1)),
+            "var" => Ok(fp_types::nanvar(group_vals, 1)),
+            "median" => Ok(fp_types::nanmedian(group_vals)),
+            "first" => Ok(if group_vals.is_empty() {
+                Scalar::Null(NullKind::NaN)
+            } else {
+                group_vals[0].clone()
+            }),
+            "last" => Ok(if group_vals.is_empty() {
+                Scalar::Null(NullKind::NaN)
+            } else {
+                group_vals[group_vals.len() - 1].clone()
+            }),
+            "nunique" => Ok(fp_types::nannunique(group_vals)),
+            "prod" => Ok(fp_types::nanprod(group_vals)),
+            other => Err(FrameError::CompatibilityRejected(format!(
+                "unsupported groupby aggregation: '{other}'"
+            ))),
+        }
+    }
+
+    /// Apply a custom function to each group DataFrame.
+    ///
+    /// Matches `df.groupby(col).apply(func)` semantics.
+    ///
+    /// The closure receives a sub-DataFrame for each group and should return
+    /// a single-row DataFrame (the aggregated result for that group).
+    /// Results are concatenated vertically with the group key as the index.
+    pub fn apply<F>(&self, func: F) -> Result<DataFrame, FrameError>
+    where
+        F: Fn(&DataFrame) -> Result<DataFrame, FrameError>,
+    {
+        let (group_order, groups) = self.build_groups();
+        let n_groups = group_order.len();
+
+        let value_cols: Vec<String> = self
+            .df
+            .column_order
+            .iter()
+            .filter(|c| !self.by.contains(c))
+            .cloned()
+            .collect();
+
+        let mut labels = Vec::with_capacity(n_groups);
+        let mut result_frames = Vec::with_capacity(n_groups);
+
+        for gkey in &group_order {
+            let row_indices = &groups[gkey];
+            let first_row = row_indices[0];
+            labels.push(self.group_key_label(first_row));
+
+            // Build sub-DataFrame for this group
+            let group_labels: Vec<IndexLabel> = row_indices
+                .iter()
+                .map(|&i| self.df.index.labels()[i].clone())
+                .collect();
+            let mut group_cols = BTreeMap::new();
+            let mut group_col_order = Vec::new();
+
+            for col_name in &value_cols {
+                let col = &self.df.columns[col_name];
+                let group_vals: Vec<Scalar> = row_indices
+                    .iter()
+                    .map(|&i| col.values()[i].clone())
+                    .collect();
+                group_cols.insert(col_name.clone(), Column::from_values(group_vals)?);
+                group_col_order.push(col_name.clone());
+            }
+
+            let group_df = DataFrame {
+                columns: group_cols,
+                column_order: group_col_order,
+                index: Index::new(group_labels),
+            };
+
+            result_frames.push(func(&group_df)?);
+        }
+
+        // Combine results: assume each result is a single row
+        if result_frames.is_empty() {
+            return Ok(DataFrame {
+                columns: BTreeMap::new(),
+                column_order: Vec::new(),
+                index: Index::new(Vec::new()),
+            });
+        }
+
+        let out_col_order = result_frames[0].column_order.clone();
+        let mut out_cols: BTreeMap<String, Vec<Scalar>> = BTreeMap::new();
+        for name in &out_col_order {
+            out_cols.insert(name.clone(), Vec::with_capacity(n_groups));
+        }
+
+        for frame in &result_frames {
+            for name in &out_col_order {
+                if let Some(col) = frame.columns.get(name) {
+                    for val in col.values() {
+                        out_cols.get_mut(name).unwrap().push(val.clone());
+                    }
+                }
+            }
+        }
+
+        let mut final_cols = BTreeMap::new();
+        for (name, vals) in out_cols {
+            final_cols.insert(name, Column::from_values(vals)?);
+        }
+
+        Ok(DataFrame {
+            columns: final_cols,
+            column_order: out_col_order,
+            index: Index::new(labels),
+        })
+    }
+
+    /// Transform each group, returning a DataFrame with the same shape as the input.
+    ///
+    /// Matches `df.groupby(col).transform(func_name)` semantics.
+    ///
+    /// The named function is applied per group and the result is broadcast back
+    /// to the original row positions.
+    pub fn transform(&self, func_name: &str) -> Result<DataFrame, FrameError> {
+        let (group_order, groups) = self.build_groups();
+        let n = self.df.len();
+
+        let value_cols: Vec<String> = self
+            .df
+            .column_order
+            .iter()
+            .filter(|c| !self.by.contains(c))
+            .cloned()
+            .collect();
+
+        let mut result_cols = BTreeMap::new();
+        let mut col_order = Vec::new();
+
+        for col_name in &value_cols {
+            let col = &self.df.columns[col_name];
+            let mut out_vals = vec![Scalar::Null(NullKind::NaN); n];
+
+            for gkey in &group_order {
+                let row_indices = &groups[gkey];
+                let group_vals: Vec<Scalar> = row_indices
+                    .iter()
+                    .map(|&i| col.values()[i].clone())
+                    .collect();
+
+                let agg_val = Self::apply_agg_func(func_name, &group_vals)?;
+
+                // Broadcast the aggregated value back to all rows in this group
+                for &row_idx in row_indices {
+                    out_vals[row_idx] = agg_val.clone();
+                }
+            }
+
+            result_cols.insert(col_name.clone(), Column::from_values(out_vals)?);
+            col_order.push(col_name.clone());
+        }
+
+        Ok(DataFrame {
+            columns: result_cols,
+            column_order: col_order,
+            index: self.df.index.clone(),
+        })
+    }
+
     /// GroupBy size (number of rows per group).
     pub fn size(&self) -> Result<Series, FrameError> {
         let (group_order, groups) = self.build_groups();
@@ -5586,6 +6473,87 @@ impl DataFrameGroupBy<'_> {
         }
 
         Series::from_values("size", labels, values)
+    }
+
+    /// Filter groups using a function that returns bool for each group.
+    ///
+    /// Analogous to `df.groupby(col).filter(func)`.
+    /// The function receives a sub-DataFrame for each group and should return
+    /// `true` to keep the group or `false` to drop it. Returns a DataFrame
+    /// containing only the rows belonging to kept groups, preserving original
+    /// index and column order.
+    pub fn filter<F>(&self, func: F) -> Result<DataFrame, FrameError>
+    where
+        F: Fn(&DataFrame) -> Result<bool, FrameError>,
+    {
+        let (group_order, groups) = self.build_groups();
+
+        let value_cols: Vec<String> = self
+            .df
+            .column_order
+            .iter()
+            .filter(|c| !self.by.contains(c))
+            .cloned()
+            .collect();
+
+        let mut keep_indices: Vec<usize> = Vec::new();
+
+        for gkey in &group_order {
+            let row_indices = &groups[gkey];
+
+            // Build sub-DataFrame for this group
+            let group_labels: Vec<IndexLabel> = row_indices
+                .iter()
+                .map(|&i| self.df.index.labels()[i].clone())
+                .collect();
+            let mut group_cols = BTreeMap::new();
+            let mut group_col_order = Vec::new();
+
+            for col_name in &value_cols {
+                let col = &self.df.columns[col_name];
+                let group_vals: Vec<Scalar> = row_indices
+                    .iter()
+                    .map(|&i| col.values()[i].clone())
+                    .collect();
+                group_cols.insert(col_name.clone(), Column::from_values(group_vals)?);
+                group_col_order.push(col_name.clone());
+            }
+
+            let group_df = DataFrame {
+                columns: group_cols,
+                column_order: group_col_order,
+                index: Index::new(group_labels),
+            };
+
+            if func(&group_df)? {
+                keep_indices.extend(row_indices);
+            }
+        }
+
+        // Sort indices to preserve original row order
+        keep_indices.sort_unstable();
+
+        // Build output DataFrame from kept rows
+        let out_labels: Vec<IndexLabel> = keep_indices
+            .iter()
+            .map(|&i| self.df.index.labels()[i].clone())
+            .collect();
+        let mut out_cols = BTreeMap::new();
+
+        for col_name in &self.df.column_order {
+            let col = &self.df.columns[col_name];
+            let vals: Vec<Scalar> = keep_indices
+                .iter()
+                .map(|&i| col.values()[i].clone())
+                .collect();
+            out_cols.insert(col_name.clone(), Column::from_values(vals)?);
+        }
+
+        Ok(DataFrame {
+            columns: out_cols,
+            column_order: self.df.column_order.clone(),
+            index: Index::new(out_labels),
+        })
     }
 }
 
@@ -12834,5 +13802,1007 @@ mod tests {
         assert_eq!(result.values()[0], Scalar::Int64(1));
         assert_eq!(result.values()[1], Scalar::Int64(2));
         assert!(result.values()[2].is_missing()); // unmapped → NaN
+    }
+
+    #[test]
+    fn dataframe_groupby_nunique() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "grp",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("b".into()),
+                    Scalar::Utf8("b".into()),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "val",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(2.0),
+                    Scalar::Float64(3.0),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let result = df.groupby(&["grp"]).unwrap().nunique().unwrap();
+        // Group "a": 1 unique value (1.0); Group "b": 2 unique values (2.0, 3.0)
+        assert_eq!(result.columns["val"].values()[0], Scalar::Int64(1));
+        assert_eq!(result.columns["val"].values()[1], Scalar::Int64(2));
+    }
+
+    #[test]
+    fn dataframe_groupby_prod() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "grp",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("b".into()),
+                    Scalar::Utf8("b".into()),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "val",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Float64(2.0),
+                    Scalar::Float64(3.0),
+                    Scalar::Float64(4.0),
+                    Scalar::Float64(5.0),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let result = df.groupby(&["grp"]).unwrap().prod().unwrap();
+        // Group "a": 2*3=6; Group "b": 4*5=20
+        assert_eq!(result.columns["val"].values()[0], Scalar::Float64(6.0));
+        assert_eq!(result.columns["val"].values()[1], Scalar::Float64(20.0));
+    }
+
+    #[test]
+    fn dataframe_groupby_agg_per_column() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "grp",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("b".into()),
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("b".into()),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "x",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Float64(10.0),
+                    Scalar::Float64(20.0),
+                    Scalar::Float64(30.0),
+                    Scalar::Float64(40.0),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "y",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(2.0),
+                    Scalar::Float64(3.0),
+                    Scalar::Float64(4.0),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let mut func_map = std::collections::HashMap::new();
+        func_map.insert("x".to_string(), "sum".to_string());
+        func_map.insert("y".to_string(), "mean".to_string());
+
+        let result = df.groupby(&["grp"]).unwrap().agg(&func_map).unwrap();
+        assert_eq!(result.len(), 2);
+        // Group "a": x sum = 10+30=40; y mean = (1+3)/2=2.0
+        assert_eq!(result.columns["x"].values()[0], Scalar::Float64(40.0));
+        assert_eq!(result.columns["y"].values()[0], Scalar::Float64(2.0));
+        // Group "b": x sum = 20+40=60; y mean = (2+4)/2=3.0
+        assert_eq!(result.columns["x"].values()[1], Scalar::Float64(60.0));
+        assert_eq!(result.columns["y"].values()[1], Scalar::Float64(3.0));
+    }
+
+    #[test]
+    fn dataframe_groupby_agg_list() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "grp",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("b".into()),
+                    Scalar::Utf8("b".into()),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "val",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Float64(10.0),
+                    Scalar::Float64(20.0),
+                    Scalar::Float64(30.0),
+                    Scalar::Float64(40.0),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let result = df
+            .groupby(&["grp"])
+            .unwrap()
+            .agg_list(&["sum", "mean"])
+            .unwrap();
+        assert_eq!(result.len(), 2);
+        // Column names: val_sum, val_mean
+        assert_eq!(result.column_order, vec!["val_sum", "val_mean"]);
+        // Group "a": sum=30, mean=15; Group "b": sum=70, mean=35
+        assert_eq!(result.columns["val_sum"].values()[0], Scalar::Float64(30.0));
+        assert_eq!(
+            result.columns["val_mean"].values()[0],
+            Scalar::Float64(15.0)
+        );
+        assert_eq!(result.columns["val_sum"].values()[1], Scalar::Float64(70.0));
+        assert_eq!(
+            result.columns["val_mean"].values()[1],
+            Scalar::Float64(35.0)
+        );
+    }
+
+    #[test]
+    fn dataframe_rolling_sum() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "a",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(2.0),
+                    Scalar::Float64(3.0),
+                    Scalar::Float64(4.0),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "b",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Float64(10.0),
+                    Scalar::Float64(20.0),
+                    Scalar::Float64(30.0),
+                    Scalar::Float64(40.0),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let result = df.rolling(2, None).sum().unwrap();
+        assert_eq!(result.len(), 4);
+        // First element: NaN (window not full)
+        assert!(result.columns["a"].values()[0].is_missing());
+        // Second element: 1+2=3
+        assert_eq!(result.columns["a"].values()[1], Scalar::Float64(3.0));
+        // Third element: 2+3=5
+        assert_eq!(result.columns["a"].values()[2], Scalar::Float64(5.0));
+        // b column also present
+        assert_eq!(result.columns["b"].values()[1], Scalar::Float64(30.0));
+    }
+
+    #[test]
+    fn dataframe_rolling_mean() {
+        let df = DataFrame::from_series(vec![Series::from_values(
+            "val",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Float64(2.0),
+                Scalar::Float64(4.0),
+                Scalar::Float64(6.0),
+                Scalar::Float64(8.0),
+            ],
+        )
+        .unwrap()])
+        .unwrap();
+
+        let result = df.rolling(2, None).mean().unwrap();
+        assert!(result.columns["val"].values()[0].is_missing());
+        assert_eq!(result.columns["val"].values()[1], Scalar::Float64(3.0)); // (2+4)/2
+        assert_eq!(result.columns["val"].values()[2], Scalar::Float64(5.0)); // (4+6)/2
+        assert_eq!(result.columns["val"].values()[3], Scalar::Float64(7.0)); // (6+8)/2
+    }
+
+    #[test]
+    fn dataframe_rolling_skips_non_numeric() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "num",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![Scalar::Float64(1.0), Scalar::Float64(2.0)],
+            )
+            .unwrap(),
+            Series::from_values(
+                "text",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![Scalar::Utf8("a".into()), Scalar::Utf8("b".into())],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let result = df.rolling(2, None).sum().unwrap();
+        // Only "num" should be in the result, not "text"
+        assert!(result.columns.contains_key("num"));
+        assert!(!result.columns.contains_key("text"));
+    }
+
+    #[test]
+    fn dataframe_expanding_sum() {
+        let df = DataFrame::from_series(vec![Series::from_values(
+            "val",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+            ],
+        )
+        .unwrap()])
+        .unwrap();
+
+        let result = df.expanding(None).sum().unwrap();
+        assert_eq!(result.columns["val"].values()[0], Scalar::Float64(1.0));
+        assert_eq!(result.columns["val"].values()[1], Scalar::Float64(3.0)); // 1+2
+        assert_eq!(result.columns["val"].values()[2], Scalar::Float64(6.0)); // 1+2+3
+    }
+
+    #[test]
+    fn dataframe_expanding_mean_with_min_periods() {
+        let df = DataFrame::from_series(vec![Series::from_values(
+            "val",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Float64(2.0),
+                Scalar::Float64(4.0),
+                Scalar::Float64(6.0),
+            ],
+        )
+        .unwrap()])
+        .unwrap();
+
+        let result = df.expanding(Some(2)).mean().unwrap();
+        // min_periods=2, so first element should be NaN
+        assert!(result.columns["val"].values()[0].is_missing());
+        assert_eq!(result.columns["val"].values()[1], Scalar::Float64(3.0)); // (2+4)/2
+        assert_eq!(result.columns["val"].values()[2], Scalar::Float64(4.0)); // (2+4+6)/3
+    }
+
+    #[test]
+    fn dataframe_groupby_agg_rejects_groupby_column() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "grp",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("b".into()),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "val",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![Scalar::Float64(1.0), Scalar::Float64(2.0)],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let mut func_map = std::collections::HashMap::new();
+        func_map.insert("grp".to_string(), "sum".to_string());
+
+        let err = df.groupby(&["grp"]).unwrap().agg(&func_map);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn series_corr_spearman() {
+        // Perfectly monotonic: [1,2,3,4] vs [10,20,30,40] → Spearman = 1.0
+        let a = Series::from_values(
+            "a",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(4.0),
+            ],
+        )
+        .unwrap();
+        let b = Series::from_values(
+            "b",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Float64(10.0),
+                Scalar::Float64(20.0),
+                Scalar::Float64(30.0),
+                Scalar::Float64(40.0),
+            ],
+        )
+        .unwrap();
+
+        let r = a.corr_spearman(&b).unwrap();
+        assert!((r - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn series_corr_spearman_inverse() {
+        // Perfectly inversely monotonic: [1,2,3] vs [30,20,10] → Spearman = -1.0
+        let a = Series::from_values(
+            "a",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+            ],
+        )
+        .unwrap();
+        let b = Series::from_values(
+            "b",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Float64(30.0),
+                Scalar::Float64(20.0),
+                Scalar::Float64(10.0),
+            ],
+        )
+        .unwrap();
+
+        let r = a.corr_spearman(&b).unwrap();
+        assert!((r - (-1.0)).abs() < 1e-10);
+    }
+
+    #[test]
+    fn series_corr_kendall() {
+        // Perfect concordance: [1,2,3] vs [4,5,6] → Kendall tau = 1.0
+        let a = Series::from_values(
+            "a",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+            ],
+        )
+        .unwrap();
+        let b = Series::from_values(
+            "b",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Float64(4.0),
+                Scalar::Float64(5.0),
+                Scalar::Float64(6.0),
+            ],
+        )
+        .unwrap();
+
+        let tau = a.corr_kendall(&b).unwrap();
+        assert!((tau - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn dataframe_corr_spearman() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "x",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(2.0),
+                    Scalar::Float64(3.0),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "y",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![
+                    Scalar::Float64(10.0),
+                    Scalar::Float64(20.0),
+                    Scalar::Float64(30.0),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let result = df.corr_method("spearman").unwrap();
+        // Self-correlation = 1.0
+        assert_eq!(result.columns["x"].values()[0], Scalar::Float64(1.0));
+        assert_eq!(result.columns["y"].values()[1], Scalar::Float64(1.0));
+        // Cross-correlation should be 1.0 for perfectly monotonic data
+        let xy = match &result.columns["y"].values()[0] {
+            Scalar::Float64(v) => *v,
+            _ => panic!("expected Float64"),
+        };
+        assert!((xy - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn dataframe_groupby_apply() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "grp",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("b".into()),
+                    Scalar::Utf8("b".into()),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "val",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Float64(10.0),
+                    Scalar::Float64(20.0),
+                    Scalar::Float64(30.0),
+                    Scalar::Float64(40.0),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        // Apply a function that returns the sum of each group as a single-row DataFrame
+        let result = df
+            .groupby(&["grp"])
+            .unwrap()
+            .apply(|group_df| {
+                // Sum the 'val' column
+                let col = &group_df.columns["val"];
+                let total: f64 = col
+                    .values()
+                    .iter()
+                    .filter_map(|v| v.to_f64().ok())
+                    .sum();
+                let mut cols = BTreeMap::new();
+                cols.insert(
+                    "val".to_string(),
+                    super::Column::from_values(vec![Scalar::Float64(total)]).unwrap(),
+                );
+                Ok(DataFrame::new_with_column_order(
+                    super::Index::new(vec![0_i64.into()]),
+                    cols,
+                    vec!["val".to_string()],
+                )
+                .unwrap())
+            })
+            .unwrap();
+
+        assert_eq!(result.len(), 2);
+        assert_eq!(result.columns["val"].values()[0], Scalar::Float64(30.0)); // 10+20
+        assert_eq!(result.columns["val"].values()[1], Scalar::Float64(70.0)); // 30+40
+    }
+
+    #[test]
+    fn dataframe_groupby_transform_mean() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "grp",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("b".into()),
+                    Scalar::Utf8("b".into()),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "val",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Float64(10.0),
+                    Scalar::Float64(20.0),
+                    Scalar::Float64(30.0),
+                    Scalar::Float64(40.0),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let result = df
+            .groupby(&["grp"])
+            .unwrap()
+            .transform("mean")
+            .unwrap();
+
+        // Same shape as input (4 rows)
+        assert_eq!(result.len(), 4);
+        // Group "a" mean = 15.0, broadcast to rows 0 and 1
+        assert_eq!(result.columns["val"].values()[0], Scalar::Float64(15.0));
+        assert_eq!(result.columns["val"].values()[1], Scalar::Float64(15.0));
+        // Group "b" mean = 35.0, broadcast to rows 2 and 3
+        assert_eq!(result.columns["val"].values()[2], Scalar::Float64(35.0));
+        assert_eq!(result.columns["val"].values()[3], Scalar::Float64(35.0));
+    }
+
+    #[test]
+    fn dataframe_groupby_transform_sum() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "grp",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![
+                    Scalar::Utf8("x".into()),
+                    Scalar::Utf8("x".into()),
+                    Scalar::Utf8("y".into()),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "val",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(2.0),
+                    Scalar::Float64(5.0),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let result = df
+            .groupby(&["grp"])
+            .unwrap()
+            .transform("sum")
+            .unwrap();
+
+        assert_eq!(result.len(), 3);
+        // Group "x" sum = 3.0 for rows 0 and 1
+        assert_eq!(result.columns["val"].values()[0], Scalar::Float64(3.0));
+        assert_eq!(result.columns["val"].values()[1], Scalar::Float64(3.0));
+        // Group "y" sum = 5.0 for row 2
+        assert_eq!(result.columns["val"].values()[2], Scalar::Float64(5.0));
+        // Original index is preserved
+        assert_eq!(
+            result.index().labels(),
+            &[0_i64.into(), 1_i64.into(), 2_i64.into()]
+        );
+    }
+
+    // ── str accessor regex tests ──
+
+    #[test]
+    fn str_contains_regex() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("foo123".into()),
+                Scalar::Utf8("bar".into()),
+                Scalar::Utf8("baz456".into()),
+            ],
+        )
+        .unwrap();
+        let result = s.str().contains_regex(r"\d+").unwrap();
+        assert_eq!(result.values()[0], Scalar::Bool(true));
+        assert_eq!(result.values()[1], Scalar::Bool(false));
+        assert_eq!(result.values()[2], Scalar::Bool(true));
+    }
+
+    #[test]
+    fn str_contains_regex_invalid_pattern() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into()],
+            vec![Scalar::Utf8("test".into())],
+        )
+        .unwrap();
+        assert!(s.str().contains_regex(r"[invalid").is_err());
+    }
+
+    #[test]
+    fn str_contains_regex_with_null() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![
+                Scalar::Utf8("abc123".into()),
+                Scalar::Null(NullKind::NaN),
+            ],
+        )
+        .unwrap();
+        let result = s.str().contains_regex(r"\d").unwrap();
+        assert_eq!(result.values()[0], Scalar::Bool(true));
+        assert!(result.values()[1].is_missing());
+    }
+
+    #[test]
+    fn str_replace_regex() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![
+                Scalar::Utf8("foo123bar456".into()),
+                Scalar::Utf8("no digits".into()),
+            ],
+        )
+        .unwrap();
+        // Replace first occurrence
+        let result = s.str().replace_regex(r"\d+", "NUM").unwrap();
+        assert_eq!(result.values()[0], Scalar::Utf8("fooNUMbar456".into()));
+        assert_eq!(result.values()[1], Scalar::Utf8("no digits".into()));
+    }
+
+    #[test]
+    fn str_replace_regex_all() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into()],
+            vec![Scalar::Utf8("foo123bar456".into())],
+        )
+        .unwrap();
+        let result = s.str().replace_regex_all(r"\d+", "NUM").unwrap();
+        assert_eq!(result.values()[0], Scalar::Utf8("fooNUMbarNUM".into()));
+    }
+
+    #[test]
+    fn str_replace_regex_with_backreference() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into()],
+            vec![Scalar::Utf8("hello world".into())],
+        )
+        .unwrap();
+        let result = s
+            .str()
+            .replace_regex(r"(\w+)\s(\w+)", "$2 $1")
+            .unwrap();
+        assert_eq!(result.values()[0], Scalar::Utf8("world hello".into()));
+    }
+
+    #[test]
+    fn str_extract_with_group() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("foo123".into()),
+                Scalar::Utf8("bar456".into()),
+                Scalar::Utf8("no match".into()),
+            ],
+        )
+        .unwrap();
+        let result = s.str().extract(r"(\d+)").unwrap();
+        assert_eq!(result.values()[0], Scalar::Utf8("123".into()));
+        assert_eq!(result.values()[1], Scalar::Utf8("456".into()));
+        assert!(result.values()[2].is_missing());
+    }
+
+    #[test]
+    fn str_extract_without_group() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into()],
+            vec![Scalar::Utf8("abc123def".into())],
+        )
+        .unwrap();
+        // No capture group → returns full match
+        let result = s.str().extract(r"\d+").unwrap();
+        assert_eq!(result.values()[0], Scalar::Utf8("123".into()));
+    }
+
+    #[test]
+    fn str_count_matches() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("aabaa".into()),
+                Scalar::Utf8("bb".into()),
+                Scalar::Utf8("aaa".into()),
+            ],
+        )
+        .unwrap();
+        let result = s.str().count_matches("a+").unwrap();
+        assert_eq!(result.values()[0], Scalar::Int64(2)); // "aa" and "aa"
+        assert_eq!(result.values()[1], Scalar::Int64(0));
+        assert_eq!(result.values()[2], Scalar::Int64(1)); // "aaa"
+    }
+
+    #[test]
+    fn str_findall() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![
+                Scalar::Utf8("foo12bar34".into()),
+                Scalar::Utf8("no digits".into()),
+            ],
+        )
+        .unwrap();
+        let result = s.str().findall(r"\d+", ",").unwrap();
+        assert_eq!(result.values()[0], Scalar::Utf8("12,34".into()));
+        assert!(result.values()[1].is_missing());
+    }
+
+    #[test]
+    fn str_fullmatch() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("123".into()),
+                Scalar::Utf8("abc123".into()),
+                Scalar::Utf8("456".into()),
+            ],
+        )
+        .unwrap();
+        let result = s.str().fullmatch(r"\d+").unwrap();
+        assert_eq!(result.values()[0], Scalar::Bool(true));
+        assert_eq!(result.values()[1], Scalar::Bool(false)); // partial match, not full
+        assert_eq!(result.values()[2], Scalar::Bool(true));
+    }
+
+    #[test]
+    fn str_match_regex() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("123abc".into()),
+                Scalar::Utf8("abc123".into()),
+                Scalar::Utf8("456".into()),
+            ],
+        )
+        .unwrap();
+        let result = s.str().match_regex(r"\d+").unwrap();
+        assert_eq!(result.values()[0], Scalar::Bool(true)); // starts with digits
+        assert_eq!(result.values()[1], Scalar::Bool(false)); // starts with letters
+        assert_eq!(result.values()[2], Scalar::Bool(true)); // all digits
+    }
+
+    #[test]
+    fn str_split_regex_get() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![
+                Scalar::Utf8("foo123bar456baz".into()),
+                Scalar::Utf8("hello".into()),
+            ],
+        )
+        .unwrap();
+        // Split on one or more digits
+        let result = s.str().split_regex_get(r"\d+", 1).unwrap();
+        assert_eq!(result.values()[0], Scalar::Utf8("bar".into()));
+        // "hello" has no digits, so split produces ["hello"] and index 1 is out of bounds
+        assert!(result.values()[1].is_missing());
+    }
+
+    // ── GroupBy filter tests ──
+
+    #[test]
+    fn dataframe_groupby_filter_keeps_matching_groups() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "grp",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("b".into()),
+                    Scalar::Utf8("b".into()),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "val",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(2.0),
+                    Scalar::Float64(10.0),
+                    Scalar::Float64(20.0),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        // Keep groups where the sum of val > 5
+        let result = df
+            .groupby(&["grp"])
+            .unwrap()
+            .filter(|group_df| {
+                let sum: f64 = group_df.columns["val"]
+                    .values()
+                    .iter()
+                    .filter_map(|v| match v {
+                        Scalar::Float64(f) => Some(*f),
+                        _ => None,
+                    })
+                    .sum();
+                Ok(sum > 5.0)
+            })
+            .unwrap();
+
+        // Group "a" has sum 3.0 (dropped), group "b" has sum 30.0 (kept)
+        assert_eq!(result.len(), 2);
+        assert_eq!(result.columns["val"].values()[0], Scalar::Float64(10.0));
+        assert_eq!(result.columns["val"].values()[1], Scalar::Float64(20.0));
+    }
+
+    #[test]
+    fn dataframe_groupby_filter_empty_result() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "grp",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("b".into()),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "val",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![Scalar::Float64(1.0), Scalar::Float64(2.0)],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        // Drop all groups
+        let result = df
+            .groupby(&["grp"])
+            .unwrap()
+            .filter(|_| Ok(false))
+            .unwrap();
+
+        assert_eq!(result.len(), 0);
+    }
+
+    // ── Series comparison operator tests ──
+
+    #[test]
+    fn series_eq_scalar() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(1)],
+        )
+        .unwrap();
+        let result = s.eq_scalar(&Scalar::Int64(1)).unwrap();
+        assert_eq!(result.values()[0], Scalar::Bool(true));
+        assert_eq!(result.values()[1], Scalar::Bool(false));
+        assert_eq!(result.values()[2], Scalar::Bool(true));
+    }
+
+    #[test]
+    fn series_gt_scalar() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Int64(5), Scalar::Int64(3)],
+        )
+        .unwrap();
+        let result = s.gt_scalar(&Scalar::Int64(2)).unwrap();
+        assert_eq!(result.values()[0], Scalar::Bool(false));
+        assert_eq!(result.values()[1], Scalar::Bool(true));
+        assert_eq!(result.values()[2], Scalar::Bool(true));
+    }
+
+    #[test]
+    fn series_le_scalar() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Float64(1.5), Scalar::Float64(2.5)],
+        )
+        .unwrap();
+        let result = s.le_scalar(&Scalar::Float64(2.0)).unwrap();
+        assert_eq!(result.values()[0], Scalar::Bool(true));
+        assert_eq!(result.values()[1], Scalar::Bool(false));
+    }
+
+    #[test]
+    fn series_equals_identical() {
+        let a = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(10), Scalar::Int64(20)],
+        )
+        .unwrap();
+        let b = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(10), Scalar::Int64(20)],
+        )
+        .unwrap();
+        assert!(a.equals(&b));
+    }
+
+    #[test]
+    fn series_equals_different_values() {
+        let a = Series::from_values(
+            "x",
+            vec![0_i64.into()],
+            vec![Scalar::Int64(1)],
+        )
+        .unwrap();
+        let b = Series::from_values(
+            "x",
+            vec![0_i64.into()],
+            vec![Scalar::Int64(2)],
+        )
+        .unwrap();
+        assert!(!a.equals(&b));
+    }
+
+    #[test]
+    fn series_equals_different_names() {
+        let a = Series::from_values(
+            "x",
+            vec![0_i64.into()],
+            vec![Scalar::Int64(1)],
+        )
+        .unwrap();
+        let b = Series::from_values(
+            "y",
+            vec![0_i64.into()],
+            vec![Scalar::Int64(1)],
+        )
+        .unwrap();
+        assert!(!a.equals(&b));
+    }
+
+    #[test]
+    fn series_equals_nan_matches_nan() {
+        let a = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Null(NullKind::NaN)],
+        )
+        .unwrap();
+        let b = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Null(NullKind::NaN)],
+        )
+        .unwrap();
+        assert!(a.equals(&b));
     }
 }

@@ -576,6 +576,7 @@ dependencies = [
  "fp-index",
  "fp-runtime",
  "fp-types",
+ "regex",
  "serde",
  "thiserror",
 ]

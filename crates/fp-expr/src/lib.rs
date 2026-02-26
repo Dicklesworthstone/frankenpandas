@@ -93,6 +93,8 @@ pub enum ExprError {
     UnknownSeries(String),
     #[error("cannot evaluate a pure literal expression without an index anchor")]
     UnanchoredLiteral,
+    #[error("parse error: {0}")]
+    ParseError(String),
     #[error(transparent)]
     Frame(#[from] FrameError),
 }
@@ -183,6 +185,34 @@ pub fn filter_dataframe_on_expr(
         )));
     }
     frame.filter_rows(&mask).map_err(ExprError::from)
+}
+
+/// Evaluate a string expression against a DataFrame and return a Series.
+///
+/// Analogous to `pandas.DataFrame.eval(expr_str)`. Parses the string
+/// expression and evaluates it using the DataFrame's columns as variables.
+pub fn eval_str(
+    expr_str: &str,
+    frame: &fp_frame::DataFrame,
+    policy: &RuntimePolicy,
+    ledger: &mut EvidenceLedger,
+) -> Result<Series, ExprError> {
+    let expr = parse_expr(expr_str)?;
+    evaluate_on_dataframe(&expr, frame, policy, ledger)
+}
+
+/// Filter a DataFrame using a string expression.
+///
+/// Analogous to `pandas.DataFrame.query(expr_str)`. Parses the string
+/// expression, evaluates it to a boolean mask, then filters the DataFrame.
+pub fn query_str(
+    expr_str: &str,
+    frame: &fp_frame::DataFrame,
+    policy: &RuntimePolicy,
+    ledger: &mut EvidenceLedger,
+) -> Result<fp_frame::DataFrame, ExprError> {
+    let expr = parse_expr(expr_str)?;
+    filter_dataframe_on_expr(&expr, frame, policy, ledger)
 }
 
 fn apply_series_comparison(
@@ -442,6 +472,400 @@ fn evaluate_delta_comparison(
             let rhs = evaluate_delta(right_expr, delta_ctx, delta, policy, ledger)?;
             apply_series_comparison(&lhs, &rhs, op)
         }
+    }
+}
+
+// ── Expression Parser ───────────────────────────────────────────────────
+//
+// A simple recursive-descent parser for pandas-style query/eval expressions.
+// Supports:
+//   - Column references (identifiers)
+//   - Numeric literals (integer and float)
+//   - String literals ('...' or "...")
+//   - Comparison operators: ==, !=, >, >=, <, <=
+//   - Logical operators: and, or, not
+//   - Arithmetic operators: +, -, *, /
+//   - Parenthesized sub-expressions
+
+/// Parse a string expression into an `Expr` AST.
+///
+/// Syntax:
+///   expr       → or_expr
+///   or_expr    → and_expr ( "or" and_expr )*
+///   and_expr   → not_expr ( "and" not_expr )*
+///   not_expr   → "not" not_expr | comparison
+///   comparison → add_expr ( ("==" | "!=" | ">" | ">=" | "<" | "<=") add_expr )?
+///   add_expr   → mul_expr ( ("+" | "-") mul_expr )*
+///   mul_expr   → atom ( ("*" | "/") atom )*
+///   atom       → NUMBER | STRING | IDENT | "(" expr ")"
+pub fn parse_expr(input: &str) -> Result<Expr, ExprError> {
+    let tokens = tokenize(input)?;
+    let mut pos = 0;
+    let result = parse_or(&tokens, &mut pos)?;
+    if pos < tokens.len() {
+        return Err(ExprError::ParseError(format!(
+            "unexpected token at position {pos}: {:?}",
+            tokens[pos]
+        )));
+    }
+    Ok(result)
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum Token {
+    Ident(String),
+    Int(i64),
+    Float(f64),
+    Str(String),
+    // Comparison
+    EqEq,
+    NotEq,
+    Gt,
+    Ge,
+    Lt,
+    Le,
+    // Arithmetic
+    Plus,
+    Minus,
+    Star,
+    Slash,
+    // Grouping
+    LParen,
+    RParen,
+    // Logical (keywords)
+    And,
+    Or,
+    Not,
+}
+
+fn tokenize(input: &str) -> Result<Vec<Token>, ExprError> {
+    let chars: Vec<char> = input.chars().collect();
+    let mut tokens = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c.is_whitespace() {
+            i += 1;
+            continue;
+        }
+        match c {
+            '+' => {
+                tokens.push(Token::Plus);
+                i += 1;
+            }
+            '-' => {
+                // Check for negative number literal
+                if i + 1 < chars.len()
+                    && chars[i + 1].is_ascii_digit()
+                    && (tokens.is_empty()
+                        || matches!(
+                            tokens.last(),
+                            Some(
+                                Token::LParen
+                                    | Token::EqEq
+                                    | Token::NotEq
+                                    | Token::Gt
+                                    | Token::Ge
+                                    | Token::Lt
+                                    | Token::Le
+                                    | Token::Plus
+                                    | Token::Minus
+                                    | Token::Star
+                                    | Token::Slash
+                                    | Token::And
+                                    | Token::Or
+                                    | Token::Not
+                            )
+                        ))
+                {
+                    let start = i;
+                    i += 1;
+                    while i < chars.len() && (chars[i].is_ascii_digit() || chars[i] == '.') {
+                        i += 1;
+                    }
+                    let num_str: String = chars[start..i].iter().collect();
+                    if num_str.contains('.') {
+                        tokens.push(Token::Float(num_str.parse::<f64>().map_err(|_| {
+                            ExprError::ParseError(format!("invalid float: {num_str}"))
+                        })?));
+                    } else {
+                        tokens.push(Token::Int(num_str.parse::<i64>().map_err(|_| {
+                            ExprError::ParseError(format!("invalid integer: {num_str}"))
+                        })?));
+                    }
+                } else {
+                    tokens.push(Token::Minus);
+                    i += 1;
+                }
+            }
+            '*' => {
+                tokens.push(Token::Star);
+                i += 1;
+            }
+            '/' => {
+                tokens.push(Token::Slash);
+                i += 1;
+            }
+            '(' => {
+                tokens.push(Token::LParen);
+                i += 1;
+            }
+            ')' => {
+                tokens.push(Token::RParen);
+                i += 1;
+            }
+            '=' => {
+                if i + 1 < chars.len() && chars[i + 1] == '=' {
+                    tokens.push(Token::EqEq);
+                    i += 2;
+                } else {
+                    return Err(ExprError::ParseError(
+                        "expected '==' but found single '='".into(),
+                    ));
+                }
+            }
+            '!' => {
+                if i + 1 < chars.len() && chars[i + 1] == '=' {
+                    tokens.push(Token::NotEq);
+                    i += 2;
+                } else {
+                    return Err(ExprError::ParseError(
+                        "expected '!=' but found single '!'".into(),
+                    ));
+                }
+            }
+            '>' => {
+                if i + 1 < chars.len() && chars[i + 1] == '=' {
+                    tokens.push(Token::Ge);
+                    i += 2;
+                } else {
+                    tokens.push(Token::Gt);
+                    i += 1;
+                }
+            }
+            '<' => {
+                if i + 1 < chars.len() && chars[i + 1] == '=' {
+                    tokens.push(Token::Le);
+                    i += 2;
+                } else {
+                    tokens.push(Token::Lt);
+                    i += 1;
+                }
+            }
+            '\'' | '"' => {
+                let quote = c;
+                i += 1;
+                let start = i;
+                while i < chars.len() && chars[i] != quote {
+                    i += 1;
+                }
+                if i >= chars.len() {
+                    return Err(ExprError::ParseError("unterminated string literal".into()));
+                }
+                let s: String = chars[start..i].iter().collect();
+                tokens.push(Token::Str(s));
+                i += 1; // skip closing quote
+            }
+            _ if c.is_ascii_digit() => {
+                let start = i;
+                while i < chars.len() && (chars[i].is_ascii_digit() || chars[i] == '.') {
+                    i += 1;
+                }
+                let num_str: String = chars[start..i].iter().collect();
+                if num_str.contains('.') {
+                    tokens.push(Token::Float(num_str.parse::<f64>().map_err(|_| {
+                        ExprError::ParseError(format!("invalid float: {num_str}"))
+                    })?));
+                } else {
+                    tokens.push(Token::Int(num_str.parse::<i64>().map_err(|_| {
+                        ExprError::ParseError(format!("invalid integer: {num_str}"))
+                    })?));
+                }
+            }
+            _ if c.is_alphabetic() || c == '_' => {
+                let start = i;
+                while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
+                    i += 1;
+                }
+                let word: String = chars[start..i].iter().collect();
+                match word.as_str() {
+                    "and" => tokens.push(Token::And),
+                    "or" => tokens.push(Token::Or),
+                    "not" => tokens.push(Token::Not),
+                    _ => tokens.push(Token::Ident(word)),
+                }
+            }
+            _ => {
+                return Err(ExprError::ParseError(format!(
+                    "unexpected character: '{c}'"
+                )));
+            }
+        }
+    }
+    Ok(tokens)
+}
+
+fn parse_or(tokens: &[Token], pos: &mut usize) -> Result<Expr, ExprError> {
+    let mut left = parse_and(tokens, pos)?;
+    while *pos < tokens.len() && tokens[*pos] == Token::Or {
+        *pos += 1;
+        let right = parse_and(tokens, pos)?;
+        left = Expr::Or {
+            left: Box::new(left),
+            right: Box::new(right),
+        };
+    }
+    Ok(left)
+}
+
+fn parse_and(tokens: &[Token], pos: &mut usize) -> Result<Expr, ExprError> {
+    let mut left = parse_not(tokens, pos)?;
+    while *pos < tokens.len() && tokens[*pos] == Token::And {
+        *pos += 1;
+        let right = parse_not(tokens, pos)?;
+        left = Expr::And {
+            left: Box::new(left),
+            right: Box::new(right),
+        };
+    }
+    Ok(left)
+}
+
+fn parse_not(tokens: &[Token], pos: &mut usize) -> Result<Expr, ExprError> {
+    if *pos < tokens.len() && tokens[*pos] == Token::Not {
+        *pos += 1;
+        let inner = parse_not(tokens, pos)?;
+        return Ok(Expr::Not {
+            expr: Box::new(inner),
+        });
+    }
+    parse_comparison(tokens, pos)
+}
+
+fn parse_comparison(tokens: &[Token], pos: &mut usize) -> Result<Expr, ExprError> {
+    let left = parse_add(tokens, pos)?;
+    if *pos < tokens.len() {
+        let op = match &tokens[*pos] {
+            Token::EqEq => Some(ComparisonOp::Eq),
+            Token::NotEq => Some(ComparisonOp::Ne),
+            Token::Gt => Some(ComparisonOp::Gt),
+            Token::Ge => Some(ComparisonOp::Ge),
+            Token::Lt => Some(ComparisonOp::Lt),
+            Token::Le => Some(ComparisonOp::Le),
+            _ => None,
+        };
+        if let Some(op) = op {
+            *pos += 1;
+            let right = parse_add(tokens, pos)?;
+            return Ok(Expr::Compare {
+                left: Box::new(left),
+                right: Box::new(right),
+                op,
+            });
+        }
+    }
+    Ok(left)
+}
+
+fn parse_add(tokens: &[Token], pos: &mut usize) -> Result<Expr, ExprError> {
+    let mut left = parse_mul(tokens, pos)?;
+    while *pos < tokens.len() {
+        match &tokens[*pos] {
+            Token::Plus => {
+                *pos += 1;
+                let right = parse_mul(tokens, pos)?;
+                left = Expr::Add {
+                    left: Box::new(left),
+                    right: Box::new(right),
+                };
+            }
+            Token::Minus => {
+                *pos += 1;
+                let right = parse_mul(tokens, pos)?;
+                left = Expr::Sub {
+                    left: Box::new(left),
+                    right: Box::new(right),
+                };
+            }
+            _ => break,
+        }
+    }
+    Ok(left)
+}
+
+fn parse_mul(tokens: &[Token], pos: &mut usize) -> Result<Expr, ExprError> {
+    let mut left = parse_atom(tokens, pos)?;
+    while *pos < tokens.len() {
+        match &tokens[*pos] {
+            Token::Star => {
+                *pos += 1;
+                let right = parse_atom(tokens, pos)?;
+                left = Expr::Mul {
+                    left: Box::new(left),
+                    right: Box::new(right),
+                };
+            }
+            Token::Slash => {
+                *pos += 1;
+                let right = parse_atom(tokens, pos)?;
+                left = Expr::Div {
+                    left: Box::new(left),
+                    right: Box::new(right),
+                };
+            }
+            _ => break,
+        }
+    }
+    Ok(left)
+}
+
+fn parse_atom(tokens: &[Token], pos: &mut usize) -> Result<Expr, ExprError> {
+    if *pos >= tokens.len() {
+        return Err(ExprError::ParseError(
+            "unexpected end of expression".into(),
+        ));
+    }
+    match &tokens[*pos] {
+        Token::Int(n) => {
+            let val = *n;
+            *pos += 1;
+            Ok(Expr::Literal {
+                value: Scalar::Int64(val),
+            })
+        }
+        Token::Float(f) => {
+            let val = *f;
+            *pos += 1;
+            Ok(Expr::Literal {
+                value: Scalar::Float64(val),
+            })
+        }
+        Token::Str(s) => {
+            let val = s.clone();
+            *pos += 1;
+            Ok(Expr::Literal {
+                value: Scalar::Utf8(val),
+            })
+        }
+        Token::Ident(name) => {
+            let name = name.clone();
+            *pos += 1;
+            Ok(Expr::Series {
+                name: SeriesRef(name),
+            })
+        }
+        Token::LParen => {
+            *pos += 1; // skip '('
+            let inner = parse_or(tokens, pos)?;
+            if *pos >= tokens.len() || tokens[*pos] != Token::RParen {
+                return Err(ExprError::ParseError("expected closing ')'".into()));
+            }
+            *pos += 1; // skip ')'
+            Ok(inner)
+        }
+        other => Err(ExprError::ParseError(format!(
+            "unexpected token: {other:?}"
+        ))),
     }
 }
 
@@ -1437,5 +1861,237 @@ mod tests {
         assert!(!MaterializedView::is_linear(&Expr::Literal {
             value: Scalar::Int64(42),
         }));
+    }
+
+    // ── Parser tests ──
+
+    #[test]
+    fn parse_simple_comparison() {
+        let expr = super::parse_expr("col_a > 5").unwrap();
+        assert_eq!(
+            expr,
+            Expr::Compare {
+                left: Box::new(Expr::Series {
+                    name: SeriesRef("col_a".into()),
+                }),
+                right: Box::new(Expr::Literal {
+                    value: Scalar::Int64(5),
+                }),
+                op: ComparisonOp::Gt,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_and_or_expression() {
+        let expr = super::parse_expr("a > 1 and b < 2").unwrap();
+        match expr {
+            Expr::And { left, right } => {
+                assert!(matches!(*left, Expr::Compare { .. }));
+                assert!(matches!(*right, Expr::Compare { .. }));
+            }
+            other => panic!("expected And, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_not_expression() {
+        let expr = super::parse_expr("not a == 1").unwrap();
+        assert!(matches!(expr, Expr::Not { .. }));
+    }
+
+    #[test]
+    fn parse_arithmetic() {
+        let expr = super::parse_expr("a + b * 2").unwrap();
+        // Should parse as a + (b * 2) due to precedence
+        match expr {
+            Expr::Add { left, right } => {
+                assert!(matches!(*left, Expr::Series { .. }));
+                assert!(matches!(*right, Expr::Mul { .. }));
+            }
+            other => panic!("expected Add, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_parentheses() {
+        let expr = super::parse_expr("(a + b) * 2").unwrap();
+        match expr {
+            Expr::Mul { left, right } => {
+                assert!(matches!(*left, Expr::Add { .. }));
+                assert!(matches!(
+                    *right,
+                    Expr::Literal {
+                        value: Scalar::Int64(2)
+                    }
+                ));
+            }
+            other => panic!("expected Mul, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_string_literal() {
+        let expr = super::parse_expr("name == 'alice'").unwrap();
+        match expr {
+            Expr::Compare { right, op, .. } => {
+                assert_eq!(op, ComparisonOp::Eq);
+                assert_eq!(
+                    *right,
+                    Expr::Literal {
+                        value: Scalar::Utf8("alice".into())
+                    }
+                );
+            }
+            other => panic!("expected Compare, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_float_literal() {
+        let expr = super::parse_expr("x > 3.14").unwrap();
+        match expr {
+            Expr::Compare { right, .. } => {
+                assert_eq!(
+                    *right,
+                    Expr::Literal {
+                        value: Scalar::Float64(3.14)
+                    }
+                );
+            }
+            other => panic!("expected Compare, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_negative_literal() {
+        let expr = super::parse_expr("x > -5").unwrap();
+        match expr {
+            Expr::Compare { right, .. } => {
+                assert_eq!(
+                    *right,
+                    Expr::Literal {
+                        value: Scalar::Int64(-5)
+                    }
+                );
+            }
+            other => panic!("expected Compare, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_error_single_equals() {
+        assert!(super::parse_expr("x = 1").is_err());
+    }
+
+    #[test]
+    fn parse_eval_integration() {
+        // Parse, then evaluate against a context
+        let expr = super::parse_expr("a + b").unwrap();
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let a = fp_frame::Series::from_values(
+            "a",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(10), Scalar::Int64(20)],
+        )
+        .unwrap();
+        let b = fp_frame::Series::from_values(
+            "b",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(3), Scalar::Int64(7)],
+        )
+        .unwrap();
+
+        let mut ctx = EvalContext::new();
+        ctx.insert_series(a);
+        ctx.insert_series(b);
+
+        let result = evaluate(&expr, &ctx, &policy, &mut ledger).unwrap();
+        assert_eq!(result.values()[0], Scalar::Int64(13));
+        assert_eq!(result.values()[1], Scalar::Int64(27));
+    }
+
+    #[test]
+    fn eval_str_arithmetic() {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "a",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![Scalar::Int64(10), Scalar::Int64(20)],
+            )
+            .unwrap(),
+            fp_frame::Series::from_values(
+                "b",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![Scalar::Int64(3), Scalar::Int64(7)],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let result = super::eval_str("a + b", &frame, &policy, &mut ledger).unwrap();
+        assert_eq!(result.values()[0], Scalar::Int64(13));
+        assert_eq!(result.values()[1], Scalar::Int64(27));
+    }
+
+    #[test]
+    fn query_str_filters_rows() {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "x",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![Scalar::Int64(1), Scalar::Int64(5), Scalar::Int64(3)],
+            )
+            .unwrap(),
+            fp_frame::Series::from_values(
+                "y",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let result = super::query_str("x > 2", &frame, &policy, &mut ledger).unwrap();
+        assert_eq!(result.len(), 2); // rows where x=5 and x=3
+        assert_eq!(result.columns()["x"].values()[0], Scalar::Int64(5));
+        assert_eq!(result.columns()["x"].values()[1], Scalar::Int64(3));
+    }
+
+    #[test]
+    fn query_str_compound_filter() {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "a",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![Scalar::Int64(1), Scalar::Int64(5), Scalar::Int64(3)],
+            )
+            .unwrap(),
+            fp_frame::Series::from_values(
+                "b",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        // Query for a > 2 and b < 25
+        let result =
+            super::query_str("a > 2 and b < 25", &frame, &policy, &mut ledger).unwrap();
+        assert_eq!(result.len(), 1); // only row 1 (a=5, b=20)
+        assert_eq!(result.columns()["a"].values()[0], Scalar::Int64(5));
+        assert_eq!(result.columns()["b"].values()[0], Scalar::Int64(20));
     }
 }
