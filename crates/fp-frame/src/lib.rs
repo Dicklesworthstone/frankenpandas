@@ -15699,8 +15699,8 @@ mod tests {
     use fp_index::AlignMode;
 
     use super::{
-        DataFrame, DataFrameColumnInput, DropNaHow, DuplicateKeep, FrameError, IndexLabel, Series,
-        cut, qcut, to_numeric,
+        DataFrame, DataFrameColumnInput, DataFrameCsvReadOptions, DropNaHow, DuplicateKeep,
+        FrameError, IndexLabel, Series, cut, qcut, to_numeric,
     };
 
     #[test]
@@ -30725,6 +30725,83 @@ mod tests {
         let df = DataFrame::from_csv(csv, ',').unwrap();
         assert_eq!(df.columns()["x"].values()[0], Scalar::Float64(1.5));
         assert_eq!(df.columns()["y"].values()[1], Scalar::Utf8("world".into()));
+    }
+
+    #[test]
+    fn df_from_csv_with_options_index_col_na_values_and_dtypes() {
+        let csv = "id,val,flag\nrow1,1,true\nrow2,NA,false";
+        let mut dtypes = BTreeMap::new();
+        dtypes.insert("val".to_owned(), DType::Float64);
+        let options = DataFrameCsvReadOptions {
+            sep: ',',
+            has_header: true,
+            dtypes,
+            index_col: Some("id".to_owned()),
+            na_values: vec!["NA".to_owned()],
+        };
+        let df = DataFrame::from_csv_with_options(csv, &options).unwrap();
+
+        assert_eq!(
+            df.index().labels(),
+            &[IndexLabel::from("row1"), IndexLabel::from("row2")]
+        );
+        assert_eq!(df.column_order, vec!["val".to_owned(), "flag".to_owned()]);
+        assert_eq!(df.columns()["val"].dtype(), DType::Float64);
+        assert_eq!(df.columns()["val"].values()[0], Scalar::Float64(1.0));
+        assert!(df.columns()["val"].values()[1].is_missing());
+        assert_eq!(df.columns()["flag"].values()[0], Scalar::Bool(true));
+        assert_eq!(df.columns()["flag"].values()[1], Scalar::Bool(false));
+    }
+
+    #[test]
+    fn df_from_csv_with_options_no_header_generates_numeric_names() {
+        let csv = "1,2\n3,4";
+        let options = DataFrameCsvReadOptions {
+            has_header: false,
+            ..DataFrameCsvReadOptions::default()
+        };
+        let df = DataFrame::from_csv_with_options(csv, &options).unwrap();
+        assert_eq!(df.column_order, vec!["0".to_owned(), "1".to_owned()]);
+        assert_eq!(df.columns()["0"].values()[0], Scalar::Int64(1));
+        assert_eq!(df.columns()["0"].values()[1], Scalar::Int64(3));
+        assert_eq!(df.columns()["1"].values()[1], Scalar::Int64(4));
+    }
+
+    #[test]
+    fn df_from_csv_with_options_rejects_invalid_dtype_parse() {
+        let csv = "a\nx";
+        let mut dtypes = BTreeMap::new();
+        dtypes.insert("a".to_owned(), DType::Int64);
+        let options = DataFrameCsvReadOptions {
+            dtypes,
+            ..DataFrameCsvReadOptions::default()
+        };
+        let err = DataFrame::from_csv_with_options(csv, &options).unwrap_err();
+        match err {
+            FrameError::CompatibilityRejected(msg) => {
+                assert!(msg.contains("column 'a'"));
+                assert!(msg.contains("int64"));
+            }
+            other => panic!("unexpected error variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn df_from_csv_with_options_rejects_unknown_dtype_column() {
+        let csv = "a\n1";
+        let mut dtypes = BTreeMap::new();
+        dtypes.insert("missing".to_owned(), DType::Int64);
+        let options = DataFrameCsvReadOptions {
+            dtypes,
+            ..DataFrameCsvReadOptions::default()
+        };
+        let err = DataFrame::from_csv_with_options(csv, &options).unwrap_err();
+        match err {
+            FrameError::CompatibilityRejected(msg) => {
+                assert!(msg.contains("unknown column 'missing'"));
+            }
+            other => panic!("unexpected error variant: {other:?}"),
+        }
     }
 
     #[test]
