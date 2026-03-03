@@ -76,12 +76,12 @@ pub fn groupby_sum_with_options(
     keys: &Series,
     values: &Series,
     options: GroupByOptions,
-    _policy: &RuntimePolicy,
-    _ledger: &mut EvidenceLedger,
+    policy: &RuntimePolicy,
+    ledger: &mut EvidenceLedger,
     exec_options: GroupByExecutionOptions,
 ) -> Result<Series, GroupByError> {
     let (result, _trace) =
-        groupby_sum_with_trace(keys, values, options, _policy, _ledger, exec_options)?;
+        groupby_sum_with_trace(keys, values, options, policy, ledger, exec_options)?;
     Ok(result)
 }
 
@@ -89,8 +89,8 @@ fn groupby_sum_with_trace(
     keys: &Series,
     values: &Series,
     options: GroupByOptions,
-    _policy: &RuntimePolicy,
-    _ledger: &mut EvidenceLedger,
+    policy: &RuntimePolicy,
+    ledger: &mut EvidenceLedger,
     exec_options: GroupByExecutionOptions,
 ) -> Result<(Series, GroupByExecutionTrace), GroupByError> {
     // Fast path: if indexes already match and are duplicate-free, alignment is identity.
@@ -114,6 +114,9 @@ fn groupby_sum_with_trace(
         };
 
     let input_rows = aligned_keys_values.len();
+    // Record an admission decision for policy observability without altering
+    // the current groupby output behavior.
+    let _ = policy.decide_join_admission(input_rows, ledger);
     let estimated_bytes = estimate_groupby_intermediate_bytes(input_rows);
     let use_arena = exec_options.use_arena && estimated_bytes <= exec_options.arena_budget_bytes;
 
@@ -474,8 +477,8 @@ pub fn groupby_agg(
     values: &Series,
     func: AggFunc,
     options: GroupByOptions,
-    _policy: &RuntimePolicy,
-    _ledger: &mut EvidenceLedger,
+    policy: &RuntimePolicy,
+    ledger: &mut EvidenceLedger,
 ) -> Result<Series, GroupByError> {
     // Alignment: if indexes differ, align to union.
     let aligned_storage = if keys.index() == values.index() && !keys.index().has_duplicates() {
@@ -496,6 +499,9 @@ pub fn groupby_agg(
         } else {
             (keys.values(), values.values())
         };
+    // Record an admission decision for policy observability without altering
+    // the current groupby output behavior.
+    let _ = policy.decide_join_admission(key_vals.len(), ledger);
 
     // Collect groups: key_ref -> (source_idx, non-null values, total count).
     let mut ordering = Vec::<GroupKeyRef<'_>>::new();
@@ -1178,6 +1184,75 @@ mod tests {
 
         assert_eq!(out.index().labels(), &["b".into(), "a".into()]);
         assert_eq!(out.values(), &[Scalar::Float64(4.0), Scalar::Float64(6.0)]);
+    }
+
+    #[test]
+    fn groupby_sum_records_runtime_admission_evidence() {
+        let keys = Series::from_values(
+            "key",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Utf8("b".to_owned()),
+                Scalar::Utf8("a".to_owned()),
+            ],
+        )
+        .expect("keys");
+        let values = Series::from_values(
+            "value",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+        )
+        .expect("values");
+
+        let policy = RuntimePolicy::strict();
+        let mut ledger = EvidenceLedger::new();
+        let out = groupby_sum(
+            &keys,
+            &values,
+            GroupByOptions::default(),
+            &policy,
+            &mut ledger,
+        )
+        .expect("groupby");
+
+        assert_eq!(out.values(), &[Scalar::Float64(4.0), Scalar::Float64(2.0)]);
+        assert_eq!(ledger.records().len(), 1);
+    }
+
+    #[test]
+    fn groupby_agg_records_runtime_admission_evidence() {
+        let keys = Series::from_values(
+            "key",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("x".to_owned()),
+                Scalar::Utf8("x".to_owned()),
+                Scalar::Utf8("y".to_owned()),
+            ],
+        )
+        .expect("keys");
+        let values = Series::from_values(
+            "value",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(5), Scalar::Int64(6), Scalar::Int64(7)],
+        )
+        .expect("values");
+
+        let policy = RuntimePolicy::strict();
+        let mut ledger = EvidenceLedger::new();
+        let out = groupby_agg(
+            &keys,
+            &values,
+            AggFunc::Count,
+            GroupByOptions::default(),
+            &policy,
+            &mut ledger,
+        )
+        .expect("groupby agg");
+
+        assert_eq!(out.values(), &[Scalar::Int64(2), Scalar::Int64(1)]);
+        assert_eq!(ledger.records().len(), 1);
     }
 
     #[test]
