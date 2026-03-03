@@ -1124,6 +1124,125 @@ impl Series {
         Self::from_values(self.name.clone(), out_labels, out_values)
     }
 
+    /// Label-based boolean mask selection.
+    ///
+    /// Matches `series.loc[bool_array]` in pandas. The boolean mask must have
+    /// the same length as the Series. Rows where the mask is `True` are kept;
+    /// `False` and `Null` mask entries are excluded.
+    pub fn loc_bool(&self, mask: &[bool]) -> Result<Self, FrameError> {
+        if mask.len() != self.len() {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "boolean index has wrong length: {} instead of {}",
+                mask.len(),
+                self.len()
+            )));
+        }
+
+        let mut out_labels = Vec::new();
+        let mut out_values = Vec::new();
+
+        for (i, &keep) in mask.iter().enumerate() {
+            if keep {
+                out_labels.push(self.index.labels()[i].clone());
+                out_values.push(self.column.values()[i].clone());
+            }
+        }
+
+        Self::from_values(self.name.clone(), out_labels, out_values)
+    }
+
+    /// Position-based boolean mask selection.
+    ///
+    /// Matches `series.iloc[bool_array]` in pandas. The boolean mask must have
+    /// the same length as the Series. Semantically identical to `loc_bool` for
+    /// Series (position and label filtering coincide on the same axis).
+    pub fn iloc_bool(&self, mask: &[bool]) -> Result<Self, FrameError> {
+        self.loc_bool(mask)
+    }
+
+    /// Label-based slice selection (inclusive on both ends).
+    ///
+    /// Matches `series.loc[start:stop]` in pandas. Both `start` and `stop` are
+    /// optional. When present, the slice is inclusive on both endpoints (pandas
+    /// semantics for label-based slicing). Returns rows in their original order.
+    pub fn loc_slice(
+        &self,
+        start: Option<&IndexLabel>,
+        stop: Option<&IndexLabel>,
+    ) -> Result<Self, FrameError> {
+        let labels = self.index.labels();
+
+        // Find the first occurrence of `start` (or begin at 0).
+        let start_pos = match start {
+            Some(label) => labels
+                .iter()
+                .position(|l| l == label)
+                .ok_or_else(|| {
+                    FrameError::CompatibilityRejected(format!(
+                        "loc slice start label not found: {label:?}"
+                    ))
+                })?,
+            None => 0,
+        };
+
+        // Find the last occurrence of `stop` (or go to the end). Pandas loc
+        // slicing is inclusive so we want the last match of stop, not the first.
+        let end_pos = match stop {
+            Some(label) => labels
+                .iter()
+                .rposition(|l| l == label)
+                .ok_or_else(|| {
+                    FrameError::CompatibilityRejected(format!(
+                        "loc slice stop label not found: {label:?}"
+                    ))
+                })?,
+            None => labels.len().saturating_sub(1),
+        };
+
+        if start_pos > end_pos {
+            // Empty result when start is after stop.
+            return Self::from_values(self.name.clone(), Vec::new(), Vec::new());
+        }
+
+        let out_labels: Vec<_> = labels[start_pos..=end_pos].to_vec();
+        let out_values: Vec<_> = self.column.values()[start_pos..=end_pos].to_vec();
+
+        Self::from_values(self.name.clone(), out_labels, out_values)
+    }
+
+    /// Position-based slice selection (exclusive end, like Python range).
+    ///
+    /// Matches `series.iloc[start:stop]` in pandas. The `start` is inclusive
+    /// and `stop` is exclusive (standard Python slice semantics). Negative
+    /// values are resolved from the end. Both are optional.
+    pub fn iloc_slice(
+        &self,
+        start: Option<i64>,
+        stop: Option<i64>,
+    ) -> Result<Self, FrameError> {
+        let len = self.len();
+
+        let resolve = |pos: i64| -> usize {
+            if pos < 0 {
+                (len as i64 + pos).max(0) as usize
+            } else {
+                (pos as usize).min(len)
+            }
+        };
+
+        let start_pos = start.map_or(0, resolve);
+        let end_pos = stop.map_or(len, resolve);
+
+        if start_pos >= end_pos || start_pos >= len {
+            return Self::from_values(self.name.clone(), Vec::new(), Vec::new());
+        }
+
+        let out_labels: Vec<_> = self.index.labels()[start_pos..end_pos].to_vec();
+        let out_values: Vec<_> = self.column.values()[start_pos..end_pos].to_vec();
+
+        Self::from_values(self.name.clone(), out_labels, out_values)
+    }
+
     /// Return a new Series sorted by index labels.
     ///
     /// Matches `s.sort_index(ascending=...)` for the current 1D IndexLabel
@@ -8903,6 +9022,206 @@ impl DataFrame {
         Self::new_with_column_order(Index::new(out_labels), columns, selected_columns)
     }
 
+    /// Boolean mask row selection.
+    ///
+    /// Matches `df.loc[bool_array]` in pandas. The boolean mask must have the
+    /// same length as the DataFrame. Rows where the mask is `True` are kept.
+    pub fn loc_bool(&self, mask: &[bool]) -> Result<Self, FrameError> {
+        if mask.len() != self.len() {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "boolean index has wrong length: {} instead of {}",
+                mask.len(),
+                self.len()
+            )));
+        }
+
+        let positions: Vec<usize> = mask
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &keep)| if keep { Some(i) } else { None })
+            .collect();
+
+        self.take_rows_by_positions(&positions)
+    }
+
+    /// Boolean mask row selection (position-based).
+    ///
+    /// Matches `df.iloc[bool_array]` in pandas. Semantically identical to
+    /// `loc_bool` for DataFrames (the mask selects rows by position either way).
+    pub fn iloc_bool(&self, mask: &[bool]) -> Result<Self, FrameError> {
+        self.loc_bool(mask)
+    }
+
+    /// Label-based slice row selection (inclusive on both ends).
+    ///
+    /// Matches `df.loc[start:stop]` in pandas. Both endpoints are inclusive
+    /// (pandas label-slicing semantics). Either may be `None` to mean "from
+    /// the beginning" or "to the end".
+    pub fn loc_slice(
+        &self,
+        start: Option<&IndexLabel>,
+        stop: Option<&IndexLabel>,
+    ) -> Result<Self, FrameError> {
+        let labels = self.index.labels();
+
+        let start_pos = match start {
+            Some(label) => labels
+                .iter()
+                .position(|l| l == label)
+                .ok_or_else(|| {
+                    FrameError::CompatibilityRejected(format!(
+                        "loc slice start label not found: {label:?}"
+                    ))
+                })?,
+            None => 0,
+        };
+
+        let end_pos = match stop {
+            Some(label) => labels
+                .iter()
+                .rposition(|l| l == label)
+                .ok_or_else(|| {
+                    FrameError::CompatibilityRejected(format!(
+                        "loc slice stop label not found: {label:?}"
+                    ))
+                })?,
+            None => labels.len().saturating_sub(1),
+        };
+
+        if start_pos > end_pos {
+            let empty_cols = self
+                .column_order
+                .iter()
+                .map(|name| {
+                    let col = &self.columns[name];
+                    (name.clone(), Column::new(col.dtype(), Vec::new()).unwrap())
+                })
+                .collect();
+            return Self::new_with_column_order(
+                Index::new(Vec::new()),
+                empty_cols,
+                self.column_order.clone(),
+            );
+        }
+
+        let positions: Vec<usize> = (start_pos..=end_pos).collect();
+        self.take_rows_by_positions(&positions)
+    }
+
+    /// Position-based slice row selection (exclusive end).
+    ///
+    /// Matches `df.iloc[start:stop]` in pandas. The `start` is inclusive and
+    /// `stop` is exclusive (Python slice semantics). Negative values are
+    /// resolved from the end. Both are optional.
+    pub fn iloc_slice(
+        &self,
+        start: Option<i64>,
+        stop: Option<i64>,
+    ) -> Result<Self, FrameError> {
+        let len = self.len();
+
+        let resolve = |pos: i64| -> usize {
+            if pos < 0 {
+                (len as i64 + pos).max(0) as usize
+            } else {
+                (pos as usize).min(len)
+            }
+        };
+
+        let start_pos = start.map_or(0, resolve);
+        let end_pos = stop.map_or(len, resolve);
+
+        if start_pos >= end_pos || start_pos >= len {
+            let empty_cols = self
+                .column_order
+                .iter()
+                .map(|name| {
+                    let col = &self.columns[name];
+                    (name.clone(), Column::new(col.dtype(), Vec::new()).unwrap())
+                })
+                .collect();
+            return Self::new_with_column_order(
+                Index::new(Vec::new()),
+                empty_cols,
+                self.column_order.clone(),
+            );
+        }
+
+        let positions: Vec<usize> = (start_pos..end_pos).collect();
+        self.take_rows_by_positions(&positions)
+    }
+
+    /// Return a single row as a Series by label.
+    ///
+    /// Matches `df.loc[label]` when `label` is a scalar in pandas. The
+    /// returned Series has the DataFrame's column names as its index and the
+    /// row values as data.
+    pub fn loc_row(&self, label: &IndexLabel) -> Result<Series, FrameError> {
+        let pos = self
+            .index
+            .labels()
+            .iter()
+            .position(|l| l == label)
+            .ok_or_else(|| {
+                FrameError::CompatibilityRejected(format!("loc label not found: {label:?}"))
+            })?;
+
+        self.row_to_series(pos)
+    }
+
+    /// Return a single row as a Series by position.
+    ///
+    /// Matches `df.iloc[n]` when `n` is a scalar in pandas. The returned
+    /// Series has the DataFrame's column names as its index and the row values
+    /// as data.
+    pub fn iloc_row(&self, position: i64) -> Result<Series, FrameError> {
+        let pos = normalize_iloc_position(position, self.len())?;
+        self.row_to_series(pos)
+    }
+
+    /// Internal helper: extract a single row by position into a Series.
+    fn row_to_series(&self, position: usize) -> Result<Series, FrameError> {
+        let mut labels = Vec::with_capacity(self.column_order.len());
+        let mut values = Vec::with_capacity(self.column_order.len());
+
+        for name in &self.column_order {
+            labels.push(IndexLabel::Utf8(name.clone()));
+            let col = self.columns.get(name).ok_or_else(|| {
+                FrameError::CompatibilityRejected(format!("column '{name}' not found"))
+            })?;
+            values.push(col.values()[position].clone());
+        }
+
+        // Use the index label as the Series name (pandas semantics).
+        let row_label = &self.index.labels()[position];
+        let name = match row_label {
+            IndexLabel::Int64(v) => v.to_string(),
+            IndexLabel::Utf8(s) => s.clone(),
+        };
+
+        // Try direct construction first. If dtypes are incompatible (e.g.,
+        // Int64 + Utf8), fall back to Utf8 representation, matching pandas'
+        // `object` dtype behavior for mixed-type rows.
+        match Series::from_values(name.clone(), labels.clone(), values.clone()) {
+            Ok(s) => Ok(s),
+            Err(_) => {
+                let utf8_values: Vec<Scalar> = values
+                    .into_iter()
+                    .map(|v| match v {
+                        Scalar::Null(_) => Scalar::Null(NullKind::Null),
+                        Scalar::Bool(b) => {
+                            Scalar::Utf8(if b { "True" } else { "False" }.to_owned())
+                        }
+                        Scalar::Int64(n) => Scalar::Utf8(n.to_string()),
+                        Scalar::Float64(f) => Scalar::Utf8(format!("{f}")),
+                        Scalar::Utf8(s) => Scalar::Utf8(s),
+                    })
+                    .collect();
+                Series::from_values(name, labels, utf8_values)
+            }
+        }
+    }
+
     /// Add or replace a column.
     ///
     /// Matches `df['new_col'] = values`.
@@ -10969,6 +11288,19 @@ impl DataFrame {
     ///
     /// Returns a `DataFrameGroupBy` for deferred aggregation.
     pub fn groupby(&self, by: &[&str]) -> Result<DataFrameGroupBy<'_>, FrameError> {
+        self.groupby_with_as_index(by, true)
+    }
+
+    /// Group the DataFrame by one or more columns with explicit `as_index`.
+    ///
+    /// When `as_index` is `true` (default), group keys become the index.
+    /// When `as_index` is `false`, group keys become regular columns and the
+    /// index is a default integer range. Matches `df.groupby(by, as_index=...)`.
+    pub fn groupby_with_as_index(
+        &self,
+        by: &[&str],
+        as_index: bool,
+    ) -> Result<DataFrameGroupBy<'_>, FrameError> {
         // Validate columns exist
         for col in by {
             if !self.columns.contains_key(*col) {
@@ -10980,6 +11312,7 @@ impl DataFrame {
         Ok(DataFrameGroupBy {
             df: self,
             by: by.iter().map(|s| (*s).to_string()).collect(),
+            as_index,
         })
     }
 
@@ -14109,6 +14442,7 @@ impl DataFrame {
 pub struct DataFrameGroupBy<'a> {
     df: &'a DataFrame,
     by: Vec<String>,
+    as_index: bool,
 }
 
 impl DataFrameGroupBy<'_> {
@@ -14245,11 +14579,45 @@ impl DataFrameGroupBy<'_> {
             col_order.push(col_name.clone());
         }
 
-        Ok(DataFrame {
-            columns: result_cols,
-            column_order: col_order,
-            index: Index::new(labels),
-        })
+        if self.as_index {
+            Ok(DataFrame {
+                columns: result_cols,
+                column_order: col_order,
+                index: Index::new(labels),
+            })
+        } else {
+            // as_index=False: group keys become regular columns, index is
+            // a default integer range (pandas semantics).
+            let mut full_cols = BTreeMap::new();
+            let mut full_order = Vec::new();
+
+            // Add group key columns first.
+            for col_name in &self.by {
+                let src_col = &self.df.columns[col_name];
+                let mut key_vals = Vec::with_capacity(n_groups);
+                for gkey in &group_order {
+                    let first_row = groups[gkey][0];
+                    key_vals.push(src_col.values()[first_row].clone());
+                }
+                full_cols.insert(col_name.clone(), Column::from_values(key_vals)?);
+                full_order.push(col_name.clone());
+            }
+
+            // Append aggregated value columns.
+            for col_name in col_order {
+                full_cols.insert(col_name.clone(), result_cols.remove(&col_name).unwrap());
+                full_order.push(col_name);
+            }
+
+            let int_labels: Vec<IndexLabel> =
+                (0..n_groups as i64).map(IndexLabel::Int64).collect();
+
+            Ok(DataFrame {
+                columns: full_cols,
+                column_order: full_order,
+                index: Index::new(int_labels),
+            })
+        }
     }
 
     /// GroupBy sum.
@@ -18590,6 +18958,245 @@ mod tests {
         );
     }
 
+    // -------- Series loc_bool / iloc_bool tests --------
+
+    #[test]
+    fn series_loc_bool_selects_true_rows() {
+        let s = Series::from_values(
+            "vals",
+            vec![
+                IndexLabel::from("a"),
+                IndexLabel::from("b"),
+                IndexLabel::from("c"),
+            ],
+            vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+        )
+        .unwrap();
+
+        let out = s.loc_bool(&[true, false, true]).unwrap();
+        assert_eq!(out.len(), 2);
+        assert_eq!(
+            out.index().labels(),
+            &[IndexLabel::from("a"), IndexLabel::from("c")]
+        );
+        assert_eq!(out.column().values(), &[Scalar::Int64(10), Scalar::Int64(30)]);
+    }
+
+    #[test]
+    fn series_loc_bool_empty_mask_returns_empty() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(10), Scalar::Int64(20)],
+        )
+        .unwrap();
+
+        let out = s.loc_bool(&[false, false]).unwrap();
+        assert_eq!(out.len(), 0);
+    }
+
+    #[test]
+    fn series_loc_bool_wrong_length_rejected() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into()],
+            vec![Scalar::Int64(10)],
+        )
+        .unwrap();
+
+        let err = s.loc_bool(&[true, false]).unwrap_err();
+        assert!(
+            matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("wrong length"))
+        );
+    }
+
+    #[test]
+    fn series_iloc_bool_delegates_to_loc_bool() {
+        let s = Series::from_values(
+            "vals",
+            vec![
+                IndexLabel::from("x"),
+                IndexLabel::from("y"),
+                IndexLabel::from("z"),
+            ],
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+        )
+        .unwrap();
+
+        let out = s.iloc_bool(&[false, true, false]).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out.column().values(), &[Scalar::Int64(2)]);
+    }
+
+    // -------- Series loc_slice / iloc_slice tests --------
+
+    #[test]
+    fn series_loc_slice_inclusive_endpoints() {
+        let s = Series::from_values(
+            "vals",
+            vec![
+                IndexLabel::from("a"),
+                IndexLabel::from("b"),
+                IndexLabel::from("c"),
+                IndexLabel::from("d"),
+            ],
+            vec![
+                Scalar::Int64(10),
+                Scalar::Int64(20),
+                Scalar::Int64(30),
+                Scalar::Int64(40),
+            ],
+        )
+        .unwrap();
+
+        let out = s
+            .loc_slice(Some(&IndexLabel::from("b")), Some(&IndexLabel::from("c")))
+            .unwrap();
+        assert_eq!(out.len(), 2);
+        assert_eq!(
+            out.column().values(),
+            &[Scalar::Int64(20), Scalar::Int64(30)]
+        );
+    }
+
+    #[test]
+    fn series_loc_slice_open_start() {
+        let s = Series::from_values(
+            "vals",
+            vec![
+                IndexLabel::from("a"),
+                IndexLabel::from("b"),
+                IndexLabel::from("c"),
+            ],
+            vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+        )
+        .unwrap();
+
+        let out = s
+            .loc_slice(None, Some(&IndexLabel::from("b")))
+            .unwrap();
+        assert_eq!(out.len(), 2);
+        assert_eq!(
+            out.column().values(),
+            &[Scalar::Int64(10), Scalar::Int64(20)]
+        );
+    }
+
+    #[test]
+    fn series_loc_slice_open_end() {
+        let s = Series::from_values(
+            "vals",
+            vec![
+                IndexLabel::from("a"),
+                IndexLabel::from("b"),
+                IndexLabel::from("c"),
+            ],
+            vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+        )
+        .unwrap();
+
+        let out = s
+            .loc_slice(Some(&IndexLabel::from("b")), None)
+            .unwrap();
+        assert_eq!(out.len(), 2);
+        assert_eq!(
+            out.column().values(),
+            &[Scalar::Int64(20), Scalar::Int64(30)]
+        );
+    }
+
+    #[test]
+    fn series_loc_slice_missing_label_rejected() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into()],
+            vec![Scalar::Int64(10)],
+        )
+        .unwrap();
+
+        let err = s
+            .loc_slice(Some(&IndexLabel::from("x")), None)
+            .unwrap_err();
+        assert!(
+            matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("not found"))
+        );
+    }
+
+    #[test]
+    fn series_iloc_slice_exclusive_end() {
+        let s = Series::from_values(
+            "vals",
+            vec![
+                IndexLabel::from("a"),
+                IndexLabel::from("b"),
+                IndexLabel::from("c"),
+                IndexLabel::from("d"),
+            ],
+            vec![
+                Scalar::Int64(10),
+                Scalar::Int64(20),
+                Scalar::Int64(30),
+                Scalar::Int64(40),
+            ],
+        )
+        .unwrap();
+
+        let out = s.iloc_slice(Some(1), Some(3)).unwrap();
+        assert_eq!(out.len(), 2);
+        assert_eq!(
+            out.column().values(),
+            &[Scalar::Int64(20), Scalar::Int64(30)]
+        );
+    }
+
+    #[test]
+    fn series_iloc_slice_negative_positions() {
+        let s = Series::from_values(
+            "vals",
+            vec![
+                IndexLabel::from("a"),
+                IndexLabel::from("b"),
+                IndexLabel::from("c"),
+            ],
+            vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+        )
+        .unwrap();
+
+        // iloc[-2:] means last 2 elements
+        let out = s.iloc_slice(Some(-2), None).unwrap();
+        assert_eq!(out.len(), 2);
+        assert_eq!(
+            out.column().values(),
+            &[Scalar::Int64(20), Scalar::Int64(30)]
+        );
+    }
+
+    #[test]
+    fn series_iloc_slice_open_both_returns_full() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(10), Scalar::Int64(20)],
+        )
+        .unwrap();
+
+        let out = s.iloc_slice(None, None).unwrap();
+        assert_eq!(out.len(), 2);
+    }
+
+    #[test]
+    fn series_iloc_slice_out_of_range_returns_empty() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into()],
+            vec![Scalar::Int64(10)],
+        )
+        .unwrap();
+
+        let out = s.iloc_slice(Some(5), Some(10)).unwrap();
+        assert_eq!(out.len(), 0);
+    }
+
     #[test]
     fn series_sort_index_ascending_orders_labels_and_keeps_values_aligned() {
         let s = Series::from_values(
@@ -20457,6 +21064,318 @@ mod tests {
             .unwrap_err();
         assert!(
             matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("duplicate column selector"))
+        );
+    }
+
+    // -------- DataFrame loc_bool / iloc_bool tests --------
+
+    #[test]
+    fn dataframe_loc_bool_selects_true_rows() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]),
+                (
+                    "b",
+                    vec![
+                        Scalar::Utf8("x".to_owned()),
+                        Scalar::Utf8("y".to_owned()),
+                        Scalar::Utf8("z".to_owned()),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let out = df.loc_bool(&[true, false, true]).unwrap();
+        assert_eq!(out.len(), 2);
+        assert_eq!(
+            out.column("a").unwrap().values(),
+            &[Scalar::Int64(1), Scalar::Int64(3)]
+        );
+        assert_eq!(
+            out.column("b").unwrap().values(),
+            &[Scalar::Utf8("x".to_owned()), Scalar::Utf8("z".to_owned())]
+        );
+    }
+
+    #[test]
+    fn dataframe_loc_bool_wrong_length_rejected() {
+        let df = DataFrame::from_dict(
+            &["a"],
+            vec![("a", vec![Scalar::Int64(1), Scalar::Int64(2)])],
+        )
+        .unwrap();
+
+        let err = df.loc_bool(&[true]).unwrap_err();
+        assert!(
+            matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("wrong length"))
+        );
+    }
+
+    #[test]
+    fn dataframe_loc_bool_all_false_returns_empty() {
+        let df = DataFrame::from_dict(
+            &["a"],
+            vec![("a", vec![Scalar::Int64(1), Scalar::Int64(2)])],
+        )
+        .unwrap();
+
+        let out = df.loc_bool(&[false, false]).unwrap();
+        assert_eq!(out.len(), 0);
+        assert_eq!(out.num_columns(), 1);
+    }
+
+    #[test]
+    fn dataframe_iloc_bool_delegates_to_loc_bool() {
+        let df = DataFrame::from_dict(
+            &["a"],
+            vec![("a", vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)])],
+        )
+        .unwrap();
+
+        let out = df.iloc_bool(&[false, true, true]).unwrap();
+        assert_eq!(out.len(), 2);
+        assert_eq!(
+            out.column("a").unwrap().values(),
+            &[Scalar::Int64(20), Scalar::Int64(30)]
+        );
+    }
+
+    // -------- DataFrame loc_slice / iloc_slice tests --------
+
+    #[test]
+    fn dataframe_loc_slice_inclusive_endpoints() {
+        let df = DataFrame::from_dict_with_index(
+            vec![
+                ("a", vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30), Scalar::Int64(40)]),
+            ],
+            vec![
+                IndexLabel::from("w"),
+                IndexLabel::from("x"),
+                IndexLabel::from("y"),
+                IndexLabel::from("z"),
+            ],
+        )
+        .unwrap();
+
+        let out = df
+            .loc_slice(Some(&IndexLabel::from("x")), Some(&IndexLabel::from("y")))
+            .unwrap();
+        assert_eq!(out.len(), 2);
+        assert_eq!(
+            out.column("a").unwrap().values(),
+            &[Scalar::Int64(20), Scalar::Int64(30)]
+        );
+    }
+
+    #[test]
+    fn dataframe_loc_slice_open_start() {
+        let df = DataFrame::from_dict_with_index(
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]),
+            ],
+            vec![
+                IndexLabel::from("a"),
+                IndexLabel::from("b"),
+                IndexLabel::from("c"),
+            ],
+        )
+        .unwrap();
+
+        let out = df.loc_slice(None, Some(&IndexLabel::from("b"))).unwrap();
+        assert_eq!(out.len(), 2);
+        assert_eq!(
+            out.column("a").unwrap().values(),
+            &[Scalar::Int64(1), Scalar::Int64(2)]
+        );
+    }
+
+    #[test]
+    fn dataframe_loc_slice_open_end() {
+        let df = DataFrame::from_dict_with_index(
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]),
+            ],
+            vec![
+                IndexLabel::from("a"),
+                IndexLabel::from("b"),
+                IndexLabel::from("c"),
+            ],
+        )
+        .unwrap();
+
+        let out = df.loc_slice(Some(&IndexLabel::from("b")), None).unwrap();
+        assert_eq!(out.len(), 2);
+        assert_eq!(
+            out.column("a").unwrap().values(),
+            &[Scalar::Int64(2), Scalar::Int64(3)]
+        );
+    }
+
+    #[test]
+    fn dataframe_loc_slice_missing_label_rejected() {
+        let df = DataFrame::from_dict(
+            &["a"],
+            vec![("a", vec![Scalar::Int64(1)])],
+        )
+        .unwrap();
+
+        let err = df
+            .loc_slice(Some(&IndexLabel::from("z")), None)
+            .unwrap_err();
+        assert!(
+            matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("not found"))
+        );
+    }
+
+    #[test]
+    fn dataframe_iloc_slice_exclusive_end() {
+        let df = DataFrame::from_dict(
+            &["a"],
+            vec![(
+                "a",
+                vec![
+                    Scalar::Int64(10),
+                    Scalar::Int64(20),
+                    Scalar::Int64(30),
+                    Scalar::Int64(40),
+                ],
+            )],
+        )
+        .unwrap();
+
+        let out = df.iloc_slice(Some(1), Some(3)).unwrap();
+        assert_eq!(out.len(), 2);
+        assert_eq!(
+            out.column("a").unwrap().values(),
+            &[Scalar::Int64(20), Scalar::Int64(30)]
+        );
+    }
+
+    #[test]
+    fn dataframe_iloc_slice_negative_positions() {
+        let df = DataFrame::from_dict(
+            &["a"],
+            vec![(
+                "a",
+                vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            )],
+        )
+        .unwrap();
+
+        // iloc[-2:] means last 2 rows
+        let out = df.iloc_slice(Some(-2), None).unwrap();
+        assert_eq!(out.len(), 2);
+        assert_eq!(
+            out.column("a").unwrap().values(),
+            &[Scalar::Int64(2), Scalar::Int64(3)]
+        );
+    }
+
+    #[test]
+    fn dataframe_iloc_slice_out_of_range_returns_empty() {
+        let df = DataFrame::from_dict(
+            &["a"],
+            vec![("a", vec![Scalar::Int64(1)])],
+        )
+        .unwrap();
+
+        let out = df.iloc_slice(Some(5), Some(10)).unwrap();
+        assert_eq!(out.len(), 0);
+        assert_eq!(out.num_columns(), 1);
+    }
+
+    // -------- DataFrame loc_row / iloc_row tests --------
+
+    #[test]
+    fn dataframe_loc_row_returns_series() {
+        let df = DataFrame::from_dict_with_index(
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                ("b", vec![Scalar::Float64(3.0), Scalar::Float64(4.0)]),
+            ],
+            vec![IndexLabel::from("x"), IndexLabel::from("y")],
+        )
+        .unwrap();
+
+        let row = df.loc_row(&IndexLabel::from("x")).unwrap();
+        assert_eq!(row.len(), 2);
+        // The Series index should be the column names
+        assert_eq!(
+            row.index().labels(),
+            &[IndexLabel::from("a"), IndexLabel::from("b")]
+        );
+        // Int64 + Float64 promotes to Float64 (common dtype)
+        assert_eq!(
+            row.column().values(),
+            &[Scalar::Float64(1.0), Scalar::Float64(3.0)]
+        );
+    }
+
+    #[test]
+    fn dataframe_loc_row_missing_label_rejected() {
+        let df = DataFrame::from_dict(
+            &["a"],
+            vec![("a", vec![Scalar::Int64(1)])],
+        )
+        .unwrap();
+
+        let err = df.loc_row(&IndexLabel::from("z")).unwrap_err();
+        assert!(
+            matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("not found"))
+        );
+    }
+
+    #[test]
+    fn dataframe_iloc_row_returns_series() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(10), Scalar::Int64(20)]),
+                ("b", vec![Scalar::Utf8("x".to_owned()), Scalar::Utf8("y".to_owned())]),
+            ],
+        )
+        .unwrap();
+
+        let row = df.iloc_row(1).unwrap();
+        assert_eq!(row.len(), 2);
+        assert_eq!(
+            row.index().labels(),
+            &[IndexLabel::from("a"), IndexLabel::from("b")]
+        );
+        // Mixed dtypes (Int64 + Utf8) fall back to Utf8 representation
+        assert_eq!(
+            row.column().values(),
+            &[Scalar::Utf8("20".to_owned()), Scalar::Utf8("y".to_owned())]
+        );
+        // Name should be the row's index label (stringified)
+        assert_eq!(row.name(), "1");
+    }
+
+    #[test]
+    fn dataframe_iloc_row_negative_position() {
+        let df = DataFrame::from_dict(
+            &["a"],
+            vec![("a", vec![Scalar::Int64(10), Scalar::Int64(20)])],
+        )
+        .unwrap();
+
+        let row = df.iloc_row(-1).unwrap();
+        assert_eq!(row.column().values(), &[Scalar::Int64(20)]);
+    }
+
+    #[test]
+    fn dataframe_iloc_row_out_of_bounds_rejected() {
+        let df = DataFrame::from_dict(
+            &["a"],
+            vec![("a", vec![Scalar::Int64(10)])],
+        )
+        .unwrap();
+
+        let err = df.iloc_row(5).unwrap_err();
+        assert!(
+            matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("out of bounds"))
         );
     }
 
@@ -22686,6 +23605,132 @@ mod tests {
         let result = df.groupby(&["grp"]).unwrap().size().unwrap();
         assert_eq!(result.values()[0], Scalar::Int64(2)); // group "a" has 2 rows
         assert_eq!(result.values()[1], Scalar::Int64(1)); // group "b" has 1 row
+    }
+
+    // ── groupby as_index=false tests ──
+
+    #[test]
+    fn dataframe_groupby_as_index_false_sum() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "grp",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("b".into()),
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("b".into()),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "val",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(2.0),
+                    Scalar::Float64(3.0),
+                    Scalar::Float64(4.0),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let result = df
+            .groupby_with_as_index(&["grp"], false)
+            .unwrap()
+            .sum()
+            .unwrap();
+
+        // as_index=false: grp becomes a regular column, index is 0..n
+        assert_eq!(result.len(), 2);
+        assert_eq!(result.num_columns(), 2); // grp + val
+        assert_eq!(
+            result.index().labels(),
+            &[IndexLabel::Int64(0), IndexLabel::Int64(1)]
+        );
+        // Column order: grp first, then val
+        assert_eq!(result.column_names(), &["grp", "val"]);
+        assert_eq!(
+            result.column("grp").unwrap().values(),
+            &[Scalar::Utf8("a".into()), Scalar::Utf8("b".into())]
+        );
+        assert_eq!(
+            result.column("val").unwrap().values(),
+            &[Scalar::Float64(4.0), Scalar::Float64(6.0)]
+        );
+    }
+
+    #[test]
+    fn dataframe_groupby_as_index_false_mean() {
+        let df = DataFrame::from_dict(
+            &["cat", "x"],
+            vec![
+                (
+                    "cat",
+                    vec![
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("b".into()),
+                    ],
+                ),
+                (
+                    "x",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(30.0),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let result = df
+            .groupby_with_as_index(&["cat"], false)
+            .unwrap()
+            .mean()
+            .unwrap();
+
+        assert_eq!(result.num_columns(), 2);
+        assert_eq!(result.column_names(), &["cat", "x"]);
+        // Default integer index
+        assert_eq!(
+            result.index().labels(),
+            &[IndexLabel::Int64(0), IndexLabel::Int64(1)]
+        );
+        assert_eq!(
+            result.column("x").unwrap().values(),
+            &[Scalar::Float64(15.0), Scalar::Float64(30.0)]
+        );
+    }
+
+    #[test]
+    fn dataframe_groupby_as_index_true_is_default() {
+        let df = DataFrame::from_dict(
+            &["cat", "x"],
+            vec![
+                ("cat", vec![Scalar::Utf8("a".into()), Scalar::Utf8("b".into())]),
+                ("x", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
+            ],
+        )
+        .unwrap();
+
+        // Default groupby (as_index=true)
+        let r1 = df.groupby(&["cat"]).unwrap().sum().unwrap();
+        // Explicit as_index=true
+        let r2 = df
+            .groupby_with_as_index(&["cat"], true)
+            .unwrap()
+            .sum()
+            .unwrap();
+
+        // Both should have "cat" as index, NOT as column
+        assert_eq!(r1.num_columns(), 1); // only "x"
+        assert_eq!(r2.num_columns(), 1);
+        assert_eq!(r1.column_names(), &["x"]);
+        assert_eq!(r2.column_names(), &["x"]);
     }
 
     // ── sample tests ──
