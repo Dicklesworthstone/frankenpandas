@@ -228,10 +228,31 @@ fn compare_non_missing_scalars_for_sort(left: &Scalar, right: &Scalar) -> Orderi
 }
 
 fn compare_scalars_with_na_last(left: &Scalar, right: &Scalar, ascending: bool) -> Ordering {
+    compare_scalars_with_na_position(left, right, ascending, false)
+}
+
+fn compare_scalars_with_na_position(
+    left: &Scalar,
+    right: &Scalar,
+    ascending: bool,
+    na_first: bool,
+) -> Ordering {
     match (left.is_missing(), right.is_missing()) {
         (true, true) => Ordering::Equal,
-        (true, false) => Ordering::Greater,
-        (false, true) => Ordering::Less,
+        (true, false) => {
+            if na_first {
+                Ordering::Less
+            } else {
+                Ordering::Greater
+            }
+        }
+        (false, true) => {
+            if na_first {
+                Ordering::Greater
+            } else {
+                Ordering::Less
+            }
+        }
         (false, false) => {
             let order = compare_non_missing_scalars_for_sort(left, right);
             if ascending { order } else { order.reverse() }
@@ -1277,12 +1298,25 @@ impl Series {
     ///
     /// Matches `s.sort_values(ascending=...)` with `na_position='last'`.
     pub fn sort_values(&self, ascending: bool) -> Result<Self, FrameError> {
+        self.sort_values_na(ascending, "last")
+    }
+
+    /// Return a new Series sorted by values with explicit NA position.
+    ///
+    /// Matches `s.sort_values(ascending=..., na_position='first'|'last')`.
+    pub fn sort_values_na(
+        &self,
+        ascending: bool,
+        na_position: &str,
+    ) -> Result<Self, FrameError> {
+        let na_first = na_position == "first";
         let mut order = (0..self.len()).collect::<Vec<_>>();
         order.sort_by(|&left_pos, &right_pos| {
-            compare_scalars_with_na_last(
+            compare_scalars_with_na_position(
                 &self.values()[left_pos],
                 &self.values()[right_pos],
                 ascending,
+                na_first,
             )
         });
         self.reorder_by_positions(&order)
@@ -7126,18 +7160,38 @@ pub fn qcut(series: &Series, q: usize) -> Result<Series, FrameError> {
 /// - Values are type-coerced to a common dtype.
 /// - Empty input returns an empty Series named "concat".
 pub fn concat_series(series_list: &[&Series]) -> Result<Series, FrameError> {
+    concat_series_with_ignore_index(series_list, false)
+}
+
+/// Concatenate Series with optional index reset.
+///
+/// Matches `pd.concat([s1, s2], ignore_index=True/False)`. When
+/// `ignore_index` is `True`, the resulting Series has a default integer
+/// index (0, 1, ..., n-1) instead of preserving the original labels.
+pub fn concat_series_with_ignore_index(
+    series_list: &[&Series],
+    ignore_index: bool,
+) -> Result<Series, FrameError> {
     if series_list.is_empty() {
         return Series::from_values("concat", Vec::new(), Vec::new());
     }
 
     let total_len: usize = series_list.iter().map(|s| s.len()).sum();
-    let mut labels = Vec::with_capacity(total_len);
     let mut values = Vec::with_capacity(total_len);
 
-    for s in series_list {
-        labels.extend_from_slice(s.index().labels());
-        values.extend_from_slice(s.values());
-    }
+    let labels = if ignore_index {
+        for s in series_list {
+            values.extend_from_slice(s.values());
+        }
+        (0..total_len as i64).map(IndexLabel::Int64).collect()
+    } else {
+        let mut labels = Vec::with_capacity(total_len);
+        for s in series_list {
+            labels.extend_from_slice(s.index().labels());
+            values.extend_from_slice(s.values());
+        }
+        labels
+    };
 
     let name = if series_list.len() == 1 {
         series_list[0].name().to_owned()
@@ -7156,17 +7210,33 @@ pub fn concat_series(series_list: &[&Series]) -> Result<Series, FrameError> {
 /// - Missing cells materialize as `Scalar::Null`.
 /// - Empty input returns an empty DataFrame.
 pub fn concat_dataframes(frames: &[&DataFrame]) -> Result<DataFrame, FrameError> {
+    concat_dataframes_with_ignore_index(frames, false)
+}
+
+/// Concatenate DataFrames along axis 0 with optional index reset.
+///
+/// Matches `pd.concat([df1, df2], ignore_index=True/False)`. When
+/// `ignore_index` is `True`, the resulting DataFrame has a default integer
+/// index (0, 1, ..., n-1) instead of preserving the original labels.
+pub fn concat_dataframes_with_ignore_index(
+    frames: &[&DataFrame],
+    ignore_index: bool,
+) -> Result<DataFrame, FrameError> {
     if frames.is_empty() {
         return DataFrame::new(Index::new(Vec::new()), BTreeMap::new());
     }
 
-    // Concatenate index labels.
+    // Build index.
     let total_len: usize = frames.iter().map(|f| f.len()).sum();
-    let mut labels = Vec::with_capacity(total_len);
-    for frame in frames {
-        labels.extend_from_slice(frame.index().labels());
-    }
-    let index = Index::new(labels);
+    let index = if ignore_index {
+        Index::new((0..total_len as i64).map(IndexLabel::Int64).collect())
+    } else {
+        let mut labels = Vec::with_capacity(total_len);
+        for frame in frames {
+            labels.extend_from_slice(frame.index().labels());
+        }
+        Index::new(labels)
+    };
 
     // Materialize union-column output with null fill for missing frame columns.
     // Preserve first-seen column order (`sort=False` pandas semantics).
@@ -8450,6 +8520,33 @@ impl DataFrame {
         Self::new_with_column_order(self.index.clone(), columns, self.column_order.clone())
     }
 
+    /// Fill missing values with per-column values.
+    ///
+    /// Matches `df.fillna({'col1': val1, 'col2': val2})`.
+    /// Columns not listed in `fill_map` are left unchanged.
+    pub fn fillna_dict(&self, fill_map: &BTreeMap<String, Scalar>) -> Result<Self, FrameError> {
+        for name in fill_map.keys() {
+            if !self.columns.contains_key(name) {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "column '{name}' not found"
+                )));
+            }
+        }
+        let mut columns = BTreeMap::new();
+        for name in &self.column_order {
+            let col = self
+                .columns
+                .get(name)
+                .expect("column name listed in order must exist");
+            if let Some(fill_val) = fill_map.get(name) {
+                columns.insert(name.clone(), col.fillna(fill_val)?);
+            } else {
+                columns.insert(name.clone(), col.clone());
+            }
+        }
+        Self::new_with_column_order(self.index.clone(), columns, self.column_order.clone())
+    }
+
     /// Drop rows containing missing values in any selected column.
     ///
     /// Matches default `df.dropna()` row-wise behavior (`axis=0`, `how='any'`).
@@ -8854,16 +8951,30 @@ impl DataFrame {
     /// Matches `df.sort_values(by=column, ascending=...)` for a single
     /// column key with default `na_position='last'`.
     pub fn sort_values(&self, column: &str, ascending: bool) -> Result<Self, FrameError> {
+        self.sort_values_na(column, ascending, "last")
+    }
+
+    /// Return a new DataFrame sorted by a column's values with explicit NA position.
+    ///
+    /// Matches `df.sort_values(by=column, ascending=..., na_position='first'|'last')`.
+    pub fn sort_values_na(
+        &self,
+        column: &str,
+        ascending: bool,
+        na_position: &str,
+    ) -> Result<Self, FrameError> {
         let sort_column = self.columns.get(column).ok_or_else(|| {
             FrameError::CompatibilityRejected(format!("column '{column}' not found"))
         })?;
 
+        let na_first = na_position == "first";
         let mut order = (0..self.len()).collect::<Vec<_>>();
         order.sort_by(|&left_pos, &right_pos| {
-            compare_scalars_with_na_last(
+            compare_scalars_with_na_position(
                 &sort_column.values()[left_pos],
                 &sort_column.values()[right_pos],
                 ascending,
+                na_first,
             )
         });
 
@@ -13860,6 +13971,50 @@ impl DataFrame {
         })
     }
 
+    /// Replace values on a per-column basis.
+    ///
+    /// Matches `df.replace({'col': {old: new, ...}, ...})`.
+    /// Each entry maps a column name to its replacement pairs. Columns not
+    /// listed in the map are left unchanged.
+    pub fn replace_dict(
+        &self,
+        per_column: &BTreeMap<String, Vec<(Scalar, Scalar)>>,
+    ) -> Result<Self, FrameError> {
+        for name in per_column.keys() {
+            if !self.columns.contains_key(name) {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "column '{name}' not found"
+                )));
+            }
+        }
+        let mut result_cols = BTreeMap::new();
+        for name in &self.column_order {
+            let col = &self.columns[name];
+            if let Some(replacements) = per_column.get(name) {
+                let new_vals: Vec<Scalar> = col
+                    .values()
+                    .iter()
+                    .map(|val| {
+                        for (from, to) in replacements {
+                            if from.semantic_eq(val) {
+                                return to.clone();
+                            }
+                        }
+                        val.clone()
+                    })
+                    .collect();
+                result_cols.insert(name.clone(), Column::from_values(new_vals)?);
+            } else {
+                result_cols.insert(name.clone(), col.clone());
+            }
+        }
+        Ok(Self {
+            columns: result_cols,
+            column_order: self.column_order.clone(),
+            index: self.index.clone(),
+        })
+    }
+
     /// Align two DataFrames on their indices.
     ///
     /// Matches `df1.align(df2, join='outer'|'inner'|'left'|'right')`.
@@ -14860,6 +15015,67 @@ impl DataFrameGroupBy<'_> {
                 "unsupported groupby aggregation: '{other}'"
             ))),
         }
+    }
+
+    /// Aggregate with multiple functions per column.
+    ///
+    /// Matches `df.groupby(col).agg({'A': ['sum', 'mean'], 'B': ['count']})`.
+    /// Output columns are named `{col}_{func}`.
+    pub fn agg_multi(
+        &self,
+        func_map: &std::collections::HashMap<String, Vec<String>>,
+    ) -> Result<DataFrame, FrameError> {
+        let (group_order, groups) = self.build_groups();
+        let n_groups = group_order.len();
+
+        let mut labels = Vec::with_capacity(n_groups);
+        for gkey in &group_order {
+            let first_row = groups[gkey][0];
+            labels.push(self.group_key_label(first_row));
+        }
+
+        let mut result_cols = BTreeMap::new();
+        let mut col_order = Vec::new();
+
+        for col_name in &self.df.column_order {
+            let funcs = match func_map.get(col_name) {
+                Some(f) => f,
+                None => continue,
+            };
+
+            if self.by.contains(col_name) {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "cannot aggregate group-by key column: '{col_name}'"
+                )));
+            }
+
+            let col = &self.df.columns[col_name];
+
+            for func_name in funcs {
+                let out_name = format!("{col_name}_{func_name}");
+                let mut agg_vals = Vec::with_capacity(n_groups);
+
+                for gkey in &group_order {
+                    let row_indices = &groups[gkey];
+                    let group_vals: Vec<Scalar> = row_indices
+                        .iter()
+                        .map(|&i| col.values()[i].clone())
+                        .collect();
+
+                    let agg_val = Self::apply_agg_func(func_name, &group_vals)?;
+                    agg_vals.push(agg_val);
+                }
+
+                result_cols.insert(out_name.clone(), Column::from_values(agg_vals)?);
+                col_order.push(out_name);
+            }
+        }
+
+        Ok(DataFrame {
+            columns: result_cols,
+            column_order: col_order,
+            index: Index::new(labels),
+        })
     }
 
     /// Apply a custom function to each group DataFrame.
@@ -16310,6 +16526,110 @@ mod tests {
         assert_eq!(
             result.values(),
             &[Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]
+        );
+    }
+
+    // -------- concat ignore_index tests --------
+
+    #[test]
+    fn concat_series_ignore_index_resets_labels() {
+        use super::concat_series_with_ignore_index;
+
+        let s1 = Series::from_values(
+            "a",
+            vec![IndexLabel::from("x"), IndexLabel::from("y")],
+            vec![Scalar::Int64(10), Scalar::Int64(20)],
+        )
+        .unwrap();
+        let s2 = Series::from_values(
+            "b",
+            vec![IndexLabel::from("z")],
+            vec![Scalar::Int64(30)],
+        )
+        .unwrap();
+
+        let result = concat_series_with_ignore_index(&[&s1, &s2], true).unwrap();
+        assert_eq!(result.len(), 3);
+        assert_eq!(
+            result.index().labels(),
+            &[IndexLabel::Int64(0), IndexLabel::Int64(1), IndexLabel::Int64(2)]
+        );
+        assert_eq!(
+            result.values(),
+            &[Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)]
+        );
+    }
+
+    #[test]
+    fn concat_series_ignore_index_false_preserves_labels() {
+        use super::concat_series_with_ignore_index;
+
+        let s1 = Series::from_values(
+            "a",
+            vec![IndexLabel::from("x")],
+            vec![Scalar::Int64(10)],
+        )
+        .unwrap();
+        let s2 = Series::from_values(
+            "b",
+            vec![IndexLabel::from("y")],
+            vec![Scalar::Int64(20)],
+        )
+        .unwrap();
+
+        let result = concat_series_with_ignore_index(&[&s1, &s2], false).unwrap();
+        assert_eq!(
+            result.index().labels(),
+            &[IndexLabel::from("x"), IndexLabel::from("y")]
+        );
+    }
+
+    #[test]
+    fn concat_dataframes_ignore_index_resets_labels() {
+        use super::concat_dataframes_with_ignore_index;
+
+        let df1 = DataFrame::from_dict_with_index(
+            vec![("a", vec![Scalar::Int64(1)])],
+            vec![IndexLabel::from("x")],
+        )
+        .unwrap();
+        let df2 = DataFrame::from_dict_with_index(
+            vec![("a", vec![Scalar::Int64(2)])],
+            vec![IndexLabel::from("y")],
+        )
+        .unwrap();
+
+        let result = concat_dataframes_with_ignore_index(&[&df1, &df2], true).unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(
+            result.index().labels(),
+            &[IndexLabel::Int64(0), IndexLabel::Int64(1)]
+        );
+        assert_eq!(
+            result.column("a").unwrap().values(),
+            &[Scalar::Int64(1), Scalar::Int64(2)]
+        );
+    }
+
+    #[test]
+    fn concat_dataframes_ignore_index_false_preserves_labels() {
+        use super::concat_dataframes_with_ignore_index;
+
+        let df1 = DataFrame::from_dict_with_index(
+            vec![("a", vec![Scalar::Int64(1)])],
+            vec![IndexLabel::from("x")],
+        )
+        .unwrap();
+        let df2 = DataFrame::from_dict_with_index(
+            vec![("a", vec![Scalar::Int64(2)])],
+            vec![IndexLabel::from("y")],
+        )
+        .unwrap();
+
+        let result = concat_dataframes_with_ignore_index(&[&df1, &df2], false).unwrap();
+        assert_eq!(
+            result.index().labels(),
+            &[IndexLabel::from("x"), IndexLabel::from("y")]
         );
     }
 
@@ -19516,6 +19836,77 @@ mod tests {
     }
 
     #[test]
+    fn series_sort_values_na_position_first_ascending() {
+        let s = Series::from_values(
+            "vals",
+            vec![
+                IndexLabel::from("r1"),
+                IndexLabel::from("r2"),
+                IndexLabel::from("r3"),
+                IndexLabel::from("r4"),
+            ],
+            vec![
+                Scalar::Int64(3),
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(1),
+                Scalar::Float64(f64::NAN),
+            ],
+        )
+        .unwrap();
+
+        let out = s.sort_values_na(true, "first").unwrap();
+        // NaN and Null should come first, then sorted values
+        assert!(out.values()[0].is_missing());
+        assert!(out.values()[1].is_missing());
+        // Then ascending non-missing values
+        assert!(out.values()[2].semantic_eq(&Scalar::Float64(1.0)));
+        assert!(out.values()[3].semantic_eq(&Scalar::Float64(3.0)));
+    }
+
+    #[test]
+    fn series_sort_values_na_position_first_descending() {
+        let s = Series::from_values(
+            "vals",
+            vec![
+                IndexLabel::from("r1"),
+                IndexLabel::from("r2"),
+                IndexLabel::from("r3"),
+                IndexLabel::from("r4"),
+            ],
+            vec![
+                Scalar::Int64(3),
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(1),
+                Scalar::Float64(f64::NAN),
+            ],
+        )
+        .unwrap();
+
+        let out = s.sort_values_na(false, "first").unwrap();
+        // NaN and Null should come first
+        assert!(out.values()[0].is_missing());
+        assert!(out.values()[1].is_missing());
+        // Then descending non-missing values
+        assert!(out.values()[2].semantic_eq(&Scalar::Float64(3.0)));
+        assert!(out.values()[3].semantic_eq(&Scalar::Float64(1.0)));
+    }
+
+    #[test]
+    fn series_sort_values_na_position_last_is_default() {
+        let s = Series::from_values(
+            "vals",
+            vec![IndexLabel::from("a"), IndexLabel::from("b"), IndexLabel::from("c")],
+            vec![Scalar::Null(NullKind::Null), Scalar::Int64(2), Scalar::Int64(1)],
+        )
+        .unwrap();
+
+        let default_sort = s.sort_values(true).unwrap();
+        let explicit_last = s.sort_values_na(true, "last").unwrap();
+        assert_eq!(default_sort.values(), explicit_last.values());
+        assert_eq!(default_sort.index().labels(), explicit_last.index().labels());
+    }
+
+    #[test]
     fn series_head_tail() {
         let s = Series::from_values(
             "vals",
@@ -19712,6 +20103,78 @@ mod tests {
             filled.column("b").unwrap().values(),
             &[Scalar::Int64(0), Scalar::Int64(20), Scalar::Int64(30)]
         );
+    }
+
+    #[test]
+    fn dataframe_fillna_dict_per_column() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                (
+                    "a",
+                    vec![
+                        Scalar::Int64(1),
+                        Scalar::Null(NullKind::Null),
+                        Scalar::Int64(3),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Null(NullKind::Null),
+                        Scalar::Int64(20),
+                        Scalar::Null(NullKind::Null),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let mut fill_map = BTreeMap::new();
+        fill_map.insert("a".to_owned(), Scalar::Int64(-1));
+        fill_map.insert("b".to_owned(), Scalar::Int64(999));
+
+        let filled = df.fillna_dict(&fill_map).unwrap();
+        assert_eq!(
+            filled.column("a").unwrap().values(),
+            &[Scalar::Int64(1), Scalar::Int64(-1), Scalar::Int64(3)]
+        );
+        assert_eq!(
+            filled.column("b").unwrap().values(),
+            &[Scalar::Int64(999), Scalar::Int64(20), Scalar::Int64(999)]
+        );
+    }
+
+    #[test]
+    fn dataframe_fillna_dict_partial_columns() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Null(NullKind::Null), Scalar::Int64(2)]),
+                ("b", vec![Scalar::Null(NullKind::Null), Scalar::Int64(20)]),
+            ],
+        )
+        .unwrap();
+
+        let mut fill_map = BTreeMap::new();
+        fill_map.insert("a".to_owned(), Scalar::Int64(0));
+        // b is not in the map → should stay null
+
+        let filled = df.fillna_dict(&fill_map).unwrap();
+        assert_eq!(
+            filled.column("a").unwrap().values(),
+            &[Scalar::Int64(0), Scalar::Int64(2)]
+        );
+        // b's null should remain
+        assert!(filled.column("b").unwrap().values()[0].is_missing());
+    }
+
+    #[test]
+    fn dataframe_fillna_dict_rejects_missing_column() {
+        let df = DataFrame::from_dict(&["a"], vec![("a", vec![Scalar::Int64(1)])]).unwrap();
+        let mut fill_map = BTreeMap::new();
+        fill_map.insert("missing".to_owned(), Scalar::Int64(0));
+        assert!(df.fillna_dict(&fill_map).is_err());
     }
 
     #[test]
@@ -20890,6 +21353,50 @@ mod tests {
         assert!(
             matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("column 'missing' not found"))
         );
+    }
+
+    #[test]
+    fn dataframe_sort_values_na_position_first() {
+        let df = DataFrame::from_dict_with_index(
+            vec![
+                (
+                    "score",
+                    vec![
+                        Scalar::Int64(3),
+                        Scalar::Null(NullKind::Null),
+                        Scalar::Int64(1),
+                        Scalar::Float64(f64::NAN),
+                    ],
+                ),
+            ],
+            vec!["r1".into(), "r2".into(), "r3".into(), "r4".into()],
+        )
+        .unwrap();
+
+        let out = df.sort_values_na("score", true, "first").unwrap();
+        // Missing values first, then ascending
+        assert_eq!(
+            out.index().labels(),
+            &[
+                IndexLabel::from("r2"),
+                IndexLabel::from("r4"),
+                IndexLabel::from("r3"),
+                IndexLabel::from("r1"),
+            ]
+        );
+    }
+
+    #[test]
+    fn dataframe_sort_values_na_default_matches_last() {
+        let df = DataFrame::from_dict_with_index(
+            vec![("v", vec![Scalar::Null(NullKind::Null), Scalar::Int64(1)])],
+            vec!["a".into(), "b".into()],
+        )
+        .unwrap();
+
+        let default_sort = df.sort_values("v", true).unwrap();
+        let explicit_last = df.sort_values_na("v", true, "last").unwrap();
+        assert_eq!(default_sort.index().labels(), explicit_last.index().labels());
     }
 
     #[test]
@@ -24432,6 +24939,94 @@ mod tests {
     }
 
     #[test]
+    fn dataframe_groupby_agg_multi_per_column_multiple_funcs() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "grp",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("b".into()),
+                    Scalar::Utf8("b".into()),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "x",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(3.0),
+                    Scalar::Float64(10.0),
+                    Scalar::Float64(20.0),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "y",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Float64(100.0),
+                    Scalar::Float64(200.0),
+                    Scalar::Float64(300.0),
+                    Scalar::Float64(400.0),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let mut func_map = std::collections::HashMap::new();
+        func_map.insert("x".to_string(), vec!["sum".to_string(), "mean".to_string()]);
+        func_map.insert("y".to_string(), vec!["count".to_string()]);
+
+        let result = df.groupby(&["grp"]).unwrap().agg_multi(&func_map).unwrap();
+        // Group "a": x=[1,3], y=[100,200]
+        // Group "b": x=[10,20], y=[300,400]
+        assert_eq!(result.len(), 2);
+        assert_eq!(
+            result.column("x_sum").unwrap().values(),
+            &[Scalar::Float64(4.0), Scalar::Float64(30.0)]
+        );
+        assert_eq!(
+            result.column("x_mean").unwrap().values(),
+            &[Scalar::Float64(2.0), Scalar::Float64(15.0)]
+        );
+        assert_eq!(
+            result.column("y_count").unwrap().values(),
+            &[Scalar::Int64(2), Scalar::Int64(2)]
+        );
+        // Columns not in func_map should be absent
+        assert!(result.column("y_sum").is_none());
+    }
+
+    #[test]
+    fn dataframe_groupby_agg_multi_rejects_groupby_column() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "grp",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![Scalar::Utf8("a".into()), Scalar::Utf8("b".into())],
+            )
+            .unwrap(),
+            Series::from_values(
+                "val",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![Scalar::Float64(1.0), Scalar::Float64(2.0)],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let mut func_map = std::collections::HashMap::new();
+        func_map.insert("grp".to_string(), vec!["sum".to_string()]);
+
+        let err = df.groupby(&["grp"]).unwrap().agg_multi(&func_map);
+        assert!(err.is_err());
+    }
+
+    #[test]
     fn series_corr_spearman() {
         // Perfectly monotonic: [1,2,3,4] vs [10,20,30,40] → Spearman = 1.0
         let a = Series::from_values(
@@ -26215,6 +26810,87 @@ mod tests {
                 Scalar::Utf8("world".to_owned())
             ]
         );
+    }
+
+    #[test]
+    fn dataframe_replace_dict_per_column() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]),
+                ("b", vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)]),
+            ],
+        )
+        .unwrap();
+
+        let mut per_col = BTreeMap::new();
+        per_col.insert("a".to_owned(), vec![(Scalar::Int64(1), Scalar::Int64(100))]);
+        per_col.insert("b".to_owned(), vec![(Scalar::Int64(20), Scalar::Int64(200))]);
+
+        let out = df.replace_dict(&per_col).unwrap();
+        assert_eq!(
+            out.column("a").unwrap().values(),
+            &[Scalar::Int64(100), Scalar::Int64(2), Scalar::Int64(3)]
+        );
+        assert_eq!(
+            out.column("b").unwrap().values(),
+            &[Scalar::Int64(10), Scalar::Int64(200), Scalar::Int64(30)]
+        );
+    }
+
+    #[test]
+    fn dataframe_replace_dict_leaves_unlisted_columns_unchanged() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                ("b", vec![Scalar::Int64(10), Scalar::Int64(20)]),
+            ],
+        )
+        .unwrap();
+
+        let mut per_col = BTreeMap::new();
+        per_col.insert("a".to_owned(), vec![(Scalar::Int64(1), Scalar::Int64(99))]);
+
+        let out = df.replace_dict(&per_col).unwrap();
+        assert_eq!(
+            out.column("a").unwrap().values(),
+            &[Scalar::Int64(99), Scalar::Int64(2)]
+        );
+        // b is untouched
+        assert_eq!(
+            out.column("b").unwrap().values(),
+            &[Scalar::Int64(10), Scalar::Int64(20)]
+        );
+    }
+
+    #[test]
+    fn dataframe_replace_dict_rejects_missing_column() {
+        let df = DataFrame::from_dict(&["a"], vec![("a", vec![Scalar::Int64(1)])]).unwrap();
+        let mut per_col = BTreeMap::new();
+        per_col.insert("missing".to_owned(), vec![(Scalar::Int64(1), Scalar::Int64(2))]);
+        let err = df.replace_dict(&per_col).unwrap_err();
+        assert!(matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("column 'missing' not found")));
+    }
+
+    #[test]
+    fn dataframe_replace_dict_handles_nan_replacement() {
+        let df = DataFrame::from_dict(
+            &["x"],
+            vec![("x", vec![Scalar::Float64(f64::NAN), Scalar::Float64(1.0)])],
+        )
+        .unwrap();
+
+        let mut per_col = BTreeMap::new();
+        per_col.insert(
+            "x".to_owned(),
+            vec![(Scalar::Null(NullKind::NaN), Scalar::Float64(0.0))],
+        );
+
+        let out = df.replace_dict(&per_col).unwrap();
+        // NaN should be replaced via semantic_eq
+        assert_eq!(out.column("x").unwrap().values()[0], Scalar::Float64(0.0));
+        assert_eq!(out.column("x").unwrap().values()[1], Scalar::Float64(1.0));
     }
 
     // --- DataFrame.align_on_index tests ---
