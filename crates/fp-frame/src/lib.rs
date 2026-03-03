@@ -7917,12 +7917,14 @@ impl DataFrame {
                                     )));
                                 }
                             }
-                            DType::Int64 => raw.parse::<i64>().map(Scalar::Int64).map_err(|_| {
-                                FrameError::CompatibilityRejected(format!(
-                                    "cannot parse int64 value '{raw}' in column '{}'",
-                                    col_names[idx]
-                                ))
-                            })?,
+                            DType::Int64 => {
+                                raw.parse::<i64>().map(Scalar::Int64).map_err(|_| {
+                                    FrameError::CompatibilityRejected(format!(
+                                        "cannot parse int64 value '{raw}' in column '{}'",
+                                        col_names[idx]
+                                    ))
+                                })?
+                            }
                             DType::Float64 => {
                                 raw.parse::<f64>().map(Scalar::Float64).map_err(|_| {
                                     FrameError::CompatibilityRejected(format!(
@@ -7968,11 +7970,14 @@ impl DataFrame {
         }
 
         if let Some(index_col) = &options.index_col {
-            let idx_pos = col_names.iter().position(|name| name == index_col).ok_or_else(|| {
-                FrameError::CompatibilityRejected(format!(
-                    "index column '{index_col}' not found in CSV headers"
-                ))
-            })?;
+            let idx_pos = col_names
+                .iter()
+                .position(|name| name == index_col)
+                .ok_or_else(|| {
+                    FrameError::CompatibilityRejected(format!(
+                        "index column '{index_col}' not found in CSV headers"
+                    ))
+                })?;
             let index_values = col_data.remove(idx_pos);
             col_names.remove(idx_pos);
             let index_labels = index_values
