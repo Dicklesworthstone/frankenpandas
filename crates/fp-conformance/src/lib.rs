@@ -55,11 +55,22 @@ impl HarnessConfig {
     #[must_use]
     pub fn default_paths() -> Self {
         let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let python_bin = std::env::var("FP_PYTHON_BIN")
+            .ok()
+            .and_then(|value| {
+                let trimmed = value.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_owned())
+                }
+            })
+            .unwrap_or_else(|| "python3".to_owned());
         Self {
             oracle_root: repo_root.join("legacy_pandas_code/pandas"),
             fixture_root: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures"),
             strict_mode: true,
-            python_bin: "python3".to_owned(),
+            python_bin,
             allow_system_pandas_fallback: false,
             repo_root,
         }

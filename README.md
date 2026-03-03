@@ -120,6 +120,13 @@ This command regenerates packet artifacts and fails closed if any packet parity 
 
 If `rch` is installed, the script automatically offloads the expensive `cargo run` to the remote worker fleet. Set `FP_NO_RCH=1` to force local execution.
 
+For live pandas-oracle runs, choose the python executable via `FP_PYTHON_BIN` or an explicit CLI flag:
+
+```bash
+cargo run -p fp-conformance --bin fp-conformance-cli -- --oracle live --python-bin python3.12
+cargo run -p fp-conformance --bin fp-ci-gates -- --gate G6 --python-bin python3.12
+```
+
 ## Porting Artifact Set
 
 - PLAN_TO_PORT_PANDAS_TO_RUST.md

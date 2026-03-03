@@ -13,6 +13,7 @@ use fp_conformance::{
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut packet_filter: Option<String> = None;
     let mut oracle_mode = OracleMode::FixtureExpected;
+    let mut python_bin: Option<String> = None;
     let mut write_artifacts = false;
     let mut require_green = false;
     let mut write_drift_history = false;
@@ -38,6 +39,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "live" => OracleMode::LiveLegacyPandas,
                     _ => return Err(format!("unsupported oracle mode: {value}").into()),
                 };
+            }
+            "--python-bin" => {
+                let value = args.next().ok_or("--python-bin requires a value")?;
+                python_bin = Some(value);
             }
             "--write-artifacts" => {
                 write_artifacts = true;
@@ -75,6 +80,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut config = HarnessConfig::default_paths();
     config.allow_system_pandas_fallback = allow_system_pandas_fallback;
+    if let Some(python_bin) = python_bin {
+        config.python_bin = python_bin;
+    }
     let options = SuiteOptions {
         packet_filter,
         oracle_mode,
@@ -214,6 +222,7 @@ fn print_help() {
          Options:\n\
          \t--packet-id <id>     Run only one packet id\n\
          \t--oracle <mode>      fixture (default) or live\n\
+         \t--python-bin <path>  Python executable for live oracle runs (default: FP_PYTHON_BIN or python3)\n\
          \t--write-artifacts    Emit parity + gate + RaptorQ sidecars per packet\n\
          \t--write-drift-history Append packet run summary to artifacts/phase2c/drift_history.jsonl\n\
          \t--write-differential-validation Emit differential validation JSONL per packet\n\

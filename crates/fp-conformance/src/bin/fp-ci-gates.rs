@@ -15,12 +15,14 @@ enum PipelineKind {
     Full,
 }
 
+#[derive(Debug)]
 struct CliArgs {
     pipeline: PipelineKind,
     gate: Option<CiGate>,
     fail_fast: bool,
     verify_sidecars: bool,
     json_out: Option<PathBuf>,
+    python_bin: Option<String>,
     allow_system_pandas_fallback: bool,
 }
 
@@ -40,6 +42,9 @@ fn run() -> Result<bool, Box<dyn std::error::Error>> {
 
     let mut harness = HarnessConfig::default_paths();
     harness.allow_system_pandas_fallback = args.allow_system_pandas_fallback;
+    if let Some(python_bin) = args.python_bin {
+        harness.python_bin = python_bin;
+    }
 
     let gates = if let Some(gate) = args.gate {
         vec![gate]
@@ -108,14 +113,22 @@ fn write_json_report(
 }
 
 fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
+    parse_args_from(std::env::args().skip(1))
+}
+
+fn parse_args_from<I>(args: I) -> Result<CliArgs, Box<dyn std::error::Error>>
+where
+    I: IntoIterator<Item = String>,
+{
     let mut pipeline = PipelineKind::Full;
     let mut gate = None;
     let mut fail_fast = true;
     let mut verify_sidecars = true;
     let mut json_out = None;
+    let mut python_bin = None;
     let mut allow_system_pandas_fallback = false;
 
-    let mut args = std::env::args().skip(1).peekable();
+    let mut args = args.into_iter().peekable();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--pipeline" => {
@@ -133,6 +146,10 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
             "--json-out" => {
                 let value = args.next().ok_or("--json-out requires a file path")?;
                 json_out = Some(PathBuf::from(value));
+            }
+            "--python-bin" => {
+                let value = args.next().ok_or("--python-bin requires a path")?;
+                python_bin = Some(value);
             }
             "--no-fail-fast" => {
                 fail_fast = false;
@@ -157,6 +174,7 @@ fn parse_args() -> Result<CliArgs, Box<dyn std::error::Error>> {
         fail_fast,
         verify_sidecars,
         json_out,
+        python_bin,
         allow_system_pandas_fallback,
     })
 }
@@ -186,9 +204,39 @@ fn print_help() {
          \t--pipeline <kind>   commit or full (default: full)\n\
          \t--gate <id>         run a single gate (G1..G8, e.g. G6 or G8E2e)\n\
          \t--json-out <path>   write machine-readable forensic report (JSON)\n\
+         \t--python-bin <path> Python executable for live oracle runs (default: FP_PYTHON_BIN or python3)\n\
          \t--no-fail-fast      continue evaluating all configured gates after failures\n\
          \t--no-verify-sidecars  skip sidecar integrity check after gate success\n\
          \t--allow-system-pandas-fallback  allow non-legacy pandas import in live mode\n\
          \t-h, --help          show this help"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PipelineKind, parse_args_from};
+
+    #[test]
+    fn parse_args_accepts_python_bin_override() {
+        let args = vec![
+            "--pipeline".to_owned(),
+            "commit".to_owned(),
+            "--python-bin".to_owned(),
+            "python3.12".to_owned(),
+        ];
+
+        let parsed = parse_args_from(args).expect("expected parse success");
+        assert!(matches!(parsed.pipeline, PipelineKind::Commit));
+        assert_eq!(parsed.python_bin.as_deref(), Some("python3.12"));
+    }
+
+    #[test]
+    fn parse_args_rejects_missing_python_bin_value() {
+        let args = vec!["--python-bin".to_owned()];
+        let err = parse_args_from(args).expect_err("expected parse failure");
+        assert!(
+            err.to_string().contains("--python-bin requires a path"),
+            "unexpected error: {err}"
+        );
+    }
 }
