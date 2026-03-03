@@ -201,26 +201,71 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
         .delimiter(options.delimiter)
         .from_reader(input.as_bytes());
 
-    let headers = reader.headers().cloned().map_err(IoError::from)?;
-    if headers.is_empty() {
-        return Err(IoError::MissingHeaders);
-    }
-
-    let header_count = headers.len();
-    let row_hint = input.len() / (header_count * 8).max(1);
-    let mut columns: Vec<Vec<Scalar>> = (0..header_count)
-        .map(|_| Vec::with_capacity(row_hint))
-        .collect();
-
     let mut row_count: i64 = 0;
-    for row in reader.records() {
-        let record = row?;
+    let (headers, mut columns) = if options.has_headers {
+        let headers_record = reader.headers().cloned().map_err(IoError::from)?;
+        if headers_record.is_empty() {
+            return Err(IoError::MissingHeaders);
+        }
+
+        let header_count = headers_record.len();
+        let row_hint = input.len() / (header_count * 8).max(1);
+        let mut columns: Vec<Vec<Scalar>> = (0..header_count)
+            .map(|_| Vec::with_capacity(row_hint))
+            .collect();
+
+        for row in reader.records() {
+            let record = row?;
+            for (idx, col) in columns.iter_mut().enumerate() {
+                let field = record.get(idx).unwrap_or_default();
+                col.push(parse_scalar_with_na(field, &options.na_values));
+            }
+            row_count += 1;
+        }
+
+        (
+            headers_record
+                .iter()
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>(),
+            columns,
+        )
+    } else {
+        let mut rows = reader.records();
+        let first_record = rows.next().transpose()?.ok_or(IoError::MissingHeaders)?;
+        if first_record.is_empty() {
+            return Err(IoError::MissingHeaders);
+        }
+
+        let header_count = first_record.len();
+        let row_hint = input.len() / (header_count * 8).max(1);
+        let mut columns: Vec<Vec<Scalar>> = (0..header_count)
+            .map(|_| Vec::with_capacity(row_hint))
+            .collect();
+
         for (idx, col) in columns.iter_mut().enumerate() {
-            let field = record.get(idx).unwrap_or_default();
+            let field = first_record.get(idx).unwrap_or_default();
             col.push(parse_scalar_with_na(field, &options.na_values));
         }
         row_count += 1;
-    }
+
+        for row in rows {
+            let record = row?;
+            for (idx, col) in columns.iter_mut().enumerate() {
+                let field = record.get(idx).unwrap_or_default();
+                col.push(parse_scalar_with_na(field, &options.na_values));
+            }
+            row_count += 1;
+        }
+
+        (
+            (0..header_count)
+                .map(|idx| format!("column_{idx}"))
+                .collect(),
+            columns,
+        )
+    };
+    let header_count = headers.len();
 
     // If index_col is set, extract that column as the index
     if let Some(ref idx_col_name) = options.index_col {
@@ -249,7 +294,7 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
             if orig_idx == idx_pos {
                 continue;
             }
-            let name = headers.get(orig_idx).unwrap_or_default().to_owned();
+            let name = headers.get(orig_idx).cloned().unwrap_or_default();
             out_columns.insert(name.clone(), Column::from_values(columns[col_idx].clone())?);
             column_order.push(name);
             col_idx += 1;
@@ -263,7 +308,7 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
         let mut out_columns = BTreeMap::new();
         let mut column_order = Vec::with_capacity(header_count);
         for (idx, values) in columns.into_iter().enumerate() {
-            let name = headers.get(idx).unwrap_or_default().to_owned();
+            let name = headers.get(idx).cloned().unwrap_or_default();
             out_columns.insert(name.clone(), Column::from_values(values)?);
             column_order.push(name);
         }
@@ -1281,6 +1326,56 @@ mod tests {
         let frame = read_csv_with_options(input, &opts).expect("parse tsv");
         assert_eq!(frame.index().len(), 2);
         assert_eq!(frame.column("a").unwrap().values()[0], Scalar::Int64(1));
+    }
+
+    #[test]
+    fn csv_without_headers_generates_default_names_and_keeps_first_row() {
+        let input = "1,2\n3,4\n";
+        let opts = CsvReadOptions {
+            has_headers: false,
+            ..Default::default()
+        };
+        let frame = read_csv_with_options(input, &opts).expect("parse");
+        assert_eq!(frame.index().len(), 2);
+        assert_eq!(
+            frame.column("column_0").unwrap().values()[0],
+            Scalar::Int64(1)
+        );
+        assert_eq!(
+            frame.column("column_1").unwrap().values()[0],
+            Scalar::Int64(2)
+        );
+        assert_eq!(
+            frame.column("column_0").unwrap().values()[1],
+            Scalar::Int64(3)
+        );
+        assert_eq!(
+            frame.column("column_1").unwrap().values()[1],
+            Scalar::Int64(4)
+        );
+    }
+
+    #[test]
+    fn csv_without_headers_supports_generated_index_col_name() {
+        let input = "10,alpha\n20,beta\n";
+        let opts = CsvReadOptions {
+            has_headers: false,
+            index_col: Some("column_0".into()),
+            ..Default::default()
+        };
+        let frame = read_csv_with_options(input, &opts).expect("parse");
+        assert_eq!(frame.index().len(), 2);
+        assert_eq!(frame.index().labels()[0], IndexLabel::Int64(10));
+        assert_eq!(frame.index().labels()[1], IndexLabel::Int64(20));
+        assert!(frame.column("column_0").is_none());
+        assert_eq!(
+            frame.column("column_1").unwrap().values()[0],
+            Scalar::Utf8("alpha".into())
+        );
+        assert_eq!(
+            frame.column("column_1").unwrap().values()[1],
+            Scalar::Utf8("beta".into())
+        );
     }
 
     #[test]
