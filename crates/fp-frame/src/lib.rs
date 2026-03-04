@@ -5053,6 +5053,55 @@ impl Expanding<'_> {
             self.series.name(),
         )
     }
+
+    /// Expanding skewness (bias=False, Fisher's definition).
+    ///
+    /// Matches `pd.Series.expanding().skew()`.
+    pub fn skew(&self) -> Result<Series, FrameError> {
+        self.apply_expanding(
+            |nums| {
+                let n = nums.len() as f64;
+                if n < 3.0 {
+                    return f64::NAN;
+                }
+                let mean = nums.iter().sum::<f64>() / n;
+                let m2: f64 = nums.iter().map(|v| (v - mean).powi(2)).sum();
+                let m3: f64 = nums.iter().map(|v| (v - mean).powi(3)).sum();
+                let s2 = m2 / (n - 1.0);
+                if s2 == 0.0 {
+                    return 0.0;
+                }
+                let s3 = s2.powf(1.5);
+                (n / ((n - 1.0) * (n - 2.0))) * (m3 / s3)
+            },
+            self.series.name(),
+        )
+    }
+
+    /// Expanding excess kurtosis (Fisher's definition, bias=False).
+    ///
+    /// Matches `pd.Series.expanding().kurt()`.
+    pub fn kurt(&self) -> Result<Series, FrameError> {
+        self.apply_expanding(
+            |nums| {
+                let n = nums.len() as f64;
+                if n < 4.0 {
+                    return f64::NAN;
+                }
+                let mean = nums.iter().sum::<f64>() / n;
+                let m2: f64 = nums.iter().map(|v| (v - mean).powi(2)).sum();
+                let m4: f64 = nums.iter().map(|v| (v - mean).powi(4)).sum();
+                let s2 = m2 / (n - 1.0);
+                if s2 == 0.0 {
+                    return 0.0;
+                }
+                let adj = (n * (n + 1.0)) / ((n - 1.0) * (n - 2.0) * (n - 3.0));
+                let sub = (3.0 * (n - 1.0).powi(2)) / ((n - 2.0) * (n - 3.0));
+                adj * (m4 / (s2 * s2)) - sub
+            },
+            self.series.name(),
+        )
+    }
 }
 
 /// Exponentially weighted moving window aggregation over a Series.
@@ -10575,6 +10624,33 @@ impl DataFrame {
         rows
     }
 
+    /// Convert DataFrame to a list of record tuples.
+    ///
+    /// Matches `df.to_records()`. Each record is a Vec of Scalar where the
+    /// first element is the index label (converted to Scalar) followed by
+    /// each column value in column order.
+    pub fn to_records(&self) -> Vec<Vec<Scalar>> {
+        let mut records = Vec::with_capacity(self.len());
+        for i in 0..self.len() {
+            let mut row = Vec::with_capacity(self.column_order.len() + 1);
+            // Index label as first element
+            let lbl = &self.index.labels()[i];
+            row.push(match lbl {
+                IndexLabel::Int64(n) => Scalar::Int64(*n),
+                IndexLabel::Utf8(s) => Scalar::Utf8(s.clone()),
+            });
+            for col_name in &self.column_order {
+                row.push(
+                    self.columns
+                        .get(col_name)
+                        .map_or(Scalar::Null(NullKind::Null), |col| col.values()[i].clone()),
+                );
+            }
+            records.push(row);
+        }
+        records
+    }
+
     /// Iterate over columns as `(column_name, Series)` pairs.
     ///
     /// Matches `df.items()` / `df.iteritems()`.
@@ -14408,6 +14484,28 @@ impl DataFrame {
     /// Matches `pd.DataFrame.div(other, fill_value=X)`.
     pub fn div_df_fill(&self, other: &Self, fill_value: f64) -> Result<Self, FrameError> {
         self.binary_df_op_fill(other, |a, b| if b == 0.0 { f64::NAN } else { a / b }, fill_value)
+    }
+
+    /// Floor-divide by another DataFrame element-wise with fill_value for NaN handling.
+    ///
+    /// Matches `pd.DataFrame.floordiv(other, fill_value=X)`.
+    pub fn floordiv_df_fill(&self, other: &Self, fill_value: f64) -> Result<Self, FrameError> {
+        self.binary_df_op_fill(
+            other,
+            |a, b| if b == 0.0 { f64::NAN } else { (a / b).floor() },
+            fill_value,
+        )
+    }
+
+    /// Modulo with another DataFrame element-wise with fill_value for NaN handling.
+    ///
+    /// Matches `pd.DataFrame.mod(other, fill_value=X)`.
+    pub fn mod_df_fill(&self, other: &Self, fill_value: f64) -> Result<Self, FrameError> {
+        self.binary_df_op_fill(
+            other,
+            |a, b| if b == 0.0 { f64::NAN } else { a % b },
+            fill_value,
+        )
     }
 
     /// Floor-divide all numeric columns by a scalar.
@@ -36983,5 +37081,76 @@ mod tests {
         let labels = renamed.index().labels();
         assert_eq!(labels[0], 0_i64.into()); // default index is 0,1 → 0,10
         assert_eq!(labels[1], 10_i64.into());
+    }
+
+    #[test]
+    fn test_expanding_skew_kurt() {
+        let s = Series::from_values(
+            "v",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(5.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(4.0),
+            ],
+        )
+        .unwrap();
+        let skew = s.expanding(1).skew().unwrap();
+        // First 2 elements have < 3 values → NaN
+        assert!(skew.column().values()[0].is_missing());
+        assert!(skew.column().values()[1].is_missing());
+        // [1,2,5] should have positive skew
+        let v = skew.column().values()[2].to_f64().unwrap();
+        assert!(v > 0.0);
+        let kurt = s.expanding(1).kurt().unwrap();
+        // First 3 elements have < 4 values → NaN
+        assert!(kurt.column().values()[2].is_missing());
+        let k = kurt.column().values()[3].to_f64().unwrap();
+        assert!(k.is_finite());
+    }
+
+    #[test]
+    fn test_to_records() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                ("b", vec![Scalar::Utf8("x".into()), Scalar::Utf8("y".into())]),
+            ],
+        )
+        .unwrap();
+        let records = df.to_records();
+        assert_eq!(records.len(), 2);
+        // First record: [index=0, a=1, b="x"]
+        assert_eq!(records[0][0], Scalar::Int64(0));
+        assert_eq!(records[0][1], Scalar::Int64(1));
+        assert_eq!(records[0][2], Scalar::Utf8("x".into()));
+        // Second record: [index=1, a=2, b="y"]
+        assert_eq!(records[1][0], Scalar::Int64(1));
+        assert_eq!(records[1][1], Scalar::Int64(2));
+    }
+
+    #[test]
+    fn test_floordiv_mod_df_fill() {
+        let df1 = DataFrame::from_dict(
+            &["x"],
+            vec![("x", vec![Scalar::Float64(10.0), Scalar::Null(NullKind::NaN)])],
+        )
+        .unwrap();
+        let df2 = DataFrame::from_dict(
+            &["x"],
+            vec![("x", vec![Scalar::Null(NullKind::NaN), Scalar::Float64(3.0)])],
+        )
+        .unwrap();
+        // floordiv_df_fill with fill=1: [floor(10/1)=10, floor(1/3)=0]
+        let fd = df1.floordiv_df_fill(&df2, 1.0).unwrap();
+        assert_eq!(fd.columns["x"].values()[0], Scalar::Float64(10.0));
+        assert_eq!(fd.columns["x"].values()[1], Scalar::Float64(0.0));
+        // mod_df_fill with fill=1: [10%1=0, 1%3=1]
+        let md = df1.mod_df_fill(&df2, 1.0).unwrap();
+        assert_eq!(md.columns["x"].values()[0], Scalar::Float64(0.0));
+        assert_eq!(md.columns["x"].values()[1], Scalar::Float64(1.0));
     }
 }
