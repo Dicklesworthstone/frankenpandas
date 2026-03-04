@@ -10742,7 +10742,15 @@ impl DataFrame {
 
     /// Compute the Pearson correlation matrix between numeric columns.
     pub fn corr(&self) -> Result<Self, FrameError> {
-        self.pairwise_stat("corr")
+        self.pairwise_stat_min("corr", 1)
+    }
+
+    /// Compute pairwise Pearson correlation with a minimum-observations threshold.
+    ///
+    /// Matches `df.corr(min_periods=n)`. Pairs with fewer than `min_periods`
+    /// valid (non-NaN) observations yield NaN.
+    pub fn corr_min_periods(&self, min_periods: usize) -> Result<Self, FrameError> {
+        self.pairwise_stat_min("corr", min_periods)
     }
 
     /// Compute correlation matrix using the specified method.
@@ -10750,7 +10758,7 @@ impl DataFrame {
     /// Supported methods: "pearson", "spearman", "kendall".
     pub fn corr_method(&self, method: &str) -> Result<Self, FrameError> {
         match method {
-            "pearson" => self.pairwise_stat("corr"),
+            "pearson" => self.pairwise_stat_min("corr", 1),
             "spearman" => self.pairwise_rank_corr("spearman"),
             "kendall" => self.pairwise_rank_corr("kendall"),
             other => Err(FrameError::CompatibilityRejected(format!(
@@ -10761,11 +10769,19 @@ impl DataFrame {
 
     /// Compute the pairwise covariance matrix between numeric columns.
     pub fn cov(&self) -> Result<Self, FrameError> {
-        self.pairwise_stat("cov")
+        self.pairwise_stat_min("cov", 1)
+    }
+
+    /// Compute pairwise covariance with a minimum-observations threshold.
+    ///
+    /// Matches `df.cov(min_periods=n)`. Pairs with fewer than `min_periods`
+    /// valid (non-NaN) observations yield NaN.
+    pub fn cov_min_periods(&self, min_periods: usize) -> Result<Self, FrameError> {
+        self.pairwise_stat_min("cov", min_periods)
     }
 
     /// Internal helper for corr/cov pairwise matrix computation.
-    fn pairwise_stat(&self, stat: &str) -> Result<Self, FrameError> {
+    fn pairwise_stat_min(&self, stat: &str, min_periods: usize) -> Result<Self, FrameError> {
         let len = self.index.len();
 
         // Only include numeric columns (Int64/Float64), matching pandas behavior
@@ -10816,7 +10832,8 @@ impl DataFrame {
                     count += 1;
                 }
 
-                let val = if count < 2 {
+                let threshold = min_periods.max(2);
+                let val = if count < threshold {
                     f64::NAN
                 } else {
                     let n_f = count as f64;
@@ -35277,5 +35294,89 @@ mod tests {
         assert_eq!(result.columns["b"].values()[0], Scalar::Float64(11.0));
         assert_eq!(result.columns["c"].values()[0], Scalar::Float64(1100.0));
         assert_eq!(result.columns["c"].values()[1], Scalar::Float64(2100.0));
+    }
+
+    // ── corr/cov min_periods ───────────────────────────────────
+
+    #[test]
+    fn dataframe_corr_min_periods_sufficient() {
+        let df = DataFrame::from_dict(
+            &["x", "y"],
+            vec![
+                ("x", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
+                ("y", vec![Scalar::Float64(2.0), Scalar::Float64(4.0), Scalar::Float64(6.0)]),
+            ],
+        )
+        .unwrap();
+
+        // 3 observations, min_periods=3 → should produce valid result
+        let result = df.corr_min_periods(3).unwrap();
+        let corr_xy = result.columns["x"].values()[1].to_f64().unwrap();
+        assert!((corr_xy - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn dataframe_corr_min_periods_insufficient() {
+        let df = DataFrame::from_dict(
+            &["x", "y"],
+            vec![
+                (
+                    "x",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Null(NullKind::NaN),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
+                (
+                    "y",
+                    vec![
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(4.0),
+                        Scalar::Null(NullKind::NaN),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+
+        // Only 1 valid pair (row 0), min_periods=3 → NaN
+        let result = df.corr_min_periods(3).unwrap();
+        let corr_xy = result.columns["x"].values()[1].to_f64().unwrap();
+        assert!(corr_xy.is_nan());
+    }
+
+    #[test]
+    fn dataframe_cov_min_periods_sufficient() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
+                ("b", vec![Scalar::Float64(4.0), Scalar::Float64(5.0), Scalar::Float64(6.0)]),
+            ],
+        )
+        .unwrap();
+
+        let result = df.cov_min_periods(2).unwrap();
+        let cov_ab = result.columns["a"].values()[1].to_f64().unwrap();
+        // cov(a,b) = 1.0 for perfectly correlated unit-spaced sequences
+        assert!((cov_ab - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn dataframe_cov_min_periods_insufficient() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
+                ("b", vec![Scalar::Float64(4.0), Scalar::Null(NullKind::NaN)]),
+            ],
+        )
+        .unwrap();
+
+        // Only 1 valid pair, min_periods=5 → NaN
+        let result = df.cov_min_periods(5).unwrap();
+        let cov_ab = result.columns["a"].values()[1].to_f64().unwrap();
+        assert!(cov_ab.is_nan());
     }
 }
