@@ -6227,6 +6227,47 @@ impl SeriesGroupBy<'_> {
         }
         Series::from_values(self.series.name(), labels, values)
     }
+
+    /// Aggregate with multiple functions, returning a DataFrame.
+    ///
+    /// Matches `series.groupby(by).agg(['sum', 'mean'])`. Returns a DataFrame
+    /// with group keys as index and one column per function.
+    pub fn agg(&self, funcs: &[&str]) -> Result<DataFrame, FrameError> {
+        let (order, _) = self.build_groups();
+        let mut result_cols = BTreeMap::new();
+        let mut col_order = Vec::new();
+
+        for &func in funcs {
+            let agg_result = match func {
+                "sum" => self.sum()?,
+                "mean" => self.mean()?,
+                "count" => self.count()?,
+                "min" => self.min()?,
+                "max" => self.max()?,
+                "std" => self.std()?,
+                "var" => self.var()?,
+                "median" => self.median()?,
+                "first" => self.first()?,
+                "last" => self.last()?,
+                "size" => self.size()?,
+                "prod" => self.prod()?,
+                _ => {
+                    return Err(FrameError::CompatibilityRejected(format!(
+                        "SeriesGroupBy.agg: unsupported function '{func}'"
+                    )));
+                }
+            };
+            result_cols.insert(func.to_string(), agg_result.column().clone());
+            col_order.push(func.to_string());
+        }
+
+        let index = Index::new(order);
+        Ok(DataFrame {
+            columns: result_cols,
+            column_order: col_order,
+            index,
+        })
+    }
 }
 
 /// String accessor for Series containing Utf8 data.
@@ -9121,6 +9162,49 @@ impl DataFrame {
         }
 
         Self::new_with_column_order(index, columns, col_order)
+    }
+
+    /// Construct a DataFrame from row-oriented tuples.
+    ///
+    /// Matches `pd.DataFrame.from_records(data, columns=...)` for tuple-style
+    /// records. Each inner Vec is a row; all must have the same length as `columns`.
+    pub fn from_tuples(
+        records: Vec<Vec<Scalar>>,
+        columns: &[&str],
+    ) -> Result<Self, FrameError> {
+        if records.is_empty() {
+            let cols: BTreeMap<String, Column> = columns
+                .iter()
+                .map(|&c| Ok((c.to_string(), Column::new(DType::Float64, Vec::new())?)))
+                .collect::<Result<_, FrameError>>()?;
+            let col_order: Vec<String> = columns.iter().map(|c| c.to_string()).collect();
+            return Self::new_with_column_order(Index::new(Vec::new()), cols, col_order);
+        }
+
+        let n_rows = records.len();
+        let n_cols = columns.len();
+
+        // Validate row lengths
+        for (i, row) in records.iter().enumerate() {
+            if row.len() != n_cols {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "from_records: row {i} has {} values, expected {n_cols}",
+                    row.len()
+                )));
+            }
+        }
+
+        // Transpose: collect column vectors
+        let mut cols = BTreeMap::new();
+        let mut col_order = Vec::new();
+        for (col_idx, &col_name) in columns.iter().enumerate() {
+            let vals: Vec<Scalar> = records.iter().map(|row| row[col_idx].clone()).collect();
+            cols.insert(col_name.to_string(), Column::from_values(vals)?);
+            col_order.push(col_name.to_string());
+        }
+
+        let labels: Vec<IndexLabel> = (0..n_rows).map(|i| (i as i64).into()).collect();
+        Self::new_with_column_order(Index::new(labels), cols, col_order)
     }
 
     /// Construct a DataFrame from mixed dict inputs (`Vec<Scalar>` and scalar).
@@ -13061,6 +13145,35 @@ impl DataFrame {
                 "unsupported reindex method: '{other}'"
             ))),
         }
+    }
+
+    /// Reindex columns: reorder, filter, or add columns.
+    ///
+    /// Matches `df.reindex(columns=[...])`. Columns present in the new list
+    /// but missing from the DataFrame are filled with NaN. Columns not in the
+    /// new list are dropped. Order follows the provided list.
+    pub fn reindex_columns(&self, new_columns: &[&str]) -> Result<Self, FrameError> {
+        let n = self.len();
+        let mut result_cols = BTreeMap::new();
+        let mut col_order = Vec::new();
+
+        for &col_name in new_columns {
+            let name = col_name.to_string();
+            if let Some(col) = self.columns.get(&name) {
+                result_cols.insert(name.clone(), col.clone());
+            } else {
+                // Add a NaN-filled column
+                let nans = vec![Scalar::Null(NullKind::NaN); n];
+                result_cols.insert(name.clone(), Column::new(DType::Float64, nans)?);
+            }
+            col_order.push(name);
+        }
+
+        Ok(Self {
+            columns: result_cols,
+            column_order: col_order,
+            index: self.index.clone(),
+        })
     }
 
     /// Update values using non-null values from another DataFrame.
@@ -39276,5 +39389,67 @@ mod tests {
         let result = s.replace_regex(r"\d+", "NUM").unwrap();
         assert_eq!(result.column().values()[0], Scalar::Utf8("helloNUM".to_string()));
         assert_eq!(result.column().values()[1], Scalar::Utf8("worldNUM".to_string()));
+    }
+
+    #[test]
+    fn test_series_groupby_agg() {
+        let s = Series::from_values(
+            "data",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(4.0),
+            ],
+        )
+        .unwrap();
+        let by = Series::from_values(
+            "grp",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("b".into()),
+            ],
+        )
+        .unwrap();
+        let gb = s.groupby(&by).unwrap();
+        let result = gb.agg(&["sum", "mean"]).unwrap();
+        let col_names: Vec<String> = result.column_names().into_iter().cloned().collect();
+        assert!(col_names.contains(&"sum".to_string()));
+        assert!(col_names.contains(&"mean".to_string()));
+        assert_eq!(result.len(), 2); // groups "a" and "b"
+    }
+
+    #[test]
+    fn test_reindex_columns() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                ("b", vec![Scalar::Int64(3), Scalar::Int64(4)]),
+            ],
+        )
+        .unwrap();
+        // Reindex: keep "b", drop "a", add new "c" with NaN
+        let result = df.reindex_columns(&["b", "c"]).unwrap();
+        let col_names: Vec<String> = result.column_names().into_iter().cloned().collect();
+        assert_eq!(col_names, vec!["b".to_string(), "c".to_string()]);
+        assert_eq!(result.columns["b"].values()[0], Scalar::Int64(3));
+        assert!(result.columns["c"].values()[0].is_missing());
+    }
+
+    #[test]
+    fn test_from_tuples() {
+        let records = vec![
+            vec![Scalar::Int64(1), Scalar::Utf8("a".to_string())],
+            vec![Scalar::Int64(2), Scalar::Utf8("b".to_string())],
+        ];
+        let df = DataFrame::from_tuples(records, &["num", "letter"]).unwrap();
+        assert_eq!(df.len(), 2);
+        assert_eq!(df.columns["num"].values()[0], Scalar::Int64(1));
+        assert_eq!(df.columns["letter"].values()[1], Scalar::Utf8("b".to_string()));
     }
 }
