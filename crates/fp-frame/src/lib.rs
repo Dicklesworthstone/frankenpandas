@@ -4024,6 +4024,19 @@ impl Series {
             series: self,
             window,
             min_periods: min_periods.unwrap_or(window),
+            center: false,
+        }
+    }
+
+    /// Create a centered rolling window over this Series.
+    ///
+    /// Matches `pd.Series.rolling(window, center=True)`.
+    pub fn rolling_center(&self, window: usize, min_periods: Option<usize>) -> Rolling<'_> {
+        Rolling {
+            series: self,
+            window,
+            min_periods: min_periods.unwrap_or(window),
+            center: true,
         }
     }
 
@@ -4591,6 +4604,7 @@ pub struct Rolling<'a> {
     series: &'a Series,
     window: usize,
     min_periods: usize,
+    center: bool,
 }
 
 impl Rolling<'_> {
@@ -4616,15 +4630,30 @@ impl Rolling<'_> {
         let len = vals.len();
         let mut out = Vec::with_capacity(len);
 
-        for i in 0..len {
-            let start = (i + 1).saturating_sub(self.window);
-            let window_slice = &vals[start..=i];
-            let nums = Self::window_values(window_slice);
+        if self.center {
+            let half = self.window / 2;
+            for i in 0..len {
+                let start = i.saturating_sub(half);
+                let end = (i + half + self.window % 2).min(len);
+                let window_slice = &vals[start..end];
+                let nums = Self::window_values(window_slice);
+                if nums.len() < self.min_periods || window_slice.len() < self.window {
+                    out.push(Scalar::Null(NullKind::NaN));
+                } else {
+                    out.push(Scalar::Float64(agg(&nums)));
+                }
+            }
+        } else {
+            for i in 0..len {
+                let start = (i + 1).saturating_sub(self.window);
+                let window_slice = &vals[start..=i];
+                let nums = Self::window_values(window_slice);
 
-            if i + 1 < self.window || nums.len() < self.min_periods {
-                out.push(Scalar::Null(NullKind::NaN));
-            } else {
-                out.push(Scalar::Float64(agg(&nums)));
+                if i + 1 < self.window || nums.len() < self.min_periods {
+                    out.push(Scalar::Null(NullKind::NaN));
+                } else {
+                    out.push(Scalar::Float64(agg(&nums)));
+                }
             }
         }
 
@@ -11224,6 +11253,46 @@ impl DataFrame {
         })
     }
 
+    /// Create a pivot table with multiple value columns.
+    ///
+    /// Matches `df.pivot_table(values=['col1','col2'], index=..., columns=..., aggfunc=...)`.
+    /// Column names in the result are formatted as "value_column_pivot_value"
+    /// (e.g. "sales_East", "profit_East").
+    pub fn pivot_table_multi_values(
+        &self,
+        values: &[&str],
+        index_col: &str,
+        columns_col: &str,
+        aggfunc: &str,
+    ) -> Result<Self, FrameError> {
+        if values.len() == 1 {
+            return self.pivot_table(values[0], index_col, columns_col, aggfunc);
+        }
+
+        // Build individual pivot tables and merge columns
+        let mut combined_cols = BTreeMap::new();
+        let mut combined_order = Vec::new();
+        let mut shared_index = None;
+
+        for &val_col in values {
+            let pt = self.pivot_table(val_col, index_col, columns_col, aggfunc)?;
+            if shared_index.is_none() {
+                shared_index = Some(pt.index.clone());
+            }
+            for col_name in &pt.column_order {
+                let prefixed = format!("{val_col}_{col_name}");
+                combined_cols.insert(prefixed.clone(), pt.columns[col_name].clone());
+                combined_order.push(prefixed);
+            }
+        }
+
+        Ok(Self {
+            columns: combined_cols,
+            column_order: combined_order,
+            index: shared_index.unwrap_or_else(|| Index::new(Vec::new())),
+        })
+    }
+
     /// Create a pivot table with optional margin totals.
     ///
     /// Matches `df.pivot_table(values, index, columns, aggfunc, margins=True)`.
@@ -12256,6 +12325,41 @@ impl DataFrame {
             result_cols.insert(col_name.clone(), Column::new(col.dtype(), new_vals)?);
         }
 
+        Ok(Self {
+            columns: result_cols,
+            column_order: self.column_order.clone(),
+            index: Index::new(new_labels),
+        })
+    }
+
+    /// Reindex with a static fill_value for missing labels.
+    ///
+    /// Matches `df.reindex(new_labels, fill_value=X)`. Labels not found
+    /// in the current index are filled with `fill_value` instead of NaN.
+    pub fn reindex_fill(
+        &self,
+        new_labels: Vec<IndexLabel>,
+        fill_value: Scalar,
+    ) -> Result<Self, FrameError> {
+        let mut old_lookup: std::collections::HashMap<&IndexLabel, usize> =
+            std::collections::HashMap::new();
+        for (i, label) in self.index.labels().iter().enumerate() {
+            old_lookup.entry(label).or_insert(i);
+        }
+        let new_len = new_labels.len();
+        let mut result_cols = BTreeMap::new();
+        for col_name in &self.column_order {
+            let col = &self.columns[col_name];
+            let mut new_vals = Vec::with_capacity(new_len);
+            for label in &new_labels {
+                if let Some(&idx) = old_lookup.get(label) {
+                    new_vals.push(col.values()[idx].clone());
+                } else {
+                    new_vals.push(fill_value.clone());
+                }
+            }
+            result_cols.insert(col_name.clone(), Column::from_values(new_vals)?);
+        }
         Ok(Self {
             columns: result_cols,
             column_order: self.column_order.clone(),
@@ -37464,5 +37568,103 @@ mod tests {
         let counts = gb.count().unwrap();
         assert_eq!(counts.column().values()[0], Scalar::Int64(2));
         assert_eq!(counts.column().values()[1], Scalar::Int64(2));
+    }
+
+    #[test]
+    fn test_reindex_fill() {
+        let df = DataFrame::from_dict(
+            &["a"],
+            vec![("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)])],
+        )
+        .unwrap();
+        let result = df
+            .reindex_fill(
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                Scalar::Float64(0.0),
+            )
+            .unwrap();
+        assert_eq!(result.columns["a"].values()[0], Scalar::Float64(1.0));
+        assert_eq!(result.columns["a"].values()[1], Scalar::Float64(2.0));
+        assert_eq!(result.columns["a"].values()[2], Scalar::Float64(0.0)); // filled
+    }
+
+    #[test]
+    fn test_rolling_center() {
+        let s = Series::from_values(
+            "v",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(4.0),
+                Scalar::Float64(5.0),
+            ],
+        )
+        .unwrap();
+        // center=true, window=3: position 1 uses [0,1,2], position 2 uses [1,2,3], etc.
+        let result = s.rolling_center(3, None).mean().unwrap();
+        // Positions 0 and 4 don't have full window → NaN
+        assert!(result.column().values()[0].is_missing());
+        assert!(result.column().values()[4].is_missing());
+        // Position 1: mean(1,2,3) = 2.0
+        assert_eq!(result.column().values()[1], Scalar::Float64(2.0));
+        // Position 2: mean(2,3,4) = 3.0
+        assert_eq!(result.column().values()[2], Scalar::Float64(3.0));
+        // Position 3: mean(3,4,5) = 4.0
+        assert_eq!(result.column().values()[3], Scalar::Float64(4.0));
+    }
+
+    #[test]
+    fn test_pivot_table_multi_values() {
+        let df = DataFrame::from_dict(
+            &["region", "product", "sales", "profit"],
+            vec![
+                (
+                    "region",
+                    vec![
+                        Scalar::Utf8("East".into()),
+                        Scalar::Utf8("West".into()),
+                        Scalar::Utf8("East".into()),
+                        Scalar::Utf8("West".into()),
+                    ],
+                ),
+                (
+                    "product",
+                    vec![
+                        Scalar::Utf8("A".into()),
+                        Scalar::Utf8("A".into()),
+                        Scalar::Utf8("B".into()),
+                        Scalar::Utf8("B".into()),
+                    ],
+                ),
+                (
+                    "sales",
+                    vec![
+                        Scalar::Float64(100.0),
+                        Scalar::Float64(200.0),
+                        Scalar::Float64(150.0),
+                        Scalar::Float64(250.0),
+                    ],
+                ),
+                (
+                    "profit",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(15.0),
+                        Scalar::Float64(25.0),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let result = df
+            .pivot_table_multi_values(&["sales", "profit"], "region", "product", "sum")
+            .unwrap();
+        // Should have columns: sales_A, sales_B, profit_A, profit_B
+        assert_eq!(result.column_names().len(), 4);
+        assert!(result.columns.contains_key("sales_A"));
+        assert!(result.columns.contains_key("profit_B"));
     }
 }
