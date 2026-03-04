@@ -107,6 +107,9 @@ pub enum DuplicateKeep {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Index {
     labels: Vec<IndexLabel>,
+    /// Optional name for the index (matches pandas `Index.name`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
     #[serde(skip)]
     duplicate_cache: OnceCell<bool>,
     /// AG-13: Cached sort order for adaptive backend selection.
@@ -137,6 +140,7 @@ impl Index {
     pub fn new(labels: Vec<IndexLabel>) -> Self {
         Self {
             labels,
+            name: None,
             duplicate_cache: OnceCell::new(),
             sort_order_cache: OnceCell::new(),
         }
@@ -165,6 +169,48 @@ impl Index {
     #[must_use]
     pub fn labels(&self) -> &[IndexLabel] {
         &self.labels
+    }
+
+    /// Return the index name (matches `pd.Index.name`).
+    #[must_use]
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
+    /// Return a new index with the given name (matches `pd.Index.set_names`).
+    #[must_use]
+    pub fn set_names(&self, name: Option<&str>) -> Self {
+        let mut idx = self.clone();
+        idx.name = name.map(String::from);
+        idx
+    }
+
+    /// Alias for `set_names` — set the index name, returning a new `Index`.
+    #[must_use]
+    pub fn set_name(&self, name: &str) -> Self {
+        self.set_names(Some(name))
+    }
+
+    /// Return a new index with the name cleared.
+    #[must_use]
+    pub fn rename_index(&self, name: Option<&str>) -> Self {
+        self.set_names(name)
+    }
+
+    /// Internal: propagate this index's name onto a newly created index.
+    fn propagate_name(&self, mut other: Self) -> Self {
+        other.name.clone_from(&self.name);
+        other
+    }
+
+    /// Internal: if both indexes share the same name, return it; otherwise None.
+    /// Matches pandas behavior for binary set operations.
+    fn shared_name(&self, other: &Self) -> Option<String> {
+        if self.name == other.name {
+            self.name.clone()
+        } else {
+            None
+        }
     }
 
     #[must_use]
@@ -296,7 +342,7 @@ impl Index {
             .filter(|l| seen.insert(l, ()).is_none())
             .cloned()
             .collect();
-        Self::new(labels)
+        self.propagate_name(Self::new(labels))
     }
 
     #[must_use]
@@ -351,7 +397,9 @@ impl Index {
             .filter(|l| other_set.contains_key(l) && seen.insert(l, ()).is_none())
             .cloned()
             .collect();
-        Self::new(labels)
+        let mut result = Self::new(labels);
+        result.name = self.shared_name(other);
+        result
     }
 
     #[must_use]
@@ -363,7 +411,9 @@ impl Index {
                 labels.push(label.clone());
             }
         }
-        Self::new(labels)
+        let mut result = Self::new(labels);
+        result.name = self.shared_name(other);
+        result
     }
 
     #[must_use]
@@ -376,7 +426,7 @@ impl Index {
             .filter(|l| !other_set.contains_key(l) && seen.insert(l, ()).is_none())
             .cloned()
             .collect();
-        Self::new(labels)
+        self.propagate_name(Self::new(labels))
     }
 
     #[must_use]
@@ -395,7 +445,9 @@ impl Index {
                 labels.push(label.clone());
             }
         }
-        Self::new(labels)
+        let mut result = Self::new(labels);
+        result.name = self.shared_name(other);
+        result
     }
 
     // ── Pandas Index Model: ordering and slicing ───────────────────────
@@ -410,19 +462,23 @@ impl Index {
     #[must_use]
     pub fn sort_values(&self) -> Self {
         let order = self.argsort();
-        Self::new(order.iter().map(|&i| self.labels[i].clone()).collect())
+        self.propagate_name(Self::new(
+            order.iter().map(|&i| self.labels[i].clone()).collect(),
+        ))
     }
 
     #[must_use]
     pub fn take(&self, indices: &[usize]) -> Self {
-        Self::new(indices.iter().map(|&i| self.labels[i].clone()).collect())
+        self.propagate_name(Self::new(
+            indices.iter().map(|&i| self.labels[i].clone()).collect(),
+        ))
     }
 
     #[must_use]
     pub fn slice(&self, start: usize, len: usize) -> Self {
         let start = start.min(self.labels.len());
         let end = start.saturating_add(len).min(self.labels.len());
-        Self::new(self.labels[start..end].to_vec())
+        self.propagate_name(Self::new(self.labels[start..end].to_vec()))
     }
 
     #[must_use]
@@ -503,7 +559,7 @@ impl Index {
     where
         F: Fn(&IndexLabel) -> IndexLabel,
     {
-        Self::new(self.labels.iter().map(&func).collect())
+        self.propagate_name(Self::new(self.labels.iter().map(&func).collect()))
     }
 
     /// Rename the index (create a copy with transformed labels).
@@ -523,13 +579,13 @@ impl Index {
     /// Matches `pd.Index.drop(labels)`.
     #[must_use]
     pub fn drop_labels(&self, labels_to_drop: &[IndexLabel]) -> Self {
-        Self::new(
+        self.propagate_name(Self::new(
             self.labels
                 .iter()
                 .filter(|l| !labels_to_drop.contains(l))
                 .cloned()
                 .collect(),
-        )
+        ))
     }
 
     /// Convert all labels to Int64 (if possible) or Utf8.
@@ -538,7 +594,7 @@ impl Index {
     /// converted to the target type representation.
     #[must_use]
     pub fn astype_int(&self) -> Self {
-        Self::new(
+        self.propagate_name(Self::new(
             self.labels
                 .iter()
                 .map(|l| match l {
@@ -548,7 +604,7 @@ impl Index {
                         .map_or_else(|_| l.clone(), IndexLabel::Int64),
                 })
                 .collect(),
-        )
+        ))
     }
 
     /// Convert all labels to Utf8 strings.
@@ -556,7 +612,7 @@ impl Index {
     /// Matches `pd.Index.astype(str)`.
     #[must_use]
     pub fn astype_str(&self) -> Self {
-        Self::new(
+        self.propagate_name(Self::new(
             self.labels
                 .iter()
                 .map(|l| match l {
@@ -564,7 +620,7 @@ impl Index {
                     IndexLabel::Utf8(_) => l.clone(),
                 })
                 .collect(),
-        )
+        ))
     }
 
     /// Fill missing-like labels (in our model, only Int64/Utf8 exist, so this
@@ -600,7 +656,7 @@ impl Index {
     /// Matches `pd.Index.where(cond, other)`.
     #[must_use]
     pub fn where_cond(&self, cond: &[bool], other: &IndexLabel) -> Self {
-        Self::new(
+        self.propagate_name(Self::new(
             self.labels
                 .iter()
                 .enumerate()
@@ -612,7 +668,7 @@ impl Index {
                     }
                 })
                 .collect(),
-        )
+        ))
     }
 }
 
@@ -1889,5 +1945,128 @@ mod tests {
         assert_eq!(result.labels()[0], IndexLabel::Utf8("a".into()));
         assert_eq!(result.labels()[1], IndexLabel::Utf8("X".into()));
         assert_eq!(result.labels()[2], IndexLabel::Utf8("c".into()));
+    }
+
+    // ── Index name tests ────────────────────────────────────────────
+
+    #[test]
+    fn index_name_default_none() {
+        let idx = Index::new(vec![1_i64.into(), 2_i64.into()]);
+        assert_eq!(idx.name(), None);
+    }
+
+    #[test]
+    fn index_set_name() {
+        let idx = Index::new(vec![1_i64.into(), 2_i64.into()]);
+        let named = idx.set_name("year");
+        assert_eq!(named.name(), Some("year"));
+        assert_eq!(named.labels(), idx.labels());
+    }
+
+    #[test]
+    fn index_set_names_some_and_none() {
+        let idx = Index::new(vec!["a".into(), "b".into()]);
+        let named = idx.set_names(Some("letters"));
+        assert_eq!(named.name(), Some("letters"));
+        let cleared = named.set_names(None);
+        assert_eq!(cleared.name(), None);
+    }
+
+    #[test]
+    fn index_name_propagates_through_unique() {
+        let idx = Index::new(vec![1_i64.into(), 1_i64.into(), 2_i64.into()])
+            .set_name("id");
+        let u = idx.unique();
+        assert_eq!(u.name(), Some("id"));
+        assert_eq!(u.len(), 2);
+    }
+
+    #[test]
+    fn index_name_propagates_through_sort_values() {
+        let idx = Index::new(vec![3_i64.into(), 1_i64.into(), 2_i64.into()])
+            .set_name("val");
+        let sorted = idx.sort_values();
+        assert_eq!(sorted.name(), Some("val"));
+    }
+
+    #[test]
+    fn index_name_propagates_through_take_and_slice() {
+        let idx = Index::new(vec!["a".into(), "b".into(), "c".into()])
+            .set_name("letter");
+        assert_eq!(idx.take(&[0, 2]).name(), Some("letter"));
+        assert_eq!(idx.slice(1, 2).name(), Some("letter"));
+    }
+
+    #[test]
+    fn index_name_propagates_through_map() {
+        let idx = Index::new(vec![1_i64.into(), 2_i64.into()])
+            .set_name("x");
+        let mapped = idx.map(|l| match l {
+            IndexLabel::Int64(v) => IndexLabel::Int64(v * 10),
+            other => other.clone(),
+        });
+        assert_eq!(mapped.name(), Some("x"));
+    }
+
+    #[test]
+    fn index_name_propagates_through_drop_labels() {
+        let idx = Index::new(vec![1_i64.into(), 2_i64.into(), 3_i64.into()])
+            .set_name("num");
+        let dropped = idx.drop_labels(&[2_i64.into()]);
+        assert_eq!(dropped.name(), Some("num"));
+        assert_eq!(dropped.len(), 2);
+    }
+
+    #[test]
+    fn index_name_propagates_through_astype() {
+        let idx = Index::new(vec![1_i64.into(), 2_i64.into()])
+            .set_name("n");
+        assert_eq!(idx.astype_str().name(), Some("n"));
+        let idx2 = Index::new(vec!["1".into(), "2".into()])
+            .set_name("s");
+        assert_eq!(idx2.astype_int().name(), Some("s"));
+    }
+
+    #[test]
+    fn index_name_shared_for_intersection() {
+        let a = Index::new(vec![1_i64.into(), 2_i64.into()]).set_name("x");
+        let b = Index::new(vec![2_i64.into(), 3_i64.into()]).set_name("x");
+        assert_eq!(a.intersection(&b).name(), Some("x"));
+
+        let c = Index::new(vec![2_i64.into(), 3_i64.into()]).set_name("y");
+        assert_eq!(a.intersection(&c).name(), None);
+    }
+
+    #[test]
+    fn index_name_shared_for_union() {
+        let a = Index::new(vec![1_i64.into()]).set_name("k");
+        let b = Index::new(vec![2_i64.into()]).set_name("k");
+        assert_eq!(a.union_with(&b).name(), Some("k"));
+
+        let c = Index::new(vec![2_i64.into()]);
+        assert_eq!(a.union_with(&c).name(), None);
+    }
+
+    #[test]
+    fn index_name_propagates_through_where_cond() {
+        let idx = Index::new(vec!["a".into(), "b".into()]).set_name("col");
+        let result = idx.where_cond(&[true, false], &"Z".into());
+        assert_eq!(result.name(), Some("col"));
+    }
+
+    #[test]
+    fn index_rename_index() {
+        let idx = Index::new(vec![1_i64.into()]);
+        let named = idx.rename_index(Some("foo"));
+        assert_eq!(named.name(), Some("foo"));
+        let cleared = named.rename_index(None);
+        assert_eq!(cleared.name(), None);
+    }
+
+    #[test]
+    fn index_equality_ignores_name() {
+        let a = Index::new(vec![1_i64.into(), 2_i64.into()]).set_name("a");
+        let b = Index::new(vec![1_i64.into(), 2_i64.into()]).set_name("b");
+        assert_eq!(a, b);
     }
 }

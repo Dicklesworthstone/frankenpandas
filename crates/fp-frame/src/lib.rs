@@ -1929,6 +1929,58 @@ impl Series {
         Self::from_values(self.name.clone(), self.index.labels().to_vec(), out)
     }
 
+    /// Map values using another Series as a lookup table.
+    ///
+    /// Matches `pd.Series.map(other_series)`. The `mapper` series' index
+    /// labels are matched against `self`'s values. For each value in `self`,
+    /// if it matches a label in `mapper`'s index, the corresponding `mapper`
+    /// value is used; otherwise NaN.
+    pub fn map_series(&self, mapper: &Series) -> Result<Self, FrameError> {
+        // Build a string-keyed lookup from mapper's index→value pairs.
+        // We key on the string representation of the index label to avoid
+        // needing Hash on Scalar, and match by converting self's values
+        // to IndexLabel for comparison.
+        let lookup: std::collections::HashMap<IndexLabel, &Scalar> = mapper
+            .index()
+            .labels()
+            .iter()
+            .cloned()
+            .zip(mapper.column.values().iter())
+            .collect();
+
+        let mut out = Vec::with_capacity(self.len());
+        for val in self.column.values() {
+            if val.is_missing() {
+                out.push(Scalar::Null(NullKind::NaN));
+                continue;
+            }
+            // Convert the value to an IndexLabel to look up in the mapper.
+            let key = match val {
+                Scalar::Int64(v) => Some(IndexLabel::Int64(*v)),
+                Scalar::Utf8(s) => Some(IndexLabel::Utf8(s.clone())),
+                Scalar::Float64(f) => {
+                    // Try converting to i64 if it's a whole number.
+                    let i = *f as i64;
+                    #[allow(clippy::float_cmp)]
+                    if i as f64 == *f {
+                        Some(IndexLabel::Int64(i))
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            };
+            let mapped = key
+                .as_ref()
+                .and_then(|k| lookup.get(k))
+                .cloned()
+                .cloned()
+                .unwrap_or(Scalar::Null(NullKind::NaN));
+            out.push(mapped);
+        }
+        Self::from_values(self.name.clone(), self.index.labels().to_vec(), out)
+    }
+
     /// Replace specific values with substitutions.
     ///
     /// Matches `pd.Series.replace(to_replace, value)` for scalar pairs.
@@ -5675,6 +5727,75 @@ impl Resample<'_> {
                 .unwrap_or(Scalar::Null(NullKind::NaN))
         })
     }
+
+    /// Apply a custom aggregation function to each time bucket.
+    ///
+    /// Matches `pd.Series.resample(freq).apply(func)`.
+    /// The function receives a slice of `Scalar` values for each bucket
+    /// and must return a single `Scalar` result.
+    pub fn apply<F>(&self, func: F) -> Result<Series, FrameError>
+    where
+        F: Fn(&[Scalar]) -> Scalar,
+    {
+        self.aggregate(func)
+    }
+
+    /// Apply a custom aggregation function (failable) to each time bucket.
+    ///
+    /// Like `apply` but the closure can return `Result`.
+    pub fn apply_fn<F>(&self, func: F) -> Result<Series, FrameError>
+    where
+        F: Fn(&[Scalar]) -> Result<Scalar, FrameError>,
+    {
+        let (order, groups) = self.build_groups();
+        let vals = self.series.column().values();
+
+        let mut out_labels = Vec::with_capacity(order.len());
+        let mut out_vals = Vec::with_capacity(order.len());
+
+        for key in &order {
+            out_labels.push(IndexLabel::Utf8(key.clone()));
+            let group_vals: Vec<Scalar> = groups[key].iter().map(|&i| vals[i].clone()).collect();
+            out_vals.push(func(&group_vals)?);
+        }
+
+        Series::from_values(self.series.name(), out_labels, out_vals)
+    }
+
+    /// Resample standard deviation (ddof=1).
+    pub fn std(&self) -> Result<Series, FrameError> {
+        self.aggregate(|vals| fp_types::nanstd(vals, 1))
+    }
+
+    /// Resample variance.
+    pub fn var(&self) -> Result<Series, FrameError> {
+        self.aggregate(|vals| {
+            let non_null: Vec<f64> = vals
+                .iter()
+                .filter_map(|v| v.to_f64().ok())
+                .collect();
+            if non_null.is_empty() {
+                return Scalar::Null(NullKind::NaN);
+            }
+            let n = non_null.len() as f64;
+            if n < 2.0 {
+                return Scalar::Null(NullKind::NaN);
+            }
+            let mean = non_null.iter().sum::<f64>() / n;
+            let variance = non_null.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1.0);
+            Scalar::Float64(variance)
+        })
+    }
+
+    /// Resample median.
+    pub fn median(&self) -> Result<Series, FrameError> {
+        self.aggregate(fp_types::nanmedian)
+    }
+
+    /// Resample product.
+    pub fn prod(&self) -> Result<Series, FrameError> {
+        self.aggregate(fp_types::nanprod)
+    }
 }
 
 /// Rolling window aggregation over a DataFrame's numeric columns.
@@ -8497,6 +8618,55 @@ pub fn qcut(series: &Series, q: usize) -> Result<Series, FrameError> {
         series.name().to_string(),
         series.index().labels().to_vec(),
         labels,
+    )
+}
+
+/// Convert an Index to a single-column DataFrame.
+///
+/// Matches `pd.Index.to_frame(index=True, name=None)`.
+/// The column name defaults to the index's name, or "0" if unnamed.
+/// The resulting DataFrame uses a default RangeIndex.
+pub fn index_to_frame(index: &Index, name: Option<&str>) -> Result<DataFrame, FrameError> {
+    let col_name = name
+        .or_else(|| index.name())
+        .unwrap_or("0");
+    let values: Vec<Scalar> = index
+        .labels()
+        .iter()
+        .map(|l| match l {
+            IndexLabel::Int64(v) => Scalar::Int64(*v),
+            IndexLabel::Utf8(s) => Scalar::Utf8(s.clone()),
+        })
+        .collect();
+    let n = values.len();
+    let range_idx: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::from).collect();
+    DataFrame::from_dict_with_index(
+        vec![(col_name, values)],
+        range_idx,
+    )
+}
+
+/// Convert an Index to a Series.
+///
+/// Matches `pd.Index.to_series(index=None, name=None)`.
+/// The series name defaults to the index's name, or "0" if unnamed.
+/// The resulting Series uses the same index labels as its own index.
+pub fn index_to_series(index: &Index, name: Option<&str>) -> Result<Series, FrameError> {
+    let series_name = name
+        .or_else(|| index.name())
+        .unwrap_or("0");
+    let values: Vec<Scalar> = index
+        .labels()
+        .iter()
+        .map(|l| match l {
+            IndexLabel::Int64(v) => Scalar::Int64(*v),
+            IndexLabel::Utf8(s) => Scalar::Utf8(s.clone()),
+        })
+        .collect();
+    Series::from_values(
+        series_name.to_string(),
+        index.labels().to_vec(),
+        values,
     )
 }
 
@@ -14851,6 +15021,124 @@ impl DataFrame {
         }
     }
 
+    /// Row-wise apply with `result_type` control.
+    ///
+    /// Matches `pd.DataFrame.apply(func, axis=1, result_type=...)`.
+    ///
+    /// - `"reduce"`: Each row produces a single scalar → returns a Series (default).
+    /// - `"expand"`: Each row produces a Vec of scalars → columns of the output DataFrame.
+    /// - `"broadcast"`: Each row produces a scalar → broadcast to all columns, preserving shape.
+    pub fn apply_with_result_type<F>(
+        &self,
+        func: F,
+        result_type: &str,
+    ) -> Result<Self, FrameError>
+    where
+        F: Fn(&[Scalar]) -> Vec<Scalar>,
+    {
+        match result_type {
+            "expand" => {
+                // Each row's result becomes a row of the output DataFrame.
+                // Number of columns is determined by the first row's result length.
+                let mut all_rows: Vec<Vec<Scalar>> = Vec::with_capacity(self.len());
+                for row_idx in 0..self.len() {
+                    let row_vals: Vec<Scalar> = self
+                        .column_order
+                        .iter()
+                        .map(|name| self.columns[name].values()[row_idx].clone())
+                        .collect();
+                    all_rows.push(func(&row_vals));
+                }
+                let n_cols = all_rows.first().map_or(0, Vec::len);
+                let mut cols = BTreeMap::new();
+                let mut col_order = Vec::with_capacity(n_cols);
+                for col_idx in 0..n_cols {
+                    let col_name = col_idx.to_string();
+                    let values: Vec<Scalar> = all_rows
+                        .iter()
+                        .map(|row| {
+                            row.get(col_idx)
+                                .cloned()
+                                .unwrap_or(Scalar::Null(NullKind::NaN))
+                        })
+                        .collect();
+                    cols.insert(col_name.clone(), Column::from_values(values)?);
+                    col_order.push(col_name);
+                }
+                Ok(Self {
+                    columns: cols,
+                    column_order: col_order,
+                    index: self.index.clone(),
+                })
+            }
+            "broadcast" => {
+                // Each row produces values that are broadcast to all columns.
+                // Result must have same number of elements as columns.
+                let mut all_rows: Vec<Vec<Scalar>> = Vec::with_capacity(self.len());
+                for row_idx in 0..self.len() {
+                    let row_vals: Vec<Scalar> = self
+                        .column_order
+                        .iter()
+                        .map(|name| self.columns[name].values()[row_idx].clone())
+                        .collect();
+                    let result = func(&row_vals);
+                    if result.len() == 1 {
+                        // Broadcast scalar to all columns
+                        all_rows.push(
+                            std::iter::repeat_n(result.into_iter().next().unwrap(), self.column_order.len())
+                                .collect(),
+                        );
+                    } else {
+                        all_rows.push(result);
+                    }
+                }
+                let mut cols = BTreeMap::new();
+                for (col_idx, col_name) in self.column_order.iter().enumerate() {
+                    let values: Vec<Scalar> = all_rows
+                        .iter()
+                        .map(|row| {
+                            row.get(col_idx)
+                                .cloned()
+                                .unwrap_or(Scalar::Null(NullKind::NaN))
+                        })
+                        .collect();
+                    cols.insert(col_name.clone(), Column::from_values(values)?);
+                }
+                Ok(Self {
+                    columns: cols,
+                    column_order: self.column_order.clone(),
+                    index: self.index.clone(),
+                })
+            }
+            "reduce" | _ => {
+                // Default: each row returns a single scalar → Series wrapped in 1-col DataFrame.
+                let mut values = Vec::with_capacity(self.len());
+                for row_idx in 0..self.len() {
+                    let row_vals: Vec<Scalar> = self
+                        .column_order
+                        .iter()
+                        .map(|name| self.columns[name].values()[row_idx].clone())
+                        .collect();
+                    let result = func(&row_vals);
+                    values.push(
+                        result
+                            .into_iter()
+                            .next()
+                            .unwrap_or(Scalar::Null(NullKind::NaN)),
+                    );
+                }
+                let s = Series::from_values("result", self.index.labels().to_vec(), values)?;
+                let mut cols = BTreeMap::new();
+                cols.insert("result".to_string(), s.column().clone());
+                Ok(Self {
+                    columns: cols,
+                    column_order: vec!["result".to_string()],
+                    index: self.index.clone(),
+                })
+            }
+        }
+    }
+
     /// Row-wise apply returning a Series (one value per row).
     ///
     /// Convenience wrapper for `apply_fn(func, 1)` that directly returns
@@ -19313,6 +19601,301 @@ impl DataFrameGroupBy<'_> {
     pub fn fillna(&self, value: &Scalar) -> Result<DataFrame, FrameError> {
         self.df.fillna(value)
     }
+
+    /// Grouped rolling window operations.
+    ///
+    /// Matches `pd.DataFrameGroupBy.rolling(window)`. Returns a
+    /// `GroupByRolling` struct that applies rolling operations per group.
+    pub fn rolling(&self, window: usize) -> GroupByRolling<'_> {
+        GroupByRolling {
+            groupby: self,
+            window,
+            min_periods: window,
+        }
+    }
+
+    /// Grouped resampling.
+    ///
+    /// Matches `pd.DataFrameGroupBy.resample(freq)`. Returns a
+    /// `GroupByResample` struct that applies resampling per group.
+    pub fn resample(&self, freq: &str) -> GroupByResample<'_> {
+        GroupByResample {
+            groupby: self,
+            freq: freq.to_string(),
+        }
+    }
+}
+
+/// Grouped rolling window over a `DataFrameGroupBy`.
+///
+/// Created by `DataFrameGroupBy::rolling()`. Applies rolling window
+/// operations within each group independently.
+pub struct GroupByRolling<'a> {
+    groupby: &'a DataFrameGroupBy<'a>,
+    window: usize,
+    min_periods: usize,
+}
+
+impl GroupByRolling<'_> {
+    /// Apply a rolling aggregation function per-group for all numeric columns.
+    fn apply_grouped_rolling<F>(&self, agg_name: &str, agg: F) -> Result<DataFrame, FrameError>
+    where
+        F: Fn(&Series, usize, usize) -> Result<Series, FrameError>,
+    {
+        let (group_order, groups) = self.groupby.build_groups();
+        let value_cols: Vec<String> = self
+            .groupby
+            .df
+            .column_order
+            .iter()
+            .filter(|c| {
+                if self.groupby.by.contains(c) {
+                    return false;
+                }
+                let dt = self.groupby.df.columns[c.as_str()].dtype();
+                dt == DType::Int64 || dt == DType::Float64
+            })
+            .cloned()
+            .collect();
+
+        let n = self.groupby.df.len();
+        let mut result_data: std::collections::HashMap<String, Vec<Scalar>> =
+            value_cols
+                .iter()
+                .map(|c| (c.clone(), vec![Scalar::Null(NullKind::NaN); n]))
+                .collect();
+
+        for gkey in &group_order {
+            let indices = &groups[gkey];
+            for col_name in &value_cols {
+                let col = &self.groupby.df.columns[col_name];
+                // Extract the group's values
+                let group_vals: Vec<Scalar> = indices.iter().map(|&i| col.values()[i].clone()).collect();
+                let group_idx: Vec<IndexLabel> = (0..group_vals.len() as i64)
+                    .map(IndexLabel::from)
+                    .collect();
+                let group_series = Series::from_values(col_name, group_idx, group_vals)?;
+                let rolled = agg(&group_series, self.window, self.min_periods)?;
+
+                // Place results back in original positions
+                let result_col = result_data.get_mut(col_name).unwrap();
+                for (gi, &orig_idx) in indices.iter().enumerate() {
+                    result_col[orig_idx] = rolled.values()[gi].clone();
+                }
+            }
+        }
+
+        let mut cols = BTreeMap::new();
+        let mut col_order = Vec::new();
+
+        // Include group-by columns
+        for col_name in &self.groupby.df.column_order {
+            if self.groupby.by.contains(col_name) {
+                cols.insert(col_name.clone(), self.groupby.df.columns[col_name].clone());
+                col_order.push(col_name.clone());
+            }
+        }
+
+        // Include rolling result columns
+        for col_name in &value_cols {
+            let _ = agg_name; // Used for identification in more complex cases
+            cols.insert(col_name.clone(), Column::from_values(result_data.remove(col_name).unwrap())?);
+            col_order.push(col_name.clone());
+        }
+
+        Ok(DataFrame {
+            columns: cols,
+            column_order: col_order,
+            index: self.groupby.df.index.clone(),
+        })
+    }
+
+    /// Grouped rolling sum.
+    pub fn sum(&self) -> Result<DataFrame, FrameError> {
+        self.apply_grouped_rolling("sum", |s, w, mp| s.rolling(w, Some(mp)).sum())
+    }
+
+    /// Grouped rolling mean.
+    pub fn mean(&self) -> Result<DataFrame, FrameError> {
+        self.apply_grouped_rolling("mean", |s, w, mp| s.rolling(w, Some(mp)).mean())
+    }
+
+    /// Grouped rolling min.
+    pub fn min(&self) -> Result<DataFrame, FrameError> {
+        self.apply_grouped_rolling("min", |s, w, mp| s.rolling(w, Some(mp)).min())
+    }
+
+    /// Grouped rolling max.
+    pub fn max(&self) -> Result<DataFrame, FrameError> {
+        self.apply_grouped_rolling("max", |s, w, mp| s.rolling(w, Some(mp)).max())
+    }
+
+    /// Grouped rolling standard deviation.
+    pub fn std(&self) -> Result<DataFrame, FrameError> {
+        self.apply_grouped_rolling("std", |s, w, mp| s.rolling(w, Some(mp)).std())
+    }
+
+    /// Grouped rolling count.
+    pub fn count(&self) -> Result<DataFrame, FrameError> {
+        self.apply_grouped_rolling("count", |s, w, mp| s.rolling(w, Some(mp)).count())
+    }
+
+    /// Grouped rolling variance.
+    pub fn var(&self) -> Result<DataFrame, FrameError> {
+        self.apply_grouped_rolling("var", |s, w, mp| s.rolling(w, Some(mp)).var())
+    }
+}
+
+/// Grouped resampling over a `DataFrameGroupBy`.
+///
+/// Created by `DataFrameGroupBy::resample()`. Applies resampling
+/// operations within each group independently.
+pub struct GroupByResample<'a> {
+    groupby: &'a DataFrameGroupBy<'a>,
+    freq: String,
+}
+
+impl GroupByResample<'_> {
+    /// Apply a resampling aggregation per-group for all numeric columns.
+    fn apply_grouped_resample<F>(&self, agg: F) -> Result<DataFrame, FrameError>
+    where
+        F: Fn(&Series, &str) -> Result<Series, FrameError>,
+    {
+        let (group_order, groups) = self.groupby.build_groups();
+        let value_cols: Vec<String> = self
+            .groupby
+            .df
+            .column_order
+            .iter()
+            .filter(|c| {
+                if self.groupby.by.contains(c) {
+                    return false;
+                }
+                let dt = self.groupby.df.columns[c.as_str()].dtype();
+                dt == DType::Int64 || dt == DType::Float64
+            })
+            .cloned()
+            .collect();
+
+        // Resample per group, collecting results with composite keys
+        let mut all_labels = Vec::new();
+        let mut all_values: std::collections::HashMap<String, Vec<Scalar>> = value_cols
+            .iter()
+            .map(|c| (c.clone(), Vec::new()))
+            .collect();
+        // Track which group each resampled row came from
+        let mut group_labels = Vec::new();
+
+        for gkey in &group_order {
+            let indices = &groups[gkey];
+            let first_row = indices[0];
+
+            // Use the first value column to determine bucket structure
+            if let Some(first_col) = value_cols.first() {
+                let col = &self.groupby.df.columns[first_col];
+                let group_idx: Vec<IndexLabel> = indices
+                    .iter()
+                    .map(|&i| self.groupby.df.index.labels()[i].clone())
+                    .collect();
+                let group_vals: Vec<Scalar> = indices.iter().map(|&i| col.values()[i].clone()).collect();
+                let group_series = Series::from_values(first_col, group_idx.clone(), group_vals)?;
+                let resampled = agg(&group_series, &self.freq)?;
+
+                // For each resampled bucket
+                let n_buckets = resampled.len();
+                for _ in 0..n_buckets {
+                    // Use the group key from the first row
+                    let group_label = self.groupby.group_key_label(first_row);
+                    group_labels.push(group_label);
+                }
+
+                // Record the resampled bucket labels
+                all_labels.extend(resampled.index().labels().iter().cloned());
+
+                // Add values for first col
+                all_values.get_mut(first_col).unwrap().extend(
+                    resampled.values().iter().cloned(),
+                );
+
+                // Now do remaining columns
+                for col_name in value_cols.iter().skip(1) {
+                    let col = &self.groupby.df.columns[col_name];
+                    let gv: Vec<Scalar> = indices.iter().map(|&i| col.values()[i].clone()).collect();
+                    let gs = Series::from_values(col_name, group_idx.clone(), gv)?;
+                    let rs = agg(&gs, &self.freq)?;
+                    all_values.get_mut(col_name).unwrap().extend(
+                        rs.values().iter().cloned(),
+                    );
+                }
+            }
+        }
+
+        // Build the output DataFrame
+        let mut cols = BTreeMap::new();
+        let mut col_order = Vec::new();
+
+        // Group-by key column(s)
+        if self.groupby.by.len() == 1 {
+            let by_col = &self.groupby.by[0];
+            let by_values: Vec<Scalar> = group_labels
+                .iter()
+                .map(|l| match l {
+                    IndexLabel::Int64(v) => Scalar::Int64(*v),
+                    IndexLabel::Utf8(s) => Scalar::Utf8(s.clone()),
+                })
+                .collect();
+            cols.insert(by_col.clone(), Column::from_values(by_values)?);
+            col_order.push(by_col.clone());
+        }
+
+        // Value columns
+        for col_name in &value_cols {
+            let vals = all_values.remove(col_name).unwrap();
+            cols.insert(col_name.clone(), Column::from_values(vals)?);
+            col_order.push(col_name.clone());
+        }
+
+        Ok(DataFrame {
+            columns: cols,
+            column_order: col_order,
+            index: Index::new(all_labels),
+        })
+    }
+
+    /// Grouped resample sum.
+    pub fn sum(&self) -> Result<DataFrame, FrameError> {
+        self.apply_grouped_resample(|s, freq| s.resample(freq).sum())
+    }
+
+    /// Grouped resample mean.
+    pub fn mean(&self) -> Result<DataFrame, FrameError> {
+        self.apply_grouped_resample(|s, freq| s.resample(freq).mean())
+    }
+
+    /// Grouped resample count.
+    pub fn count(&self) -> Result<DataFrame, FrameError> {
+        self.apply_grouped_resample(|s, freq| s.resample(freq).count())
+    }
+
+    /// Grouped resample min.
+    pub fn min(&self) -> Result<DataFrame, FrameError> {
+        self.apply_grouped_resample(|s, freq| s.resample(freq).min())
+    }
+
+    /// Grouped resample max.
+    pub fn max(&self) -> Result<DataFrame, FrameError> {
+        self.apply_grouped_resample(|s, freq| s.resample(freq).max())
+    }
+
+    /// Grouped resample first.
+    pub fn first(&self) -> Result<DataFrame, FrameError> {
+        self.apply_grouped_resample(|s, freq| s.resample(freq).first())
+    }
+
+    /// Grouped resample last.
+    pub fn last(&self) -> Result<DataFrame, FrameError> {
+        self.apply_grouped_resample(|s, freq| s.resample(freq).last())
+    }
 }
 
 #[cfg(test)]
@@ -19327,8 +19910,9 @@ mod tests {
 
     use super::{
         DataFrame, DataFrameColumnInput, DataFrameCsvReadOptions, DropNaHow, DuplicateKeep,
-        FrameError, IndexLabel, Series, cut, qcut, to_numeric,
+        FrameError, IndexLabel, Series, cut, index_to_frame, index_to_series, qcut, to_numeric,
     };
+    use fp_index::Index;
 
     #[test]
     fn series_add_aligns_on_union_index() {
@@ -33392,6 +33976,96 @@ mod tests {
         assert_eq!(max_result.values()[0], Scalar::Float64(8.0));
     }
 
+    #[test]
+    fn resample_apply_custom_sum_of_squares() {
+        let s = Series::from_values(
+            "val",
+            vec![
+                "2024-01-05".into(),
+                "2024-01-20".into(),
+                "2024-02-10".into(),
+            ],
+            vec![
+                Scalar::Float64(3.0),
+                Scalar::Float64(4.0),
+                Scalar::Float64(5.0),
+            ],
+        )
+        .unwrap();
+
+        let result = s.resample("M").apply(|vals| {
+            let sum_sq: f64 = vals
+                .iter()
+                .filter_map(|v| v.to_f64().ok())
+                .map(|x| x * x)
+                .sum();
+            Scalar::Float64(sum_sq)
+        }).unwrap();
+
+        assert_eq!(result.len(), 2);
+        // Jan: 3^2 + 4^2 = 9 + 16 = 25
+        assert_eq!(result.values()[0], Scalar::Float64(25.0));
+        // Feb: 5^2 = 25
+        assert_eq!(result.values()[1], Scalar::Float64(25.0));
+    }
+
+    #[test]
+    fn resample_apply_fn_failable() {
+        let s = Series::from_values(
+            "val",
+            vec!["2024-01-01".into(), "2024-02-01".into()],
+            vec![Scalar::Float64(10.0), Scalar::Float64(20.0)],
+        )
+        .unwrap();
+
+        let result = s.resample("M").apply_fn(|vals| {
+            let total: f64 = vals
+                .iter()
+                .filter_map(|v| v.to_f64().ok())
+                .sum();
+            Ok(Scalar::Float64(total * 2.0))
+        }).unwrap();
+
+        assert_eq!(result.values()[0], Scalar::Float64(20.0));
+        assert_eq!(result.values()[1], Scalar::Float64(40.0));
+    }
+
+    #[test]
+    fn resample_std_var_median_prod() {
+        let s = Series::from_values(
+            "val",
+            vec![
+                "2024-01-01".into(),
+                "2024-01-15".into(),
+                "2024-01-30".into(),
+            ],
+            vec![
+                Scalar::Float64(2.0),
+                Scalar::Float64(4.0),
+                Scalar::Float64(6.0),
+            ],
+        )
+        .unwrap();
+
+        // Median: 4.0
+        let med = s.resample("M").median().unwrap();
+        assert_eq!(med.values()[0], Scalar::Float64(4.0));
+
+        // Prod: 2*4*6 = 48
+        let prod = s.resample("M").prod().unwrap();
+        assert_eq!(prod.values()[0], Scalar::Float64(48.0));
+
+        // Std: sqrt(var) where var = ((2-4)^2 + (4-4)^2 + (6-4)^2) / 2 = 4
+        let std_result = s.resample("M").std().unwrap();
+        let std_val = std_result.values()[0].to_f64().unwrap();
+        assert!((std_val - 2.0).abs() < 1e-10);
+
+        // Var: 4
+        let var_result = s.resample("M").var().unwrap();
+        let var_val = var_result.values()[0].to_f64().unwrap();
+        assert!((var_val - 4.0).abs() < 1e-10);
+    }
+
     // ── DataFrame explode tests ──
 
     #[test]
@@ -39754,5 +40428,405 @@ mod tests {
             result.column().values()[2],
             Scalar::Utf8("2023-01-01 00:00:00".to_string())
         );
+    }
+
+    // ── Index to_frame / to_series tests ─────────────────────────────
+
+    #[test]
+    fn index_to_frame_default_name() {
+        let idx = Index::new(vec![10_i64.into(), 20_i64.into(), 30_i64.into()]);
+        let df = index_to_frame(&idx, None).unwrap();
+        assert_eq!(df.shape(), (3, 1));
+        assert_eq!(df.column_names(), vec!["0"]);
+        let col = df.column("0").unwrap();
+        assert_eq!(
+            col.values(),
+            &[Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)]
+        );
+    }
+
+    #[test]
+    fn index_to_frame_with_name() {
+        let idx = Index::new(vec!["a".into(), "b".into()]).set_name("letter");
+        let df = index_to_frame(&idx, None).unwrap();
+        assert_eq!(df.column_names(), vec!["letter"]);
+
+        let df2 = index_to_frame(&idx, Some("custom")).unwrap();
+        assert_eq!(df2.column_names(), vec!["custom"]);
+    }
+
+    #[test]
+    fn index_to_series_default_name() {
+        let idx = Index::new(vec![1_i64.into(), 2_i64.into(), 3_i64.into()]);
+        let s = index_to_series(&idx, None).unwrap();
+        assert_eq!(s.name(), "0");
+        assert_eq!(s.len(), 3);
+        assert_eq!(
+            s.column().values(),
+            &[Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]
+        );
+        // Index of the series should match the original index labels
+        assert_eq!(s.index().labels(), idx.labels());
+    }
+
+    #[test]
+    fn index_to_series_with_name() {
+        let idx = Index::new(vec!["x".into(), "y".into()]).set_name("coord");
+        let s = index_to_series(&idx, None).unwrap();
+        assert_eq!(s.name(), "coord");
+
+        let s2 = index_to_series(&idx, Some("custom")).unwrap();
+        assert_eq!(s2.name(), "custom");
+    }
+
+    #[test]
+    fn index_to_series_utf8_values() {
+        let idx = Index::new(vec!["hello".into(), "world".into()]);
+        let s = index_to_series(&idx, Some("words")).unwrap();
+        assert_eq!(
+            s.column().values(),
+            &[
+                Scalar::Utf8("hello".to_string()),
+                Scalar::Utf8("world".to_string())
+            ]
+        );
+    }
+
+    // ── Series.map_series tests ──────────────────────────────────────
+
+    // ── DataFrame apply_with_result_type tests ─────────────────────
+
+    #[test]
+    fn df_apply_result_type_expand() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(4)]),
+                ("b", vec![Scalar::Int64(2), Scalar::Int64(5)]),
+            ],
+        )
+        .unwrap();
+
+        // Each row → [sum, product]
+        let result = df
+            .apply_with_result_type(
+                |row| {
+                    let sum: i64 = row.iter().filter_map(|v| match v {
+                        Scalar::Int64(i) => Some(*i),
+                        _ => None,
+                    }).sum();
+                    let prod: i64 = row.iter().filter_map(|v| match v {
+                        Scalar::Int64(i) => Some(*i),
+                        _ => None,
+                    }).product();
+                    vec![Scalar::Int64(sum), Scalar::Int64(prod)]
+                },
+                "expand",
+            )
+            .unwrap();
+
+        assert_eq!(result.shape(), (2, 2));
+        assert_eq!(result.column_names(), vec!["0", "1"]);
+        // Row 0: sum=3, prod=2
+        assert_eq!(result.column("0").unwrap().values()[0], Scalar::Int64(3));
+        assert_eq!(result.column("1").unwrap().values()[0], Scalar::Int64(2));
+        // Row 1: sum=9, prod=20
+        assert_eq!(result.column("0").unwrap().values()[1], Scalar::Int64(9));
+        assert_eq!(result.column("1").unwrap().values()[1], Scalar::Int64(20));
+    }
+
+    #[test]
+    fn df_apply_result_type_broadcast() {
+        let df = DataFrame::from_dict(
+            &["x", "y"],
+            vec![
+                ("x", vec![Scalar::Float64(1.0), Scalar::Float64(4.0)]),
+                ("y", vec![Scalar::Float64(2.0), Scalar::Float64(5.0)]),
+            ],
+        )
+        .unwrap();
+
+        // Broadcast: each row → its mean, assigned to all columns
+        let result = df
+            .apply_with_result_type(
+                |row| {
+                    let vals: Vec<f64> = row.iter().filter_map(|v| v.to_f64().ok()).collect();
+                    let mean = vals.iter().sum::<f64>() / vals.len() as f64;
+                    vec![Scalar::Float64(mean)]
+                },
+                "broadcast",
+            )
+            .unwrap();
+
+        assert_eq!(result.shape(), (2, 2));
+        assert_eq!(result.column_names(), vec!["x", "y"]);
+        // Row 0: mean(1,2) = 1.5 → both columns
+        assert_eq!(result.column("x").unwrap().values()[0], Scalar::Float64(1.5));
+        assert_eq!(result.column("y").unwrap().values()[0], Scalar::Float64(1.5));
+        // Row 1: mean(4,5) = 4.5 → both columns
+        assert_eq!(result.column("x").unwrap().values()[1], Scalar::Float64(4.5));
+        assert_eq!(result.column("y").unwrap().values()[1], Scalar::Float64(4.5));
+    }
+
+    #[test]
+    fn df_apply_result_type_reduce() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(10), Scalar::Int64(30)]),
+                ("b", vec![Scalar::Int64(20), Scalar::Int64(40)]),
+            ],
+        )
+        .unwrap();
+
+        let result = df
+            .apply_with_result_type(
+                |row| {
+                    let sum: i64 = row.iter().filter_map(|v| match v {
+                        Scalar::Int64(i) => Some(*i),
+                        _ => None,
+                    }).sum();
+                    vec![Scalar::Int64(sum)]
+                },
+                "reduce",
+            )
+            .unwrap();
+
+        assert_eq!(result.shape(), (2, 1));
+        assert_eq!(result.column("result").unwrap().values()[0], Scalar::Int64(30));
+        assert_eq!(result.column("result").unwrap().values()[1], Scalar::Int64(70));
+    }
+
+    // ── Series.map_series tests ──────────────────────────────────────
+
+    #[test]
+    fn series_map_series_basic() {
+        // mapper: index=[1,2,3], values=["one","two","three"]
+        let mapper = Series::from_values(
+            "mapper",
+            vec![1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Utf8("one".to_string()),
+                Scalar::Utf8("two".to_string()),
+                Scalar::Utf8("three".to_string()),
+            ],
+        )
+        .unwrap();
+
+        // series: values=[2, 1, 3, 1]
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Int64(2),
+                Scalar::Int64(1),
+                Scalar::Int64(3),
+                Scalar::Int64(1),
+            ],
+        )
+        .unwrap();
+
+        let result = s.map_series(&mapper).unwrap();
+        assert_eq!(
+            result.column().values(),
+            &[
+                Scalar::Utf8("two".to_string()),
+                Scalar::Utf8("one".to_string()),
+                Scalar::Utf8("three".to_string()),
+                Scalar::Utf8("one".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn series_map_series_missing_key_produces_nan() {
+        let mapper = Series::from_values(
+            "m",
+            vec!["a".into(), "b".into()],
+            vec![Scalar::Int64(10), Scalar::Int64(20)],
+        )
+        .unwrap();
+
+        let s = Series::from_values(
+            "s",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("a".to_string()),
+                Scalar::Utf8("c".to_string()), // not in mapper
+                Scalar::Utf8("b".to_string()),
+            ],
+        )
+        .unwrap();
+
+        let result = s.map_series(&mapper).unwrap();
+        assert_eq!(result.column().values()[0], Scalar::Int64(10));
+        assert!(result.column().values()[1].is_missing());
+        assert_eq!(result.column().values()[2], Scalar::Int64(20));
+    }
+
+    #[test]
+    fn series_map_series_nan_input_stays_nan() {
+        let mapper = Series::from_values(
+            "m",
+            vec![1_i64.into()],
+            vec![Scalar::Utf8("mapped".to_string())],
+        )
+        .unwrap();
+
+        let s = Series::from_values(
+            "s",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Null(NullKind::NaN), Scalar::Int64(1)],
+        )
+        .unwrap();
+
+        let result = s.map_series(&mapper).unwrap();
+        assert!(result.column().values()[0].is_missing());
+        assert_eq!(
+            result.column().values()[1],
+            Scalar::Utf8("mapped".to_string())
+        );
+    }
+
+    // ── GroupBy rolling tests ────────────────────────────────────────
+
+    #[test]
+    fn groupby_rolling_sum() {
+        let df = DataFrame::from_dict(
+            &["grp", "val"],
+            vec![
+                (
+                    "grp",
+                    vec![
+                        Scalar::Utf8("a".to_string()),
+                        Scalar::Utf8("a".to_string()),
+                        Scalar::Utf8("a".to_string()),
+                        Scalar::Utf8("b".to_string()),
+                        Scalar::Utf8("b".to_string()),
+                    ],
+                ),
+                (
+                    "val",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let result = df.groupby(&["grp"]).unwrap().rolling(2).sum().unwrap();
+        let vals = result.column("val").unwrap().values();
+        // Group a: window=2 → [NaN, 1+2=3, 2+3=5]
+        assert!(vals[0].is_missing());
+        assert_eq!(vals[1], Scalar::Float64(3.0));
+        assert_eq!(vals[2], Scalar::Float64(5.0));
+        // Group b: window=2 → [NaN, 10+20=30]
+        assert!(vals[3].is_missing());
+        assert_eq!(vals[4], Scalar::Float64(30.0));
+    }
+
+    #[test]
+    fn groupby_rolling_mean() {
+        let df = DataFrame::from_dict(
+            &["grp", "val"],
+            vec![
+                (
+                    "grp",
+                    vec![
+                        Scalar::Utf8("x".to_string()),
+                        Scalar::Utf8("x".to_string()),
+                        Scalar::Utf8("x".to_string()),
+                    ],
+                ),
+                (
+                    "val",
+                    vec![
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(4.0),
+                        Scalar::Float64(6.0),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let result = df.groupby(&["grp"]).unwrap().rolling(3).mean().unwrap();
+        let vals = result.column("val").unwrap().values();
+        // Window=3, min_periods=3: [NaN, NaN, (2+4+6)/3=4]
+        assert!(vals[0].is_missing());
+        assert!(vals[1].is_missing());
+        assert_eq!(vals[2], Scalar::Float64(4.0));
+    }
+
+    // ── GroupBy resample tests ───────────────────────────────────────
+
+    #[test]
+    fn groupby_resample_sum() {
+        let df = DataFrame::from_dict(
+            &["grp", "val"],
+            vec![
+                (
+                    "grp",
+                    vec![
+                        Scalar::Utf8("a".to_string()),
+                        Scalar::Utf8("a".to_string()),
+                        Scalar::Utf8("b".to_string()),
+                        Scalar::Utf8("b".to_string()),
+                    ],
+                ),
+                (
+                    "val",
+                    vec![
+                        Scalar::Float64(100.0),
+                        Scalar::Float64(200.0),
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+
+        // Set datetime index
+        let df_with_idx = DataFrame::from_dict_with_index(
+            vec![
+                (
+                    "grp",
+                    vec![
+                        Scalar::Utf8("a".to_string()),
+                        Scalar::Utf8("a".to_string()),
+                        Scalar::Utf8("b".to_string()),
+                        Scalar::Utf8("b".to_string()),
+                    ],
+                ),
+                (
+                    "val",
+                    vec![
+                        Scalar::Float64(100.0),
+                        Scalar::Float64(200.0),
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                    ],
+                ),
+            ],
+            vec![
+                "2024-01-01".into(),
+                "2024-02-01".into(),
+                "2024-01-15".into(),
+                "2024-02-15".into(),
+            ],
+        )
+        .unwrap();
+
+        let result = df_with_idx.groupby(&["grp"]).unwrap().resample("M").sum().unwrap();
+        // Group a: Jan=100, Feb=200; Group b: Jan=10, Feb=20
+        assert_eq!(result.shape().1, 2); // grp + val columns
+        // The result should have 4 rows (2 groups x 2 months)
+        assert_eq!(result.len(), 4);
     }
 }
