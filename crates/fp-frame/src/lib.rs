@@ -7772,6 +7772,117 @@ impl DatetimeAccessor<'_> {
             self.series.name(),
         )
     }
+
+    /// Round each datetime down (floor) to the given frequency.
+    ///
+    /// Matches `pd.Series.dt.floor(freq)`. Supported frequencies:
+    /// "D" (day), "h" (hour), "min" (minute), "s" (second).
+    pub fn floor(&self, freq: &str) -> Result<Series, FrameError> {
+        let freq_owned = freq.to_owned();
+        self.extract_component(
+            |s| Self::round_datetime(s, &freq_owned, false),
+            self.series.name(),
+        )
+    }
+
+    /// Round each datetime up (ceil) to the given frequency.
+    ///
+    /// Matches `pd.Series.dt.ceil(freq)`. Supported frequencies:
+    /// "D" (day), "h" (hour), "min" (minute), "s" (second).
+    pub fn ceil(&self, freq: &str) -> Result<Series, FrameError> {
+        let freq_owned = freq.to_owned();
+        self.extract_component(
+            |s| Self::round_datetime(s, &freq_owned, true),
+            self.series.name(),
+        )
+    }
+
+    /// Internal: round a datetime string to the given frequency, either floor or ceil.
+    fn round_datetime(s: &str, freq: &str, is_ceil: bool) -> Scalar {
+        let Some((y, m, d)) = Self::parse_ymd_from_datetime(s) else {
+            return Scalar::Null(NullKind::NaN);
+        };
+        let h = match Self::parse_datetime_component(s, 3) {
+            Scalar::Int64(v) => v,
+            _ => 0,
+        };
+        let mi = match Self::parse_datetime_component(s, 4) {
+            Scalar::Int64(v) => v,
+            _ => 0,
+        };
+        let sec = match Self::parse_datetime_component(s, 5) {
+            Scalar::Int64(v) => v,
+            _ => 0,
+        };
+
+        match freq {
+            "D" => {
+                if is_ceil && (h > 0 || mi > 0 || sec > 0) {
+                    // Need to add one day
+                    let dim = Self::days_in_month_val(y, m);
+                    let (ny, nm, nd) = if d + 1 > dim {
+                        if m + 1 > 12 {
+                            (y + 1, 1, 1)
+                        } else {
+                            (y, m + 1, 1)
+                        }
+                    } else {
+                        (y, m, d + 1)
+                    };
+                    Scalar::Utf8(format!("{ny:04}-{nm:02}-{nd:02} 00:00:00"))
+                } else {
+                    Scalar::Utf8(format!("{y:04}-{m:02}-{d:02} 00:00:00"))
+                }
+            }
+            "h" | "H" => {
+                if is_ceil && (mi > 0 || sec > 0) {
+                    let nh = h + 1;
+                    if nh >= 24 {
+                        let dim = Self::days_in_month_val(y, m);
+                        let (ny, nm, nd) = if d + 1 > dim {
+                            if m + 1 > 12 { (y + 1, 1, 1) } else { (y, m + 1, 1) }
+                        } else {
+                            (y, m, d + 1)
+                        };
+                        Scalar::Utf8(format!("{ny:04}-{nm:02}-{nd:02} 00:00:00"))
+                    } else {
+                        Scalar::Utf8(format!("{y:04}-{m:02}-{d:02} {nh:02}:00:00"))
+                    }
+                } else {
+                    Scalar::Utf8(format!("{y:04}-{m:02}-{d:02} {h:02}:00:00"))
+                }
+            }
+            "min" | "T" => {
+                if is_ceil && sec > 0 {
+                    let nmi = mi + 1;
+                    if nmi >= 60 {
+                        // Cascade to hour
+                        let nh = h + 1;
+                        if nh >= 24 {
+                            let dim = Self::days_in_month_val(y, m);
+                            let (ny, nm, nd) = if d + 1 > dim {
+                                if m + 1 > 12 { (y + 1, 1, 1) } else { (y, m + 1, 1) }
+                            } else {
+                                (y, m, d + 1)
+                            };
+                            Scalar::Utf8(format!("{ny:04}-{nm:02}-{nd:02} 00:00:00"))
+                        } else {
+                            Scalar::Utf8(format!("{y:04}-{m:02}-{d:02} {nh:02}:00:00"))
+                        }
+                    } else {
+                        Scalar::Utf8(format!("{y:04}-{m:02}-{d:02} {h:02}:{nmi:02}:00"))
+                    }
+                } else {
+                    Scalar::Utf8(format!("{y:04}-{m:02}-{d:02} {h:02}:{mi:02}:00"))
+                }
+            }
+            "s" | "S" => {
+                // Already at second precision
+                Scalar::Utf8(format!("{y:04}-{m:02}-{d:02} {h:02}:{mi:02}:{sec:02}"))
+            }
+            _ => Scalar::Null(NullKind::NaN),
+        }
+    }
 }
 
 impl std::fmt::Display for Series {
@@ -13186,6 +13297,21 @@ impl DataFrame {
         as_index: bool,
         sort: bool,
     ) -> Result<DataFrameGroupBy<'_>, FrameError> {
+        self.groupby_full_options(by, as_index, sort, true)
+    }
+
+    /// Group with all options including `dropna`.
+    ///
+    /// When `dropna` is `true` (default), rows with NaN in any group key column
+    /// are excluded. When `false`, NaN keys form their own group.
+    /// Matches `df.groupby(by, dropna=False)`.
+    pub fn groupby_full_options(
+        &self,
+        by: &[&str],
+        as_index: bool,
+        sort: bool,
+        dropna: bool,
+    ) -> Result<DataFrameGroupBy<'_>, FrameError> {
         // Validate columns exist
         for col in by {
             if !self.columns.contains_key(*col) {
@@ -13199,6 +13325,7 @@ impl DataFrame {
             by: by.iter().map(|s| (*s).to_string()).collect(),
             as_index,
             sort,
+            dropna,
         })
     }
 
@@ -13932,6 +14059,86 @@ impl DataFrame {
             column_order: self.column_order.clone(),
             index: Index::new(new_labels),
         })
+    }
+
+    /// Weighted sampling of rows.
+    ///
+    /// Matches `df.sample(n, weights=...)`. The `weights` slice must have the
+    /// same length as the DataFrame. Weights are normalized to sum to 1.
+    pub fn sample_weights(
+        &self,
+        n: usize,
+        weights: &[f64],
+        replace: bool,
+        seed: Option<u64>,
+    ) -> Result<Self, FrameError> {
+        let total = self.len();
+        if weights.len() != total {
+            return Err(FrameError::LengthMismatch {
+                index_len: total,
+                column_len: weights.len(),
+            });
+        }
+        if !replace && n > total {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "cannot sample {n} rows from {total} without replacement"
+            )));
+        }
+
+        // Normalize weights to cumulative distribution
+        let w_sum: f64 = weights.iter().sum();
+        if w_sum <= 0.0 {
+            return Err(FrameError::CompatibilityRejected(
+                "weights must sum to a positive value".to_string(),
+            ));
+        }
+        let mut cumulative = Vec::with_capacity(total);
+        let mut acc = 0.0;
+        for &w in weights {
+            acc += w / w_sum;
+            cumulative.push(acc);
+        }
+
+        // LCG for deterministic RNG
+        let mut rng_state = seed.unwrap_or(42);
+        let mut next_f64 = || -> f64 {
+            rng_state = rng_state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
+            (rng_state >> 11) as f64 / ((1_u64 << 53) as f64)
+        };
+
+        let mut indices = Vec::with_capacity(n);
+        let mut used = vec![false; total];
+
+        for _ in 0..n {
+            let r = next_f64();
+            let idx = cumulative
+                .iter()
+                .position(|&c| r <= c)
+                .unwrap_or(total - 1);
+            if !replace && used[idx] {
+                // Find next available
+                let mut found = None;
+                for offset in 1..total {
+                    let candidate = (idx + offset) % total;
+                    if !used[candidate] {
+                        found = Some(candidate);
+                        break;
+                    }
+                }
+                let Some(actual) = found else {
+                    break;
+                };
+                used[actual] = true;
+                indices.push(actual);
+            } else {
+                used[idx] = true;
+                indices.push(idx);
+            }
+        }
+
+        self.take_rows_by_positions(&indices)
     }
 
     /// Stack: pivot columns into rows (wide-to-long).
@@ -16836,6 +17043,7 @@ pub struct DataFrameGroupBy<'a> {
     by: Vec<String>,
     as_index: bool,
     sort: bool,
+    dropna: bool,
 }
 
 impl DataFrameGroupBy<'_> {
@@ -16847,6 +17055,16 @@ impl DataFrameGroupBy<'_> {
             std::collections::HashMap::new();
 
         for row in 0..n {
+            // Check if any group key is missing
+            if self.dropna {
+                let has_na = self.by.iter().any(|col_name| {
+                    self.df.columns[col_name].values()[row].is_missing()
+                });
+                if has_na {
+                    continue;
+                }
+            }
+
             let key: String = self
                 .by
                 .iter()
@@ -38478,5 +38696,102 @@ mod tests {
         assert_eq!(result.columns["a"].values()[1], Scalar::Float64(0.0)); // filled
         assert!(result.columns["a"].values()[2].is_missing()); // limit exceeded
         assert!(result.columns["a"].values()[3].is_missing()); // limit exceeded
+    }
+
+    #[test]
+    fn test_dt_floor_hour() {
+        let s = Series::from_values(
+            "ts",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![
+                Scalar::Utf8("2023-01-15 14:35:22".to_string()),
+                Scalar::Utf8("2023-06-30 23:59:59".to_string()),
+            ],
+        )
+        .unwrap();
+        let result = s.dt().floor("h").unwrap();
+        assert_eq!(
+            result.column().values()[0],
+            Scalar::Utf8("2023-01-15 14:00:00".to_string())
+        );
+        assert_eq!(
+            result.column().values()[1],
+            Scalar::Utf8("2023-06-30 23:00:00".to_string())
+        );
+    }
+
+    #[test]
+    fn test_dt_ceil_day() {
+        let s = Series::from_values(
+            "ts",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![
+                Scalar::Utf8("2023-01-15 14:35:22".to_string()),
+                Scalar::Utf8("2023-01-15 00:00:00".to_string()),
+            ],
+        )
+        .unwrap();
+        let result = s.dt().ceil("D").unwrap();
+        // Has time component → ceil to next day
+        assert_eq!(
+            result.column().values()[0],
+            Scalar::Utf8("2023-01-16 00:00:00".to_string())
+        );
+        // Already at midnight → no change
+        assert_eq!(
+            result.column().values()[1],
+            Scalar::Utf8("2023-01-15 00:00:00".to_string())
+        );
+    }
+
+    #[test]
+    fn test_groupby_dropna() {
+        let df = DataFrame::from_dict(
+            &["key", "val"],
+            vec![
+                ("key", vec![
+                    Scalar::Utf8("a".to_string()),
+                    Scalar::Null(NullKind::NaN),
+                    Scalar::Utf8("a".to_string()),
+                    Scalar::Utf8("b".to_string()),
+                ]),
+                ("val", vec![
+                    Scalar::Int64(1),
+                    Scalar::Int64(2),
+                    Scalar::Int64(3),
+                    Scalar::Int64(4),
+                ]),
+            ],
+        )
+        .unwrap();
+        // dropna=true (default) → NaN row excluded
+        let gb_drop = df.groupby_full_options(&["key"], true, true, true).unwrap();
+        let result_drop = gb_drop.sum().unwrap();
+        assert_eq!(result_drop.len(), 2); // "a" and "b" only
+
+        // dropna=false → NaN forms its own group
+        let gb_keep = df.groupby_full_options(&["key"], true, true, false).unwrap();
+        let result_keep = gb_keep.sum().unwrap();
+        assert_eq!(result_keep.len(), 3); // "a", "b", and NaN group
+    }
+
+    #[test]
+    fn test_sample_weights() {
+        let df = DataFrame::from_dict(
+            &["a"],
+            vec![("a", vec![
+                Scalar::Int64(10),
+                Scalar::Int64(20),
+                Scalar::Int64(30),
+            ])],
+        )
+        .unwrap();
+        // Weight heavily toward index 2
+        let weights = vec![0.0, 0.0, 1.0];
+        let result = df.sample_weights(2, &weights, true, Some(123)).unwrap();
+        assert_eq!(result.len(), 2);
+        // Both samples should be from index 2 (weight=1.0)
+        assert_eq!(result.columns["a"].values()[0], Scalar::Int64(30));
+        assert_eq!(result.columns["a"].values()[1], Scalar::Int64(30));
     }
 }
