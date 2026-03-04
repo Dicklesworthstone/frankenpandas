@@ -3537,6 +3537,52 @@ impl Series {
         Self::from_values(self.name.clone(), self.index.labels().to_vec(), flags)
     }
 
+    /// Mark duplicate values with control over which occurrence to keep.
+    ///
+    /// Matches `pd.Series.duplicated(keep=...)`.
+    /// - `First`: mark all but the first occurrence as True
+    /// - `Last`: mark all but the last occurrence as True
+    /// - `None`: mark all duplicated values as True
+    pub fn duplicated_keep(&self, keep: DuplicateKeep) -> Result<Self, FrameError> {
+        let vals = self.column.values();
+        let n = vals.len();
+        let mut flags = vec![false; n];
+
+        match keep {
+            DuplicateKeep::First => {
+                let mut seen = Vec::<&Scalar>::new();
+                for (i, val) in vals.iter().enumerate() {
+                    if seen.iter().any(|e| e.semantic_eq(val)) {
+                        flags[i] = true;
+                    } else {
+                        seen.push(val);
+                    }
+                }
+            }
+            DuplicateKeep::Last => {
+                let mut seen = Vec::<&Scalar>::new();
+                for (i, val) in vals.iter().enumerate().rev() {
+                    if seen.iter().any(|e| e.semantic_eq(val)) {
+                        flags[i] = true;
+                    } else {
+                        seen.push(val);
+                    }
+                }
+            }
+            DuplicateKeep::None => {
+                for (i, val) in vals.iter().enumerate() {
+                    let count = vals.iter().filter(|v| v.semantic_eq(val)).count();
+                    if count > 1 {
+                        flags[i] = true;
+                    }
+                }
+            }
+        }
+
+        let bool_flags: Vec<Scalar> = flags.into_iter().map(Scalar::Bool).collect();
+        Self::from_values(self.name.clone(), self.index.labels().to_vec(), bool_flags)
+    }
+
     /// Remove duplicate values, keeping the first occurrence.
     ///
     /// Matches `pd.Series.drop_duplicates(keep='first')`.
@@ -35825,5 +35871,57 @@ mod tests {
         // Row "b": sum=30, mean=30
         assert_eq!(result.columns["x_sum"].values()[1], Scalar::Float64(30.0));
         assert_eq!(result.columns["x_mean"].values()[1], Scalar::Float64(30.0));
+    }
+
+    // ── Series.duplicated_keep ─────────────────────────────────
+
+    #[test]
+    fn series_duplicated_keep_first() {
+        let s = Series::from_values(
+            "a",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(1), Scalar::Int64(3)],
+        )
+        .unwrap();
+
+        let result = s.duplicated_keep(DuplicateKeep::First).unwrap();
+        assert_eq!(
+            result.values(),
+            &[Scalar::Bool(false), Scalar::Bool(false), Scalar::Bool(true), Scalar::Bool(false)]
+        );
+    }
+
+    #[test]
+    fn series_duplicated_keep_last() {
+        let s = Series::from_values(
+            "a",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(1), Scalar::Int64(3)],
+        )
+        .unwrap();
+
+        let result = s.duplicated_keep(DuplicateKeep::Last).unwrap();
+        // First 1 (idx 0) is duplicate, second 1 (idx 2) is not
+        assert_eq!(
+            result.values(),
+            &[Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(false), Scalar::Bool(false)]
+        );
+    }
+
+    #[test]
+    fn series_duplicated_keep_none() {
+        let s = Series::from_values(
+            "a",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(1), Scalar::Int64(3)],
+        )
+        .unwrap();
+
+        let result = s.duplicated_keep(DuplicateKeep::None).unwrap();
+        // Both 1s are duplicated
+        assert_eq!(
+            result.values(),
+            &[Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true), Scalar::Bool(false)]
+        );
     }
 }
