@@ -1963,6 +1963,26 @@ impl Series {
         Self::from_values(self.name.clone(), self.index.labels().to_vec(), out)
     }
 
+    /// Replace string values matching a regex pattern.
+    ///
+    /// Matches `series.replace(regex=True)` or `series.str.replace(pat, repl, regex=True)`.
+    /// Non-Utf8 values pass through unchanged.
+    pub fn replace_regex(&self, pat: &str, repl: &str) -> Result<Self, FrameError> {
+        let re = regex::Regex::new(pat).map_err(|e| {
+            FrameError::CompatibilityRejected(format!("invalid regex: {e}"))
+        })?;
+        let mut out = Vec::with_capacity(self.len());
+        for val in self.column.values() {
+            match val {
+                Scalar::Utf8(s) => {
+                    out.push(Scalar::Utf8(re.replace_all(s, repl).into_owned()));
+                }
+                other => out.push(other.clone()),
+            }
+        }
+        Self::from_values(self.name.clone(), self.index.labels().to_vec(), out)
+    }
+
     /// Compute the q-th quantile (0.0 to 1.0) using linear interpolation.
     ///
     /// Matches `pd.Series.quantile(q)`.
@@ -6129,6 +6149,44 @@ impl SeriesGroupBy<'_> {
         )
     }
 
+    /// Variance of each group (ddof=1).
+    pub fn var(&self) -> Result<Series, FrameError> {
+        self.agg_numeric(
+            |nums| {
+                if nums.len() < 2 { return f64::NAN; }
+                let mean = nums.iter().sum::<f64>() / nums.len() as f64;
+                nums.iter().map(|x| (x - mean).powi(2)).sum::<f64>()
+                    / (nums.len() - 1) as f64
+            },
+            self.series.name(),
+        )
+    }
+
+    /// Median of each group.
+    pub fn median(&self) -> Result<Series, FrameError> {
+        self.agg_numeric(
+            |nums| {
+                let mut sorted = nums.to_vec();
+                sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                let n = sorted.len();
+                if n % 2 == 0 {
+                    (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
+                } else {
+                    sorted[n / 2]
+                }
+            },
+            self.series.name(),
+        )
+    }
+
+    /// Product of each group.
+    pub fn prod(&self) -> Result<Series, FrameError> {
+        self.agg_numeric(
+            |nums| nums.iter().product(),
+            self.series.name(),
+        )
+    }
+
     /// First value of each group.
     pub fn first(&self) -> Result<Series, FrameError> {
         let (order, groups) = self.build_groups();
@@ -7888,6 +7946,52 @@ impl DatetimeAccessor<'_> {
             |s| Self::round_datetime(s, &freq_owned, true),
             self.series.name(),
         )
+    }
+
+    /// Round each datetime to the nearest given frequency.
+    ///
+    /// Matches `pd.Series.dt.round(freq)`. Rounds to the nearest boundary.
+    /// Supported: "D", "h"/"H", "min"/"T", "s"/"S".
+    pub fn round(&self, freq: &str) -> Result<Series, FrameError> {
+        let freq_owned = freq.to_owned();
+        self.extract_component(
+            |s| {
+                let floor = Self::round_datetime(s, &freq_owned, false);
+                let ceil = Self::round_datetime(s, &freq_owned, true);
+                if floor == ceil {
+                    return floor;
+                }
+                let Scalar::Utf8(ref fs) = floor else { return floor; };
+                let Scalar::Utf8(ref cs) = ceil else { return floor; };
+                let floor_secs = Self::total_secs_approx(fs);
+                let ceil_secs = Self::total_secs_approx(cs);
+                let orig_secs = Self::total_secs_approx(s);
+                let d_floor = (orig_secs - floor_secs).abs();
+                let d_ceil = (ceil_secs - orig_secs).abs();
+                if d_floor <= d_ceil { floor } else { ceil }
+            },
+            self.series.name(),
+        )
+    }
+
+    /// Internal: approximate total seconds for datetime comparison.
+    fn total_secs_approx(s: &str) -> f64 {
+        let Some((y, m, d)) = Self::parse_ymd_from_datetime(s) else {
+            return 0.0;
+        };
+        let h = match Self::parse_datetime_component(s, 3) {
+            Scalar::Int64(v) => v,
+            _ => 0,
+        };
+        let mi = match Self::parse_datetime_component(s, 4) {
+            Scalar::Int64(v) => v,
+            _ => 0,
+        };
+        let sec = match Self::parse_datetime_component(s, 5) {
+            Scalar::Int64(v) => v,
+            _ => 0,
+        };
+        (y * 366 + m * 31 + d) as f64 * 86400.0 + (h * 3600 + mi * 60 + sec) as f64
     }
 
     /// Internal: round a datetime string to the given frequency, either floor or ceil.
@@ -39096,5 +39200,81 @@ mod tests {
         let col_names: Vec<String> = result.column_names().into_iter().cloned().collect();
         assert!(col_names.contains(&"val_sum".to_string()));
         assert!(col_names.contains(&"val_mean".to_string()));
+    }
+
+    #[test]
+    fn test_dt_round() {
+        let s = Series::from_values(
+            "ts",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![
+                Scalar::Utf8("2023-01-15 14:20:00".to_string()),
+                Scalar::Utf8("2023-01-15 14:40:00".to_string()),
+            ],
+        )
+        .unwrap();
+        let result = s.dt().round("h").unwrap();
+        // 14:20 rounds down to 14:00
+        assert_eq!(
+            result.column().values()[0],
+            Scalar::Utf8("2023-01-15 14:00:00".to_string())
+        );
+        // 14:40 rounds up to 15:00
+        assert_eq!(
+            result.column().values()[1],
+            Scalar::Utf8("2023-01-15 15:00:00".to_string())
+        );
+    }
+
+    #[test]
+    fn test_series_groupby_var_median() {
+        let s = Series::from_values(
+            "data",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(4.0),
+            ],
+        )
+        .unwrap();
+        let by = Series::from_values(
+            "grp",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("b".into()),
+            ],
+        )
+        .unwrap();
+        let gb = s.groupby(&by).unwrap();
+        let var = gb.var().unwrap();
+        // group "a": var([1,3]) = 2.0
+        assert_eq!(var.column().values()[0], Scalar::Float64(2.0));
+
+        let med = gb.median().unwrap();
+        // group "a": median([1,3]) = 2.0
+        assert_eq!(med.column().values()[0], Scalar::Float64(2.0));
+        // group "b": median([2,4]) = 3.0
+        assert_eq!(med.column().values()[1], Scalar::Float64(3.0));
+    }
+
+    #[test]
+    fn test_series_replace_regex() {
+        let s = Series::from_values(
+            "data",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![
+                Scalar::Utf8("hello123".to_string()),
+                Scalar::Utf8("world456".to_string()),
+            ],
+        )
+        .unwrap();
+        let result = s.replace_regex(r"\d+", "NUM").unwrap();
+        assert_eq!(result.column().values()[0], Scalar::Utf8("helloNUM".to_string()));
+        assert_eq!(result.column().values()[1], Scalar::Utf8("worldNUM".to_string()));
     }
 }
