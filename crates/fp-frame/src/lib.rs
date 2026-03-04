@@ -136,6 +136,42 @@ fn index_label_to_utf8_scalar(label: &IndexLabel) -> Scalar {
     }
 }
 
+/// Coerce a single scalar to a target dtype, falling back to NaN on failure.
+fn coerce_scalar(val: &Scalar, dtype: DType) -> Scalar {
+    if val.is_missing() {
+        return val.clone();
+    }
+    match dtype {
+        DType::Float64 => match val.to_f64() {
+            Ok(f) => Scalar::Float64(f),
+            Err(_) => Scalar::Null(NullKind::NaN),
+        },
+        DType::Int64 => match val {
+            Scalar::Int64(_) => val.clone(),
+            Scalar::Float64(f) => Scalar::Int64(*f as i64),
+            Scalar::Utf8(s) => match s.parse::<i64>() {
+                Ok(n) => Scalar::Int64(n),
+                Err(_) => Scalar::Null(NullKind::NaN),
+            },
+            Scalar::Bool(b) => Scalar::Int64(if *b { 1 } else { 0 }),
+            _ => Scalar::Null(NullKind::NaN),
+        },
+        DType::Utf8 => Scalar::Utf8(format!("{val}")),
+        DType::Bool => match val {
+            Scalar::Bool(_) => val.clone(),
+            Scalar::Int64(n) => Scalar::Bool(*n != 0),
+            Scalar::Float64(f) => Scalar::Bool(*f != 0.0),
+            Scalar::Utf8(s) => match s.to_lowercase().as_str() {
+                "true" | "1" | "yes" => Scalar::Bool(true),
+                "false" | "0" | "no" => Scalar::Bool(false),
+                _ => Scalar::Null(NullKind::NaN),
+            },
+            _ => Scalar::Null(NullKind::NaN),
+        },
+        DType::Null => Scalar::Null(NullKind::Null),
+    }
+}
+
 fn index_position_groups(index: &Index) -> BTreeMap<IndexLabel, Vec<usize>> {
     let mut groups: BTreeMap<IndexLabel, Vec<usize>> = BTreeMap::new();
     for (pos, label) in index.labels().iter().enumerate() {
@@ -2086,47 +2122,19 @@ impl Series {
     /// - `errors="raise"` (default): same as `astype()`
     /// - `errors="coerce"`: values that fail conversion become NaN
     pub fn astype_safe(&self, dtype: DType, errors: &str) -> Result<Self, FrameError> {
-        if errors != "coerce" {
-            return self.astype(dtype);
-        }
-        // Coerce mode: try converting each value, NaN on failure
-        let mut out = Vec::with_capacity(self.len());
-        for val in self.column.values() {
-            if val.is_missing() {
-                out.push(val.clone());
-                continue;
+        match errors {
+            "ignore" => self.astype(dtype).or_else(|_| Ok(self.clone())),
+            "coerce" => {
+                let out: Vec<Scalar> = self
+                    .column
+                    .values()
+                    .iter()
+                    .map(|val| coerce_scalar(val, dtype))
+                    .collect();
+                Self::from_values(self.name.clone(), self.index.labels().to_vec(), out)
             }
-            match dtype {
-                DType::Float64 => match val.to_f64() {
-                    Ok(f) => out.push(Scalar::Float64(f)),
-                    Err(_) => out.push(Scalar::Null(NullKind::NaN)),
-                },
-                DType::Int64 => match val {
-                    Scalar::Int64(_) => out.push(val.clone()),
-                    Scalar::Float64(f) => out.push(Scalar::Int64(*f as i64)),
-                    Scalar::Utf8(s) => match s.parse::<i64>() {
-                        Ok(n) => out.push(Scalar::Int64(n)),
-                        Err(_) => out.push(Scalar::Null(NullKind::NaN)),
-                    },
-                    Scalar::Bool(b) => out.push(Scalar::Int64(if *b { 1 } else { 0 })),
-                    _ => out.push(Scalar::Null(NullKind::NaN)),
-                },
-                DType::Utf8 => out.push(Scalar::Utf8(format!("{val}"))),
-                DType::Bool => match val {
-                    Scalar::Bool(_) => out.push(val.clone()),
-                    Scalar::Int64(n) => out.push(Scalar::Bool(*n != 0)),
-                    Scalar::Float64(f) => out.push(Scalar::Bool(*f != 0.0)),
-                    Scalar::Utf8(s) => match s.to_lowercase().as_str() {
-                        "true" | "1" | "yes" => out.push(Scalar::Bool(true)),
-                        "false" | "0" | "no" => out.push(Scalar::Bool(false)),
-                        _ => out.push(Scalar::Null(NullKind::NaN)),
-                    },
-                    _ => out.push(Scalar::Null(NullKind::NaN)),
-                },
-                DType::Null => out.push(Scalar::Null(NullKind::Null)),
-            }
+            _ => self.astype(dtype),
         }
-        Self::from_values(self.name.clone(), self.index.labels().to_vec(), out)
     }
 
     /// Clip values to `[lower, upper]`.
@@ -4250,6 +4258,23 @@ impl Series {
             window,
             min_periods: min_periods.unwrap_or(window),
             center: false,
+        }
+    }
+
+    /// Create a rolling window with explicit center parameter.
+    ///
+    /// Matches `pd.Series.rolling(window, min_periods, center)`.
+    pub fn rolling_with_center(
+        &self,
+        window: usize,
+        min_periods: Option<usize>,
+        center: bool,
+    ) -> Rolling<'_> {
+        Rolling {
+            series: self,
+            window,
+            min_periods: min_periods.unwrap_or(window),
+            center,
         }
     }
 
@@ -11016,6 +11041,64 @@ impl DataFrame {
     /// Matches `df.astype({\"col\": dtype})` for single-column mapping.
     pub fn astype_column(&self, name: &str, dtype: DType) -> Result<Self, FrameError> {
         self.astype_columns(&[(name, dtype)])
+    }
+
+    /// Cast all columns to a single target dtype.
+    ///
+    /// Matches `df.astype(dtype)` (scalar form).
+    pub fn astype(&self, dtype: DType) -> Result<Self, FrameError> {
+        let mut columns = BTreeMap::new();
+        for (name, col) in &self.columns {
+            let casted = Column::new(dtype, col.values().to_vec())?;
+            columns.insert(name.clone(), casted);
+        }
+        Self::new_with_column_order(self.index.clone(), columns, self.column_order.clone())
+    }
+
+    /// Cast one or more columns with error handling.
+    ///
+    /// Matches `df.astype({"a": dtype}, errors='coerce'|'raise'|'ignore')`.
+    /// - `errors="raise"` (default): propagate conversion errors
+    /// - `errors="coerce"`: values that fail conversion become NaN
+    /// - `errors="ignore"`: return the original DataFrame unchanged on error
+    pub fn astype_columns_safe(
+        &self,
+        mapping: &[(&str, DType)],
+        errors: &str,
+    ) -> Result<Self, FrameError> {
+        match errors {
+            "ignore" => self.astype_columns(mapping).or_else(|_| Ok(self.clone())),
+            "coerce" => {
+                let mut columns = self.columns.clone();
+                for &(name, dtype) in mapping {
+                    let source = self.columns.get(name).ok_or_else(|| {
+                        FrameError::CompatibilityRejected(format!("column '{name}' not found"))
+                    })?;
+                    let vals: Vec<Scalar> = source
+                        .values()
+                        .iter()
+                        .map(|val| coerce_scalar(val, dtype))
+                        .collect();
+                    let casted = Column::new(dtype, vals)?;
+                    columns.insert(name.to_owned(), casted);
+                }
+                Self::new_with_column_order(
+                    self.index.clone(),
+                    columns,
+                    self.column_order.clone(),
+                )
+            }
+            _ => self.astype_columns(mapping),
+        }
+    }
+
+    /// Cast all columns with error handling.
+    ///
+    /// Matches `df.astype(dtype, errors='coerce'|'raise'|'ignore')`.
+    pub fn astype_safe(&self, dtype: DType, errors: &str) -> Result<Self, FrameError> {
+        let mapping: Vec<(&str, DType)> =
+            self.column_order.iter().map(|n| (n.as_str(), dtype)).collect();
+        self.astype_columns_safe(&mapping, errors)
     }
 
     /// Remove a column by name, returning the modified DataFrame.
@@ -40828,5 +40911,141 @@ mod tests {
         assert_eq!(result.shape().1, 2); // grp + val columns
         // The result should have 4 rows (2 groups x 2 months)
         assert_eq!(result.len(), 4);
+    }
+
+    // ── DataFrame.astype (all columns) ──────────────────────────────
+
+    #[test]
+    fn df_astype_all_columns() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                ("b", vec![Scalar::Int64(3), Scalar::Int64(4)]),
+            ],
+        )
+        .unwrap();
+        let result = df.astype(DType::Float64).unwrap();
+        assert_eq!(result.column("a").unwrap().dtype(), DType::Float64);
+        assert_eq!(result.column("b").unwrap().dtype(), DType::Float64);
+    }
+
+    #[test]
+    fn df_astype_safe_coerce() {
+        let df = DataFrame::from_dict(
+            &["x"],
+            vec![(
+                "x",
+                vec![
+                    Scalar::Utf8("1".into()),
+                    Scalar::Utf8("bad".into()),
+                    Scalar::Utf8("3".into()),
+                ],
+            )],
+        )
+        .unwrap();
+        let result = df
+            .astype_columns_safe(&[("x", DType::Int64)], "coerce")
+            .unwrap();
+        let vals = result.column("x").unwrap().values();
+        assert_eq!(vals[0], Scalar::Int64(1));
+        assert!(vals[1].is_missing());
+        assert_eq!(vals[2], Scalar::Int64(3));
+    }
+
+    #[test]
+    fn df_astype_safe_ignore() {
+        let df = DataFrame::from_dict(
+            &["x"],
+            vec![(
+                "x",
+                vec![Scalar::Utf8("hello".into()), Scalar::Utf8("world".into())],
+            )],
+        )
+        .unwrap();
+        // Cast to Int64 will fail, but errors="ignore" returns original
+        let result = df.astype_safe(DType::Int64, "ignore").unwrap();
+        assert_eq!(result.column("x").unwrap().dtype(), DType::Utf8);
+    }
+
+    #[test]
+    fn df_astype_safe_raise() {
+        let df = DataFrame::from_dict(
+            &["x"],
+            vec![(
+                "x",
+                vec![Scalar::Utf8("hello".into())],
+            )],
+        )
+        .unwrap();
+        // errors="raise" should fail on incompatible cast
+        assert!(df.astype_safe(DType::Int64, "raise").is_err());
+    }
+
+    // ── Series.rolling_with_center ──────────────────────────────────
+
+    #[test]
+    fn rolling_with_center_false() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+            ],
+        )
+        .unwrap();
+        let result = s.rolling_with_center(2, None, false).mean().unwrap();
+        assert!(result.values()[0].is_missing());
+        let v1 = result.values()[1].to_f64().unwrap();
+        assert!((v1 - 1.5).abs() < 1e-10);
+    }
+
+    #[test]
+    fn rolling_with_center_true() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(4.0),
+                Scalar::Float64(5.0),
+            ],
+        )
+        .unwrap();
+        // center=true, window=3, default min_periods=3
+        let centered = s.rolling_with_center(3, None, true).mean().unwrap();
+        // With center=true, window=3:
+        // pos 0 -> NaN (only 2 values in centered window)
+        // pos 1 -> mean(1,2,3) = 2.0
+        // pos 2 -> mean(2,3,4) = 3.0
+        // pos 3 -> mean(3,4,5) = 4.0
+        // pos 4 -> NaN (only 2 values)
+        assert!(centered.values()[0].is_missing());
+        let v1 = centered.values()[1].to_f64().unwrap();
+        let v2 = centered.values()[2].to_f64().unwrap();
+        let v3 = centered.values()[3].to_f64().unwrap();
+        assert!((v1 - 2.0).abs() < 1e-10);
+        assert!((v2 - 3.0).abs() < 1e-10);
+        assert!((v3 - 4.0).abs() < 1e-10);
+        assert!(centered.values()[4].is_missing());
+    }
+
+    // ── Series.astype_safe errors=ignore ────────────────────────────
+
+    #[test]
+    fn series_astype_safe_ignore() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into()],
+            vec![Scalar::Utf8("hello".into())],
+        )
+        .unwrap();
+        let result = s.astype_safe(DType::Int64, "ignore").unwrap();
+        // Should return original since conversion fails
+        assert_eq!(result.values()[0], Scalar::Utf8("hello".into()));
     }
 }

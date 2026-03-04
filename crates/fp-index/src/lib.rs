@@ -191,6 +191,35 @@ impl Index {
         self.set_names(Some(name))
     }
 
+    /// Return a list of index names.
+    ///
+    /// Matches `pd.Index.names`. For a flat (non-MultiIndex) index this returns
+    /// a single-element list with the current name (or `None`).
+    #[must_use]
+    pub fn names(&self) -> Vec<Option<String>> {
+        vec![self.name.clone()]
+    }
+
+    /// Set names from a list.
+    ///
+    /// Matches `pd.Index.set_names([name])`. For flat index only the first
+    /// element is used. Panics if the list is empty.
+    #[must_use]
+    pub fn set_names_list(&self, names: &[Option<&str>]) -> Self {
+        assert!(!names.is_empty(), "set_names_list requires at least one name");
+        self.set_names(names[0])
+    }
+
+    /// Return the index as-is (flat index identity).
+    ///
+    /// Matches `pd.Index.to_flat_index()`. For a non-MultiIndex this is a
+    /// no-op that returns a clone. For a MultiIndex it would convert tuples
+    /// to flat labels.
+    #[must_use]
+    pub fn to_flat_index(&self) -> Self {
+        self.clone()
+    }
+
     /// Return a new index with the name cleared.
     #[must_use]
     pub fn rename_index(&self, name: Option<&str>) -> Self {
@@ -2068,5 +2097,30 @@ mod tests {
         let a = Index::new(vec![1_i64.into(), 2_i64.into()]).set_name("a");
         let b = Index::new(vec![1_i64.into(), 2_i64.into()]).set_name("b");
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn index_names_property() {
+        let idx = Index::new(vec![1_i64.into()]);
+        assert_eq!(idx.names(), vec![None]);
+        let named = idx.set_name("x");
+        assert_eq!(named.names(), vec![Some("x".to_string())]);
+    }
+
+    #[test]
+    fn index_set_names_list() {
+        let idx = Index::new(vec![1_i64.into()]);
+        let named = idx.set_names_list(&[Some("foo")]);
+        assert_eq!(named.name(), Some("foo"));
+        let cleared = named.set_names_list(&[None]);
+        assert_eq!(cleared.name(), None);
+    }
+
+    #[test]
+    fn index_to_flat_index() {
+        let idx = Index::new(vec!["a".into(), "b".into()]).set_name("x");
+        let flat = idx.to_flat_index();
+        assert_eq!(flat, idx);
+        assert_eq!(flat.name(), Some("x"));
     }
 }
