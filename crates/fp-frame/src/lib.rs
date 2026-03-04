@@ -35091,8 +35091,8 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![1_i64.into(), 2_i64.into(), 3_i64.into()]),
-                ("b", vec!["x".into(), "y".into(), "z".into()]),
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]),
+                ("b", vec![Scalar::Utf8("x".into()), Scalar::Utf8("y".into()), Scalar::Utf8("z".into())]),
             ],
         )
         .unwrap();
@@ -35117,8 +35117,8 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![1_i64.into(), 2_i64.into()]),
-                ("b", vec![10_i64.into(), 20_i64.into()]),
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                ("b", vec![Scalar::Int64(10), Scalar::Int64(20)]),
             ],
         )
         .unwrap();
@@ -35138,7 +35138,7 @@ mod tests {
     fn dataframe_isin_dict_with_nan() {
         let df = DataFrame::from_dict(
             &["a"],
-            vec![("a", vec![1_i64.into(), Scalar::Null(NullKind::NaN), 3_i64.into()])],
+            vec![("a", vec![Scalar::Int64(1), Scalar::Null(NullKind::NaN), Scalar::Int64(3)])],
         )
         .unwrap();
 
@@ -35185,8 +35185,8 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![1_i64.into(), 2_i64.into()]),
-                ("b", vec![10_i64.into(), 20_i64.into()]),
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                ("b", vec![Scalar::Int64(10), Scalar::Int64(20)]),
             ],
         )
         .unwrap();
