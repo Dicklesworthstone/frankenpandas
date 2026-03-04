@@ -2198,6 +2198,40 @@ impl Series {
         Ok(Scalar::Float64(sum_sq_diff / (count as f64 - 1.0)))
     }
 
+    /// Variance with configurable degrees of freedom.
+    ///
+    /// Matches `pd.Series.var(ddof=n)`. `ddof=0` gives population variance,
+    /// `ddof=1` (default in pandas) gives sample variance.
+    pub fn var_ddof(&self, ddof: usize) -> Result<Scalar, FrameError> {
+        let count = self.count();
+        if count <= ddof {
+            return Ok(Scalar::Float64(f64::NAN));
+        }
+        let mean_val = match self.mean()? {
+            Scalar::Float64(v) => v,
+            _ => return Ok(Scalar::Float64(f64::NAN)),
+        };
+        let mut sum_sq_diff = 0.0_f64;
+        for val in self.column.values() {
+            if !val.is_missing() {
+                let v = val.to_f64().map_err(ColumnError::from)?;
+                let diff = v - mean_val;
+                sum_sq_diff += diff * diff;
+            }
+        }
+        Ok(Scalar::Float64(sum_sq_diff / (count as f64 - ddof as f64)))
+    }
+
+    /// Standard deviation with configurable degrees of freedom.
+    ///
+    /// Matches `pd.Series.std(ddof=n)`.
+    pub fn std_ddof(&self, ddof: usize) -> Result<Scalar, FrameError> {
+        match self.var_ddof(ddof)? {
+            Scalar::Float64(v) => Ok(Scalar::Float64(v.sqrt())),
+            other => Ok(other),
+        }
+    }
+
     /// Median of non-null numeric values. Returns NaN for empty.
     ///
     /// Matches `pd.Series.median()`.
@@ -36059,5 +36093,53 @@ mod tests {
 
         assert_eq!(result.columns["x"].values()[0], Scalar::Float64(3.0));
         assert_eq!(result.columns["x"].values()[1], Scalar::Float64(1.0));
+    }
+
+    // ── Series.std_ddof / var_ddof ─────────────────────────────
+
+    #[test]
+    fn series_var_ddof_population() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![Scalar::Float64(2.0), Scalar::Float64(4.0), Scalar::Float64(6.0), Scalar::Float64(8.0)],
+        )
+        .unwrap();
+
+        // Population variance (ddof=0): mean=5, var = ((2-5)^2+(4-5)^2+(6-5)^2+(8-5)^2)/4 = (9+1+1+9)/4 = 5.0
+        let var_pop = s.var_ddof(0).unwrap();
+        assert_eq!(var_pop, Scalar::Float64(5.0));
+
+        // Sample variance (ddof=1): same sum / 3 = 20/3 ≈ 6.6667
+        let var_sample = s.var_ddof(1).unwrap();
+        let v = var_sample.to_f64().unwrap();
+        assert!((v - 20.0 / 3.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn series_std_ddof() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![Scalar::Float64(2.0), Scalar::Float64(4.0), Scalar::Float64(6.0), Scalar::Float64(8.0)],
+        )
+        .unwrap();
+
+        let std_pop = s.std_ddof(0).unwrap().to_f64().unwrap();
+        assert!((std_pop - 5.0_f64.sqrt()).abs() < 1e-10);
+    }
+
+    #[test]
+    fn series_var_ddof_insufficient_data() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into()],
+            vec![Scalar::Float64(42.0)],
+        )
+        .unwrap();
+
+        // ddof=1 with 1 value → NaN
+        let result = s.var_ddof(1).unwrap().to_f64().unwrap();
+        assert!(result.is_nan());
     }
 }
