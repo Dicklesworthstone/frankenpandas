@@ -2114,6 +2114,46 @@ impl Series {
         self.clip(None, Some(threshold))
     }
 
+    /// Clip values using element-wise Series bounds.
+    ///
+    /// Matches `series.clip(lower=series, upper=series)`. Each element is
+    /// clipped independently using the corresponding bound.
+    pub fn clip_with_series(
+        &self,
+        lower: Option<&Self>,
+        upper: Option<&Self>,
+    ) -> Result<Self, FrameError> {
+        let mut out = Vec::with_capacity(self.len());
+        for i in 0..self.len() {
+            let val = &self.column.values()[i];
+            if val.is_missing() {
+                out.push(val.clone());
+                continue;
+            }
+            let Ok(v) = val.to_f64() else {
+                out.push(val.clone());
+                continue;
+            };
+            let mut result = v;
+            if let Some(lo) = lower
+                && i < lo.len()
+                && !lo.column.values()[i].is_missing()
+                && let Ok(lo_val) = lo.column.values()[i].to_f64()
+            {
+                result = result.max(lo_val);
+            }
+            if let Some(hi) = upper
+                && i < hi.len()
+                && !hi.column.values()[i].is_missing()
+                && let Ok(hi_val) = hi.column.values()[i].to_f64()
+            {
+                result = result.min(hi_val);
+            }
+            out.push(Scalar::Float64(result));
+        }
+        Self::from_values(self.name.clone(), self.index.labels().to_vec(), out)
+    }
+
     /// Return a new Series with name prefixed.
     ///
     /// Analogous to `pandas.Series.add_prefix(prefix)`.
@@ -10760,6 +10800,31 @@ impl DataFrame {
         Self::new_with_column_order(self.index.clone(), columns, column_order)
     }
 
+    /// Drop multiple columns at once.
+    ///
+    /// Matches `df.drop(columns=[...])`. Returns error if any column is missing.
+    pub fn drop_columns(&self, names: &[&str]) -> Result<Self, FrameError> {
+        for name in names {
+            if !self.columns.contains_key(*name) {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "column '{name}' not found"
+                )));
+            }
+        }
+        let drop_set: std::collections::HashSet<&str> = names.iter().copied().collect();
+        let mut columns = self.columns.clone();
+        for name in names {
+            columns.remove(*name);
+        }
+        let column_order: Vec<String> = self
+            .column_order
+            .iter()
+            .filter(|c| !drop_set.contains(c.as_str()))
+            .cloned()
+            .collect();
+        Self::new_with_column_order(self.index.clone(), columns, column_order)
+    }
+
     /// Rename columns using a mapping.
     ///
     /// Matches `df.rename(columns={'old': 'new'})`.
@@ -12876,6 +12941,24 @@ impl DataFrame {
     /// Get the bottom N rows ordered by a column.
     pub fn nsmallest(&self, n: usize, column: &str) -> Result<Self, FrameError> {
         let sorted = self.sort_values(column, true)?;
+        sorted.head(n as i64)
+    }
+
+    /// Get the top N rows ordered by multiple columns.
+    ///
+    /// Matches `df.nlargest(n, columns=[...])`.
+    pub fn nlargest_multi(&self, n: usize, columns: &[&str]) -> Result<Self, FrameError> {
+        let ascending: Vec<bool> = columns.iter().map(|_| false).collect();
+        let sorted = self.sort_values_multi(columns, &ascending, "last")?;
+        sorted.head(n as i64)
+    }
+
+    /// Get the bottom N rows ordered by multiple columns.
+    ///
+    /// Matches `df.nsmallest(n, columns=[...])`.
+    pub fn nsmallest_multi(&self, n: usize, columns: &[&str]) -> Result<Self, FrameError> {
+        let ascending: Vec<bool> = columns.iter().map(|_| true).collect();
+        let sorted = self.sort_values_multi(columns, &ascending, "last")?;
         sorted.head(n as i64)
     }
 
@@ -39451,5 +39534,64 @@ mod tests {
         assert_eq!(df.len(), 2);
         assert_eq!(df.columns["num"].values()[0], Scalar::Int64(1));
         assert_eq!(df.columns["letter"].values()[1], Scalar::Utf8("b".to_string()));
+    }
+
+    #[test]
+    fn test_drop_columns() {
+        let df = DataFrame::from_dict(
+            &["a", "b", "c"],
+            vec![
+                ("a", vec![Scalar::Int64(1)]),
+                ("b", vec![Scalar::Int64(2)]),
+                ("c", vec![Scalar::Int64(3)]),
+            ],
+        )
+        .unwrap();
+        let result = df.drop_columns(&["a", "c"]).unwrap();
+        let col_names: Vec<String> = result.column_names().into_iter().cloned().collect();
+        assert_eq!(col_names, vec!["b".to_string()]);
+    }
+
+    #[test]
+    fn test_clip_with_series() {
+        let s = Series::from_values(
+            "data",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Float64(1.0), Scalar::Float64(5.0), Scalar::Float64(9.0)],
+        )
+        .unwrap();
+        let lo = Series::from_values(
+            "lo",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Float64(2.0), Scalar::Float64(2.0), Scalar::Float64(2.0)],
+        )
+        .unwrap();
+        let hi = Series::from_values(
+            "hi",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Float64(8.0), Scalar::Float64(8.0), Scalar::Float64(8.0)],
+        )
+        .unwrap();
+        let result = s.clip_with_series(Some(&lo), Some(&hi)).unwrap();
+        assert_eq!(result.column().values()[0], Scalar::Float64(2.0)); // 1 clipped up to 2
+        assert_eq!(result.column().values()[1], Scalar::Float64(5.0)); // in range
+        assert_eq!(result.column().values()[2], Scalar::Float64(8.0)); // 9 clipped down to 8
+    }
+
+    #[test]
+    fn test_nlargest_multi() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(3), Scalar::Int64(1), Scalar::Int64(3), Scalar::Int64(2)]),
+                ("b", vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30), Scalar::Int64(40)]),
+            ],
+        )
+        .unwrap();
+        let result = df.nlargest_multi(2, &["a", "b"]).unwrap();
+        assert_eq!(result.len(), 2);
+        // Top by (a desc, b desc): (3,30) then (3,10)
+        assert_eq!(result.columns["a"].values()[0], Scalar::Int64(3));
+        assert_eq!(result.columns["b"].values()[0], Scalar::Int64(30));
     }
 }
