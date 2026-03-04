@@ -1944,6 +1944,25 @@ impl Series {
         Self::from_values(self.name.clone(), self.index.labels().to_vec(), out)
     }
 
+    /// Replace values using a HashMap mapping.
+    ///
+    /// Matches `series.replace({old1: new1, old2: new2})`.
+    pub fn replace_map(
+        &self,
+        mapping: &std::collections::HashMap<String, Scalar>,
+    ) -> Result<Self, FrameError> {
+        let mut out = Vec::with_capacity(self.len());
+        for val in self.column.values() {
+            let key = format!("{val:?}");
+            if let Some(replacement) = mapping.get(&key) {
+                out.push(replacement.clone());
+            } else {
+                out.push(val.clone());
+            }
+        }
+        Self::from_values(self.name.clone(), self.index.labels().to_vec(), out)
+    }
+
     /// Compute the q-th quantile (0.0 to 1.0) using linear interpolation.
     ///
     /// Matches `pd.Series.quantile(q)`.
@@ -4645,6 +4664,29 @@ impl Series {
         Self::from_values(self.name(), self.index().labels().to_vec(), new_vals)
     }
 
+    /// Apply a function with `na_action='ignore'`.
+    ///
+    /// Matches `series.apply(func, na_action='ignore')`. Skips NaN/null values,
+    /// preserving them in the output unchanged.
+    pub fn apply_fn_na<F>(&self, func: F) -> Result<Self, FrameError>
+    where
+        F: Fn(&Scalar) -> Scalar,
+    {
+        let new_vals: Vec<Scalar> = self
+            .column()
+            .values()
+            .iter()
+            .map(|v| {
+                if v.is_missing() {
+                    v.clone()
+                } else {
+                    func(v)
+                }
+            })
+            .collect();
+        Self::from_values(self.name(), self.index().labels().to_vec(), new_vals)
+    }
+
     /// Map values using a failable closure.
     ///
     /// Like `apply_fn` but the closure returns `Result<Scalar, FrameError>`,
@@ -5903,6 +5945,57 @@ impl DataFrameResample<'_> {
     /// Resample max across all numeric columns.
     pub fn max(&self) -> Result<DataFrame, FrameError> {
         self.apply_resample(|s, freq| s.resample(freq).max())
+    }
+
+    /// Aggregate with multiple functions, producing prefixed column names.
+    ///
+    /// Matches `df.resample(freq).agg(['sum', 'mean'])`. Each numeric column
+    /// gets one output column per function, named `{col}_{func}`.
+    pub fn agg(&self, funcs: &[&str]) -> Result<DataFrame, FrameError> {
+        let mut result_cols = BTreeMap::new();
+        let mut col_order = Vec::new();
+        let mut result_index: Option<Index> = None;
+
+        for col_name in &self.df.column_order {
+            let col = &self.df.columns[col_name];
+            let dt = col.dtype();
+            if dt != DType::Int64 && dt != DType::Float64 {
+                continue;
+            }
+
+            let series = Series::new(col_name, self.df.index.clone(), col.clone())?;
+            let resample = series.resample(&self.freq);
+
+            for &func in funcs {
+                let agg_result = match func {
+                    "sum" => resample.sum()?,
+                    "mean" => resample.mean()?,
+                    "count" => resample.count()?,
+                    "min" => resample.min()?,
+                    "max" => resample.max()?,
+                    "first" => resample.first()?,
+                    "last" => resample.last()?,
+                    _ => {
+                        return Err(FrameError::CompatibilityRejected(format!(
+                            "resample agg: unsupported function '{func}'"
+                        )));
+                    }
+                };
+                if result_index.is_none() {
+                    result_index = Some(agg_result.index().clone());
+                }
+                let out_name = format!("{col_name}_{func}");
+                result_cols.insert(out_name.clone(), agg_result.column().clone());
+                col_order.push(out_name);
+            }
+        }
+
+        let index = result_index.unwrap_or_else(|| Index::new(Vec::new()));
+        Ok(DataFrame {
+            columns: result_cols,
+            column_order: col_order,
+            index,
+        })
     }
 }
 
@@ -38936,5 +39029,72 @@ mod tests {
         let result = df.swaplevel();
         assert_eq!(result.index().labels()[0], IndexLabel::Utf8("(1, x)".to_string()));
         assert_eq!(result.index().labels()[1], IndexLabel::Utf8("(2, y)".to_string()));
+    }
+
+    #[test]
+    fn test_series_replace_map() {
+        let s = Series::from_values(
+            "data",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+        )
+        .unwrap();
+        let mut mapping = std::collections::HashMap::new();
+        mapping.insert(format!("{:?}", Scalar::Int64(1)), Scalar::Int64(100));
+        mapping.insert(format!("{:?}", Scalar::Int64(3)), Scalar::Int64(300));
+        let result = s.replace_map(&mapping).unwrap();
+        assert_eq!(result.column().values()[0], Scalar::Int64(100));
+        assert_eq!(result.column().values()[1], Scalar::Int64(2)); // unchanged
+        assert_eq!(result.column().values()[2], Scalar::Int64(300));
+    }
+
+    #[test]
+    fn test_series_apply_fn_na() {
+        let s = Series::from_values(
+            "data",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Float64(2.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(4.0),
+            ],
+        )
+        .unwrap();
+        let result = s.apply_fn_na(|v| {
+            if let Ok(f) = v.to_f64() {
+                Scalar::Float64(f * 10.0)
+            } else {
+                v.clone()
+            }
+        }).unwrap();
+        assert_eq!(result.column().values()[0], Scalar::Float64(20.0));
+        assert!(result.column().values()[1].is_missing()); // NaN preserved
+        assert_eq!(result.column().values()[2], Scalar::Float64(40.0));
+    }
+
+    #[test]
+    fn test_resample_agg_multi() {
+        let df = DataFrame::from_dict_with_index(
+            vec![
+                ("val", vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(2.0),
+                    Scalar::Float64(3.0),
+                    Scalar::Float64(4.0),
+                ]),
+            ],
+            vec![
+                IndexLabel::Utf8("2023-01-01".to_string()),
+                IndexLabel::Utf8("2023-01-15".to_string()),
+                IndexLabel::Utf8("2023-02-01".to_string()),
+                IndexLabel::Utf8("2023-02-15".to_string()),
+            ],
+        )
+        .unwrap();
+        let result = df.resample("ME").agg(&["sum", "mean"]).unwrap();
+        // Should have columns val_sum and val_mean
+        let col_names: Vec<String> = result.column_names().into_iter().cloned().collect();
+        assert!(col_names.contains(&"val_sum".to_string()));
+        assert!(col_names.contains(&"val_mean".to_string()));
     }
 }
