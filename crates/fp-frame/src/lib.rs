@@ -13349,6 +13349,113 @@ impl DataFrame {
         out
     }
 
+    /// Render the DataFrame as a string table with truncation.
+    ///
+    /// Matches `df.to_string(max_rows=N, max_cols=M)`. When the number
+    /// of rows exceeds `max_rows`, shows the first and last `max_rows/2`
+    /// rows with "..." in between. Similarly truncates columns.
+    pub fn to_string_truncated(
+        &self,
+        include_index: bool,
+        max_rows: Option<usize>,
+        max_cols: Option<usize>,
+    ) -> String {
+        let need_row_trunc = max_rows.is_some_and(|m| self.len() > m);
+        let need_col_trunc = max_cols.is_some_and(|m| self.column_order.len() > m);
+
+        // If no truncation needed, delegate
+        if !need_row_trunc && !need_col_trunc {
+            return self.to_string_table(include_index);
+        }
+
+        // Truncate columns if needed
+        let col_order = if let Some(max_c) = max_cols {
+            if self.column_order.len() > max_c {
+                let half = max_c / 2;
+                let mut cols: Vec<String> = self.column_order[..half].to_vec();
+                cols.push("...".to_string());
+                cols.extend_from_slice(&self.column_order[self.column_order.len() - half..]);
+                cols
+            } else {
+                self.column_order.clone()
+            }
+        } else {
+            self.column_order.clone()
+        };
+
+        // Determine row indices to show
+        let row_indices: Vec<usize> = if let Some(max_r) = max_rows {
+            if self.len() > max_r {
+                let half = max_r / 2;
+                let mut indices: Vec<usize> = (0..half).collect();
+                indices.push(usize::MAX); // sentinel for "..."
+                indices.extend((self.len() - half)..self.len());
+                indices
+            } else {
+                (0..self.len()).collect()
+            }
+        } else {
+            (0..self.len()).collect()
+        };
+
+        fn format_scalar(val: &Scalar) -> String {
+            match val {
+                Scalar::Null(_) => "NaN".to_string(),
+                Scalar::Bool(b) => if *b { "True" } else { "False" }.to_string(),
+                Scalar::Int64(v) => v.to_string(),
+                Scalar::Float64(v) => {
+                    if v.is_nan() {
+                        "NaN".to_string()
+                    } else if *v == v.round() && v.abs() < 1e15 {
+                        format!("{v:.1}")
+                    } else {
+                        v.to_string()
+                    }
+                }
+                Scalar::Utf8(s) => s.clone(),
+            }
+        }
+
+        let mut out = String::new();
+        // Header
+        let mut header_parts: Vec<String> = Vec::new();
+        if include_index {
+            header_parts.push(String::new());
+        }
+        for c in &col_order {
+            header_parts.push(c.clone());
+        }
+        out.push_str(&header_parts.join("  "));
+        out.push('\n');
+
+        // Rows
+        for &row_idx in &row_indices {
+            if row_idx == usize::MAX {
+                out.push_str("...\n");
+                continue;
+            }
+            let mut parts: Vec<String> = Vec::new();
+            if include_index {
+                parts.push(match &self.index.labels()[row_idx] {
+                    IndexLabel::Int64(v) => v.to_string(),
+                    IndexLabel::Utf8(s) => s.clone(),
+                });
+            }
+            for c in &col_order {
+                if c == "..." {
+                    parts.push("...".to_string());
+                } else if let Some(col) = self.columns.get(c) {
+                    parts.push(format_scalar(&col.values()[row_idx]));
+                }
+            }
+            out.push_str(&parts.join("  "));
+            if row_idx != *row_indices.last().unwrap_or(&0) {
+                out.push('\n');
+            }
+        }
+        out
+    }
+
     /// Render the DataFrame as a Markdown table.
     ///
     /// Matches `df.to_markdown()`.
@@ -15564,6 +15671,55 @@ impl DataFrame {
         Self::new_with_column_order(Index::new(new_labels), columns, self.column_order.clone())
     }
 
+    /// Truncate the DataFrame by index label range.
+    ///
+    /// Matches `df.truncate(before=..., after=...)`. Keeps rows where
+    /// the index label is `>= before` and `<= after`.
+    pub fn truncate(
+        &self,
+        before: Option<&IndexLabel>,
+        after: Option<&IndexLabel>,
+    ) -> Result<Self, FrameError> {
+        let labels = self.index.labels();
+        let start = match before {
+            Some(b) => labels.iter().position(|l| l >= b).unwrap_or(labels.len()),
+            None => 0,
+        };
+        let end = match after {
+            Some(a) => labels
+                .iter()
+                .rposition(|l| l <= a)
+                .map(|i| i + 1)
+                .unwrap_or(0),
+            None => labels.len(),
+        };
+        if start >= end {
+            let empty_cols: BTreeMap<String, Column> = self
+                .column_order
+                .iter()
+                .map(|name| {
+                    (
+                        name.clone(),
+                        Column::from_values(Vec::new()).expect("empty column"),
+                    )
+                })
+                .collect();
+            return Self::new_with_column_order(
+                Index::new(Vec::new()),
+                empty_cols,
+                self.column_order.clone(),
+            );
+        }
+        let new_labels = labels[start..end].to_vec();
+        let mut columns = BTreeMap::new();
+        for name in &self.column_order {
+            let col = &self.columns[name];
+            let vals: Vec<Scalar> = col.values()[start..end].to_vec();
+            columns.insert(name.clone(), Column::from_values(vals)?);
+        }
+        Self::new_with_column_order(Index::new(new_labels), columns, self.column_order.clone())
+    }
+
     /// Insert a column at a specific position.
     ///
     /// Matches `df.insert(loc, column, value)`. The column is placed at
@@ -15666,6 +15822,40 @@ impl DataFrame {
                             }
                         }
                         val.clone()
+                    })
+                    .collect();
+                result_cols.insert(name.clone(), Column::from_values(new_vals)?);
+            } else {
+                result_cols.insert(name.clone(), col.clone());
+            }
+        }
+        Ok(Self {
+            columns: result_cols,
+            column_order: self.column_order.clone(),
+            index: self.index.clone(),
+        })
+    }
+
+    /// Replace string values matching a regex pattern across all columns.
+    ///
+    /// Matches `df.replace(regex=pat, value=repl)`. Only applies to
+    /// Utf8 columns; non-string columns are left unchanged.
+    pub fn replace_regex(&self, pat: &str, repl: &str) -> Result<Self, FrameError> {
+        let re = regex::Regex::new(pat).map_err(|e| {
+            FrameError::CompatibilityRejected(format!("invalid regex: {e}"))
+        })?;
+        let mut result_cols = BTreeMap::new();
+        for name in &self.column_order {
+            let col = &self.columns[name];
+            if col.dtype() == DType::Utf8 {
+                let new_vals: Vec<Scalar> = col
+                    .values()
+                    .iter()
+                    .map(|val| match val {
+                        Scalar::Utf8(s) => {
+                            Scalar::Utf8(re.replace_all(s, repl).into_owned())
+                        }
+                        other => other.clone(),
                     })
                     .collect();
                 result_cols.insert(name.clone(), Column::from_values(new_vals)?);
@@ -37666,5 +37856,100 @@ mod tests {
         assert_eq!(result.column_names().len(), 4);
         assert!(result.columns.contains_key("sales_A"));
         assert!(result.columns.contains_key("profit_B"));
+    }
+
+    #[test]
+    fn test_dataframe_truncate() {
+        let df = DataFrame::from_dict(
+            &["a"],
+            vec![(
+                "a",
+                vec![
+                    Scalar::Int64(10),
+                    Scalar::Int64(20),
+                    Scalar::Int64(30),
+                    Scalar::Int64(40),
+                    Scalar::Int64(50),
+                ],
+            )],
+        )
+        .unwrap();
+        // Truncate: keep index 1..=3
+        let result = df
+            .truncate(Some(&1_i64.into()), Some(&3_i64.into()))
+            .unwrap();
+        assert_eq!(result.len(), 3);
+        assert_eq!(result.columns["a"].values()[0], Scalar::Int64(20));
+        assert_eq!(result.columns["a"].values()[2], Scalar::Int64(40));
+    }
+
+    #[test]
+    fn test_replace_regex() {
+        let df = DataFrame::from_dict(
+            &["name", "code"],
+            vec![
+                (
+                    "name",
+                    vec![
+                        Scalar::Utf8("John123".into()),
+                        Scalar::Utf8("Jane456".into()),
+                    ],
+                ),
+                (
+                    "code",
+                    vec![Scalar::Int64(100), Scalar::Int64(200)],
+                ),
+            ],
+        )
+        .unwrap();
+        let result = df.replace_regex(r"\d+", "NUM").unwrap();
+        // String column should have digits replaced
+        assert_eq!(
+            result.columns["name"].values()[0],
+            Scalar::Utf8("JohnNUM".into())
+        );
+        assert_eq!(
+            result.columns["name"].values()[1],
+            Scalar::Utf8("JaneNUM".into())
+        );
+        // Int column should be unchanged
+        assert_eq!(result.columns["code"].values()[0], Scalar::Int64(100));
+    }
+
+    #[test]
+    fn test_to_string_truncated() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                (
+                    "a",
+                    vec![
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                        Scalar::Int64(3),
+                        Scalar::Int64(4),
+                        Scalar::Int64(5),
+                        Scalar::Int64(6),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Int64(10),
+                        Scalar::Int64(20),
+                        Scalar::Int64(30),
+                        Scalar::Int64(40),
+                        Scalar::Int64(50),
+                        Scalar::Int64(60),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let s = df.to_string_truncated(true, Some(4), None);
+        assert!(s.contains("..."));
+        // Should show first 2 and last 2 rows
+        assert!(s.contains("1"));
+        assert!(s.contains("6"));
     }
 }
