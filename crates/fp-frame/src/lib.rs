@@ -9505,6 +9505,27 @@ impl DataFrame {
         Series::from_values("count", labels, values)
     }
 
+    /// Count of missing (NaN/null) values per column.
+    ///
+    /// Matches `df.isna().sum()`. Returns a Series indexed by column name.
+    pub fn count_na(&self) -> Result<Series, FrameError> {
+        let labels: Vec<IndexLabel> = self
+            .column_order
+            .iter()
+            .map(|name| IndexLabel::Utf8(name.clone()))
+            .collect();
+        let values: Vec<Scalar> = self
+            .column_order
+            .iter()
+            .map(|name| {
+                let col = &self.columns[name];
+                let na_count = col.values().iter().filter(|v| v.is_missing()).count();
+                Scalar::Int64(na_count as i64)
+            })
+            .collect();
+        Series::from_values("count_na", labels, values)
+    }
+
     /// Fill missing values in each column with `fill_value`.
     ///
     /// Matches `df.fillna(value)` for scalar `value`.
@@ -11661,6 +11682,39 @@ impl DataFrame {
             column_order: result_col_order,
             index: Index::new(new_labels),
         })
+    }
+
+    /// Create a pivot table with a fill_value for missing cells.
+    ///
+    /// Matches `df.pivot_table(values, index, columns, aggfunc, fill_value=v)`.
+    pub fn pivot_table_fill(
+        &self,
+        values: &str,
+        index_col: &str,
+        columns_col: &str,
+        aggfunc: &str,
+        fill_value: f64,
+    ) -> Result<Self, FrameError> {
+        let mut result = self.pivot_table(values, index_col, columns_col, aggfunc)?;
+        // Replace NaN cells with fill_value
+        for col_name in &result.column_order {
+            let col = &result.columns[col_name];
+            let filled: Vec<Scalar> = col
+                .values()
+                .iter()
+                .map(|v| {
+                    if v.is_missing() {
+                        Scalar::Float64(fill_value)
+                    } else {
+                        v.clone()
+                    }
+                })
+                .collect();
+            result
+                .columns
+                .insert(col_name.clone(), Column::new(DType::Float64, filled)?);
+        }
+        Ok(result)
     }
 
     /// Create a pivot table with multiple value columns.
@@ -17032,6 +17086,34 @@ impl DataFrame {
             column_order: self.column_order.clone(),
             index: Index::new(new_labels),
         })
+    }
+
+    /// Swap levels of a composite string index.
+    ///
+    /// Matches `df.swaplevel()`. For indexes of the form "(a, b)", swaps
+    /// the components to produce "(b, a)". Non-composite labels are returned
+    /// unchanged.
+    pub fn swaplevel(&self) -> Self {
+        let new_labels: Vec<IndexLabel> = self
+            .index
+            .labels()
+            .iter()
+            .map(|label| {
+                if let IndexLabel::Utf8(s) = label
+                    && let Some(inner) = s.trim().strip_prefix('(').and_then(|s| s.strip_suffix(')'))
+                    && let Some((a, b)) = inner.split_once(", ")
+                {
+                    return IndexLabel::Utf8(format!("({b}, {a})"));
+                }
+                label.clone()
+            })
+            .collect();
+
+        DataFrame {
+            columns: self.columns.clone(),
+            column_order: self.column_order.clone(),
+            index: Index::new(new_labels),
+        }
     }
 }
 
@@ -38793,5 +38875,66 @@ mod tests {
         // Both samples should be from index 2 (weight=1.0)
         assert_eq!(result.columns["a"].values()[0], Scalar::Int64(30));
         assert_eq!(result.columns["a"].values()[1], Scalar::Int64(30));
+    }
+
+    #[test]
+    fn test_count_na() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Null(NullKind::NaN), Scalar::Int64(3)]),
+                ("b", vec![Scalar::Null(NullKind::NaN), Scalar::Null(NullKind::NaN), Scalar::Int64(5)]),
+            ],
+        )
+        .unwrap();
+        let result = df.count_na().unwrap();
+        // Column "a" has 1 missing, column "b" has 2 missing
+        assert_eq!(result.column().values()[0], Scalar::Int64(1));
+        assert_eq!(result.column().values()[1], Scalar::Int64(2));
+    }
+
+    #[test]
+    fn test_pivot_table_fill() {
+        let df = DataFrame::from_dict(
+            &["row", "col", "val"],
+            vec![
+                ("row", vec![
+                    Scalar::Utf8("a".to_string()),
+                    Scalar::Utf8("a".to_string()),
+                    Scalar::Utf8("b".to_string()),
+                ]),
+                ("col", vec![
+                    Scalar::Utf8("x".to_string()),
+                    Scalar::Utf8("y".to_string()),
+                    Scalar::Utf8("x".to_string()),
+                ]),
+                ("val", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
+            ],
+        )
+        .unwrap();
+        // Without fill: (b, y) should be NaN
+        let pt = df.pivot_table("val", "row", "col", "sum").unwrap();
+        assert!(pt.columns["y"].values()[1].is_missing());
+
+        // With fill_value=0.0: (b, y) should be 0.0
+        let pt_fill = df.pivot_table_fill("val", "row", "col", "sum", 0.0).unwrap();
+        assert_eq!(pt_fill.columns["y"].values()[1], Scalar::Float64(0.0));
+    }
+
+    #[test]
+    fn test_swaplevel() {
+        let df = DataFrame::from_dict_with_index(
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+            ],
+            vec![
+                IndexLabel::Utf8("(x, 1)".to_string()),
+                IndexLabel::Utf8("(y, 2)".to_string()),
+            ],
+        )
+        .unwrap();
+        let result = df.swaplevel();
+        assert_eq!(result.index().labels()[0], IndexLabel::Utf8("(1, x)".to_string()));
+        assert_eq!(result.index().labels()[1], IndexLabel::Utf8("(2, y)".to_string()));
     }
 }
