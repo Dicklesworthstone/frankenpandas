@@ -694,26 +694,41 @@ def op_dataframe_from_dict(pd, payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def op_dataframe_from_records(pd, payload: dict[str, Any]) -> dict[str, Any]:
-    raw_records = payload.get("records")
-    if not isinstance(raw_records, list):
-        raise OracleError("dataframe_from_records requires records list payload")
-
-    records: list[dict[str, Any]] = []
-    for row in raw_records:
-        if not isinstance(row, dict):
-            raise OracleError(
-                "dataframe_from_records requires each record to be an object"
-            )
-        parsed_row: dict[str, Any] = {}
-        for key, value in row.items():
-            parsed_row[str(key)] = scalar_from_json(value)
-        records.append(parsed_row)
-
     column_order = parse_constructor_column_order(payload, "dataframe_from_records")
     index = parse_constructor_index(payload, "dataframe_from_records")
+    raw_records = payload.get("records")
+    raw_matrix_rows = payload.get("matrix_rows")
+
+    if raw_records is not None and raw_matrix_rows is not None:
+        raise OracleError(
+            "dataframe_from_records cannot define both records and matrix_rows"
+        )
+
+    data: list[Any]
+    if raw_records is not None:
+        if not isinstance(raw_records, list):
+            raise OracleError("dataframe_from_records requires records list payload")
+
+        records: list[dict[str, Any]] = []
+        for row in raw_records:
+            if not isinstance(row, dict):
+                raise OracleError(
+                    "dataframe_from_records requires each record to be an object"
+                )
+            parsed_row: dict[str, Any] = {}
+            for key, value in row.items():
+                parsed_row[str(key)] = scalar_from_json(value)
+            records.append(parsed_row)
+        data = records
+    elif raw_matrix_rows is not None:
+        data = parse_constructor_matrix_rows(payload, "dataframe_from_records")
+    else:
+        raise OracleError(
+            "dataframe_from_records requires records or matrix_rows payload"
+        )
 
     try:
-        frame = pd.DataFrame(records, columns=column_order, index=index)
+        frame = pd.DataFrame.from_records(data, columns=column_order, index=index)
     except Exception as exc:
         raise OracleError(f"dataframe_from_records failed: {exc}") from exc
 

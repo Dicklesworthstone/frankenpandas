@@ -225,7 +225,7 @@ Source files: `pandas/core/frame.py` (~18,600 lines), `pandas/core/generic.py` (
 |----------------|-----------|------------|-----------|-------------|-------------|
 | `__init__(data, index, columns, dtype, copy)` | STABLE | PUBLIC | CORE | PARTIAL | `DataFrame::new`, `from_dict` |
 | `from_dict(data, orient, dtype, columns)` | STABLE | PUBLIC | COMMON | FULL | `DataFrame::from_dict` |
-| `from_records(data, index, columns, ...)` | STABLE | PUBLIC | COMMON | NONE | -- |
+| `from_records(data, index, columns, ...)` | STABLE | PUBLIC | COMMON | FULL | `DataFrame::from_records`, `DataFrame::from_record_maps` |
 | `from_arrow(data)` | STABLE | PUBLIC | NICHE | NONE | -- |
 
 ### 3.2 Properties & Attributes

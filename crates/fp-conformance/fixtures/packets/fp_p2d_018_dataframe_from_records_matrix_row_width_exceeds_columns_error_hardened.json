@@ -1,0 +1,15 @@
+{
+  "packet_id": "FP-P2D-018",
+  "case_id": "dataframe_from_records_matrix_row_width_exceeds_columns_error_hardened",
+  "mode": "hardened",
+  "operation": "dataframe_from_records",
+  "column_order": ["a", "b"],
+  "matrix_rows": [
+    [
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 3 }
+    ]
+  ],
+  "expected_error_contains": "row width 3 exceeds columns length 2"
+}

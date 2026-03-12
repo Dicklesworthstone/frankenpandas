@@ -70,6 +70,26 @@
       "id": "dataframe_from_records_empty_records_with_columns_hardened",
       "path": "crates/fp-conformance/fixtures/packets/fp_p2d_018_dataframe_from_records_empty_records_with_columns_hardened.json",
       "class": "dataframe_from_records_empty_rows_with_declared_columns"
+    },
+    {
+      "id": "dataframe_from_records_matrix_basic_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_018_dataframe_from_records_matrix_basic_strict.json",
+      "class": "dataframe_from_records_matrix_basic"
+    },
+    {
+      "id": "dataframe_from_records_matrix_short_rows_null_fill_hardened",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_018_dataframe_from_records_matrix_short_rows_null_fill_hardened.json",
+      "class": "dataframe_from_records_matrix_short_rows_null_fill"
+    },
+    {
+      "id": "dataframe_from_records_matrix_explicit_index_utf8_strict",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_018_dataframe_from_records_matrix_explicit_index_utf8_strict.json",
+      "class": "dataframe_from_records_matrix_explicit_index"
+    },
+    {
+      "id": "dataframe_from_records_matrix_row_width_exceeds_columns_error_hardened",
+      "path": "crates/fp-conformance/fixtures/packets/fp_p2d_018_dataframe_from_records_matrix_row_width_exceeds_columns_error_hardened.json",
+      "class": "dataframe_from_records_matrix_width_error"
     }
   ]
 }

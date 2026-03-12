@@ -4835,13 +4835,6 @@ fn require_dict_columns(fixture: &PacketFixture) -> Result<&BTreeMap<String, Vec
         .ok_or_else(|| "missing dict_columns fixture payload".to_owned())
 }
 
-fn require_records(fixture: &PacketFixture) -> Result<&Vec<BTreeMap<String, Scalar>>, String> {
-    fixture
-        .records
-        .as_ref()
-        .ok_or_else(|| "missing records fixture payload".to_owned())
-}
-
 fn require_matrix_rows(fixture: &PacketFixture) -> Result<&Vec<Vec<Scalar>>, String> {
     fixture
         .matrix_rows
@@ -5320,13 +5313,31 @@ fn execute_dataframe_from_dict_fixture_operation(
 fn execute_dataframe_from_records_fixture_operation(
     fixture: &PacketFixture,
 ) -> Result<DataFrame, String> {
-    let records = require_records(fixture)?;
-    let frame = DataFrame::from_records(
-        records.clone(),
-        fixture.column_order.as_deref(),
-        fixture.index.clone(),
-    )
-    .map_err(|err| err.to_string())?;
+    let frame = match (&fixture.records, &fixture.matrix_rows) {
+        (Some(records), None) => DataFrame::from_record_maps(
+            records.clone(),
+            fixture.column_order.as_deref(),
+            fixture.index.clone(),
+        )
+        .map_err(|err| err.to_string())?,
+        (None, Some(matrix_rows)) => DataFrame::from_records(
+            matrix_rows.clone(),
+            fixture.column_order.as_deref(),
+            fixture.index.clone(),
+        )
+        .map_err(|err| err.to_string())?,
+        (Some(_), Some(_)) => {
+            return Err(
+                "dataframe_from_records fixture cannot define both records and matrix_rows"
+                    .to_owned(),
+            );
+        }
+        (None, None) => {
+            return Err(
+                "dataframe_from_records requires records or matrix_rows payload".to_owned(),
+            );
+        }
+    };
 
     apply_constructor_options(fixture, "dataframe_from_records", frame)
 }

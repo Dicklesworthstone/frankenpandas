@@ -9874,10 +9874,93 @@ impl DataFrame {
         Self::new_with_column_order(index, columns, col_order)
     }
 
+    fn from_matrix_rows(
+        matrix_rows: Vec<Vec<Scalar>>,
+        column_order: Option<&[String]>,
+        index_labels: Option<Vec<IndexLabel>>,
+        operation_name: &str,
+    ) -> Result<Self, FrameError> {
+        let row_count = matrix_rows.len();
+        if let Some(labels) = index_labels.as_ref()
+            && labels.len() != row_count
+        {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "{operation_name} index length {} does not match row count {row_count}",
+                labels.len()
+            )));
+        }
+
+        let max_row_width = matrix_rows
+            .iter()
+            .map(std::vec::Vec::len)
+            .max()
+            .unwrap_or(0);
+        let output_order = if let Some(requested_order) = column_order {
+            let mut explicit = Vec::with_capacity(requested_order.len());
+            let mut seen = BTreeSet::new();
+            for requested in requested_order {
+                if !seen.insert(requested.clone()) {
+                    return Err(FrameError::CompatibilityRejected(format!(
+                        "duplicate column selector: '{requested}'"
+                    )));
+                }
+                explicit.push(requested.clone());
+            }
+            if max_row_width > explicit.len() {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "{operation_name} row width {max_row_width} exceeds columns length {}",
+                    explicit.len()
+                )));
+            }
+            explicit
+        } else {
+            (0..max_row_width).map(|idx| idx.to_string()).collect()
+        };
+
+        let index = match index_labels {
+            Some(labels) => Index::new(labels),
+            None => range_index(row_count)?,
+        };
+
+        let mut columns = BTreeMap::new();
+        for (column_offset, column_name) in output_order.iter().enumerate() {
+            let values = matrix_rows
+                .iter()
+                .map(|row| {
+                    row.get(column_offset)
+                        .cloned()
+                        .unwrap_or(Scalar::Null(NullKind::Null))
+                })
+                .collect::<Vec<_>>();
+            columns.insert(column_name.clone(), Column::from_values(values)?);
+        }
+
+        Self::new_with_column_order(index, columns, output_order)
+    }
+
+    /// Construct a DataFrame from row-oriented list-like records.
+    ///
+    /// Matches `pd.DataFrame.from_records(data, columns=..., index=...)` for
+    /// tuple/list-style records. Short rows are null-filled; explicit columns
+    /// may also introduce trailing all-null columns.
+    pub fn from_records(
+        records: Vec<Vec<Scalar>>,
+        column_order: Option<&[String]>,
+        index_labels: Option<Vec<IndexLabel>>,
+    ) -> Result<Self, FrameError> {
+        Self::from_matrix_rows(
+            records,
+            column_order,
+            index_labels,
+            "dataframe_from_records",
+        )
+    }
+
     /// Construct a DataFrame from row-oriented tuples.
     ///
-    /// Matches `pd.DataFrame.from_records(data, columns=...)` for tuple-style
-    /// records. Each inner Vec is a row; all must have the same length as `columns`.
+    /// Matches the rectangular tuple/list subset of
+    /// `pd.DataFrame.from_records(data, columns=...)`. Each inner Vec is a row;
+    /// all rows must have the same length as `columns`.
     pub fn from_tuples(records: Vec<Vec<Scalar>>, columns: &[&str]) -> Result<Self, FrameError> {
         if records.is_empty() {
             let cols: BTreeMap<String, Column> = columns
@@ -9901,17 +9984,16 @@ impl DataFrame {
             }
         }
 
-        // Transpose: collect column vectors
-        let mut cols = BTreeMap::new();
-        let mut col_order = Vec::new();
-        for (col_idx, &col_name) in columns.iter().enumerate() {
-            let vals: Vec<Scalar> = records.iter().map(|row| row[col_idx].clone()).collect();
-            cols.insert(col_name.to_string(), Column::from_values(vals)?);
-            col_order.push(col_name.to_string());
-        }
-
-        let labels: Vec<IndexLabel> = (0..n_rows).map(|i| (i as i64).into()).collect();
-        Self::new_with_column_order(Index::new(labels), cols, col_order)
+        let column_order = columns
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect::<Vec<_>>();
+        Self::from_matrix_rows(
+            records,
+            Some(&column_order),
+            Some((0..n_rows as i64).map(IndexLabel::from).collect()),
+            "from_tuples",
+        )
     }
 
     /// Construct a DataFrame from a list of row tuples with custom index.
@@ -9928,21 +10010,16 @@ impl DataFrame {
                 column_len: records.len(),
             });
         }
-        let mut cols = BTreeMap::new();
-        let mut col_order = Vec::new();
-        for (col_idx, &col_name) in columns.iter().enumerate() {
-            let vals: Vec<Scalar> = records
-                .iter()
-                .map(|row| {
-                    row.get(col_idx)
-                        .cloned()
-                        .unwrap_or(Scalar::Null(NullKind::NaN))
-                })
-                .collect();
-            cols.insert(col_name.to_string(), Column::from_values(vals)?);
-            col_order.push(col_name.to_string());
-        }
-        Self::new_with_column_order(Index::new(index_labels), cols, col_order)
+        let column_order = columns
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect::<Vec<_>>();
+        Self::from_matrix_rows(
+            records,
+            Some(&column_order),
+            Some(index_labels),
+            "from_tuples_with_index",
+        )
     }
 
     /// Construct a DataFrame from mixed dict inputs (`Vec<Scalar>` and scalar).
@@ -9992,13 +10069,14 @@ impl DataFrame {
         Self::from_dict(column_order, expanded)
     }
 
-    /// Construct a DataFrame from row records.
+    /// Construct a DataFrame from mapping records.
     ///
-    /// Matches `pd.DataFrame.from_records(records, columns=..., index=...)`.
+    /// Matches the mapping-record branch of
+    /// `pd.DataFrame.from_records(records, columns=..., index=...)`.
     /// Missing keys are null-filled. If `column_order` is provided, it is used
     /// as the exact output column selector/order and may include labels absent
     /// from the records (materialized as all-null columns).
-    pub fn from_records(
+    pub fn from_record_maps(
         records: Vec<BTreeMap<String, Scalar>>,
         column_order: Option<&[String]>,
         index_labels: Option<Vec<IndexLabel>>,
@@ -21387,7 +21465,7 @@ mod tests {
             BTreeMap::from([("b".to_owned(), Scalar::Int64(30))]),
         ];
 
-        let df = DataFrame::from_records(records, None, None).unwrap();
+        let df = DataFrame::from_record_maps(records, None, None).unwrap();
         assert_eq!(
             df.index().labels(),
             &[0_i64.into(), 1_i64.into(), 2_i64.into()]
@@ -21418,7 +21496,7 @@ mod tests {
         ];
         let order = vec!["a".to_owned(), "z".to_owned()];
 
-        let df = DataFrame::from_records(records, Some(&order), None).unwrap();
+        let df = DataFrame::from_record_maps(records, Some(&order), None).unwrap();
         let names = df
             .column_names()
             .into_iter()
@@ -21438,7 +21516,7 @@ mod tests {
             BTreeMap::from([("city".to_owned(), Scalar::Utf8("la".to_owned()))]),
         ];
 
-        let df = DataFrame::from_records(
+        let df = DataFrame::from_record_maps(
             records,
             None,
             Some(vec![
@@ -21463,7 +21541,7 @@ mod tests {
             BTreeMap::from([("a".to_owned(), Scalar::Int64(2))]),
         ];
 
-        let err = DataFrame::from_records(
+        let err = DataFrame::from_record_maps(
             records,
             None,
             Some(vec![IndexLabel::Utf8("only-one".to_owned())]),
@@ -21473,6 +21551,65 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "compatibility gate rejected operation: dataframe_from_records index length 1 does not match records length 2"
+        );
+    }
+
+    #[test]
+    fn dataframe_from_records_matrix_default_columns() {
+        let df = DataFrame::from_records(
+            vec![
+                vec![Scalar::Int64(1), Scalar::Utf8("x".to_owned())],
+                vec![Scalar::Int64(2), Scalar::Utf8("y".to_owned())],
+            ],
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(df.column_names(), vec!["0", "1"]);
+        assert_eq!(df.index().labels(), &[0_i64.into(), 1_i64.into()]);
+        assert_eq!(
+            df.column("1").unwrap().values(),
+            &[Scalar::Utf8("x".to_owned()), Scalar::Utf8("y".to_owned())]
+        );
+    }
+
+    #[test]
+    fn dataframe_from_records_matrix_short_rows_null_fill() {
+        let columns = vec!["a".to_owned(), "b".to_owned(), "c".to_owned()];
+        let df = DataFrame::from_records(
+            vec![
+                vec![Scalar::Int64(1), Scalar::Int64(10)],
+                vec![Scalar::Int64(2)],
+            ],
+            Some(&columns),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            df.column("b").unwrap().values(),
+            &[Scalar::Int64(10), Scalar::Null(NullKind::Null)]
+        );
+        assert_eq!(
+            df.column("c").unwrap().values(),
+            &[Scalar::Null(NullKind::Null), Scalar::Null(NullKind::Null)]
+        );
+    }
+
+    #[test]
+    fn dataframe_from_records_matrix_row_width_exceeds_columns_errors() {
+        let columns = vec!["a".to_owned(), "b".to_owned()];
+        let err = DataFrame::from_records(
+            vec![vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]],
+            Some(&columns),
+            None,
+        )
+        .expect_err("constructor should reject rows wider than explicit columns");
+
+        assert_eq!(
+            err.to_string(),
+            "compatibility gate rejected operation: dataframe_from_records row width 3 exceeds columns length 2"
         );
     }
 
