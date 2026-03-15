@@ -30,6 +30,8 @@ pub enum IoError {
     Parquet(String),
     #[error("excel error: {0}")]
     Excel(String),
+    #[error("sql error: {0}")]
+    Sql(String),
     #[error(transparent)]
     Csv(#[from] csv::Error),
     #[error(transparent)]
@@ -1367,6 +1369,221 @@ pub fn write_excel_bytes(frame: &DataFrame) -> Result<Vec<u8>, IoError> {
     Ok(buf)
 }
 
+// ── SQL (SQLite) I/O ────────────────────────────────────────────────────
+
+/// Options for writing a DataFrame to SQL.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SqlIfExists {
+    /// Raise an error if the table already exists.
+    Fail,
+    /// Drop the table and recreate it.
+    Replace,
+    /// Insert new rows into the existing table.
+    Append,
+}
+
+/// Map an fp-types DType to an SQLite column type declaration.
+fn dtype_to_sql(dtype: DType) -> &'static str {
+    match dtype {
+        DType::Int64 => "INTEGER",
+        DType::Float64 => "REAL",
+        DType::Utf8 => "TEXT",
+        DType::Bool => "INTEGER",
+        DType::Null => "TEXT",
+    }
+}
+
+/// Convert an SQLite column value to a Scalar.
+fn sql_value_to_scalar(value: &rusqlite::types::Value) -> Scalar {
+    match value {
+        rusqlite::types::Value::Null => Scalar::Null(NullKind::Null),
+        rusqlite::types::Value::Integer(v) => Scalar::Int64(*v),
+        rusqlite::types::Value::Real(v) => Scalar::Float64(*v),
+        rusqlite::types::Value::Text(s) => Scalar::Utf8(s.clone()),
+        rusqlite::types::Value::Blob(b) => Scalar::Utf8(format!("<blob:{} bytes>", b.len())),
+    }
+}
+
+/// Read the result of a SQL query into a DataFrame.
+///
+/// Matches `pd.read_sql(sql, con)`.
+pub fn read_sql(conn: &rusqlite::Connection, query: &str) -> Result<DataFrame, IoError> {
+    let mut stmt = conn
+        .prepare(query)
+        .map_err(|e| IoError::Sql(format!("prepare failed: {e}")))?;
+
+    let col_count = stmt.column_count();
+    let headers: Vec<String> = (0..col_count)
+        .map(|i| stmt.column_name(i).unwrap_or("?").to_owned())
+        .collect();
+
+    let mut columns: Vec<Vec<Scalar>> = (0..col_count).map(|_| Vec::new()).collect();
+
+    let mut rows = stmt
+        .query([])
+        .map_err(|e| IoError::Sql(format!("query failed: {e}")))?;
+
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| IoError::Sql(format!("row fetch failed: {e}")))?
+    {
+        for (col_idx, col_vec) in columns.iter_mut().enumerate() {
+            let value: rusqlite::types::Value = row
+                .get(col_idx)
+                .map_err(|e| IoError::Sql(format!("cell read failed: {e}")))?;
+            col_vec.push(sql_value_to_scalar(&value));
+        }
+    }
+
+    let row_count = columns.first().map_or(0, Vec::len);
+    let mut out_columns = BTreeMap::new();
+    let mut column_order = Vec::new();
+
+    for (name, values) in headers.into_iter().zip(columns) {
+        out_columns.insert(name.clone(), Column::from_values(values)?);
+        column_order.push(name);
+    }
+
+    let index = Index::from_i64((0..row_count as i64).collect());
+    Ok(DataFrame::new_with_column_order(index, out_columns, column_order)?)
+}
+
+/// Read an entire SQL table into a DataFrame.
+///
+/// Matches `pd.read_sql_table(table_name, con)`.
+pub fn read_sql_table(conn: &rusqlite::Connection, table_name: &str) -> Result<DataFrame, IoError> {
+    // Validate table name to prevent SQL injection (only allow alphanumeric + underscore).
+    if !table_name
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '_')
+    {
+        return Err(IoError::Sql(format!(
+            "invalid table name: '{table_name}' (only alphanumeric and underscore allowed)"
+        )));
+    }
+    read_sql(conn, &format!("SELECT * FROM \"{table_name}\""))
+}
+
+/// Write a DataFrame to a SQLite table.
+///
+/// Matches `pd.DataFrame.to_sql(name, con)`.
+pub fn write_sql(
+    frame: &DataFrame,
+    conn: &rusqlite::Connection,
+    table_name: &str,
+    if_exists: SqlIfExists,
+) -> Result<(), IoError> {
+    // Validate table name to prevent SQL injection.
+    if !table_name
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '_')
+    {
+        return Err(IoError::Sql(format!(
+            "invalid table name: '{table_name}' (only alphanumeric and underscore allowed)"
+        )));
+    }
+
+    let col_names = frame.column_names();
+
+    // Handle if_exists policy.
+    match if_exists {
+        SqlIfExists::Fail => {
+            // Check if table exists.
+            let exists: bool = conn
+                .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1")
+                .and_then(|mut s| s.exists(rusqlite::params![table_name]))
+                .map_err(|e| IoError::Sql(format!("existence check failed: {e}")))?;
+            if exists {
+                return Err(IoError::Sql(format!("table '{table_name}' already exists")));
+            }
+        }
+        SqlIfExists::Replace => {
+            conn.execute_batch(&format!("DROP TABLE IF EXISTS \"{table_name}\""))
+                .map_err(|e| IoError::Sql(format!("drop table failed: {e}")))?;
+        }
+        SqlIfExists::Append => {
+            // Table may or may not exist; CREATE TABLE IF NOT EXISTS handles both.
+        }
+    }
+
+    // Build CREATE TABLE statement.
+    let col_defs: Vec<String> = col_names
+        .iter()
+        .map(|name| {
+            let dt = frame
+                .column(name)
+                .map_or(DType::Utf8, |c| c.dtype());
+            format!("\"{}\" {}", name, dtype_to_sql(dt))
+        })
+        .collect();
+
+    let create_sql = format!(
+        "CREATE TABLE IF NOT EXISTS \"{}\" ({})",
+        table_name,
+        col_defs.join(", ")
+    );
+    conn.execute_batch(&create_sql)
+        .map_err(|e| IoError::Sql(format!("create table failed: {e}")))?;
+
+    // Insert rows in a transaction for performance.
+    let placeholders: Vec<&str> = col_names.iter().map(|_| "?").collect();
+    let insert_sql = format!(
+        "INSERT INTO \"{}\" ({}) VALUES ({})",
+        table_name,
+        col_names
+            .iter()
+            .map(|n| format!("\"{}\"", n))
+            .collect::<Vec<_>>()
+            .join(", "),
+        placeholders.join(", ")
+    );
+
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| IoError::Sql(format!("begin transaction failed: {e}")))?;
+
+    {
+        let mut stmt = tx
+            .prepare_cached(&insert_sql)
+            .map_err(|e| IoError::Sql(format!("prepare insert failed: {e}")))?;
+
+        let nrows = frame.index().len();
+        for row_idx in 0..nrows {
+            let params: Vec<rusqlite::types::Value> = col_names
+                .iter()
+                .map(|name| {
+                    frame
+                        .column(name)
+                        .and_then(|col| col.value(row_idx))
+                        .map_or(rusqlite::types::Value::Null, |scalar| match scalar {
+                            Scalar::Int64(v) => rusqlite::types::Value::Integer(*v),
+                            Scalar::Float64(v) => {
+                                if v.is_nan() {
+                                    rusqlite::types::Value::Null
+                                } else {
+                                    rusqlite::types::Value::Real(*v)
+                                }
+                            }
+                            Scalar::Bool(b) => {
+                                rusqlite::types::Value::Integer(if *b { 1 } else { 0 })
+                            }
+                            Scalar::Utf8(s) => rusqlite::types::Value::Text(s.clone()),
+                            Scalar::Null(_) => rusqlite::types::Value::Null,
+                        })
+                })
+                .collect();
+
+            stmt.execute(rusqlite::params_from_iter(params.iter()))
+                .map_err(|e| IoError::Sql(format!("insert row {row_idx} failed: {e}")))?;
+        }
+    }
+
+    tx.commit()
+        .map_err(|e| IoError::Sql(format!("commit failed: {e}")))?;
+
+    Ok(())
+}
+
 // ── Extension trait for DataFrame IO convenience methods ─────────────
 
 /// Extension trait that adds IO convenience methods to `DataFrame`.
@@ -1401,6 +1618,16 @@ pub trait DataFrameIoExt {
 
     /// Serialize this DataFrame to Excel (.xlsx) bytes in memory.
     fn to_excel_bytes(&self) -> Result<Vec<u8>, IoError>;
+
+    /// Write this DataFrame to a SQLite table.
+    ///
+    /// Matches `pd.DataFrame.to_sql(name, con)`.
+    fn to_sql(
+        &self,
+        conn: &rusqlite::Connection,
+        table_name: &str,
+        if_exists: SqlIfExists,
+    ) -> Result<(), IoError>;
 }
 
 impl DataFrameIoExt for DataFrame {
@@ -1426,6 +1653,15 @@ impl DataFrameIoExt for DataFrame {
 
     fn to_excel_bytes(&self) -> Result<Vec<u8>, IoError> {
         write_excel_bytes(self)
+    }
+
+    fn to_sql(
+        &self,
+        conn: &rusqlite::Connection,
+        table_name: &str,
+        if_exists: SqlIfExists,
+    ) -> Result<(), IoError> {
+        write_sql(self, conn, table_name, if_exists)
     }
 }
 
@@ -2495,5 +2731,216 @@ mod tests {
         // With has_headers=false, column names are auto-generated.
         assert_eq!(frame2.index().len(), 2);
         assert!(frame2.column("column_0").is_some());
+    }
+
+    // ── SQL I/O tests ──────────────────────────────────────────────
+
+    use super::{SqlIfExists, read_sql, read_sql_table, write_sql};
+
+    fn make_sql_test_conn() -> rusqlite::Connection {
+        rusqlite::Connection::open_in_memory().expect("in-memory sqlite")
+    }
+
+    #[test]
+    fn sql_write_read_roundtrip() {
+        let frame = make_test_dataframe();
+        let conn = make_sql_test_conn();
+
+        write_sql(&frame, &conn, "test_table", SqlIfExists::Fail).expect("write sql");
+
+        let frame2 = read_sql_table(&conn, "test_table").expect("read sql");
+        assert_eq!(frame2.index().len(), 3);
+
+        // Int values survive round-trip.
+        let ints = frame2.column("ints").unwrap();
+        assert_eq!(ints.values()[0], Scalar::Int64(10));
+        assert_eq!(ints.values()[1], Scalar::Int64(20));
+        assert_eq!(ints.values()[2], Scalar::Int64(30));
+
+        // Float values survive round-trip.
+        let floats = frame2.column("floats").unwrap();
+        assert_eq!(floats.values()[0], Scalar::Float64(1.5));
+        assert_eq!(floats.values()[1], Scalar::Float64(2.5));
+        assert_eq!(floats.values()[2], Scalar::Float64(3.5));
+
+        // String values survive round-trip.
+        let names = frame2.column("names").unwrap();
+        assert_eq!(names.values()[0], Scalar::Utf8("alice".into()));
+        assert_eq!(names.values()[1], Scalar::Utf8("bob".into()));
+        assert_eq!(names.values()[2], Scalar::Utf8("carol".into()));
+    }
+
+    #[test]
+    fn sql_read_with_query() {
+        let frame = make_test_dataframe();
+        let conn = make_sql_test_conn();
+        write_sql(&frame, &conn, "data", SqlIfExists::Fail).unwrap();
+
+        let filtered = read_sql(&conn, "SELECT ints, names FROM data WHERE ints > 15").unwrap();
+        assert_eq!(filtered.index().len(), 2); // rows with ints=20,30
+        assert_eq!(
+            filtered.column("ints").unwrap().values()[0],
+            Scalar::Int64(20)
+        );
+        assert_eq!(
+            filtered.column("names").unwrap().values()[1],
+            Scalar::Utf8("carol".into())
+        );
+    }
+
+    #[test]
+    fn sql_if_exists_fail() {
+        let frame = make_test_dataframe();
+        let conn = make_sql_test_conn();
+        write_sql(&frame, &conn, "tbl", SqlIfExists::Fail).unwrap();
+
+        let err = write_sql(&frame, &conn, "tbl", SqlIfExists::Fail);
+        assert!(err.is_err());
+        assert!(
+            matches!(&err.unwrap_err(), IoError::Sql(msg) if msg.contains("already exists")),
+        );
+    }
+
+    #[test]
+    fn sql_if_exists_replace() {
+        let frame = make_test_dataframe();
+        let conn = make_sql_test_conn();
+        write_sql(&frame, &conn, "tbl", SqlIfExists::Fail).unwrap();
+
+        // Replace should succeed and overwrite.
+        write_sql(&frame, &conn, "tbl", SqlIfExists::Replace).unwrap();
+        let frame2 = read_sql_table(&conn, "tbl").unwrap();
+        assert_eq!(frame2.index().len(), 3);
+    }
+
+    #[test]
+    fn sql_if_exists_append() {
+        let frame = make_test_dataframe();
+        let conn = make_sql_test_conn();
+        write_sql(&frame, &conn, "tbl", SqlIfExists::Fail).unwrap();
+
+        // Append should add rows.
+        write_sql(&frame, &conn, "tbl", SqlIfExists::Append).unwrap();
+        let frame2 = read_sql_table(&conn, "tbl").unwrap();
+        assert_eq!(frame2.index().len(), 6); // 3 + 3
+    }
+
+    #[test]
+    fn sql_with_nulls() {
+        use fp_types::DType;
+
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            "vals".to_string(),
+            Column::new(
+                DType::Float64,
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Null(NullKind::NaN),
+                    Scalar::Float64(3.0),
+                ],
+            )
+            .unwrap(),
+        );
+
+        let labels = vec![
+            IndexLabel::Int64(0),
+            IndexLabel::Int64(1),
+            IndexLabel::Int64(2),
+        ];
+        let frame = DataFrame::new_with_column_order(
+            Index::new(labels),
+            columns,
+            vec!["vals".to_string()],
+        )
+        .unwrap();
+
+        let conn = make_sql_test_conn();
+        write_sql(&frame, &conn, "nulltest", SqlIfExists::Fail).unwrap();
+        let frame2 = read_sql_table(&conn, "nulltest").unwrap();
+
+        assert_eq!(
+            frame2.column("vals").unwrap().values()[0],
+            Scalar::Float64(1.0)
+        );
+        assert!(frame2.column("vals").unwrap().values()[1].is_missing());
+        assert_eq!(
+            frame2.column("vals").unwrap().values()[2],
+            Scalar::Float64(3.0)
+        );
+    }
+
+    #[test]
+    fn sql_bool_roundtrip() {
+        use fp_types::DType;
+
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            "flags".to_string(),
+            Column::new(
+                DType::Bool,
+                vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)],
+            )
+            .unwrap(),
+        );
+
+        let labels = vec![
+            IndexLabel::Int64(0),
+            IndexLabel::Int64(1),
+            IndexLabel::Int64(2),
+        ];
+        let frame = DataFrame::new_with_column_order(
+            Index::new(labels),
+            columns,
+            vec!["flags".to_string()],
+        )
+        .unwrap();
+
+        let conn = make_sql_test_conn();
+        write_sql(&frame, &conn, "booltest", SqlIfExists::Fail).unwrap();
+        let frame2 = read_sql_table(&conn, "booltest").unwrap();
+
+        // Bools stored as INTEGER(0/1), read back as Int64.
+        assert_eq!(
+            frame2.column("flags").unwrap().values()[0],
+            Scalar::Int64(1)
+        );
+        assert_eq!(
+            frame2.column("flags").unwrap().values()[1],
+            Scalar::Int64(0)
+        );
+    }
+
+    #[test]
+    fn sql_invalid_table_name_rejected() {
+        let conn = make_sql_test_conn();
+        let err = read_sql_table(&conn, "Robert'; DROP TABLE students; --");
+        assert!(err.is_err());
+        assert!(
+            matches!(&err.unwrap_err(), IoError::Sql(msg) if msg.contains("invalid table name")),
+        );
+    }
+
+    #[test]
+    fn sql_empty_result() {
+        let conn = make_sql_test_conn();
+        conn.execute_batch("CREATE TABLE empty (x INTEGER, y TEXT)")
+            .unwrap();
+        let frame = read_sql_table(&conn, "empty").unwrap();
+        assert_eq!(frame.index().len(), 0);
+        assert_eq!(frame.column_names().len(), 2);
+    }
+
+    #[test]
+    fn sql_extension_trait() {
+        let frame = make_test_dataframe();
+        let conn = make_sql_test_conn();
+
+        // Use the extension trait method.
+        use super::DataFrameIoExt;
+        frame.to_sql(&conn, "ext_test", SqlIfExists::Fail).unwrap();
+
+        let frame2 = read_sql_table(&conn, "ext_test").unwrap();
+        assert_eq!(frame2.index().len(), 3);
     }
 }

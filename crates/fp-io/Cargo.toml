@@ -15,5 +15,6 @@ fp-index = { path = "../fp-index" }
 fp-types = { path = "../fp-types" }
 parquet = { workspace = true }
 rust_xlsxwriter = { workspace = true }
+rusqlite = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
