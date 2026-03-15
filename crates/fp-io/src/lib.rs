@@ -3086,4 +3086,177 @@ mod tests {
         let frame2 = read_sql_table(&conn, "ext_test").unwrap();
         assert_eq!(frame2.index().len(), 3);
     }
+
+    // ── Arrow IPC / Feather tests ────────────────────────────────────
+
+    #[test]
+    fn feather_bytes_roundtrip() {
+        let frame = make_test_dataframe();
+        let bytes = super::write_feather_bytes(&frame).expect("write feather");
+        assert!(!bytes.is_empty());
+
+        let frame2 = super::read_feather_bytes(&bytes).expect("read feather");
+        assert_eq!(frame2.index().len(), 3);
+
+        // Check all column values survive round-trip exactly.
+        let ints = frame2.column("ints").unwrap();
+        assert_eq!(ints.values()[0], Scalar::Int64(10));
+        assert_eq!(ints.values()[1], Scalar::Int64(20));
+        assert_eq!(ints.values()[2], Scalar::Int64(30));
+
+        let floats = frame2.column("floats").unwrap();
+        assert_eq!(floats.values()[0], Scalar::Float64(1.5));
+        assert_eq!(floats.values()[2], Scalar::Float64(3.5));
+
+        let names = frame2.column("names").unwrap();
+        assert_eq!(names.values()[0], Scalar::Utf8("alice".into()));
+        assert_eq!(names.values()[2], Scalar::Utf8("carol".into()));
+    }
+
+    #[test]
+    fn feather_file_roundtrip() {
+        let frame = make_test_dataframe();
+        let dir = std::env::temp_dir();
+        let path = dir.join("fp_io_test_feather_roundtrip.feather");
+
+        super::write_feather(&frame, &path).expect("write feather file");
+        let frame2 = super::read_feather(&path).expect("read feather file");
+        assert_eq!(frame2.index().len(), 3);
+        assert_eq!(
+            frame2.column("ints").unwrap().values()[0],
+            Scalar::Int64(10)
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn ipc_stream_bytes_roundtrip() {
+        let frame = make_test_dataframe();
+        let bytes = super::write_ipc_stream_bytes(&frame).expect("write ipc stream");
+        assert!(!bytes.is_empty());
+
+        let frame2 = super::read_ipc_stream_bytes(&bytes).expect("read ipc stream");
+        assert_eq!(frame2.index().len(), 3);
+        assert_eq!(
+            frame2.column("ints").unwrap().values()[1],
+            Scalar::Int64(20)
+        );
+        assert_eq!(
+            frame2.column("names").unwrap().values()[1],
+            Scalar::Utf8("bob".into())
+        );
+    }
+
+    #[test]
+    fn feather_with_nulls() {
+        use fp_types::DType;
+
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            "vals".to_string(),
+            Column::new(
+                DType::Float64,
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Null(NullKind::NaN),
+                    Scalar::Float64(3.0),
+                ],
+            )
+            .unwrap(),
+        );
+
+        let labels = vec![
+            IndexLabel::Int64(0),
+            IndexLabel::Int64(1),
+            IndexLabel::Int64(2),
+        ];
+        let frame = DataFrame::new_with_column_order(
+            Index::new(labels),
+            columns,
+            vec!["vals".to_string()],
+        )
+        .unwrap();
+
+        let bytes = super::write_feather_bytes(&frame).expect("write");
+        let frame2 = super::read_feather_bytes(&bytes).expect("read");
+
+        assert_eq!(
+            frame2.column("vals").unwrap().values()[0],
+            Scalar::Float64(1.0)
+        );
+        assert!(frame2.column("vals").unwrap().values()[1].is_missing());
+        assert_eq!(
+            frame2.column("vals").unwrap().values()[2],
+            Scalar::Float64(3.0)
+        );
+    }
+
+    #[test]
+    fn feather_bool_column() {
+        use fp_types::DType;
+
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            "flags".to_string(),
+            Column::new(
+                DType::Bool,
+                vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)],
+            )
+            .unwrap(),
+        );
+
+        let labels = vec![
+            IndexLabel::Int64(0),
+            IndexLabel::Int64(1),
+            IndexLabel::Int64(2),
+        ];
+        let frame = DataFrame::new_with_column_order(
+            Index::new(labels),
+            columns,
+            vec!["flags".to_string()],
+        )
+        .unwrap();
+
+        let bytes = super::write_feather_bytes(&frame).expect("write");
+        let frame2 = super::read_feather_bytes(&bytes).expect("read");
+
+        assert_eq!(
+            frame2.column("flags").unwrap().values()[0],
+            Scalar::Bool(true)
+        );
+        assert_eq!(
+            frame2.column("flags").unwrap().values()[1],
+            Scalar::Bool(false)
+        );
+    }
+
+    #[test]
+    fn feather_preserves_column_order() {
+        let frame = make_test_dataframe();
+        let bytes = super::write_feather_bytes(&frame).expect("write");
+        let frame2 = super::read_feather_bytes(&bytes).expect("read");
+
+        assert_eq!(
+            frame2
+                .column_names()
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>(),
+            frame
+                .column_names()
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn feather_extension_trait() {
+        use super::DataFrameIoExt;
+
+        let frame = make_test_dataframe();
+        let bytes = frame.to_feather_bytes().unwrap();
+        let frame2 = super::read_feather_bytes(&bytes).unwrap();
+        assert_eq!(frame2.index().len(), 3);
+    }
 }
