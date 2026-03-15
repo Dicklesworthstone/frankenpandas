@@ -715,6 +715,14 @@ pub struct AlignmentPlan {
 pub enum IndexError {
     #[error("alignment vectors must have equal lengths")]
     InvalidAlignmentVectors,
+    #[error("position {position} out of bounds for length {length}")]
+    OutOfBounds { position: usize, length: usize },
+    #[error("length mismatch: expected {expected}, got {actual} ({context})")]
+    LengthMismatch {
+        expected: usize,
+        actual: usize,
+        context: String,
+    },
 }
 
 /// Alignment mode for index-level join semantics.
@@ -1009,9 +1017,280 @@ pub fn multi_way_align(indexes: &[&Index]) -> MultiAlignmentPlan {
     }
 }
 
+// ── MultiIndex ──────────────────────────────────────────────────────────
+
+/// A hierarchical (multi-level) index for DataFrames and Series.
+///
+/// Stores multiple levels of labels as separate vectors (columnar layout),
+/// analogous to pandas `pd.MultiIndex`. Each row position has one label
+/// per level. The combination of labels across all levels forms the
+/// composite key for that row.
+///
+/// This type exists alongside `Index` and can be converted to/from it.
+/// Full DataFrame integration is a future step.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MultiIndex {
+    /// One Vec<IndexLabel> per level, all the same length (= nrows).
+    levels: Vec<Vec<IndexLabel>>,
+    /// Optional name for each level.
+    names: Vec<Option<String>>,
+}
+
+impl MultiIndex {
+    /// Number of levels in this MultiIndex.
+    #[must_use]
+    pub fn nlevels(&self) -> usize {
+        self.levels.len()
+    }
+
+    /// Number of rows (entries) in this MultiIndex.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.levels.first().map_or(0, Vec::len)
+    }
+
+    /// Whether this MultiIndex has zero entries.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Level names.
+    #[must_use]
+    pub fn names(&self) -> &[Option<String>] {
+        &self.names
+    }
+
+    /// Set the names for all levels.
+    #[must_use]
+    pub fn set_names(mut self, names: Vec<Option<String>>) -> Self {
+        // Pad or truncate to match nlevels.
+        self.names = names;
+        self.names.resize(self.nlevels(), None);
+        self
+    }
+
+    /// Get the labels for a specific level.
+    ///
+    /// Matches `pd.MultiIndex.get_level_values(level)`.
+    pub fn get_level_values(&self, level: usize) -> Result<Index, IndexError> {
+        if level >= self.levels.len() {
+            return Err(IndexError::OutOfBounds {
+                position: level,
+                length: self.levels.len(),
+            });
+        }
+        let mut idx = Index::new(self.levels[level].clone());
+        if let Some(name) = self.names.get(level).and_then(|n| n.as_ref()) {
+            idx = idx.set_name(name);
+        }
+        Ok(idx)
+    }
+
+    /// Get the tuple of labels at a specific position.
+    pub fn get_tuple(&self, position: usize) -> Option<Vec<&IndexLabel>> {
+        if position >= self.len() {
+            return None;
+        }
+        Some(self.levels.iter().map(|level| &level[position]).collect())
+    }
+
+    /// Construct a MultiIndex from tuples of labels.
+    ///
+    /// Matches `pd.MultiIndex.from_tuples(tuples)`.
+    /// Each inner Vec represents one row's labels across all levels.
+    pub fn from_tuples(tuples: Vec<Vec<IndexLabel>>) -> Result<Self, IndexError> {
+        if tuples.is_empty() {
+            return Ok(Self {
+                levels: Vec::new(),
+                names: Vec::new(),
+            });
+        }
+
+        let nlevels = tuples[0].len();
+        for (i, t) in tuples.iter().enumerate() {
+            if t.len() != nlevels {
+                return Err(IndexError::LengthMismatch {
+                    expected: nlevels,
+                    actual: t.len(),
+                    context: format!("tuple at position {i} has wrong number of levels"),
+                });
+            }
+        }
+
+        let mut levels: Vec<Vec<IndexLabel>> = (0..nlevels).map(|_| Vec::with_capacity(tuples.len())).collect();
+        for tuple in &tuples {
+            for (level_idx, label) in tuple.iter().enumerate() {
+                levels[level_idx].push(label.clone());
+            }
+        }
+
+        Ok(Self {
+            levels,
+            names: vec![None; nlevels],
+        })
+    }
+
+    /// Construct a MultiIndex from parallel arrays (one per level).
+    ///
+    /// Matches `pd.MultiIndex.from_arrays(arrays)`.
+    pub fn from_arrays(arrays: Vec<Vec<IndexLabel>>) -> Result<Self, IndexError> {
+        if arrays.is_empty() {
+            return Ok(Self {
+                levels: Vec::new(),
+                names: Vec::new(),
+            });
+        }
+
+        let expected_len = arrays[0].len();
+        for (i, arr) in arrays.iter().enumerate() {
+            if arr.len() != expected_len {
+                return Err(IndexError::LengthMismatch {
+                    expected: expected_len,
+                    actual: arr.len(),
+                    context: format!("level {i} array length mismatch"),
+                });
+            }
+        }
+
+        let nlevels = arrays.len();
+        Ok(Self {
+            levels: arrays,
+            names: vec![None; nlevels],
+        })
+    }
+
+    /// Construct a MultiIndex from the Cartesian product of iterables.
+    ///
+    /// Matches `pd.MultiIndex.from_product(iterables)`.
+    pub fn from_product(iterables: Vec<Vec<IndexLabel>>) -> Result<Self, IndexError> {
+        if iterables.is_empty() {
+            return Ok(Self {
+                levels: Vec::new(),
+                names: Vec::new(),
+            });
+        }
+
+        // Compute total size of the Cartesian product.
+        let total: usize = iterables.iter().map(Vec::len).product();
+        if total == 0 {
+            let nlevels = iterables.len();
+            return Ok(Self {
+                levels: (0..nlevels).map(|_| Vec::new()).collect(),
+                names: vec![None; nlevels],
+            });
+        }
+
+        let nlevels = iterables.len();
+        let mut levels: Vec<Vec<IndexLabel>> = (0..nlevels).map(|_| Vec::with_capacity(total)).collect();
+
+        // Generate Cartesian product: for each position, compute which
+        // element from each level by dividing position by the product of
+        // all subsequent level lengths.
+        for pos in 0..total {
+            let mut remaining = pos;
+            for (level_idx, iterable) in iterables.iter().enumerate().rev() {
+                let idx_in_level = remaining % iterable.len();
+                remaining /= iterable.len();
+                levels[level_idx].push(iterable[idx_in_level].clone());
+            }
+        }
+
+        Ok(Self {
+            levels,
+            names: vec![None; nlevels],
+        })
+    }
+
+    /// Flatten this MultiIndex into a single-level Index by joining
+    /// level labels with a separator.
+    ///
+    /// Matches `pd.MultiIndex.to_flat_index()` (approximately).
+    #[must_use]
+    pub fn to_flat_index(&self, sep: &str) -> Index {
+        let n = self.len();
+        let labels: Vec<IndexLabel> = (0..n)
+            .map(|i| {
+                let parts: Vec<String> = self
+                    .levels
+                    .iter()
+                    .map(|level| level[i].to_string())
+                    .collect();
+                IndexLabel::Utf8(parts.join(sep))
+            })
+            .collect();
+        Index::new(labels)
+    }
+
+    /// Drop a level from this MultiIndex, returning a new MultiIndex
+    /// (or an Index if only one level remains).
+    ///
+    /// Matches `pd.MultiIndex.droplevel(level)`.
+    pub fn droplevel(&self, level: usize) -> Result<MultiIndexOrIndex, IndexError> {
+        if level >= self.nlevels() {
+            return Err(IndexError::OutOfBounds {
+                position: level,
+                length: self.nlevels(),
+            });
+        }
+        if self.nlevels() <= 1 {
+            return Err(IndexError::OutOfBounds {
+                position: level,
+                length: self.nlevels(),
+            });
+        }
+
+        let mut new_levels = self.levels.clone();
+        new_levels.remove(level);
+        let mut new_names = self.names.clone();
+        new_names.remove(level);
+
+        if new_levels.len() == 1 {
+            let mut idx = Index::new(new_levels.into_iter().next().unwrap());
+            if let Some(ref name) = new_names[0] {
+                idx = idx.set_name(name);
+            }
+            Ok(MultiIndexOrIndex::Index(idx))
+        } else {
+            Ok(MultiIndexOrIndex::Multi(Self {
+                levels: new_levels,
+                names: new_names,
+            }))
+        }
+    }
+
+    /// Swap two levels.
+    ///
+    /// Matches `pd.MultiIndex.swaplevel(i, j)`.
+    pub fn swaplevel(&self, i: usize, j: usize) -> Result<Self, IndexError> {
+        if i >= self.nlevels() || j >= self.nlevels() {
+            return Err(IndexError::OutOfBounds {
+                position: i.max(j),
+                length: self.nlevels(),
+            });
+        }
+        let mut new_levels = self.levels.clone();
+        let mut new_names = self.names.clone();
+        new_levels.swap(i, j);
+        new_names.swap(i, j);
+        Ok(Self {
+            levels: new_levels,
+            names: new_names,
+        })
+    }
+}
+
+/// Result of `MultiIndex::droplevel` — either a MultiIndex (if 2+ levels remain)
+/// or a plain Index (if reduced to 1 level).
+#[derive(Debug, Clone, PartialEq)]
+pub enum MultiIndexOrIndex {
+    Multi(MultiIndex),
+    Index(Index),
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Index, IndexLabel, align_union, validate_alignment_plan};
+    use super::{Index, IndexLabel, MultiIndex, align_union, validate_alignment_plan};
 
     #[test]
     fn union_alignment_preserves_left_then_right_unseen_order() {
@@ -2118,5 +2397,191 @@ mod tests {
         let flat = idx.to_flat_index();
         assert_eq!(flat, idx);
         assert_eq!(flat.name(), Some("x"));
+    }
+
+    // ── MultiIndex tests ──
+
+    #[test]
+    fn multi_index_from_tuples() {
+        let mi = MultiIndex::from_tuples(vec![
+            vec!["a".into(), 1_i64.into()],
+            vec!["a".into(), 2_i64.into()],
+            vec!["b".into(), 1_i64.into()],
+        ])
+        .unwrap();
+
+        assert_eq!(mi.nlevels(), 2);
+        assert_eq!(mi.len(), 3);
+        assert!(!mi.is_empty());
+    }
+
+    #[test]
+    fn multi_index_from_tuples_ragged_errors() {
+        let err = MultiIndex::from_tuples(vec![
+            vec!["a".into(), 1_i64.into()],
+            vec!["b".into()], // wrong number of levels
+        ]);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn multi_index_from_arrays() {
+        let mi = MultiIndex::from_arrays(vec![
+            vec!["a".into(), "a".into(), "b".into()],
+            vec![1_i64.into(), 2_i64.into(), 1_i64.into()],
+        ])
+        .unwrap();
+
+        assert_eq!(mi.nlevels(), 2);
+        assert_eq!(mi.len(), 3);
+    }
+
+    #[test]
+    fn multi_index_from_arrays_length_mismatch_errors() {
+        let err = MultiIndex::from_arrays(vec![
+            vec!["a".into(), "b".into()],
+            vec![1_i64.into()], // wrong length
+        ]);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn multi_index_from_product() {
+        let mi = MultiIndex::from_product(vec![
+            vec!["a".into(), "b".into()],
+            vec![1_i64.into(), 2_i64.into(), 3_i64.into()],
+        ])
+        .unwrap();
+
+        assert_eq!(mi.nlevels(), 2);
+        assert_eq!(mi.len(), 6); // 2 * 3
+    }
+
+    #[test]
+    fn multi_index_from_product_values() {
+        let mi = MultiIndex::from_product(vec![
+            vec!["x".into(), "y".into()],
+            vec![1_i64.into(), 2_i64.into()],
+        ])
+        .unwrap();
+
+        // Should produce: (x,1), (x,2), (y,1), (y,2)
+        assert_eq!(mi.get_tuple(0).unwrap(), vec![&IndexLabel::Utf8("x".into()), &IndexLabel::Int64(1)]);
+        assert_eq!(mi.get_tuple(1).unwrap(), vec![&IndexLabel::Utf8("x".into()), &IndexLabel::Int64(2)]);
+        assert_eq!(mi.get_tuple(2).unwrap(), vec![&IndexLabel::Utf8("y".into()), &IndexLabel::Int64(1)]);
+        assert_eq!(mi.get_tuple(3).unwrap(), vec![&IndexLabel::Utf8("y".into()), &IndexLabel::Int64(2)]);
+    }
+
+    #[test]
+    fn multi_index_get_level_values() {
+        let mi = MultiIndex::from_tuples(vec![
+            vec!["a".into(), 1_i64.into()],
+            vec!["b".into(), 2_i64.into()],
+        ])
+        .unwrap()
+        .set_names(vec![Some("letter".into()), Some("number".into())]);
+
+        let level0 = mi.get_level_values(0).unwrap();
+        assert_eq!(level0.labels(), &[IndexLabel::Utf8("a".into()), IndexLabel::Utf8("b".into())]);
+        assert_eq!(level0.name(), Some("letter"));
+
+        let level1 = mi.get_level_values(1).unwrap();
+        assert_eq!(level1.labels(), &[IndexLabel::Int64(1), IndexLabel::Int64(2)]);
+        assert_eq!(level1.name(), Some("number"));
+    }
+
+    #[test]
+    fn multi_index_get_level_values_out_of_bounds() {
+        let mi = MultiIndex::from_tuples(vec![
+            vec!["a".into()],
+        ])
+        .unwrap();
+        assert!(mi.get_level_values(1).is_err());
+    }
+
+    #[test]
+    fn multi_index_to_flat_index() {
+        let mi = MultiIndex::from_tuples(vec![
+            vec!["a".into(), 1_i64.into()],
+            vec!["b".into(), 2_i64.into()],
+        ])
+        .unwrap();
+
+        let flat = mi.to_flat_index("_");
+        assert_eq!(flat.labels()[0], IndexLabel::Utf8("a_1".into()));
+        assert_eq!(flat.labels()[1], IndexLabel::Utf8("b_2".into()));
+    }
+
+    #[test]
+    fn multi_index_droplevel() {
+        let mi = MultiIndex::from_tuples(vec![
+            vec!["a".into(), 1_i64.into(), "x".into()],
+            vec!["b".into(), 2_i64.into(), "y".into()],
+        ])
+        .unwrap()
+        .set_names(vec![Some("l0".into()), Some("l1".into()), Some("l2".into())]);
+
+        // Drop middle level -> 2 levels remain -> MultiIndex
+        let result = mi.droplevel(1).unwrap();
+        match result {
+            super::MultiIndexOrIndex::Multi(mi2) => {
+                assert_eq!(mi2.nlevels(), 2);
+                assert_eq!(mi2.names(), &[Some("l0".into()), Some("l2".into())]);
+            }
+            _ => panic!("expected MultiIndex after dropping from 3 levels"),
+        }
+    }
+
+    #[test]
+    fn multi_index_droplevel_to_index() {
+        let mi = MultiIndex::from_tuples(vec![
+            vec!["a".into(), 1_i64.into()],
+            vec!["b".into(), 2_i64.into()],
+        ])
+        .unwrap()
+        .set_names(vec![Some("letter".into()), Some("number".into())]);
+
+        // Drop one level from 2 -> 1 level -> plain Index
+        let result = mi.droplevel(0).unwrap();
+        match result {
+            super::MultiIndexOrIndex::Index(idx) => {
+                assert_eq!(idx.labels(), &[IndexLabel::Int64(1), IndexLabel::Int64(2)]);
+                assert_eq!(idx.name(), Some("number"));
+            }
+            _ => panic!("expected Index after dropping from 2 levels"),
+        }
+    }
+
+    #[test]
+    fn multi_index_swaplevel() {
+        let mi = MultiIndex::from_tuples(vec![
+            vec!["a".into(), 1_i64.into()],
+        ])
+        .unwrap()
+        .set_names(vec![Some("first".into()), Some("second".into())]);
+
+        let swapped = mi.swaplevel(0, 1).unwrap();
+        assert_eq!(swapped.names(), &[Some("second".into()), Some("first".into())]);
+        assert_eq!(
+            swapped.get_tuple(0).unwrap(),
+            vec![&IndexLabel::Int64(1), &IndexLabel::Utf8("a".into())]
+        );
+    }
+
+    #[test]
+    fn multi_index_empty() {
+        let mi = MultiIndex::from_tuples(vec![]).unwrap();
+        assert_eq!(mi.nlevels(), 0);
+        assert_eq!(mi.len(), 0);
+        assert!(mi.is_empty());
+    }
+
+    #[test]
+    fn multi_index_get_tuple_out_of_bounds() {
+        let mi = MultiIndex::from_tuples(vec![
+            vec!["a".into()],
+        ])
+        .unwrap();
+        assert!(mi.get_tuple(1).is_none());
     }
 }
