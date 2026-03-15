@@ -3150,4 +3150,215 @@ mod tests {
         let ref_col = result.columns.get("ref_val").unwrap();
         assert_eq!(ref_col.values()[1], Scalar::Float64(500.0)); // time=7 → 5 is nearest
     }
+
+    #[test]
+    fn merge_asof_exact_match() {
+        use super::AsofDirection;
+
+        let left = fp_frame::DataFrame::from_dict(
+            &["time", "val"],
+            vec![
+                ("time", vec![Scalar::Int64(2), Scalar::Int64(4)]),
+                ("val", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
+            ],
+        )
+        .unwrap();
+
+        let right = fp_frame::DataFrame::from_dict(
+            &["time", "quote"],
+            vec![
+                ("time", vec![Scalar::Int64(2), Scalar::Int64(4)]),
+                ("quote", vec![Scalar::Float64(20.0), Scalar::Float64(40.0)]),
+            ],
+        )
+        .unwrap();
+
+        // Backward: exact match should work (right_val <= left_val includes ==).
+        let result = super::merge_asof(&left, &right, "time", AsofDirection::Backward).unwrap();
+        assert_eq!(
+            result.columns.get("quote").unwrap().values()[0],
+            Scalar::Float64(20.0)
+        );
+        assert_eq!(
+            result.columns.get("quote").unwrap().values()[1],
+            Scalar::Float64(40.0)
+        );
+
+        // Forward: exact match should work (right_val >= left_val includes ==).
+        let result = super::merge_asof(&left, &right, "time", AsofDirection::Forward).unwrap();
+        assert_eq!(
+            result.columns.get("quote").unwrap().values()[0],
+            Scalar::Float64(20.0)
+        );
+    }
+
+    #[test]
+    fn merge_asof_no_matches_backward() {
+        use super::AsofDirection;
+
+        let left = fp_frame::DataFrame::from_dict(
+            &["time", "val"],
+            vec![
+                ("time", vec![Scalar::Int64(1)]),
+                ("val", vec![Scalar::Float64(10.0)]),
+            ],
+        )
+        .unwrap();
+
+        // Right starts at time=5, so backward from time=1 finds nothing.
+        let right = fp_frame::DataFrame::from_dict(
+            &["time", "quote"],
+            vec![
+                ("time", vec![Scalar::Int64(5)]),
+                ("quote", vec![Scalar::Float64(50.0)]),
+            ],
+        )
+        .unwrap();
+
+        let result = super::merge_asof(&left, &right, "time", AsofDirection::Backward).unwrap();
+        assert!(result.columns.get("quote").unwrap().values()[0].is_missing());
+    }
+
+    #[test]
+    fn merge_asof_no_matches_forward() {
+        use super::AsofDirection;
+
+        let left = fp_frame::DataFrame::from_dict(
+            &["time", "val"],
+            vec![
+                ("time", vec![Scalar::Int64(10)]),
+                ("val", vec![Scalar::Float64(10.0)]),
+            ],
+        )
+        .unwrap();
+
+        // Right ends at time=5, so forward from time=10 finds nothing.
+        let right = fp_frame::DataFrame::from_dict(
+            &["time", "quote"],
+            vec![
+                ("time", vec![Scalar::Int64(5)]),
+                ("quote", vec![Scalar::Float64(50.0)]),
+            ],
+        )
+        .unwrap();
+
+        let result = super::merge_asof(&left, &right, "time", AsofDirection::Forward).unwrap();
+        assert!(result.columns.get("quote").unwrap().values()[0].is_missing());
+    }
+
+    #[test]
+    fn merge_asof_nan_in_key() {
+        use super::AsofDirection;
+
+        let left = fp_frame::DataFrame::from_dict(
+            &["time", "val"],
+            vec![
+                ("time", vec![Scalar::Int64(1), Scalar::Null(NullKind::NaN), Scalar::Int64(5)]),
+                ("val", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
+            ],
+        )
+        .unwrap();
+
+        let right = fp_frame::DataFrame::from_dict(
+            &["time", "quote"],
+            vec![
+                ("time", vec![Scalar::Int64(2), Scalar::Int64(4)]),
+                ("quote", vec![Scalar::Float64(200.0), Scalar::Float64(400.0)]),
+            ],
+        )
+        .unwrap();
+
+        let result = super::merge_asof(&left, &right, "time", AsofDirection::Backward).unwrap();
+        // NaN in key → no match
+        assert!(result.columns.get("quote").unwrap().values()[1].is_missing());
+        // time=5 → backward match to time=4 → quote=400
+        assert_eq!(
+            result.columns.get("quote").unwrap().values()[2],
+            Scalar::Float64(400.0)
+        );
+    }
+
+    #[test]
+    fn merge_asof_duplicate_column_gets_suffix() {
+        use super::AsofDirection;
+
+        // Both left and right have a "val" column besides the key.
+        let left = fp_frame::DataFrame::from_dict(
+            &["time", "val"],
+            vec![
+                ("time", vec![Scalar::Int64(1)]),
+                ("val", vec![Scalar::Float64(10.0)]),
+            ],
+        )
+        .unwrap();
+
+        let right = fp_frame::DataFrame::from_dict(
+            &["time", "val"],
+            vec![
+                ("time", vec![Scalar::Int64(1)]),
+                ("val", vec![Scalar::Float64(99.0)]),
+            ],
+        )
+        .unwrap();
+
+        let result = super::merge_asof(&left, &right, "time", AsofDirection::Backward).unwrap();
+        // Right "val" should get "_y" suffix.
+        assert!(result.columns.contains_key("val"));
+        assert!(result.columns.contains_key("val_y"));
+        assert_eq!(
+            result.columns.get("val").unwrap().values()[0],
+            Scalar::Float64(10.0)
+        );
+        assert_eq!(
+            result.columns.get("val_y").unwrap().values()[0],
+            Scalar::Float64(99.0)
+        );
+    }
+
+    #[test]
+    fn merge_asof_missing_column_errors() {
+        use super::AsofDirection;
+
+        let left = fp_frame::DataFrame::from_dict(
+            &["a"],
+            vec![("a", vec![Scalar::Int64(1)])],
+        )
+        .unwrap();
+
+        let right = fp_frame::DataFrame::from_dict(
+            &["b"],
+            vec![("b", vec![Scalar::Int64(1)])],
+        )
+        .unwrap();
+
+        let err = super::merge_asof(&left, &right, "time", AsofDirection::Backward);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn merge_asof_preserves_all_left_rows() {
+        use super::AsofDirection;
+
+        let left = fp_frame::DataFrame::from_dict(
+            &["time", "val"],
+            vec![
+                ("time", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3), Scalar::Int64(4), Scalar::Int64(5)]),
+                ("val", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0), Scalar::Float64(40.0), Scalar::Float64(50.0)]),
+            ],
+        )
+        .unwrap();
+
+        let right = fp_frame::DataFrame::from_dict(
+            &["time", "quote"],
+            vec![
+                ("time", vec![Scalar::Int64(3)]),
+                ("quote", vec![Scalar::Float64(300.0)]),
+            ],
+        )
+        .unwrap();
+
+        let result = super::merge_asof(&left, &right, "time", AsofDirection::Backward).unwrap();
+        // All 5 left rows should be present.
+        assert_eq!(result.index.len(), 5);
+    }
 }
