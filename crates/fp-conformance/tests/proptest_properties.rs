@@ -9,7 +9,7 @@
 
 use proptest::prelude::*;
 
-use fp_frame::Series;
+use fp_frame::{DataFrame, Series};
 use fp_groupby::{GroupByExecutionOptions, GroupByOptions, groupby_sum, groupby_sum_with_options};
 use fp_index::{Index, IndexLabel, align_union, validate_alignment_plan};
 use fp_join::{JoinExecutionOptions, JoinType, join_series, join_series_with_options};
@@ -1295,5 +1295,219 @@ proptest! {
         let not_and: Vec<bool> = a.and_mask(&b).not_mask().bits().collect();
         let or_not: Vec<bool> = a.not_mask().or_mask(&b.not_mask()).bits().collect();
         prop_assert_eq!(not_and, or_not, "De Morgan: not(a AND b) == not(a) OR not(b)");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Property: DataFrame arithmetic invariants (frankenpandas-s6d)
+// ---------------------------------------------------------------------------
+
+/// Generate a small DataFrame with numeric columns for arithmetic testing.
+fn arb_numeric_dataframe(max_rows: usize) -> impl Strategy<Value = DataFrame> {
+    (1..=max_rows).prop_flat_map(|nrows| {
+        let idx_labels = arb_index_labels(nrows);
+        let col_a = arb_numeric_values(nrows);
+        let col_b = arb_numeric_values(nrows);
+        (idx_labels, col_a, col_b).prop_filter_map(
+            "dataframe construction must succeed",
+            move |(labels, va, vb)| {
+                let index = Index::new(labels);
+                let col_a = fp_columnar::Column::from_values(va).ok()?;
+                let col_b = fp_columnar::Column::from_values(vb).ok()?;
+                let mut cols = std::collections::BTreeMap::new();
+                cols.insert("a".to_string(), col_a);
+                cols.insert("b".to_string(), col_b);
+                DataFrame::new_with_column_order(
+                    index,
+                    cols,
+                    vec!["a".to_string(), "b".to_string()],
+                )
+                .ok()
+            },
+        )
+    })
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(100))]
+
+    /// DataFrame add_scalar never panics.
+    #[test]
+    fn prop_df_add_scalar_no_panic(df in arb_numeric_dataframe(10), scalar in -1e6_f64..1e6_f64) {
+        let _ = df.add_scalar(scalar);
+    }
+
+    /// DataFrame add_scalar preserves shape (rows x columns).
+    #[test]
+    fn prop_df_add_scalar_preserves_shape(df in arb_numeric_dataframe(10)) {
+        if let Ok(result) = df.add_scalar(1.0) {
+            prop_assert_eq!(result.index().len(), df.index().len(),
+                "add_scalar must preserve row count");
+            prop_assert_eq!(result.column_names().len(), df.column_names().len(),
+                "add_scalar must preserve column count");
+        }
+    }
+
+    /// DataFrame add_scalar(0) is approximately identity for non-missing values.
+    #[test]
+    fn prop_df_add_zero_is_identity(df in arb_numeric_dataframe(10)) {
+        if let Ok(result) = df.add_scalar(0.0) {
+            for name in df.column_names() {
+                let orig_col = df.column(name).unwrap();
+                let result_col = result.column(name).unwrap();
+                for (i, (orig, res)) in orig_col.values().iter().zip(result_col.values()).enumerate() {
+                    if orig.is_missing() {
+                        prop_assert!(res.is_missing(),
+                            "missing + 0 should stay missing at col={}, idx={}", name, i);
+                    } else if let (Ok(ov), Ok(rv)) = (orig.to_f64(), res.to_f64())
+                        && ov.is_finite()
+                    {
+                        prop_assert!((ov - rv).abs() < 1e-9,
+                            "add(0) should be identity: {} vs {} at col={}, idx={}",
+                            ov, rv, name, i);
+                    }
+                }
+            }
+        }
+    }
+
+    /// DataFrame mul_scalar(1) is approximately identity for non-missing values.
+    #[test]
+    fn prop_df_mul_one_is_identity(df in arb_numeric_dataframe(10)) {
+        if let Ok(result) = df.mul_scalar(1.0) {
+            for name in df.column_names() {
+                let orig_col = df.column(name).unwrap();
+                let result_col = result.column(name).unwrap();
+                for (i, (orig, res)) in orig_col.values().iter().zip(result_col.values()).enumerate() {
+                    if orig.is_missing() {
+                        prop_assert!(res.is_missing(),
+                            "missing * 1 should stay missing at col={}, idx={}", name, i);
+                    } else if let (Ok(ov), Ok(rv)) = (orig.to_f64(), res.to_f64())
+                        && ov.is_finite()
+                    {
+                        prop_assert!((ov - rv).abs() < 1e-9,
+                            "mul(1) should be identity: {} vs {} at col={}, idx={}",
+                            ov, rv, name, i);
+                    }
+                }
+            }
+        }
+    }
+
+    /// DataFrame add_df result index contains all labels from both inputs.
+    #[test]
+    fn prop_df_add_df_index_is_union(
+        df1 in arb_numeric_dataframe(8),
+        df2 in arb_numeric_dataframe(8),
+    ) {
+        if let Ok(result) = df1.add_df(&df2) {
+            let result_labels = result.index().labels();
+            for label in df1.index().labels() {
+                prop_assert!(
+                    result_labels.contains(label),
+                    "add_df result must contain left label {:?}", label
+                );
+            }
+            for label in df2.index().labels() {
+                prop_assert!(
+                    result_labels.contains(label),
+                    "add_df result must contain right label {:?}", label
+                );
+            }
+        }
+    }
+
+    /// DataFrame add_df result has union of columns from both inputs.
+    #[test]
+    fn prop_df_add_df_columns_are_union(
+        df1 in arb_numeric_dataframe(5),
+        df2 in arb_numeric_dataframe(5),
+    ) {
+        if let Ok(result) = df1.add_df(&df2) {
+            let result_names: Vec<&String> = result.column_names();
+            for name in df1.column_names() {
+                prop_assert!(
+                    result_names.contains(&name),
+                    "add_df result must contain left column {:?}", name
+                );
+            }
+            for name in df2.column_names() {
+                prop_assert!(
+                    result_names.contains(&name),
+                    "add_df result must contain right column {:?}", name
+                );
+            }
+        }
+    }
+
+    /// DataFrame eq_scalar_df produces all-Bool output.
+    #[test]
+    fn prop_df_eq_scalar_produces_bool(df in arb_numeric_dataframe(10)) {
+        let scalar = Scalar::Int64(0);
+        if let Ok(result) = df.eq_scalar_df(&scalar) {
+            for name in result.column_names() {
+                let col = result.column(name).unwrap();
+                for (i, val) in col.values().iter().enumerate() {
+                    prop_assert!(
+                        matches!(val, Scalar::Bool(_)),
+                        "eq_scalar_df must produce Bool values, got {:?} at col={}, idx={}",
+                        val, name, i
+                    );
+                }
+            }
+        }
+    }
+
+    /// DataFrame comparison ops preserve shape.
+    #[test]
+    fn prop_df_comparison_preserves_shape(df in arb_numeric_dataframe(10)) {
+        let scalar = Scalar::Int64(5);
+        for op_name in ["eq", "ne", "gt", "ge", "lt", "le"] {
+            let result = match op_name {
+                "eq" => df.eq_scalar_df(&scalar),
+                "ne" => df.ne_scalar_df(&scalar),
+                "gt" => df.gt_scalar_df(&scalar),
+                "ge" => df.ge_scalar_df(&scalar),
+                "lt" => df.lt_scalar_df(&scalar),
+                "le" => df.le_scalar_df(&scalar),
+                _ => unreachable!(),
+            };
+            if let Ok(result_df) = result {
+                prop_assert_eq!(result_df.index().len(), df.index().len(),
+                    "{}_scalar_df must preserve row count", op_name);
+                prop_assert_eq!(result_df.column_names().len(), df.column_names().len(),
+                    "{}_scalar_df must preserve column count", op_name);
+            }
+        }
+    }
+
+    /// DataFrame eq + ne are complementary for non-NaN values.
+    /// For any non-NaN value, eq(x) XOR ne(x) must be true.
+    #[test]
+    fn prop_df_eq_ne_complementary(df in arb_numeric_dataframe(8)) {
+        let scalar = Scalar::Int64(0);
+        let eq_result = df.eq_scalar_df(&scalar);
+        let ne_result = df.ne_scalar_df(&scalar);
+        if let (Ok(eq_df), Ok(ne_df)) = (eq_result, ne_result) {
+            for name in eq_df.column_names() {
+                let eq_col = eq_df.column(name).unwrap();
+                let ne_col = ne_df.column(name).unwrap();
+                let orig_col = df.column(name).unwrap();
+                for (i, ((eq_v, ne_v), orig)) in eq_col.values().iter()
+                    .zip(ne_col.values())
+                    .zip(orig_col.values())
+                    .enumerate()
+                {
+                    // Skip NaN values (NaN comparisons have special semantics)
+                    if orig.is_missing() {
+                        continue;
+                    }
+                    if let (Scalar::Bool(eq_b), Scalar::Bool(ne_b)) = (eq_v, ne_v) {
+                        prop_assert_ne!(eq_b, ne_b,
+                            "eq XOR ne must be true for non-NaN at col={}, idx={}", name, i);
+                    }
+                }
+            }
+        }
     }
 }
