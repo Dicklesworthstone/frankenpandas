@@ -11956,9 +11956,12 @@ impl DataFrame {
             let level_labels: Vec<IndexLabel> = (0..nrows)
                 .map(|i| {
                     col.value(i)
-                        .map(|s| match scalar_to_index_label(s) {
-                            Ok(label) => label,
-                            Err(_) => IndexLabel::Utf8(String::new()),
+                        .map(|s| match s {
+                            Scalar::Int64(v) => IndexLabel::Int64(*v),
+                            Scalar::Utf8(v) => IndexLabel::Utf8(v.clone()),
+                            Scalar::Float64(v) => IndexLabel::Utf8(v.to_string()),
+                            Scalar::Bool(b) => IndexLabel::Utf8(b.to_string()),
+                            Scalar::Null(_) => IndexLabel::Utf8(String::new()),
                         })
                         .unwrap_or(IndexLabel::Utf8(String::new()))
                 })
@@ -44323,5 +44326,31 @@ mod tests {
 
         let err = df.to_multi_index(&["a", "nonexistent"]);
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn df_to_multi_index_float_and_bool_columns() {
+        let df = DataFrame::from_dict(
+            &["score", "flag"],
+            vec![
+                ("score", vec![Scalar::Float64(1.5), Scalar::Float64(2.5)]),
+                ("flag", vec![Scalar::Bool(true), Scalar::Bool(false)]),
+            ],
+        )
+        .unwrap();
+
+        let mi = df.to_multi_index(&["score", "flag"]).unwrap();
+        assert_eq!(mi.nlevels(), 2);
+        assert_eq!(mi.len(), 2);
+
+        // Float64 values should become Utf8 string labels, not empty strings.
+        let level0 = mi.get_level_values(0).unwrap();
+        assert_eq!(level0.labels()[0], IndexLabel::Utf8("1.5".into()));
+        assert_eq!(level0.labels()[1], IndexLabel::Utf8("2.5".into()));
+
+        // Bool values should become Utf8 "true"/"false" labels.
+        let level1 = mi.get_level_values(1).unwrap();
+        assert_eq!(level1.labels()[0], IndexLabel::Utf8("true".into()));
+        assert_eq!(level1.labels()[1], IndexLabel::Utf8("false".into()));
     }
 }
