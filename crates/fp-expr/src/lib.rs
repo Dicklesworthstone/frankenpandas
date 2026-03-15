@@ -2396,4 +2396,236 @@ mod tests {
         assert_eq!(result.columns()["a"].values()[0], Scalar::Int64(5));
         assert_eq!(result.columns()["b"].values()[0], Scalar::Int64(20));
     }
+
+    // ── eval/query parity tests (frankenpandas-xmp) ──
+
+    #[test]
+    fn eval_str_subtraction() {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "a",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![Scalar::Int64(10), Scalar::Int64(20)],
+            )
+            .unwrap(),
+            fp_frame::Series::from_values(
+                "b",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![Scalar::Int64(3), Scalar::Int64(7)],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let result = super::eval_str("a - b", &frame, &policy, &mut ledger).unwrap();
+        assert_eq!(result.values()[0], Scalar::Int64(7));
+        assert_eq!(result.values()[1], Scalar::Int64(13));
+    }
+
+    #[test]
+    fn eval_str_multiplication() {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "a",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![Scalar::Int64(3), Scalar::Int64(5)],
+            )
+            .unwrap(),
+            fp_frame::Series::from_values(
+                "b",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![Scalar::Int64(4), Scalar::Int64(6)],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let result = super::eval_str("a * b", &frame, &policy, &mut ledger).unwrap();
+        assert_eq!(result.values()[0], Scalar::Int64(12));
+        assert_eq!(result.values()[1], Scalar::Int64(30));
+    }
+
+    #[test]
+    fn eval_str_division() {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "a",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![Scalar::Float64(10.0), Scalar::Float64(21.0)],
+            )
+            .unwrap(),
+            fp_frame::Series::from_values(
+                "b",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![Scalar::Float64(2.0), Scalar::Float64(7.0)],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let result = super::eval_str("a / b", &frame, &policy, &mut ledger).unwrap();
+        assert_eq!(result.values()[0], Scalar::Float64(5.0));
+        assert_eq!(result.values()[1], Scalar::Float64(3.0));
+    }
+
+    #[test]
+    fn eval_str_parenthesized_expression() {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "a",
+                vec![0_i64.into()],
+                vec![Scalar::Int64(2)],
+            )
+            .unwrap(),
+            fp_frame::Series::from_values(
+                "b",
+                vec![0_i64.into()],
+                vec![Scalar::Int64(3)],
+            )
+            .unwrap(),
+            fp_frame::Series::from_values(
+                "c",
+                vec![0_i64.into()],
+                vec![Scalar::Int64(4)],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        // (a + b) * c = (2 + 3) * 4 = 20
+        let result = super::eval_str("(a + b) * c", &frame, &policy, &mut ledger).unwrap();
+        assert_eq!(result.values()[0], Scalar::Int64(20));
+    }
+
+    #[test]
+    fn eval_str_comparison() {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "x",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![Scalar::Int64(1), Scalar::Int64(5), Scalar::Int64(3)],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let result = super::eval_str("x >= 3", &frame, &policy, &mut ledger).unwrap();
+        assert_eq!(result.values()[0], Scalar::Bool(false));
+        assert_eq!(result.values()[1], Scalar::Bool(true));
+        assert_eq!(result.values()[2], Scalar::Bool(true));
+    }
+
+    #[test]
+    fn query_str_equality() {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "name",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![
+                    Scalar::Int64(10),
+                    Scalar::Int64(20),
+                    Scalar::Int64(10),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let result = super::query_str("name == 10", &frame, &policy, &mut ledger).unwrap();
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn query_str_or_filter() {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "x",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Int64(1),
+                    Scalar::Int64(5),
+                    Scalar::Int64(3),
+                    Scalar::Int64(8),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        // x < 2 or x > 7 → rows where x=1 or x=8
+        let result = super::query_str("x < 2 or x > 7", &frame, &policy, &mut ledger).unwrap();
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn eval_extension_trait() {
+        use super::DataFrameExprExt;
+
+        let frame = fp_frame::DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                ("b", vec![Scalar::Int64(10), Scalar::Int64(20)]),
+            ],
+        )
+        .unwrap();
+
+        let result = frame.eval("a + b").unwrap();
+        assert_eq!(result.values()[0], Scalar::Int64(11));
+        assert_eq!(result.values()[1], Scalar::Int64(22));
+    }
+
+    #[test]
+    fn query_extension_trait() {
+        use super::DataFrameExprExt;
+
+        let frame = fp_frame::DataFrame::from_dict(
+            &["x", "y"],
+            vec![
+                ("x", vec![Scalar::Int64(1), Scalar::Int64(5), Scalar::Int64(3)]),
+                ("y", vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)]),
+            ],
+        )
+        .unwrap();
+
+        let result = frame.query("x > 2 and y < 25").unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result.columns()["x"].values()[0], Scalar::Int64(5));
+    }
+
+    #[test]
+    fn eval_with_locals_extension_trait() {
+        use super::DataFrameExprExt;
+
+        let frame = fp_frame::DataFrame::from_dict(
+            &["val"],
+            vec![("val", vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)])],
+        )
+        .unwrap();
+
+        let locals = BTreeMap::from([("threshold".to_owned(), Scalar::Int64(15))]);
+        let result = frame.query_with_locals("val > @threshold", &locals).unwrap();
+        assert_eq!(result.len(), 2);
+    }
 }
