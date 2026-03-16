@@ -1278,6 +1278,54 @@ impl MultiIndex {
             names: new_names,
         })
     }
+
+    /// Reorder levels according to the given order.
+    ///
+    /// Matches `pd.MultiIndex.reorder_levels(order)`.
+    /// `order` is a slice of level indices specifying the new order.
+    /// Must contain each level index exactly once.
+    pub fn reorder_levels(&self, order: &[usize]) -> Result<Self, IndexError> {
+        if order.len() != self.nlevels() {
+            return Err(IndexError::LengthMismatch {
+                expected: self.nlevels(),
+                actual: order.len(),
+                context: "reorder_levels: order length must match nlevels".into(),
+            });
+        }
+
+        // Validate all indices are in range and unique.
+        let mut seen = vec![false; self.nlevels()];
+        for &idx in order {
+            if idx >= self.nlevels() {
+                return Err(IndexError::OutOfBounds {
+                    position: idx,
+                    length: self.nlevels(),
+                });
+            }
+            if seen[idx] {
+                return Err(IndexError::LengthMismatch {
+                    expected: self.nlevels(),
+                    actual: order.len(),
+                    context: format!("reorder_levels: duplicate level index {idx}"),
+                });
+            }
+            seen[idx] = true;
+        }
+
+        let new_levels: Vec<Vec<IndexLabel>> = order
+            .iter()
+            .map(|&idx| self.levels[idx].clone())
+            .collect();
+        let new_names: Vec<Option<String>> = order
+            .iter()
+            .map(|&idx| self.names[idx].clone())
+            .collect();
+
+        Ok(Self {
+            levels: new_levels,
+            names: new_names,
+        })
+    }
 }
 
 /// Result of `MultiIndex::droplevel` — either a MultiIndex (if 2+ levels remain)
@@ -2583,5 +2631,72 @@ mod tests {
         ])
         .unwrap();
         assert!(mi.get_tuple(1).is_none());
+    }
+
+    #[test]
+    fn multi_index_reorder_levels() {
+        let mi = MultiIndex::from_tuples(vec![
+            vec!["a".into(), 1_i64.into(), "x".into()],
+            vec!["b".into(), 2_i64.into(), "y".into()],
+        ])
+        .unwrap()
+        .set_names(vec![Some("letter".into()), Some("number".into()), Some("code".into())]);
+
+        // Reorder: [2, 0, 1] → code, letter, number.
+        let reordered = mi.reorder_levels(&[2, 0, 1]).unwrap();
+        assert_eq!(reordered.nlevels(), 3);
+        assert_eq!(
+            reordered.names(),
+            &[Some("code".into()), Some("letter".into()), Some("number".into())]
+        );
+
+        // First row should be ("x", "a", 1).
+        let tuple = reordered.get_tuple(0).unwrap();
+        assert_eq!(tuple[0], &IndexLabel::Utf8("x".into()));
+        assert_eq!(tuple[1], &IndexLabel::Utf8("a".into()));
+        assert_eq!(tuple[2], &IndexLabel::Int64(1));
+    }
+
+    #[test]
+    fn multi_index_reorder_levels_identity() {
+        let mi = MultiIndex::from_tuples(vec![
+            vec!["a".into(), 1_i64.into()],
+        ])
+        .unwrap();
+
+        // Identity reorder [0, 1] should be a no-op.
+        let same = mi.reorder_levels(&[0, 1]).unwrap();
+        assert_eq!(same, mi);
+    }
+
+    #[test]
+    fn multi_index_reorder_levels_wrong_length_errors() {
+        let mi = MultiIndex::from_tuples(vec![
+            vec!["a".into(), 1_i64.into()],
+        ])
+        .unwrap();
+
+        assert!(mi.reorder_levels(&[0]).is_err());
+        assert!(mi.reorder_levels(&[0, 1, 2]).is_err());
+    }
+
+    #[test]
+    fn multi_index_reorder_levels_duplicate_index_errors() {
+        let mi = MultiIndex::from_tuples(vec![
+            vec!["a".into(), 1_i64.into()],
+        ])
+        .unwrap();
+
+        assert!(mi.reorder_levels(&[0, 0]).is_err());
+    }
+
+    #[test]
+    fn multi_index_reorder_levels_out_of_bounds_errors() {
+        let mi = MultiIndex::from_tuples(vec![
+            vec!["a".into(), 1_i64.into()],
+        ])
+        .unwrap();
+
+        assert!(mi.reorder_levels(&[0, 5]).is_err());
     }
 }
