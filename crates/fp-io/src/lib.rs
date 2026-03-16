@@ -3275,4 +3275,182 @@ mod tests {
         let frame2 = super::read_feather_bytes(&bytes).unwrap();
         assert_eq!(frame2.index().len(), 3);
     }
+
+    // ── Adversarial parser tests (frankenpandas-yby) ─────────────────
+
+    #[test]
+    fn adversarial_csv_very_long_field() {
+        // A single field with >100K characters should parse without panic.
+        let long_val = "x".repeat(200_000);
+        let input = format!("col\n{long_val}\n");
+        let frame = read_csv_str(&input).expect("long field must parse");
+        assert_eq!(frame.index().len(), 1);
+        if let Scalar::Utf8(s) = &frame.column("col").unwrap().values()[0] {
+            assert_eq!(s.len(), 200_000);
+        } else {
+            panic!("expected Utf8 for long field");
+        }
+    }
+
+    #[test]
+    fn adversarial_csv_many_columns() {
+        // CSV with 1000 columns should parse correctly.
+        let ncols = 1000;
+        let headers: Vec<String> = (0..ncols).map(|i| format!("c{i}")).collect();
+        let mut csv = headers.join(",");
+        csv.push('\n');
+        let vals: Vec<String> = (0..ncols).map(|i| i.to_string()).collect();
+        csv.push_str(&vals.join(","));
+        csv.push('\n');
+
+        let frame = read_csv_str(&csv).expect("1000-column CSV must parse");
+        assert_eq!(frame.columns().len(), ncols);
+        assert_eq!(frame.index().len(), 1);
+    }
+
+    #[test]
+    fn adversarial_csv_empty_rows() {
+        // CSV with empty rows between data should handle gracefully.
+        // The csv crate skips truly empty records, but rows with the right
+        // number of empty fields produce null values.
+        let input = "a,b\n1,2\n,\n3,4\n";
+        let frame = read_csv_str(input).expect("parse");
+        assert_eq!(frame.index().len(), 3);
+        // Row 1 (index 1) has empty fields → null
+        assert!(frame.column("a").unwrap().values()[1].is_missing());
+    }
+
+    #[test]
+    fn adversarial_csv_field_with_newlines_in_quotes() {
+        // Embedded newlines in quoted fields must not break row boundaries.
+        let input = "msg\n\"line1\nline2\nline3\"\n\"single\"\n";
+        let frame = read_csv_str(input).expect("quoted newlines must parse");
+        assert_eq!(frame.index().len(), 2);
+    }
+
+    #[test]
+    fn adversarial_csv_header_only_no_data() {
+        let input = "x,y,z\n";
+        let frame = read_csv_str(input).expect("header-only must parse");
+        assert_eq!(frame.index().len(), 0);
+        assert_eq!(frame.columns().len(), 3);
+    }
+
+    #[test]
+    fn adversarial_json_deeply_nested_values() {
+        // JSON with nested objects as values should store them as strings.
+        let input = r#"[{"a":1,"b":{"nested":"value"}}]"#;
+        let frame = read_json_str(input, JsonOrient::Records).expect("nested JSON must parse");
+        assert_eq!(frame.index().len(), 1);
+        // The nested object becomes a Utf8 representation.
+        let b_val = &frame.column("b").unwrap().values()[0];
+        assert!(matches!(b_val, Scalar::Utf8(_)));
+    }
+
+    #[test]
+    fn adversarial_json_i64_max_value() {
+        // JSON with values at i64 boundary.
+        let input = format!(r#"[{{"v":{}}}]"#, i64::MAX);
+        let frame = read_json_str(&input, JsonOrient::Records).expect("i64::MAX must parse");
+        assert_eq!(frame.column("v").unwrap().values()[0], Scalar::Int64(i64::MAX));
+    }
+
+    #[test]
+    fn adversarial_json_i64_min_value() {
+        let input = format!(r#"[{{"v":{}}}]"#, i64::MIN);
+        let frame = read_json_str(&input, JsonOrient::Records).expect("i64::MIN must parse");
+        assert_eq!(frame.column("v").unwrap().values()[0], Scalar::Int64(i64::MIN));
+    }
+
+    #[test]
+    fn adversarial_json_float_special_values() {
+        // JSON doesn't natively support Infinity/NaN, but we should handle
+        // null gracefully.
+        let input = r#"[{"v":null},{"v":1.7976931348623157e+308}]"#;
+        let frame = read_json_str(input, JsonOrient::Records).expect("special floats must parse");
+        assert!(frame.column("v").unwrap().values()[0].is_missing());
+        // f64::MAX is approximately 1.7976931348623157e+308
+        if let Scalar::Float64(v) = frame.column("v").unwrap().values()[1] {
+            assert!(v.is_finite());
+        }
+    }
+
+    #[test]
+    fn adversarial_json_empty_records_array() {
+        let input = r#"[]"#;
+        let frame = read_json_str(input, JsonOrient::Records).expect("empty array must parse");
+        assert_eq!(frame.index().len(), 0);
+    }
+
+    #[test]
+    fn adversarial_json_empty_columns_object() {
+        let input = r#"{}"#;
+        let frame = read_json_str(input, JsonOrient::Columns).expect("empty object must parse");
+        assert_eq!(frame.index().len(), 0);
+        assert_eq!(frame.columns().len(), 0);
+    }
+
+    #[test]
+    fn adversarial_csv_unicode_values() {
+        // CSV with multi-byte UTF-8 characters in values.
+        let input = "name,emoji\n日本語,🎉\nрусский,🚀\n";
+        let frame = read_csv_str(input).expect("unicode CSV must parse");
+        assert_eq!(frame.index().len(), 2);
+        assert_eq!(
+            frame.column("name").unwrap().values()[0],
+            Scalar::Utf8("日本語".into())
+        );
+        assert_eq!(
+            frame.column("emoji").unwrap().values()[1],
+            Scalar::Utf8("🚀".into())
+        );
+    }
+
+    #[test]
+    fn adversarial_csv_single_column_no_trailing_newline() {
+        let input = "val\n42";
+        let frame = read_csv_str(input).expect("no trailing newline must parse");
+        assert_eq!(frame.index().len(), 1);
+        assert_eq!(frame.column("val").unwrap().values()[0], Scalar::Int64(42));
+    }
+
+    #[test]
+    fn adversarial_sql_large_batch_insert() {
+        // Insert 10K rows in a single write_sql call.
+        let n = 10_000;
+        let vals: Vec<Scalar> = (0..n).map(|i| Scalar::Int64(i as i64)).collect();
+        let df = fp_frame::DataFrame::from_dict(
+            &["x"],
+            vec![("x", vals)],
+        )
+        .unwrap();
+
+        let conn = make_sql_test_conn();
+        write_sql(&df, &conn, "big_table", SqlIfExists::Fail).unwrap();
+        let back = read_sql_table(&conn, "big_table").unwrap();
+        assert_eq!(back.index().len(), n);
+        assert_eq!(
+            back.column("x").unwrap().values()[n - 1],
+            Scalar::Int64((n - 1) as i64)
+        );
+    }
+
+    #[test]
+    fn adversarial_sql_column_name_with_spaces_rejected() {
+        // Column names with spaces are valid in SQL (quoted) but table names aren't
+        // in our validation. Column names go through quoting in INSERT/CREATE.
+        let df = fp_frame::DataFrame::from_dict(
+            &["has space"],
+            vec![("has space", vec![Scalar::Int64(1)])],
+        )
+        .unwrap();
+
+        let conn = make_sql_test_conn();
+        // This should work since column names are quoted.
+        let result = write_sql(&df, &conn, "test_spaces", SqlIfExists::Fail);
+        assert!(result.is_ok(), "columns with spaces should work: {:?}", result.err());
+
+        let back = read_sql_table(&conn, "test_spaces").unwrap();
+        assert!(back.column("has space").is_some());
+    }
 }
