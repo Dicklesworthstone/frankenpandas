@@ -255,8 +255,6 @@ fn e2e_step7_export_sql() {
 
 #[test]
 fn e2e_full_pipeline() {
-    use fp_expr::DataFrameExprExt;
-
     // 1. Read CSV.
     let trades = fp_io::read_csv_str(sample_trades_csv()).unwrap();
     assert_eq!(trades.index().len(), 8);
