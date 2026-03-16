@@ -666,6 +666,7 @@ dependencies = [
  "fp-types",
  "proptest",
  "raptorq",
+ "rusqlite",
  "serde",
  "serde_json",
  "serde_yaml",
