@@ -9918,6 +9918,191 @@ fn parse_datetime_string(s: &str, format: Option<&str>) -> Scalar {
     Scalar::Null(NullKind::NaT)
 }
 
+/// Convert a Series of strings or numbers to timedelta (duration) representations.
+///
+/// Matches `pd.to_timedelta(series)`. Parses various duration formats:
+///
+/// - "1 days 02:03:04" (pandas default timedelta string)
+/// - "02:03:04" (HH:MM:SS)
+/// - "5 days", "3 hours", "30 minutes", "45 seconds" (natural language)
+/// - Int64/Float64: interpreted as seconds
+///
+/// Returns a Series of Utf8 strings in "X days HH:MM:SS" normalized format.
+/// Missing/unparseable values become NaT.
+pub fn to_timedelta(series: &Series) -> Result<Series, FrameError> {
+    let mut converted = Vec::with_capacity(series.len());
+
+    for val in series.values() {
+        let result = match val {
+            Scalar::Null(_) => Scalar::Null(NullKind::NaT),
+            Scalar::Int64(secs) => format_timedelta_seconds(*secs as f64),
+            Scalar::Float64(secs) => {
+                if secs.is_nan() || secs.is_infinite() {
+                    Scalar::Null(NullKind::NaT)
+                } else {
+                    format_timedelta_seconds(*secs)
+                }
+            }
+            Scalar::Utf8(s) => parse_timedelta_string(s),
+            _ => Scalar::Null(NullKind::NaT),
+        };
+        converted.push(result);
+    }
+
+    Series::from_values(
+        series.name().to_owned(),
+        series.index().labels().to_vec(),
+        converted,
+    )
+}
+
+/// Parse a timedelta string into normalized format.
+fn parse_timedelta_string(s: &str) -> Scalar {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return Scalar::Null(NullKind::NaT);
+    }
+
+    // Try "X days HH:MM:SS" format.
+    if let Some(total_secs) = parse_pandas_timedelta(trimmed) {
+        return format_timedelta_seconds(total_secs);
+    }
+
+    // Try "HH:MM:SS" format.
+    if let Some(total_secs) = parse_hms(trimmed) {
+        return format_timedelta_seconds(total_secs);
+    }
+
+    // Try natural language: "5 days", "3 hours", "30 minutes", "45 seconds".
+    if let Some(total_secs) = parse_natural_duration(trimmed) {
+        return format_timedelta_seconds(total_secs);
+    }
+
+    Scalar::Null(NullKind::NaT)
+}
+
+/// Parse "X days HH:MM:SS" or "X days" format.
+fn parse_pandas_timedelta(s: &str) -> Option<f64> {
+    let parts: Vec<&str> = s.splitn(2, " days").collect();
+    if parts.len() == 2 {
+        let days: f64 = parts[0].trim().parse().ok()?;
+        let remainder = parts[1].trim();
+        if remainder.is_empty() {
+            return Some(days * 86400.0);
+        }
+        let hms_secs = parse_hms(remainder)?;
+        return Some(days * 86400.0 + hms_secs);
+    }
+    // Also handle "X day" (singular).
+    let parts: Vec<&str> = s.splitn(2, " day").collect();
+    if parts.len() == 2 {
+        let days: f64 = parts[0].trim().parse().ok()?;
+        let remainder = parts[1].trim().trim_start_matches('s').trim();
+        if remainder.is_empty() {
+            return Some(days * 86400.0);
+        }
+        let hms_secs = parse_hms(remainder)?;
+        return Some(days * 86400.0 + hms_secs);
+    }
+    None
+}
+
+/// Parse "HH:MM:SS" or "MM:SS" format to total seconds.
+fn parse_hms(s: &str) -> Option<f64> {
+    let parts: Vec<&str> = s.split(':').collect();
+    match parts.len() {
+        3 => {
+            let h: f64 = parts[0].trim().parse().ok()?;
+            let m: f64 = parts[1].trim().parse().ok()?;
+            let sec: f64 = parts[2].trim().parse().ok()?;
+            Some(h * 3600.0 + m * 60.0 + sec)
+        }
+        2 => {
+            let m: f64 = parts[0].trim().parse().ok()?;
+            let sec: f64 = parts[1].trim().parse().ok()?;
+            Some(m * 60.0 + sec)
+        }
+        _ => None,
+    }
+}
+
+/// Parse natural language durations: "5 days", "3 hours", "30 minutes", "45 seconds".
+fn parse_natural_duration(s: &str) -> Option<f64> {
+    let lower = s.to_lowercase();
+    let parts: Vec<&str> = lower.split_whitespace().collect();
+    if parts.len() != 2 {
+        return None;
+    }
+    let value: f64 = parts[0].parse().ok()?;
+    let unit = parts[1].trim_end_matches('s'); // normalize plural
+    match unit {
+        "day" => Some(value * 86400.0),
+        "hour" | "hr" | "h" => Some(value * 3600.0),
+        "minute" | "min" | "m" => Some(value * 60.0),
+        "second" | "sec" => Some(value),
+        _ => None,
+    }
+}
+
+/// Format total seconds as "X days HH:MM:SS" normalized timedelta string.
+fn format_timedelta_seconds(total_secs: f64) -> Scalar {
+    let negative = total_secs < 0.0;
+    let abs_secs = total_secs.abs();
+    let days = (abs_secs / 86400.0).floor() as i64;
+    let remaining = abs_secs % 86400.0;
+    let hours = (remaining / 3600.0).floor() as u32;
+    let minutes = ((remaining % 3600.0) / 60.0).floor() as u32;
+    let seconds = (remaining % 60.0).floor() as u32;
+
+    let sign = if negative { "-" } else { "" };
+    if days == 0 {
+        Scalar::Utf8(format!("{sign}{hours:02}:{minutes:02}:{seconds:02}"))
+    } else {
+        Scalar::Utf8(format!(
+            "{sign}{days} days {hours:02}:{minutes:02}:{seconds:02}"
+        ))
+    }
+}
+
+/// Convert a timedelta-like Series to total seconds as Float64.
+///
+/// Matches `pd.Series.dt.total_seconds()`. Parses the timedelta string
+/// format produced by `to_timedelta()` and returns the total duration
+/// in seconds.
+pub fn timedelta_total_seconds(series: &Series) -> Result<Series, FrameError> {
+    let mut result = Vec::with_capacity(series.len());
+
+    for val in series.values() {
+        let secs = match val {
+            Scalar::Utf8(s) => {
+                if let Some(total) = parse_pandas_timedelta(s) {
+                    Scalar::Float64(total)
+                } else if let Some(total) = parse_hms(s) {
+                    Scalar::Float64(total)
+                } else {
+                    Scalar::Null(NullKind::NaN)
+                }
+            }
+            Scalar::Int64(v) => Scalar::Float64(*v as f64),
+            Scalar::Float64(v) => {
+                if v.is_nan() {
+                    Scalar::Null(NullKind::NaN)
+                } else {
+                    Scalar::Float64(*v)
+                }
+            }
+            _ => Scalar::Null(NullKind::NaN),
+        };
+        result.push(secs);
+    }
+
+    Series::from_values(
+        series.name().to_owned(),
+        series.index().labels().to_vec(),
+        result,
+    )
+}
+
 /// Bin values into discrete intervals.
 ///
 /// Matches `pd.cut(series, bins)`. Creates equal-width bins from the
@@ -44474,6 +44659,122 @@ mod tests {
         let level1 = mi.get_level_values(1).unwrap();
         assert_eq!(level1.labels()[0], IndexLabel::Utf8("true".into()));
         assert_eq!(level1.labels()[1], IndexLabel::Utf8("false".into()));
+    }
+
+    // ── to_timedelta tests ──
+
+    #[test]
+    fn to_timedelta_hms_string() {
+        let s = Series::from_values(
+            "td",
+            vec![0_i64.into()],
+            vec![Scalar::Utf8("02:30:45".into())],
+        )
+        .unwrap();
+        let result = super::to_timedelta(&s).unwrap();
+        assert_eq!(result.values()[0], Scalar::Utf8("02:30:45".into()));
+    }
+
+    #[test]
+    fn to_timedelta_days_hms_string() {
+        let s = Series::from_values(
+            "td",
+            vec![0_i64.into()],
+            vec![Scalar::Utf8("3 days 04:15:30".into())],
+        )
+        .unwrap();
+        let result = super::to_timedelta(&s).unwrap();
+        assert_eq!(result.values()[0], Scalar::Utf8("3 days 04:15:30".into()));
+    }
+
+    #[test]
+    fn to_timedelta_days_only() {
+        let s = Series::from_values(
+            "td",
+            vec![0_i64.into()],
+            vec![Scalar::Utf8("5 days".into())],
+        )
+        .unwrap();
+        let result = super::to_timedelta(&s).unwrap();
+        assert_eq!(result.values()[0], Scalar::Utf8("5 days 00:00:00".into()));
+    }
+
+    #[test]
+    fn to_timedelta_natural_language() {
+        let s = Series::from_values(
+            "td",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("3 hours".into()),
+                Scalar::Utf8("30 minutes".into()),
+                Scalar::Utf8("45 seconds".into()),
+            ],
+        )
+        .unwrap();
+        let result = super::to_timedelta(&s).unwrap();
+        assert_eq!(result.values()[0], Scalar::Utf8("03:00:00".into()));
+        assert_eq!(result.values()[1], Scalar::Utf8("00:30:00".into()));
+        assert_eq!(result.values()[2], Scalar::Utf8("00:00:45".into()));
+    }
+
+    #[test]
+    fn to_timedelta_from_seconds_int() {
+        let s = Series::from_values(
+            "secs",
+            vec![0_i64.into()],
+            vec![Scalar::Int64(3661)], // 1h 1m 1s
+        )
+        .unwrap();
+        let result = super::to_timedelta(&s).unwrap();
+        assert_eq!(result.values()[0], Scalar::Utf8("01:01:01".into()));
+    }
+
+    #[test]
+    fn to_timedelta_from_seconds_large() {
+        let s = Series::from_values(
+            "secs",
+            vec![0_i64.into()],
+            vec![Scalar::Int64(90061)], // 1 day + 1h 1m 1s
+        )
+        .unwrap();
+        let result = super::to_timedelta(&s).unwrap();
+        assert_eq!(result.values()[0], Scalar::Utf8("1 days 01:01:01".into()));
+    }
+
+    #[test]
+    fn to_timedelta_null_produces_nat() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into()],
+            vec![Scalar::Null(NullKind::Null)],
+        )
+        .unwrap();
+        let result = super::to_timedelta(&s).unwrap();
+        assert!(result.values()[0].is_missing());
+    }
+
+    #[test]
+    fn timedelta_total_seconds_from_hms() {
+        let s = Series::from_values(
+            "td",
+            vec![0_i64.into()],
+            vec![Scalar::Utf8("01:30:00".into())],
+        )
+        .unwrap();
+        let result = super::timedelta_total_seconds(&s).unwrap();
+        assert_eq!(result.values()[0], Scalar::Float64(5400.0));
+    }
+
+    #[test]
+    fn timedelta_total_seconds_from_days_hms() {
+        let s = Series::from_values(
+            "td",
+            vec![0_i64.into()],
+            vec![Scalar::Utf8("2 days 03:00:00".into())],
+        )
+        .unwrap();
+        let result = super::timedelta_total_seconds(&s).unwrap();
+        assert_eq!(result.values()[0], Scalar::Float64(183600.0)); // 2*86400 + 3*3600
     }
 
     // ── to_datetime tests ──
