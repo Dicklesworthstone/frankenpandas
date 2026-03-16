@@ -9796,6 +9796,128 @@ pub fn to_numeric(series: &Series) -> Result<Series, FrameError> {
     )
 }
 
+/// Convert a Series of strings or integers to normalized ISO 8601 datetime strings.
+///
+/// Matches `pd.to_datetime(series)`. Since FrankenPandas stores datetimes as
+/// Utf8 (ISO 8601 strings), this function normalizes various input formats:
+///
+/// - ISO 8601: "2024-01-15", "2024-01-15T10:30:00", "2024-01-15 10:30:00"
+/// - Date-only with slashes: "2024/01/15", "01/15/2024"
+/// - Epoch seconds (Int64): Unix timestamp integers
+/// - Epoch milliseconds (Int64 > 1e11): Auto-detected as ms
+///
+/// Optional `format` parameter provides explicit format string (subset of
+/// strftime: `%Y`, `%m`, `%d`, `%H`, `%M`, `%S`).
+///
+/// Missing/unparseable values become `Null`.
+pub fn to_datetime(series: &Series) -> Result<Series, FrameError> {
+    to_datetime_with_format(series, None)
+}
+
+/// Convert to datetime with an explicit format string.
+///
+/// Matches `pd.to_datetime(series, format=...)`.
+pub fn to_datetime_with_format(
+    series: &Series,
+    format: Option<&str>,
+) -> Result<Series, FrameError> {
+    let mut converted = Vec::with_capacity(series.len());
+
+    for val in series.values() {
+        let result = match val {
+            Scalar::Null(_) => Scalar::Null(NullKind::NaT),
+            Scalar::Utf8(s) => parse_datetime_string(s, format),
+            Scalar::Int64(epoch) => {
+                // Auto-detect: values > 1e11 are likely milliseconds, else seconds.
+                let secs = if epoch.unsigned_abs() > 100_000_000_000 {
+                    *epoch / 1000
+                } else {
+                    *epoch
+                };
+                match DateTime::from_timestamp(secs, 0) {
+                    Some(dt) => Scalar::Utf8(dt.format("%Y-%m-%d %H:%M:%S").to_string()),
+                    None => Scalar::Null(NullKind::NaT),
+                }
+            }
+            Scalar::Float64(v) => {
+                if v.is_nan() || v.is_infinite() {
+                    Scalar::Null(NullKind::NaT)
+                } else {
+                    let secs = *v as i64;
+                    match DateTime::from_timestamp(secs, 0) {
+                        Some(dt) => Scalar::Utf8(dt.format("%Y-%m-%d %H:%M:%S").to_string()),
+                        None => Scalar::Null(NullKind::NaT),
+                    }
+                }
+            }
+            _ => Scalar::Null(NullKind::NaT),
+        };
+        converted.push(result);
+    }
+
+    Series::from_values(
+        series.name().to_owned(),
+        series.index().labels().to_vec(),
+        converted,
+    )
+}
+
+/// Parse a datetime string in various common formats.
+fn parse_datetime_string(s: &str, format: Option<&str>) -> Scalar {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return Scalar::Null(NullKind::NaT);
+    }
+
+    // If explicit format is provided, use it.
+    if let Some(fmt) = format {
+        return match NaiveDateTime::parse_from_str(trimmed, fmt) {
+            Ok(dt) => Scalar::Utf8(dt.format("%Y-%m-%d %H:%M:%S").to_string()),
+            Err(_) => {
+                // Try as date-only.
+                match NaiveDate::parse_from_str(trimmed, fmt) {
+                    Ok(d) => Scalar::Utf8(format!("{} 00:00:00", d.format("%Y-%m-%d"))),
+                    Err(_) => Scalar::Null(NullKind::NaT),
+                }
+            }
+        };
+    }
+
+    // Auto-detect format: try common patterns in order.
+
+    // ISO 8601 with T separator: 2024-01-15T10:30:00
+    if let Ok(dt) = NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%dT%H:%M:%S") {
+        return Scalar::Utf8(dt.format("%Y-%m-%d %H:%M:%S").to_string());
+    }
+
+    // ISO 8601 with space: 2024-01-15 10:30:00
+    if let Ok(dt) = NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%d %H:%M:%S") {
+        return Scalar::Utf8(dt.format("%Y-%m-%d %H:%M:%S").to_string());
+    }
+
+    // Date only: 2024-01-15
+    if let Ok(d) = NaiveDate::parse_from_str(trimmed, "%Y-%m-%d") {
+        return Scalar::Utf8(format!("{} 00:00:00", d.format("%Y-%m-%d")));
+    }
+
+    // Date with slashes: 2024/01/15
+    if let Ok(d) = NaiveDate::parse_from_str(trimmed, "%Y/%m/%d") {
+        return Scalar::Utf8(format!("{} 00:00:00", d.format("%Y-%m-%d")));
+    }
+
+    // US date format: 01/15/2024 (MM/DD/YYYY)
+    if let Ok(d) = NaiveDate::parse_from_str(trimmed, "%m/%d/%Y") {
+        return Scalar::Utf8(format!("{} 00:00:00", d.format("%Y-%m-%d")));
+    }
+
+    // Already normalized or has timezone info - return as-is if it looks like a datetime.
+    if trimmed.len() >= 10 && trimmed.as_bytes().get(4) == Some(&b'-') {
+        return Scalar::Utf8(trimmed.to_owned());
+    }
+
+    Scalar::Null(NullKind::NaT)
+}
+
 /// Bin values into discrete intervals.
 ///
 /// Matches `pd.cut(series, bins)`. Creates equal-width bins from the
@@ -44352,5 +44474,157 @@ mod tests {
         let level1 = mi.get_level_values(1).unwrap();
         assert_eq!(level1.labels()[0], IndexLabel::Utf8("true".into()));
         assert_eq!(level1.labels()[1], IndexLabel::Utf8("false".into()));
+    }
+
+    // ── to_datetime tests ──
+
+    #[test]
+    fn to_datetime_iso8601_date() {
+        let s = Series::from_values(
+            "dates",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![
+                Scalar::Utf8("2024-01-15".into()),
+                Scalar::Utf8("2024-06-30".into()),
+            ],
+        )
+        .unwrap();
+        let result = super::to_datetime(&s).unwrap();
+        assert_eq!(result.values()[0], Scalar::Utf8("2024-01-15 00:00:00".into()));
+        assert_eq!(result.values()[1], Scalar::Utf8("2024-06-30 00:00:00".into()));
+    }
+
+    #[test]
+    fn to_datetime_iso8601_with_time() {
+        let s = Series::from_values(
+            "ts",
+            vec![0_i64.into()],
+            vec![Scalar::Utf8("2024-01-15T10:30:45".into())],
+        )
+        .unwrap();
+        let result = super::to_datetime(&s).unwrap();
+        assert_eq!(result.values()[0], Scalar::Utf8("2024-01-15 10:30:45".into()));
+    }
+
+    #[test]
+    fn to_datetime_space_separator() {
+        let s = Series::from_values(
+            "ts",
+            vec![0_i64.into()],
+            vec![Scalar::Utf8("2024-01-15 10:30:45".into())],
+        )
+        .unwrap();
+        let result = super::to_datetime(&s).unwrap();
+        assert_eq!(result.values()[0], Scalar::Utf8("2024-01-15 10:30:45".into()));
+    }
+
+    #[test]
+    fn to_datetime_slash_date() {
+        let s = Series::from_values(
+            "d",
+            vec![0_i64.into()],
+            vec![Scalar::Utf8("2024/03/25".into())],
+        )
+        .unwrap();
+        let result = super::to_datetime(&s).unwrap();
+        assert_eq!(result.values()[0], Scalar::Utf8("2024-03-25 00:00:00".into()));
+    }
+
+    #[test]
+    fn to_datetime_us_date_format() {
+        let s = Series::from_values(
+            "d",
+            vec![0_i64.into()],
+            vec![Scalar::Utf8("01/15/2024".into())],
+        )
+        .unwrap();
+        let result = super::to_datetime(&s).unwrap();
+        assert_eq!(result.values()[0], Scalar::Utf8("2024-01-15 00:00:00".into()));
+    }
+
+    #[test]
+    fn to_datetime_epoch_seconds() {
+        let s = Series::from_values(
+            "epoch",
+            vec![0_i64.into()],
+            vec![Scalar::Int64(1705312200)], // 2024-01-15 10:30:00 UTC
+        )
+        .unwrap();
+        let result = super::to_datetime(&s).unwrap();
+        if let Scalar::Utf8(dt_str) = &result.values()[0] {
+            assert!(dt_str.starts_with("2024-01-15"), "got: {dt_str}");
+        } else {
+            panic!("expected Utf8");
+        }
+    }
+
+    #[test]
+    fn to_datetime_epoch_milliseconds() {
+        let s = Series::from_values(
+            "epoch_ms",
+            vec![0_i64.into()],
+            vec![Scalar::Int64(1705312200000)], // same as above but ms
+        )
+        .unwrap();
+        let result = super::to_datetime(&s).unwrap();
+        if let Scalar::Utf8(dt_str) = &result.values()[0] {
+            assert!(dt_str.starts_with("2024-01-15"), "got: {dt_str}");
+        } else {
+            panic!("expected Utf8");
+        }
+    }
+
+    #[test]
+    fn to_datetime_null_produces_nat() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into()],
+            vec![Scalar::Null(NullKind::Null)],
+        )
+        .unwrap();
+        let result = super::to_datetime(&s).unwrap();
+        assert!(result.values()[0].is_missing());
+    }
+
+    #[test]
+    fn to_datetime_unparseable_produces_nat() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into()],
+            vec![Scalar::Utf8("not a date".into())],
+        )
+        .unwrap();
+        let result = super::to_datetime(&s).unwrap();
+        assert!(result.values()[0].is_missing());
+    }
+
+    #[test]
+    fn to_datetime_with_format_string() {
+        let s = Series::from_values(
+            "d",
+            vec![0_i64.into()],
+            vec![Scalar::Utf8("15-01-2024".into())],
+        )
+        .unwrap();
+        let result = super::to_datetime_with_format(&s, Some("%d-%m-%Y")).unwrap();
+        assert_eq!(result.values()[0], Scalar::Utf8("2024-01-15 00:00:00".into()));
+    }
+
+    #[test]
+    fn to_datetime_mixed_types() {
+        let s = Series::from_values(
+            "mixed",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("2024-01-01".into()),
+                Scalar::Null(NullKind::Null),
+                Scalar::Utf8("invalid".into()),
+            ],
+        )
+        .unwrap();
+        let result = super::to_datetime(&s).unwrap();
+        assert_eq!(result.values()[0], Scalar::Utf8("2024-01-01 00:00:00".into()));
+        assert!(result.values()[1].is_missing());
+        assert!(result.values()[2].is_missing());
     }
 }
