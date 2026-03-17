@@ -20347,6 +20347,70 @@ impl DataFrameGroupBy<'_> {
         })
     }
 
+    /// Named aggregation: each tuple is `(output_name, input_column, function)`.
+    ///
+    /// Matches `df.groupby('g').agg(out=('col', 'func'))` in pandas.
+    /// The output DataFrame has columns named by `output_name`, computed
+    /// by applying `function` to `input_column` within each group.
+    ///
+    /// Example:
+    /// ```rust,ignore
+    /// let result = df.groupby(&["region"]).unwrap().agg_named(&[
+    ///     ("total_sales", "revenue", "sum"),
+    ///     ("avg_price", "price", "mean"),
+    ///     ("num_orders", "order_id", "count"),
+    /// ]).unwrap();
+    /// ```
+    pub fn agg_named(
+        &self,
+        specs: &[(&str, &str, &str)],
+    ) -> Result<DataFrame, FrameError> {
+        let (group_order, groups) = self.build_groups();
+        let n_groups = group_order.len();
+
+        let mut labels = Vec::with_capacity(n_groups);
+        for gkey in &group_order {
+            let first_row = groups[gkey][0];
+            labels.push(self.group_key_label(first_row));
+        }
+
+        let mut result_cols = BTreeMap::new();
+        let mut col_order = Vec::new();
+
+        for &(output_name, input_col, func_name) in specs {
+            if self.by.contains(&input_col.to_owned()) {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "agg_named: cannot aggregate group-by key column '{input_col}'"
+                )));
+            }
+
+            let col = self.df.columns.get(input_col).ok_or_else(|| {
+                FrameError::CompatibilityRejected(format!(
+                    "agg_named: column '{input_col}' not found"
+                ))
+            })?;
+
+            let mut agg_vals = Vec::with_capacity(n_groups);
+            for gkey in &group_order {
+                let row_indices = &groups[gkey];
+                let group_vals: Vec<Scalar> = row_indices
+                    .iter()
+                    .map(|&i| col.values()[i].clone())
+                    .collect();
+                agg_vals.push(Self::apply_agg_func(func_name, &group_vals)?);
+            }
+
+            result_cols.insert(output_name.to_owned(), Column::from_values(agg_vals)?);
+            col_order.push(output_name.to_owned());
+        }
+
+        Ok(DataFrame {
+            columns: result_cols,
+            column_order: col_order,
+            index: Index::new(labels),
+        })
+    }
+
     /// Apply a named aggregation function to a group's values.
     fn apply_agg_func(func_name: &str, group_vals: &[Scalar]) -> Result<Scalar, FrameError> {
         match func_name {
@@ -44947,5 +45011,107 @@ mod tests {
         assert_eq!(result.values()[0], Scalar::Utf8("2024-01-01 00:00:00".into()));
         assert!(result.values()[1].is_missing());
         assert!(result.values()[2].is_missing());
+    }
+
+    // ── agg_named tests ──
+
+    #[test]
+    fn groupby_agg_named_basic() {
+        let df = DataFrame::from_dict(
+            &["region", "revenue", "qty"],
+            vec![
+                ("region", vec![
+                    Scalar::Utf8("east".into()), Scalar::Utf8("west".into()),
+                    Scalar::Utf8("east".into()), Scalar::Utf8("west".into()),
+                ]),
+                ("revenue", vec![
+                    Scalar::Float64(100.0), Scalar::Float64(200.0),
+                    Scalar::Float64(150.0), Scalar::Float64(250.0),
+                ]),
+                ("qty", vec![
+                    Scalar::Int64(10), Scalar::Int64(20),
+                    Scalar::Int64(15), Scalar::Int64(25),
+                ]),
+            ],
+        )
+        .unwrap();
+
+        let result = df
+            .groupby(&["region"])
+            .unwrap()
+            .agg_named(&[
+                ("total_revenue", "revenue", "sum"),
+                ("avg_qty", "qty", "mean"),
+            ])
+            .unwrap();
+
+        assert_eq!(result.index().len(), 2);
+        // Output columns should be named by the output_name, not input_col.
+        assert!(result.column("total_revenue").is_some());
+        assert!(result.column("avg_qty").is_some());
+        assert!(result.column("revenue").is_none());
+        assert!(result.column("qty").is_none());
+    }
+
+    #[test]
+    fn groupby_agg_named_values() {
+        let df = DataFrame::from_dict(
+            &["g", "v"],
+            vec![
+                ("g", vec![Scalar::Utf8("a".into()), Scalar::Utf8("a".into()), Scalar::Utf8("b".into())]),
+                ("v", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
+            ],
+        )
+        .unwrap();
+
+        let result = df
+            .groupby(&["g"])
+            .unwrap()
+            .agg_named(&[
+                ("v_sum", "v", "sum"),
+                ("v_count", "v", "count"),
+            ])
+            .unwrap();
+
+        // Group "a": sum=30, count=2. Group "b": sum=30, count=1.
+        assert_eq!(result.index().len(), 2);
+        assert!(result.column("v_sum").is_some());
+        assert!(result.column("v_count").is_some());
+    }
+
+    #[test]
+    fn groupby_agg_named_missing_column_errors() {
+        let df = DataFrame::from_dict(
+            &["g", "v"],
+            vec![
+                ("g", vec![Scalar::Utf8("a".into())]),
+                ("v", vec![Scalar::Int64(1)]),
+            ],
+        )
+        .unwrap();
+
+        let err = df
+            .groupby(&["g"])
+            .unwrap()
+            .agg_named(&[("out", "nonexistent", "sum")]);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn groupby_agg_named_key_column_errors() {
+        let df = DataFrame::from_dict(
+            &["g", "v"],
+            vec![
+                ("g", vec![Scalar::Utf8("a".into())]),
+                ("v", vec![Scalar::Int64(1)]),
+            ],
+        )
+        .unwrap();
+
+        let err = df
+            .groupby(&["g"])
+            .unwrap()
+            .agg_named(&[("out", "g", "sum")]);
+        assert!(err.is_err());
     }
 }
