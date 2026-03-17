@@ -879,6 +879,93 @@ pub fn write_json(frame: &DataFrame, path: &Path, orient: JsonOrient) -> Result<
     Ok(())
 }
 
+// ── JSONL (JSON Lines) I/O ──────────────────────────────────────────────
+
+/// Write a DataFrame to JSONL (JSON Lines) format.
+///
+/// Matches `pd.DataFrame.to_json(orient='records', lines=True)`.
+/// Each row is written as a separate JSON object on its own line,
+/// with no enclosing array. This format is standard for streaming
+/// data pipelines and log processing.
+pub fn write_jsonl_string(frame: &DataFrame) -> Result<String, IoError> {
+    let headers: Vec<String> = frame.column_names().into_iter().cloned().collect();
+    let row_count = frame.index().len();
+
+    let mut lines = Vec::with_capacity(row_count);
+    for row_idx in 0..row_count {
+        let mut obj = serde_json::Map::new();
+        for name in &headers {
+            let val = frame
+                .column(name)
+                .and_then(|c| c.value(row_idx))
+                .map(scalar_to_json)
+                .unwrap_or(serde_json::Value::Null);
+            obj.insert(name.clone(), val);
+        }
+        lines.push(serde_json::to_string(&serde_json::Value::Object(obj))?);
+    }
+
+    Ok(lines.join("\n"))
+}
+
+/// Read a DataFrame from JSONL (JSON Lines) format.
+///
+/// Matches `pd.read_json(input, lines=True)`.
+/// Each line must be a valid JSON object with the same keys.
+pub fn read_jsonl_str(input: &str) -> Result<DataFrame, IoError> {
+    let mut all_rows: Vec<serde_json::Map<String, serde_json::Value>> = Vec::new();
+
+    for line in input.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let parsed: serde_json::Value = serde_json::from_str(trimmed)?;
+        let obj = parsed
+            .as_object()
+            .ok_or_else(|| IoError::JsonFormat("JSONL: each line must be a JSON object".into()))?;
+        all_rows.push(obj.clone());
+    }
+
+    if all_rows.is_empty() {
+        return DataFrame::new(Index::new(Vec::new()), BTreeMap::new()).map_err(IoError::Frame);
+    }
+
+    // Collect column names from first row (preserving insertion order via BTreeMap keys).
+    let col_names: Vec<String> = all_rows[0].keys().cloned().collect();
+    let mut columns: Vec<Vec<Scalar>> = col_names.iter().map(|_| Vec::with_capacity(all_rows.len())).collect();
+
+    for row in &all_rows {
+        for (col_idx, name) in col_names.iter().enumerate() {
+            let val = row.get(name).unwrap_or(&serde_json::Value::Null);
+            columns[col_idx].push(json_value_to_scalar(val));
+        }
+    }
+
+    let mut out_columns = BTreeMap::new();
+    let mut column_order = Vec::new();
+    for (name, values) in col_names.into_iter().zip(columns) {
+        out_columns.insert(name.clone(), Column::from_values(values)?);
+        column_order.push(name);
+    }
+
+    let index = Index::from_i64((0..all_rows.len() as i64).collect());
+    Ok(DataFrame::new_with_column_order(index, out_columns, column_order)?)
+}
+
+/// Write a DataFrame to a JSONL file.
+pub fn write_jsonl(frame: &DataFrame, path: &Path) -> Result<(), IoError> {
+    let content = write_jsonl_string(frame)?;
+    std::fs::write(path, content)?;
+    Ok(())
+}
+
+/// Read a DataFrame from a JSONL file.
+pub fn read_jsonl(path: &Path) -> Result<DataFrame, IoError> {
+    let content = std::fs::read_to_string(path)?;
+    read_jsonl_str(&content)
+}
+
 // ── Parquet I/O ─────────────────────────────────────────────────────────────
 
 /// Convert an fp-types DType to an Arrow DataType.
@@ -1816,6 +1903,11 @@ pub trait DataFrameIoExt {
     /// Serialize this DataFrame to Excel (.xlsx) bytes in memory.
     fn to_excel_bytes(&self) -> Result<Vec<u8>, IoError>;
 
+    /// Write this DataFrame to a JSONL file (one JSON object per line).
+    ///
+    /// Matches `pd.DataFrame.to_json(path, orient='records', lines=True)`.
+    fn to_jsonl_file(&self, path: &Path) -> Result<(), IoError>;
+
     /// Write this DataFrame to an Arrow IPC (Feather v2) file.
     ///
     /// Matches `pd.DataFrame.to_feather(path)`.
@@ -1858,6 +1950,10 @@ impl DataFrameIoExt for DataFrame {
 
     fn to_excel_bytes(&self) -> Result<Vec<u8>, IoError> {
         write_excel_bytes(self)
+    }
+
+    fn to_jsonl_file(&self, path: &Path) -> Result<(), IoError> {
+        write_jsonl(self, path)
     }
 
     fn to_feather_file(&self, path: &Path) -> Result<(), IoError> {
@@ -3460,6 +3556,91 @@ mod tests {
         };
         let frame = read_csv_with_options(input, &opts).expect("parse");
         assert_eq!(frame.index().len(), 0);
+    }
+
+    // ── JSONL tests (frankenpandas-sue) ──────────────────────────────
+
+    #[test]
+    fn jsonl_write_read_roundtrip() {
+        let frame = make_test_dataframe();
+        let jsonl = super::write_jsonl_string(&frame).expect("JSONL write failed");
+
+        // Each line should be a valid JSON object.
+        let line_count = jsonl.lines().count();
+        assert_eq!(line_count, 3, "3 rows = 3 lines");
+
+        let back = super::read_jsonl_str(&jsonl).expect("JSONL read failed");
+        assert_eq!(back.index().len(), 3);
+        assert_eq!(
+            back.column("ints").unwrap().values()[0],
+            Scalar::Int64(10)
+        );
+        assert_eq!(
+            back.column("names").unwrap().values()[2],
+            Scalar::Utf8("carol".into())
+        );
+    }
+
+    #[test]
+    fn jsonl_each_line_is_valid_json() {
+        let frame = make_test_dataframe();
+        let jsonl = super::write_jsonl_string(&frame).unwrap();
+
+        for (i, line) in jsonl.lines().enumerate() {
+            let parsed: serde_json::Value =
+                serde_json::from_str(line).unwrap_or_else(|e| panic!("line {i} invalid JSON: {e}"));
+            assert!(parsed.is_object(), "line {i} must be a JSON object");
+        }
+    }
+
+    #[test]
+    fn jsonl_with_nulls() {
+        use fp_types::DType;
+
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            "v".to_string(),
+            Column::new(
+                DType::Float64,
+                vec![Scalar::Float64(1.0), Scalar::Null(NullKind::NaN), Scalar::Float64(3.0)],
+            )
+            .unwrap(),
+        );
+        let labels = vec![
+            IndexLabel::Int64(0),
+            IndexLabel::Int64(1),
+            IndexLabel::Int64(2),
+        ];
+        let frame = DataFrame::new_with_column_order(
+            Index::new(labels),
+            columns,
+            vec!["v".to_string()],
+        )
+        .unwrap();
+
+        let jsonl = super::write_jsonl_string(&frame).unwrap();
+        let back = super::read_jsonl_str(&jsonl).unwrap();
+        assert!(back.column("v").unwrap().values()[1].is_missing());
+    }
+
+    #[test]
+    fn jsonl_empty_input() {
+        let back = super::read_jsonl_str("").expect("empty JSONL must parse");
+        assert_eq!(back.index().len(), 0);
+    }
+
+    #[test]
+    fn jsonl_blank_lines_skipped() {
+        let input = "{\"a\":1}\n\n{\"a\":2}\n\n";
+        let back = super::read_jsonl_str(input).expect("JSONL with blanks must parse");
+        assert_eq!(back.index().len(), 2);
+    }
+
+    #[test]
+    fn jsonl_non_object_line_errors() {
+        let input = "{\"a\":1}\n[1,2,3]\n";
+        let err = super::read_jsonl_str(input);
+        assert!(err.is_err());
     }
 
     #[test]
