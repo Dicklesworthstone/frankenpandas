@@ -18,10 +18,10 @@
 pub use fp_types::{DType, NullKind, Scalar};
 pub use fp_types::{cast_scalar, common_dtype, infer_dtype, isna, notna};
 
-pub use fp_columnar::{ArithmeticOp, Column, ComparisonOp, ValidityMask};
+pub use fp_columnar::{ArithmeticOp, Column, ColumnError, ComparisonOp, ValidityMask};
 
 pub use fp_index::{
-    AlignMode, AlignmentPlan, Index, IndexLabel, MultiAlignmentPlan, MultiIndex,
+    AlignMode, AlignmentPlan, Index, IndexError, IndexLabel, MultiAlignmentPlan, MultiIndex,
     MultiIndexOrIndex,
 };
 
@@ -61,18 +61,20 @@ pub use fp_io::{
     read_ipc_stream_bytes, write_ipc_stream_bytes,
     // SQL
     SqlIfExists, read_sql, read_sql_table, write_sql,
+    // Error type
+    IoError,
     // Extension trait
     DataFrameIoExt,
 };
 
 // ── Expression engine ───────────────────────────────────────────────────
 
-pub use fp_expr::DataFrameExprExt;
+pub use fp_expr::{DataFrameExprExt, ExprError};
 
 // ── Join/merge ──────────────────────────────────────────────────────────
 
 pub use fp_join::{
-    AsofDirection, DataFrameMergeExt, JoinType, MergedDataFrame,
+    AsofDirection, DataFrameMergeExt, JoinError, JoinType, MergedDataFrame,
     join_series, merge_asof, merge_dataframes_on,
 };
 
@@ -90,7 +92,7 @@ pub use fp_runtime::{EvidenceLedger, RuntimePolicy};
 pub mod prelude {
     pub use crate::{
         // Core types
-        DType, DataFrame, Index, IndexLabel, MultiIndex, Scalar, Series,
+        Column, DType, DataFrame, Index, IndexLabel, MultiIndex, NullKind, Scalar, Series,
         // IO
         read_csv_str, read_json_str, read_jsonl_str,
         read_feather_bytes, write_feather_bytes,
