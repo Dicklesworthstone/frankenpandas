@@ -80,34 +80,34 @@ AACE is a core identity constraint, not a best-effort optimization. pandas' alig
 ## Architecture
 
 ```
-                    ┌─────────────────────┐
-                    │   frankenpandas      │  ← Unified facade crate
-                    │   (prelude re-exports)│
-                    └────────┬────────────┘
-                             │
-        ┌────────────────────┼────────────────────┐
-        ▼                    ▼                     ▼
-   ┌─────────┐      ┌──────────────┐      ┌────────────┐
-   │ fp-expr  │      │   fp-frame   │      │   fp-io    │
-   │ eval()   │      │ DataFrame    │      │ 7 formats  │
-   │ query()  │      │ Series       │      │ CSV/JSON/  │
-   └────┬─────┘      │ Categorical  │      │ JSONL/     │
-        │            │ MultiIndex   │      │ Parquet/   │
-        ▼            └──────┬───────┘      │ Excel/SQL/ │
-   ┌──────────┐             │              │ Feather    │
-   │fp-runtime│      ┌──────┼──────┐       └────────────┘
-   │ Policy   │      ▼      ▼      ▼
-   │ Ledger   │  fp-index fp-groupby fp-join
-   └──────────┘  alignment  arena-   merge_asof
-                 planning   backed   cross join
+                  ┌────────────────────────┐
+                  │     frankenpandas       │  ← Unified facade crate
+                  │   (prelude re-exports)  │
+                  └───────────┬────────────┘
+                              │
+       ┌──────────────────────┼──────────────────────┐
+       ▼                      ▼                      ▼
+  ┌──────────┐      ┌────────────────┐      ┌──────────────┐
+  │ fp-expr   │      │   fp-frame     │      │    fp-io     │
+  │ eval()    │      │ DataFrame      │      │  7 formats   │
+  │ query()   │      │ Series         │      │  CSV/JSON/   │
+  └─────┬─────┘      │ Categorical    │      │  JSONL/      │
+        │            │ MultiIndex     │      │  Parquet/    │
+        ▼            └───────┬────────┘      │  Excel/SQL/  │
+  ┌──────────┐               │               │  Feather     │
+  │fp-runtime│        ┌──────┼──────┐        └──────────────┘
+  │ Policy   │        ▼      ▼      ▼
+  │ Ledger   │   fp-index fp-groupby fp-join
+  └──────────┘   alignment  arena-   merge_asof
+                  planning  backed   cross join
                             agg
-        ┌────────────────────┘
-        ▼
-   ┌───────────┐      ┌──────────────┐
-   │fp-columnar│      │  fp-types     │
-   │ Column    │      │ Scalar, DType │
-   │ ValidMask │      │ NaN/NaT/Null  │
-   └───────────┘      └──────────────┘
+       ┌────────────────────┘
+       ▼
+  ┌────────────┐      ┌───────────────┐
+  │ fp-columnar │      │   fp-types    │
+  │ Column      │      │ Scalar, DType │
+  │ ValidMask   │      │ NaN/NaT/Null  │
+  └────────────┘      └───────────────┘
 ```
 
 **12 workspace crates**, 84,000+ lines of Rust, 788 public functions.
@@ -280,19 +280,19 @@ For multi-way alignment (e.g., `DataFrame.from_series([s1, s2, s3])`), a leapfro
 The GroupBy engine automatically selects the fastest execution path based on key cardinality and memory budget:
 
 ```
-                         ┌──────────────────────┐
-                         │  All keys Int64 AND   │
-                         │  key range ≤ 65,536?  │
-                         └───────┬───────────────┘
-                            Yes  │        No
-                    ┌────────────┘        └─────────┐
-                    ▼                               ▼
-          ┌─────────────────┐             ┌─────────────────┐
-          │ Dense Int64 Path │             │ HashMap Generic  │
-          │ O(1) array index │             │ Path (fallback)  │
-          │ Pre-alloc by key │             │ (source_idx,sum) │
-          │ range: max-min   │             │ pairs, no clone  │
-          └─────────────────┘             └─────────────────┘
+                       ┌───────────────────────┐
+                       │  All keys Int64 AND    │
+                       │  key range ≤ 65,536?   │
+                       └───────────┬────────────┘
+                          Yes      │       No
+                    ┌──────────────┘       └──────────┐
+                    ▼                                  ▼
+          ┌──────────────────┐             ┌──────────────────┐
+          │ Dense Int64 Path  │             │ HashMap Generic   │
+          │ O(1) array index  │             │ Path (fallback)   │
+          │ Pre-alloc by key  │             │ (source_idx, sum) │
+          │ range: max-min    │             │ pairs, no clone   │
+          └──────────────────┘             └──────────────────┘
 ```
 
 **Path 1, Dense Int64:** When all group keys are integers spanning ≤ 65,536 values, pre-allocates a dense array indexed directly by `key - min_key`. O(1) per-element grouping with zero hash overhead. Used for common patterns like grouping by year, month, category ID.
@@ -1322,29 +1322,29 @@ let above = df.query_with_locals("value > @threshold", &locals)?;
 The conformance system is a differential testing framework that verifies FrankenPandas output against the actual pandas library:
 
 ```
-                  ┌──────────────┐
-                  │ Fixture JSON  │  ← Input DataFrame + operation
-                  └──────┬───────┘
+                  ┌───────────────┐
+                  │ Fixture JSON   │  ← Input DataFrame + operation
+                  └───────┬───────┘
+                          │
+              ┌───────────┴───────────┐
+              ▼                       ▼
+    ┌───────────────────┐   ┌─────────────────────┐
+    │ FrankenPandas      │   │ pandas Oracle        │
+    │ (Rust execution)   │   │ (Python subprocess)  │
+    └─────────┬─────────┘   └──────────┬──────────┘
+              │                        │
+              ▼                        ▼
+    ┌──────────────────────────────────────────┐
+    │          Parity Comparison                │
+    │  dtype match?  value match?  order?       │
+    └────────────────────┬─────────────────────┘
                          │
               ┌──────────┴──────────┐
               ▼                     ▼
-    ┌──────────────────┐   ┌────────────────────┐
-    │ FrankenPandas     │   │ pandas Oracle       │
-    │ (Rust execution)  │   │ (Python subprocess) │
-    └────────┬─────────┘   └────────┬────────────┘
-             │                      │
-             ▼                      ▼
-    ┌──────────────────────────────────────┐
-    │         Parity Comparison            │
-    │  dtype match? value match? order?    │
-    └──────────────┬───────────────────────┘
-                   │
-         ┌─────────┴─────────┐
-         ▼                   ▼
-  ┌──────────────┐   ┌───────────────┐
-  │ parity_report │   │ parity_gate   │
-  │ .json         │   │ _result.json  │
-  └──────────────┘   └───────────────┘
+    ┌────────────────┐   ┌────────────────┐
+    │ parity_report   │   │ parity_gate    │
+    │ .json           │   │ _result.json   │
+    └────────────────┘   └────────────────┘
 ```
 
 **Packet families** cover: series alignment (FP-P2C-001–003), join semantics (FP-P2C-004), groupby aggregates (FP-P2C-005, 011), concat (FP-P2C-006), null/NaN ops (FP-P2C-007), CSV round-trip (FP-P2C-008), dtype invariants (FP-P2C-009), filter/selection (FP-P2C-010), plus 30+ DataFrame-level packets (FP-P2D-014 through FP-P2D-055) covering merge, concat axis options, head/tail, loc/iloc, sort, constructor variants, and more.
