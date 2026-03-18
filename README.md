@@ -854,6 +854,226 @@ let merged = df1.merge_with_options(&df2, &["key"], JoinType::Inner,
 
 Regenerates conformance packet artifacts and fails closed if any parity report or gate is not green. 20+ packet suites covering alignment, join, groupby, concat, filter, CSV, dtype, null semantics, and more.
 
+## Missing Data Handling
+
+Complete pandas-compatible toolkit for detecting, filling, and removing missing values:
+
+### Detection
+
+```rust
+let nulls = series.isna()?;        // Bool Series: true where null/NaN
+let valid = series.notna()?;       // Bool Series: true where valid
+let count = series.count();        // Count of non-missing values
+let has   = series.hasnans();      // true if any missing values exist
+```
+
+DataFrame-level: `df.isna()`, `df.notna()`, `df.isnull()`, `df.notnull()` — all return DataFrames of Booleans. `first_valid_index()` and `last_valid_index()` scan for the first/last non-null row.
+
+### Filling
+
+```rust
+// Fill with constant
+let filled = series.fillna(&Scalar::Float64(0.0))?;
+
+// Forward fill (propagate last valid value)
+let ffilled = series.ffill(None)?;      // No limit
+let ffilled = series.ffill(Some(3))?;   // Fill at most 3 consecutive NaN
+
+// Backward fill (propagate next valid value)
+let bfilled = series.bfill(Some(2))?;
+
+// Linear interpolation
+let interp = series.interpolate()?;
+
+// Combine two DataFrames, filling nulls from `other`
+let combined = df.combine_first(&other)?;  // Like pd.DataFrame.combine_first
+
+// Update in place from another DataFrame
+let updated = df.update(&other)?;  // Non-null values in `other` overwrite `df`
+```
+
+DataFrame-level: `df.fillna(&scalar)`, `df.ffill(limit)`, `df.bfill(limit)`, `df.interpolate()`, `df.fillna_method("ffill")` / `df.fillna_method("bfill")`.
+
+### Dropping
+
+```rust
+// Drop rows with any null (default)
+let clean = df.dropna()?;
+
+// Drop rows where ALL values are null
+let clean = df.dropna_with_options(DropNaHow::All, None)?;
+
+// Drop rows with nulls in specific columns only
+let clean = df.dropna_with_options(DropNaHow::Any, Some(&["price".into(), "volume".into()]))?;
+
+// Drop rows with fewer than N non-null values (thresh)
+let clean = df.dropna_with_thresh(3)?;
+
+// Drop COLUMNS with nulls (axis=1)
+let clean = df.dropna_columns()?;
+```
+
+## Type Coercion and Conversion
+
+```rust
+// Cast Series to a specific dtype
+let float_col = int_series.astype(DType::Float64)?;
+
+// Cast DataFrame column
+let df2 = df.astype_column("price", DType::Float64)?;
+
+// Cast multiple columns at once
+let df2 = df.astype_columns(&[("id", DType::Utf8), ("score", DType::Float64)])?;
+
+// Auto-infer best dtypes (Utf8 → Int64/Float64 where possible)
+let df2 = df.convert_dtypes()?;
+let df2 = df.infer_objects()?;  // Same idea, pandas-compatible name
+
+// Coerce to numeric with NaN for failures
+let numeric = to_numeric(&string_series)?;
+```
+
+The `common_dtype()` function determines the result type when combining two columns. It follows pandas' promotion rules exactly: `Bool + Int64 → Int64`, `Int64 + Float64 → Float64`, `Utf8 + numeric → Error`.
+
+## Element-Wise Operations
+
+### Arithmetic
+
+```rust
+// Scalar operations
+let doubled = df.mul_scalar(2.0)?;
+let offset  = df.add_scalar(100.0)?;
+let pct     = df.div_scalar(total)?;
+let squared = df.pow_scalar(2.0)?;
+let modulo  = df.mod_scalar(10.0)?;
+let floored = df.floordiv_scalar(3.0)?;
+
+// DataFrame-to-DataFrame (with automatic index alignment)
+let diff  = df1.sub_df(&df2)?;         // Aligned subtraction
+let ratio = df1.div_df(&df2)?;         // Aligned division
+let product = df1.mul_df(&df2)?;       // Aligned multiplication
+
+// With fill_value for missing alignment positions
+let sum = df1.add_df_fill(&df2, 0.0)?;  // Fill missing with 0 before adding
+```
+
+### Cumulative and Sequential
+
+```rust
+let csum  = df.cumsum()?;      // Running sum
+let cprod = df.cumprod()?;     // Running product
+let cmax  = df.cummax()?;      // Running maximum
+let cmin  = df.cummin()?;      // Running minimum
+let delta = df.diff(1)?;       // First difference (n periods)
+let moved = df.shift(1)?;      // Shift values by n periods
+let pct   = df.pct_change()?;  // Percentage change
+```
+
+### Clipping and Rounding
+
+```rust
+let clipped = df.clip(0.0, 100.0)?;    // Clip to [0, 100]
+let lower   = df.clip_lower(0.0)?;     // Floor at 0
+let upper   = df.clip_upper(100.0)?;   // Cap at 100
+let rounded = df.round(2)?;            // Round to 2 decimal places
+let absolute = df.abs()?;              // Absolute value
+```
+
+### Replacement
+
+```rust
+// Replace specific values
+let cleaned = df.replace(&Scalar::Int64(-999), &Scalar::Null(NullKind::NaN))?;
+
+// Series: regex replace
+let fixed = series.str().replace_regex(r"\d{3}-\d{4}", "***-****")?;
+
+// Series: map with replacement dictionary
+let mapped = series.map_with_na_action(&mapping, true)?;  // na_action=ignore
+
+// Series: conditional assignment
+let graded = scores.case_when(&[
+    (scores.ge(&Scalar::Int64(90))?, Series::constant("A", n)?),
+    (scores.ge(&Scalar::Int64(80))?, Series::constant("B", n)?),
+])?;
+```
+
+## Advanced Selection Methods
+
+Beyond basic `loc`/`iloc`, FrankenPandas provides the full pandas selection toolkit:
+
+```rust
+// Top-N and Bottom-N rows by column value
+let top5 = df.nlargest(5, "revenue")?;
+let bot3 = df.nsmallest(3, "price")?;
+// With keep parameter: 'first' (default), 'last', 'all'
+let top5 = df.nlargest_keep(5, "revenue", "all")?;
+
+// Find label of min/max value
+let worst_day = series.idxmin()?;   // → IndexLabel of minimum
+let best_day  = series.idxmax()?;   // → IndexLabel of maximum
+
+// Value counts (like Series.value_counts())
+let counts = series.value_counts()?;
+// With full options: normalize, sort, ascending, dropna
+let pcts = series.value_counts_with_options(true, true, false, true)?;
+
+// Membership testing
+let mask = series.isin(&[Scalar::Utf8("A".into()), Scalar::Utf8("B".into())])?;
+let in_range = series.between(&Scalar::Int64(10), &Scalar::Int64(20))?;
+
+// Index-based position lookup
+let pos = series.searchsorted(&Scalar::Float64(42.0), "left")?;
+let (codes, uniques) = series.factorize()?;  // Encode as integers
+
+// Select columns by dtype
+let numeric_only = df.select_dtypes(&[DType::Int64, DType::Float64], &[])?;
+let non_numeric = df.select_dtypes(&[], &[DType::Int64, DType::Float64])?;
+
+// Flexible label-based filtering
+let subset = df.filter_labels(Some(&["price", "volume"]), None, None, 1)?; // axis=1
+let regex_match = df.filter_labels(None, None, Some("^rev"), 1)?;  // Regex on col names
+
+// Reindex to new labels (fill missing with NaN)
+let reindexed = series.reindex(new_labels)?;
+let trimmed = series.truncate(Some(&start_label), Some(&end_label))?;
+
+// Column manipulation
+let (popped_series, remaining_df) = df.pop("temp_col")?;       // Remove and return
+let with_new = df.insert(2, "computed", new_column)?;            // Positional insert
+let renamed = df.add_prefix("raw_")?;                           // Prefix all columns
+let renamed = df.add_suffix("_v2")?;                             // Suffix all columns
+```
+
+## DataFrame Introspection
+
+```rust
+let shape = df.shape();              // (nrows, ncols)
+let dtypes = df.dtypes();            // Vec<(column_name, DType)>
+let info = df.info();                // String summary (like df.info() in pandas)
+let mem = df.memory_usage()?;        // Per-column byte estimates as Series
+let ndim = df.ndim();                // Always 2 for DataFrame
+let axes = df.axes();                // (index, column_names)
+let is_empty = df.is_empty();        // True if zero rows
+
+// Deep equality (structural + value comparison)
+let same = df1.equals(&df2);         // true if identical structure and values
+
+// Element-wise diff between two DataFrames
+let changes = df1.compare(&df2)?;    // Shows only positions that differ
+
+// Squeeze single-column/single-row DataFrames
+let series = single_col_df.squeeze(1)?;   // DataFrame → Series
+let scalar = single_cell_df.squeeze(0)?;  // DataFrame → Scalar
+
+// Scalar access
+let val = series.iat(0)?;           // By position (like .iat[0])
+let val = series.at(&label)?;       // By label (like .at[label])
+
+// Lookup specific (row, col) pairs
+let values = df.lookup(&row_labels, &col_names)?;
+```
+
 ## Recipes
 
 ### Financial Data Pipeline
