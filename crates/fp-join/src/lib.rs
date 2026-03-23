@@ -3253,8 +3253,22 @@ mod tests {
         let left = fp_frame::DataFrame::from_dict(
             &["time", "val"],
             vec![
-                ("time", vec![Scalar::Int64(1), Scalar::Null(NullKind::NaN), Scalar::Int64(5)]),
-                ("val", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
+                (
+                    "time",
+                    vec![
+                        Scalar::Int64(1),
+                        Scalar::Null(NullKind::NaN),
+                        Scalar::Int64(5),
+                    ],
+                ),
+                (
+                    "val",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(30.0),
+                    ],
+                ),
             ],
         )
         .unwrap();
@@ -3263,7 +3277,10 @@ mod tests {
             &["time", "quote"],
             vec![
                 ("time", vec![Scalar::Int64(2), Scalar::Int64(4)]),
-                ("quote", vec![Scalar::Float64(200.0), Scalar::Float64(400.0)]),
+                (
+                    "quote",
+                    vec![Scalar::Float64(200.0), Scalar::Float64(400.0)],
+                ),
             ],
         )
         .unwrap();
@@ -3319,17 +3336,11 @@ mod tests {
     fn merge_asof_missing_column_errors() {
         use super::AsofDirection;
 
-        let left = fp_frame::DataFrame::from_dict(
-            &["a"],
-            vec![("a", vec![Scalar::Int64(1)])],
-        )
-        .unwrap();
+        let left =
+            fp_frame::DataFrame::from_dict(&["a"], vec![("a", vec![Scalar::Int64(1)])]).unwrap();
 
-        let right = fp_frame::DataFrame::from_dict(
-            &["b"],
-            vec![("b", vec![Scalar::Int64(1)])],
-        )
-        .unwrap();
+        let right =
+            fp_frame::DataFrame::from_dict(&["b"], vec![("b", vec![Scalar::Int64(1)])]).unwrap();
 
         let err = super::merge_asof(&left, &right, "time", AsofDirection::Backward);
         assert!(err.is_err());
@@ -3342,8 +3353,26 @@ mod tests {
         let left = fp_frame::DataFrame::from_dict(
             &["time", "val"],
             vec![
-                ("time", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3), Scalar::Int64(4), Scalar::Int64(5)]),
-                ("val", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0), Scalar::Float64(40.0), Scalar::Float64(50.0)]),
+                (
+                    "time",
+                    vec![
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                        Scalar::Int64(3),
+                        Scalar::Int64(4),
+                        Scalar::Int64(5),
+                    ],
+                ),
+                (
+                    "val",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(30.0),
+                        Scalar::Float64(40.0),
+                        Scalar::Float64(50.0),
+                    ],
+                ),
             ],
         )
         .unwrap();

@@ -103,10 +103,7 @@ fn e2e_step2_to_datetime() {
 
     // All dates should be normalized to "YYYY-MM-DD 00:00:00" format.
     if let Scalar::Utf8(s) = &parsed.values()[0] {
-        assert!(
-            s.starts_with("2024-01-15"),
-            "expected 2024-01-15, got: {s}"
-        );
+        assert!(s.starts_with("2024-01-15"), "expected 2024-01-15, got: {s}");
         assert!(s.contains("00:00:00"), "expected time component, got: {s}");
     } else {
         panic!("expected Utf8 datetime string");
@@ -232,10 +229,12 @@ fn e2e_step7_export_feather() {
 
     // Feather round-trip.
     let feather_bytes = fp_io::write_feather_bytes(&frame).expect("Feather write failed");
-    let feather_back =
-        fp_io::read_feather_bytes(&feather_bytes).expect("Feather re-read failed");
+    let feather_back = fp_io::read_feather_bytes(&feather_bytes).expect("Feather re-read failed");
     assert_eq!(feather_back.index().len(), frame.index().len());
-    assert_eq!(feather_back.column_names().len(), frame.column_names().len());
+    assert_eq!(
+        feather_back.column_names().len(),
+        frame.column_names().len()
+    );
 }
 
 #[test]
@@ -264,11 +263,7 @@ fn e2e_full_pipeline() {
     assert!(!filtered.is_empty());
 
     // 3. GroupBy ticker, sum volume.
-    let grouped = filtered
-        .groupby(&["ticker"])
-        .unwrap()
-        .sum()
-        .unwrap();
+    let grouped = filtered.groupby(&["ticker"]).unwrap().sum().unwrap();
     assert!(grouped.index().len() <= 2);
 
     // 4. Sort by volume descending.

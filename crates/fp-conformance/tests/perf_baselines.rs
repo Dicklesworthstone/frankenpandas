@@ -77,9 +77,12 @@ fn perf_join_inner_10k() {
     let left = make_numeric_series("left", n, 0);
     let right = make_numeric_series("right", n, n - overlap);
 
-    let durations = bench_iters(|| {
-        let _ = join_series(&left, &right, JoinType::Inner).unwrap();
-    }, 50);
+    let durations = bench_iters(
+        || {
+            let _ = join_series(&left, &right, JoinType::Inner).unwrap();
+        },
+        50,
+    );
 
     report("join_inner_10k (50% overlap)", &durations);
 }
@@ -92,9 +95,12 @@ fn perf_join_left_10k() {
     let left = make_numeric_series("left", n, 0);
     let right = make_numeric_series("right", n, n - overlap);
 
-    let durations = bench_iters(|| {
-        let _ = join_series(&left, &right, JoinType::Left).unwrap();
-    }, 50);
+    let durations = bench_iters(
+        || {
+            let _ = join_series(&left, &right, JoinType::Left).unwrap();
+        },
+        50,
+    );
 
     report("join_left_10k (50% overlap)", &durations);
 }
@@ -107,9 +113,12 @@ fn perf_join_outer_10k() {
     let left = make_numeric_series("left", n, 0);
     let right = make_numeric_series("right", n, n - overlap);
 
-    let durations = bench_iters(|| {
-        let _ = join_series(&left, &right, JoinType::Outer).unwrap();
-    }, 50);
+    let durations = bench_iters(
+        || {
+            let _ = join_series(&left, &right, JoinType::Outer).unwrap();
+        },
+        50,
+    );
 
     report("join_outer_10k (50% overlap)", &durations);
 }
@@ -122,9 +131,12 @@ fn perf_join_inner_100k() {
     let left = make_numeric_series("left", n, 0);
     let right = make_numeric_series("right", n, n - overlap);
 
-    let durations = bench_iters(|| {
-        let _ = join_series(&left, &right, JoinType::Inner).unwrap();
-    }, 20);
+    let durations = bench_iters(
+        || {
+            let _ = join_series(&left, &right, JoinType::Inner).unwrap();
+        },
+        20,
+    );
 
     report("join_inner_100k (50% overlap)", &durations);
 }
@@ -137,9 +149,12 @@ fn perf_join_outer_100k() {
     let left = make_numeric_series("left", n, 0);
     let right = make_numeric_series("right", n, n - overlap);
 
-    let durations = bench_iters(|| {
-        let _ = join_series(&left, &right, JoinType::Outer).unwrap();
-    }, 20);
+    let durations = bench_iters(
+        || {
+            let _ = join_series(&left, &right, JoinType::Outer).unwrap();
+        },
+        20,
+    );
 
     report("join_outer_100k (50% overlap)", &durations);
 }
@@ -152,19 +167,21 @@ fn perf_filter_boolean_mask_10k() {
     let n = 10_000;
     let df = make_numeric_dataframe(n, 5);
     // Create a boolean mask: keep every other row
-    let mask_values: Vec<Scalar> = (0..n)
-        .map(|i| Scalar::Bool(i % 2 == 0))
-        .collect();
-    let mask_labels: Vec<IndexLabel> = (0..n)
-        .map(|i| IndexLabel::Int64(i as i64))
-        .collect();
+    let mask_values: Vec<Scalar> = (0..n).map(|i| Scalar::Bool(i % 2 == 0)).collect();
+    let mask_labels: Vec<IndexLabel> = (0..n).map(|i| IndexLabel::Int64(i as i64)).collect();
     let mask = Series::from_values("mask".to_owned(), mask_labels, mask_values).unwrap();
 
-    let durations = bench_iters(|| {
-        let _ = df.filter_rows(&mask).unwrap();
-    }, 50);
+    let durations = bench_iters(
+        || {
+            let _ = df.filter_rows(&mask).unwrap();
+        },
+        50,
+    );
 
-    report("filter_boolean_mask_10k (5 cols, 50% selectivity)", &durations);
+    report(
+        "filter_boolean_mask_10k (5 cols, 50% selectivity)",
+        &durations,
+    );
 }
 
 #[test]
@@ -172,19 +189,21 @@ fn perf_filter_boolean_mask_10k() {
 fn perf_filter_boolean_mask_100k() {
     let n = 100_000;
     let df = make_numeric_dataframe(n, 5);
-    let mask_values: Vec<Scalar> = (0..n)
-        .map(|i| Scalar::Bool(i % 2 == 0))
-        .collect();
-    let mask_labels: Vec<IndexLabel> = (0..n)
-        .map(|i| IndexLabel::Int64(i as i64))
-        .collect();
+    let mask_values: Vec<Scalar> = (0..n).map(|i| Scalar::Bool(i % 2 == 0)).collect();
+    let mask_labels: Vec<IndexLabel> = (0..n).map(|i| IndexLabel::Int64(i as i64)).collect();
     let mask = Series::from_values("mask".to_owned(), mask_labels, mask_values).unwrap();
 
-    let durations = bench_iters(|| {
-        let _ = df.filter_rows(&mask).unwrap();
-    }, 20);
+    let durations = bench_iters(
+        || {
+            let _ = df.filter_rows(&mask).unwrap();
+        },
+        20,
+    );
 
-    report("filter_boolean_mask_100k (5 cols, 50% selectivity)", &durations);
+    report(
+        "filter_boolean_mask_100k (5 cols, 50% selectivity)",
+        &durations,
+    );
 }
 
 #[test]
@@ -193,14 +212,20 @@ fn perf_filter_head_tail_100k() {
     let n = 100_000;
     let df = make_numeric_dataframe(n, 5);
 
-    let head_durations = bench_iters(|| {
-        let _ = df.head(1000);
-    }, 50);
+    let head_durations = bench_iters(
+        || {
+            let _ = df.head(1000);
+        },
+        50,
+    );
     report("head(1000)_100k (5 cols)", &head_durations);
 
-    let tail_durations = bench_iters(|| {
-        let _ = df.tail(1000);
-    }, 50);
+    let tail_durations = bench_iters(
+        || {
+            let _ = df.tail(1000);
+        },
+        50,
+    );
     report("tail(1000)_100k (5 cols)", &tail_durations);
 }
 
@@ -212,9 +237,12 @@ fn perf_df_add_scalar_100k() {
     let n = 100_000;
     let df = make_numeric_dataframe(n, 5);
 
-    let durations = bench_iters(|| {
-        let _ = df.add_scalar(42.0).unwrap();
-    }, 20);
+    let durations = bench_iters(
+        || {
+            let _ = df.add_scalar(42.0).unwrap();
+        },
+        20,
+    );
 
     report("df_add_scalar_100k (5 cols)", &durations);
 }
@@ -226,9 +254,12 @@ fn perf_df_add_df_aligned_100k() {
     let df1 = make_numeric_dataframe(n, 5);
     let df2 = make_numeric_dataframe(n, 5);
 
-    let durations = bench_iters(|| {
-        let _ = df1.add_df(&df2).unwrap();
-    }, 20);
+    let durations = bench_iters(
+        || {
+            let _ = df1.add_df(&df2).unwrap();
+        },
+        20,
+    );
 
     report("df_add_df_aligned_100k (5 cols, same index)", &durations);
 }
@@ -240,9 +271,12 @@ fn perf_df_eq_scalar_100k() {
     let df = make_numeric_dataframe(n, 5);
     let scalar = Scalar::Float64(42.0);
 
-    let durations = bench_iters(|| {
-        let _ = df.eq_scalar_df(&scalar).unwrap();
-    }, 20);
+    let durations = bench_iters(
+        || {
+            let _ = df.eq_scalar_df(&scalar).unwrap();
+        },
+        20,
+    );
 
     report("df_eq_scalar_100k (5 cols)", &durations);
 }
@@ -260,10 +294,13 @@ fn perf_series_add_with_alignment_10k() {
     let right = make_numeric_series("right", n, n - overlap);
     let policy = RuntimePolicy::hardened(Some(1_000_000));
 
-    let durations = bench_iters(|| {
-        let mut ledger = EvidenceLedger::new();
-        let _ = left.add_with_policy(&right, &policy, &mut ledger).unwrap();
-    }, 50);
+    let durations = bench_iters(
+        || {
+            let mut ledger = EvidenceLedger::new();
+            let _ = left.add_with_policy(&right, &policy, &mut ledger).unwrap();
+        },
+        50,
+    );
 
     report("series_add_aligned_10k (50% overlap)", &durations);
 }
@@ -288,7 +325,12 @@ fn perf_run_all_baselines() {
             (JoinType::Right, "right"),
             (JoinType::Outer, "outer"),
         ] {
-            let d = bench_iters(|| { let _ = join_series(&left, &right, jt); }, 30);
+            let d = bench_iters(
+                || {
+                    let _ = join_series(&left, &right, jt);
+                },
+                30,
+            );
             report(&format!("join_{name}_10k"), &d);
         }
     }
@@ -301,10 +343,20 @@ fn perf_run_all_baselines() {
         let mask_labels: Vec<IndexLabel> = (0..n).map(|i| IndexLabel::Int64(i as i64)).collect();
         let mask = Series::from_values("mask".to_owned(), mask_labels, mask_values).unwrap();
 
-        let d = bench_iters(|| { let _ = df.filter_rows(&mask); }, 30);
+        let d = bench_iters(
+            || {
+                let _ = df.filter_rows(&mask);
+            },
+            30,
+        );
         report("filter_mask_10k", &d);
 
-        let d = bench_iters(|| { let _ = df.head(100); }, 30);
+        let d = bench_iters(
+            || {
+                let _ = df.head(100);
+            },
+            30,
+        );
         report("head_100_10k", &d);
     }
 
@@ -313,11 +365,21 @@ fn perf_run_all_baselines() {
         let n = 10_000;
         let df = make_numeric_dataframe(n, 5);
 
-        let d = bench_iters(|| { let _ = df.add_scalar(42.0); }, 30);
+        let d = bench_iters(
+            || {
+                let _ = df.add_scalar(42.0);
+            },
+            30,
+        );
         report("add_scalar_10k", &d);
 
         let scalar = Scalar::Float64(42.0);
-        let d = bench_iters(|| { let _ = df.eq_scalar_df(&scalar); }, 30);
+        let d = bench_iters(
+            || {
+                let _ = df.eq_scalar_df(&scalar);
+            },
+            30,
+        );
         report("eq_scalar_10k", &d);
     }
 

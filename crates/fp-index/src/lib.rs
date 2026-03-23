@@ -1118,7 +1118,9 @@ impl MultiIndex {
             }
         }
 
-        let mut levels: Vec<Vec<IndexLabel>> = (0..nlevels).map(|_| Vec::with_capacity(tuples.len())).collect();
+        let mut levels: Vec<Vec<IndexLabel>> = (0..nlevels)
+            .map(|_| Vec::with_capacity(tuples.len()))
+            .collect();
         for tuple in &tuples {
             for (level_idx, label) in tuple.iter().enumerate() {
                 levels[level_idx].push(label.clone());
@@ -1182,7 +1184,8 @@ impl MultiIndex {
         }
 
         let nlevels = iterables.len();
-        let mut levels: Vec<Vec<IndexLabel>> = (0..nlevels).map(|_| Vec::with_capacity(total)).collect();
+        let mut levels: Vec<Vec<IndexLabel>> =
+            (0..nlevels).map(|_| Vec::with_capacity(total)).collect();
 
         // Generate Cartesian product: for each position, compute which
         // element from each level by dividing position by the product of
@@ -1312,14 +1315,10 @@ impl MultiIndex {
             seen[idx] = true;
         }
 
-        let new_levels: Vec<Vec<IndexLabel>> = order
-            .iter()
-            .map(|&idx| self.levels[idx].clone())
-            .collect();
-        let new_names: Vec<Option<String>> = order
-            .iter()
-            .map(|&idx| self.names[idx].clone())
-            .collect();
+        let new_levels: Vec<Vec<IndexLabel>> =
+            order.iter().map(|&idx| self.levels[idx].clone()).collect();
+        let new_names: Vec<Option<String>> =
+            order.iter().map(|&idx| self.names[idx].clone()).collect();
 
         Ok(Self {
             levels: new_levels,
@@ -2514,10 +2513,22 @@ mod tests {
         .unwrap();
 
         // Should produce: (x,1), (x,2), (y,1), (y,2)
-        assert_eq!(mi.get_tuple(0).unwrap(), vec![&IndexLabel::Utf8("x".into()), &IndexLabel::Int64(1)]);
-        assert_eq!(mi.get_tuple(1).unwrap(), vec![&IndexLabel::Utf8("x".into()), &IndexLabel::Int64(2)]);
-        assert_eq!(mi.get_tuple(2).unwrap(), vec![&IndexLabel::Utf8("y".into()), &IndexLabel::Int64(1)]);
-        assert_eq!(mi.get_tuple(3).unwrap(), vec![&IndexLabel::Utf8("y".into()), &IndexLabel::Int64(2)]);
+        assert_eq!(
+            mi.get_tuple(0).unwrap(),
+            vec![&IndexLabel::Utf8("x".into()), &IndexLabel::Int64(1)]
+        );
+        assert_eq!(
+            mi.get_tuple(1).unwrap(),
+            vec![&IndexLabel::Utf8("x".into()), &IndexLabel::Int64(2)]
+        );
+        assert_eq!(
+            mi.get_tuple(2).unwrap(),
+            vec![&IndexLabel::Utf8("y".into()), &IndexLabel::Int64(1)]
+        );
+        assert_eq!(
+            mi.get_tuple(3).unwrap(),
+            vec![&IndexLabel::Utf8("y".into()), &IndexLabel::Int64(2)]
+        );
     }
 
     #[test]
@@ -2530,20 +2541,23 @@ mod tests {
         .set_names(vec![Some("letter".into()), Some("number".into())]);
 
         let level0 = mi.get_level_values(0).unwrap();
-        assert_eq!(level0.labels(), &[IndexLabel::Utf8("a".into()), IndexLabel::Utf8("b".into())]);
+        assert_eq!(
+            level0.labels(),
+            &[IndexLabel::Utf8("a".into()), IndexLabel::Utf8("b".into())]
+        );
         assert_eq!(level0.name(), Some("letter"));
 
         let level1 = mi.get_level_values(1).unwrap();
-        assert_eq!(level1.labels(), &[IndexLabel::Int64(1), IndexLabel::Int64(2)]);
+        assert_eq!(
+            level1.labels(),
+            &[IndexLabel::Int64(1), IndexLabel::Int64(2)]
+        );
         assert_eq!(level1.name(), Some("number"));
     }
 
     #[test]
     fn multi_index_get_level_values_out_of_bounds() {
-        let mi = MultiIndex::from_tuples(vec![
-            vec!["a".into()],
-        ])
-        .unwrap();
+        let mi = MultiIndex::from_tuples(vec![vec!["a".into()]]).unwrap();
         assert!(mi.get_level_values(1).is_err());
     }
 
@@ -2567,7 +2581,11 @@ mod tests {
             vec!["b".into(), 2_i64.into(), "y".into()],
         ])
         .unwrap()
-        .set_names(vec![Some("l0".into()), Some("l1".into()), Some("l2".into())]);
+        .set_names(vec![
+            Some("l0".into()),
+            Some("l1".into()),
+            Some("l2".into()),
+        ]);
 
         // Drop middle level -> 2 levels remain -> MultiIndex
         let result = mi.droplevel(1).unwrap();
@@ -2602,14 +2620,15 @@ mod tests {
 
     #[test]
     fn multi_index_swaplevel() {
-        let mi = MultiIndex::from_tuples(vec![
-            vec!["a".into(), 1_i64.into()],
-        ])
-        .unwrap()
-        .set_names(vec![Some("first".into()), Some("second".into())]);
+        let mi = MultiIndex::from_tuples(vec![vec!["a".into(), 1_i64.into()]])
+            .unwrap()
+            .set_names(vec![Some("first".into()), Some("second".into())]);
 
         let swapped = mi.swaplevel(0, 1).unwrap();
-        assert_eq!(swapped.names(), &[Some("second".into()), Some("first".into())]);
+        assert_eq!(
+            swapped.names(),
+            &[Some("second".into()), Some("first".into())]
+        );
         assert_eq!(
             swapped.get_tuple(0).unwrap(),
             vec![&IndexLabel::Int64(1), &IndexLabel::Utf8("a".into())]
@@ -2626,10 +2645,7 @@ mod tests {
 
     #[test]
     fn multi_index_get_tuple_out_of_bounds() {
-        let mi = MultiIndex::from_tuples(vec![
-            vec!["a".into()],
-        ])
-        .unwrap();
+        let mi = MultiIndex::from_tuples(vec![vec!["a".into()]]).unwrap();
         assert!(mi.get_tuple(1).is_none());
     }
 
@@ -2640,14 +2656,22 @@ mod tests {
             vec!["b".into(), 2_i64.into(), "y".into()],
         ])
         .unwrap()
-        .set_names(vec![Some("letter".into()), Some("number".into()), Some("code".into())]);
+        .set_names(vec![
+            Some("letter".into()),
+            Some("number".into()),
+            Some("code".into()),
+        ]);
 
         // Reorder: [2, 0, 1] → code, letter, number.
         let reordered = mi.reorder_levels(&[2, 0, 1]).unwrap();
         assert_eq!(reordered.nlevels(), 3);
         assert_eq!(
             reordered.names(),
-            &[Some("code".into()), Some("letter".into()), Some("number".into())]
+            &[
+                Some("code".into()),
+                Some("letter".into()),
+                Some("number".into())
+            ]
         );
 
         // First row should be ("x", "a", 1).
@@ -2659,10 +2683,7 @@ mod tests {
 
     #[test]
     fn multi_index_reorder_levels_identity() {
-        let mi = MultiIndex::from_tuples(vec![
-            vec!["a".into(), 1_i64.into()],
-        ])
-        .unwrap();
+        let mi = MultiIndex::from_tuples(vec![vec!["a".into(), 1_i64.into()]]).unwrap();
 
         // Identity reorder [0, 1] should be a no-op.
         let same = mi.reorder_levels(&[0, 1]).unwrap();
@@ -2671,10 +2692,7 @@ mod tests {
 
     #[test]
     fn multi_index_reorder_levels_wrong_length_errors() {
-        let mi = MultiIndex::from_tuples(vec![
-            vec!["a".into(), 1_i64.into()],
-        ])
-        .unwrap();
+        let mi = MultiIndex::from_tuples(vec![vec!["a".into(), 1_i64.into()]]).unwrap();
 
         assert!(mi.reorder_levels(&[0]).is_err());
         assert!(mi.reorder_levels(&[0, 1, 2]).is_err());
@@ -2682,20 +2700,14 @@ mod tests {
 
     #[test]
     fn multi_index_reorder_levels_duplicate_index_errors() {
-        let mi = MultiIndex::from_tuples(vec![
-            vec!["a".into(), 1_i64.into()],
-        ])
-        .unwrap();
+        let mi = MultiIndex::from_tuples(vec![vec!["a".into(), 1_i64.into()]]).unwrap();
 
         assert!(mi.reorder_levels(&[0, 0]).is_err());
     }
 
     #[test]
     fn multi_index_reorder_levels_out_of_bounds_errors() {
-        let mi = MultiIndex::from_tuples(vec![
-            vec!["a".into(), 1_i64.into()],
-        ])
-        .unwrap();
+        let mi = MultiIndex::from_tuples(vec![vec!["a".into(), 1_i64.into()]]).unwrap();
 
         assert!(mi.reorder_levels(&[0, 5]).is_err());
     }

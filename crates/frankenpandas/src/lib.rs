@@ -25,9 +25,7 @@ pub use fp_index::{
     MultiIndexOrIndex,
 };
 
-pub use fp_frame::{
-    CategoricalAccessor, CategoricalMetadata, DataFrame, FrameError, Series,
-};
+pub use fp_frame::{CategoricalAccessor, CategoricalMetadata, DataFrame, FrameError, Series};
 
 // ── Module-level functions (like pd.concat, pd.to_datetime, etc.) ────
 
@@ -37,34 +35,60 @@ pub use fp_frame::{
     concat_series_with_ignore_index,
 };
 
-pub use fp_frame::{to_datetime, to_datetime_with_format};
-pub use fp_frame::{timedelta_total_seconds, to_timedelta};
 pub use fp_frame::to_numeric;
 pub use fp_frame::{cut, qcut};
+pub use fp_frame::{timedelta_total_seconds, to_timedelta};
+pub use fp_frame::{to_datetime, to_datetime_with_format};
 
 // ── IO functions ────────────────────────────────────────────────────────
 
 pub use fp_io::{
     // CSV
-    CsvReadOptions, read_csv_str, read_csv_with_options,
-    read_csv, read_csv_with_options_path, write_csv, write_csv_string,
-    // JSON
-    JsonOrient, read_json, read_json_str, write_json, write_json_string,
-    // JSONL
-    read_jsonl, read_jsonl_str, write_jsonl, write_jsonl_string,
-    // Parquet
-    read_parquet, read_parquet_bytes, write_parquet, write_parquet_bytes,
-    // Excel
-    ExcelReadOptions, read_excel, read_excel_bytes, write_excel, write_excel_bytes,
-    // Feather (Arrow IPC)
-    read_feather, read_feather_bytes, write_feather, write_feather_bytes,
-    read_ipc_stream_bytes, write_ipc_stream_bytes,
-    // SQL
-    SqlIfExists, read_sql, read_sql_table, write_sql,
-    // Error type
-    IoError,
+    CsvReadOptions,
     // Extension trait
     DataFrameIoExt,
+    // Excel
+    ExcelReadOptions,
+    // Error type
+    IoError,
+    // JSON
+    JsonOrient,
+    // SQL
+    SqlIfExists,
+    read_csv,
+    read_csv_str,
+    read_csv_with_options,
+    read_csv_with_options_path,
+    read_excel,
+    read_excel_bytes,
+    // Feather (Arrow IPC)
+    read_feather,
+    read_feather_bytes,
+    read_ipc_stream_bytes,
+    read_json,
+    read_json_str,
+    // JSONL
+    read_jsonl,
+    read_jsonl_str,
+    // Parquet
+    read_parquet,
+    read_parquet_bytes,
+    read_sql,
+    read_sql_table,
+    write_csv,
+    write_csv_string,
+    write_excel,
+    write_excel_bytes,
+    write_feather,
+    write_feather_bytes,
+    write_ipc_stream_bytes,
+    write_json,
+    write_json_string,
+    write_jsonl,
+    write_jsonl_string,
+    write_parquet,
+    write_parquet_bytes,
+    write_sql,
 };
 
 // ── Expression engine ───────────────────────────────────────────────────
@@ -74,8 +98,8 @@ pub use fp_expr::{DataFrameExprExt, ExprError};
 // ── Join/merge ──────────────────────────────────────────────────────────
 
 pub use fp_join::{
-    AsofDirection, DataFrameMergeExt, JoinError, JoinType, MergedDataFrame,
-    join_series, merge_asof, merge_dataframes_on,
+    AsofDirection, DataFrameMergeExt, JoinError, JoinType, MergedDataFrame, join_series,
+    merge_asof, merge_dataframes_on,
 };
 
 // ── Runtime policy ──────────────────────────────────────────────────────
@@ -92,21 +116,40 @@ pub use fp_runtime::{EvidenceLedger, RuntimePolicy};
 pub mod prelude {
     pub use crate::{
         // Core types
-        Column, DType, DataFrame, Index, IndexLabel, MultiIndex, NullKind, Scalar, Series,
-        // IO
-        read_csv_str, read_json_str, read_jsonl_str,
-        read_feather_bytes, write_feather_bytes,
-        read_parquet_bytes, write_parquet_bytes,
-        JsonOrient, CsvReadOptions, DataFrameIoExt,
-        // Module-level functions
-        concat_dataframes, concat_series,
-        to_datetime, to_timedelta, to_numeric,
+        Column,
+        CsvReadOptions,
+        DType,
+        DataFrame,
         // Traits
-        DataFrameExprExt, DataFrameMergeExt,
+        DataFrameExprExt,
+        DataFrameIoExt,
+        DataFrameMergeExt,
+        // Runtime
+        EvidenceLedger,
+        Index,
+        IndexLabel,
         // Join
         JoinType,
-        // Runtime
-        EvidenceLedger, RuntimePolicy,
+        JsonOrient,
+        MultiIndex,
+        NullKind,
+        RuntimePolicy,
+        Scalar,
+        Series,
+        // Module-level functions
+        concat_dataframes,
+        concat_series,
+        // IO
+        read_csv_str,
+        read_feather_bytes,
+        read_json_str,
+        read_jsonl_str,
+        read_parquet_bytes,
+        to_datetime,
+        to_numeric,
+        to_timedelta,
+        write_feather_bytes,
+        write_parquet_bytes,
     };
 }
 
@@ -146,18 +189,10 @@ mod tests {
 
     #[test]
     fn prelude_concat_works() {
-        let s1 = Series::from_values(
-            "x",
-            vec![IndexLabel::Int64(0)],
-            vec![Scalar::Int64(1)],
-        )
-        .unwrap();
-        let s2 = Series::from_values(
-            "x",
-            vec![IndexLabel::Int64(1)],
-            vec![Scalar::Int64(2)],
-        )
-        .unwrap();
+        let s1 =
+            Series::from_values("x", vec![IndexLabel::Int64(0)], vec![Scalar::Int64(1)]).unwrap();
+        let s2 =
+            Series::from_values("x", vec![IndexLabel::Int64(1)], vec![Scalar::Int64(2)]).unwrap();
         let combined = concat_series(&[&s1, &s2]).unwrap();
         assert_eq!(combined.len(), 2);
     }

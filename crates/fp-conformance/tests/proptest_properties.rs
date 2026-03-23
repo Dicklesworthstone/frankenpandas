@@ -1527,10 +1527,7 @@ fn arb_int64_dataframe(
     (1..=max_rows, 1..=max_cols).prop_flat_map(|(nrows, ncols)| {
         let col_names = proptest::collection::vec(arb_column_name(), ncols);
         let columns = proptest::collection::vec(
-            proptest::collection::vec(
-                (-100_000i64..100_000i64).prop_map(Scalar::Int64),
-                nrows,
-            ),
+            proptest::collection::vec((-100_000i64..100_000i64).prop_map(Scalar::Int64), nrows),
             ncols,
         );
         (col_names, columns).prop_filter_map(

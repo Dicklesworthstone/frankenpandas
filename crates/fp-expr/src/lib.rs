@@ -2483,24 +2483,9 @@ mod tests {
         let mut ledger = EvidenceLedger::new();
 
         let frame = fp_frame::DataFrame::from_series(vec![
-            fp_frame::Series::from_values(
-                "a",
-                vec![0_i64.into()],
-                vec![Scalar::Int64(2)],
-            )
-            .unwrap(),
-            fp_frame::Series::from_values(
-                "b",
-                vec![0_i64.into()],
-                vec![Scalar::Int64(3)],
-            )
-            .unwrap(),
-            fp_frame::Series::from_values(
-                "c",
-                vec![0_i64.into()],
-                vec![Scalar::Int64(4)],
-            )
-            .unwrap(),
+            fp_frame::Series::from_values("a", vec![0_i64.into()], vec![Scalar::Int64(2)]).unwrap(),
+            fp_frame::Series::from_values("b", vec![0_i64.into()], vec![Scalar::Int64(3)]).unwrap(),
+            fp_frame::Series::from_values("c", vec![0_i64.into()], vec![Scalar::Int64(4)]).unwrap(),
         ])
         .unwrap();
 
@@ -2539,11 +2524,7 @@ mod tests {
             fp_frame::Series::from_values(
                 "name",
                 vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-                vec![
-                    Scalar::Int64(10),
-                    Scalar::Int64(20),
-                    Scalar::Int64(10),
-                ],
+                vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(10)],
             )
             .unwrap(),
         ])
@@ -2603,8 +2584,14 @@ mod tests {
         let frame = fp_frame::DataFrame::from_dict(
             &["x", "y"],
             vec![
-                ("x", vec![Scalar::Int64(1), Scalar::Int64(5), Scalar::Int64(3)]),
-                ("y", vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)]),
+                (
+                    "x",
+                    vec![Scalar::Int64(1), Scalar::Int64(5), Scalar::Int64(3)],
+                ),
+                (
+                    "y",
+                    vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+                ),
             ],
         )
         .unwrap();
@@ -2620,12 +2607,17 @@ mod tests {
 
         let frame = fp_frame::DataFrame::from_dict(
             &["val"],
-            vec![("val", vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)])],
+            vec![(
+                "val",
+                vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+            )],
         )
         .unwrap();
 
         let locals = BTreeMap::from([("threshold".to_owned(), Scalar::Int64(15))]);
-        let result = frame.query_with_locals("val > @threshold", &locals).unwrap();
+        let result = frame
+            .query_with_locals("val > @threshold", &locals)
+            .unwrap();
         assert_eq!(result.len(), 2);
     }
 }

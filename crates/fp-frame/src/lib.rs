@@ -5088,10 +5088,9 @@ impl Series {
     /// Matches `pd.Series.cat`. Returns `None` if the Series is not categorical.
     #[must_use]
     pub fn cat(&self) -> Option<CategoricalAccessor<'_>> {
-        self.categorical.as_ref().map(|meta| CategoricalAccessor {
-            series: self,
-            meta,
-        })
+        self.categorical
+            .as_ref()
+            .map(|meta| CategoricalAccessor { series: self, meta })
     }
 
     /// Returns `true` if this Series has categorical metadata.
@@ -5115,9 +5114,8 @@ impl Series {
             std::collections::HashMap::new();
 
         let mut codes: Vec<Scalar> = Vec::with_capacity(values.len());
-        let index_labels: Vec<IndexLabel> = (0..values.len() as i64)
-            .map(IndexLabel::Int64)
-            .collect();
+        let index_labels: Vec<IndexLabel> =
+            (0..values.len() as i64).map(IndexLabel::Int64).collect();
 
         for val in &values {
             if val.is_missing() {
@@ -5159,9 +5157,8 @@ impl Series {
         categories: Vec<Scalar>,
         ordered: bool,
     ) -> Result<Self, FrameError> {
-        let index_labels: Vec<IndexLabel> = (0..codes.len() as i64)
-            .map(IndexLabel::Int64)
-            .collect();
+        let index_labels: Vec<IndexLabel> =
+            (0..codes.len() as i64).map(IndexLabel::Int64).collect();
 
         let code_scalars: Vec<Scalar> = codes.into_iter().map(Scalar::Int64).collect();
         let column = Column::from_values(code_scalars)?;
@@ -6975,8 +6972,7 @@ impl CategoricalAccessor<'_> {
         // Build new categories (only used ones) and a code remapping.
         let mut new_categories = Vec::new();
         let mut remap: Vec<i64> = vec![-1; self.meta.categories.len()];
-        for (old_code, (cat, &is_used)) in
-            self.meta.categories.iter().zip(used.iter()).enumerate()
+        for (old_code, (cat, &is_used)) in self.meta.categories.iter().zip(used.iter()).enumerate()
         {
             if is_used {
                 remap[old_code] = new_categories.len() as i64;
@@ -12280,10 +12276,7 @@ impl DataFrame {
             levels.push(level_labels);
         }
 
-        let names: Vec<Option<String>> = columns
-            .iter()
-            .map(|&c| Some(c.to_owned()))
-            .collect();
+        let names: Vec<Option<String>> = columns.iter().map(|&c| Some(c.to_owned())).collect();
 
         fp_index::MultiIndex::from_arrays(levels)
             .map(|mi| mi.set_names(names))
@@ -16104,10 +16097,7 @@ impl DataFrame {
                     .index
                     .name()
                     .map_or(Scalar::Null(NullKind::Null), |n| Scalar::Utf8(n.to_owned()));
-                result.insert(
-                    "index_names".to_owned(),
-                    vec![("0".to_owned(), index_name)],
-                );
+                result.insert("index_names".to_owned(), vec![("0".to_owned(), index_name)]);
 
                 // column_names: always [None] for single-level columns
                 result.insert(
@@ -20361,10 +20351,7 @@ impl DataFrameGroupBy<'_> {
     ///     ("num_orders", "order_id", "count"),
     /// ]).unwrap();
     /// ```
-    pub fn agg_named(
-        &self,
-        specs: &[(&str, &str, &str)],
-    ) -> Result<DataFrame, FrameError> {
+    pub fn agg_named(&self, specs: &[(&str, &str, &str)]) -> Result<DataFrame, FrameError> {
         let (group_order, groups) = self.build_groups();
         let n_groups = group_order.len();
 
@@ -32047,7 +32034,10 @@ mod tests {
             &["x", "y"],
             vec![
                 ("x", vec![Scalar::Int64(1), Scalar::Int64(2)]),
-                ("y", vec![Scalar::Utf8("a".into()), Scalar::Utf8("b".into())]),
+                (
+                    "y",
+                    vec![Scalar::Utf8("a".into()), Scalar::Utf8("b".into())],
+                ),
             ],
         )
         .unwrap();
@@ -32069,28 +32059,27 @@ mod tests {
 
     #[test]
     fn dataframe_to_dict_display_labels() {
-        let df = DataFrame::from_dict(
-            &["val"],
-            vec![("val", vec![Scalar::Int64(42)])],
-        )
-        .unwrap();
+        let df = DataFrame::from_dict(&["val"], vec![("val", vec![Scalar::Int64(42)])]).unwrap();
 
         // Dict orient: keys should be display-formatted labels ("0"), not debug ("Int64(0)")
         let result = df.to_dict("dict").unwrap();
         let key = &result["val"][0].0;
-        assert_eq!(key, "0", "label key should be display-formatted, got: {key}");
+        assert_eq!(
+            key, "0",
+            "label key should be display-formatted, got: {key}"
+        );
     }
 
     #[test]
     fn dataframe_to_dict_index_display_labels() {
-        let df = DataFrame::from_dict(
-            &["val"],
-            vec![("val", vec![Scalar::Int64(42)])],
-        )
-        .unwrap();
+        let df = DataFrame::from_dict(&["val"], vec![("val", vec![Scalar::Int64(42)])]).unwrap();
 
         let result = df.to_dict("index").unwrap();
-        assert!(result.contains_key("0"), "index orient key should be '0', got keys: {:?}", result.keys().collect::<Vec<_>>());
+        assert!(
+            result.contains_key("0"),
+            "index orient key should be '0', got keys: {:?}",
+            result.keys().collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -44379,7 +44368,8 @@ mod tests {
             Scalar::Utf8("medium".into()),
             Scalar::Utf8("high".into()),
         ];
-        let s = Series::from_categorical_codes("rating", vec![0, 2, 1, 0], categories, true).unwrap();
+        let s =
+            Series::from_categorical_codes("rating", vec![0, 2, 1, 0], categories, true).unwrap();
 
         assert!(s.is_categorical());
         let cat = s.cat().unwrap();
@@ -44441,7 +44431,10 @@ mod tests {
         let renamed = s
             .cat()
             .unwrap()
-            .rename_categories(vec![Scalar::Utf8("alpha".into()), Scalar::Utf8("beta".into())])
+            .rename_categories(vec![
+                Scalar::Utf8("alpha".into()),
+                Scalar::Utf8("beta".into()),
+            ])
             .unwrap();
 
         let vals = renamed.cat().unwrap().to_values().unwrap();
@@ -44467,12 +44460,7 @@ mod tests {
 
     #[test]
     fn categorical_add_categories() {
-        let s = Series::from_categorical(
-            "x",
-            vec![Scalar::Utf8("a".into())],
-            false,
-        )
-        .unwrap();
+        let s = Series::from_categorical("x", vec![Scalar::Utf8("a".into())], false).unwrap();
 
         let extended = s
             .cat()
@@ -44569,12 +44557,7 @@ mod tests {
 
     #[test]
     fn non_categorical_series_cat_returns_none() {
-        let s = Series::from_values(
-            "x",
-            vec![0_i64.into()],
-            vec![Scalar::Int64(42)],
-        )
-        .unwrap();
+        let s = Series::from_values("x", vec![0_i64.into()], vec![Scalar::Int64(42)]).unwrap();
         assert!(!s.is_categorical());
         assert!(s.cat().is_none());
     }
@@ -44605,19 +44588,47 @@ mod tests {
         let df = DataFrame::from_dict(
             &["region", "product", "sales"],
             vec![
-                ("region", vec![Scalar::Utf8("east".into()), Scalar::Utf8("west".into()), Scalar::Utf8("east".into())]),
-                ("product", vec![Scalar::Utf8("A".into()), Scalar::Utf8("B".into()), Scalar::Utf8("A".into())]),
-                ("sales", vec![Scalar::Int64(100), Scalar::Int64(200), Scalar::Int64(300)]),
+                (
+                    "region",
+                    vec![
+                        Scalar::Utf8("east".into()),
+                        Scalar::Utf8("west".into()),
+                        Scalar::Utf8("east".into()),
+                    ],
+                ),
+                (
+                    "product",
+                    vec![
+                        Scalar::Utf8("A".into()),
+                        Scalar::Utf8("B".into()),
+                        Scalar::Utf8("A".into()),
+                    ],
+                ),
+                (
+                    "sales",
+                    vec![Scalar::Int64(100), Scalar::Int64(200), Scalar::Int64(300)],
+                ),
             ],
         )
         .unwrap();
 
-        let indexed = df.set_index_multi(&["region", "product"], true, "_").unwrap();
+        let indexed = df
+            .set_index_multi(&["region", "product"], true, "_")
+            .unwrap();
         assert_eq!(indexed.index().len(), 3);
         // Composite index labels: "east_A", "west_B", "east_A"
-        assert_eq!(indexed.index().labels()[0], IndexLabel::Utf8("east_A".into()));
-        assert_eq!(indexed.index().labels()[1], IndexLabel::Utf8("west_B".into()));
-        assert_eq!(indexed.index().labels()[2], IndexLabel::Utf8("east_A".into()));
+        assert_eq!(
+            indexed.index().labels()[0],
+            IndexLabel::Utf8("east_A".into())
+        );
+        assert_eq!(
+            indexed.index().labels()[1],
+            IndexLabel::Utf8("west_B".into())
+        );
+        assert_eq!(
+            indexed.index().labels()[2],
+            IndexLabel::Utf8("east_A".into())
+        );
         // Only "sales" column remains when drop=true
         assert_eq!(indexed.column_names().len(), 1);
         assert!(indexed.column("sales").is_some());
@@ -44629,7 +44640,10 @@ mod tests {
             &["a", "b", "v"],
             vec![
                 ("a", vec![Scalar::Int64(1), Scalar::Int64(2)]),
-                ("b", vec![Scalar::Utf8("x".into()), Scalar::Utf8("y".into())]),
+                (
+                    "b",
+                    vec![Scalar::Utf8("x".into()), Scalar::Utf8("y".into())],
+                ),
                 ("v", vec![Scalar::Float64(10.0), Scalar::Float64(20.0)]),
             ],
         )
@@ -44646,7 +44660,10 @@ mod tests {
         let df = DataFrame::from_dict(
             &["region", "year", "value"],
             vec![
-                ("region", vec![Scalar::Utf8("east".into()), Scalar::Utf8("west".into())]),
+                (
+                    "region",
+                    vec![Scalar::Utf8("east".into()), Scalar::Utf8("west".into())],
+                ),
                 ("year", vec![Scalar::Int64(2024), Scalar::Int64(2025)]),
                 ("value", vec![Scalar::Float64(1.5), Scalar::Float64(2.5)]),
             ],
@@ -44673,7 +44690,10 @@ mod tests {
         let df = DataFrame::from_dict(
             &["id", "val"],
             vec![
-                ("id", vec![Scalar::Utf8("a".into()), Scalar::Utf8("b".into())]),
+                (
+                    "id",
+                    vec![Scalar::Utf8("a".into()), Scalar::Utf8("b".into())],
+                ),
                 ("val", vec![Scalar::Int64(10), Scalar::Int64(20)]),
             ],
         )
@@ -44687,11 +44707,7 @@ mod tests {
 
     #[test]
     fn df_set_index_multi_missing_column_errors() {
-        let df = DataFrame::from_dict(
-            &["a"],
-            vec![("a", vec![Scalar::Int64(1)])],
-        )
-        .unwrap();
+        let df = DataFrame::from_dict(&["a"], vec![("a", vec![Scalar::Int64(1)])]).unwrap();
 
         let err = df.set_index_multi(&["a", "nonexistent"], true, "_");
         assert!(err.is_err());
@@ -44699,11 +44715,7 @@ mod tests {
 
     #[test]
     fn df_to_multi_index_missing_column_errors() {
-        let df = DataFrame::from_dict(
-            &["a"],
-            vec![("a", vec![Scalar::Int64(1)])],
-        )
-        .unwrap();
+        let df = DataFrame::from_dict(&["a"], vec![("a", vec![Scalar::Int64(1)])]).unwrap();
 
         let err = df.to_multi_index(&["a", "nonexistent"]);
         assert!(err.is_err());
@@ -44833,12 +44845,8 @@ mod tests {
 
     #[test]
     fn to_timedelta_null_produces_nat() {
-        let s = Series::from_values(
-            "x",
-            vec![0_i64.into()],
-            vec![Scalar::Null(NullKind::Null)],
-        )
-        .unwrap();
+        let s = Series::from_values("x", vec![0_i64.into()], vec![Scalar::Null(NullKind::Null)])
+            .unwrap();
         let result = super::to_timedelta(&s).unwrap();
         assert!(result.values()[0].is_missing());
     }
@@ -44881,8 +44889,14 @@ mod tests {
         )
         .unwrap();
         let result = super::to_datetime(&s).unwrap();
-        assert_eq!(result.values()[0], Scalar::Utf8("2024-01-15 00:00:00".into()));
-        assert_eq!(result.values()[1], Scalar::Utf8("2024-06-30 00:00:00".into()));
+        assert_eq!(
+            result.values()[0],
+            Scalar::Utf8("2024-01-15 00:00:00".into())
+        );
+        assert_eq!(
+            result.values()[1],
+            Scalar::Utf8("2024-06-30 00:00:00".into())
+        );
     }
 
     #[test]
@@ -44894,7 +44908,10 @@ mod tests {
         )
         .unwrap();
         let result = super::to_datetime(&s).unwrap();
-        assert_eq!(result.values()[0], Scalar::Utf8("2024-01-15 10:30:45".into()));
+        assert_eq!(
+            result.values()[0],
+            Scalar::Utf8("2024-01-15 10:30:45".into())
+        );
     }
 
     #[test]
@@ -44906,7 +44923,10 @@ mod tests {
         )
         .unwrap();
         let result = super::to_datetime(&s).unwrap();
-        assert_eq!(result.values()[0], Scalar::Utf8("2024-01-15 10:30:45".into()));
+        assert_eq!(
+            result.values()[0],
+            Scalar::Utf8("2024-01-15 10:30:45".into())
+        );
     }
 
     #[test]
@@ -44918,7 +44938,10 @@ mod tests {
         )
         .unwrap();
         let result = super::to_datetime(&s).unwrap();
-        assert_eq!(result.values()[0], Scalar::Utf8("2024-03-25 00:00:00".into()));
+        assert_eq!(
+            result.values()[0],
+            Scalar::Utf8("2024-03-25 00:00:00".into())
+        );
     }
 
     #[test]
@@ -44930,7 +44953,10 @@ mod tests {
         )
         .unwrap();
         let result = super::to_datetime(&s).unwrap();
-        assert_eq!(result.values()[0], Scalar::Utf8("2024-01-15 00:00:00".into()));
+        assert_eq!(
+            result.values()[0],
+            Scalar::Utf8("2024-01-15 00:00:00".into())
+        );
     }
 
     #[test]
@@ -44967,12 +44993,8 @@ mod tests {
 
     #[test]
     fn to_datetime_null_produces_nat() {
-        let s = Series::from_values(
-            "x",
-            vec![0_i64.into()],
-            vec![Scalar::Null(NullKind::Null)],
-        )
-        .unwrap();
+        let s = Series::from_values("x", vec![0_i64.into()], vec![Scalar::Null(NullKind::Null)])
+            .unwrap();
         let result = super::to_datetime(&s).unwrap();
         assert!(result.values()[0].is_missing());
     }
@@ -44998,7 +45020,10 @@ mod tests {
         )
         .unwrap();
         let result = super::to_datetime_with_format(&s, Some("%d-%m-%Y")).unwrap();
-        assert_eq!(result.values()[0], Scalar::Utf8("2024-01-15 00:00:00".into()));
+        assert_eq!(
+            result.values()[0],
+            Scalar::Utf8("2024-01-15 00:00:00".into())
+        );
     }
 
     #[test]
@@ -45014,7 +45039,10 @@ mod tests {
         )
         .unwrap();
         let result = super::to_datetime(&s).unwrap();
-        assert_eq!(result.values()[0], Scalar::Utf8("2024-01-01 00:00:00".into()));
+        assert_eq!(
+            result.values()[0],
+            Scalar::Utf8("2024-01-01 00:00:00".into())
+        );
         assert!(result.values()[1].is_missing());
         assert!(result.values()[2].is_missing());
     }
@@ -45026,18 +45054,33 @@ mod tests {
         let df = DataFrame::from_dict(
             &["region", "revenue", "qty"],
             vec![
-                ("region", vec![
-                    Scalar::Utf8("east".into()), Scalar::Utf8("west".into()),
-                    Scalar::Utf8("east".into()), Scalar::Utf8("west".into()),
-                ]),
-                ("revenue", vec![
-                    Scalar::Float64(100.0), Scalar::Float64(200.0),
-                    Scalar::Float64(150.0), Scalar::Float64(250.0),
-                ]),
-                ("qty", vec![
-                    Scalar::Int64(10), Scalar::Int64(20),
-                    Scalar::Int64(15), Scalar::Int64(25),
-                ]),
+                (
+                    "region",
+                    vec![
+                        Scalar::Utf8("east".into()),
+                        Scalar::Utf8("west".into()),
+                        Scalar::Utf8("east".into()),
+                        Scalar::Utf8("west".into()),
+                    ],
+                ),
+                (
+                    "revenue",
+                    vec![
+                        Scalar::Float64(100.0),
+                        Scalar::Float64(200.0),
+                        Scalar::Float64(150.0),
+                        Scalar::Float64(250.0),
+                    ],
+                ),
+                (
+                    "qty",
+                    vec![
+                        Scalar::Int64(10),
+                        Scalar::Int64(20),
+                        Scalar::Int64(15),
+                        Scalar::Int64(25),
+                    ],
+                ),
             ],
         )
         .unwrap();
@@ -45064,8 +45107,22 @@ mod tests {
         let df = DataFrame::from_dict(
             &["g", "v"],
             vec![
-                ("g", vec![Scalar::Utf8("a".into()), Scalar::Utf8("a".into()), Scalar::Utf8("b".into())]),
-                ("v", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
+                (
+                    "g",
+                    vec![
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("b".into()),
+                    ],
+                ),
+                (
+                    "v",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(30.0),
+                    ],
+                ),
             ],
         )
         .unwrap();
@@ -45073,10 +45130,7 @@ mod tests {
         let result = df
             .groupby(&["g"])
             .unwrap()
-            .agg_named(&[
-                ("v_sum", "v", "sum"),
-                ("v_count", "v", "count"),
-            ])
+            .agg_named(&[("v_sum", "v", "sum"), ("v_count", "v", "count")])
             .unwrap();
 
         assert_eq!(result.index().len(), 2);
@@ -45086,12 +45140,18 @@ mod tests {
         let counts = result.column("v_count").unwrap();
 
         // Find which group index is "a" vs "b" (order may vary).
-        let idx_a = result.index().labels().iter().position(|l| {
-            matches!(l, IndexLabel::Utf8(s) if s == "a")
-        }).expect("group 'a' must exist");
-        let idx_b = result.index().labels().iter().position(|l| {
-            matches!(l, IndexLabel::Utf8(s) if s == "b")
-        }).expect("group 'b' must exist");
+        let idx_a = result
+            .index()
+            .labels()
+            .iter()
+            .position(|l| matches!(l, IndexLabel::Utf8(s) if s == "a"))
+            .expect("group 'a' must exist");
+        let idx_b = result
+            .index()
+            .labels()
+            .iter()
+            .position(|l| matches!(l, IndexLabel::Utf8(s) if s == "b"))
+            .expect("group 'b' must exist");
 
         // Group "a": sum(10+20)=30, count=2.
         assert_eq!(sums.values()[idx_a], Scalar::Float64(30.0));

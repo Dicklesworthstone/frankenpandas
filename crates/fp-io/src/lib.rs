@@ -943,7 +943,10 @@ pub fn read_jsonl_str(input: &str) -> Result<DataFrame, IoError> {
         }
     }
     let col_names = col_names_ordered;
-    let mut columns: Vec<Vec<Scalar>> = col_names.iter().map(|_| Vec::with_capacity(all_rows.len())).collect();
+    let mut columns: Vec<Vec<Scalar>> = col_names
+        .iter()
+        .map(|_| Vec::with_capacity(all_rows.len()))
+        .collect();
 
     for row in &all_rows {
         for (col_idx, name) in col_names.iter().enumerate() {
@@ -960,7 +963,11 @@ pub fn read_jsonl_str(input: &str) -> Result<DataFrame, IoError> {
     }
 
     let index = Index::from_i64((0..all_rows.len() as i64).collect());
-    Ok(DataFrame::new_with_column_order(index, out_columns, column_order)?)
+    Ok(DataFrame::new_with_column_order(
+        index,
+        out_columns,
+        column_order,
+    )?)
 }
 
 /// Write a DataFrame to a JSONL file.
@@ -1331,8 +1338,7 @@ fn parse_excel_rows(
     options: &ExcelReadOptions,
 ) -> Result<DataFrame, IoError> {
     if rows.is_empty() {
-        return DataFrame::new(Index::new(Vec::new()), BTreeMap::new())
-            .map_err(IoError::Frame);
+        return DataFrame::new(Index::new(Vec::new()), BTreeMap::new()).map_err(IoError::Frame);
     }
 
     // Extract headers.
@@ -1356,7 +1362,9 @@ fn parse_excel_rows(
     let ncols = headers.len();
 
     // Accumulate columns.
-    let mut columns: Vec<Vec<Scalar>> = (0..ncols).map(|_| Vec::with_capacity(data_rows.len())).collect();
+    let mut columns: Vec<Vec<Scalar>> = (0..ncols)
+        .map(|_| Vec::with_capacity(data_rows.len()))
+        .collect();
 
     for row in data_rows {
         for (col_idx, col_vec) in columns.iter_mut().enumerate() {
@@ -1400,7 +1408,11 @@ fn parse_excel_rows(
         Index::from_i64((0..data_rows.len() as i64).collect())
     };
 
-    Ok(DataFrame::new_with_column_order(index, out_columns, column_order)?)
+    Ok(DataFrame::new_with_column_order(
+        index,
+        out_columns,
+        column_order,
+    )?)
 }
 
 /// Read an Excel (.xlsx/.xls/.xlsb/.ods) file into a DataFrame.
@@ -1549,14 +1561,12 @@ pub fn write_feather_bytes(frame: &DataFrame) -> Result<Vec<u8>, IoError> {
     let schema = batch.schema();
 
     let mut buf = Vec::new();
-    let mut writer = FileWriter::try_new(&mut buf, &schema)
-        .map_err(|e| IoError::Arrow(e.to_string()))?;
+    let mut writer =
+        FileWriter::try_new(&mut buf, &schema).map_err(|e| IoError::Arrow(e.to_string()))?;
     writer
         .write(&batch)
         .map_err(|e| IoError::Arrow(e.to_string()))?;
-    writer
-        .finish()
-        .map_err(|e| IoError::Arrow(e.to_string()))?;
+    writer.finish().map_err(|e| IoError::Arrow(e.to_string()))?;
     Ok(buf)
 }
 
@@ -1567,8 +1577,7 @@ pub fn read_feather_bytes(data: &[u8]) -> Result<DataFrame, IoError> {
     use arrow::ipc::reader::FileReader;
 
     let cursor = std::io::Cursor::new(data);
-    let reader = FileReader::try_new(cursor, None)
-        .map_err(|e| IoError::Arrow(e.to_string()))?;
+    let reader = FileReader::try_new(cursor, None).map_err(|e| IoError::Arrow(e.to_string()))?;
 
     let mut all_frames: Vec<DataFrame> = Vec::new();
     for batch_result in reader {
@@ -1620,14 +1629,12 @@ pub fn write_ipc_stream_bytes(frame: &DataFrame) -> Result<Vec<u8>, IoError> {
     let schema = batch.schema();
 
     let mut buf = Vec::new();
-    let mut writer = StreamWriter::try_new(&mut buf, &schema)
-        .map_err(|e| IoError::Arrow(e.to_string()))?;
+    let mut writer =
+        StreamWriter::try_new(&mut buf, &schema).map_err(|e| IoError::Arrow(e.to_string()))?;
     writer
         .write(&batch)
         .map_err(|e| IoError::Arrow(e.to_string()))?;
-    writer
-        .finish()
-        .map_err(|e| IoError::Arrow(e.to_string()))?;
+    writer.finish().map_err(|e| IoError::Arrow(e.to_string()))?;
     Ok(buf)
 }
 
@@ -1636,8 +1643,7 @@ pub fn read_ipc_stream_bytes(data: &[u8]) -> Result<DataFrame, IoError> {
     use arrow::ipc::reader::StreamReader;
 
     let cursor = std::io::Cursor::new(data);
-    let reader = StreamReader::try_new(cursor, None)
-        .map_err(|e| IoError::Arrow(e.to_string()))?;
+    let reader = StreamReader::try_new(cursor, None).map_err(|e| IoError::Arrow(e.to_string()))?;
 
     let mut all_frames: Vec<DataFrame> = Vec::new();
     for batch_result in reader {
@@ -1737,7 +1743,11 @@ pub fn read_sql(conn: &rusqlite::Connection, query: &str) -> Result<DataFrame, I
     }
 
     let index = Index::from_i64((0..row_count as i64).collect());
-    Ok(DataFrame::new_with_column_order(index, out_columns, column_order)?)
+    Ok(DataFrame::new_with_column_order(
+        index,
+        out_columns,
+        column_order,
+    )?)
 }
 
 /// Read an entire SQL table into a DataFrame.
@@ -1745,11 +1755,7 @@ pub fn read_sql(conn: &rusqlite::Connection, query: &str) -> Result<DataFrame, I
 /// Matches `pd.read_sql_table(table_name, con)`.
 pub fn read_sql_table(conn: &rusqlite::Connection, table_name: &str) -> Result<DataFrame, IoError> {
     // Validate table name to prevent SQL injection (only allow alphanumeric + underscore, non-empty).
-    if table_name.is_empty()
-        || !table_name
-            .chars()
-            .all(|c| c.is_alphanumeric() || c == '_')
-    {
+    if table_name.is_empty() || !table_name.chars().all(|c| c.is_alphanumeric() || c == '_') {
         return Err(IoError::Sql(format!(
             "invalid table name: '{table_name}' (must be non-empty, only alphanumeric and underscore allowed)"
         )));
@@ -1767,11 +1773,7 @@ pub fn write_sql(
     if_exists: SqlIfExists,
 ) -> Result<(), IoError> {
     // Validate table name to prevent SQL injection (only allow alphanumeric + underscore, non-empty).
-    if table_name.is_empty()
-        || !table_name
-            .chars()
-            .all(|c| c.is_alphanumeric() || c == '_')
-    {
+    if table_name.is_empty() || !table_name.chars().all(|c| c.is_alphanumeric() || c == '_') {
         return Err(IoError::Sql(format!(
             "invalid table name: '{table_name}' (must be non-empty, only alphanumeric and underscore allowed)"
         )));
@@ -1804,9 +1806,7 @@ pub fn write_sql(
     let col_defs: Vec<String> = col_names
         .iter()
         .map(|name| {
-            let dt = frame
-                .column(name)
-                .map_or(DType::Utf8, |c| c.dtype());
+            let dt = frame.column(name).map_or(DType::Utf8, |c| c.dtype());
             format!("\"{}\" {}", name, dtype_to_sql(dt))
         })
         .collect();
@@ -2872,8 +2872,8 @@ mod tests {
         let bytes = super::write_excel_bytes(&frame).expect("write excel");
         assert!(!bytes.is_empty());
 
-        let frame2 =
-            super::read_excel_bytes(&bytes, &super::ExcelReadOptions::default()).expect("read excel");
+        let frame2 = super::read_excel_bytes(&bytes, &super::ExcelReadOptions::default())
+            .expect("read excel");
         assert_eq!(frame2.index().len(), 3);
         // Excel preserves the write-time column order (ints, floats, names).
         assert_eq!(
@@ -2944,28 +2944,19 @@ mod tests {
             IndexLabel::Int64(1),
             IndexLabel::Int64(2),
         ];
-        let frame = DataFrame::new_with_column_order(
-            Index::new(labels),
-            columns,
-            vec!["vals".to_string()],
-        )
-        .unwrap();
+        let frame =
+            DataFrame::new_with_column_order(Index::new(labels), columns, vec!["vals".to_string()])
+                .unwrap();
 
         let bytes = super::write_excel_bytes(&frame).expect("write");
         let frame2 =
             super::read_excel_bytes(&bytes, &super::ExcelReadOptions::default()).expect("read");
 
         // Non-null values round-trip.
-        assert_eq!(
-            frame2.column("vals").unwrap().values()[0],
-            Scalar::Int64(1)
-        );
+        assert_eq!(frame2.column("vals").unwrap().values()[0], Scalar::Int64(1));
         // NaN written as empty cell, read back as Null.
         assert!(frame2.column("vals").unwrap().values()[1].is_missing());
-        assert_eq!(
-            frame2.column("vals").unwrap().values()[2],
-            Scalar::Int64(3)
-        );
+        assert_eq!(frame2.column("vals").unwrap().values()[2], Scalar::Int64(3));
     }
 
     #[test]
@@ -3021,19 +3012,12 @@ mod tests {
         let mut columns = BTreeMap::new();
         columns.insert(
             "x".to_string(),
-            Column::new(
-                DType::Int64,
-                vec![Scalar::Int64(1), Scalar::Int64(2)],
-            )
-            .unwrap(),
+            Column::new(DType::Int64, vec![Scalar::Int64(1), Scalar::Int64(2)]).unwrap(),
         );
         let labels = vec![IndexLabel::Int64(0), IndexLabel::Int64(1)];
-        let frame = DataFrame::new_with_column_order(
-            Index::new(labels),
-            columns,
-            vec!["x".to_string()],
-        )
-        .unwrap();
+        let frame =
+            DataFrame::new_with_column_order(Index::new(labels), columns, vec!["x".to_string()])
+                .unwrap();
 
         let bytes = super::write_excel_bytes(&frame).expect("write");
         let frame2 = super::read_excel_bytes(
@@ -3115,9 +3099,7 @@ mod tests {
 
         let err = write_sql(&frame, &conn, "tbl", SqlIfExists::Fail);
         assert!(err.is_err());
-        assert!(
-            matches!(&err.unwrap_err(), IoError::Sql(msg) if msg.contains("already exists")),
-        );
+        assert!(matches!(&err.unwrap_err(), IoError::Sql(msg) if msg.contains("already exists")),);
     }
 
     #[test]
@@ -3167,12 +3149,9 @@ mod tests {
             IndexLabel::Int64(1),
             IndexLabel::Int64(2),
         ];
-        let frame = DataFrame::new_with_column_order(
-            Index::new(labels),
-            columns,
-            vec!["vals".to_string()],
-        )
-        .unwrap();
+        let frame =
+            DataFrame::new_with_column_order(Index::new(labels), columns, vec!["vals".to_string()])
+                .unwrap();
 
         let conn = make_sql_test_conn();
         write_sql(&frame, &conn, "nulltest", SqlIfExists::Fail).unwrap();
@@ -3360,12 +3339,9 @@ mod tests {
             IndexLabel::Int64(1),
             IndexLabel::Int64(2),
         ];
-        let frame = DataFrame::new_with_column_order(
-            Index::new(labels),
-            columns,
-            vec!["vals".to_string()],
-        )
-        .unwrap();
+        let frame =
+            DataFrame::new_with_column_order(Index::new(labels), columns, vec!["vals".to_string()])
+                .unwrap();
 
         let bytes = super::write_feather_bytes(&frame).expect("write");
         let frame2 = super::read_feather_bytes(&bytes).expect("read");
@@ -3540,10 +3516,7 @@ mod tests {
             Scalar::Float64(87.0)
         );
         // id column should remain Int64 (not in dtype map)
-        assert_eq!(
-            frame.column("id").unwrap().values()[0],
-            Scalar::Int64(1)
-        );
+        assert_eq!(frame.column("id").unwrap().values()[0], Scalar::Int64(1));
     }
 
     #[test]
@@ -3581,10 +3554,7 @@ mod tests {
 
         let back = super::read_jsonl_str(&jsonl).expect("JSONL read failed");
         assert_eq!(back.index().len(), 3);
-        assert_eq!(
-            back.column("ints").unwrap().values()[0],
-            Scalar::Int64(10)
-        );
+        assert_eq!(back.column("ints").unwrap().values()[0], Scalar::Int64(10));
         assert_eq!(
             back.column("names").unwrap().values()[2],
             Scalar::Utf8("carol".into())
@@ -3612,7 +3582,11 @@ mod tests {
             "v".to_string(),
             Column::new(
                 DType::Float64,
-                vec![Scalar::Float64(1.0), Scalar::Null(NullKind::NaN), Scalar::Float64(3.0)],
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Null(NullKind::NaN),
+                    Scalar::Float64(3.0),
+                ],
             )
             .unwrap(),
         );
@@ -3621,12 +3595,9 @@ mod tests {
             IndexLabel::Int64(1),
             IndexLabel::Int64(2),
         ];
-        let frame = DataFrame::new_with_column_order(
-            Index::new(labels),
-            columns,
-            vec!["v".to_string()],
-        )
-        .unwrap();
+        let frame =
+            DataFrame::new_with_column_order(Index::new(labels), columns, vec!["v".to_string()])
+                .unwrap();
 
         let jsonl = super::write_jsonl_string(&frame).unwrap();
         let back = super::read_jsonl_str(&jsonl).unwrap();
@@ -3747,14 +3718,20 @@ mod tests {
         // JSON with values at i64 boundary.
         let input = format!(r#"[{{"v":{}}}]"#, i64::MAX);
         let frame = read_json_str(&input, JsonOrient::Records).expect("i64::MAX must parse");
-        assert_eq!(frame.column("v").unwrap().values()[0], Scalar::Int64(i64::MAX));
+        assert_eq!(
+            frame.column("v").unwrap().values()[0],
+            Scalar::Int64(i64::MAX)
+        );
     }
 
     #[test]
     fn adversarial_json_i64_min_value() {
         let input = format!(r#"[{{"v":{}}}]"#, i64::MIN);
         let frame = read_json_str(&input, JsonOrient::Records).expect("i64::MIN must parse");
-        assert_eq!(frame.column("v").unwrap().values()[0], Scalar::Int64(i64::MIN));
+        assert_eq!(
+            frame.column("v").unwrap().values()[0],
+            Scalar::Int64(i64::MIN)
+        );
     }
 
     #[test]
@@ -3814,11 +3791,7 @@ mod tests {
         // Insert 10K rows in a single write_sql call.
         let n = 10_000;
         let vals: Vec<Scalar> = (0..n).map(|i| Scalar::Int64(i as i64)).collect();
-        let df = fp_frame::DataFrame::from_dict(
-            &["x"],
-            vec![("x", vals)],
-        )
-        .unwrap();
+        let df = fp_frame::DataFrame::from_dict(&["x"], vec![("x", vals)]).unwrap();
 
         let conn = make_sql_test_conn();
         write_sql(&df, &conn, "big_table", SqlIfExists::Fail).unwrap();
@@ -3843,7 +3816,11 @@ mod tests {
         let conn = make_sql_test_conn();
         // This should work since column names are quoted.
         let result = write_sql(&df, &conn, "test_spaces", SqlIfExists::Fail);
-        assert!(result.is_ok(), "columns with spaces should work: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "columns with spaces should work: {:?}",
+            result.err()
+        );
 
         let back = read_sql_table(&conn, "test_spaces").unwrap();
         assert!(back.column("has space").is_some());
