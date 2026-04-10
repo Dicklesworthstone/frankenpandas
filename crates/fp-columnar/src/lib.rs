@@ -202,13 +202,8 @@ impl ColumnData {
                     .map(|v| match v {
                         Scalar::Float64(f) => *f,
                         Scalar::Int64(i) => *i as f64,
-                        Scalar::Bool(b) => {
-                            if *b {
-                                1.0
-                            } else {
-                                0.0
-                            }
-                        }
+                        Scalar::Bool(true) => 1.0,
+                        Scalar::Bool(false) => 0.0,
                         _ => 0.0, // sentinel for invalid positions
                     })
                     .collect();

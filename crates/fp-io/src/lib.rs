@@ -1387,7 +1387,7 @@ fn parse_excel_rows(
     let mut out_columns = BTreeMap::new();
     let mut column_order = Vec::new();
 
-    for (idx, (name, values)) in headers.into_iter().zip(columns.into_iter()).enumerate() {
+    for (idx, (name, values)) in headers.into_iter().zip(columns).enumerate() {
         if Some(idx) == index_col_idx {
             continue; // skip index column from data columns
         }

@@ -18015,12 +18015,7 @@ impl DataFrame {
         }
 
         let mut columns = BTreeMap::new();
-        for (name, values) in self
-            .column_order
-            .iter()
-            .cloned()
-            .zip(per_column.into_iter())
-        {
+        for (name, values) in self.column_order.iter().cloned().zip(per_column) {
             columns.insert(name, Column::new(DType::Float64, values)?);
         }
 
@@ -25436,8 +25431,8 @@ mod tests {
 
     #[test]
     fn series_loc_slice_empty_returns_empty() {
-        let s = Series::from_values("vals", Vec::<IndexLabel>::new(), Vec::<Scalar>::new())
-            .unwrap();
+        let s =
+            Series::from_values("vals", Vec::<IndexLabel>::new(), Vec::<Scalar>::new()).unwrap();
 
         let out = s.loc_slice(None, None).unwrap();
         assert_eq!(out.len(), 0);
