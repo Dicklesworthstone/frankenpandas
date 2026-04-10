@@ -1296,9 +1296,14 @@ impl DataFrameMergeExt for fp_frame::DataFrame {
         direction: &str,
     ) -> Result<MergedDataFrame, JoinError> {
         let dir = match direction {
+            "backward" => AsofDirection::Backward,
             "forward" => AsofDirection::Forward,
             "nearest" => AsofDirection::Nearest,
-            _ => AsofDirection::Backward,
+            _ => {
+                return Err(JoinError::Frame(FrameError::CompatibilityRejected(
+                    format!("merge_asof: invalid direction '{direction}'"),
+                )));
+            }
         };
         crate::merge_asof(self, other, on, dir)
     }
@@ -1310,7 +1315,7 @@ mod tests {
     use fp_types::{NullKind, Scalar};
 
     use super::{
-        JoinExecutionOptions, JoinType, join_series, join_series_with_options,
+        DataFrameMergeExt, JoinExecutionOptions, JoinType, join_series, join_series_with_options,
         join_series_with_trace,
     };
     use fp_frame::Series;
@@ -3403,6 +3408,23 @@ mod tests {
 
         let err = super::merge_asof(&left, &right, "time", AsofDirection::Backward);
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn merge_asof_invalid_direction_errors() {
+        let left =
+            fp_frame::DataFrame::from_dict(&["time"], vec![("time", vec![Scalar::Int64(1)])])
+                .unwrap();
+        let right =
+            fp_frame::DataFrame::from_dict(&["time"], vec![("time", vec![Scalar::Int64(1)])])
+                .unwrap();
+
+        let err = left.merge_asof(&right, "time", "sideways");
+        assert!(matches!(
+            err,
+            Err(super::JoinError::Frame(fp_frame::FrameError::CompatibilityRejected(msg)))
+                if msg.contains("invalid direction")
+        ));
     }
 
     #[test]
