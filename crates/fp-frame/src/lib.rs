@@ -1318,7 +1318,8 @@ impl Series {
     /// The mask must be a Bool-typed Series. Indexes are aligned before
     /// applying the mask. Missing values in the mask are treated as `False`.
     pub fn filter(&self, mask: &Self) -> Result<Self, FrameError> {
-        let plan = align_union(&self.index, &mask.index);
+        // Align mask to the Series index (pandas behavior: extra mask labels are ignored).
+        let plan = align(&self.index, &mask.index, AlignMode::Left);
         validate_alignment_plan(&plan)?;
 
         let aligned_data = self.column.reindex_by_positions(&plan.left_positions)?;
@@ -1460,6 +1461,9 @@ impl Series {
         stop: Option<&IndexLabel>,
     ) -> Result<Self, FrameError> {
         let labels = self.index.labels();
+        if labels.is_empty() {
+            return Self::from_values(self.name.clone(), Vec::new(), Vec::new());
+        }
 
         // Find the first occurrence of `start` (or begin at 0).
         let start_pos = match start {
@@ -11644,7 +11648,8 @@ impl DataFrame {
     /// The mask must be a Bool-typed Series. Indexes are aligned; missing
     /// mask values are treated as `False`.
     pub fn filter_rows(&self, mask: &Series) -> Result<Self, FrameError> {
-        let plan = align_union(&self.index, mask.index());
+        // Align mask to DataFrame index (pandas behavior: extra mask labels are ignored).
+        let plan = align(&self.index, mask.index(), AlignMode::Left);
         validate_alignment_plan(&plan)?;
 
         let aligned_mask = mask.column().reindex_by_positions(&plan.right_positions)?;
@@ -12609,6 +12614,21 @@ impl DataFrame {
         stop: Option<&IndexLabel>,
     ) -> Result<Self, FrameError> {
         let labels = self.index.labels();
+        if labels.is_empty() {
+            let mut empty_cols = BTreeMap::new();
+            for name in &self.column_order {
+                let col = self
+                    .columns
+                    .get(name)
+                    .expect("column name listed in order must exist");
+                empty_cols.insert(name.clone(), Column::new(col.dtype(), Vec::new())?);
+            }
+            return Self::new_with_column_order(
+                Index::new(Vec::new()),
+                empty_cols,
+                self.column_order.clone(),
+            );
+        }
 
         let start_pos = match start {
             Some(label) => labels.iter().position(|l| l == label).ok_or_else(|| {
@@ -25415,6 +25435,16 @@ mod tests {
     }
 
     #[test]
+    fn series_loc_slice_empty_returns_empty() {
+        let s = Series::from_values("vals", Vec::<IndexLabel>::new(), Vec::<Scalar>::new())
+            .unwrap();
+
+        let out = s.loc_slice(None, None).unwrap();
+        assert_eq!(out.len(), 0);
+        assert!(out.values().is_empty());
+    }
+
+    #[test]
     fn series_loc_slice_missing_label_rejected() {
         let s = Series::from_values("vals", vec![0_i64.into()], vec![Scalar::Int64(10)]).unwrap();
 
@@ -25859,6 +25889,28 @@ mod tests {
         assert_eq!(tail.values(), &[]);
     }
 
+    #[test]
+    fn series_filter_ignores_extra_mask_labels() {
+        let s = Series::from_values(
+            "vals",
+            vec![IndexLabel::from("a"), IndexLabel::from("b")],
+            vec![Scalar::Int64(1), Scalar::Int64(2)],
+        )
+        .unwrap();
+
+        let mask = Series::from_values(
+            "mask",
+            vec![IndexLabel::from("a"), IndexLabel::from("c")],
+            vec![Scalar::Bool(true), Scalar::Bool(true)],
+        )
+        .unwrap();
+
+        let out = s.filter(&mask).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out.index().labels(), &[IndexLabel::from("a")]);
+        assert_eq!(out.values(), &[Scalar::Int64(1)]);
+    }
+
     // ---- DataFrame filter_rows/fillna/dropna/head/tail/column-mutation tests ----
 
     #[test]
@@ -25895,6 +25947,27 @@ mod tests {
             result.column("b").unwrap().values(),
             &[Scalar::Int64(10), Scalar::Int64(30)]
         );
+    }
+
+    #[test]
+    fn dataframe_filter_rows_ignores_extra_mask_labels() {
+        let df = DataFrame::from_dict(
+            &["a"],
+            vec![("a", vec![Scalar::Int64(1), Scalar::Int64(2)])],
+        )
+        .unwrap();
+
+        let mask = Series::from_values(
+            "mask",
+            vec![IndexLabel::from(0_i64), IndexLabel::from(2_i64)],
+            vec![Scalar::Bool(true), Scalar::Bool(true)],
+        )
+        .unwrap();
+
+        let result = df.filter_rows(&mask).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result.index().labels(), &[IndexLabel::from(0_i64)]);
+        assert_eq!(result.column("a").unwrap().values(), &[Scalar::Int64(1)]);
     }
 
     #[test]
@@ -27719,6 +27792,16 @@ mod tests {
             out.column("a").unwrap().values(),
             &[Scalar::Int64(2), Scalar::Int64(3)]
         );
+    }
+
+    #[test]
+    fn dataframe_loc_slice_empty_returns_empty() {
+        let df = DataFrame::from_dict(&["a"], vec![("a", Vec::<Scalar>::new())]).unwrap();
+
+        let out = df.loc_slice(None, None).unwrap();
+        assert_eq!(out.len(), 0);
+        assert_eq!(out.num_columns(), 1);
+        assert!(out.column("a").unwrap().values().is_empty());
     }
 
     #[test]
