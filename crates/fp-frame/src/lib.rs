@@ -2925,9 +2925,9 @@ impl Series {
     ///
     /// Matches `series.where(cond, other)`. If `other` is `None`, replaced
     /// values become `NaN`. The condition Series is aligned to `self` via
-    /// outer-index union before masking.
+    /// left-index alignment before masking.
     pub fn where_cond(&self, cond: &Self, other: Option<&Scalar>) -> Result<Self, FrameError> {
-        let plan = align_union(&self.index, &cond.index);
+        let plan = align(&self.index, &cond.index, AlignMode::Left);
         validate_alignment_plan(&plan)?;
 
         let aligned_data = self.column.reindex_by_positions(&plan.left_positions)?;
@@ -2959,13 +2959,13 @@ impl Series {
     ///
     /// Matches `series.where(cond, other=series)`.
     pub fn where_cond_series(&self, cond: &Self, other: &Self) -> Result<Self, FrameError> {
-        let plan = align_union(&self.index, &cond.index);
+        let plan = align(&self.index, &cond.index, AlignMode::Left);
         validate_alignment_plan(&plan)?;
 
         let aligned_data = self.column.reindex_by_positions(&plan.left_positions)?;
         let aligned_cond = cond.column.reindex_by_positions(&plan.right_positions)?;
 
-        let other_plan = align_union(&plan.union_index, &other.index);
+        let other_plan = align(&self.index, &other.index, AlignMode::Left);
         validate_alignment_plan(&other_plan)?;
         let aligned_other = other
             .column
@@ -2999,13 +2999,13 @@ impl Series {
     ///
     /// Matches `series.mask(cond, other=series)`.
     pub fn mask_series(&self, cond: &Self, other: &Self) -> Result<Self, FrameError> {
-        let plan = align_union(&self.index, &cond.index);
+        let plan = align(&self.index, &cond.index, AlignMode::Left);
         validate_alignment_plan(&plan)?;
 
         let aligned_data = self.column.reindex_by_positions(&plan.left_positions)?;
         let aligned_cond = cond.column.reindex_by_positions(&plan.right_positions)?;
 
-        let other_plan = align_union(&plan.union_index, &other.index);
+        let other_plan = align(&self.index, &other.index, AlignMode::Left);
         validate_alignment_plan(&other_plan)?;
         let aligned_other = other
             .column
@@ -3039,7 +3039,7 @@ impl Series {
     /// Matches `series.mask(cond, other)`. This is the inverse of `where`:
     /// values are replaced where the condition IS True, not where it is False.
     pub fn mask(&self, cond: &Self, other: Option<&Scalar>) -> Result<Self, FrameError> {
-        let plan = align_union(&self.index, &cond.index);
+        let plan = align(&self.index, &cond.index, AlignMode::Left);
         validate_alignment_plan(&plan)?;
 
         let aligned_data = self.column.reindex_by_positions(&plan.left_positions)?;
@@ -13586,6 +13586,8 @@ impl DataFrame {
     /// If `other` is `None`, replaced values become NaN.
     pub fn where_cond(&self, cond: &Self, other: Option<&Scalar>) -> Result<Self, FrameError> {
         let fill = other.cloned().unwrap_or(Scalar::Null(NullKind::NaN));
+        let plan = align(&self.index, &cond.index, AlignMode::Left);
+        validate_alignment_plan(&plan)?;
         let mut new_columns = BTreeMap::new();
 
         for col_name in &self.column_order {
@@ -13598,11 +13600,12 @@ impl DataFrame {
                     "where: condition missing column '{col_name}'"
                 ))
             })?;
+            let aligned_cond = cond_col.reindex_by_positions(&plan.right_positions)?;
 
             let values: Vec<Scalar> = data_col
                 .values()
                 .iter()
-                .zip(cond_col.values())
+                .zip(aligned_cond.values())
                 .map(|(val, c)| match c {
                     Scalar::Bool(true) => val.clone(),
                     Scalar::Bool(false) => fill.clone(),
@@ -13622,6 +13625,8 @@ impl DataFrame {
     /// Matches `df.mask(cond, other)`. Inverse of `where_cond`.
     pub fn mask(&self, cond: &Self, other: Option<&Scalar>) -> Result<Self, FrameError> {
         let fill = other.cloned().unwrap_or(Scalar::Null(NullKind::NaN));
+        let plan = align(&self.index, &cond.index, AlignMode::Left);
+        validate_alignment_plan(&plan)?;
         let mut new_columns = BTreeMap::new();
 
         for col_name in &self.column_order {
@@ -13634,11 +13639,12 @@ impl DataFrame {
                     "mask: condition missing column '{col_name}'"
                 ))
             })?;
+            let aligned_cond = cond_col.reindex_by_positions(&plan.right_positions)?;
 
             let values: Vec<Scalar> = data_col
                 .values()
                 .iter()
-                .zip(cond_col.values())
+                .zip(aligned_cond.values())
                 .map(|(val, c)| match c {
                     Scalar::Bool(true) => fill.clone(),
                     Scalar::Bool(false) => val.clone(),
@@ -13658,6 +13664,10 @@ impl DataFrame {
     ///
     /// Matches `df.where(cond, other=df)`.
     pub fn where_cond_df(&self, cond: &Self, other: &Self) -> Result<Self, FrameError> {
+        let cond_plan = align(&self.index, &cond.index, AlignMode::Left);
+        validate_alignment_plan(&cond_plan)?;
+        let other_plan = align(&self.index, &other.index, AlignMode::Left);
+        validate_alignment_plan(&other_plan)?;
         let mut new_columns = BTreeMap::new();
 
         for col_name in &self.column_order {
@@ -13667,16 +13677,22 @@ impl DataFrame {
                     "where_cond_df: condition missing column '{col_name}'"
                 ))
             })?;
-            let other_col = other.columns.get(col_name);
+            let aligned_cond = cond_col.reindex_by_positions(&cond_plan.right_positions)?;
+            let aligned_other = other
+                .columns
+                .get(col_name)
+                .map(|col| col.reindex_by_positions(&other_plan.right_positions))
+                .transpose()?;
 
             let values: Vec<Scalar> = data_col
                 .values()
                 .iter()
-                .zip(cond_col.values())
+                .zip(aligned_cond.values())
                 .enumerate()
                 .map(|(i, (val, c))| match c {
                     Scalar::Bool(true) => val.clone(),
-                    Scalar::Bool(false) => other_col
+                    Scalar::Bool(false) => aligned_other
+                        .as_ref()
                         .and_then(|oc| oc.values().get(i).cloned())
                         .unwrap_or(Scalar::Null(NullKind::NaN)),
                     _ => Scalar::Null(NullKind::NaN),
@@ -13694,6 +13710,10 @@ impl DataFrame {
     ///
     /// Matches `df.mask(cond, other=df)`.
     pub fn mask_df_other(&self, cond: &Self, other: &Self) -> Result<Self, FrameError> {
+        let cond_plan = align(&self.index, &cond.index, AlignMode::Left);
+        validate_alignment_plan(&cond_plan)?;
+        let other_plan = align(&self.index, &other.index, AlignMode::Left);
+        validate_alignment_plan(&other_plan)?;
         let mut new_columns = BTreeMap::new();
 
         for col_name in &self.column_order {
@@ -13703,15 +13723,21 @@ impl DataFrame {
                     "mask_df_other: condition missing column '{col_name}'"
                 ))
             })?;
-            let other_col = other.columns.get(col_name);
+            let aligned_cond = cond_col.reindex_by_positions(&cond_plan.right_positions)?;
+            let aligned_other = other
+                .columns
+                .get(col_name)
+                .map(|col| col.reindex_by_positions(&other_plan.right_positions))
+                .transpose()?;
 
             let values: Vec<Scalar> = data_col
                 .values()
                 .iter()
-                .zip(cond_col.values())
+                .zip(aligned_cond.values())
                 .enumerate()
                 .map(|(i, (val, c))| match c {
-                    Scalar::Bool(true) => other_col
+                    Scalar::Bool(true) => aligned_other
+                        .as_ref()
                         .and_then(|oc| oc.values().get(i).cloned())
                         .unwrap_or(Scalar::Null(NullKind::NaN)),
                     Scalar::Bool(false) => val.clone(),
@@ -18675,6 +18701,8 @@ impl DataFrame {
     /// Matches `pd.DataFrame.where(cond, other)` with a DataFrame condition.
     /// Where `cond_df` is True, keep the original value; where False, use `other`.
     pub fn where_mask_df(&self, cond_df: &Self, other: &Scalar) -> Result<Self, FrameError> {
+        let cond_plan = align(&self.index, &cond_df.index, AlignMode::Left);
+        validate_alignment_plan(&cond_plan)?;
         let mut result_cols = BTreeMap::new();
         for col_name in &self.column_order {
             let data_col = &self.columns[col_name];
@@ -18683,10 +18711,11 @@ impl DataFrame {
                     "where_mask_df: condition missing column '{col_name}'"
                 ))
             })?;
+            let aligned_cond = cond_col.reindex_by_positions(&cond_plan.right_positions)?;
             let vals: Vec<Scalar> = data_col
                 .values()
                 .iter()
-                .zip(cond_col.values())
+                .zip(aligned_cond.values())
                 .map(|(val, c)| match c {
                     Scalar::Bool(true) => val.clone(),
                     Scalar::Bool(false) => other.clone(),
@@ -18707,6 +18736,8 @@ impl DataFrame {
     /// Matches `pd.DataFrame.mask(cond, other)` with a DataFrame condition.
     /// Inverse of `where_mask_df`: where `cond_df` is True, replace with `other`.
     pub fn mask_df(&self, cond_df: &Self, other: &Scalar) -> Result<Self, FrameError> {
+        let cond_plan = align(&self.index, &cond_df.index, AlignMode::Left);
+        validate_alignment_plan(&cond_plan)?;
         let mut result_cols = BTreeMap::new();
         for col_name in &self.column_order {
             let data_col = &self.columns[col_name];
@@ -18715,10 +18746,11 @@ impl DataFrame {
                     "mask_df: condition missing column '{col_name}'"
                 ))
             })?;
+            let aligned_cond = cond_col.reindex_by_positions(&cond_plan.right_positions)?;
             let vals: Vec<Scalar> = data_col
                 .values()
                 .iter()
-                .zip(cond_col.values())
+                .zip(aligned_cond.values())
                 .map(|(val, c)| match c {
                     Scalar::Bool(true) => other.clone(),
                     Scalar::Bool(false) => val.clone(),
@@ -22067,6 +22099,54 @@ mod tests {
         cut, index_to_frame, index_to_series, qcut, to_numeric,
     };
     use fp_index::Index;
+
+    fn expect_float64(value: &Scalar) -> f64 {
+        if let Scalar::Float64(v) = value {
+            *v
+        } else {
+            assert!(
+                matches!(value, Scalar::Float64(_)),
+                "expected Float64, got {value:?}"
+            );
+            0.0
+        }
+    }
+
+    fn expect_int64(value: &Scalar) -> i64 {
+        if let Scalar::Int64(v) = value {
+            *v
+        } else {
+            assert!(
+                matches!(value, Scalar::Int64(_)),
+                "expected Int64, got {value:?}"
+            );
+            0
+        }
+    }
+
+    fn expect_utf8(value: &Scalar) -> &str {
+        if let Scalar::Utf8(v) = value {
+            v
+        } else {
+            assert!(
+                matches!(value, Scalar::Utf8(_)),
+                "expected Utf8, got {value:?}"
+            );
+            ""
+        }
+    }
+
+    fn expect_utf8_label(label: &IndexLabel) -> &str {
+        if let IndexLabel::Utf8(v) = label {
+            v
+        } else {
+            assert!(
+                matches!(label, IndexLabel::Utf8(_)),
+                "expected Utf8 label, got {label:?}"
+            );
+            ""
+        }
+    }
 
     #[test]
     fn series_add_aligns_on_union_index() {
@@ -28211,6 +28291,28 @@ mod tests {
     }
 
     #[test]
+    fn series_where_cond_ignores_extra_labels() {
+        let s = Series::from_values(
+            "x",
+            vec!["a".into(), "b".into()],
+            vec![Scalar::Int64(10), Scalar::Int64(20)],
+        )
+        .unwrap();
+
+        let cond = Series::from_values(
+            "c",
+            vec!["a".into(), "c".into()],
+            vec![Scalar::Bool(true), Scalar::Bool(false)],
+        )
+        .unwrap();
+
+        let result = s.where_cond(&cond, None).unwrap();
+        assert_eq!(result.index().labels(), s.index().labels());
+        assert_eq!(result.values()[0], Scalar::Int64(10));
+        assert!(result.values()[1].is_missing());
+    }
+
+    #[test]
     fn series_where_cond_with_other() {
         let s = Series::from_values(
             "x",
@@ -28753,6 +28855,30 @@ mod tests {
         assert!(result.column("a").unwrap().values()[1].is_missing());
         assert!(result.column("b").unwrap().values()[0].is_missing());
         assert_eq!(result.column("b").unwrap().values()[1], Scalar::Int64(4));
+    }
+
+    #[test]
+    fn dataframe_where_cond_ignores_extra_rows() {
+        let df = DataFrame::from_dict(
+            &["a"],
+            vec![("a", vec![Scalar::Int64(1), Scalar::Int64(2)])],
+        )
+        .unwrap();
+
+        let cond = DataFrame::from_dict(
+            &["a"],
+            vec![(
+                "a",
+                vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)],
+            )],
+        )
+        .unwrap();
+
+        let result = df.where_cond(&cond, None).unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result.index().labels(), df.index().labels());
+        assert_eq!(result.column("a").unwrap().values()[0], Scalar::Int64(1));
+        assert!(result.column("a").unwrap().values()[1].is_missing());
     }
 
     #[test]
@@ -31230,10 +31356,7 @@ mod tests {
         assert_eq!(result.columns["x"].values()[0], Scalar::Float64(1.0));
         assert_eq!(result.columns["y"].values()[1], Scalar::Float64(1.0));
         // Cross-correlation should be 1.0 for perfectly monotonic data
-        let xy = match &result.columns["y"].values()[0] {
-            Scalar::Float64(v) => *v,
-            _ => panic!("expected Float64"),
-        };
+        let xy = expect_float64(&result.columns["y"].values()[0]);
         assert!((xy - 1.0).abs() < 1e-10);
     }
 
@@ -33180,11 +33303,8 @@ mod tests {
         // Normalized: each count / 4
         assert_eq!(vc.len(), 2);
         // Both values have 0.5
-        if let Scalar::Float64(v) = &vc.values()[0] {
-            assert!((v - 0.5).abs() < 1e-10);
-        } else {
-            panic!("expected Float64");
-        }
+        let v = expect_float64(&vc.values()[0]);
+        assert!((v - 0.5).abs() < 1e-10);
     }
 
     #[test]
@@ -33818,11 +33938,8 @@ mod tests {
         .unwrap();
 
         let result = s.str().wrap(15).unwrap();
-        if let Scalar::Utf8(wrapped) = &result.values()[0] {
-            assert!(wrapped.contains('\n'));
-        } else {
-            panic!("expected Utf8");
-        }
+        let wrapped = expect_utf8(&result.values()[0]);
+        assert!(wrapped.contains('\n'));
     }
 
     #[test]
@@ -33969,11 +34086,8 @@ mod tests {
             })
             .unwrap();
 
-        if let Scalar::Float64(v) = result.values()[0] {
-            assert!((v - 10.0 / 3.0).abs() < 1e-10);
-        } else {
-            panic!("expected Float64");
-        }
+        let v = expect_float64(&result.values()[0]);
+        assert!((v - 10.0 / 3.0).abs() < 1e-10);
     }
 
     // --- DataFrame clip_lower/clip_upper/round tests ---
@@ -35202,10 +35316,8 @@ mod tests {
         assert_eq!(mem.len(), 3);
         // All values should be positive Int64
         for v in mem.values() {
-            match v {
-                Scalar::Int64(n) => assert!(*n > 0),
-                _ => panic!("expected Int64"),
-            }
+            let n = expect_int64(v);
+            assert!(n > 0);
         }
     }
 
@@ -35744,11 +35856,8 @@ mod tests {
         // First value: NaN (can't compute variance from 1 obs)
         assert!(result.values()[0].is_missing());
         // Second value should be a positive number
-        if let Scalar::Float64(v) = &result.values()[1] {
-            assert!(*v > 0.0);
-        } else {
-            panic!("expected Float64");
-        }
+        let v = expect_float64(&result.values()[1]);
+        assert!(v > 0.0);
     }
 
     #[test]
@@ -35768,11 +35877,8 @@ mod tests {
         // First: NaN
         assert!(result.values()[0].is_missing());
         // Rest: should be sqrt of var, so positive
-        if let Scalar::Float64(v) = &result.values()[1] {
-            assert!(*v > 0.0);
-        } else {
-            panic!("expected Float64");
-        }
+        let v = expect_float64(&result.values()[1]);
+        assert!(v > 0.0);
     }
 
     // ── autocorr tests ──
@@ -36671,14 +36777,10 @@ mod tests {
 
         // Check that index labels have keys
         let labels = result.index().labels();
-        match &labels[0] {
-            IndexLabel::Utf8(s) => assert!(s.starts_with("first|")),
-            _ => panic!("expected Utf8 label"),
-        }
-        match &labels[2] {
-            IndexLabel::Utf8(s) => assert!(s.starts_with("second|")),
-            _ => panic!("expected Utf8 label"),
-        }
+        let first = expect_utf8_label(&labels[0]);
+        assert!(first.starts_with("first|"));
+        let second = expect_utf8_label(&labels[2]);
+        assert!(second.starts_with("second|"));
     }
 
     #[test]
@@ -36778,17 +36880,11 @@ mod tests {
         let v = result.column_as_series("v").unwrap();
         assert!(v.values()[0].is_missing()); // first: NaN
         // (110-100)/100 = 0.1
-        if let Scalar::Float64(f) = &v.values()[1] {
-            assert!((*f - 0.1).abs() < 1e-10);
-        } else {
-            panic!("expected Float64");
-        }
+        let f1 = expect_float64(&v.values()[1]);
+        assert!((f1 - 0.1).abs() < 1e-10);
         // (121-110)/110 = 0.1
-        if let Scalar::Float64(f) = &v.values()[2] {
-            assert!((*f - 0.1).abs() < 1e-10);
-        } else {
-            panic!("expected Float64");
-        }
+        let f2 = expect_float64(&v.values()[2]);
+        assert!((f2 - 0.1).abs() < 1e-10);
     }
 
     // ── GroupBy value_counts tests ──
@@ -38434,11 +38530,8 @@ mod tests {
         .unwrap();
         let result = df.std_axis1().unwrap();
         // std of [2, 4, 6] = 2.0 (sample std)
-        if let Scalar::Float64(v) = &result.column().values()[0] {
-            assert!((v - 2.0).abs() < 1e-10);
-        } else {
-            panic!("expected Float64");
-        }
+        let v = expect_float64(&result.column().values()[0]);
+        assert!((v - 2.0).abs() < 1e-10);
     }
 
     #[test]
@@ -38454,11 +38547,8 @@ mod tests {
         .unwrap();
         let result = df.var_axis1().unwrap();
         // var of [2, 4, 6] = 4.0 (sample var)
-        if let Scalar::Float64(v) = &result.column().values()[0] {
-            assert!((v - 4.0).abs() < 1e-10);
-        } else {
-            panic!("expected Float64");
-        }
+        let v = expect_float64(&result.column().values()[0]);
+        assert!((v - 4.0).abs() < 1e-10);
     }
 
     #[test]
@@ -38473,16 +38563,10 @@ mod tests {
         )
         .unwrap();
         let result = df.sem_axis1().unwrap();
-        if let Scalar::Float64(v) = &result.column().values()[0] {
-            assert!((v - (2.0 / 3.0_f64.sqrt())).abs() < 1e-10);
-        } else {
-            panic!("expected Float64");
-        }
-        if let Scalar::Float64(v) = &result.column().values()[1] {
-            assert!(v.is_nan());
-        } else {
-            panic!("expected Float64");
-        }
+        let v0 = expect_float64(&result.column().values()[0]);
+        assert!((v0 - (2.0 / 3.0_f64.sqrt())).abs() < 1e-10);
+        let v1 = expect_float64(&result.column().values()[1]);
+        assert!(v1.is_nan());
     }
 
     #[test]
@@ -38497,16 +38581,10 @@ mod tests {
         )
         .unwrap();
         let result = df.skew_axis1().unwrap();
-        if let Scalar::Float64(v) = &result.column().values()[0] {
-            assert!(v.abs() < 1e-10);
-        } else {
-            panic!("expected Float64");
-        }
-        if let Scalar::Float64(v) = &result.column().values()[1] {
-            assert!(v.abs() < 1e-10);
-        } else {
-            panic!("expected Float64");
-        }
+        let v0 = expect_float64(&result.column().values()[0]);
+        assert!(v0.abs() < 1e-10);
+        let v1 = expect_float64(&result.column().values()[1]);
+        assert!(v1.abs() < 1e-10);
     }
 
     #[test]
@@ -38558,21 +38636,12 @@ mod tests {
         )
         .unwrap();
         let result = df.kurtosis_axis1().unwrap();
-        if let Scalar::Float64(v) = &result.column().values()[0] {
-            assert!((v + 1.2).abs() < 1e-10);
-        } else {
-            panic!("expected Float64");
-        }
-        if let Scalar::Float64(v) = &result.column().values()[1] {
-            assert!(v.abs() < 1e-10);
-        } else {
-            panic!("expected Float64");
-        }
-        if let Scalar::Float64(v) = &result.column().values()[2] {
-            assert!(v.is_nan());
-        } else {
-            panic!("expected Float64");
-        }
+        let v0 = expect_float64(&result.column().values()[0]);
+        assert!((v0 + 1.2).abs() < 1e-10);
+        let v1 = expect_float64(&result.column().values()[1]);
+        assert!(v1.abs() < 1e-10);
+        let v2 = expect_float64(&result.column().values()[2]);
+        assert!(v2.is_nan());
     }
 
     #[test]
@@ -38592,21 +38661,12 @@ mod tests {
         let skew = df.apply("skew", 1).unwrap();
         let kurt = df.apply("kurtosis", 1).unwrap();
 
-        if let Scalar::Float64(v) = &sem.column().values()[0] {
-            assert!((v - 0.6454972243679028).abs() < 1e-10);
-        } else {
-            panic!("expected Float64");
-        }
-        if let Scalar::Float64(v) = &skew.column().values()[0] {
-            assert!(v.abs() < 1e-10);
-        } else {
-            panic!("expected Float64");
-        }
-        if let Scalar::Float64(v) = &kurt.column().values()[0] {
-            assert!((v + 1.2).abs() < 1e-10);
-        } else {
-            panic!("expected Float64");
-        }
+        let sem_v = expect_float64(&sem.column().values()[0]);
+        assert!((sem_v - 0.6454972243679028).abs() < 1e-10);
+        let skew_v = expect_float64(&skew.column().values()[0]);
+        assert!(skew_v.abs() < 1e-10);
+        let kurt_v = expect_float64(&kurt.column().values()[0]);
+        assert!((kurt_v + 1.2).abs() < 1e-10);
     }
 
     #[test]
@@ -39105,7 +39165,12 @@ mod tests {
                 assert!(msg.contains("column 'a'"));
                 assert!(msg.contains("int64"));
             }
-            other => panic!("unexpected error variant: {other:?}"),
+            other => {
+                assert!(
+                    matches!(other, FrameError::CompatibilityRejected(_)),
+                    "unexpected error variant: {other:?}"
+                );
+            }
         }
     }
 
@@ -39123,7 +39188,12 @@ mod tests {
             FrameError::CompatibilityRejected(msg) => {
                 assert!(msg.contains("unknown column 'missing'"));
             }
-            other => panic!("unexpected error variant: {other:?}"),
+            other => {
+                assert!(
+                    matches!(other, FrameError::CompatibilityRejected(_)),
+                    "unexpected error variant: {other:?}"
+                );
+            }
         }
     }
 
@@ -40152,6 +40222,28 @@ mod tests {
         assert_eq!(result.columns["a"].values()[0], Scalar::Int64(1)); // true -> keep
         assert_eq!(result.columns["a"].values()[1], Scalar::Int64(0)); // false -> other
         assert_eq!(result.columns["a"].values()[2], Scalar::Int64(3)); // true -> keep
+    }
+
+    #[test]
+    fn df_where_mask_df_ignores_extra_rows() {
+        let df = DataFrame::from_dict(
+            &["a"],
+            vec![("a", vec![Scalar::Int64(1), Scalar::Int64(2)])],
+        )
+        .unwrap();
+        let cond = DataFrame::from_dict(
+            &["a"],
+            vec![(
+                "a",
+                vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)],
+            )],
+        )
+        .unwrap();
+        let result = df.where_mask_df(&cond, &Scalar::Int64(0)).unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result.index().labels(), df.index().labels());
+        assert_eq!(result.columns["a"].values()[0], Scalar::Int64(1));
+        assert_eq!(result.columns["a"].values()[1], Scalar::Int64(0));
     }
 
     #[test]
@@ -42503,6 +42595,34 @@ mod tests {
         assert_eq!(result.column().values()[0], Scalar::Int64(10)); // True → keep
         assert_eq!(result.column().values()[1], Scalar::Int64(88)); // False → other
         assert_eq!(result.column().values()[2], Scalar::Int64(30)); // True → keep
+    }
+
+    #[test]
+    fn test_series_where_cond_series_ignores_extra_labels() {
+        let s = Series::from_values(
+            "data",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(10), Scalar::Int64(20)],
+        )
+        .unwrap();
+        let cond = Series::from_values(
+            "cond",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Bool(false), Scalar::Bool(true), Scalar::Bool(true)],
+        )
+        .unwrap();
+        let other = Series::from_values(
+            "other",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(99), Scalar::Int64(88), Scalar::Int64(77)],
+        )
+        .unwrap();
+
+        let result = s.where_cond_series(&cond, &other).unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result.index().labels(), s.index().labels());
+        assert_eq!(result.column().values()[0], Scalar::Int64(99)); // False → other
+        assert_eq!(result.column().values()[1], Scalar::Int64(20)); // True → keep
     }
 
     #[test]
@@ -45046,11 +45166,8 @@ mod tests {
         )
         .unwrap();
         let result = super::to_datetime(&s).unwrap();
-        if let Scalar::Utf8(dt_str) = &result.values()[0] {
-            assert!(dt_str.starts_with("2024-01-15"), "got: {dt_str}");
-        } else {
-            panic!("expected Utf8");
-        }
+        let dt_str = expect_utf8(&result.values()[0]);
+        assert!(dt_str.starts_with("2024-01-15"), "got: {dt_str}");
     }
 
     #[test]
@@ -45062,11 +45179,8 @@ mod tests {
         )
         .unwrap();
         let result = super::to_datetime(&s).unwrap();
-        if let Scalar::Utf8(dt_str) = &result.values()[0] {
-            assert!(dt_str.starts_with("2024-01-15"), "got: {dt_str}");
-        } else {
-            panic!("expected Utf8");
-        }
+        let dt_str = expect_utf8(&result.values()[0]);
+        assert!(dt_str.starts_with("2024-01-15"), "got: {dt_str}");
     }
 
     #[test]

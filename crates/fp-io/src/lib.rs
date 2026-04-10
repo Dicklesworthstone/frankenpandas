@@ -465,6 +465,16 @@ fn json_value_to_index_label(value: &serde_json::Value) -> IndexLabel {
     }
 }
 
+fn json_value_to_column_name(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::Bool(b) => b.to_string(),
+        serde_json::Value::Null => "null".to_owned(),
+        other => other.to_string(),
+    }
+}
+
 fn json_key_to_index_label(value: &str) -> IndexLabel {
     value
         .parse::<i64>()
@@ -511,12 +521,18 @@ pub fn read_json_str(input: &str, orient: JsonOrient) -> Result<DataFrame, IoErr
             }
 
             for record in arr {
-                let obj = record.as_object().unwrap(); // Already validated
+                let obj = record
+                    .as_object()
+                    .ok_or_else(|| IoError::JsonFormat("each record must be an object".into()))?;
                 for name in &col_names {
                     let val = obj.get(name).unwrap_or(&serde_json::Value::Null);
                     columns
                         .get_mut(name)
-                        .unwrap()
+                        .ok_or_else(|| {
+                            IoError::JsonFormat(format!(
+                                "records orient missing column accumulator for '{name}'"
+                            ))
+                        })?
                         .push(json_value_to_scalar(val));
                 }
             }
@@ -642,7 +658,7 @@ pub fn read_json_str(input: &str, orient: JsonOrient) -> Result<DataFrame, IoErr
                 .and_then(|v| v.as_array())
                 .ok_or_else(|| IoError::JsonFormat("split orient needs 'columns' array".into()))?
                 .iter()
-                .map(|v| v.as_str().unwrap_or_default().to_owned())
+                .map(json_value_to_column_name)
                 .collect();
 
             let data = obj
@@ -670,15 +686,26 @@ pub fn read_json_str(input: &str, orient: JsonOrient) -> Result<DataFrame, IoErr
                 columns.insert(name.clone(), Vec::with_capacity(data.len()));
             }
 
-            for row in data {
+            for (row_idx, row) in data.iter().enumerate() {
                 let arr = row
                     .as_array()
                     .ok_or_else(|| IoError::JsonFormat("each data row must be an array".into()))?;
+                if arr.len() != col_names.len() {
+                    return Err(IoError::JsonFormat(format!(
+                        "split orient row {row_idx} length ({}) does not match columns length ({})",
+                        arr.len(),
+                        col_names.len()
+                    )));
+                }
                 for (i, name) in col_names.iter().enumerate() {
                     let val = arr.get(i).unwrap_or(&serde_json::Value::Null);
                     columns
                         .get_mut(name)
-                        .unwrap()
+                        .ok_or_else(|| {
+                            IoError::JsonFormat(format!(
+                                "split orient missing column accumulator for '{name}'"
+                            ))
+                        })?
                         .push(json_value_to_scalar(val));
                 }
             }
@@ -734,7 +761,11 @@ pub fn read_json_str(input: &str, orient: JsonOrient) -> Result<DataFrame, IoErr
                     let val = arr.get(col_idx).unwrap_or(&serde_json::Value::Null);
                     columns
                         .get_mut(name)
-                        .expect("column initialized above")
+                        .ok_or_else(|| {
+                            IoError::JsonFormat(format!(
+                                "values orient missing column accumulator for '{name}'"
+                            ))
+                        })?
                         .push(json_value_to_scalar(val));
                 }
             }
@@ -1238,7 +1269,12 @@ pub fn read_parquet_bytes(data: &[u8]) -> Result<DataFrame, IoError> {
 
     // For a single batch (common case), return directly
     if all_frames.len() == 1 {
-        return Ok(all_frames.into_iter().next().expect("checked non-empty"));
+        if let Some(frame) = all_frames.into_iter().next() {
+            return Ok(frame);
+        }
+        return Err(IoError::Parquet(
+            "parquet reader produced zero record batches".to_owned(),
+        ));
     }
 
     // Multiple batches: concatenate via fp_frame::concat_dataframes
@@ -1594,7 +1630,12 @@ pub fn read_feather_bytes(data: &[u8]) -> Result<DataFrame, IoError> {
     }
 
     if all_frames.len() == 1 {
-        return Ok(all_frames.into_iter().next().expect("checked non-empty"));
+        if let Some(frame) = all_frames.into_iter().next() {
+            return Ok(frame);
+        }
+        return Err(IoError::Arrow(
+            "feather reader produced zero record batches".to_owned(),
+        ));
     }
 
     let refs: Vec<&DataFrame> = all_frames.iter().collect();
@@ -1660,7 +1701,12 @@ pub fn read_ipc_stream_bytes(data: &[u8]) -> Result<DataFrame, IoError> {
     }
 
     if all_frames.len() == 1 {
-        return Ok(all_frames.into_iter().next().expect("checked non-empty"));
+        if let Some(frame) = all_frames.into_iter().next() {
+            return Ok(frame);
+        }
+        return Err(IoError::Arrow(
+            "ipc stream reader produced zero record batches".to_owned(),
+        ));
     }
 
     let refs: Vec<&DataFrame> = all_frames.iter().collect();
@@ -1700,6 +1746,13 @@ fn sql_value_to_scalar(value: &rusqlite::types::Value) -> Scalar {
         rusqlite::types::Value::Text(s) => Scalar::Utf8(s.clone()),
         rusqlite::types::Value::Blob(b) => Scalar::Utf8(format!("<blob:{} bytes>", b.len())),
     }
+}
+
+fn escape_sql_ident(name: &str) -> Result<String, IoError> {
+    if name.contains('\0') {
+        return Err(IoError::Sql("invalid SQL identifier: NUL byte".to_owned()));
+    }
+    Ok(name.replace('"', "\"\""))
 }
 
 /// Read the result of a SQL query into a DataFrame.
@@ -1760,7 +1813,8 @@ pub fn read_sql_table(conn: &rusqlite::Connection, table_name: &str) -> Result<D
             "invalid table name: '{table_name}' (must be non-empty, only alphanumeric and underscore allowed)"
         )));
     }
-    read_sql(conn, &format!("SELECT * FROM \"{table_name}\""))
+    let escaped_table = escape_sql_ident(table_name)?;
+    read_sql(conn, &format!("SELECT * FROM \"{escaped_table}\""))
 }
 
 /// Write a DataFrame to a SQLite table.
@@ -1780,6 +1834,11 @@ pub fn write_sql(
     }
 
     let col_names = frame.column_names();
+    let escaped_table = escape_sql_ident(table_name)?;
+    let escaped_cols: Vec<String> = col_names
+        .iter()
+        .map(|name| escape_sql_ident(name))
+        .collect::<Result<Vec<_>, _>>()?;
 
     // Handle if_exists policy.
     match if_exists {
@@ -1794,7 +1853,7 @@ pub fn write_sql(
             }
         }
         SqlIfExists::Replace => {
-            conn.execute_batch(&format!("DROP TABLE IF EXISTS \"{table_name}\""))
+            conn.execute_batch(&format!("DROP TABLE IF EXISTS \"{escaped_table}\""))
                 .map_err(|e| IoError::Sql(format!("drop table failed: {e}")))?;
         }
         SqlIfExists::Append => {
@@ -1805,15 +1864,16 @@ pub fn write_sql(
     // Build CREATE TABLE statement.
     let col_defs: Vec<String> = col_names
         .iter()
-        .map(|name| {
+        .zip(&escaped_cols)
+        .map(|(name, escaped)| {
             let dt = frame.column(name).map_or(DType::Utf8, |c| c.dtype());
-            format!("\"{}\" {}", name, dtype_to_sql(dt))
+            format!("\"{}\" {}", escaped, dtype_to_sql(dt))
         })
         .collect();
 
     let create_sql = format!(
         "CREATE TABLE IF NOT EXISTS \"{}\" ({})",
-        table_name,
+        escaped_table,
         col_defs.join(", ")
     );
     conn.execute_batch(&create_sql)
@@ -1823,8 +1883,8 @@ pub fn write_sql(
     let placeholders: Vec<&str> = col_names.iter().map(|_| "?").collect();
     let insert_sql = format!(
         "INSERT INTO \"{}\" ({}) VALUES ({})",
-        table_name,
-        col_names
+        escaped_table,
+        escaped_cols
             .iter()
             .map(|n| format!("\"{}\"", n))
             .collect::<Vec<_>>()
@@ -2473,6 +2533,27 @@ mod tests {
             matches!(&err, IoError::JsonFormat(msg) if msg.contains("index length")),
             "expected split index length error, got {err:?}"
         );
+    }
+
+    #[test]
+    fn json_split_row_length_mismatch_errors() {
+        let input = r#"{"columns":["x","y"],"data":[[1],[2,3]]}"#;
+        let err = read_json_str(input, JsonOrient::Split)
+            .expect_err("split orient row length mismatch should error");
+        assert!(
+            matches!(&err, IoError::JsonFormat(msg) if msg.contains("row 0 length")),
+            "expected split row length error, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn json_split_non_string_columns_are_stringified() {
+        let input = r#"{"columns":[1,true,null,"name"],"data":[[10,20,30,40]]}"#;
+        let frame = read_json_str(input, JsonOrient::Split).expect("read json split");
+        assert_eq!(frame.column("1").unwrap().values()[0], Scalar::Int64(10));
+        assert_eq!(frame.column("true").unwrap().values()[0], Scalar::Int64(20));
+        assert_eq!(frame.column("null").unwrap().values()[0], Scalar::Int64(30));
+        assert_eq!(frame.column("name").unwrap().values()[0], Scalar::Int64(40));
     }
 
     #[test]
@@ -3568,7 +3649,7 @@ mod tests {
 
         for (i, line) in jsonl.lines().enumerate() {
             let parsed: serde_json::Value =
-                serde_json::from_str(line).unwrap_or_else(|e| panic!("line {i} invalid JSON: {e}"));
+                serde_json::from_str(line).expect("jsonl line must be valid JSON");
             assert!(parsed.is_object(), "line {i} must be a JSON object");
         }
     }
@@ -3651,10 +3732,12 @@ mod tests {
         let input = format!("col\n{long_val}\n");
         let frame = read_csv_str(&input).expect("long field must parse");
         assert_eq!(frame.index().len(), 1);
-        if let Scalar::Utf8(s) = &frame.column("col").unwrap().values()[0] {
-            assert_eq!(s.len(), 200_000);
-        } else {
-            panic!("expected Utf8 for long field");
+        match &frame.column("col").unwrap().values()[0] {
+            Scalar::Utf8(s) => assert_eq!(s.len(), 200_000),
+            other => assert!(
+                matches!(other, Scalar::Utf8(_)),
+                "expected Utf8 for long field"
+            ),
         }
     }
 
@@ -3824,5 +3907,24 @@ mod tests {
 
         let back = read_sql_table(&conn, "test_spaces").unwrap();
         assert!(back.column("has space").is_some());
+    }
+
+    #[test]
+    fn adversarial_sql_column_name_with_quotes_accepted() {
+        let col_name = "has\"quote";
+        let df =
+            fp_frame::DataFrame::from_dict(&[col_name], vec![(col_name, vec![Scalar::Int64(7)])])
+                .unwrap();
+
+        let conn = make_sql_test_conn();
+        let result = write_sql(&df, &conn, "test_quotes", SqlIfExists::Fail);
+        assert!(
+            result.is_ok(),
+            "columns with quotes should work: {:?}",
+            result.err()
+        );
+
+        let back = read_sql_table(&conn, "test_quotes").unwrap();
+        assert_eq!(back.column(col_name).unwrap().values()[0], Scalar::Int64(7));
     }
 }
