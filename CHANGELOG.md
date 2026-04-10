@@ -8,7 +8,7 @@ FrankenPandas is a clean-room Rust reimplementation of the full pandas API surfa
 Repository: <https://github.com/Dicklesworthstone/frankenpandas>
 
 **No tagged releases or GitHub releases exist.** Development spans 269 commits from
-2026-02-13 to 2026-03-17 on a single `main` branch. The `master` branch diverges at
+2026-02-13 to 2026-03-17 on a single `main` branch. The legacy compatibility branch diverges at
 [`a9889ca`](https://github.com/Dicklesworthstone/frankenpandas/commit/a9889cafc70ec04293d907d06f0d80868263e4e8)
 (MIT licensing, 2026-02-18).
 

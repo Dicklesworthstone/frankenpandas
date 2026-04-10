@@ -696,6 +696,7 @@ pub fn read_json_str(input: &str, orient: JsonOrient) -> Result<DataFrame, IoErr
                 .iter()
                 .map(json_value_to_column_name)
                 .collect();
+            ensure_unique_headers(&col_names)?;
 
             let data = obj
                 .get("data")
@@ -2610,6 +2611,13 @@ mod tests {
         assert_eq!(frame.column("true").unwrap().values()[0], Scalar::Int64(20));
         assert_eq!(frame.column("null").unwrap().values()[0], Scalar::Int64(30));
         assert_eq!(frame.column("name").unwrap().values()[0], Scalar::Int64(40));
+    }
+
+    #[test]
+    fn json_split_duplicate_column_names_error() {
+        let input = r#"{"columns":[1,"1"],"data":[[10,20]]}"#;
+        let err = read_json_str(input, JsonOrient::Split).expect_err("dup columns");
+        assert!(matches!(err, IoError::DuplicateColumnName(name) if name == "1"));
     }
 
     #[test]
