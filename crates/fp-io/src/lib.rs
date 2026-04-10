@@ -26,6 +26,8 @@ pub enum IoError {
     MissingIndexColumn(String),
     #[error("duplicate column name '{0}'")]
     DuplicateColumnName(String),
+    #[error("usecols contains missing columns: {0:?}")]
+    MissingUsecols(Vec<String>),
     #[error("json format error: {0}")]
     JsonFormat(String),
     #[error("parquet error: {0}")]
@@ -230,6 +232,21 @@ fn ensure_unique_headers(headers: &[String]) -> Result<(), IoError> {
     Ok(())
 }
 
+fn validate_usecols(headers: &[String], usecols: &[String]) -> Result<(), IoError> {
+    let header_set: std::collections::BTreeSet<&String> = headers.iter().collect();
+    let mut missing = Vec::new();
+    for name in usecols {
+        if !header_set.contains(name) {
+            missing.push(name.clone());
+        }
+    }
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(IoError::MissingUsecols(missing))
+    }
+}
+
 // ── CSV with options ───────────────────────────────────────────────────
 
 pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<DataFrame, IoError> {
@@ -327,6 +344,11 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
             columns,
         )
     };
+    ensure_unique_headers(&headers)?;
+    if let Some(ref usecols) = options.usecols {
+        validate_usecols(&headers, usecols)?;
+    }
+
     // Apply usecols filter: keep only selected columns.
     let (headers, mut columns) = if let Some(ref usecols) = options.usecols {
         let mut fh = Vec::new();
@@ -341,7 +363,6 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
     } else {
         (headers, columns)
     };
-    ensure_unique_headers(&headers)?;
 
     // Apply dtype coercion if specified.
     if let Some(ref dtype_map) = options.dtype {
@@ -2390,6 +2411,19 @@ mod tests {
         assert_eq!(
             frame.column("column_1").unwrap().values()[1],
             Scalar::Int64(4)
+        );
+    }
+
+    #[test]
+    fn csv_usecols_missing_column_errors() {
+        let input = "a,b\n1,2\n";
+        let opts = CsvReadOptions {
+            usecols: Some(vec!["c".to_string()]),
+            ..Default::default()
+        };
+        let err = read_csv_with_options(input, &opts).expect_err("missing usecols");
+        assert!(
+            matches!(err, IoError::MissingUsecols(missing) if missing == vec!["c".to_string()])
         );
     }
 
