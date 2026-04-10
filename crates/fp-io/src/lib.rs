@@ -465,6 +465,16 @@ fn json_value_to_index_label(value: &serde_json::Value) -> IndexLabel {
     }
 }
 
+fn json_value_to_column_name(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::Bool(b) => b.to_string(),
+        serde_json::Value::Null => "null".to_owned(),
+        other => other.to_string(),
+    }
+}
+
 fn json_key_to_index_label(value: &str) -> IndexLabel {
     value
         .parse::<i64>()
@@ -642,7 +652,7 @@ pub fn read_json_str(input: &str, orient: JsonOrient) -> Result<DataFrame, IoErr
                 .and_then(|v| v.as_array())
                 .ok_or_else(|| IoError::JsonFormat("split orient needs 'columns' array".into()))?
                 .iter()
-                .map(|v| v.as_str().unwrap_or_default().to_owned())
+                .map(json_value_to_column_name)
                 .collect();
 
             let data = obj
@@ -1702,6 +1712,13 @@ fn sql_value_to_scalar(value: &rusqlite::types::Value) -> Scalar {
     }
 }
 
+fn escape_sql_ident(name: &str) -> Result<String, IoError> {
+    if name.contains('\0') {
+        return Err(IoError::Sql("invalid SQL identifier: NUL byte".to_owned()));
+    }
+    Ok(name.replace('"', "\"\""))
+}
+
 /// Read the result of a SQL query into a DataFrame.
 ///
 /// Matches `pd.read_sql(sql, con)`.
@@ -1760,7 +1777,8 @@ pub fn read_sql_table(conn: &rusqlite::Connection, table_name: &str) -> Result<D
             "invalid table name: '{table_name}' (must be non-empty, only alphanumeric and underscore allowed)"
         )));
     }
-    read_sql(conn, &format!("SELECT * FROM \"{table_name}\""))
+    let escaped_table = escape_sql_ident(table_name)?;
+    read_sql(conn, &format!("SELECT * FROM \"{escaped_table}\""))
 }
 
 /// Write a DataFrame to a SQLite table.
@@ -1780,6 +1798,11 @@ pub fn write_sql(
     }
 
     let col_names = frame.column_names();
+    let escaped_table = escape_sql_ident(table_name)?;
+    let escaped_cols: Vec<String> = col_names
+        .iter()
+        .map(|name| escape_sql_ident(name))
+        .collect::<Result<Vec<_>, _>>()?;
 
     // Handle if_exists policy.
     match if_exists {
@@ -1794,7 +1817,7 @@ pub fn write_sql(
             }
         }
         SqlIfExists::Replace => {
-            conn.execute_batch(&format!("DROP TABLE IF EXISTS \"{table_name}\""))
+            conn.execute_batch(&format!("DROP TABLE IF EXISTS \"{escaped_table}\""))
                 .map_err(|e| IoError::Sql(format!("drop table failed: {e}")))?;
         }
         SqlIfExists::Append => {
@@ -1805,15 +1828,16 @@ pub fn write_sql(
     // Build CREATE TABLE statement.
     let col_defs: Vec<String> = col_names
         .iter()
-        .map(|name| {
+        .zip(&escaped_cols)
+        .map(|(name, escaped)| {
             let dt = frame.column(name).map_or(DType::Utf8, |c| c.dtype());
-            format!("\"{}\" {}", name, dtype_to_sql(dt))
+            format!("\"{}\" {}", escaped, dtype_to_sql(dt))
         })
         .collect();
 
     let create_sql = format!(
         "CREATE TABLE IF NOT EXISTS \"{}\" ({})",
-        table_name,
+        escaped_table,
         col_defs.join(", ")
     );
     conn.execute_batch(&create_sql)
@@ -1823,8 +1847,8 @@ pub fn write_sql(
     let placeholders: Vec<&str> = col_names.iter().map(|_| "?").collect();
     let insert_sql = format!(
         "INSERT INTO \"{}\" ({}) VALUES ({})",
-        table_name,
-        col_names
+        escaped_table,
+        escaped_cols
             .iter()
             .map(|n| format!("\"{}\"", n))
             .collect::<Vec<_>>()
@@ -2473,6 +2497,16 @@ mod tests {
             matches!(&err, IoError::JsonFormat(msg) if msg.contains("index length")),
             "expected split index length error, got {err:?}"
         );
+    }
+
+    #[test]
+    fn json_split_non_string_columns_are_stringified() {
+        let input = r#"{"columns":[1,true,null,"name"],"data":[[10,20,30,40]]}"#;
+        let frame = read_json_str(input, JsonOrient::Split).expect("read json split");
+        assert_eq!(frame.column("1").unwrap().values()[0], Scalar::Int64(10));
+        assert_eq!(frame.column("true").unwrap().values()[0], Scalar::Int64(20));
+        assert_eq!(frame.column("null").unwrap().values()[0], Scalar::Int64(30));
+        assert_eq!(frame.column("name").unwrap().values()[0], Scalar::Int64(40));
     }
 
     #[test]
@@ -3824,5 +3858,24 @@ mod tests {
 
         let back = read_sql_table(&conn, "test_spaces").unwrap();
         assert!(back.column("has space").is_some());
+    }
+
+    #[test]
+    fn adversarial_sql_column_name_with_quotes_accepted() {
+        let col_name = "has\"quote";
+        let df =
+            fp_frame::DataFrame::from_dict(&[col_name], vec![(col_name, vec![Scalar::Int64(7)])])
+                .unwrap();
+
+        let conn = make_sql_test_conn();
+        let result = write_sql(&df, &conn, "test_quotes", SqlIfExists::Fail);
+        assert!(
+            result.is_ok(),
+            "columns with quotes should work: {:?}",
+            result.err()
+        );
+
+        let back = read_sql_table(&conn, "test_quotes").unwrap();
+        assert_eq!(back.column(col_name).unwrap().values()[0], Scalar::Int64(7));
     }
 }

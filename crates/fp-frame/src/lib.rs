@@ -2925,9 +2925,9 @@ impl Series {
     ///
     /// Matches `series.where(cond, other)`. If `other` is `None`, replaced
     /// values become `NaN`. The condition Series is aligned to `self` via
-    /// outer-index union before masking.
+    /// left-index alignment before masking.
     pub fn where_cond(&self, cond: &Self, other: Option<&Scalar>) -> Result<Self, FrameError> {
-        let plan = align_union(&self.index, &cond.index);
+        let plan = align(&self.index, &cond.index, AlignMode::Left);
         validate_alignment_plan(&plan)?;
 
         let aligned_data = self.column.reindex_by_positions(&plan.left_positions)?;
@@ -2959,13 +2959,13 @@ impl Series {
     ///
     /// Matches `series.where(cond, other=series)`.
     pub fn where_cond_series(&self, cond: &Self, other: &Self) -> Result<Self, FrameError> {
-        let plan = align_union(&self.index, &cond.index);
+        let plan = align(&self.index, &cond.index, AlignMode::Left);
         validate_alignment_plan(&plan)?;
 
         let aligned_data = self.column.reindex_by_positions(&plan.left_positions)?;
         let aligned_cond = cond.column.reindex_by_positions(&plan.right_positions)?;
 
-        let other_plan = align_union(&plan.union_index, &other.index);
+        let other_plan = align(&self.index, &other.index, AlignMode::Left);
         validate_alignment_plan(&other_plan)?;
         let aligned_other = other
             .column
@@ -2999,13 +2999,13 @@ impl Series {
     ///
     /// Matches `series.mask(cond, other=series)`.
     pub fn mask_series(&self, cond: &Self, other: &Self) -> Result<Self, FrameError> {
-        let plan = align_union(&self.index, &cond.index);
+        let plan = align(&self.index, &cond.index, AlignMode::Left);
         validate_alignment_plan(&plan)?;
 
         let aligned_data = self.column.reindex_by_positions(&plan.left_positions)?;
         let aligned_cond = cond.column.reindex_by_positions(&plan.right_positions)?;
 
-        let other_plan = align_union(&plan.union_index, &other.index);
+        let other_plan = align(&self.index, &other.index, AlignMode::Left);
         validate_alignment_plan(&other_plan)?;
         let aligned_other = other
             .column
@@ -3039,7 +3039,7 @@ impl Series {
     /// Matches `series.mask(cond, other)`. This is the inverse of `where`:
     /// values are replaced where the condition IS True, not where it is False.
     pub fn mask(&self, cond: &Self, other: Option<&Scalar>) -> Result<Self, FrameError> {
-        let plan = align_union(&self.index, &cond.index);
+        let plan = align(&self.index, &cond.index, AlignMode::Left);
         validate_alignment_plan(&plan)?;
 
         let aligned_data = self.column.reindex_by_positions(&plan.left_positions)?;
@@ -13586,6 +13586,8 @@ impl DataFrame {
     /// If `other` is `None`, replaced values become NaN.
     pub fn where_cond(&self, cond: &Self, other: Option<&Scalar>) -> Result<Self, FrameError> {
         let fill = other.cloned().unwrap_or(Scalar::Null(NullKind::NaN));
+        let plan = align(&self.index, &cond.index, AlignMode::Left);
+        validate_alignment_plan(&plan)?;
         let mut new_columns = BTreeMap::new();
 
         for col_name in &self.column_order {
@@ -13598,11 +13600,12 @@ impl DataFrame {
                     "where: condition missing column '{col_name}'"
                 ))
             })?;
+            let aligned_cond = cond_col.reindex_by_positions(&plan.right_positions)?;
 
             let values: Vec<Scalar> = data_col
                 .values()
                 .iter()
-                .zip(cond_col.values())
+                .zip(aligned_cond.values())
                 .map(|(val, c)| match c {
                     Scalar::Bool(true) => val.clone(),
                     Scalar::Bool(false) => fill.clone(),
@@ -13622,6 +13625,8 @@ impl DataFrame {
     /// Matches `df.mask(cond, other)`. Inverse of `where_cond`.
     pub fn mask(&self, cond: &Self, other: Option<&Scalar>) -> Result<Self, FrameError> {
         let fill = other.cloned().unwrap_or(Scalar::Null(NullKind::NaN));
+        let plan = align(&self.index, &cond.index, AlignMode::Left);
+        validate_alignment_plan(&plan)?;
         let mut new_columns = BTreeMap::new();
 
         for col_name in &self.column_order {
@@ -13634,11 +13639,12 @@ impl DataFrame {
                     "mask: condition missing column '{col_name}'"
                 ))
             })?;
+            let aligned_cond = cond_col.reindex_by_positions(&plan.right_positions)?;
 
             let values: Vec<Scalar> = data_col
                 .values()
                 .iter()
-                .zip(cond_col.values())
+                .zip(aligned_cond.values())
                 .map(|(val, c)| match c {
                     Scalar::Bool(true) => fill.clone(),
                     Scalar::Bool(false) => val.clone(),
@@ -13658,6 +13664,10 @@ impl DataFrame {
     ///
     /// Matches `df.where(cond, other=df)`.
     pub fn where_cond_df(&self, cond: &Self, other: &Self) -> Result<Self, FrameError> {
+        let cond_plan = align(&self.index, &cond.index, AlignMode::Left);
+        validate_alignment_plan(&cond_plan)?;
+        let other_plan = align(&self.index, &other.index, AlignMode::Left);
+        validate_alignment_plan(&other_plan)?;
         let mut new_columns = BTreeMap::new();
 
         for col_name in &self.column_order {
@@ -13667,16 +13677,22 @@ impl DataFrame {
                     "where_cond_df: condition missing column '{col_name}'"
                 ))
             })?;
-            let other_col = other.columns.get(col_name);
+            let aligned_cond = cond_col.reindex_by_positions(&cond_plan.right_positions)?;
+            let aligned_other = other
+                .columns
+                .get(col_name)
+                .map(|col| col.reindex_by_positions(&other_plan.right_positions))
+                .transpose()?;
 
             let values: Vec<Scalar> = data_col
                 .values()
                 .iter()
-                .zip(cond_col.values())
+                .zip(aligned_cond.values())
                 .enumerate()
                 .map(|(i, (val, c))| match c {
                     Scalar::Bool(true) => val.clone(),
-                    Scalar::Bool(false) => other_col
+                    Scalar::Bool(false) => aligned_other
+                        .as_ref()
                         .and_then(|oc| oc.values().get(i).cloned())
                         .unwrap_or(Scalar::Null(NullKind::NaN)),
                     _ => Scalar::Null(NullKind::NaN),
@@ -13694,6 +13710,10 @@ impl DataFrame {
     ///
     /// Matches `df.mask(cond, other=df)`.
     pub fn mask_df_other(&self, cond: &Self, other: &Self) -> Result<Self, FrameError> {
+        let cond_plan = align(&self.index, &cond.index, AlignMode::Left);
+        validate_alignment_plan(&cond_plan)?;
+        let other_plan = align(&self.index, &other.index, AlignMode::Left);
+        validate_alignment_plan(&other_plan)?;
         let mut new_columns = BTreeMap::new();
 
         for col_name in &self.column_order {
@@ -13703,15 +13723,21 @@ impl DataFrame {
                     "mask_df_other: condition missing column '{col_name}'"
                 ))
             })?;
-            let other_col = other.columns.get(col_name);
+            let aligned_cond = cond_col.reindex_by_positions(&cond_plan.right_positions)?;
+            let aligned_other = other
+                .columns
+                .get(col_name)
+                .map(|col| col.reindex_by_positions(&other_plan.right_positions))
+                .transpose()?;
 
             let values: Vec<Scalar> = data_col
                 .values()
                 .iter()
-                .zip(cond_col.values())
+                .zip(aligned_cond.values())
                 .enumerate()
                 .map(|(i, (val, c))| match c {
-                    Scalar::Bool(true) => other_col
+                    Scalar::Bool(true) => aligned_other
+                        .as_ref()
                         .and_then(|oc| oc.values().get(i).cloned())
                         .unwrap_or(Scalar::Null(NullKind::NaN)),
                     Scalar::Bool(false) => val.clone(),
@@ -18675,6 +18701,8 @@ impl DataFrame {
     /// Matches `pd.DataFrame.where(cond, other)` with a DataFrame condition.
     /// Where `cond_df` is True, keep the original value; where False, use `other`.
     pub fn where_mask_df(&self, cond_df: &Self, other: &Scalar) -> Result<Self, FrameError> {
+        let cond_plan = align(&self.index, &cond_df.index, AlignMode::Left);
+        validate_alignment_plan(&cond_plan)?;
         let mut result_cols = BTreeMap::new();
         for col_name in &self.column_order {
             let data_col = &self.columns[col_name];
@@ -18683,10 +18711,11 @@ impl DataFrame {
                     "where_mask_df: condition missing column '{col_name}'"
                 ))
             })?;
+            let aligned_cond = cond_col.reindex_by_positions(&cond_plan.right_positions)?;
             let vals: Vec<Scalar> = data_col
                 .values()
                 .iter()
-                .zip(cond_col.values())
+                .zip(aligned_cond.values())
                 .map(|(val, c)| match c {
                     Scalar::Bool(true) => val.clone(),
                     Scalar::Bool(false) => other.clone(),
@@ -18707,6 +18736,8 @@ impl DataFrame {
     /// Matches `pd.DataFrame.mask(cond, other)` with a DataFrame condition.
     /// Inverse of `where_mask_df`: where `cond_df` is True, replace with `other`.
     pub fn mask_df(&self, cond_df: &Self, other: &Scalar) -> Result<Self, FrameError> {
+        let cond_plan = align(&self.index, &cond_df.index, AlignMode::Left);
+        validate_alignment_plan(&cond_plan)?;
         let mut result_cols = BTreeMap::new();
         for col_name in &self.column_order {
             let data_col = &self.columns[col_name];
@@ -18715,10 +18746,11 @@ impl DataFrame {
                     "mask_df: condition missing column '{col_name}'"
                 ))
             })?;
+            let aligned_cond = cond_col.reindex_by_positions(&cond_plan.right_positions)?;
             let vals: Vec<Scalar> = data_col
                 .values()
                 .iter()
-                .zip(cond_col.values())
+                .zip(aligned_cond.values())
                 .map(|(val, c)| match c {
                     Scalar::Bool(true) => other.clone(),
                     Scalar::Bool(false) => val.clone(),
@@ -28211,6 +28243,28 @@ mod tests {
     }
 
     #[test]
+    fn series_where_cond_ignores_extra_labels() {
+        let s = Series::from_values(
+            "x",
+            vec!["a".into(), "b".into()],
+            vec![Scalar::Int64(10), Scalar::Int64(20)],
+        )
+        .unwrap();
+
+        let cond = Series::from_values(
+            "c",
+            vec!["a".into(), "c".into()],
+            vec![Scalar::Bool(true), Scalar::Bool(false)],
+        )
+        .unwrap();
+
+        let result = s.where_cond(&cond, None).unwrap();
+        assert_eq!(result.index().labels(), s.index().labels());
+        assert_eq!(result.values()[0], Scalar::Int64(10));
+        assert!(result.values()[1].is_missing());
+    }
+
+    #[test]
     fn series_where_cond_with_other() {
         let s = Series::from_values(
             "x",
@@ -28753,6 +28807,30 @@ mod tests {
         assert!(result.column("a").unwrap().values()[1].is_missing());
         assert!(result.column("b").unwrap().values()[0].is_missing());
         assert_eq!(result.column("b").unwrap().values()[1], Scalar::Int64(4));
+    }
+
+    #[test]
+    fn dataframe_where_cond_ignores_extra_rows() {
+        let df = DataFrame::from_dict(
+            &["a"],
+            vec![("a", vec![Scalar::Int64(1), Scalar::Int64(2)])],
+        )
+        .unwrap();
+
+        let cond = DataFrame::from_dict(
+            &["a"],
+            vec![(
+                "a",
+                vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)],
+            )],
+        )
+        .unwrap();
+
+        let result = df.where_cond(&cond, None).unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result.index().labels(), df.index().labels());
+        assert_eq!(result.column("a").unwrap().values()[0], Scalar::Int64(1));
+        assert!(result.column("a").unwrap().values()[1].is_missing());
     }
 
     #[test]
@@ -40155,6 +40233,28 @@ mod tests {
     }
 
     #[test]
+    fn df_where_mask_df_ignores_extra_rows() {
+        let df = DataFrame::from_dict(
+            &["a"],
+            vec![("a", vec![Scalar::Int64(1), Scalar::Int64(2)])],
+        )
+        .unwrap();
+        let cond = DataFrame::from_dict(
+            &["a"],
+            vec![(
+                "a",
+                vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)],
+            )],
+        )
+        .unwrap();
+        let result = df.where_mask_df(&cond, &Scalar::Int64(0)).unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result.index().labels(), df.index().labels());
+        assert_eq!(result.columns["a"].values()[0], Scalar::Int64(1));
+        assert_eq!(result.columns["a"].values()[1], Scalar::Int64(0));
+    }
+
+    #[test]
     fn df_mask_df() {
         let df = DataFrame::from_dict(
             &["a"],
@@ -42503,6 +42603,34 @@ mod tests {
         assert_eq!(result.column().values()[0], Scalar::Int64(10)); // True → keep
         assert_eq!(result.column().values()[1], Scalar::Int64(88)); // False → other
         assert_eq!(result.column().values()[2], Scalar::Int64(30)); // True → keep
+    }
+
+    #[test]
+    fn test_series_where_cond_series_ignores_extra_labels() {
+        let s = Series::from_values(
+            "data",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(10), Scalar::Int64(20)],
+        )
+        .unwrap();
+        let cond = Series::from_values(
+            "cond",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Bool(false), Scalar::Bool(true), Scalar::Bool(true)],
+        )
+        .unwrap();
+        let other = Series::from_values(
+            "other",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(99), Scalar::Int64(88), Scalar::Int64(77)],
+        )
+        .unwrap();
+
+        let result = s.where_cond_series(&cond, &other).unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result.index().labels(), s.index().labels());
+        assert_eq!(result.column().values()[0], Scalar::Int64(99)); // False → other
+        assert_eq!(result.column().values()[1], Scalar::Int64(20)); // True → keep
     }
 
     #[test]
