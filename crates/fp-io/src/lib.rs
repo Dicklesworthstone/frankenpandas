@@ -24,6 +24,8 @@ pub enum IoError {
     MissingHeaders,
     #[error("csv index column '{0}' not found in headers")]
     MissingIndexColumn(String),
+    #[error("duplicate column name '{0}'")]
+    DuplicateColumnName(String),
     #[error("json format error: {0}")]
     JsonFormat(String),
     #[error("parquet error: {0}")]
@@ -97,11 +99,13 @@ pub fn read_csv_str(input: &str) -> Result<DataFrame, IoError> {
         .has_headers(true)
         .from_reader(input.as_bytes());
 
-    let headers = reader.headers().cloned().map_err(IoError::from)?;
+    let headers_record = reader.headers().cloned().map_err(IoError::from)?;
 
-    if headers.is_empty() {
+    if headers_record.is_empty() {
         return Err(IoError::MissingHeaders);
     }
+    let headers: Vec<String> = headers_record.iter().map(ToOwned::to_owned).collect();
+    ensure_unique_headers(&headers)?;
 
     // AG-07: Vec-based column accumulation (O(1) per cell vs O(log c) BTreeMap).
     // Capacity hint from byte length avoids reallocation for typical CSVs.
@@ -124,7 +128,7 @@ pub fn read_csv_str(input: &str) -> Result<DataFrame, IoError> {
     let mut out_columns = BTreeMap::new();
     let mut column_order = Vec::with_capacity(header_count);
     for (idx, values) in columns.into_iter().enumerate() {
-        let name = headers.get(idx).unwrap_or_default().to_owned();
+        let name = headers.get(idx).cloned().unwrap_or_default();
         out_columns.insert(name.clone(), Column::from_values(values)?);
         column_order.push(name);
     }
@@ -214,6 +218,16 @@ fn parse_scalar_with_na(field: &str, na_values: &[String]) -> Scalar {
         return Scalar::Bool(value);
     }
     Scalar::Utf8(trimmed.to_owned())
+}
+
+fn ensure_unique_headers(headers: &[String]) -> Result<(), IoError> {
+    let mut seen = std::collections::BTreeSet::new();
+    for name in headers {
+        if !seen.insert(name) {
+            return Err(IoError::DuplicateColumnName(name.clone()));
+        }
+    }
+    Ok(())
 }
 
 // ── CSV with options ───────────────────────────────────────────────────
@@ -327,6 +341,7 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
     } else {
         (headers, columns)
     };
+    ensure_unique_headers(&headers)?;
 
     // Apply dtype coercion if specified.
     if let Some(ref dtype_map) = options.dtype {
@@ -1767,6 +1782,7 @@ pub fn read_sql(conn: &rusqlite::Connection, query: &str) -> Result<DataFrame, I
     let headers: Vec<String> = (0..col_count)
         .map(|i| stmt.column_name(i).unwrap_or("?").to_owned())
         .collect();
+    ensure_unique_headers(&headers)?;
 
     let mut columns: Vec<Vec<Scalar>> = (0..col_count).map(|_| Vec::new()).collect();
 
@@ -2053,7 +2069,7 @@ mod tests {
     use fp_index::{Index, IndexLabel};
     use fp_types::{NullKind, Scalar};
 
-    use super::{read_csv_str, write_csv_string};
+    use super::{IoError, read_csv_str, write_csv_string};
 
     #[test]
     fn csv_round_trip_preserves_null_and_numeric_shape() {
@@ -2066,6 +2082,13 @@ mod tests {
         let out = write_csv_string(&frame).expect("write");
         assert!(out.contains("id,value"));
         assert!(out.contains("3,3.5"));
+    }
+
+    #[test]
+    fn csv_duplicate_headers_error() {
+        let input = "a,a\n1,2\n";
+        let err = read_csv_str(input).expect_err("duplicate header");
+        assert!(matches!(err, IoError::DuplicateColumnName(name) if name == "a"));
     }
 
     // === AG-07-T: CSV Parser Optimization Tests ===
@@ -2328,8 +2351,7 @@ mod tests {
     // === bd-2gi.19: IO Complete Contract Tests ===
 
     use super::{
-        CsvReadOptions, IoError, JsonOrient, read_csv_with_options, read_json_str,
-        write_json_string,
+        CsvReadOptions, JsonOrient, read_csv_with_options, read_json_str, write_json_string,
     };
 
     #[test]
@@ -3170,6 +3192,13 @@ mod tests {
             filtered.column("names").unwrap().values()[1],
             Scalar::Utf8("carol".into())
         );
+    }
+
+    #[test]
+    fn sql_duplicate_column_names_error() {
+        let conn = make_sql_test_conn();
+        let err = read_sql(&conn, "SELECT 1 as dup, 2 as dup");
+        assert!(matches!(err, Err(IoError::DuplicateColumnName(name)) if name == "dup"));
     }
 
     #[test]
