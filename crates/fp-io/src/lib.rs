@@ -355,10 +355,12 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
     if let Some(ref dtype_map) = options.dtype {
         for (i, name) in headers.iter().enumerate() {
             if let Some(&target_dt) = dtype_map.get(name) {
-                columns[i] = columns[i]
+                let coerced = columns[i]
                     .iter()
-                    .map(|v| fp_types::cast_scalar(v, target_dt).unwrap_or_else(|_| v.clone()))
-                    .collect();
+                    .map(|v| fp_types::cast_scalar(v, target_dt))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|err| IoError::Column(ColumnError::from(err)))?;
+                columns[i] = coerced;
             }
         }
     }
@@ -3715,6 +3717,24 @@ mod tests {
         );
         // id column should remain Int64 (not in dtype map)
         assert_eq!(frame.column("id").unwrap().values()[0], Scalar::Int64(1));
+    }
+
+    #[test]
+    fn csv_dtype_coercion_invalid_value_errors() {
+        let input = "id,score\n1,abc\n";
+        let mut dtype_map = std::collections::HashMap::new();
+        dtype_map.insert("score".to_owned(), fp_types::DType::Int64);
+        let opts = CsvReadOptions {
+            dtype: Some(dtype_map),
+            ..Default::default()
+        };
+        let err = read_csv_with_options(input, &opts).expect_err("invalid cast must error");
+        assert!(matches!(
+            err,
+            IoError::Column(fp_columnar::ColumnError::Type(
+                fp_types::TypeError::InvalidCast { .. }
+            ))
+        ));
     }
 
     #[test]
