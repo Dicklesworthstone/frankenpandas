@@ -4139,6 +4139,11 @@ impl Series {
                 Ok(format!("[{}]", vals.join(",")))
             }
             "index" => {
+                if self.index.has_duplicates() {
+                    return Err(FrameError::CompatibilityRejected(
+                        "to_json orient 'index' does not support duplicate index labels".to_owned(),
+                    ));
+                }
                 let pairs: Vec<String> = self
                     .index
                     .labels()
@@ -16330,6 +16335,12 @@ impl DataFrame {
                 serialize_json_value(&Value::Array(rows))
             }
             "columns" => {
+                if self.index.has_duplicates() {
+                    return Err(FrameError::CompatibilityRejected(
+                        "to_json orient 'columns' does not support duplicate index labels"
+                            .to_owned(),
+                    ));
+                }
                 let mut columns = Map::new();
                 for name in &self.column_order {
                     let col = &self.columns[name];
@@ -16342,6 +16353,11 @@ impl DataFrame {
                 serialize_json_value(&Value::Object(columns))
             }
             "index" => {
+                if self.index.has_duplicates() {
+                    return Err(FrameError::CompatibilityRejected(
+                        "to_json orient 'index' does not support duplicate index labels".to_owned(),
+                    ));
+                }
                 let mut rows = Map::new();
                 for (row_idx, label) in self.index.labels().iter().enumerate() {
                     let mut row = Map::new();
@@ -34420,6 +34436,29 @@ mod tests {
     }
 
     #[test]
+    fn dataframe_to_json_duplicate_index_rejected() {
+        let df = DataFrame::from_dict_with_index(
+            vec![("x", vec![Scalar::Int64(1), Scalar::Int64(2)])],
+            vec!["dup".into(), "dup".into()],
+        )
+        .unwrap();
+
+        let err = df
+            .to_json("index")
+            .expect_err("duplicate index labels should error");
+        assert!(
+            matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("duplicate index"))
+        );
+
+        let err = df
+            .to_json("columns")
+            .expect_err("duplicate index labels should error");
+        assert!(
+            matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("duplicate index"))
+        );
+    }
+
+    #[test]
     fn dataframe_to_json_split() {
         let df = DataFrame::from_dict_with_index(
             vec![
@@ -38475,6 +38514,22 @@ mod tests {
         let json = s.to_json("index").unwrap();
         assert!(json.contains("\"a\":1"));
         assert!(json.contains("\"b\":2"));
+    }
+
+    #[test]
+    fn series_to_json_duplicate_index_rejected() {
+        let s = Series::from_values(
+            "x",
+            vec!["dup".into(), "dup".into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2)],
+        )
+        .unwrap();
+        let err = s
+            .to_json("index")
+            .expect_err("duplicate index labels should error");
+        assert!(
+            matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("duplicate index"))
+        );
     }
 
     #[test]
