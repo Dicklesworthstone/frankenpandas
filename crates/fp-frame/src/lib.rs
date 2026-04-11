@@ -18464,34 +18464,29 @@ impl DataFrame {
                 .zip(rc.values())
                 .map(|(lv, rv)| {
                     if lv.is_missing() || rv.is_missing() {
-                        // NaN compared to anything is false (except ne where it's true)
-                        match op {
-                            ComparisonOp::Ne => Scalar::Bool(true),
-                            _ => Scalar::Bool(false),
-                        }
-                    } else {
-                        match (lv.to_f64(), rv.to_f64()) {
-                            (Ok(l), Ok(r)) => Scalar::Bool(match op {
-                                ComparisonOp::Eq => l == r,
-                                ComparisonOp::Ne => l != r,
-                                ComparisonOp::Gt => l > r,
-                                ComparisonOp::Ge => l >= r,
-                                ComparisonOp::Lt => l < r,
-                                ComparisonOp::Le => l <= r,
-                            }),
-                            _ => {
-                                // For non-numeric, compare as strings
-                                let ls = format!("{lv}");
-                                let rs = format!("{rv}");
-                                Scalar::Bool(match op {
-                                    ComparisonOp::Eq => ls == rs,
-                                    ComparisonOp::Ne => ls != rs,
-                                    ComparisonOp::Gt => ls > rs,
-                                    ComparisonOp::Ge => ls >= rs,
-                                    ComparisonOp::Lt => ls < rs,
-                                    ComparisonOp::Le => ls <= rs,
-                                })
-                            }
+                        return Scalar::Null(NullKind::Null);
+                    }
+                    match (lv.to_f64(), rv.to_f64()) {
+                        (Ok(l), Ok(r)) => Scalar::Bool(match op {
+                            ComparisonOp::Eq => l == r,
+                            ComparisonOp::Ne => l != r,
+                            ComparisonOp::Gt => l > r,
+                            ComparisonOp::Ge => l >= r,
+                            ComparisonOp::Lt => l < r,
+                            ComparisonOp::Le => l <= r,
+                        }),
+                        _ => {
+                            // For non-numeric, compare as strings
+                            let ls = format!("{lv}");
+                            let rs = format!("{rv}");
+                            Scalar::Bool(match op {
+                                ComparisonOp::Eq => ls == rs,
+                                ComparisonOp::Ne => ls != rs,
+                                ComparisonOp::Gt => ls > rs,
+                                ComparisonOp::Ge => ls >= rs,
+                                ComparisonOp::Lt => ls < rs,
+                                ComparisonOp::Le => ls <= rs,
+                            })
                         }
                     }
                 })
@@ -18560,32 +18555,28 @@ impl DataFrame {
                 .iter()
                 .map(|v| {
                     if v.is_missing() || scalar.is_missing() {
-                        match op {
-                            ComparisonOp::Ne => Scalar::Bool(true),
-                            _ => Scalar::Bool(false),
-                        }
-                    } else {
-                        match (v.to_f64(), scalar.to_f64()) {
-                            (Ok(l), Ok(r)) => Scalar::Bool(match op {
-                                ComparisonOp::Eq => l == r,
-                                ComparisonOp::Ne => l != r,
-                                ComparisonOp::Gt => l > r,
-                                ComparisonOp::Ge => l >= r,
-                                ComparisonOp::Lt => l < r,
-                                ComparisonOp::Le => l <= r,
-                            }),
-                            _ => {
-                                let vs = format!("{v}");
-                                let ss = format!("{scalar}");
-                                Scalar::Bool(match op {
-                                    ComparisonOp::Eq => vs == ss,
-                                    ComparisonOp::Ne => vs != ss,
-                                    ComparisonOp::Gt => vs > ss,
-                                    ComparisonOp::Ge => vs >= ss,
-                                    ComparisonOp::Lt => vs < ss,
-                                    ComparisonOp::Le => vs <= ss,
-                                })
-                            }
+                        return Scalar::Null(NullKind::Null);
+                    }
+                    match (v.to_f64(), scalar.to_f64()) {
+                        (Ok(l), Ok(r)) => Scalar::Bool(match op {
+                            ComparisonOp::Eq => l == r,
+                            ComparisonOp::Ne => l != r,
+                            ComparisonOp::Gt => l > r,
+                            ComparisonOp::Ge => l >= r,
+                            ComparisonOp::Lt => l < r,
+                            ComparisonOp::Le => l <= r,
+                        }),
+                        _ => {
+                            let vs = format!("{v}");
+                            let ss = format!("{scalar}");
+                            Scalar::Bool(match op {
+                                ComparisonOp::Eq => vs == ss,
+                                ComparisonOp::Ne => vs != ss,
+                                ComparisonOp::Gt => vs > ss,
+                                ComparisonOp::Ge => vs >= ss,
+                                ComparisonOp::Lt => vs < ss,
+                                ComparisonOp::Le => vs <= ss,
+                            })
                         }
                     }
                 })
@@ -40008,12 +39999,10 @@ mod tests {
         .unwrap();
         let eq = df1.eq_df(&df2).unwrap();
         assert_eq!(eq.columns["x"].values()[0], Scalar::Bool(true));
-        // NaN compared to anything is false for eq
-        assert_eq!(eq.columns["x"].values()[1], Scalar::Bool(false));
+        assert!(eq.columns["x"].values()[1].is_missing());
 
         let ne = df1.ne_df(&df2).unwrap();
-        // NaN != anything is true
-        assert_eq!(ne.columns["x"].values()[1], Scalar::Bool(true));
+        assert!(ne.columns["x"].values()[1].is_missing());
     }
 
     // ── DataFrame floordiv_df / mod_df ──
