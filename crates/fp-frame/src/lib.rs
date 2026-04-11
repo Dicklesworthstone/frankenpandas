@@ -434,6 +434,20 @@ fn align_union_duplicate_aware(
     (Index::new(out_labels), left_positions, right_positions)
 }
 
+fn align_union_plan(left: &Index, right: &Index) -> AlignmentPlan {
+    if left.has_duplicates() || right.has_duplicates() {
+        let (union_index, left_positions, right_positions) =
+            align_union_duplicate_aware(left, right);
+        AlignmentPlan {
+            union_index,
+            left_positions,
+            right_positions,
+        }
+    } else {
+        align_union(left, right)
+    }
+}
+
 fn range_index(len: usize) -> Result<Index, FrameError> {
     let len_i64 = i64::try_from(len).map_err(|_| {
         FrameError::CompatibilityRejected(format!(
@@ -956,7 +970,7 @@ impl Series {
     /// Matches `pd.Series.combine_first(other)`: uses outer alignment,
     /// then for each position takes self's value if non-null, else other's.
     pub fn combine_first(&self, other: &Self) -> Result<Self, FrameError> {
-        let plan = align_union(&self.index, &other.index);
+        let plan = align_union_plan(&self.index, &other.index);
         validate_alignment_plan(&plan)?;
 
         let left_col = self.column.reindex_by_positions(&plan.left_positions)?;
@@ -1045,6 +1059,11 @@ impl Series {
     ///
     /// Matches `pd.Series.reindex(new_index)`.
     pub fn reindex(&self, new_labels: Vec<IndexLabel>) -> Result<Self, FrameError> {
+        if self.index.has_duplicates() {
+            return Err(FrameError::CompatibilityRejected(
+                "reindex cannot handle duplicate index labels".to_owned(),
+            ));
+        }
         let new_index = Index::new(new_labels);
         let current_map = self.index.position_map_first();
 
@@ -1082,7 +1101,7 @@ impl Series {
     /// Core comparison: align indexes, reindex columns, apply comparison.
     /// Returns a Bool-typed Series.
     fn comparison_op(&self, other: &Self, op: ComparisonOp) -> Result<Self, FrameError> {
-        let plan = align_union(&self.index, &other.index);
+        let plan = align_union_plan(&self.index, &other.index);
         validate_alignment_plan(&plan)?;
 
         let left = self.column.reindex_by_positions(&plan.left_positions)?;
@@ -1230,7 +1249,7 @@ impl Series {
         self.ensure_boolean_series("and")?;
         other.ensure_boolean_series("and")?;
 
-        let plan = align_union(&self.index, &other.index);
+        let plan = align_union_plan(&self.index, &other.index);
         validate_alignment_plan(&plan)?;
 
         let left = self.column.reindex_by_positions(&plan.left_positions)?;
@@ -1269,7 +1288,7 @@ impl Series {
         self.ensure_boolean_series("or")?;
         other.ensure_boolean_series("or")?;
 
-        let plan = align_union(&self.index, &other.index);
+        let plan = align_union_plan(&self.index, &other.index);
         validate_alignment_plan(&plan)?;
 
         let left = self.column.reindex_by_positions(&plan.left_positions)?;
@@ -15326,6 +15345,11 @@ impl DataFrame {
     ///
     /// Missing rows are filled with NaN.
     pub fn reindex(&self, new_labels: Vec<IndexLabel>) -> Result<Self, FrameError> {
+        if self.index.has_duplicates() {
+            return Err(FrameError::CompatibilityRejected(
+                "reindex cannot handle duplicate index labels".to_owned(),
+            ));
+        }
         // Build a lookup from old label -> row index
         let mut old_lookup: std::collections::HashMap<&IndexLabel, usize> =
             std::collections::HashMap::new();
@@ -15365,6 +15389,11 @@ impl DataFrame {
         new_labels: Vec<IndexLabel>,
         fill_value: Scalar,
     ) -> Result<Self, FrameError> {
+        if self.index.has_duplicates() {
+            return Err(FrameError::CompatibilityRejected(
+                "reindex cannot handle duplicate index labels".to_owned(),
+            ));
+        }
         let mut old_lookup: std::collections::HashMap<&IndexLabel, usize> =
             std::collections::HashMap::new();
         for (i, label) in self.index.labels().iter().enumerate() {
@@ -23854,6 +23883,37 @@ mod tests {
         assert_eq!(result.values(), &[Scalar::Int64(10), Scalar::Int64(20)]);
     }
 
+    #[test]
+    fn combine_first_duplicate_labels_cartesian() {
+        let left = Series::from_values(
+            "x",
+            vec![1_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(10), Scalar::Null(NullKind::NaN)],
+        )
+        .unwrap();
+        let right = Series::from_values(
+            "y",
+            vec![1_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2)],
+        )
+        .unwrap();
+
+        let result = left.combine_first(&right).unwrap();
+        assert_eq!(
+            result.index().labels(),
+            &[1_i64.into(), 1_i64.into(), 1_i64.into(), 1_i64.into()]
+        );
+        assert_eq!(
+            result.values(),
+            &[
+                Scalar::Int64(10),
+                Scalar::Int64(10),
+                Scalar::Int64(1),
+                Scalar::Int64(2)
+            ]
+        );
+    }
+
     // ---- Series.reindex() tests (bd-2gi.15) ----
 
     #[test]
@@ -23908,6 +23968,22 @@ mod tests {
 
         let result = s.reindex(Vec::new()).unwrap();
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn reindex_rejects_duplicate_index_labels() {
+        let s = Series::from_values(
+            "x",
+            vec![1_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(10), Scalar::Int64(20)],
+        )
+        .unwrap();
+
+        let err = s.reindex(vec![1_i64.into()]).unwrap_err();
+        assert!(matches!(
+            err,
+            FrameError::CompatibilityRejected(msg) if msg.contains("duplicate index")
+        ));
     }
 
     #[test]
@@ -30123,6 +30199,21 @@ mod tests {
         assert_eq!(reindexed.columns["val"].values()[0], Scalar::Float64(30.0)); // label 2
         assert_eq!(reindexed.columns["val"].values()[1], Scalar::Float64(10.0)); // label 0
         assert!(reindexed.columns["val"].values()[2].is_missing()); // label 5 → NaN
+    }
+
+    #[test]
+    fn dataframe_reindex_duplicate_index_rejected() {
+        let df = DataFrame::from_dict_with_index(
+            vec![("v", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)])],
+            vec![1_i64.into(), 1_i64.into()],
+        )
+        .unwrap();
+
+        let err = df.reindex(vec![1_i64.into()]).unwrap_err();
+        assert!(matches!(
+            err,
+            FrameError::CompatibilityRejected(msg) if msg.contains("duplicate index")
+        ));
     }
 
     // ── str accessor tests ──
