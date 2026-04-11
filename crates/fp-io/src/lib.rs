@@ -73,7 +73,8 @@ pub struct CsvReadOptions {
     /// Maximum number of data rows to read. `None` means read all.
     /// Matches pandas `nrows` parameter.
     pub nrows: Option<usize>,
-    /// Number of initial data rows to skip (after the header).
+    /// Number of initial lines to skip at the start of the file (including
+    /// the header line when `has_headers` is true).
     /// Matches pandas `skiprows` parameter (when given as int).
     pub skiprows: usize,
     /// Force specific dtypes for columns. Map of column name -> DType.
@@ -257,43 +258,32 @@ fn validate_usecols(headers: &[String], usecols: &[String]) -> Result<(), IoErro
 
 pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<DataFrame, IoError> {
     let mut reader = ReaderBuilder::new()
-        .has_headers(options.has_headers)
+        .has_headers(false)
         .delimiter(options.delimiter)
         .from_reader(input.as_bytes());
 
     let max_rows = options.nrows.unwrap_or(usize::MAX);
     let skip = options.skiprows;
 
+    let mut records = reader.records();
+    for _ in 0..skip {
+        if records.next().transpose()?.is_none() {
+            return Err(IoError::MissingHeaders);
+        }
+    }
+
     let mut row_count: i64 = 0;
-    let (headers, columns) = if options.has_headers {
-        let headers_record = reader.headers().cloned().map_err(IoError::from)?;
+    let (headers, mut columns) = if options.has_headers {
+        let headers_record = records.next().transpose()?.ok_or(IoError::MissingHeaders)?;
         if headers_record.is_empty() {
             return Err(IoError::MissingHeaders);
         }
 
         let header_count = headers_record.len();
         let row_hint = input.len() / (header_count * 8).max(1);
-        let mut columns: Vec<Vec<Scalar>> = (0..header_count)
+        let columns: Vec<Vec<Scalar>> = (0..header_count)
             .map(|_| Vec::with_capacity(row_hint))
             .collect();
-
-        let mut rows_seen: usize = 0;
-        for row in reader.records() {
-            let record = row?;
-            if rows_seen < skip {
-                rows_seen += 1;
-                continue;
-            }
-            if (row_count as usize) >= max_rows {
-                break;
-            }
-            for (idx, col) in columns.iter_mut().enumerate() {
-                let field = record.get(idx).unwrap_or_default();
-                col.push(parse_scalar_with_na(field, &options.na_values));
-            }
-            row_count += 1;
-            rows_seen += 1;
-        }
 
         (
             headers_record
@@ -303,8 +293,7 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
             columns,
         )
     } else {
-        let mut rows = reader.records();
-        let first_record = rows.next().transpose()?.ok_or(IoError::MissingHeaders)?;
+        let first_record = records.next().transpose()?.ok_or(IoError::MissingHeaders)?;
         if first_record.is_empty() {
             return Err(IoError::MissingHeaders);
         }
@@ -315,32 +304,12 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
             .map(|_| Vec::with_capacity(row_hint))
             .collect();
 
-        // First record is data row 0 (no headers mode).
-        let mut rows_seen: usize = 0;
-        if rows_seen >= skip && (row_count as usize) < max_rows {
+        if (row_count as usize) < max_rows {
             for (idx, col) in columns.iter_mut().enumerate() {
                 let field = first_record.get(idx).unwrap_or_default();
                 col.push(parse_scalar_with_na(field, &options.na_values));
             }
             row_count += 1;
-        }
-        rows_seen += 1;
-
-        for row in rows {
-            let record = row?;
-            if rows_seen < skip {
-                rows_seen += 1;
-                continue;
-            }
-            if (row_count as usize) >= max_rows {
-                break;
-            }
-            for (idx, col) in columns.iter_mut().enumerate() {
-                let field = record.get(idx).unwrap_or_default();
-                col.push(parse_scalar_with_na(field, &options.na_values));
-            }
-            row_count += 1;
-            rows_seen += 1;
         }
 
         (
@@ -350,6 +319,18 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
             columns,
         )
     };
+
+    for row in records {
+        if (row_count as usize) >= max_rows {
+            break;
+        }
+        let record = row?;
+        for (idx, col) in columns.iter_mut().enumerate() {
+            let field = record.get(idx).unwrap_or_default();
+            col.push(parse_scalar_with_na(field, &options.na_values));
+        }
+        row_count += 1;
+    }
     ensure_unique_headers(&headers)?;
     if let Some(ref usecols) = options.usecols {
         validate_usecols(&headers, usecols)?;
@@ -3668,8 +3649,8 @@ mod tests {
             ..Default::default()
         };
         let frame = read_csv_with_options(input, &opts).expect("parse");
-        assert_eq!(frame.index().len(), 3); // skipped rows 1,2; read 3,4,5
-        assert_eq!(frame.column("x").unwrap().values()[0], Scalar::Int64(3));
+        assert_eq!(frame.index().len(), 3); // skipped header + first data row
+        assert_eq!(frame.column("2").unwrap().values()[0], Scalar::Int64(3));
     }
 
     #[test]
@@ -3681,9 +3662,9 @@ mod tests {
             ..Default::default()
         };
         let frame = read_csv_with_options(input, &opts).expect("parse");
-        assert_eq!(frame.index().len(), 2); // skipped 1; read 2,3
-        assert_eq!(frame.column("x").unwrap().values()[0], Scalar::Int64(2));
-        assert_eq!(frame.column("x").unwrap().values()[1], Scalar::Int64(3));
+        assert_eq!(frame.index().len(), 2); // skipped header; read 2 data rows
+        assert_eq!(frame.column("1").unwrap().values()[0], Scalar::Int64(2));
+        assert_eq!(frame.column("1").unwrap().values()[1], Scalar::Int64(3));
     }
 
     #[test]
@@ -3737,14 +3718,14 @@ mod tests {
     }
 
     #[test]
-    fn csv_skiprows_beyond_data_returns_empty() {
+    fn csv_skiprows_beyond_data_errors() {
         let input = "x\n1\n2\n";
         let opts = CsvReadOptions {
             skiprows: 100,
             ..Default::default()
         };
-        let frame = read_csv_with_options(input, &opts).expect("parse");
-        assert_eq!(frame.index().len(), 0);
+        let err = read_csv_with_options(input, &opts).expect_err("skiprows removes header");
+        assert!(matches!(err, IoError::MissingHeaders));
     }
 
     #[test]
