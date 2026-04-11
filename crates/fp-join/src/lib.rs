@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 use std::{
+    cmp::Ordering,
     collections::{HashMap, HashSet},
     mem::size_of,
 };
@@ -400,11 +401,53 @@ pub struct MergedDataFrame {
     pub columns: std::collections::BTreeMap<String, Column>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum JoinKeyComponent {
     Present(IndexLabel),
     FloatBits(u64),
     Missing,
+}
+
+impl Ord for JoinKeyComponent {
+    fn cmp(&self, other: &Self) -> Ordering {
+        use JoinKeyComponent::{FloatBits, Missing, Present};
+        match (self, other) {
+            (Missing, Missing) => Ordering::Equal,
+            (Missing, _) => Ordering::Greater,
+            (_, Missing) => Ordering::Less,
+            (Present(IndexLabel::Int64(a)), Present(IndexLabel::Int64(b))) => a.cmp(b),
+            (Present(IndexLabel::Utf8(a)), Present(IndexLabel::Utf8(b))) => a.cmp(b),
+            (Present(IndexLabel::Int64(_)), Present(IndexLabel::Utf8(_))) => Ordering::Less,
+            (Present(IndexLabel::Utf8(_)), Present(IndexLabel::Int64(_))) => Ordering::Greater,
+            (Present(IndexLabel::Int64(a)), FloatBits(bits)) => {
+                let ord = (*a as f64).total_cmp(&f64::from_bits(*bits));
+                if ord == Ordering::Equal {
+                    Ordering::Less
+                } else {
+                    ord
+                }
+            }
+            (FloatBits(bits), Present(IndexLabel::Int64(a))) => {
+                let ord = f64::from_bits(*bits).total_cmp(&(*a as f64));
+                if ord == Ordering::Equal {
+                    Ordering::Greater
+                } else {
+                    ord
+                }
+            }
+            (FloatBits(a_bits), FloatBits(b_bits)) => {
+                f64::from_bits(*a_bits).total_cmp(&f64::from_bits(*b_bits))
+            }
+            (FloatBits(_), Present(IndexLabel::Utf8(_))) => Ordering::Less,
+            (Present(IndexLabel::Utf8(_)), FloatBits(_)) => Ordering::Greater,
+        }
+    }
+}
+
+impl PartialOrd for JoinKeyComponent {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 fn scalar_to_key_component(s: &fp_types::Scalar) -> JoinKeyComponent {
@@ -1958,6 +2001,76 @@ mod tests {
         assert_eq!(
             merged.columns.get("right_v").expect("right_v").values(),
             &[Scalar::Int64(100), Scalar::Int64(200), Scalar::Int64(200)]
+        );
+    }
+
+    #[test]
+    fn merge_inner_sort_true_orders_float_keys_numerically() {
+        let left = DataFrame::from_dict(
+            &["id", "left_v"],
+            vec![
+                (
+                    "id",
+                    vec![
+                        Scalar::Float64(1.5),
+                        Scalar::Float64(-2.5),
+                        Scalar::Float64(0.25),
+                    ],
+                ),
+                (
+                    "left_v",
+                    vec![Scalar::Int64(15), Scalar::Int64(-25), Scalar::Int64(2)],
+                ),
+            ],
+        )
+        .expect("left");
+        let right = DataFrame::from_dict(
+            &["id", "right_v"],
+            vec![
+                (
+                    "id",
+                    vec![
+                        Scalar::Float64(-2.5),
+                        Scalar::Float64(0.25),
+                        Scalar::Float64(1.5),
+                    ],
+                ),
+                (
+                    "right_v",
+                    vec![Scalar::Int64(250), Scalar::Int64(25), Scalar::Int64(150)],
+                ),
+            ],
+        )
+        .expect("right");
+
+        let merged = merge_dataframes_on_with_options(
+            &left,
+            &right,
+            &["id"],
+            &["id"],
+            JoinType::Inner,
+            MergeExecutionOptions {
+                sort: true,
+                ..MergeExecutionOptions::default()
+            },
+        )
+        .expect("merge");
+
+        assert_eq!(
+            merged.columns.get("id").expect("id").values(),
+            &[
+                Scalar::Float64(-2.5),
+                Scalar::Float64(0.25),
+                Scalar::Float64(1.5)
+            ]
+        );
+        assert_eq!(
+            merged.columns.get("left_v").expect("left_v").values(),
+            &[Scalar::Int64(-25), Scalar::Int64(2), Scalar::Int64(15)]
+        );
+        assert_eq!(
+            merged.columns.get("right_v").expect("right_v").values(),
+            &[Scalar::Int64(250), Scalar::Int64(25), Scalar::Int64(150)]
         );
     }
 
