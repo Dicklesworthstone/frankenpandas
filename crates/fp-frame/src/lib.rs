@@ -11694,6 +11694,44 @@ impl DataFrame {
     /// mask values are treated as `False`.
     pub fn filter_rows(&self, mask: &Series) -> Result<Self, FrameError> {
         // Align mask to DataFrame index (pandas behavior: extra mask labels are ignored).
+        if self.index.has_duplicates() || mask.index().has_duplicates() {
+            let data_first = self.index.position_map_first();
+            let mask_first = mask.index().position_map_first();
+
+            let mut new_labels = Vec::new();
+            let mut kept_positions = Vec::new();
+
+            for label in self.index.labels() {
+                let Some(&mask_pos) = mask_first.get(label) else {
+                    continue;
+                };
+                if matches!(mask.column().values()[mask_pos], Scalar::Bool(true)) {
+                    let data_pos = data_first.get(label).copied().unwrap_or(mask_pos);
+                    new_labels.push(label.clone());
+                    kept_positions.push(data_pos);
+                }
+            }
+
+            let mut new_columns = BTreeMap::new();
+            for name in &self.column_order {
+                let col = self
+                    .columns
+                    .get(name)
+                    .expect("column name listed in order must exist");
+                let mut filtered_values = Vec::with_capacity(kept_positions.len());
+                for &pos in &kept_positions {
+                    filtered_values.push(col.values()[pos].clone());
+                }
+                new_columns.insert(name.clone(), Column::new(col.dtype(), filtered_values)?);
+            }
+
+            return Self::new_with_column_order(
+                Index::new(new_labels),
+                new_columns,
+                self.column_order.clone(),
+            );
+        }
+
         let plan = align(&self.index, mask.index(), AlignMode::Left);
         validate_alignment_plan(&plan)?;
 
@@ -26201,6 +26239,61 @@ mod tests {
         let err = df.filter_rows(&mask).unwrap_err();
         assert!(
             matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("boolean mask required for filter_rows"))
+        );
+    }
+
+    #[test]
+    fn dataframe_filter_rows_duplicate_index_uses_first_occurrence() {
+        let index = Index::new(vec![
+            IndexLabel::from("a"),
+            IndexLabel::from("a"),
+            IndexLabel::from("b"),
+        ]);
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            "x".to_string(),
+            Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)])
+                .unwrap(),
+        );
+        columns.insert(
+            "y".to_string(),
+            Column::from_values(vec![
+                Scalar::Int64(10),
+                Scalar::Int64(20),
+                Scalar::Int64(30),
+            ])
+            .unwrap(),
+        );
+        let df = DataFrame::new_with_column_order(
+            index,
+            columns,
+            vec!["x".to_string(), "y".to_string()],
+        )
+        .unwrap();
+
+        let mask = Series::from_values(
+            "mask",
+            vec![IndexLabel::from("a"), IndexLabel::from("b")],
+            vec![Scalar::Bool(true), Scalar::Bool(true)],
+        )
+        .unwrap();
+
+        let result = df.filter_rows(&mask).unwrap();
+        assert_eq!(
+            result.index().labels(),
+            &[
+                IndexLabel::from("a"),
+                IndexLabel::from("a"),
+                IndexLabel::from("b")
+            ]
+        );
+        assert_eq!(
+            result.column("x").unwrap().values(),
+            &[Scalar::Int64(1), Scalar::Int64(1), Scalar::Int64(3)]
+        );
+        assert_eq!(
+            result.column("y").unwrap().values(),
+            &[Scalar::Int64(10), Scalar::Int64(10), Scalar::Int64(30)]
         );
     }
 
