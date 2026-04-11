@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::str::FromStr;
 
 use chrono::{
@@ -143,6 +143,40 @@ fn scalar_to_value_counts_index_label(value: &Scalar) -> IndexLabel {
         // Keep float labels as textual index labels for current IndexLabel surface.
         Scalar::Float64(v) => IndexLabel::Utf8(format!("{v:?}")),
         Scalar::Null(_) => IndexLabel::Utf8("<null>".to_owned()),
+    }
+}
+
+#[derive(Hash, PartialEq, Eq)]
+enum ScalarKey<'a> {
+    Null(NullKind),
+    Bool(bool),
+    Int64(i64),
+    FloatBits(u64),
+    Utf8(&'a str),
+}
+
+fn scalar_key_allow_missing(value: &Scalar) -> ScalarKey<'_> {
+    match value {
+        Scalar::Null(kind) => ScalarKey::Null(*kind),
+        Scalar::Bool(v) => ScalarKey::Bool(*v),
+        Scalar::Int64(v) => ScalarKey::Int64(*v),
+        Scalar::Float64(v) => {
+            if v.is_nan() {
+                ScalarKey::Null(NullKind::NaN)
+            } else {
+                let normalized = if *v == 0.0 { 0.0 } else { *v };
+                ScalarKey::FloatBits(normalized.to_bits())
+            }
+        }
+        Scalar::Utf8(v) => ScalarKey::Utf8(v.as_str()),
+    }
+}
+
+fn scalar_key_skip_missing(value: &Scalar) -> Option<ScalarKey<'_>> {
+    if value.is_missing() {
+        None
+    } else {
+        Some(scalar_key_allow_missing(value))
     }
 }
 
@@ -15097,10 +15131,10 @@ impl DataFrame {
         let mut counts = Vec::new();
         for col_name in &self.column_order {
             let col = &self.columns[col_name];
-            let mut seen = std::collections::HashSet::new();
+            let mut seen: HashSet<ScalarKey<'_>> = HashSet::new();
             for v in col.values() {
-                if !v.is_missing() {
-                    seen.insert(format!("{v:?}"));
+                if let Some(key) = scalar_key_skip_missing(v) {
+                    seen.insert(key);
                 }
             }
             labels.push(IndexLabel::Utf8(col_name.clone()));
@@ -15125,33 +15159,36 @@ impl DataFrame {
         }
 
         // Build composite keys for each row
-        let mut key_counts: Vec<(String, i64)> = Vec::new();
-        let mut key_order: Vec<String> = Vec::new();
+        let mut key_counts: Vec<(Vec<ScalarKey<'_>>, String, i64)> = Vec::new();
 
         for i in 0..self.len() {
-            let parts: Vec<String> = self
-                .column_order
-                .iter()
-                .map(|cn| format!("{}", self.columns[cn].values()[i]))
-                .collect();
-            let key = parts.join(", ");
+            let mut parts = Vec::with_capacity(self.column_order.len());
+            let mut key_parts = Vec::with_capacity(self.column_order.len());
+            for col_name in &self.column_order {
+                let value = &self.columns[col_name].values()[i];
+                parts.push(value.to_string());
+                key_parts.push(scalar_key_allow_missing(value));
+            }
+            let key_label = parts.join(", ");
 
-            if let Some(entry) = key_counts.iter_mut().find(|(k, _)| k == &key) {
-                entry.1 += 1;
+            if let Some((_, _, count)) = key_counts.iter_mut().find(|(k, _, _)| *k == key_parts) {
+                *count += 1;
             } else {
-                key_order.push(key.clone());
-                key_counts.push((key, 1));
+                key_counts.push((key_parts, key_label, 1));
             }
         }
 
         // Sort by count descending
-        key_counts.sort_by_key(|entry| std::cmp::Reverse(entry.1));
+        key_counts.sort_by_key(|entry| std::cmp::Reverse(entry.2));
 
         let labels: Vec<IndexLabel> = key_counts
             .iter()
-            .map(|(k, _)| IndexLabel::Utf8(k.clone()))
+            .map(|(_, label, _)| IndexLabel::Utf8(label.clone()))
             .collect();
-        let values: Vec<Scalar> = key_counts.iter().map(|(_, c)| Scalar::Int64(*c)).collect();
+        let values: Vec<Scalar> = key_counts
+            .iter()
+            .map(|(_, _, count)| Scalar::Int64(*count))
+            .collect();
 
         Series::from_values("count".to_string(), labels, values)
     }
@@ -17398,10 +17435,10 @@ impl DataFrame {
             .iter()
             .map(|n| {
                 let col = &self.columns[n];
-                let mut seen = BTreeSet::new();
+                let mut seen: HashSet<ScalarKey<'_>> = HashSet::new();
                 for v in col.values() {
-                    if !v.is_missing() {
-                        seen.insert(format!("{v:?}"));
+                    if let Some(key) = scalar_key_skip_missing(v) {
+                        seen.insert(key);
                     }
                 }
                 Scalar::Int64(seen.len() as i64)
@@ -17422,11 +17459,11 @@ impl DataFrame {
         // axis=1: count unique values per row
         let mut values = Vec::with_capacity(self.len());
         for row_idx in 0..self.len() {
-            let mut seen = BTreeSet::new();
+            let mut seen: HashSet<ScalarKey<'_>> = HashSet::new();
             for col_name in &self.column_order {
                 let val = &self.columns[col_name].values()[row_idx];
-                if !val.is_missing() {
-                    seen.insert(format!("{val:?}"));
+                if let Some(key) = scalar_key_skip_missing(val) {
+                    seen.insert(key);
                 }
             }
             values.push(Scalar::Int64(seen.len() as i64));
@@ -32540,6 +32577,25 @@ mod tests {
         assert_eq!(result.values()[0], Scalar::Int64(2));
     }
 
+    #[test]
+    fn dataframe_nunique_merges_negative_zero_and_zero() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "a",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![
+                    Scalar::Float64(-0.0),
+                    Scalar::Float64(0.0),
+                    Scalar::Float64(1.0),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+        let result = df.nunique().unwrap();
+        assert_eq!(result.values()[0], Scalar::Int64(2));
+    }
+
     // ── DataFrame.all / .any tests ──
 
     #[test]
@@ -36000,6 +36056,22 @@ mod tests {
         let result = df.nunique_axis(1).unwrap();
         assert_eq!(result.values()[0], Scalar::Int64(2)); // row 0: {1.0, 2.0}
         assert_eq!(result.values()[1], Scalar::Int64(3)); // row 1: {1.0, 2.0, 3.0}
+    }
+
+    #[test]
+    fn df_nunique_axis1_merges_negative_zero_and_zero() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(-0.0), Scalar::Float64(1.0)]),
+                ("b", vec![Scalar::Float64(0.0), Scalar::Float64(2.0)]),
+            ],
+        )
+        .unwrap();
+
+        let result = df.nunique_axis(1).unwrap();
+        assert_eq!(result.values()[0], Scalar::Int64(1));
+        assert_eq!(result.values()[1], Scalar::Int64(2));
     }
 
     // ── astype_safe ──
@@ -40725,6 +40797,27 @@ mod tests {
         // "x, 1" appears 2 times, "y, 2" appears 1 time
         assert_eq!(result.len(), 2);
         assert_eq!(result.column().values()[0], Scalar::Int64(2)); // most frequent first
+        assert_eq!(result.column().values()[1], Scalar::Int64(1));
+    }
+
+    #[test]
+    fn df_value_counts_merges_negative_zero_and_zero() {
+        let df = DataFrame::from_dict(
+            &["a"],
+            vec![(
+                "a",
+                vec![
+                    Scalar::Float64(-0.0),
+                    Scalar::Float64(0.0),
+                    Scalar::Float64(1.0),
+                ],
+            )],
+        )
+        .unwrap();
+
+        let result = df.value_counts().unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result.column().values()[0], Scalar::Int64(2));
         assert_eq!(result.column().values()[1], Scalar::Int64(1));
     }
 
