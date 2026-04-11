@@ -378,7 +378,7 @@ fn index_position_groups(index: &Index) -> BTreeMap<IndexLabel, Vec<usize>> {
 ///
 /// Mirrors pandas non-unique join behavior for `Series.align(join="outer")`
 /// with `sort=False`:
-/// - preserve left-then-unseen label order
+/// - preserve left order, then append right-only labels in right order
 /// - shared labels materialize cartesian matches (lc * rc rows)
 /// - left-only and right-only labels keep their original multiplicity
 fn align_union_duplicate_aware(
@@ -388,46 +388,32 @@ fn align_union_duplicate_aware(
     let left_groups = index_position_groups(left);
     let right_groups = index_position_groups(right);
 
-    let mut seen = BTreeSet::new();
-    let mut union_labels = Vec::new();
-    for label in left.labels().iter().chain(right.labels().iter()) {
-        if seen.insert(label.clone()) {
-            union_labels.push(label.clone());
-        }
-    }
-
     let mut out_labels = Vec::new();
     let mut left_positions = Vec::new();
     let mut right_positions = Vec::new();
 
-    for label in union_labels {
-        let left_hits = left_groups.get(&label).map_or(&[][..], Vec::as_slice);
-        let right_hits = right_groups.get(&label).map_or(&[][..], Vec::as_slice);
-
-        if left_hits.is_empty() {
-            for &rp in right_hits {
-                out_labels.push(label.clone());
-                left_positions.push(None);
-                right_positions.push(Some(rp));
+    for (left_pos, label) in left.labels().iter().enumerate() {
+        match right_groups.get(label) {
+            Some(right_hits) if !right_hits.is_empty() => {
+                for &right_pos in right_hits {
+                    out_labels.push(label.clone());
+                    left_positions.push(Some(left_pos));
+                    right_positions.push(Some(right_pos));
+                }
             }
-            continue;
-        }
-
-        if right_hits.is_empty() {
-            for &lp in left_hits {
+            _ => {
                 out_labels.push(label.clone());
-                left_positions.push(Some(lp));
+                left_positions.push(Some(left_pos));
                 right_positions.push(None);
             }
-            continue;
         }
+    }
 
-        for &lp in left_hits {
-            for &rp in right_hits {
-                out_labels.push(label.clone());
-                left_positions.push(Some(lp));
-                right_positions.push(Some(rp));
-            }
+    for (right_pos, label) in right.labels().iter().enumerate() {
+        if !left_groups.contains_key(label) {
+            out_labels.push(label.clone());
+            left_positions.push(None);
+            right_positions.push(Some(right_pos));
         }
     }
 

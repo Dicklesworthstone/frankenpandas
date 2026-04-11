@@ -738,11 +738,125 @@ pub enum AlignMode {
     Outer,
 }
 
+fn index_position_groups(index: &Index) -> HashMap<IndexLabel, Vec<usize>> {
+    let mut groups: HashMap<IndexLabel, Vec<usize>> = HashMap::new();
+    for (pos, label) in index.labels().iter().enumerate() {
+        groups.entry(label.clone()).or_default().push(pos);
+    }
+    groups
+}
+
+fn align_non_unique(left: &Index, right: &Index, mode: AlignMode) -> AlignmentPlan {
+    let left_groups = index_position_groups(left);
+    let right_groups = index_position_groups(right);
+
+    let mut out_labels = Vec::new();
+    let mut left_positions = Vec::new();
+    let mut right_positions = Vec::new();
+
+    match mode {
+        AlignMode::Inner => {
+            for (left_pos, label) in left.labels().iter().enumerate() {
+                if let Some(right_hits) = right_groups.get(label) {
+                    for &right_pos in right_hits {
+                        out_labels.push(label.clone());
+                        left_positions.push(Some(left_pos));
+                        right_positions.push(Some(right_pos));
+                    }
+                }
+            }
+        }
+        AlignMode::Left => {
+            for (left_pos, label) in left.labels().iter().enumerate() {
+                match right_groups.get(label) {
+                    Some(right_hits) if !right_hits.is_empty() => {
+                        for &right_pos in right_hits {
+                            out_labels.push(label.clone());
+                            left_positions.push(Some(left_pos));
+                            right_positions.push(Some(right_pos));
+                        }
+                    }
+                    _ => {
+                        out_labels.push(label.clone());
+                        left_positions.push(Some(left_pos));
+                        right_positions.push(None);
+                    }
+                }
+            }
+        }
+        AlignMode::Right => {
+            for (right_pos, label) in right.labels().iter().enumerate() {
+                match left_groups.get(label) {
+                    Some(left_hits) if !left_hits.is_empty() => {
+                        for &left_pos in left_hits {
+                            out_labels.push(label.clone());
+                            left_positions.push(Some(left_pos));
+                            right_positions.push(Some(right_pos));
+                        }
+                    }
+                    _ => {
+                        out_labels.push(label.clone());
+                        left_positions.push(None);
+                        right_positions.push(Some(right_pos));
+                    }
+                }
+            }
+        }
+        AlignMode::Outer => {
+            for (left_pos, label) in left.labels().iter().enumerate() {
+                match right_groups.get(label) {
+                    Some(right_hits) if !right_hits.is_empty() => {
+                        for &right_pos in right_hits {
+                            out_labels.push(label.clone());
+                            left_positions.push(Some(left_pos));
+                            right_positions.push(Some(right_pos));
+                        }
+                    }
+                    _ => {
+                        out_labels.push(label.clone());
+                        left_positions.push(Some(left_pos));
+                        right_positions.push(None);
+                    }
+                }
+            }
+
+            for (right_pos, label) in right.labels().iter().enumerate() {
+                if !left_groups.contains_key(label) {
+                    out_labels.push(label.clone());
+                    left_positions.push(None);
+                    right_positions.push(Some(right_pos));
+                }
+            }
+        }
+    }
+
+    let mut union_index = Index::new(out_labels);
+    match mode {
+        AlignMode::Left => {
+            union_index.name = left.name.clone();
+        }
+        AlignMode::Right => {
+            union_index.name = right.name.clone();
+        }
+        AlignMode::Inner | AlignMode::Outer => {}
+    }
+
+    AlignmentPlan {
+        union_index,
+        left_positions,
+        right_positions,
+    }
+}
+
 /// Align two indexes using the specified join mode.
 ///
 /// Returns an `AlignmentPlan` whose `union_index` contains the output index
 /// (which may be an intersection, left-only, right-only, or union depending on mode).
 pub fn align(left: &Index, right: &Index, mode: AlignMode) -> AlignmentPlan {
+    if left.has_duplicates() || right.has_duplicates() {
+        return align_non_unique(left, right, mode);
+    }
+
     match mode {
         AlignMode::Inner => align_inner(left, right),
         AlignMode::Left => align_left(left, right),
@@ -758,8 +872,14 @@ pub fn align(left: &Index, right: &Index, mode: AlignMode) -> AlignmentPlan {
     }
 }
 
-/// Inner alignment: only labels present in both indexes (first-match semantics).
+/// Inner alignment: only labels present in both indexes.
+///
+/// For non-unique labels, emits cartesian matches preserving left order.
 pub fn align_inner(left: &Index, right: &Index) -> AlignmentPlan {
+    if left.has_duplicates() || right.has_duplicates() {
+        return align_non_unique(left, right, AlignMode::Inner);
+    }
+
     let right_map = right.position_map_first_ref();
 
     let mut output_labels = Vec::new();
@@ -783,6 +903,10 @@ pub fn align_inner(left: &Index, right: &Index) -> AlignmentPlan {
 
 /// Left alignment: all left labels preserved, right fills with None for missing.
 pub fn align_left(left: &Index, right: &Index) -> AlignmentPlan {
+    if left.has_duplicates() || right.has_duplicates() {
+        return align_non_unique(left, right, AlignMode::Left);
+    }
+
     let right_map = right.position_map_first_ref();
 
     let mut left_positions = Vec::with_capacity(left.len());
@@ -801,6 +925,10 @@ pub fn align_left(left: &Index, right: &Index) -> AlignmentPlan {
 }
 
 pub fn align_union(left: &Index, right: &Index) -> AlignmentPlan {
+    if left.has_duplicates() || right.has_duplicates() {
+        return align_non_unique(left, right, AlignMode::Outer);
+    }
+
     let left_positions_map = left.position_map_first_ref();
     let right_positions_map = right.position_map_first_ref();
 
@@ -1575,6 +1703,97 @@ mod tests {
         let plan_outer = align(&left, &right, AlignMode::Outer);
         let plan_union = align_union(&left, &right);
         assert_eq!(plan_outer, plan_union);
+    }
+
+    #[test]
+    fn align_inner_duplicate_labels_cartesian() {
+        let left = Index::new(vec!["a".into(), "b".into(), "a".into()]);
+        let right = Index::new(vec!["a".into(), "a".into(), "c".into()]);
+
+        let plan = align_inner(&left, &right);
+        assert_eq!(
+            plan.union_index.labels(),
+            &["a".into(), "a".into(), "a".into(), "a".into()]
+        );
+        assert_eq!(
+            plan.left_positions,
+            vec![Some(0), Some(0), Some(2), Some(2)]
+        );
+        assert_eq!(
+            plan.right_positions,
+            vec![Some(0), Some(1), Some(0), Some(1)]
+        );
+        validate_alignment_plan(&plan).expect("valid");
+    }
+
+    #[test]
+    fn align_left_duplicate_labels_expand_right_matches() {
+        let left = Index::new(vec!["a".into(), "b".into(), "a".into()]);
+        let right = Index::new(vec!["a".into(), "a".into(), "c".into()]);
+
+        let plan = align_left(&left, &right);
+        assert_eq!(
+            plan.union_index.labels(),
+            &["a".into(), "a".into(), "b".into(), "a".into(), "a".into()]
+        );
+        assert_eq!(
+            plan.left_positions,
+            vec![Some(0), Some(0), Some(1), Some(2), Some(2)]
+        );
+        assert_eq!(
+            plan.right_positions,
+            vec![Some(0), Some(1), None, Some(0), Some(1)]
+        );
+        validate_alignment_plan(&plan).expect("valid");
+    }
+
+    #[test]
+    fn align_right_duplicate_labels_expand_left_matches() {
+        let left = Index::new(vec!["a".into(), "b".into(), "a".into()]);
+        let right = Index::new(vec!["a".into(), "a".into(), "c".into()]);
+
+        let plan = align(&left, &right, AlignMode::Right);
+        assert_eq!(
+            plan.union_index.labels(),
+            &["a".into(), "a".into(), "a".into(), "a".into(), "c".into()]
+        );
+        assert_eq!(
+            plan.left_positions,
+            vec![Some(0), Some(2), Some(0), Some(2), None]
+        );
+        assert_eq!(
+            plan.right_positions,
+            vec![Some(0), Some(0), Some(1), Some(1), Some(2)]
+        );
+        validate_alignment_plan(&plan).expect("valid");
+    }
+
+    #[test]
+    fn align_outer_duplicate_labels_preserves_left_order_and_right_only() {
+        let left = Index::new(vec!["a".into(), "b".into(), "a".into()]);
+        let right = Index::new(vec!["a".into(), "a".into(), "c".into()]);
+
+        let plan = align_union(&left, &right);
+        assert_eq!(
+            plan.union_index.labels(),
+            &[
+                "a".into(),
+                "a".into(),
+                "b".into(),
+                "a".into(),
+                "a".into(),
+                "c".into()
+            ]
+        );
+        assert_eq!(
+            plan.left_positions,
+            vec![Some(0), Some(0), Some(1), Some(2), Some(2), None]
+        );
+        assert_eq!(
+            plan.right_positions,
+            vec![Some(0), Some(1), None, Some(0), Some(1), Some(2)]
+        );
+        validate_alignment_plan(&plan).expect("valid");
     }
 
     #[test]
@@ -2589,12 +2808,13 @@ mod tests {
 
         // Drop middle level -> 2 levels remain -> MultiIndex
         let result = mi.droplevel(1).unwrap();
-        match result {
-            super::MultiIndexOrIndex::Multi(mi2) => {
-                assert_eq!(mi2.nlevels(), 2);
-                assert_eq!(mi2.names(), &[Some("l0".into()), Some("l2".into())]);
-            }
-            _ => panic!("expected MultiIndex after dropping from 3 levels"),
+        assert!(
+            matches!(&result, super::MultiIndexOrIndex::Multi(_)),
+            "expected MultiIndex after dropping from 3 levels"
+        );
+        if let super::MultiIndexOrIndex::Multi(mi2) = result {
+            assert_eq!(mi2.nlevels(), 2);
+            assert_eq!(mi2.names(), &[Some("l0".into()), Some("l2".into())]);
         }
     }
 
@@ -2609,12 +2829,13 @@ mod tests {
 
         // Drop one level from 2 -> 1 level -> plain Index
         let result = mi.droplevel(0).unwrap();
-        match result {
-            super::MultiIndexOrIndex::Index(idx) => {
-                assert_eq!(idx.labels(), &[IndexLabel::Int64(1), IndexLabel::Int64(2)]);
-                assert_eq!(idx.name(), Some("number"));
-            }
-            _ => panic!("expected Index after dropping from 2 levels"),
+        assert!(
+            matches!(&result, super::MultiIndexOrIndex::Index(_)),
+            "expected Index after dropping from 2 levels"
+        );
+        if let super::MultiIndexOrIndex::Index(idx) = result {
+            assert_eq!(idx.labels(), &[IndexLabel::Int64(1), IndexLabel::Int64(2)]);
+            assert_eq!(idx.name(), Some("number"));
         }
     }
 
