@@ -19333,7 +19333,18 @@ impl DataFrame {
         other: &Self,
         mode: AlignMode,
     ) -> Result<(Self, Self), FrameError> {
-        let plan = align(&self.index, &other.index, mode);
+        let has_duplicate_labels = self.index.has_duplicates() || other.index.has_duplicates();
+        let plan = if matches!(mode, AlignMode::Outer) && has_duplicate_labels {
+            let (union_index, left_positions, right_positions) =
+                align_union_duplicate_aware(&self.index, &other.index);
+            AlignmentPlan {
+                union_index,
+                left_positions,
+                right_positions,
+            }
+        } else {
+            align(&self.index, &other.index, mode)
+        };
         validate_alignment_plan(&plan)?;
 
         // Build union column set (self's columns first, then new from other)
@@ -33255,6 +33266,45 @@ mod tests {
         assert!(right.column("a").unwrap().values()[0].is_missing());
         assert_eq!(right.column("b").unwrap().values()[1], Scalar::Int64(10));
         assert_eq!(right.column("b").unwrap().values()[2], Scalar::Int64(20));
+    }
+
+    #[test]
+    fn dataframe_align_outer_duplicate_labels_cartesian() {
+        let df1 = DataFrame::from_dict_with_index(
+            vec![("a", vec![Scalar::Int64(10), Scalar::Int64(20)])],
+            vec![1_i64.into(), 1_i64.into()],
+        )
+        .unwrap();
+        let df2 = DataFrame::from_dict_with_index(
+            vec![("b", vec![Scalar::Int64(1), Scalar::Int64(2)])],
+            vec![1_i64.into(), 1_i64.into()],
+        )
+        .unwrap();
+
+        let (left, right) = df1.align_on_index(&df2, AlignMode::Outer).unwrap();
+        assert_eq!(left.len(), 4);
+        assert_eq!(
+            left.index().labels(),
+            &[1_i64.into(), 1_i64.into(), 1_i64.into(), 1_i64.into()]
+        );
+        assert_eq!(
+            left.column("a").unwrap().values(),
+            &[
+                Scalar::Int64(10),
+                Scalar::Int64(10),
+                Scalar::Int64(20),
+                Scalar::Int64(20)
+            ]
+        );
+        assert_eq!(
+            right.column("b").unwrap().values(),
+            &[
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(1),
+                Scalar::Int64(2)
+            ]
+        );
     }
 
     #[test]
