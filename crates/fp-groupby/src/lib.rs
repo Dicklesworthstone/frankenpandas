@@ -286,11 +286,14 @@ impl<'a> GroupKeyRef<'a> {
         match key {
             Scalar::Bool(v) => Self::Bool(*v),
             Scalar::Int64(v) => Self::Int64(*v),
-            Scalar::Float64(v) => Self::FloatBits(if v.is_nan() {
-                f64::NAN.to_bits()
-            } else {
-                v.to_bits()
-            }),
+            Scalar::Float64(v) => {
+                if v.is_nan() {
+                    Self::FloatBits(f64::NAN.to_bits())
+                } else {
+                    let normalized = if *v == 0.0 { 0.0 } else { *v };
+                    Self::FloatBits(normalized.to_bits())
+                }
+            }
             Scalar::Utf8(v) => Self::Utf8(v.as_str()),
             Scalar::Null(kind) => Self::Null(*kind),
         }
@@ -1218,6 +1221,41 @@ mod tests {
 
         assert_eq!(out.values(), &[Scalar::Float64(4.0), Scalar::Float64(2.0)]);
         assert_eq!(ledger.records().len(), 1);
+    }
+
+    #[test]
+    fn groupby_sum_merges_negative_zero_and_zero_float_keys() {
+        let keys = Series::from_values(
+            "key",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Float64(-0.0),
+                Scalar::Float64(1.0),
+                Scalar::Float64(0.0),
+            ],
+        )
+        .expect("keys");
+
+        let values = Series::from_values(
+            "value",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(4)],
+        )
+        .expect("values");
+
+        let mut ledger = EvidenceLedger::new();
+        let out = groupby_sum(
+            &keys,
+            &values,
+            GroupByOptions::default(),
+            &RuntimePolicy::strict(),
+            &mut ledger,
+        )
+        .expect("groupby");
+
+        assert_eq!(out.index().labels().len(), 2);
+        assert_eq!(out.index().labels()[1], "1".into());
+        assert_eq!(out.values(), &[Scalar::Float64(5.0), Scalar::Float64(2.0)]);
     }
 
     #[test]
