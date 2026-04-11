@@ -12,7 +12,7 @@ use regex::Regex;
 
 use fp_columnar::{ArithmeticOp, Column, ColumnError, ComparisonOp};
 use fp_index::{
-    AlignMode, DuplicateKeep, Index, IndexError, IndexLabel, align, align_union,
+    AlignMode, AlignmentPlan, DuplicateKeep, Index, IndexError, IndexLabel, align, align_union,
     validate_alignment_plan,
 };
 use fp_runtime::{DecisionAction, EvidenceLedger, RuntimePolicy};
@@ -15568,65 +15568,44 @@ impl DataFrame {
     where
         F: Fn(&Scalar, &Scalar) -> Scalar,
     {
-        let fill = Scalar::Null(NullKind::NaN);
+        let has_duplicate_labels = self.index.has_duplicates() || other.index.has_duplicates();
+        let plan = if has_duplicate_labels {
+            let (union_index, left_positions, right_positions) =
+                align_union_duplicate_aware(&self.index, &other.index);
+            AlignmentPlan {
+                union_index,
+                left_positions,
+                right_positions,
+            }
+        } else {
+            align_union(&self.index, &other.index)
+        };
+        validate_alignment_plan(&plan)?;
 
-        // Union of index labels
-        let mut seen = std::collections::HashSet::new();
-        let mut union_labels = Vec::new();
-        for label in self.index.labels() {
-            if seen.insert(label.clone()) {
-                union_labels.push(label.clone());
-            }
-        }
-        for label in other.index.labels() {
-            if seen.insert(label.clone()) {
-                union_labels.push(label.clone());
-            }
-        }
-
-        // Union of columns
-        let mut col_order = Vec::new();
-        let mut col_set = std::collections::HashSet::new();
-        for name in &self.column_order {
-            if col_set.insert(name.clone()) {
-                col_order.push(name.clone());
-            }
-        }
+        // Union of columns (self first, then new from other).
+        let mut col_order = self.column_order.clone();
         for name in &other.column_order {
-            if col_set.insert(name.clone()) {
+            if !self.columns.contains_key(name) {
                 col_order.push(name.clone());
             }
         }
 
-        // Index position lookups
-        let self_idx: BTreeMap<&IndexLabel, usize> = self
-            .index
-            .labels()
-            .iter()
-            .enumerate()
-            .map(|(i, l)| (l, i))
-            .collect();
-        let other_idx: BTreeMap<&IndexLabel, usize> = other
-            .index
-            .labels()
-            .iter()
-            .enumerate()
-            .map(|(i, l)| (l, i))
-            .collect();
-
+        let null = Scalar::Null(NullKind::NaN);
         let mut result_cols = BTreeMap::new();
         for col_name in &col_order {
             let self_col = self.columns.get(col_name);
             let other_col = other.columns.get(col_name);
-            let vals: Vec<Scalar> = union_labels
+            let vals: Vec<Scalar> = plan
+                .left_positions
                 .iter()
-                .map(|label| {
+                .zip(plan.right_positions.iter())
+                .map(|(lp, rp)| {
                     let left = self_col
-                        .and_then(|c| self_idx.get(label).map(|&i| &c.values()[i]))
-                        .unwrap_or(&fill);
+                        .and_then(|c| lp.map(|i| &c.values()[i]))
+                        .unwrap_or(&null);
                     let right = other_col
-                        .and_then(|c| other_idx.get(label).map(|&i| &c.values()[i]))
-                        .unwrap_or(&fill);
+                        .and_then(|c| rp.map(|i| &c.values()[i]))
+                        .unwrap_or(&null);
                     func(left, right)
                 })
                 .collect();
@@ -15636,7 +15615,7 @@ impl DataFrame {
         Ok(Self {
             columns: result_cols,
             column_order: col_order,
-            index: Index::new(union_labels),
+            index: plan.union_index,
         })
     }
 
@@ -41678,6 +41657,63 @@ mod tests {
 
         assert_eq!(result.columns["a"].values()[0], Scalar::Float64(11.0));
         assert_eq!(result.columns["a"].values()[1], Scalar::Float64(22.0));
+    }
+
+    #[test]
+    fn dataframe_combine_aligns_index_and_columns() {
+        let mut left_cols = BTreeMap::new();
+        left_cols.insert(
+            "a".to_string(),
+            Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2)]).unwrap(),
+        );
+        let df1 = DataFrame::new_with_column_order(
+            Index::from_i64(vec![0, 2]),
+            left_cols,
+            vec!["a".to_string()],
+        )
+        .unwrap();
+
+        let mut right_cols = BTreeMap::new();
+        right_cols.insert(
+            "b".to_string(),
+            Column::from_values(vec![Scalar::Int64(10), Scalar::Int64(20)]).unwrap(),
+        );
+        let df2 = DataFrame::new_with_column_order(
+            Index::from_i64(vec![1, 2]),
+            right_cols,
+            vec!["b".to_string()],
+        )
+        .unwrap();
+
+        let result = df1
+            .combine(&df2, |left, right| match (left.to_f64(), right.to_f64()) {
+                (Ok(l), Ok(r)) => Scalar::Float64(l + r),
+                (Ok(l), Err(_)) => Scalar::Float64(l),
+                (Err(_), Ok(r)) => Scalar::Float64(r),
+                _ => Scalar::Null(NullKind::NaN),
+            })
+            .unwrap();
+
+        assert_eq!(
+            result.index().labels(),
+            &vec![0_i64.into(), 2_i64.into(), 1_i64.into()]
+        );
+        assert_eq!(
+            result.columns["a"].values(),
+            &[
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Null(NullKind::NaN)
+            ]
+        );
+        assert_eq!(
+            result.columns["b"].values(),
+            &[
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(20.0),
+                Scalar::Float64(10.0)
+            ]
+        );
     }
 
     #[test]
