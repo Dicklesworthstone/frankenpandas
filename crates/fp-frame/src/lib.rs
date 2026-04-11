@@ -19501,7 +19501,7 @@ impl DataFrame {
             for (i, diff_flag) in has_diff.iter_mut().enumerate() {
                 let sv = &self_col.values()[i];
                 let ov = &other_col.values()[i];
-                if sv != ov {
+                if !sv.semantic_eq(ov) {
                     *diff_flag = true;
                     col_has_diff = true;
                     self_vals.push(sv.clone());
@@ -33741,6 +33741,24 @@ mod tests {
         .unwrap();
 
         let diff = df.compare(&df).unwrap();
+        assert_eq!(diff.len(), 0);
+        assert_eq!(diff.num_columns(), 0);
+    }
+
+    #[test]
+    fn dataframe_compare_nan_equal() {
+        let df1 = DataFrame::from_dict(
+            &["a"],
+            vec![("a", vec![Scalar::Float64(1.0), Scalar::Null(NullKind::NaN)])],
+        )
+        .unwrap();
+        let df2 = DataFrame::from_dict(
+            &["a"],
+            vec![("a", vec![Scalar::Float64(1.0), Scalar::Null(NullKind::NaN)])],
+        )
+        .unwrap();
+
+        let diff = df1.compare(&df2).unwrap();
         assert_eq!(diff.len(), 0);
         assert_eq!(diff.num_columns(), 0);
     }
