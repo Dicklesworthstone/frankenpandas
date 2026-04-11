@@ -1431,6 +1431,7 @@ fn parse_excel_rows(
         let headers: Vec<String> = (0..ncols).map(|i| format!("column_{i}")).collect();
         (headers, rows.as_slice())
     };
+    ensure_unique_headers(&headers)?;
 
     let ncols = headers.len();
 
@@ -3181,6 +3182,21 @@ mod tests {
         assert!(frame2.column("column_0").is_some());
     }
 
+    #[test]
+    fn excel_duplicate_headers_error() {
+        let rows = vec![
+            vec![
+                calamine::Data::String("dup".to_owned()),
+                calamine::Data::String("dup".to_owned()),
+            ],
+            vec![calamine::Data::Int(1), calamine::Data::Int(2)],
+        ];
+
+        let err = super::parse_excel_rows(rows, &super::ExcelReadOptions::default())
+            .expect_err("duplicate headers should error");
+        assert!(matches!(err, IoError::DuplicateColumnName(_)));
+    }
+
     // ── SQL I/O tests ──────────────────────────────────────────────
 
     use super::{SqlIfExists, read_sql, read_sql_table, write_sql};
@@ -3637,15 +3653,14 @@ mod tests {
     }
 
     #[test]
-    fn csv_usecols_nonexistent_column_silently_skipped() {
+    fn csv_usecols_nonexistent_column_errors() {
         let input = "a,b\n1,2\n";
         let opts = CsvReadOptions {
             usecols: Some(vec!["a".into(), "nonexistent".into()]),
             ..Default::default()
         };
-        let frame = read_csv_with_options(input, &opts).expect("parse");
-        assert_eq!(frame.column_names().len(), 1);
-        assert!(frame.column("a").is_some());
+        let err = read_csv_with_options(input, &opts).expect_err("missing usecols should error");
+        assert!(matches!(err, IoError::MissingUsecols(_)));
     }
 
     #[test]
