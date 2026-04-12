@@ -288,19 +288,53 @@ pub fn nancount(values: &[Scalar]) -> Scalar {
 }
 
 pub fn nanmin(values: &[Scalar]) -> Scalar {
-    let nums = collect_finite(values);
-    if nums.is_empty() {
-        return Scalar::Null(NullKind::NaN);
+    let mut min: Option<&Scalar> = None;
+    for v in values {
+        if v.is_missing() {
+            continue;
+        }
+        match (min, v) {
+            (None, _) => min = Some(v),
+            (Some(Scalar::Int64(a)), Scalar::Int64(b)) => if b < a { min = Some(v) },
+            (Some(Scalar::Float64(a)), Scalar::Float64(b)) => if *b < *a { min = Some(v) },
+            (Some(Scalar::Utf8(a)), Scalar::Utf8(b)) => if b < a { min = Some(v) },
+            (Some(Scalar::Bool(a)), Scalar::Bool(b)) => if b < a { min = Some(v) },
+            (Some(a), b) => {
+                if let (Ok(af), Ok(bf)) = (a.to_f64(), b.to_f64()) {
+                    if bf < af { min = Some(v) }
+                }
+            }
+        }
     }
-    Scalar::Float64(nums.iter().copied().fold(f64::INFINITY, f64::min))
+    match min {
+        Some(v) => v.clone(),
+        None => Scalar::Null(NullKind::NaN),
+    }
 }
 
 pub fn nanmax(values: &[Scalar]) -> Scalar {
-    let nums = collect_finite(values);
-    if nums.is_empty() {
-        return Scalar::Null(NullKind::NaN);
+    let mut max: Option<&Scalar> = None;
+    for v in values {
+        if v.is_missing() {
+            continue;
+        }
+        match (max, v) {
+            (None, _) => max = Some(v),
+            (Some(Scalar::Int64(a)), Scalar::Int64(b)) => if b > a { max = Some(v) },
+            (Some(Scalar::Float64(a)), Scalar::Float64(b)) => if *b > *a { max = Some(v) },
+            (Some(Scalar::Utf8(a)), Scalar::Utf8(b)) => if b > a { max = Some(v) },
+            (Some(Scalar::Bool(a)), Scalar::Bool(b)) => if b > a { max = Some(v) },
+            (Some(a), b) => {
+                if let (Ok(af), Ok(bf)) = (a.to_f64(), b.to_f64()) {
+                    if bf > af { max = Some(v) }
+                }
+            }
+        }
     }
-    Scalar::Float64(nums.iter().copied().fold(f64::NEG_INFINITY, f64::max))
+    match max {
+        Some(v) => v.clone(),
+        None => Scalar::Null(NullKind::NaN),
+    }
 }
 
 pub fn nanmedian(values: &[Scalar]) -> Scalar {

@@ -1959,7 +1959,7 @@ mod tests {
         assert_eq!(out.index().labels(), &["a".into(), "b".into()]);
         assert_eq!(
             out.values(),
-            &[Scalar::Float64(10.0), Scalar::Float64(20.0)]
+            &[Scalar::Int64(10), Scalar::Int64(20)]
         );
         assert_eq!(out.name(), "min");
     }
@@ -1980,7 +1980,7 @@ mod tests {
         assert_eq!(out.index().labels(), &["a".into(), "b".into()]);
         assert_eq!(
             out.values(),
-            &[Scalar::Float64(30.0), Scalar::Float64(40.0)]
+            &[Scalar::Int64(30), Scalar::Int64(40)]
         );
         assert_eq!(out.name(), "max");
     }
