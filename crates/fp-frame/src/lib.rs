@@ -1810,7 +1810,7 @@ impl Series {
             if val.is_missing() {
                 if let Some(fill) = last_valid {
                     consecutive_fills += 1;
-                    if limit.is_none() || consecutive_fills <= limit.unwrap() {
+                    if limit.map_or(true, |l| consecutive_fills <= l) {
                         out.push(fill.clone());
                     } else {
                         out.push(val.clone());
@@ -1843,7 +1843,7 @@ impl Series {
             if vals[i].is_missing() {
                 if let Some(fill) = next_valid {
                     consecutive_fills += 1;
-                    if limit.is_none() || consecutive_fills <= limit.unwrap() {
+                    if limit.map_or(true, |l| consecutive_fills <= l) {
                         out[i] = fill.clone();
                     } else {
                         out[i] = vals[i].clone();
@@ -11048,12 +11048,21 @@ impl DataFrame {
         }
 
         // Phase 1: Compute global union index across all series.
-        let mut union_index = series_list[0].index.clone();
-        for series in &series_list[1..] {
-            let plan = align_union(&union_index, &series.index);
-            validate_alignment_plan(&plan)?;
-            union_index = plan.union_index;
-        }
+        // Use N-way leapfrog triejoin fast-path if no duplicates are present.
+        let has_duplicates = series_list.iter().any(|s| s.index.has_duplicates());
+        let union_index = if has_duplicates {
+            let mut union_index = series_list[0].index.clone();
+            for series in &series_list[1..] {
+                let plan = align_union(&union_index, &series.index);
+                validate_alignment_plan(&plan)?;
+                union_index = plan.union_index;
+            }
+            union_index
+        } else {
+            let indexes: Vec<&Index> = series_list.iter().map(|s| &s.index).collect();
+            let plan = fp_index::multi_way_align(&indexes);
+            plan.union_index
+        };
 
         // Phase 2: Reindex each series column exactly once against the final union index.
         let mut columns = BTreeMap::new();

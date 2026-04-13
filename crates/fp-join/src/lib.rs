@@ -1231,7 +1231,7 @@ pub fn merge_asof(
                     right_matches.push(None);
                     continue;
                 }
-                let pos = right_non_nan_values.partition_point(|rv| *rv < lv);
+                let pos = right_non_nan_values.partition_point(|rv| *rv <= lv);
                 let chosen = if pos == 0 {
                     0
                 } else if pos >= right_non_nan_values.len() {

@@ -316,6 +316,29 @@ impl ColumnData {
 /// Both scalars are converted to `f64` for comparison. For `Utf8` values,
 /// lexicographic ordering is used. Returns `Err` for incompatible types.
 fn scalar_compare(left: &Scalar, right: &Scalar, op: ComparisonOp) -> Result<bool, ColumnError> {
+    // Coerce differing numeric types to avoid precision loss (e.g. Bool vs Int64).
+    let left_dtype = left.dtype();
+    let right_dtype = right.dtype();
+    if left_dtype != right_dtype {
+        if let Ok(common) = fp_types::common_dtype(left_dtype, right_dtype) {
+            if common == DType::Int64 {
+                let l_cast = fp_types::cast_scalar(left, common)?;
+                let r_cast = fp_types::cast_scalar(right, common)?;
+                // Handle Int64 comparisons to avoid precision loss in f64 cast.
+                if let (Scalar::Int64(a), Scalar::Int64(b)) = (&l_cast, &r_cast) {
+                    return Ok(match op {
+                        ComparisonOp::Gt => a > b,
+                        ComparisonOp::Lt => a < b,
+                        ComparisonOp::Eq => a == b,
+                        ComparisonOp::Ne => a != b,
+                        ComparisonOp::Ge => a >= b,
+                        ComparisonOp::Le => a <= b,
+                    });
+                }
+            }
+        }
+    }
+
     // Handle Utf8 comparisons separately (lexicographic).
     if let (Scalar::Utf8(a), Scalar::Utf8(b)) = (left, right) {
         return Ok(match op {
@@ -704,6 +727,24 @@ impl Column {
                     });
                 }
 
+                if matches!(out_dtype, DType::Int64) {
+                    let lhs_i64 = match cast_scalar(left, DType::Int64)? {
+                        Scalar::Int64(v) => v,
+                        _ => unreachable!(),
+                    };
+                    let rhs_i64 = match cast_scalar(right, DType::Int64)? {
+                        Scalar::Int64(v) => v,
+                        _ => unreachable!(),
+                    };
+                    let result = match op {
+                        ArithmeticOp::Add => lhs_i64.wrapping_add(rhs_i64),
+                        ArithmeticOp::Sub => lhs_i64.wrapping_sub(rhs_i64),
+                        ArithmeticOp::Mul => lhs_i64.wrapping_mul(rhs_i64),
+                        ArithmeticOp::Div => unreachable!(),
+                    };
+                    return Ok(Scalar::Int64(result));
+                }
+
                 let lhs = left.to_f64()?;
                 let rhs = right.to_f64()?;
                 let result = match op {
@@ -713,16 +754,7 @@ impl Column {
                     ArithmeticOp::Div => lhs / rhs,
                 };
 
-                if matches!(out_dtype, DType::Int64)
-                    && result.is_finite()
-                    && result == result.trunc()
-                    && result >= i64::MIN as f64
-                    && result < 9223372036854775808.0
-                {
-                    Ok(Scalar::Int64(result as i64))
-                } else {
-                    Ok(Scalar::Float64(result))
-                }
+                Ok(Scalar::Float64(result))
             })
             .collect::<Result<Vec<_>, _>>()?;
 
