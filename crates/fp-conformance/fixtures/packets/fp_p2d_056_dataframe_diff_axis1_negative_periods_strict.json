@@ -1,0 +1,50 @@
+{
+  "packet_id": "FP-P2D-056",
+  "case_id": "dataframe_diff_axis1_negative_periods_strict",
+  "mode": "strict",
+  "operation": "dataframe_diff",
+  "diff_periods": -1,
+  "diff_axis": 1,
+  "frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 }
+    ],
+    "columns": {
+      "a": [
+        { "kind": "float64", "value": 1.0 },
+        { "kind": "float64", "value": 2.0 }
+      ],
+      "b": [
+        { "kind": "float64", "value": 4.0 },
+        { "kind": "float64", "value": 5.0 }
+      ],
+      "c": [
+        { "kind": "float64", "value": 7.0 },
+        { "kind": "float64", "value": 9.0 }
+      ]
+    },
+    "column_order": ["a", "b", "c"]
+  },
+  "expected_frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 }
+    ],
+    "columns": {
+      "a": [
+        { "kind": "float64", "value": -3.0 },
+        { "kind": "float64", "value": -3.0 }
+      ],
+      "b": [
+        { "kind": "float64", "value": -3.0 },
+        { "kind": "float64", "value": -4.0 }
+      ],
+      "c": [
+        { "kind": "null", "value": "na_n" },
+        { "kind": "null", "value": "na_n" }
+      ]
+    },
+    "column_order": ["a", "b", "c"]
+  }
+}

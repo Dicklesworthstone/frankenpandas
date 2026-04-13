@@ -566,8 +566,14 @@ pub fn groupby_agg(
             AggFunc::Sum => fp_types::nansum(vals),
             AggFunc::Mean => fp_types::nanmean(vals),
             AggFunc::Count => fp_types::nancount(vals),
-            AggFunc::Min => fp_types::nanmin(vals),
-            AggFunc::Max => fp_types::nanmax(vals),
+            AggFunc::Min => match fp_types::nanmin(vals) {
+                Scalar::Int64(v) => Scalar::Float64(v as f64),
+                other => other,
+            },
+            AggFunc::Max => match fp_types::nanmax(vals) {
+                Scalar::Int64(v) => Scalar::Float64(v as f64),
+                other => other,
+            },
             AggFunc::First => {
                 if vals.is_empty() {
                     Scalar::Null(NullKind::NaN)
@@ -1323,9 +1329,12 @@ mod tests {
         )
         .expect("groupby");
 
-        // Duplicate-label alignment in current model maps duplicates to first position.
-        assert_eq!(out.index().labels(), &["a".into()]);
-        assert_eq!(out.values(), &[Scalar::Float64(5.0)]);
+        // Duplicate-label alignment expands to a cartesian product of duplicate positions.
+        assert_eq!(out.index().labels(), &["a".into(), "b".into()]);
+        assert_eq!(
+            out.values(),
+            &[Scalar::Float64(6.0), Scalar::Float64(3.0)]
+        );
     }
 
     #[test]
@@ -1959,7 +1968,7 @@ mod tests {
         assert_eq!(out.index().labels(), &["a".into(), "b".into()]);
         assert_eq!(
             out.values(),
-            &[Scalar::Int64(10), Scalar::Int64(20)]
+            &[Scalar::Float64(10.0), Scalar::Float64(20.0)]
         );
         assert_eq!(out.name(), "min");
     }
@@ -1980,7 +1989,7 @@ mod tests {
         assert_eq!(out.index().labels(), &["a".into(), "b".into()]);
         assert_eq!(
             out.values(),
-            &[Scalar::Int64(30), Scalar::Int64(40)]
+            &[Scalar::Float64(30.0), Scalar::Float64(40.0)]
         );
         assert_eq!(out.name(), "max");
     }

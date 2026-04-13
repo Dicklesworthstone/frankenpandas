@@ -22,6 +22,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut write_fault_injection = false;
     let mut write_e2e_scenarios = false;
     let mut write_final_evidence_pack = false;
+    let mut print_mismatches = false;
 
     let mut args = std::env::args().skip(1).peekable();
     while let Some(arg) = args.next() {
@@ -68,6 +69,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--write-final-evidence-pack" => {
                 write_final_evidence_pack = true;
             }
+            "--print-mismatches" => {
+                print_mismatches = true;
+            }
             "--help" | "-h" => {
                 print_help();
                 return Ok(());
@@ -99,6 +103,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             report.failed,
             report.is_green()
         );
+        if print_mismatches && report.failed > 0 {
+            for case in &report.results {
+                if case.status != fp_conformance::CaseStatus::Fail {
+                    continue;
+                }
+                let mismatch = case
+                    .mismatch
+                    .as_deref()
+                    .unwrap_or("<no mismatch details>");
+                let class = case
+                    .mismatch_class
+                    .as_deref()
+                    .unwrap_or("<none>");
+                println!(
+                    "  mismatch case={} op={:?} class={} details={}",
+                    case.case_id, case.operation, class, mismatch
+                );
+            }
+        }
     }
 
     if require_green {

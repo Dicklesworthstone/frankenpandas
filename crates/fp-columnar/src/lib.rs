@@ -409,6 +409,9 @@ fn vectorized_binary_f64(
         ArithmeticOp::Sub => |a, b| a - b,
         ArithmeticOp::Mul => |a, b| a * b,
         ArithmeticOp::Div => |a, b| a / b,
+        ArithmeticOp::Mod => |a, b| a % b,
+        ArithmeticOp::Pow => |a, b| a.powf(b),
+        ArithmeticOp::FloorDiv => |a, b| (a / b).floor(),
     };
 
     let out: Vec<f64> = left
@@ -440,12 +443,20 @@ fn vectorized_binary_i64(
 ) -> Option<(Vec<i64>, ValidityMask)> {
     let combined = left_validity.and_mask(right_validity);
 
+    if matches!(
+        op,
+        ArithmeticOp::Div | ArithmeticOp::Mod | ArithmeticOp::Pow | ArithmeticOp::FloorDiv
+    ) {
+        return None;
+    }
+
     let apply: fn(i64, i64) -> i64 = match op {
         ArithmeticOp::Add => |a, b| a.wrapping_add(b),
         ArithmeticOp::Sub => |a, b| a.wrapping_sub(b),
         ArithmeticOp::Mul => |a, b| a.wrapping_mul(b),
-        // Division always promotes to Float64 in pandas semantics.
-        ArithmeticOp::Div => return None,
+        ArithmeticOp::Div | ArithmeticOp::Mod | ArithmeticOp::Pow | ArithmeticOp::FloorDiv => {
+            unreachable!("handled by early return above")
+        }
     };
 
     let out: Vec<i64> = left
@@ -478,6 +489,9 @@ pub enum ArithmeticOp {
     Sub,
     Mul,
     Div,
+    Mod,
+    Pow,
+    FloorDiv,
 }
 
 /// Element-wise comparison operations that produce `Bool`-typed columns.
@@ -522,10 +536,12 @@ impl Column {
                 .collect::<Result<Vec<_>, _>>()?
         } else {
             // No coercion needed: values already match dtype.
-            // Only remap Null variants to the dtype-specific missing marker.
+            // Preserve explicit NaN/NaT markers; remap generic Null to dtype-specific missing.
             values
                 .into_iter()
                 .map(|value| match value {
+                    Scalar::Null(NullKind::NaN) => Scalar::Null(NullKind::NaN),
+                    Scalar::Null(NullKind::NaT) => Scalar::Null(NullKind::NaT),
                     Scalar::Null(_) => Scalar::missing_for_dtype(dtype),
                     other => other,
                 })
@@ -704,7 +720,10 @@ impl Column {
         if matches!(out_dtype, DType::Bool) {
             out_dtype = DType::Int64;
         }
-        if matches!(op, ArithmeticOp::Div) {
+        if matches!(
+            op,
+            ArithmeticOp::Div | ArithmeticOp::Mod | ArithmeticOp::Pow | ArithmeticOp::FloorDiv
+        ) {
             out_dtype = DType::Float64;
         }
 
@@ -740,7 +759,7 @@ impl Column {
                         ArithmeticOp::Add => lhs_i64.wrapping_add(rhs_i64),
                         ArithmeticOp::Sub => lhs_i64.wrapping_sub(rhs_i64),
                         ArithmeticOp::Mul => lhs_i64.wrapping_mul(rhs_i64),
-                        ArithmeticOp::Div => unreachable!(),
+                        ArithmeticOp::Div | ArithmeticOp::Mod | ArithmeticOp::Pow | ArithmeticOp::FloorDiv => unreachable!(),
                     };
                     return Ok(Scalar::Int64(result));
                 }
@@ -752,6 +771,9 @@ impl Column {
                     ArithmeticOp::Sub => lhs - rhs,
                     ArithmeticOp::Mul => lhs * rhs,
                     ArithmeticOp::Div => lhs / rhs,
+                    ArithmeticOp::Mod => lhs % rhs,
+                    ArithmeticOp::Pow => lhs.powf(rhs),
+                    ArithmeticOp::FloorDiv => (lhs / rhs).floor(),
                 };
 
                 Ok(Scalar::Float64(result))
@@ -1081,7 +1103,7 @@ impl CrackIndex {
 
 #[cfg(test)]
 mod tests {
-    use fp_types::{NullKind, Scalar};
+    use fp_types::{DType, NullKind, Scalar};
 
     use super::{ArithmeticOp, Column, ValidityMask};
 
@@ -1438,6 +1460,42 @@ mod tests {
         assert_eq!(sub.values()[0], Scalar::Float64(7.0));
         assert_eq!(mul.values()[0], Scalar::Float64(30.0));
         assert!(matches!(div.values()[0], Scalar::Float64(v) if (v - 10.0/3.0).abs() < 1e-10));
+    }
+
+    #[test]
+    fn vectorized_f64_mod_pow_floordiv() {
+        let left = Column::from_values(vec![
+            Scalar::Float64(10.0),
+            Scalar::Float64(2.0),
+            Scalar::Float64(-3.0),
+        ])
+        .expect("left");
+        let right = Column::from_values(vec![
+            Scalar::Float64(3.0),
+            Scalar::Float64(3.0),
+            Scalar::Float64(2.0),
+        ])
+        .expect("right");
+
+        let modulo = left.binary_numeric(&right, ArithmeticOp::Mod).expect("mod");
+        assert_eq!(modulo.dtype(), DType::Float64);
+        assert!(matches!(modulo.values()[0], Scalar::Float64(v) if (v - 1.0).abs() < 1e-10));
+        assert!(matches!(modulo.values()[1], Scalar::Float64(v) if (v - 2.0).abs() < 1e-10));
+        assert!(matches!(modulo.values()[2], Scalar::Float64(v) if (v - (-3.0_f64 % 2.0)).abs() < 1e-10));
+
+        let pow = left.binary_numeric(&right, ArithmeticOp::Pow).expect("pow");
+        assert_eq!(pow.dtype(), DType::Float64);
+        assert!(matches!(pow.values()[0], Scalar::Float64(v) if (v - 1000.0).abs() < 1e-10));
+        assert!(matches!(pow.values()[1], Scalar::Float64(v) if (v - 8.0).abs() < 1e-10));
+        assert!(matches!(pow.values()[2], Scalar::Float64(v) if (v - 9.0).abs() < 1e-10));
+
+        let floordiv = left
+            .binary_numeric(&right, ArithmeticOp::FloorDiv)
+            .expect("floordiv");
+        assert_eq!(floordiv.dtype(), DType::Float64);
+        assert!(matches!(floordiv.values()[0], Scalar::Float64(v) if (v - 3.0).abs() < 1e-10));
+        assert!(matches!(floordiv.values()[1], Scalar::Float64(v) if (v - 0.0).abs() < 1e-10));
+        assert!(matches!(floordiv.values()[2], Scalar::Float64(v) if (v - -2.0).abs() < 1e-10));
     }
 
     #[test]

@@ -1,0 +1,36 @@
+{
+  "packet_id": "FP-P2D-056",
+  "case_id": "dataframe_diff_axis0_strict",
+  "mode": "strict",
+  "operation": "dataframe_diff",
+  "diff_periods": 1,
+  "diff_axis": 0,
+  "frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 }
+    ],
+    "columns": {
+      "value": [
+        { "kind": "float64", "value": 1.0 },
+        { "kind": "float64", "value": 3.0 },
+        { "kind": "float64", "value": 6.0 }
+      ]
+    }
+  },
+  "expected_frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 }
+    ],
+    "columns": {
+      "value": [
+        { "kind": "null", "value": "na_n" },
+        { "kind": "float64", "value": 2.0 },
+        { "kind": "float64", "value": 3.0 }
+      ]
+    }
+  }
+}

@@ -1307,10 +1307,16 @@ pub fn merge_asof(
         for m in &right_matches {
             match m {
                 Some(j) if *j < right_n => vals.push(right_col.values()[*j].clone()),
-                _ => vals.push(fp_types::Scalar::Null(fp_types::NullKind::NaN)),
+                _ => {
+                    vals.push(fp_types::Scalar::Null(fp_types::NullKind::NaN));
+                }
             }
         }
-        insert_merged_output_column(&mut out_columns, output_name, Column::from_values(vals)?)?;
+        insert_merged_output_column(
+            &mut out_columns,
+            output_name,
+            Column::new(right_col.dtype(), vals)?,
+        )?;
     }
 
     Ok(MergedDataFrame {

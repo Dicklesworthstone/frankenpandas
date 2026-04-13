@@ -13,7 +13,7 @@ pub enum DType {
     Utf8,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NullKind {
     Null,
@@ -91,6 +91,22 @@ impl Scalar {
     }
 
     #[must_use]
+    pub fn semantic_le(&self, other: &Self) -> bool {
+        match self.semantic_cmp(other) {
+            std::cmp::Ordering::Less | std::cmp::Ordering::Equal => true,
+            std::cmp::Ordering::Greater => false,
+        }
+    }
+
+    #[must_use]
+    pub fn semantic_ge(&self, other: &Self) -> bool {
+        match self.semantic_cmp(other) {
+            std::cmp::Ordering::Greater | std::cmp::Ordering::Equal => true,
+            std::cmp::Ordering::Less => false,
+        }
+    }
+
+    #[must_use]
     pub fn is_null(&self) -> bool {
         matches!(self, Self::Null(_))
     }
@@ -106,6 +122,22 @@ impl Scalar {
             other.clone()
         } else {
             self.clone()
+        }
+    }
+
+    #[must_use]
+    pub fn semantic_cmp(&self, other: &Self) -> std::cmp::Ordering {
+        match (self, other) {
+            (Self::Int64(a), Self::Int64(b)) => a.cmp(b),
+            (Self::Float64(a), Self::Float64(b)) => a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal),
+            (Self::Utf8(a), Self::Utf8(b)) => a.cmp(b),
+            (Self::Bool(a), Self::Bool(b)) => a.cmp(b),
+            (Self::Null(a), Self::Null(b)) => a.cmp(b),
+            // Cross-numeric comparison
+            (Self::Int64(a), Self::Float64(b)) => (*a as f64).partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal),
+            (Self::Float64(a), Self::Int64(b)) => a.partial_cmp(&(*b as f64)).unwrap_or(std::cmp::Ordering::Equal),
+            // Fallback to debug representation for inconsistent types
+            (a, b) => format!("{a:?}").cmp(&format!("{b:?}")),
         }
     }
 
@@ -147,10 +179,10 @@ pub fn common_dtype(left: DType, right: DType) -> Result<DType, TypeError> {
     let out = match (left, right) {
         (a, b) if a == b => a,
         (Null, other) | (other, Null) => other,
+        (Utf8, _) | (_, Utf8) => Utf8,
         (Bool, Int64) | (Int64, Bool) => Int64,
         (Bool, Float64) | (Float64, Bool) => Float64,
         (Int64, Float64) | (Float64, Int64) => Float64,
-        (Utf8, Utf8) => Utf8,
         _ => return Err(TypeError::IncompatibleDtypes { left, right }),
     };
 

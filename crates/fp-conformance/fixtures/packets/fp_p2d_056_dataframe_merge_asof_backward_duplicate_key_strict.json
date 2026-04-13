@@ -1,0 +1,44 @@
+{
+  "packet_id": "FP-P2D-056",
+  "case_id": "dataframe_merge_asof_backward_duplicate_key_strict",
+  "mode": "strict",
+  "operation": "dataframe_merge_asof",
+  "merge_on": "time",
+  "direction": "backward",
+  "frame": {
+    "index": [{ "kind": "int64", "value": 0 }],
+    "columns": {
+      "time": [{ "kind": "int64", "value": 2 }],
+      "left_val": [{ "kind": "int64", "value": 7 }]
+    },
+    "column_order": ["time", "left_val"]
+  },
+  "frame_right": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 }
+    ],
+    "columns": {
+      "time": [
+        { "kind": "int64", "value": 1 },
+        { "kind": "int64", "value": 2 },
+        { "kind": "int64", "value": 2 }
+      ],
+      "right_val": [
+        { "kind": "int64", "value": 10 },
+        { "kind": "int64", "value": 20 },
+        { "kind": "int64", "value": 21 }
+      ]
+    },
+    "column_order": ["time", "right_val"]
+  },
+  "expected_frame": {
+    "index": [{ "kind": "int64", "value": 0 }],
+    "columns": {
+      "time": [{ "kind": "int64", "value": 2 }],
+      "left_val": [{ "kind": "int64", "value": 7 }],
+      "right_val": [{ "kind": "int64", "value": 21 }]
+    }
+  }
+}

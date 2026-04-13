@@ -1,0 +1,12 @@
+{
+  "packet_id": "FP-P2D-058",
+  "case_id": "index_is_monotonic_decreasing_true",
+  "mode": "strict",
+  "operation": "index_is_monotonic_decreasing",
+  "index": [
+    { "kind": "int64", "value": 3 },
+    { "kind": "int64", "value": 2 },
+    { "kind": "int64", "value": 1 }
+  ],
+  "expected_bool": true
+}

@@ -5,10 +5,11 @@ use std::path::Path;
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, BooleanArray, BooleanBuilder, Float64Array, Float64Builder, Int64Array, Int64Builder,
-    RecordBatch, StringArray, StringBuilder,
+    Array, BooleanArray, BooleanBuilder, Date32Array, Date64Array, Float64Array, Float64Builder,
+    Int64Array, Int64Builder, RecordBatch, StringArray, StringBuilder, TimestampMicrosecondArray,
+    TimestampMillisecondArray, TimestampNanosecondArray, TimestampSecondArray,
 };
-use arrow::datatypes::{DataType as ArrowDataType, Field, Schema};
+use arrow::datatypes::{DataType as ArrowDataType, Field, Schema, TimeUnit};
 use csv::{ReaderBuilder, WriterBuilder};
 use fp_columnar::{Column, ColumnError};
 use fp_frame::{DataFrame, FrameError};
@@ -107,8 +108,8 @@ pub fn read_csv_str(input: &str) -> Result<DataFrame, IoError> {
     if headers_record.is_empty() {
         return Err(IoError::MissingHeaders);
     }
-    let headers: Vec<String> = headers_record.iter().map(ToOwned::to_owned).collect();
-    ensure_unique_headers(&headers)?;
+    let mut headers: Vec<String> = headers_record.iter().map(ToOwned::to_owned).collect();
+    mangle_duplicate_headers(&mut headers);
 
     // AG-07: Vec-based column accumulation (O(1) per cell vs O(log c) BTreeMap).
     // Capacity hint from byte length avoids reallocation for typical CSVs.
@@ -171,9 +172,18 @@ pub fn write_csv_string(frame: &DataFrame) -> Result<String, IoError> {
     Ok(String::from_utf8(bytes)?)
 }
 
+fn is_pandas_default_na(s: &str) -> bool {
+    matches!(
+        s,
+        "" | "#N/A" | "#N/A N/A" | "#NA" | "-1.#IND" | "-1.#QNAN" | "-NaN" | "-nan"
+            | "1.#IND" | "1.#QNAN" | "<NA>" | "N/A" | "NA" | "NULL" | "NaN" | "n/a" | "nan"
+            | "null"
+    )
+}
+
 fn parse_scalar(field: &str) -> Scalar {
     let trimmed = field.trim();
-    if trimmed.is_empty() {
+    if is_pandas_default_na(trimmed) {
         return Scalar::Null(NullKind::Null);
     }
 
@@ -211,7 +221,7 @@ fn scalar_to_csv(scalar: &Scalar) -> String {
 
 fn parse_scalar_with_na(field: &str, na_values: &[String]) -> Scalar {
     let trimmed = field.trim();
-    if trimmed.is_empty() || na_values.iter().any(|na| na == trimmed) {
+    if is_pandas_default_na(trimmed) || na_values.iter().any(|na| na == trimmed) {
         return Scalar::Null(NullKind::Null);
     }
     if let Ok(value) = trimmed.parse::<i64>() {
@@ -229,14 +239,30 @@ fn parse_scalar_with_na(field: &str, na_values: &[String]) -> Scalar {
     Scalar::Utf8(trimmed.to_owned())
 }
 
-fn ensure_unique_headers(headers: &[String]) -> Result<(), IoError> {
-    let mut seen = std::collections::BTreeSet::new();
-    for name in headers {
-        if !seen.insert(name) {
-            return Err(IoError::DuplicateColumnName(name.clone()));
+fn mangle_duplicate_headers(headers: &mut [String]) {
+    let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let mut used: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+
+    for name in headers.iter_mut() {
+        let base = name.clone();
+        let entry = counts.entry(base.clone()).or_insert(0);
+
+        if *entry == 0 && !used.contains(&base) {
+            used.insert(base.clone());
+            *entry = 1;
+            continue;
         }
+
+        let mut suffix = *entry;
+        let mut candidate = format!("{base}.{suffix}");
+        while used.contains(&candidate) {
+            suffix += 1;
+            candidate = format!("{base}.{suffix}");
+        }
+        *entry = suffix + 1;
+        used.insert(candidate.clone());
+        *name = candidate;
     }
-    Ok(())
 }
 
 fn validate_usecols(headers: &[String], usecols: &[String]) -> Result<(), IoError> {
@@ -273,7 +299,7 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
     }
 
     let mut row_count: i64 = 0;
-    let (headers, mut columns) = if options.has_headers {
+    let (mut headers, mut columns) = if options.has_headers {
         let headers_record = records.next().transpose()?.ok_or(IoError::MissingHeaders)?;
         if headers_record.is_empty() {
             return Err(IoError::MissingHeaders);
@@ -331,7 +357,7 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
         }
         row_count += 1;
     }
-    ensure_unique_headers(&headers)?;
+    mangle_duplicate_headers(&mut headers);
     if let Some(ref usecols) = options.usecols {
         validate_usecols(&headers, usecols)?;
     }
@@ -687,14 +713,14 @@ pub fn read_json_str(input: &str, orient: JsonOrient) -> Result<DataFrame, IoErr
                 .as_object()
                 .ok_or_else(|| IoError::JsonFormat("expected object for split orient".into()))?;
 
-            let col_names: Vec<String> = obj
+            let mut col_names: Vec<String> = obj
                 .get("columns")
                 .and_then(|v| v.as_array())
                 .ok_or_else(|| IoError::JsonFormat("split orient needs 'columns' array".into()))?
                 .iter()
                 .map(json_value_to_column_name)
                 .collect();
-            ensure_unique_headers(&col_names)?;
+            mangle_duplicate_headers(&mut col_names);
 
             let data = obj
                 .get("data")
@@ -1253,6 +1279,132 @@ fn arrow_array_to_scalars(arr: &dyn Array, dt: &ArrowDataType) -> Result<Vec<Sca
                 }
             }
         }
+        ArrowDataType::Date32 => {
+            let typed = arr
+                .as_any()
+                .downcast_ref::<Date32Array>()
+                .ok_or_else(|| IoError::Parquet("expected Date32Array".into()))?;
+            for i in 0..len {
+                if typed.is_null(i) {
+                    scalars.push(Scalar::Null(NullKind::NaT));
+                } else {
+                    if let Some(date) = arrow::temporal_conversions::as_date::<
+                        arrow::datatypes::Date32Type,
+                    >(typed.value(i).into())
+                    {
+                        scalars.push(Scalar::Utf8(date.format("%Y-%m-%d").to_string()));
+                    } else {
+                        scalars.push(Scalar::Null(NullKind::NaT));
+                    }
+                }
+            }
+        }
+        ArrowDataType::Date64 => {
+            let typed = arr
+                .as_any()
+                .downcast_ref::<Date64Array>()
+                .ok_or_else(|| IoError::Parquet("expected Date64Array".into()))?;
+            for i in 0..len {
+                if typed.is_null(i) {
+                    scalars.push(Scalar::Null(NullKind::NaT));
+                } else {
+                    if let Some(dt) = arrow::temporal_conversions::as_datetime::<
+                        arrow::datatypes::Date64Type,
+                    >(typed.value(i))
+                    {
+                        scalars.push(Scalar::Utf8(dt.format("%Y-%m-%d").to_string()));
+                    } else {
+                        scalars.push(Scalar::Null(NullKind::NaT));
+                    }
+                }
+            }
+        }
+        ArrowDataType::Timestamp(unit, _tz) => match unit {
+            TimeUnit::Second => {
+                let typed = arr
+                    .as_any()
+                    .downcast_ref::<TimestampSecondArray>()
+                    .ok_or_else(|| IoError::Parquet("expected TimestampSecondArray".into()))?;
+                for i in 0..len {
+                    if typed.is_null(i) {
+                        scalars.push(Scalar::Null(NullKind::NaT));
+                    } else {
+                        if let Some(dt) = arrow::temporal_conversions::as_datetime::<
+                            arrow::datatypes::TimestampSecondType,
+                        >(typed.value(i))
+                        {
+                            scalars.push(Scalar::Utf8(dt.format("%Y-%m-%d %H:%M:%S").to_string()));
+                        } else {
+                            scalars.push(Scalar::Null(NullKind::NaT));
+                        }
+                    }
+                }
+            }
+            TimeUnit::Millisecond => {
+                let typed = arr
+                    .as_any()
+                    .downcast_ref::<TimestampMillisecondArray>()
+                    .ok_or_else(|| IoError::Parquet("expected TimestampMillisecondArray".into()))?;
+                for i in 0..len {
+                    if typed.is_null(i) {
+                        scalars.push(Scalar::Null(NullKind::NaT));
+                    } else {
+                        if let Some(dt) = arrow::temporal_conversions::as_datetime::<
+                            arrow::datatypes::TimestampMillisecondType,
+                        >(typed.value(i))
+                        {
+                            scalars.push(Scalar::Utf8(dt.format("%Y-%m-%d %H:%M:%S").to_string()));
+                        } else {
+                            scalars.push(Scalar::Null(NullKind::NaT));
+                        }
+                    }
+                }
+            }
+            TimeUnit::Microsecond => {
+                let typed = arr
+                    .as_any()
+                    .downcast_ref::<TimestampMicrosecondArray>()
+                    .ok_or_else(|| IoError::Parquet("expected TimestampMicrosecondArray".into()))?;
+                for i in 0..len {
+                    if typed.is_null(i) {
+                        scalars.push(Scalar::Null(NullKind::NaT));
+                    } else {
+                        if let Some(dt) = arrow::temporal_conversions::as_datetime::<
+                            arrow::datatypes::TimestampMicrosecondType,
+                        >(typed.value(i))
+                        {
+                            scalars.push(Scalar::Utf8(
+                                dt.format("%Y-%m-%d %H:%M:%S%.6f").to_string(),
+                            ));
+                        } else {
+                            scalars.push(Scalar::Null(NullKind::NaT));
+                        }
+                    }
+                }
+            }
+            TimeUnit::Nanosecond => {
+                let typed = arr
+                    .as_any()
+                    .downcast_ref::<TimestampNanosecondArray>()
+                    .ok_or_else(|| IoError::Parquet("expected TimestampNanosecondArray".into()))?;
+                for i in 0..len {
+                    if typed.is_null(i) {
+                        scalars.push(Scalar::Null(NullKind::NaT));
+                    } else {
+                        if let Some(dt) = arrow::temporal_conversions::as_datetime::<
+                            arrow::datatypes::TimestampNanosecondType,
+                        >(typed.value(i))
+                        {
+                            scalars.push(Scalar::Utf8(
+                                dt.format("%Y-%m-%d %H:%M:%S%.9f").to_string(),
+                            ));
+                        } else {
+                            scalars.push(Scalar::Null(NullKind::NaT));
+                        }
+                    }
+                }
+            }
+        },
         other => {
             return Err(IoError::Parquet(format!(
                 "unsupported Arrow data type: {other:?}"
@@ -1413,7 +1565,7 @@ fn parse_excel_rows(
     }
 
     // Extract headers.
-    let (headers, data_rows) = if options.has_headers {
+    let (mut headers, data_rows) = if options.has_headers {
         let header_row = &rows[0];
         let headers: Vec<String> = header_row
             .iter()
@@ -1429,7 +1581,7 @@ fn parse_excel_rows(
         let headers: Vec<String> = (0..ncols).map(|i| format!("column_{i}")).collect();
         (headers, rows.as_slice())
     };
-    ensure_unique_headers(&headers)?;
+    mangle_duplicate_headers(&mut headers);
 
     let ncols = headers.len();
 
@@ -1800,10 +1952,10 @@ pub fn read_sql(conn: &rusqlite::Connection, query: &str) -> Result<DataFrame, I
         .map_err(|e| IoError::Sql(format!("prepare failed: {e}")))?;
 
     let col_count = stmt.column_count();
-    let headers: Vec<String> = (0..col_count)
+    let mut headers: Vec<String> = (0..col_count)
         .map(|i| stmt.column_name(i).unwrap_or("?").to_owned())
         .collect();
-    ensure_unique_headers(&headers)?;
+    mangle_duplicate_headers(&mut headers);
 
     let mut columns: Vec<Vec<Scalar>> = (0..col_count).map(|_| Vec::new()).collect();
 

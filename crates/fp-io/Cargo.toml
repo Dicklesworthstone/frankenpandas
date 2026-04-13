@@ -5,6 +5,7 @@ edition = "2024"
 license-file = "../../LICENSE"
 
 [dependencies]
+chrono = { workspace = true }
 arrow = { workspace = true }
 bytes = { workspace = true }
 calamine = { workspace = true }

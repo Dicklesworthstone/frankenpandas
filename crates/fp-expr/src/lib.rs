@@ -38,6 +38,18 @@ pub enum Expr {
         left: Box<Expr>,
         right: Box<Expr>,
     },
+    Modulo {
+        left: Box<Expr>,
+        right: Box<Expr>,
+    },
+    FloorDiv {
+        left: Box<Expr>,
+        right: Box<Expr>,
+    },
+    Pow {
+        left: Box<Expr>,
+        right: Box<Expr>,
+    },
     And {
         left: Box<Expr>,
         right: Box<Expr>,
@@ -181,6 +193,24 @@ pub fn evaluate(
             let lhs = evaluate(left, context, policy, ledger)?;
             let rhs = evaluate(right, context, policy, ledger)?;
             lhs.div_with_policy(&rhs, policy, ledger)
+                .map_err(ExprError::from)
+        }
+        Expr::Modulo { left, right } => {
+            let lhs = evaluate(left, context, policy, ledger)?;
+            let rhs = evaluate(right, context, policy, ledger)?;
+            lhs.modulo_with_policy(&rhs, policy, ledger)
+                .map_err(ExprError::from)
+        }
+        Expr::FloorDiv { left, right } => {
+            let lhs = evaluate(left, context, policy, ledger)?;
+            let rhs = evaluate(right, context, policy, ledger)?;
+            lhs.floordiv_with_policy(&rhs, policy, ledger)
+                .map_err(ExprError::from)
+        }
+        Expr::Pow { left, right } => {
+            let lhs = evaluate(left, context, policy, ledger)?;
+            let rhs = evaluate(right, context, policy, ledger)?;
+            lhs.pow_with_policy(&rhs, policy, ledger)
                 .map_err(ExprError::from)
         }
         Expr::And { left, right } => {
@@ -525,6 +555,9 @@ impl MaterializedView {
             | Expr::Sub { left, right }
             | Expr::Mul { left, right }
             | Expr::Div { left, right }
+            | Expr::Modulo { left, right }
+            | Expr::FloorDiv { left, right }
+            | Expr::Pow { left, right }
             | Expr::And { left, right }
             | Expr::Or { left, right }
             | Expr::Compare { left, right, .. } => {
@@ -606,6 +639,24 @@ fn evaluate_delta(
             lhs.div_with_policy(&rhs, policy, ledger)
                 .map_err(ExprError::from)
         }
+        Expr::Modulo { left, right } => {
+            let lhs = evaluate_delta(left, delta_ctx, delta, policy, ledger)?;
+            let rhs = evaluate_delta(right, delta_ctx, delta, policy, ledger)?;
+            lhs.modulo_with_policy(&rhs, policy, ledger)
+                .map_err(ExprError::from)
+        }
+        Expr::FloorDiv { left, right } => {
+            let lhs = evaluate_delta(left, delta_ctx, delta, policy, ledger)?;
+            let rhs = evaluate_delta(right, delta_ctx, delta, policy, ledger)?;
+            lhs.floordiv_with_policy(&rhs, policy, ledger)
+                .map_err(ExprError::from)
+        }
+        Expr::Pow { left, right } => {
+            let lhs = evaluate_delta(left, delta_ctx, delta, policy, ledger)?;
+            let rhs = evaluate_delta(right, delta_ctx, delta, policy, ledger)?;
+            lhs.pow_with_policy(&rhs, policy, ledger)
+                .map_err(ExprError::from)
+        }
         Expr::And { left, right } => {
             let lhs = evaluate_delta(left, delta_ctx, delta, policy, ledger)?;
             let rhs = evaluate_delta(right, delta_ctx, delta, policy, ledger)?;
@@ -667,7 +718,7 @@ fn evaluate_delta_comparison(
 //   - String literals ('...' or "...")
 //   - Comparison operators: ==, !=, >, >=, <, <=
 //   - Logical operators: and, or, not
-//   - Arithmetic operators: +, -, *, /
+//   - Arithmetic operators: +, -, *, /, //, %, **
 //   - Parenthesized sub-expressions
 
 /// Parse a string expression into an `Expr` AST.
@@ -679,7 +730,9 @@ fn evaluate_delta_comparison(
 ///   not_expr   → "not" not_expr | comparison
 ///   comparison → add_expr ( ("==" | "!=" | ">" | ">=" | "<" | "<=") add_expr )?
 ///   add_expr   → mul_expr ( ("+" | "-") mul_expr )*
-///   mul_expr   → atom ( ("*" | "/") atom )*
+///   mul_expr   → unary_expr ( ("*" | "/" | "//" | "%") unary_expr )*
+///   unary_expr → ("+" | "-") unary_expr | pow_expr
+///   pow_expr   → atom ( "**" unary_expr )?
 ///   atom       → NUMBER | STRING | IDENT | LOCAL | "(" expr ")"
 pub fn parse_expr(input: &str) -> Result<Expr, ExprError> {
     let tokens = tokenize(input)?;
@@ -713,6 +766,9 @@ enum Token {
     Minus,
     Star,
     Slash,
+    FloorDiv,
+    Percent,
+    Pow,
     // Grouping
     LParen,
     RParen,
@@ -740,7 +796,7 @@ fn tokenize(input: &str) -> Result<Vec<Token>, ExprError> {
             '-' => {
                 // Check for negative number literal
                 if i + 1 < chars.len()
-                    && chars[i + 1].is_ascii_digit()
+                    && (chars[i + 1].is_ascii_digit() || chars[i + 1] == '.')
                     && (tokens.is_empty()
                         || matches!(
                             tokens.last(),
@@ -756,6 +812,9 @@ fn tokenize(input: &str) -> Result<Vec<Token>, ExprError> {
                                     | Token::Minus
                                     | Token::Star
                                     | Token::Slash
+                                    | Token::FloorDiv
+                                    | Token::Percent
+                                    | Token::Pow
                                     | Token::And
                                     | Token::Or
                                     | Token::Not
@@ -763,10 +822,20 @@ fn tokenize(input: &str) -> Result<Vec<Token>, ExprError> {
                         ))
                 {
                     let start = i;
-                    i += 1;
-                    while i < chars.len() && (chars[i].is_ascii_digit() || chars[i] == '.') {
-                        i += 1;
+                    let mut scan = i + 1;
+                    while scan < chars.len() && (chars[scan].is_ascii_digit() || chars[scan] == '.') {
+                        scan += 1;
                     }
+                    let mut after = scan;
+                    while after < chars.len() && chars[after].is_whitespace() {
+                        after += 1;
+                    }
+                    if after + 1 < chars.len() && chars[after] == '*' && chars[after + 1] == '*' {
+                        tokens.push(Token::Minus);
+                        i += 1;
+                        continue;
+                    }
+                    i = scan;
                     let num_str: String = chars[start..i].iter().collect();
                     if num_str.contains('.') {
                         tokens.push(Token::Float(num_str.parse::<f64>().map_err(|_| {
@@ -782,12 +851,43 @@ fn tokenize(input: &str) -> Result<Vec<Token>, ExprError> {
                     i += 1;
                 }
             }
+            '.' => {
+                if i + 1 < chars.len() && chars[i + 1].is_ascii_digit() {
+                    let start = i;
+                    i += 1;
+                    while i < chars.len() && (chars[i].is_ascii_digit() || chars[i] == '.') {
+                        i += 1;
+                    }
+                    let num_str: String = chars[start..i].iter().collect();
+                    tokens.push(Token::Float(num_str.parse::<f64>().map_err(|_| {
+                        ExprError::ParseError(format!("invalid float: {num_str}"))
+                    })?));
+                } else {
+                    return Err(ExprError::ParseError(format!(
+                        "unexpected character: '{c}'"
+                    )));
+                }
+            }
             '*' => {
-                tokens.push(Token::Star);
-                i += 1;
+                if i + 1 < chars.len() && chars[i + 1] == '*' {
+                    tokens.push(Token::Pow);
+                    i += 2;
+                } else {
+                    tokens.push(Token::Star);
+                    i += 1;
+                }
             }
             '/' => {
-                tokens.push(Token::Slash);
+                if i + 1 < chars.len() && chars[i + 1] == '/' {
+                    tokens.push(Token::FloorDiv);
+                    i += 2;
+                } else {
+                    tokens.push(Token::Slash);
+                    i += 1;
+                }
+            }
+            '%' => {
+                tokens.push(Token::Percent);
                 i += 1;
             }
             '(' => {
@@ -863,6 +963,18 @@ fn tokenize(input: &str) -> Result<Vec<Token>, ExprError> {
                 }
                 let word: String = chars[start..i].iter().collect();
                 tokens.push(Token::Local(word));
+            }
+            '&' => {
+                tokens.push(Token::And);
+                i += 1;
+            }
+            '|' => {
+                tokens.push(Token::Or);
+                i += 1;
+            }
+            '~' => {
+                tokens.push(Token::Not);
+                i += 1;
             }
             _ if c.is_ascii_digit() => {
                 let start = i;
@@ -992,12 +1104,12 @@ fn parse_add(tokens: &[Token], pos: &mut usize) -> Result<Expr, ExprError> {
 }
 
 fn parse_mul(tokens: &[Token], pos: &mut usize) -> Result<Expr, ExprError> {
-    let mut left = parse_atom(tokens, pos)?;
+    let mut left = parse_unary(tokens, pos)?;
     while *pos < tokens.len() {
         match &tokens[*pos] {
             Token::Star => {
                 *pos += 1;
-                let right = parse_atom(tokens, pos)?;
+                let right = parse_unary(tokens, pos)?;
                 left = Expr::Mul {
                     left: Box::new(left),
                     right: Box::new(right),
@@ -1005,8 +1117,24 @@ fn parse_mul(tokens: &[Token], pos: &mut usize) -> Result<Expr, ExprError> {
             }
             Token::Slash => {
                 *pos += 1;
-                let right = parse_atom(tokens, pos)?;
+                let right = parse_unary(tokens, pos)?;
                 left = Expr::Div {
+                    left: Box::new(left),
+                    right: Box::new(right),
+                };
+            }
+            Token::FloorDiv => {
+                *pos += 1;
+                let right = parse_unary(tokens, pos)?;
+                left = Expr::FloorDiv {
+                    left: Box::new(left),
+                    right: Box::new(right),
+                };
+            }
+            Token::Percent => {
+                *pos += 1;
+                let right = parse_unary(tokens, pos)?;
+                left = Expr::Modulo {
                     left: Box::new(left),
                     right: Box::new(right),
                 };
@@ -1015,6 +1143,43 @@ fn parse_mul(tokens: &[Token], pos: &mut usize) -> Result<Expr, ExprError> {
         }
     }
     Ok(left)
+}
+
+fn parse_unary(tokens: &[Token], pos: &mut usize) -> Result<Expr, ExprError> {
+    if *pos < tokens.len() {
+        match tokens[*pos] {
+            Token::Plus => {
+                *pos += 1;
+                return parse_unary(tokens, pos);
+            }
+            Token::Minus => {
+                *pos += 1;
+                let inner = parse_unary(tokens, pos)?;
+                return Ok(Expr::Sub {
+                    left: Box::new(Expr::Literal {
+                        value: Scalar::Int64(0),
+                    }),
+                    right: Box::new(inner),
+                });
+            }
+            _ => {}
+        }
+    }
+    parse_pow(tokens, pos)
+}
+
+fn parse_pow(tokens: &[Token], pos: &mut usize) -> Result<Expr, ExprError> {
+    let left = parse_atom(tokens, pos)?;
+    if *pos < tokens.len() && tokens[*pos] == Token::Pow {
+        *pos += 1;
+        let right = parse_unary(tokens, pos)?;
+        Ok(Expr::Pow {
+            left: Box::new(left),
+            right: Box::new(right),
+        })
+    } else {
+        Ok(left)
+    }
 }
 
 fn parse_atom(tokens: &[Token], pos: &mut usize) -> Result<Expr, ExprError> {
@@ -2045,6 +2210,30 @@ mod tests {
                 name: SeriesRef("b".into()),
             }),
         }));
+        assert!(!MaterializedView::is_linear(&Expr::Modulo {
+            left: Box::new(Expr::Series {
+                name: SeriesRef("a".into()),
+            }),
+            right: Box::new(Expr::Series {
+                name: SeriesRef("b".into()),
+            }),
+        }));
+        assert!(!MaterializedView::is_linear(&Expr::FloorDiv {
+            left: Box::new(Expr::Series {
+                name: SeriesRef("a".into()),
+            }),
+            right: Box::new(Expr::Series {
+                name: SeriesRef("b".into()),
+            }),
+        }));
+        assert!(!MaterializedView::is_linear(&Expr::Pow {
+            left: Box::new(Expr::Series {
+                name: SeriesRef("a".into()),
+            }),
+            right: Box::new(Expr::Series {
+                name: SeriesRef("b".into()),
+            }),
+        }));
         assert!(!MaterializedView::is_linear(&Expr::And {
             left: Box::new(Expr::Series {
                 name: SeriesRef("a".into()),
@@ -2151,6 +2340,45 @@ mod tests {
     }
 
     #[test]
+    fn parse_arithmetic_advanced() {
+        let expr = super::parse_expr("a ** b // 2 % 3").unwrap();
+        assert!(
+            matches!(&expr, Expr::Modulo { .. }),
+            "expected Modulo, got {expr:?}"
+        );
+        if let Expr::Modulo { left, .. } = expr {
+            assert!(
+                matches!(*left, Expr::FloorDiv { .. }),
+                "expected FloorDiv, got {left:?}"
+            );
+            if let Expr::FloorDiv { left: inner_left, .. } = *left {
+                assert!(
+                    matches!(*inner_left, Expr::Pow { .. }),
+                    "expected Pow, got {inner_left:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn parse_unary_minus_identifier() {
+        let expr = super::parse_expr("-a").unwrap();
+        assert!(
+            matches!(&expr, Expr::Sub { .. }),
+            "expected Sub, got {expr:?}"
+        );
+    }
+
+    #[test]
+    fn parse_unary_plus_identifier() {
+        let expr = super::parse_expr("+a").unwrap();
+        assert!(
+            matches!(&expr, Expr::Series { .. }),
+            "expected Series, got {expr:?}"
+        );
+    }
+
+    #[test]
     fn parse_parentheses() {
         let expr = super::parse_expr("(a + b) * 2").unwrap();
         assert!(
@@ -2215,6 +2443,40 @@ mod tests {
                 *right,
                 Expr::Literal {
                     value: Scalar::Int64(-5)
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn parse_leading_dot_float_literal() {
+        let expr = super::parse_expr("x > .5").unwrap();
+        assert!(
+            matches!(&expr, Expr::Compare { .. }),
+            "expected Compare, got {expr:?}"
+        );
+        if let Expr::Compare { right, .. } = expr {
+            assert_eq!(
+                *right,
+                Expr::Literal {
+                    value: Scalar::Float64(0.5)
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn parse_negative_leading_dot_float_literal() {
+        let expr = super::parse_expr("x > -.5").unwrap();
+        assert!(
+            matches!(&expr, Expr::Compare { .. }),
+            "expected Compare, got {expr:?}"
+        );
+        if let Expr::Compare { right, .. } = expr {
+            assert_eq!(
+                *right,
+                Expr::Literal {
+                    value: Scalar::Float64(-0.5)
                 }
             );
         }
@@ -2318,6 +2580,28 @@ mod tests {
                 .unwrap();
         assert_eq!(result.values()[0], Scalar::Int64(20));
         assert_eq!(result.values()[1], Scalar::Int64(30));
+    }
+
+    #[test]
+    fn eval_str_unary_minus_respects_pow_precedence() {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "anchor",
+                vec![0_i64.into()],
+                vec![Scalar::Int64(1)],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let result = super::eval_str("-2 ** 2", &frame, &policy, &mut ledger).unwrap();
+        assert_eq!(result.values()[0], Scalar::Float64(-4.0));
+
+        let result = super::eval_str("(-2) ** 2", &frame, &policy, &mut ledger).unwrap();
+        assert_eq!(result.values()[0], Scalar::Float64(4.0));
     }
 
     #[test]

@@ -192,6 +192,8 @@ pub enum FixtureOperation {
     GroupBySum,
     IndexAlignUnion,
     IndexHasDuplicates,
+    IndexIsMonotonicIncreasing,
+    IndexIsMonotonicDecreasing,
     IndexFirstPositions,
     // FP-P2C-006: Join + concat
     SeriesConcat,
@@ -281,11 +283,17 @@ pub enum FixtureOperation {
     DataFrameSortIndex,
     #[serde(rename = "dataframe_sort_values", alias = "data_frame_sort_values")]
     DataFrameSortValues,
+    #[serde(rename = "dataframe_diff", alias = "data_frame_diff")]
+    DataFrameDiff,
+    #[serde(rename = "dataframe_pct_change", alias = "data_frame_pct_change")]
+    DataFramePctChange,
     // FP-P2D-014: DataFrame merge/join/concat parity matrix
     #[serde(rename = "dataframe_merge", alias = "data_frame_merge")]
     DataFrameMerge,
     #[serde(rename = "dataframe_merge_index", alias = "data_frame_merge_index")]
     DataFrameMergeIndex,
+    #[serde(rename = "dataframe_merge_asof", alias = "data_frame_merge_asof")]
+    DataFrameMergeAsof,
     #[serde(rename = "dataframe_concat", alias = "data_frame_concat")]
     DataFrameConcat,
     // FP-P2C-011: Full GroupBy aggregate matrix
@@ -329,6 +337,8 @@ impl FixtureOperation {
             Self::GroupBySum => "groupby_sum",
             Self::IndexAlignUnion => "index_align_union",
             Self::IndexHasDuplicates => "index_has_duplicates",
+            Self::IndexIsMonotonicIncreasing => "index_is_monotonic_increasing",
+            Self::IndexIsMonotonicDecreasing => "index_is_monotonic_decreasing",
             Self::IndexFirstPositions => "index_first_positions",
             Self::SeriesConcat => "series_concat",
             Self::NanSum => "nan_sum",
@@ -377,8 +387,11 @@ impl FixtureOperation {
             Self::DataFrameDropDuplicates => "dataframe_drop_duplicates",
             Self::DataFrameSortIndex => "dataframe_sort_index",
             Self::DataFrameSortValues => "dataframe_sort_values",
+            Self::DataFrameDiff => "dataframe_diff",
+            Self::DataFramePctChange => "dataframe_pct_change",
             Self::DataFrameMerge => "dataframe_merge",
             Self::DataFrameMergeIndex => "dataframe_merge_index",
+            Self::DataFrameMergeAsof => "dataframe_merge_asof",
             Self::DataFrameConcat => "dataframe_concat",
             Self::GroupByMean => "groupby_mean",
             Self::GroupByCount => "groupby_count",
@@ -547,6 +560,14 @@ pub struct PacketFixture {
     #[serde(default)]
     pub tail_n: Option<i64>,
     #[serde(default)]
+    pub diff_periods: Option<i64>,
+    #[serde(default)]
+    pub diff_axis: Option<usize>,
+    #[serde(default)]
+    pub rank_method: Option<String>,
+    #[serde(default)]
+    pub rank_na_option: Option<String>,
+    #[serde(default)]
     pub sort_column: Option<String>,
     #[serde(default)]
     pub sort_ascending: Option<bool>,
@@ -554,6 +575,8 @@ pub struct PacketFixture {
     pub concat_axis: Option<i64>,
     #[serde(default)]
     pub concat_join: Option<String>,
+    #[serde(default)]
+    pub direction: Option<String>,
     #[serde(default)]
     pub set_index_column: Option<String>,
     #[serde(default)]
@@ -766,6 +789,7 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::SeriesConcat
         | FixtureOperation::DataFrameMerge
         | FixtureOperation::DataFrameMergeIndex
+        | FixtureOperation::DataFrameMergeAsof
         | FixtureOperation::DataFrameConcat => &["CC-006"],
         FixtureOperation::DataFrameFromSeries => &["CC-003", "CC-005", "CC-006"],
         FixtureOperation::GroupBySum
@@ -781,6 +805,8 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::SeriesValueCounts => &["CC-007"],
         FixtureOperation::IndexAlignUnion
         | FixtureOperation::IndexHasDuplicates
+        | FixtureOperation::IndexIsMonotonicIncreasing
+        | FixtureOperation::IndexIsMonotonicDecreasing
         | FixtureOperation::IndexFirstPositions => &["CC-003"],
         FixtureOperation::NanSum
         | FixtureOperation::NanMean
@@ -826,7 +852,9 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::DataFrameDuplicated
         | FixtureOperation::DataFrameDropDuplicates
         | FixtureOperation::DataFrameSortIndex
-        | FixtureOperation::DataFrameSortValues => &["CC-004"],
+        | FixtureOperation::DataFrameSortValues
+        | FixtureOperation::DataFrameDiff
+        | FixtureOperation::DataFramePctChange => &["CC-004"],
     }
 }
 
@@ -1316,11 +1344,19 @@ struct OracleRequest {
     #[serde(default)]
     fill_value: Option<Scalar>,
     #[serde(default)]
-    head_n: Option<i64>,
+    pub head_n: Option<i64>,
     #[serde(default)]
-    tail_n: Option<i64>,
+    pub tail_n: Option<i64>,
     #[serde(default)]
-    sort_column: Option<String>,
+    pub diff_periods: Option<i64>,
+    #[serde(default)]
+    pub diff_axis: Option<usize>,
+    #[serde(default)]
+    pub rank_method: Option<String>,
+    #[serde(default)]
+    pub rank_na_option: Option<String>,
+    #[serde(default)]
+    pub sort_column: Option<String>,
     #[serde(default)]
     sort_ascending: Option<bool>,
     #[serde(default)]
@@ -3472,16 +3508,33 @@ fn run_fixture_operation(
             };
             compare_alignment_expected(&plan, &expected)
         }
-        FixtureOperation::IndexHasDuplicates => {
+        FixtureOperation::IndexHasDuplicates
+        | FixtureOperation::IndexIsMonotonicIncreasing
+        | FixtureOperation::IndexIsMonotonicDecreasing => {
             let index = require_index(fixture)?;
-            let actual = Index::new(index.clone()).has_duplicates();
+            let actual = match fixture.operation {
+                FixtureOperation::IndexHasDuplicates => Index::new(index.clone()).has_duplicates(),
+                FixtureOperation::IndexIsMonotonicIncreasing => {
+                    Index::new(index.clone()).is_monotonic_increasing()
+                }
+                FixtureOperation::IndexIsMonotonicDecreasing => {
+                    Index::new(index.clone()).is_monotonic_decreasing()
+                }
+                _ => unreachable!(),
+            };
             let expected = match expected {
                 ResolvedExpected::Bool(value) => value,
-                _ => return Err("expected_bool is required for index_has_duplicates".to_owned()),
+                _ => {
+                    return Err(format!(
+                        "expected_bool is required for {:?}",
+                        fixture.operation
+                    ));
+                }
             };
             if actual != expected {
                 return Err(format!(
-                    "duplicate mismatch: actual={actual}, expected={expected}"
+                    "boolean mismatch for {:?}: actual={actual}, expected={expected}",
+                    fixture.operation
                 ));
             }
             Ok(())
@@ -4273,6 +4326,7 @@ fn run_fixture_operation(
         }
         FixtureOperation::DataFrameMerge
         | FixtureOperation::DataFrameMergeIndex
+        | FixtureOperation::DataFrameMergeAsof
         | FixtureOperation::DataFrameConcat
         | FixtureOperation::DataFrameIsNa
         | FixtureOperation::DataFrameNotNa
@@ -4285,7 +4339,9 @@ fn run_fixture_operation(
         | FixtureOperation::DataFrameResetIndex
         | FixtureOperation::DataFrameDropDuplicates
         | FixtureOperation::DataFrameSortIndex
-        | FixtureOperation::DataFrameSortValues => {
+        | FixtureOperation::DataFrameSortValues
+        | FixtureOperation::DataFrameDiff
+        | FixtureOperation::DataFramePctChange => {
             let actual = execute_dataframe_fixture_operation(fixture);
             match expected {
                 ResolvedExpected::Frame(frame) => compare_dataframe_expected(&actual?, &frame),
@@ -4422,6 +4478,16 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
                     fixture.case_id
                 ))
             }),
+        FixtureOperation::IndexIsMonotonicIncreasing
+        | FixtureOperation::IndexIsMonotonicDecreasing => fixture
+            .expected_bool
+            .map(ResolvedExpected::Bool)
+            .ok_or_else(|| {
+                HarnessError::FixtureFormat(format!(
+                    "missing expected_bool for case {}",
+                    fixture.case_id
+                ))
+            }),
         FixtureOperation::SeriesAny | FixtureOperation::SeriesAll => fixture
             .expected_bool
             .map(ResolvedExpected::Bool)
@@ -4502,9 +4568,12 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::DataFrameDropDuplicates
         | FixtureOperation::DataFrameMerge
         | FixtureOperation::DataFrameMergeIndex
+        | FixtureOperation::DataFrameMergeAsof
         | FixtureOperation::DataFrameConcat
         | FixtureOperation::DataFrameSortIndex
-        | FixtureOperation::DataFrameSortValues => fixture
+        | FixtureOperation::DataFrameSortValues
+        | FixtureOperation::DataFrameDiff
+        | FixtureOperation::DataFramePctChange => fixture
             .expected_frame
             .clone()
             .map(ResolvedExpected::Frame)
@@ -4600,6 +4669,10 @@ fn capture_live_oracle_expected(
         fill_value: fixture.fill_value.clone(),
         head_n: fixture.head_n,
         tail_n: fixture.tail_n,
+        diff_periods: fixture.diff_periods,
+        diff_axis: fixture.diff_axis,
+        rank_method: fixture.rank_method.clone(),
+        rank_na_option: fixture.rank_na_option.clone(),
         sort_column: fixture.sort_column.clone(),
         sort_ascending: fixture.sort_ascending,
         concat_axis: fixture.concat_axis,
@@ -4699,7 +4772,9 @@ fn capture_live_oracle_expected(
             .ok_or_else(|| {
                 HarnessError::FixtureFormat("oracle omitted expected_alignment".to_owned())
             }),
-        FixtureOperation::IndexHasDuplicates => response
+        FixtureOperation::IndexHasDuplicates
+        | FixtureOperation::IndexIsMonotonicIncreasing
+        | FixtureOperation::IndexIsMonotonicDecreasing => response
             .expected_bool
             .map(ResolvedExpected::Bool)
             .ok_or_else(|| HarnessError::FixtureFormat("oracle omitted expected_bool".to_owned())),
@@ -4770,9 +4845,12 @@ fn capture_live_oracle_expected(
         | FixtureOperation::DataFrameDropDuplicates
         | FixtureOperation::DataFrameMerge
         | FixtureOperation::DataFrameMergeIndex
+        | FixtureOperation::DataFrameMergeAsof
         | FixtureOperation::DataFrameConcat
         | FixtureOperation::DataFrameSortIndex
-        | FixtureOperation::DataFrameSortValues => response
+        | FixtureOperation::DataFrameSortValues
+        | FixtureOperation::DataFrameDiff
+        | FixtureOperation::DataFramePctChange => response
             .expected_frame
             .map(ResolvedExpected::Frame)
             .ok_or_else(|| HarnessError::FixtureFormat("oracle omitted expected_frame".to_owned())),
@@ -5018,6 +5096,31 @@ fn resolve_merge_suffixes(
 
 fn resolve_merge_sort(merge_sort: Option<bool>) -> bool {
     merge_sort.unwrap_or(false)
+}
+
+fn execute_dataframe_merge_asof_fixture_operation(
+    fixture: &PacketFixture,
+) -> Result<DataFrame, String> {
+    let left = build_dataframe(require_frame(fixture)?)
+        .map_err(|err| format!("left frame build failed: {err}"))?;
+    let right = build_dataframe(require_frame_right(fixture)?)
+        .map_err(|err| format!("right frame build failed: {err}"))?;
+
+    let on = fixture.merge_on.as_deref().ok_or_else(|| {
+        "merge_on field required for dataframe_merge_asof".to_owned()
+    })?;
+
+    let direction_str = fixture.direction.as_deref().unwrap_or("backward");
+    let direction = match direction_str {
+        "backward" => fp_join::AsofDirection::Backward,
+        "forward" => fp_join::AsofDirection::Forward,
+        "nearest" => fp_join::AsofDirection::Nearest,
+        _ => return Err(format!("invalid merge_asof direction: {direction_str}")),
+    };
+
+    let merged = fp_join::merge_asof(&left, &right, on, direction)
+        .map_err(|err| err.to_string())?;
+    DataFrame::new(merged.index, merged.columns).map_err(|err| err.to_string())
 }
 
 fn validate_cross_merge_configuration(
@@ -5541,6 +5644,9 @@ fn execute_dataframe_fixture_operation(fixture: &PacketFixture) -> Result<DataFr
         FixtureOperation::DataFrameMergeIndex => {
             execute_dataframe_merge_fixture_operation(fixture, true)
         }
+        FixtureOperation::DataFrameMergeAsof => {
+            execute_dataframe_merge_asof_fixture_operation(fixture)
+        }
         FixtureOperation::DataFrameConcat => {
             let left = build_dataframe(require_frame(fixture)?)
                 .map_err(|err| format!("left frame build failed: {err}"))?;
@@ -5567,6 +5673,35 @@ fn execute_dataframe_fixture_operation(fixture: &PacketFixture) -> Result<DataFr
                     resolve_sort_ascending(fixture),
                 )
                 .map_err(|err| err.to_string())
+        }
+        FixtureOperation::DataFrameDiff => {
+            let frame = build_dataframe(require_frame(fixture)?)
+                .map_err(|err| format!("frame build failed: {err}"))?;
+            let periods = fixture.diff_periods.unwrap_or(1);
+            let axis = fixture.diff_axis.unwrap_or(0);
+            if axis == 1 {
+                frame.diff_axis1(periods).map_err(|err| err.to_string())
+            } else {
+                frame.diff(periods).map_err(|err| err.to_string())
+            }
+        }
+        FixtureOperation::DataFramePctChange => {
+            let frame = build_dataframe(require_frame(fixture)?)
+                .map_err(|err| format!("frame build failed: {err}"))?;
+            let periods = fixture.diff_periods.unwrap_or(1);
+            let axis = fixture.diff_axis.unwrap_or(0);
+            if axis == 1 {
+                frame
+                    .pct_change_axis1(periods)
+                    .map_err(|err| err.to_string())
+            } else {
+                if periods < 0 {
+                    return Err("dataframe_pct_change periods must be non-negative".to_owned());
+                }
+                frame
+                    .pct_change(periods as usize)
+                    .map_err(|err| err.to_string())
+            }
         }
         FixtureOperation::DataFrameIsNa => {
             let frame = build_dataframe(require_frame(fixture)?)
@@ -6618,14 +6753,27 @@ fn execute_and_compare_differential(
             };
             Ok(diff_alignment(&plan, &expected))
         }
-        FixtureOperation::IndexHasDuplicates => {
+        FixtureOperation::IndexHasDuplicates
+        | FixtureOperation::IndexIsMonotonicIncreasing
+        | FixtureOperation::IndexIsMonotonicDecreasing => {
             let index = require_index(fixture)?;
-            let actual = Index::new(index.clone()).has_duplicates();
+            let index = Index::new(index.clone());
+            let actual = match fixture.operation {
+                FixtureOperation::IndexHasDuplicates => index.has_duplicates(),
+                FixtureOperation::IndexIsMonotonicIncreasing => index.is_monotonic_increasing(),
+                FixtureOperation::IndexIsMonotonicDecreasing => index.is_monotonic_decreasing(),
+                _ => unreachable!(),
+            };
             let expected = match expected {
                 ResolvedExpected::Bool(b) => b,
-                _ => return Err("expected_bool required for index_has_duplicates".to_owned()),
+                _ => {
+                    return Err(format!(
+                        "expected_bool required for {}",
+                        fixture.operation.operation_name()
+                    ));
+                }
             };
-            Ok(diff_bool(actual, expected, "has_duplicates"))
+            Ok(diff_bool(actual, expected, fixture.operation.operation_name()))
         }
         FixtureOperation::IndexFirstPositions => {
             let index = require_index(fixture)?;
@@ -7549,6 +7697,7 @@ fn execute_and_compare_differential(
         }
         FixtureOperation::DataFrameMerge
         | FixtureOperation::DataFrameMergeIndex
+        | FixtureOperation::DataFrameMergeAsof
         | FixtureOperation::DataFrameConcat
         | FixtureOperation::DataFrameIsNa
         | FixtureOperation::DataFrameNotNa
@@ -7561,7 +7710,9 @@ fn execute_and_compare_differential(
         | FixtureOperation::DataFrameResetIndex
         | FixtureOperation::DataFrameDropDuplicates
         | FixtureOperation::DataFrameSortIndex
-        | FixtureOperation::DataFrameSortValues => {
+        | FixtureOperation::DataFrameSortValues
+        | FixtureOperation::DataFrameDiff
+        | FixtureOperation::DataFramePctChange => {
             let actual = execute_dataframe_fixture_operation(fixture);
             match expected {
                 ResolvedExpected::Frame(frame) => Ok(diff_dataframe(&actual?, &frame)),
@@ -10057,6 +10208,19 @@ mod tests {
         assert!(
             report.fixture_count >= 6,
             "expected FP-P2D-055 series sub/mul/div fixtures"
+        );
+        assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
+    fn packet_filter_runs_dataframe_merge_asof_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2D-056", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-056"));
+        assert!(
+            report.fixture_count >= 2,
+            "expected FP-P2D-056 dataframe merge_asof fixtures"
         );
         assert!(report.is_green(), "expected report green: {report:?}");
     }

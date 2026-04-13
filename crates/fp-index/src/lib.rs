@@ -366,6 +366,32 @@ impl Index {
     // ── Pandas Index Model: deduplication ──────────────────────────────
 
     #[must_use]
+    pub fn is_monotonic_increasing(&self) -> bool {
+        if self.labels.len() <= 1 {
+            return true;
+        }
+        for pair in self.labels.windows(2) {
+            if pair[0] > pair[1] {
+                return false;
+            }
+        }
+        true
+    }
+
+    #[must_use]
+    pub fn is_monotonic_decreasing(&self) -> bool {
+        if self.labels.len() <= 1 {
+            return true;
+        }
+        for pair in self.labels.windows(2) {
+            if pair[0] < pair[1] {
+                return false;
+            }
+        }
+        true
+    }
+
+    #[must_use]
     pub fn unique(&self) -> Self {
         let mut seen = HashMap::<&IndexLabel, ()>::new();
         let labels: Vec<IndexLabel> = self
@@ -1120,7 +1146,23 @@ pub fn multi_way_align(indexes: &[&Index]) -> MultiAlignmentPlan {
         };
     }
 
-    let union = leapfrog_union(indexes);
+    // Preserve pandas-style union ordering: start with the first index's labels,
+    // then append unseen labels from subsequent indexes in encounter order.
+    // This matches iterative align_union(sort=False) semantics while avoiding
+    // the O(N*K) pairwise alignment cascade.
+    let mut seen: std::collections::HashSet<IndexLabel> =
+        std::collections::HashSet::with_capacity(
+            indexes.iter().map(|idx| idx.labels().len()).sum(),
+        );
+    let mut union_labels: Vec<IndexLabel> = Vec::new();
+    for idx in indexes {
+        for label in idx.labels() {
+            if seen.insert(label.clone()) {
+                union_labels.push(label.clone());
+            }
+        }
+    }
+    let union = Index::new(union_labels);
 
     // Build position maps for each input
     let maps: Vec<HashMap<&IndexLabel, usize>> = indexes
@@ -1776,10 +1818,23 @@ mod tests {
         let plan = align_union(&left, &right);
         assert_eq!(
             plan.union_index.labels(),
-            &["a".into(), "b".into(), "a".into(), "c".into()]
+            &[
+                "a".into(),
+                "a".into(),
+                "b".into(),
+                "a".into(),
+                "a".into(),
+                "c".into()
+            ]
         );
-        assert_eq!(plan.left_positions, vec![Some(0), Some(1), Some(0), None]);
-        assert_eq!(plan.right_positions, vec![Some(0), None, Some(0), Some(2)]);
+        assert_eq!(
+            plan.left_positions,
+            vec![Some(0), Some(0), Some(1), Some(2), Some(2), None]
+        );
+        assert_eq!(
+            plan.right_positions,
+            vec![Some(0), Some(1), None, Some(0), Some(1), Some(2)]
+        );
         validate_alignment_plan(&plan).expect("valid");
     }
 
@@ -2197,17 +2252,17 @@ mod tests {
             plan.union_index.labels(),
             &[
                 IndexLabel::Int64(1),
-                IndexLabel::Int64(2),
                 IndexLabel::Int64(3),
+                IndexLabel::Int64(2),
             ]
         );
         assert_eq!(plan.positions.len(), 3);
-        // a has 1 at pos 0, no 2, 3 at pos 1
-        assert_eq!(plan.positions[0], vec![Some(0), None, Some(1)]);
-        // b has no 1, 2 at pos 0, 3 at pos 1
-        assert_eq!(plan.positions[1], vec![None, Some(0), Some(1)]);
-        // c has 1 at pos 0, 2 at pos 1, no 3
-        assert_eq!(plan.positions[2], vec![Some(0), Some(1), None]);
+        // a has 1 at pos 0, 3 at pos 1, no 2
+        assert_eq!(plan.positions[0], vec![Some(0), Some(1), None]);
+        // b has no 1, 3 at pos 1, 2 at pos 0
+        assert_eq!(plan.positions[1], vec![None, Some(1), Some(0)]);
+        // c has 1 at pos 0, no 3, 2 at pos 1
+        assert_eq!(plan.positions[2], vec![Some(0), None, Some(1)]);
     }
 
     #[test]
@@ -2309,19 +2364,19 @@ mod tests {
             plan.union_index.labels(),
             &[
                 IndexLabel::Int64(1),
-                IndexLabel::Int64(2),
                 IndexLabel::Int64(3),
-                IndexLabel::Int64(4),
                 IndexLabel::Int64(5),
+                IndexLabel::Int64(2),
+                IndexLabel::Int64(4),
             ]
         );
         assert_eq!(
             plan.positions[0],
-            vec![Some(0), None, Some(1), None, Some(2)]
+            vec![Some(0), Some(1), Some(2), None, None]
         );
         assert_eq!(
             plan.positions[1],
-            vec![None, Some(0), Some(1), Some(2), None]
+            vec![None, Some(1), None, Some(0), Some(2)]
         );
         eprintln!("[AG-11-T] two_sorted_overlapping | in=[3,3] out=5 | PASS");
     }

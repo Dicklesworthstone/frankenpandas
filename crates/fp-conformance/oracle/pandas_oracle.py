@@ -1787,6 +1787,29 @@ def op_dataframe_merge_index(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return op_dataframe_merge(pd, payload, use_index_keys=True)
 
 
+def op_dataframe_merge_asof(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    frame_right_payload = payload.get("frame_right")
+    if frame_payload is None or frame_right_payload is None:
+        raise OracleError("dataframe_merge_asof requires frame and frame_right payloads")
+
+    left = dataframe_from_json(pd, frame_payload)
+    right = dataframe_from_json(pd, frame_right_payload)
+
+    on = payload.get("merge_on")
+    if on is None:
+        on = payload.get("on")
+    if on is None:
+        raise OracleError("dataframe_merge_asof requires 'merge_on' column string payload")
+
+    direction = payload.get("direction", "backward")
+
+    try:
+        out = pd.merge_asof(left, right, on=on, direction=direction)
+    except Exception as exc:
+        raise OracleError(f"dataframe_merge_asof failed: {exc}") from exc
+    return {"expected_frame": dataframe_to_json(out)}
+
 def op_dataframe_concat(pd, payload: dict[str, Any]) -> dict[str, Any]:
     frame_payload = payload.get("frame")
     frame_right_payload = payload.get("frame_right")
@@ -1981,6 +2004,8 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_dataframe_merge(pd, payload)
     if op in {"dataframe_merge_index", "data_frame_merge_index"}:
         return op_dataframe_merge_index(pd, payload)
+    if op in {"dataframe_merge_asof", "data_frame_merge_asof"}:
+        return op_dataframe_merge_asof(pd, payload)
     if op in {"dataframe_concat", "data_frame_concat"}:
         return op_dataframe_concat(pd, payload)
     raise OracleError(f"unsupported operation: {op!r}")

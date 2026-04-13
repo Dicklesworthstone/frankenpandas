@@ -807,6 +807,9 @@ impl Series {
             ArithmeticOp::Sub => "-",
             ArithmeticOp::Mul => "*",
             ArithmeticOp::Div => "/",
+            ArithmeticOp::Mod => "%",
+            ArithmeticOp::Pow => "**",
+            ArithmeticOp::FloorDiv => "//",
         };
 
         let out_name = if self.name == other.name {
@@ -909,6 +912,21 @@ impl Series {
                                 fill_value / r
                             }
                         }
+                        ArithmeticOp::Mod => {
+                            if r == 0.0 {
+                                f64::NAN
+                            } else {
+                                fill_value % r
+                            }
+                        }
+                        ArithmeticOp::Pow => fill_value.powf(r),
+                        ArithmeticOp::FloorDiv => {
+                            if r == 0.0 {
+                                f64::NAN
+                            } else {
+                                (fill_value / r).floor()
+                            }
+                        }
                     };
                     Scalar::Float64(v)
                 }
@@ -923,6 +941,21 @@ impl Series {
                                 f64::NAN
                             } else {
                                 l / fill_value
+                            }
+                        }
+                        ArithmeticOp::Mod => {
+                            if fill_value == 0.0 {
+                                f64::NAN
+                            } else {
+                                l % fill_value
+                            }
+                        }
+                        ArithmeticOp::Pow => l.powf(fill_value),
+                        ArithmeticOp::FloorDiv => {
+                            if fill_value == 0.0 {
+                                f64::NAN
+                            } else {
+                                (l / fill_value).floor()
                             }
                         }
                     };
@@ -942,6 +975,21 @@ impl Series {
                                 l / r
                             }
                         }
+                        ArithmeticOp::Mod => {
+                            if r == 0.0 {
+                                f64::NAN
+                            } else {
+                                l % r
+                            }
+                        }
+                        ArithmeticOp::Pow => l.powf(r),
+                        ArithmeticOp::FloorDiv => {
+                            if r == 0.0 {
+                                f64::NAN
+                            } else {
+                                (l / r).floor()
+                            }
+                        }
                     };
                     Scalar::Float64(v)
                 }
@@ -957,6 +1005,9 @@ impl Series {
                 ArithmeticOp::Sub => "-",
                 ArithmeticOp::Mul => "*",
                 ArithmeticOp::Div => "/",
+                ArithmeticOp::Mod => "%",
+                ArithmeticOp::Pow => "**",
+                ArithmeticOp::FloorDiv => "//",
             };
             format!("{}{op_sym}{}", self.name, other.name)
         };
@@ -990,50 +1041,51 @@ impl Series {
     ///
     /// Matches `s1.mod(s2)` / `s1 % s2` in pandas.
     pub fn modulo(&self, other: &Self) -> Result<Self, FrameError> {
-        let (left_aligned, right_aligned) = self.align(other, AlignMode::Outer)?;
-        let mut out = Vec::with_capacity(left_aligned.len());
-        for (lv, rv) in left_aligned
-            .column()
-            .values()
-            .iter()
-            .zip(right_aligned.column().values().iter())
-        {
-            if lv.is_missing() || rv.is_missing() {
-                out.push(Scalar::Null(NullKind::NaN));
-            } else {
-                let l = lv.to_f64().map_err(ColumnError::from)?;
-                let r = rv.to_f64().map_err(ColumnError::from)?;
-                out.push(if r == 0.0 {
-                    Scalar::Null(NullKind::NaN)
-                } else {
-                    Scalar::Float64(l % r)
-                });
-            }
-        }
-        Self::from_values(self.name(), left_aligned.index().labels().to_vec(), out)
+        let mut ledger = EvidenceLedger::new();
+        self.modulo_with_policy(other, &RuntimePolicy::strict(), &mut ledger)
+    }
+
+    pub fn modulo_with_policy(
+        &self,
+        other: &Self,
+        policy: &RuntimePolicy,
+        ledger: &mut EvidenceLedger,
+    ) -> Result<Self, FrameError> {
+        self.binary_op_with_policy(other, ArithmeticOp::Mod, policy, ledger)
+    }
+
+    /// Floor-division operation (element-wise).
+    ///
+    /// Matches `s1.floordiv(s2)` / `s1 // s2` in pandas.
+    pub fn floordiv(&self, other: &Self) -> Result<Self, FrameError> {
+        let mut ledger = EvidenceLedger::new();
+        self.floordiv_with_policy(other, &RuntimePolicy::strict(), &mut ledger)
+    }
+
+    pub fn floordiv_with_policy(
+        &self,
+        other: &Self,
+        policy: &RuntimePolicy,
+        ledger: &mut EvidenceLedger,
+    ) -> Result<Self, FrameError> {
+        self.binary_op_with_policy(other, ArithmeticOp::FloorDiv, policy, ledger)
     }
 
     /// Power operation (element-wise exponentiation).
     ///
     /// Matches `s1.pow(s2)` / `s1 ** s2` in pandas.
     pub fn pow(&self, other: &Self) -> Result<Self, FrameError> {
-        let (left_aligned, right_aligned) = self.align(other, AlignMode::Outer)?;
-        let mut out = Vec::with_capacity(left_aligned.len());
-        for (lv, rv) in left_aligned
-            .column()
-            .values()
-            .iter()
-            .zip(right_aligned.column().values().iter())
-        {
-            if lv.is_missing() || rv.is_missing() {
-                out.push(Scalar::Null(NullKind::NaN));
-            } else {
-                let l = lv.to_f64().map_err(ColumnError::from)?;
-                let r = rv.to_f64().map_err(ColumnError::from)?;
-                out.push(Scalar::Float64(l.powf(r)));
-            }
-        }
-        Self::from_values(self.name(), left_aligned.index().labels().to_vec(), out)
+        let mut ledger = EvidenceLedger::new();
+        self.pow_with_policy(other, &RuntimePolicy::strict(), &mut ledger)
+    }
+
+    pub fn pow_with_policy(
+        &self,
+        other: &Self,
+        policy: &RuntimePolicy,
+        ledger: &mut EvidenceLedger,
+    ) -> Result<Self, FrameError> {
+        self.binary_op_with_policy(other, ArithmeticOp::Pow, policy, ledger)
     }
 
     /// Return the number of elements in this Series.
@@ -2247,15 +2299,40 @@ impl Series {
             return true;
         }
         for pair in vals.windows(2) {
-            if pair[0].is_missing() || pair[1].is_missing() {
+            let (a, b) = (&pair[0], &pair[1]);
+            if a.is_missing() || b.is_missing() {
                 return false;
             }
-            match (pair[0].to_f64(), pair[1].to_f64()) {
-                (Ok(a), Ok(b)) if a >= b => {}
-                _ => return false,
+            if !a.semantic_ge(b) {
+                return false;
             }
         }
         true
+    }
+
+    // String regex matching lives on the string accessor (`Series::str()`).
+}
+
+impl Series {
+    /// Apply a custom function to each element of the Series.
+    ///
+    /// Matches `pd.Series.apply(func)`.
+    pub fn apply<F>(&self, func: F) -> Result<Series, FrameError>
+    where
+        F: Fn(&Scalar) -> Scalar,
+    {
+        let out: Vec<Scalar> = self.column.values().iter().map(func).collect();
+        Series::from_values(self.name.clone(), self.index.labels().to_vec(), out)
+    }
+
+    /// Map values of a Series using an input mapping or function.
+    ///
+    /// Matches `pd.Series.map(arg)`.
+    pub fn map_func<F>(&self, func: F) -> Result<Series, FrameError>
+    where
+        F: Fn(&Scalar) -> Scalar,
+    {
+        self.apply(func)
     }
 
     /// Return unique non-null values in first-seen order.
@@ -2942,14 +3019,7 @@ impl Series {
             .map(|(v, _)| v)
             .collect();
         // Sort modes for deterministic output
-        modes.sort_by(|a, b| {
-            let fa = a.to_f64().ok();
-            let fb = b.to_f64().ok();
-            match (fa, fb) {
-                (Some(x), Some(y)) => x.partial_cmp(&y).unwrap_or(Ordering::Equal),
-                _ => format!("{a:?}").cmp(&format!("{b:?}")),
-            }
-        });
+        modes.sort_by(|a, b| a.semantic_cmp(b));
         let labels: Vec<IndexLabel> = (0..modes.len()).map(|i| (i as i64).into()).collect();
         Self::from_values(self.name.clone(), labels, modes)
     }
@@ -5527,12 +5597,32 @@ impl Rolling<'_> {
         let len = vals.len();
         let mut out = Vec::with_capacity(len);
 
-        for i in 0..len {
-            let start = (i + 1).saturating_sub(self.window);
-            let window_slice = &vals[start..=i];
-            let count = window_slice.iter().filter(|v| !v.is_missing()).count();
+        if self.center {
+            let half = self.window / 2;
+            for i in 0..len {
+                let start = i.saturating_sub(half);
+                let end = (i + half + self.window % 2).min(len);
+                let window_slice = &vals[start..end];
+                let count = window_slice.iter().filter(|v| !v.is_missing()).count();
 
-            out.push(Scalar::Float64(count as f64));
+                if count < self.min_periods || window_slice.len() < self.window {
+                    out.push(Scalar::Null(NullKind::NaN));
+                } else {
+                    out.push(Scalar::Float64(count as f64));
+                }
+            }
+        } else {
+            for i in 0..len {
+                let start = (i + 1).saturating_sub(self.window);
+                let window_slice = &vals[start..=i];
+                let count = window_slice.iter().filter(|v| !v.is_missing()).count();
+
+                if i + 1 < self.window || count < self.min_periods {
+                    out.push(Scalar::Null(NullKind::NaN));
+                } else {
+                    out.push(Scalar::Float64(count as f64));
+                }
+            }
         }
 
         Series::from_values(
@@ -6898,6 +6988,132 @@ impl SeriesGroupBy<'_> {
         )
     }
 
+    /// Rank values within each group.
+    ///
+    /// Matches `series.groupby(by).rank()`.
+    /// `method`: "average" (default), "min", "max", "first", "dense"
+    /// `ascending`: rank direction (default true = smallest gets rank 1)
+    /// `na_option`: "keep" (NaN stays NaN), "top" (NaN gets lowest ranks), "bottom" (NaN gets highest ranks)
+    pub fn rank(&self, method: &str, ascending: bool, na_option: &str) -> Result<Series, FrameError> {
+        let (_order, order_keys, groups) = self.build_groups();
+        let mut ranks = vec![Scalar::Null(NullKind::NaN); self.series.len()];
+        
+        for key in &order_keys {
+            let indices = &groups[key];
+            let mut null_pos = Vec::new();
+            let mut sortable: Vec<(usize, f64)> = Vec::new();
+
+            for &i in indices {
+                let v = &self.series.column.values()[i];
+                if v.is_missing() {
+                    null_pos.push(i);
+                } else if let Ok(f) = v.to_f64() {
+                    sortable.push((i, f));
+                } else {
+                    null_pos.push(i);
+                }
+            }
+
+            if ascending {
+                sortable.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+            } else {
+                sortable.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            }
+
+            match method {
+                "average" => {
+                    let mut i = 0;
+                    while i < sortable.len() {
+                        let mut j = i + 1;
+                        while j < sortable.len() && (sortable[j].1 - sortable[i].1).abs() < f64::EPSILON {
+                            j += 1;
+                        }
+                        let avg: f64 = ((i + 1)..=j).map(|r| r as f64).sum::<f64>() / (j - i) as f64;
+                        for item in &sortable[i..j] {
+                            ranks[item.0] = Scalar::Float64(avg);
+                        }
+                        i = j;
+                    }
+                }
+                "min" => {
+                    let mut i = 0;
+                    while i < sortable.len() {
+                        let mut j = i + 1;
+                        while j < sortable.len() && (sortable[j].1 - sortable[i].1).abs() < f64::EPSILON {
+                            j += 1;
+                        }
+                        let min_rank = (i + 1) as f64;
+                        for item in &sortable[i..j] {
+                            ranks[item.0] = Scalar::Float64(min_rank);
+                        }
+                        i = j;
+                    }
+                }
+                "max" => {
+                    let mut i = 0;
+                    while i < sortable.len() {
+                        let mut j = i + 1;
+                        while j < sortable.len() && (sortable[j].1 - sortable[i].1).abs() < f64::EPSILON {
+                            j += 1;
+                        }
+                        let max_rank = j as f64;
+                        for item in &sortable[i..j] {
+                            ranks[item.0] = Scalar::Float64(max_rank);
+                        }
+                        i = j;
+                    }
+                }
+                "first" => {
+                    for (rank_idx, item) in sortable.iter().enumerate() {
+                        ranks[item.0] = Scalar::Float64((rank_idx + 1) as f64);
+                    }
+                }
+                "dense" => {
+                    let mut dense_rank = 0u64;
+                    let mut i = 0;
+                    while i < sortable.len() {
+                        dense_rank += 1;
+                        let mut j = i + 1;
+                        while j < sortable.len() && (sortable[j].1 - sortable[i].1).abs() < f64::EPSILON {
+                            j += 1;
+                        }
+                        for item in &sortable[i..j] {
+                            ranks[item.0] = Scalar::Float64(dense_rank as f64);
+                        }
+                        i = j;
+                    }
+                }
+                _ => {}
+            }
+
+            match na_option {
+                "keep" => {}
+                "top" => {
+                    let null_count = null_pos.len();
+                    for &i in indices {
+                        if let Scalar::Float64(r) = &mut ranks[i] {
+                            if !r.is_nan() {
+                                *r += null_count as f64;
+                            }
+                        }
+                    }
+                    for (i, &pos) in null_pos.iter().enumerate() {
+                        ranks[pos] = Scalar::Float64((i + 1) as f64);
+                    }
+                }
+                "bottom" => {
+                    let non_null_count = sortable.len();
+                    for (i, &pos) in null_pos.iter().enumerate() {
+                        ranks[pos] = Scalar::Float64((non_null_count + i + 1) as f64);
+                    }
+                }
+                _ => {}
+            }
+        }
+        
+        Series::from_values(self.series.name(), self.series.index.labels().to_vec(), ranks)
+    }
+
     /// Standard deviation of each group (ddof=1).
     pub fn std(&self) -> Result<Series, FrameError> {
         self.agg_numeric(
@@ -7566,6 +7782,19 @@ impl StringAccessor<'_> {
                 }
                 None => Scalar::Null(NullKind::NaN),
             },
+            self.series.name(),
+        )
+    }
+
+    /// Count occurrences of pattern in each string.
+    ///
+    /// Matches `pd.Series.str.count(pat)`.
+    pub fn count(&self, pat: &str) -> Result<Series, FrameError> {
+        let re = Regex::new(pat).map_err(|e| {
+            FrameError::CompatibilityRejected(format!("invalid regex pattern: {e}"))
+        })?;
+        self.apply_str(
+            |s| Scalar::Int64(re.find_iter(s).count() as i64),
             self.series.name(),
         )
     }
@@ -17783,31 +18012,31 @@ impl DataFrame {
     /// Matches `pd.DataFrame.mode()`. Returns a DataFrame where each column
     /// contains its mode value. Only the first mode is kept when there are ties.
     pub fn mode(&self) -> Result<Self, FrameError> {
-        let mut result_cols = BTreeMap::new();
-        let mut col_order = Vec::new();
+        let mut column_modes = Vec::new();
+        let mut max_modes = 0;
 
         for name in &self.column_order {
             let s = self.column_as_series(name)?;
-            let mode_series = s.mode()?;
-            if mode_series.is_empty() {
-                result_cols.insert(
-                    name.clone(),
-                    Column::from_values(vec![Scalar::Null(NullKind::NaN)])?,
-                );
-            } else {
-                result_cols.insert(
-                    name.clone(),
-                    Column::from_values(vec![mode_series.values()[0].clone()])?,
-                );
-            }
-            col_order.push(name.clone());
+            let modes = s.mode()?;
+            max_modes = max_modes.max(modes.len());
+            column_modes.push((name.clone(), modes));
         }
 
-        Ok(Self {
-            columns: result_cols,
-            column_order: col_order,
-            index: Index::new(vec![0_i64.into()]),
-        })
+        if max_modes == 0 {
+            return Ok(Self::new(Index::new(Vec::new()), BTreeMap::new())?);
+        }
+
+        let mut result_cols = BTreeMap::new();
+        for (name, modes) in column_modes {
+            let mut vals = modes.column().values().to_vec();
+            while vals.len() < max_modes {
+                vals.push(Scalar::Null(NullKind::NaN));
+            }
+            result_cols.insert(name, Column::from_values(vals)?);
+        }
+
+        let labels: Vec<IndexLabel> = (0..max_modes).map(|i| (i as i64).into()).collect();
+        Self::new_with_column_order(Index::new(labels), result_cols, self.column_order.clone())
     }
 
     /// Internal: reduce each numeric column to a single scalar via the named function.
@@ -18029,6 +18258,27 @@ impl DataFrame {
             |vals| vals.iter().copied().fold(f64::INFINITY, f64::min),
             "min",
         )
+    }
+
+    /// Apply a custom function to each row of the DataFrame.
+    ///
+    /// Matches `pd.DataFrame.apply(func, axis=1)`. The function receives
+    /// a slice of `Scalar` values representing the row (in `column_order`)
+    /// and should return a single `Scalar` result.
+    pub fn apply_rows<F>(&self, func: F, name: &str) -> Result<Series, FrameError>
+    where
+        F: Fn(&[Scalar]) -> Scalar,
+    {
+        let mut values = Vec::with_capacity(self.len());
+        for row_idx in 0..self.len() {
+            let row: Vec<Scalar> = self
+                .column_order
+                .iter()
+                .map(|col_name| self.columns[col_name].values()[row_idx].clone())
+                .collect();
+            values.push(func(&row));
+        }
+        Series::from_values(name, self.index.labels().to_vec(), values)
     }
 
     /// Maximum across columns per row.
@@ -18267,6 +18517,97 @@ impl DataFrame {
     /// Matches `pd.DataFrame.diff(periods)`.
     pub fn diff(&self, periods: i64) -> Result<Self, FrameError> {
         self.apply_per_column(|s| s.diff(periods))
+    }
+
+    /// First-order difference across columns per row.
+    ///
+    /// Matches `pd.DataFrame.diff(periods, axis=1)`.
+    pub fn diff_axis1(&self, periods: i64) -> Result<Self, FrameError> {
+        let n_cols = self.column_order.len();
+        let n_rows = self.len();
+        let mut out_cols = BTreeMap::new();
+
+        for (j, name) in self.column_order.iter().enumerate() {
+            let mut vals = Vec::with_capacity(n_rows);
+            let prev_idx = if periods >= 0 {
+                j.checked_sub(periods as usize)
+            } else {
+                let p = periods.unsigned_abs() as usize;
+                match j.checked_add(p) {
+                    Some(p_idx) if p_idx < n_cols => Some(p_idx),
+                    _ => None,
+                }
+            };
+
+            if let Some(p_idx) = prev_idx {
+                let prev_name = &self.column_order[p_idx];
+                let current_col = &self.columns[name];
+                let prev_col = &self.columns[prev_name];
+
+                for i in 0..n_rows {
+                    let curr_val = &current_col.values()[i];
+                    let prev_val = &prev_col.values()[i];
+                    if curr_val.is_missing() || prev_val.is_missing() {
+                        vals.push(Scalar::Null(NullKind::NaN));
+                        continue;
+                    }
+                    match (curr_val.to_f64(), prev_val.to_f64()) {
+                        (Ok(c), Ok(p)) => vals.push(Scalar::Float64(c - p)),
+                        _ => vals.push(Scalar::Null(NullKind::NaN)),
+                    }
+                }
+            } else {
+                vals.resize(n_rows, Scalar::Null(NullKind::NaN));
+            }
+            out_cols.insert(name.clone(), Column::new(DType::Float64, vals)?);
+        }
+        Self::new_with_column_order(self.index.clone(), out_cols, self.column_order.clone())
+    }
+
+    /// Percentage change across columns per row.
+    ///
+    /// Matches `pd.DataFrame.pct_change(periods, axis=1)`.
+    pub fn pct_change_axis1(&self, periods: i64) -> Result<Self, FrameError> {
+        let n_cols = self.column_order.len();
+        let n_rows = self.len();
+        let mut out_cols = BTreeMap::new();
+
+        for (j, name) in self.column_order.iter().enumerate() {
+            let mut vals = Vec::with_capacity(n_rows);
+            let prev_idx = if periods >= 0 {
+                j.checked_sub(periods as usize)
+            } else {
+                let p = periods.unsigned_abs() as usize;
+                match j.checked_add(p) {
+                    Some(p_idx) if p_idx < n_cols => Some(p_idx),
+                    _ => None,
+                }
+            };
+
+            if let Some(p_idx) = prev_idx {
+                let prev_name = &self.column_order[p_idx];
+                let current_col = &self.columns[name];
+                let prev_col = &self.columns[prev_name];
+
+                for i in 0..n_rows {
+                    let curr_val = &current_col.values()[i];
+                    let prev_val = &prev_col.values()[i];
+                    if curr_val.is_missing() || prev_val.is_missing() {
+                        vals.push(Scalar::Null(NullKind::NaN));
+                        continue;
+                    }
+                    match (curr_val.to_f64(), prev_val.to_f64()) {
+                        (Ok(c), Ok(p)) => vals.push(Scalar::Float64((c - p) / p)),
+                        _ => vals.push(Scalar::Null(NullKind::NaN)),
+                    }
+                }
+            } else {
+                vals.resize(n_rows, Scalar::Null(NullKind::NaN));
+            }
+            out_cols.insert(name.clone(), Column::new(DType::Float64, vals)?);
+        }
+
+        Self::new_with_column_order(self.index.clone(), out_cols, self.column_order.clone())
     }
 
     /// Shift values per column.
@@ -20266,6 +20607,55 @@ impl DataFrameGroupBy<'_> {
         }
     }
 
+    /// Helper to format the final aggregated DataFrame respecting `as_index`.
+    fn format_output(
+        &self,
+        mut result_cols: BTreeMap<String, Column>,
+        col_order: Vec<String>,
+        labels: Vec<IndexLabel>,
+        group_order: &[GroupKey<'_>],
+        groups: &GroupMap<'_>,
+    ) -> Result<DataFrame, FrameError> {
+        let n_groups = group_order.len();
+        if self.as_index {
+            Ok(DataFrame {
+                columns: result_cols,
+                column_order: col_order,
+                index: Index::new(labels),
+            })
+        } else {
+            // as_index=False: group keys become regular columns, index is
+            // a default integer range (pandas semantics).
+            let mut full_cols = BTreeMap::new();
+            let mut full_order = Vec::new();
+
+            // Add group key columns first.
+            for col_name in &self.by {
+                let src_col = &self.df.columns[col_name];
+                let mut key_vals = Vec::with_capacity(n_groups);
+                for gkey in group_order {
+                    let first_row = groups[gkey][0];
+                    key_vals.push(src_col.values()[first_row].clone());
+                }
+                full_cols.insert(col_name.clone(), Column::from_values(key_vals)?);
+                full_order.push(col_name.clone());
+            }
+
+            // Append aggregated value columns.
+            for col_name in col_order {
+                full_cols.insert(col_name.clone(), result_cols.remove(&col_name).unwrap());
+                full_order.push(col_name);
+            }
+
+            let int_labels: Vec<IndexLabel> = (0..n_groups as i64).map(IndexLabel::Int64).collect();
+            Ok(DataFrame {
+                columns: full_cols,
+                column_order: full_order,
+                index: Index::new(int_labels),
+            })
+        }
+    }
+
     /// Aggregate each value column per group with the given function.
     fn aggregate(&self, func_name: &str) -> Result<DataFrame, FrameError> {
         let (group_order, groups) = self.build_groups();
@@ -20341,44 +20731,7 @@ impl DataFrameGroupBy<'_> {
             col_order.push(col_name.clone());
         }
 
-        if self.as_index {
-            Ok(DataFrame {
-                columns: result_cols,
-                column_order: col_order,
-                index: Index::new(labels),
-            })
-        } else {
-            // as_index=False: group keys become regular columns, index is
-            // a default integer range (pandas semantics).
-            let mut full_cols = BTreeMap::new();
-            let mut full_order = Vec::new();
-
-            // Add group key columns first.
-            for col_name in &self.by {
-                let src_col = &self.df.columns[col_name];
-                let mut key_vals = Vec::with_capacity(n_groups);
-                for gkey in &group_order {
-                    let first_row = groups[gkey][0];
-                    key_vals.push(src_col.values()[first_row].clone());
-                }
-                full_cols.insert(col_name.clone(), Column::from_values(key_vals)?);
-                full_order.push(col_name.clone());
-            }
-
-            // Append aggregated value columns.
-            for col_name in col_order {
-                full_cols.insert(col_name.clone(), result_cols.remove(&col_name).unwrap());
-                full_order.push(col_name);
-            }
-
-            let int_labels: Vec<IndexLabel> = (0..n_groups as i64).map(IndexLabel::Int64).collect();
-
-            Ok(DataFrame {
-                columns: full_cols,
-                column_order: full_order,
-                index: Index::new(int_labels),
-            })
-        }
+        self.format_output(result_cols, col_order, labels, &group_order, &groups)
     }
 
     /// GroupBy sum.
@@ -20494,11 +20847,7 @@ impl DataFrameGroupBy<'_> {
             col_order.push(col_name.clone());
         }
 
-        Ok(DataFrame {
-            columns: result_cols,
-            column_order: col_order,
-            index: Index::new(labels),
-        })
+        self.format_output(result_cols, col_order, labels, &group_order, &groups)
     }
 
     /// Aggregate with multiple functions applied to all value columns.
@@ -20551,11 +20900,7 @@ impl DataFrameGroupBy<'_> {
             }
         }
 
-        Ok(DataFrame {
-            columns: result_cols,
-            column_order: col_order,
-            index: Index::new(labels),
-        })
+        self.format_output(result_cols, col_order, labels, &group_order, &groups)
     }
 
     /// Named aggregation: each tuple is `(output_name, input_column, function)`.
@@ -20708,11 +21053,7 @@ impl DataFrameGroupBy<'_> {
             }
         }
 
-        Ok(DataFrame {
-            columns: result_cols,
-            column_order: col_order,
-            index: Index::new(labels),
-        })
+        self.format_output(result_cols, col_order, labels, &group_order, &groups)
     }
 
     /// Apply a custom function to each group DataFrame.
@@ -20802,11 +21143,7 @@ impl DataFrameGroupBy<'_> {
             final_cols.insert(name, Column::from_values(vals)?);
         }
 
-        Ok(DataFrame {
-            columns: final_cols,
-            column_order: out_col_order,
-            index: Index::new(labels),
-        })
+        self.format_output(final_cols, out_col_order, labels, &group_order, &groups)
     }
 
     /// Transform each group, returning a DataFrame with the same shape as the input.
@@ -21098,40 +21435,128 @@ impl DataFrameGroupBy<'_> {
     /// GroupBy rank within each group.
     ///
     /// Matches `df.groupby(col).rank()`.
-    /// Uses average method by default.
-    pub fn rank(&self) -> Result<DataFrame, FrameError> {
+    /// `method`: "average" (default), "min", "max", "first", "dense"
+    /// `ascending`: rank direction (default true = smallest gets rank 1)
+    /// `na_option`: "keep" (NaN stays NaN), "top" (NaN gets lowest ranks), "bottom" (NaN gets highest ranks)
+    pub fn rank(&self, method: &str, ascending: bool, na_option: &str) -> Result<DataFrame, FrameError> {
         self.transform_groups(|vals| {
             let n = vals.len();
-            let mut indexed: Vec<(usize, f64)> = Vec::new();
             let mut null_pos = Vec::new();
+            let mut sortable: Vec<(usize, f64)> = Vec::new();
 
             for (i, v) in vals.iter().enumerate() {
                 if v.is_missing() {
                     null_pos.push(i);
                 } else if let Ok(f) = v.to_f64() {
-                    indexed.push((i, f));
+                    sortable.push((i, f));
                 } else {
                     null_pos.push(i);
                 }
             }
 
-            indexed.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-
-            let mut ranks = vec![Scalar::Null(NullKind::NaN); n];
-            let mut i = 0;
-            while i < indexed.len() {
-                let mut j = i + 1;
-                while j < indexed.len() && (indexed[j].1 - indexed[i].1).abs() < f64::EPSILON {
-                    j += 1;
-                }
-                let avg: f64 = ((i + 1)..=j).map(|r| r as f64).sum::<f64>() / (j - i) as f64;
-                for item in &indexed[i..j] {
-                    ranks[item.0] = Scalar::Float64(avg);
-                }
-                i = j;
+            if ascending {
+                sortable.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+            } else {
+                sortable.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
             }
 
-            ranks
+            let mut ranks = vec![f64::NAN; n];
+
+            match method {
+                "average" => {
+                    let mut i = 0;
+                    while i < sortable.len() {
+                        let mut j = i + 1;
+                        while j < sortable.len() && (sortable[j].1 - sortable[i].1).abs() < f64::EPSILON {
+                            j += 1;
+                        }
+                        let avg: f64 = ((i + 1)..=j).map(|r| r as f64).sum::<f64>() / (j - i) as f64;
+                        for item in &sortable[i..j] {
+                            ranks[item.0] = avg;
+                        }
+                        i = j;
+                    }
+                }
+                "min" => {
+                    let mut i = 0;
+                    while i < sortable.len() {
+                        let mut j = i + 1;
+                        while j < sortable.len() && (sortable[j].1 - sortable[i].1).abs() < f64::EPSILON {
+                            j += 1;
+                        }
+                        let min_rank = (i + 1) as f64;
+                        for item in &sortable[i..j] {
+                            ranks[item.0] = min_rank;
+                        }
+                        i = j;
+                    }
+                }
+                "max" => {
+                    let mut i = 0;
+                    while i < sortable.len() {
+                        let mut j = i + 1;
+                        while j < sortable.len() && (sortable[j].1 - sortable[i].1).abs() < f64::EPSILON {
+                            j += 1;
+                        }
+                        let max_rank = j as f64;
+                        for item in &sortable[i..j] {
+                            ranks[item.0] = max_rank;
+                        }
+                        i = j;
+                    }
+                }
+                "first" => {
+                    for (rank_idx, item) in sortable.iter().enumerate() {
+                        ranks[item.0] = (rank_idx + 1) as f64;
+                    }
+                }
+                "dense" => {
+                    let mut dense_rank = 0u64;
+                    let mut i = 0;
+                    while i < sortable.len() {
+                        dense_rank += 1;
+                        let mut j = i + 1;
+                        while j < sortable.len() && (sortable[j].1 - sortable[i].1).abs() < f64::EPSILON {
+                            j += 1;
+                        }
+                        for item in &sortable[i..j] {
+                            ranks[item.0] = dense_rank as f64;
+                        }
+                        i = j;
+                    }
+                }
+                _ => {}
+            }
+
+            match na_option {
+                "keep" => {}
+                "top" => {
+                    let null_count = null_pos.len();
+                    for r in &mut ranks {
+                        if !r.is_nan() {
+                            *r += null_count as f64;
+                        }
+                    }
+                    for (i, &pos) in null_pos.iter().enumerate() {
+                        ranks[pos] = (i + 1) as f64;
+                    }
+                }
+                "bottom" => {
+                    let non_null_count = sortable.len();
+                    for (i, &pos) in null_pos.iter().enumerate() {
+                        ranks[pos] = (non_null_count + i + 1) as f64;
+                    }
+                }
+                _ => {}
+            }
+
+            ranks.into_iter().map(|r| {
+                if r.is_nan() {
+                    Scalar::Null(NullKind::NaN)
+                } else {
+                    Scalar::Float64(r)
+                }
+            }).collect()
         })
     }
 
@@ -22140,8 +22565,8 @@ impl GroupByResample<'_> {
         let mut all_labels = Vec::new();
         let mut all_values: std::collections::HashMap<String, Vec<Scalar>> =
             value_cols.iter().map(|c| (c.clone(), Vec::new())).collect();
-        // Track which group each resampled row came from
-        let mut group_labels = Vec::new();
+        // Track which group each resampled row came from using the first row of the group
+        let mut group_first_rows = Vec::new();
 
         for gkey in &group_order {
             let indices = &groups[gkey];
@@ -22162,9 +22587,7 @@ impl GroupByResample<'_> {
                 // For each resampled bucket
                 let n_buckets = resampled.len();
                 for _ in 0..n_buckets {
-                    // Use the group key from the first row
-                    let group_label = self.groupby.group_key_label(first_row);
-                    group_labels.push(group_label);
+                    group_first_rows.push(first_row);
                 }
 
                 // Record the resampled bucket labels
@@ -22196,17 +22619,14 @@ impl GroupByResample<'_> {
         let mut col_order = Vec::new();
 
         // Group-by key column(s)
-        if self.groupby.by.len() == 1 {
-            let by_col = &self.groupby.by[0];
-            let by_values: Vec<Scalar> = group_labels
+        for col_name in &self.groupby.by {
+            let src_col = &self.groupby.df.columns[col_name];
+            let by_values: Vec<Scalar> = group_first_rows
                 .iter()
-                .map(|l| match l {
-                    IndexLabel::Int64(v) => Scalar::Int64(*v),
-                    IndexLabel::Utf8(s) => Scalar::Utf8(s.clone()),
-                })
+                .map(|&row| src_col.values()[row].clone())
                 .collect();
-            cols.insert(by_col.clone(), Column::from_values(by_values)?);
-            col_order.push(by_col.clone());
+            cols.insert(col_name.clone(), Column::from_values(by_values)?);
+            col_order.push(col_name.clone());
         }
 
         // Value columns
@@ -32798,6 +33218,25 @@ mod tests {
     }
 
     #[test]
+    fn dataframe_diff_axis1() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(3.0)]),
+                ("b", vec![Scalar::Float64(4.0), Scalar::Float64(2.0)]),
+            ],
+        )
+        .unwrap();
+        let result = df.diff_axis1(1).unwrap();
+        let cola = result.column("a").unwrap();
+        let colb = result.column("b").unwrap();
+        assert!(cola.values()[0].is_missing());
+        assert!(cola.values()[1].is_missing());
+        assert_eq!(colb.values()[0], Scalar::Float64(3.0)); // 4 - 1
+        assert_eq!(colb.values()[1], Scalar::Float64(-1.0)); // 2 - 3
+    }
+
+    #[test]
     fn dataframe_shift() {
         let df = DataFrame::from_series(vec![
             Series::from_values(
@@ -32861,6 +33300,34 @@ mod tests {
         assert!(col.values()[0].is_missing());
         if let Scalar::Float64(v) = &col.values()[1] {
             assert!((v - 0.1).abs() < 1e-10);
+        }
+    }
+
+    #[test]
+    fn dataframe_pct_change_axis1() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(100.0), Scalar::Float64(50.0)]),
+                ("b", vec![Scalar::Float64(110.0), Scalar::Float64(40.0)]),
+            ],
+        )
+        .unwrap();
+        let result = df.pct_change_axis1(1).unwrap();
+        let cola = result.column("a").unwrap();
+        let colb = result.column("b").unwrap();
+        assert!(cola.values()[0].is_missing());
+        assert!(cola.values()[1].is_missing());
+
+        if let Scalar::Float64(v) = &colb.values()[0] {
+            assert!((v - 0.1).abs() < 1e-10); // (110 - 100) / 100
+        } else {
+            panic!("Expected float");
+        }
+        if let Scalar::Float64(v) = &colb.values()[1] {
+            assert!((v + 0.2).abs() < 1e-10); // (40 - 50) / 50
+        } else {
+            panic!("Expected float");
         }
     }
 
@@ -36692,7 +37159,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = df.groupby(&["g"]).unwrap().rank().unwrap();
+        let result = df.groupby(&["g"]).unwrap().rank("average", true, "keep").unwrap();
         let v = result.column_as_series("v").unwrap();
         // Within group a: 30 -> rank 3, 10 -> rank 1, 20 -> rank 2
         assert_eq!(v.values()[0], Scalar::Float64(3.0));
@@ -46086,5 +46553,109 @@ mod tests {
             .unwrap()
             .agg_named(&[("out", "g", "sum")]);
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn series_str_is_methods() {
+        let s = Series::from_values(
+            "s",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("abc123".into()),
+                Scalar::Utf8("123".into()),
+                Scalar::Utf8("!!!".into()),
+            ],
+        )
+        .unwrap();
+        assert_eq!(s.str().isalnum().unwrap().values()[0], Scalar::Bool(true));
+        assert_eq!(s.str().isalnum().unwrap().values()[2], Scalar::Bool(false));
+        assert_eq!(s.str().isdigit().unwrap().values()[1], Scalar::Bool(true));
+        assert_eq!(s.str().isdigit().unwrap().values()[0], Scalar::Bool(false));
+    }
+
+    #[test]
+    fn dataframe_apply_rows() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                ("b", vec![Scalar::Int64(10), Scalar::Int64(20)]),
+            ],
+        )
+        .unwrap();
+        let result = df
+            .apply_rows(
+                |row| {
+                    let a = match row[0] {
+                        Scalar::Int64(n) => n,
+                        _ => 0,
+                    };
+                    let b = match row[1] {
+                        Scalar::Int64(n) => n,
+                        _ => 0,
+                    };
+                    Scalar::Int64(a + b)
+                },
+                "sum_ab",
+            )
+            .unwrap();
+        assert_eq!(result.values()[0], Scalar::Int64(11));
+        assert_eq!(result.values()[1], Scalar::Int64(22));
+    }
+
+    #[test]
+    fn series_apply() {
+        let s = Series::from_values(
+            "s",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(10), Scalar::Int64(20)],
+        )
+        .unwrap();
+        let result = s
+            .apply(|v| match v {
+                Scalar::Int64(n) => Scalar::Int64(n * 2),
+                _ => v.clone(),
+            })
+            .unwrap();
+        assert_eq!(result.values()[0], Scalar::Int64(20));
+        assert_eq!(result.values()[1], Scalar::Int64(40));
+    }
+
+    #[test]
+    fn series_str_extract() {
+        let s = Series::from_values(
+            "s",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("alice@example.com".into()),
+                Scalar::Utf8("bob@gmail.com".into()),
+                Scalar::Utf8("invalid".into()),
+            ],
+        )
+        .unwrap();
+        let extracted = s.str().extract(r"(\w+)@").unwrap();
+        assert_eq!(extracted.len(), 3);
+        assert_eq!(extracted.values()[0], Scalar::Utf8("alice".into()));
+        assert_eq!(extracted.values()[1], Scalar::Utf8("bob".into()));
+        assert!(extracted.values()[2].is_missing());
+    }
+
+    #[test]
+    fn series_str_match_regex() {
+        let s = Series::from_values(
+            "s",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("alice@example.com".into()),
+                Scalar::Utf8("bob@gmail.com".into()),
+                Scalar::Utf8("invalid".into()),
+            ],
+        )
+        .unwrap();
+        let matched = s.str().match_regex(r"\w+@\w+\.\w+").unwrap();
+        assert_eq!(matched.len(), 3);
+        assert_eq!(matched.values()[0], Scalar::Bool(true));
+        assert_eq!(matched.values()[1], Scalar::Bool(true));
+        assert_eq!(matched.values()[2], Scalar::Bool(false));
     }
 }

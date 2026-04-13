@@ -1,33 +1,33 @@
 {
   "packet_id": "FP-P2C-002",
-  "case_id": "index_align_union_strict",
+  "case_id": "index_align_union_right_unseen_order_strict",
   "mode": "strict",
   "operation": "index_align_union",
   "left": {
     "name": "left_idx",
     "index": [
-      { "kind": "int64", "value": 1 },
       { "kind": "int64", "value": 2 },
-      { "kind": "int64", "value": 2 }
+      { "kind": "int64", "value": 1 }
     ],
     "values": []
   },
   "right": {
     "name": "right_idx",
     "index": [
+      { "kind": "int64", "value": 3 },
       { "kind": "int64", "value": 2 },
-      { "kind": "int64", "value": 3 }
+      { "kind": "int64", "value": 4 }
     ],
     "values": []
   },
   "expected_alignment": {
     "union_index": [
+      { "kind": "int64", "value": 2 },
       { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 2 },
-      { "kind": "int64", "value": 2 },
-      { "kind": "int64", "value": 3 }
+      { "kind": "int64", "value": 3 },
+      { "kind": "int64", "value": 4 }
     ],
-    "left_positions": [0, 1, 2, null],
-    "right_positions": [null, 0, 0, 1]
+    "left_positions": [0, 1, null, null],
+    "right_positions": [1, null, 0, 2]
   }
 }
