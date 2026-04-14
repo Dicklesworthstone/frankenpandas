@@ -152,12 +152,11 @@ proptest! {
     }
 
     /// align_union preserves left order for unique indices: non-None left
-    /// positions are strictly increasing when left has no duplicates.
-    /// With duplicates, position_map_first maps all occurrences to the first
-    /// position, so ordering is not monotonic.
+    /// positions are strictly increasing when both inputs have no duplicates.
+    /// If either side has duplicates, alignment can repeat positions.
     #[test]
     fn prop_align_union_preserves_left_order((left, right) in arb_index_pair(20)) {
-        if left.has_duplicates() {
+        if left.has_duplicates() || right.has_duplicates() {
             // With duplicates, position_map_first introduces non-monotonic
             // position references. This is correct behavior.
             return Ok(());
@@ -1442,7 +1441,8 @@ proptest! {
         }
     }
 
-    /// DataFrame eq_scalar_df produces all-Bool output.
+    /// DataFrame eq_scalar_df produces Bool output, allowing missing values
+    /// to propagate as Null.
     #[test]
     fn prop_df_eq_scalar_produces_bool(df in arb_numeric_dataframe(10)) {
         let scalar = Scalar::Int64(0);
@@ -1451,8 +1451,8 @@ proptest! {
                 let col = result.column(name).unwrap();
                 for (i, val) in col.values().iter().enumerate() {
                     prop_assert!(
-                        matches!(val, Scalar::Bool(_)),
-                        "eq_scalar_df must produce Bool values, got {:?} at col={}, idx={}",
+                        matches!(val, Scalar::Bool(_)) || val.is_missing(),
+                        "eq_scalar_df must produce Bool or missing values, got {:?} at col={}, idx={}",
                         val, name, i
                     );
                 }

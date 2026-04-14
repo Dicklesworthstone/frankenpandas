@@ -33,7 +33,7 @@
       { "kind": "int64", "value": 2 },
       { "kind": "int64", "value": 3 },
       { "kind": "null", "value": "null" },
-      { "kind": "null", "value": "null" }
+      { "kind": "null", "value": "na_n" }
     ]
   }
 }

@@ -1342,6 +1342,32 @@ def op_dataframe_count(pd, payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def op_dataframe_mode(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    if frame_payload is None:
+        raise OracleError("dataframe_mode requires frame payload")
+
+    frame = dataframe_from_json(pd, frame_payload)
+    out = frame.mode()
+    return {"expected_frame": dataframe_to_json(out)}
+
+
+def op_dataframe_rank(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    if frame_payload is None:
+        raise OracleError("dataframe_rank requires frame payload")
+
+    method = payload.get("rank_method") or "average"
+    na_option = payload.get("rank_na_option") or "keep"
+    ascending = payload.get("sort_ascending")
+    if ascending is None:
+        ascending = True
+
+    frame = dataframe_from_json(pd, frame_payload)
+    out = frame.rank(method=method, ascending=ascending, na_option=na_option)
+    return {"expected_frame": dataframe_to_json(out)}
+
+
 def op_dataframe_fillna(pd, payload: dict[str, Any]) -> dict[str, Any]:
     frame_payload = payload.get("frame")
     fill_value_payload = payload.get("fill_value")
@@ -1982,6 +2008,10 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_dataframe_notnull(pd, payload)
     if op in {"dataframe_count", "data_frame_count"}:
         return op_dataframe_count(pd, payload)
+    if op in {"dataframe_mode", "data_frame_mode"}:
+        return op_dataframe_mode(pd, payload)
+    if op in {"dataframe_rank", "data_frame_rank"}:
+        return op_dataframe_rank(pd, payload)
     if op in {"dataframe_fillna", "data_frame_fillna"}:
         return op_dataframe_fillna(pd, payload)
     if op in {"dataframe_dropna", "data_frame_dropna"}:

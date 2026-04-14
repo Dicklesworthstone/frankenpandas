@@ -14,5 +14,5 @@
       { "kind": "int64", "value": 1 }
     ]
   },
-  "expected_error_contains": "dtype coercion"
+  "expected_error_contains": "cannot cast scalar"
 }

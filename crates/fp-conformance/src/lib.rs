@@ -258,6 +258,10 @@ pub enum FixtureOperation {
     DataFrameNotNull,
     #[serde(rename = "dataframe_count", alias = "data_frame_count")]
     DataFrameCount,
+    #[serde(rename = "dataframe_mode", alias = "data_frame_mode")]
+    DataFrameMode,
+    #[serde(rename = "dataframe_rank", alias = "data_frame_rank")]
+    DataFrameRank,
     #[serde(rename = "dataframe_fillna", alias = "data_frame_fillna")]
     DataFrameFillNa,
     #[serde(rename = "dataframe_dropna", alias = "data_frame_dropna")]
@@ -378,6 +382,8 @@ impl FixtureOperation {
             Self::DataFrameIsNull => "dataframe_isnull",
             Self::DataFrameNotNull => "dataframe_notnull",
             Self::DataFrameCount => "dataframe_count",
+            Self::DataFrameMode => "dataframe_mode",
+            Self::DataFrameRank => "dataframe_rank",
             Self::DataFrameFillNa => "dataframe_fillna",
             Self::DataFrameDropNa => "dataframe_dropna",
             Self::DataFrameDropNaColumns => "dataframe_dropna_columns",
@@ -816,7 +822,8 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::NanVar
         | FixtureOperation::NanCount
         | FixtureOperation::SeriesCount
-        | FixtureOperation::DataFrameCount => &["CC-005"],
+        | FixtureOperation::DataFrameCount
+        | FixtureOperation::DataFrameMode => &["CC-005"],
         FixtureOperation::FillNa
         | FixtureOperation::DropNa
         | FixtureOperation::SeriesIsNa
@@ -853,6 +860,7 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::DataFrameDropDuplicates
         | FixtureOperation::DataFrameSortIndex
         | FixtureOperation::DataFrameSortValues
+        | FixtureOperation::DataFrameRank
         | FixtureOperation::DataFrameDiff
         | FixtureOperation::DataFramePctChange => &["CC-004"],
     }
@@ -1497,6 +1505,7 @@ pub fn enforce_packet_gates(
     config: &HarnessConfig,
     reports: &[PacketParityReport],
 ) -> Result<(), HarnessError> {
+    ensure_phase2c_parity_reports(config)?;
     let mut failures = Vec::new();
     for report in reports {
         let packet_id = report.packet_id.as_deref().unwrap_or("<unknown>");
@@ -1563,6 +1572,49 @@ pub fn append_phase2c_drift_history(
     }
 
     Ok(history_path)
+}
+
+fn ensure_phase2c_parity_reports(config: &HarnessConfig) -> Result<(), HarnessError> {
+    let phase_root = config.repo_root.join("artifacts/phase2c");
+    if !phase_root.exists() {
+        return Ok(());
+    }
+    let packet_root = config.packet_fixture_root();
+    if !packet_root.exists() {
+        return Ok(());
+    }
+    let mut packet_ids: BTreeSet<String> = BTreeSet::new();
+    for entry in fs::read_dir(&packet_root)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        let fixture = load_fixture(&path)?;
+        packet_ids.insert(fixture.packet_id);
+    }
+
+    for packet_id in packet_ids {
+        let report_path = phase_root.join(&packet_id).join("parity_report.json");
+        if report_path.exists() {
+            continue;
+        }
+        let fixture_count = load_fixtures(config, Some(&packet_id))?.len();
+        let synthetic = PacketParityReport {
+            suite: format!("phase2c_packets:{packet_id}"),
+            packet_id: Some(packet_id.clone()),
+            oracle_present: config.oracle_root.exists(),
+            fixture_count,
+            passed: 0,
+            failed: fixture_count,
+            results: Vec::new(),
+        };
+        write_packet_artifacts(config, &synthetic)?;
+    }
+    Ok(())
 }
 
 // === Differential Harness: Public API ===
@@ -4047,6 +4099,65 @@ fn run_fixture_operation(
                 ),
             }
         }
+        FixtureOperation::DataFrameMode => {
+            let frame = build_dataframe(require_frame(fixture)?)
+                .map_err(|err| format!("frame build failed: {err}"))?;
+            let actual = frame.mode().map_err(|err| err.to_string());
+            match expected {
+                ResolvedExpected::Frame(frame) => compare_dataframe_expected(&actual?, &frame),
+                ResolvedExpected::ErrorContains(substr) => match actual {
+                    Err(message) if message.contains(&substr) => Ok(()),
+                    Err(message) => Err(format!(
+                        "expected dataframe_mode error containing '{substr}', got '{message}'"
+                    )),
+                    Ok(_) => Err(format!(
+                        "expected dataframe_mode to fail with error containing '{substr}'"
+                    )),
+                },
+                ResolvedExpected::ErrorAny => {
+                    if actual.is_err() {
+                        Ok(())
+                    } else {
+                        Err("expected dataframe_mode to fail but operation succeeded".to_owned())
+                    }
+                }
+                _ => Err(
+                    "expected_frame or expected_error is required for dataframe_mode".to_owned(),
+                ),
+            }
+        }
+        FixtureOperation::DataFrameRank => {
+            let frame = build_dataframe(require_frame(fixture)?)
+                .map_err(|err| format!("frame build failed: {err}"))?;
+            let method = fixture.rank_method.as_deref().unwrap_or("average");
+            let na_option = fixture.rank_na_option.as_deref().unwrap_or("keep");
+            let ascending = resolve_sort_ascending(fixture);
+            let actual = frame
+                .rank(method, ascending, na_option)
+                .map_err(|err| err.to_string());
+            match expected {
+                ResolvedExpected::Frame(frame) => compare_dataframe_expected(&actual?, &frame),
+                ResolvedExpected::ErrorContains(substr) => match actual {
+                    Err(message) if message.contains(&substr) => Ok(()),
+                    Err(message) => Err(format!(
+                        "expected dataframe_rank error containing '{substr}', got '{message}'"
+                    )),
+                    Ok(_) => Err(format!(
+                        "expected dataframe_rank to fail with error containing '{substr}'"
+                    )),
+                },
+                ResolvedExpected::ErrorAny => {
+                    if actual.is_err() {
+                        Ok(())
+                    } else {
+                        Err("expected dataframe_rank to fail but operation succeeded".to_owned())
+                    }
+                }
+                _ => Err(
+                    "expected_frame or expected_error is required for dataframe_rank".to_owned(),
+                ),
+            }
+        }
         FixtureOperation::DataFrameDuplicated => {
             let frame = build_dataframe(require_frame(fixture)?)
                 .map_err(|err| format!("frame build failed: {err}"))?;
@@ -4549,6 +4660,8 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::DataFrameIloc
         | FixtureOperation::DataFrameHead
         | FixtureOperation::DataFrameTail
+        | FixtureOperation::DataFrameMode
+        | FixtureOperation::DataFrameRank
         | FixtureOperation::DataFrameFromSeries
         | FixtureOperation::DataFrameFromDict
         | FixtureOperation::DataFrameFromRecords
@@ -4826,6 +4939,8 @@ fn capture_live_oracle_expected(
         | FixtureOperation::DataFrameIloc
         | FixtureOperation::DataFrameHead
         | FixtureOperation::DataFrameTail
+        | FixtureOperation::DataFrameMode
+        | FixtureOperation::DataFrameRank
         | FixtureOperation::DataFrameFromSeries
         | FixtureOperation::DataFrameFromDict
         | FixtureOperation::DataFrameFromRecords
@@ -5722,6 +5837,20 @@ fn execute_dataframe_fixture_operation(fixture: &PacketFixture) -> Result<DataFr
             let frame = build_dataframe(require_frame(fixture)?)
                 .map_err(|err| format!("frame build failed: {err}"))?;
             frame.notnull().map_err(|err| err.to_string())
+        }
+        FixtureOperation::DataFrameMode => {
+            let frame = build_dataframe(require_frame(fixture)?)
+                .map_err(|err| format!("frame build failed: {err}"))?;
+            frame.mode().map_err(|err| err.to_string())
+        }
+        FixtureOperation::DataFrameRank => {
+            let frame = build_dataframe(require_frame(fixture)?)
+                .map_err(|err| format!("frame build failed: {err}"))?;
+            let method = fixture.rank_method.as_deref().unwrap_or("average");
+            let na_option = fixture.rank_na_option.as_deref().unwrap_or("keep");
+            let ascending = resolve_sort_ascending(fixture);
+            frame.rank(method, ascending, na_option)
+                .map_err(|err| err.to_string())
         }
         FixtureOperation::DataFrameFillNa => {
             let frame = build_dataframe(require_frame(fixture)?)
@@ -7363,6 +7492,85 @@ fn execute_and_compare_differential(
                 _ => {
                     Err("expected_series or expected_error required for dataframe_count".to_owned())
                 }
+            }
+        }
+        FixtureOperation::DataFrameMode => {
+            let frame = build_dataframe(require_frame(fixture)?)
+                .map_err(|err| format!("frame build failed: {err}"))?;
+            let actual = frame.mode().map_err(|err| err.to_string());
+            match expected {
+                ResolvedExpected::Frame(frame) => Ok(diff_dataframe(&actual?, &frame)),
+                ResolvedExpected::ErrorContains(substr) => Ok(match actual {
+                    Err(message) if message.contains(&substr) => Vec::new(),
+                    Err(message) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "dataframe_mode.error",
+                        format!(
+                            "expected dataframe_mode error containing '{substr}', got '{message}'"
+                        ),
+                    )],
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "dataframe_mode.error",
+                        "expected dataframe_mode to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                ResolvedExpected::ErrorAny => Ok(match actual {
+                    Err(_) => Vec::new(),
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "dataframe_mode.error",
+                        "expected dataframe_mode to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                _ => Err(
+                    "expected_frame or expected_error required for dataframe_mode".to_owned(),
+                ),
+            }
+        }
+        FixtureOperation::DataFrameRank => {
+            let frame = build_dataframe(require_frame(fixture)?)
+                .map_err(|err| format!("frame build failed: {err}"))?;
+            let method = fixture.rank_method.as_deref().unwrap_or("average");
+            let na_option = fixture.rank_na_option.as_deref().unwrap_or("keep");
+            let ascending = resolve_sort_ascending(fixture);
+            let actual = frame
+                .rank(method, ascending, na_option)
+                .map_err(|err| err.to_string());
+            match expected {
+                ResolvedExpected::Frame(frame) => Ok(diff_dataframe(&actual?, &frame)),
+                ResolvedExpected::ErrorContains(substr) => Ok(match actual {
+                    Err(message) if message.contains(&substr) => Vec::new(),
+                    Err(message) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "dataframe_rank.error",
+                        format!(
+                            "expected dataframe_rank error containing '{substr}', got '{message}'"
+                        ),
+                    )],
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "dataframe_rank.error",
+                        "expected dataframe_rank to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                ResolvedExpected::ErrorAny => Ok(match actual {
+                    Err(_) => Vec::new(),
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "dataframe_rank.error",
+                        "expected dataframe_rank to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                _ => Err(
+                    "expected_frame or expected_error required for dataframe_rank".to_owned(),
+                ),
             }
         }
         FixtureOperation::DataFrameDuplicated => {

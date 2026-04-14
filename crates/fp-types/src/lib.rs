@@ -332,8 +332,10 @@ pub fn nanmin(values: &[Scalar]) -> Scalar {
             (Some(Scalar::Utf8(a)), Scalar::Utf8(b)) => if b < a { min = Some(v) },
             (Some(Scalar::Bool(a)), Scalar::Bool(b)) => if b < a { min = Some(v) },
             (Some(a), b) => {
-                if let (Ok(af), Ok(bf)) = (a.to_f64(), b.to_f64()) {
-                    if bf < af { min = Some(v) }
+                if let (Ok(af), Ok(bf)) = (a.to_f64(), b.to_f64())
+                    && bf < af
+                {
+                    min = Some(v);
                 }
             }
         }
@@ -357,8 +359,10 @@ pub fn nanmax(values: &[Scalar]) -> Scalar {
             (Some(Scalar::Utf8(a)), Scalar::Utf8(b)) => if b > a { max = Some(v) },
             (Some(Scalar::Bool(a)), Scalar::Bool(b)) => if b > a { max = Some(v) },
             (Some(a), b) => {
-                if let (Ok(af), Ok(bf)) = (a.to_f64(), b.to_f64()) {
-                    if bf > af { max = Some(v) }
+                if let (Ok(af), Ok(bf)) = (a.to_f64(), b.to_f64())
+                    && bf > af
+                {
+                    max = Some(v);
                 }
             }
         }

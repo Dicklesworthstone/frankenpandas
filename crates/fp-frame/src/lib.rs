@@ -1862,7 +1862,7 @@ impl Series {
             if val.is_missing() {
                 if let Some(fill) = last_valid {
                     consecutive_fills += 1;
-                    if limit.map_or(true, |l| consecutive_fills <= l) {
+                    if limit.is_none_or(|l| consecutive_fills <= l) {
                         out.push(fill.clone());
                     } else {
                         out.push(val.clone());
@@ -1895,7 +1895,7 @@ impl Series {
             if vals[i].is_missing() {
                 if let Some(fill) = next_valid {
                     consecutive_fills += 1;
-                    if limit.map_or(true, |l| consecutive_fills <= l) {
+                    if limit.is_none_or(|l| consecutive_fills <= l) {
                         out[i] = fill.clone();
                     } else {
                         out[i] = vals[i].clone();
@@ -6875,6 +6875,24 @@ pub struct SeriesGroupBy<'a> {
     by: &'a Series,
 }
 
+fn validate_rank_method(method: &str) -> Result<(), FrameError> {
+    match method {
+        "average" | "min" | "max" | "first" | "dense" => Ok(()),
+        _ => Err(FrameError::CompatibilityRejected(format!(
+            "rank method '{method}' not supported"
+        ))),
+    }
+}
+
+fn validate_rank_na_option(na_option: &str) -> Result<(), FrameError> {
+    match na_option {
+        "keep" | "top" | "bottom" => Ok(()),
+        _ => Err(FrameError::CompatibilityRejected(format!(
+            "na_option '{na_option}' not supported"
+        ))),
+    }
+}
+
 impl SeriesGroupBy<'_> {
     /// Build groups as (key_label -> Vec<row_index>).
     fn build_groups(
@@ -6995,6 +7013,8 @@ impl SeriesGroupBy<'_> {
     /// `ascending`: rank direction (default true = smallest gets rank 1)
     /// `na_option`: "keep" (NaN stays NaN), "top" (NaN gets lowest ranks), "bottom" (NaN gets highest ranks)
     pub fn rank(&self, method: &str, ascending: bool, na_option: &str) -> Result<Series, FrameError> {
+        validate_rank_method(method)?;
+        validate_rank_na_option(na_option)?;
         let (_order, order_keys, groups) = self.build_groups();
         let mut ranks = vec![Scalar::Null(NullKind::NaN); self.series.len()];
         
@@ -7091,10 +7111,10 @@ impl SeriesGroupBy<'_> {
                 "top" => {
                     let null_count = null_pos.len();
                     for &i in indices {
-                        if let Scalar::Float64(r) = &mut ranks[i] {
-                            if !r.is_nan() {
-                                *r += null_count as f64;
-                            }
+                        if let Scalar::Float64(r) = &mut ranks[i]
+                            && !r.is_nan()
+                        {
+                            *r += null_count as f64;
                         }
                     }
                     for (i, &pos) in null_pos.iter().enumerate() {
@@ -18023,7 +18043,7 @@ impl DataFrame {
         }
 
         if max_modes == 0 {
-            return Ok(Self::new(Index::new(Vec::new()), BTreeMap::new())?);
+            return Self::new(Index::new(Vec::new()), BTreeMap::new());
         }
 
         let mut result_cols = BTreeMap::new();
@@ -21439,6 +21459,8 @@ impl DataFrameGroupBy<'_> {
     /// `ascending`: rank direction (default true = smallest gets rank 1)
     /// `na_option`: "keep" (NaN stays NaN), "top" (NaN gets lowest ranks), "bottom" (NaN gets highest ranks)
     pub fn rank(&self, method: &str, ascending: bool, na_option: &str) -> Result<DataFrame, FrameError> {
+        validate_rank_method(method)?;
+        validate_rank_na_option(na_option)?;
         self.transform_groups(|vals| {
             let n = vals.len();
             let mut null_pos = Vec::new();
@@ -37168,6 +37190,56 @@ mod tests {
     }
 
     #[test]
+    fn groupby_rank_rejects_invalid_method() {
+        let df = DataFrame::from_dict(
+            &["g", "v"],
+            vec![
+                (
+                    "g",
+                    vec![Scalar::Utf8("a".to_owned()), Scalar::Utf8("a".to_owned())],
+                ),
+                ("v", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+            ],
+        )
+        .unwrap();
+
+        let err = df
+            .groupby(&["g"])
+            .unwrap()
+            .rank("sideways", true, "keep")
+            .expect_err("expected invalid method error");
+        assert!(
+            err.to_string().contains("rank method 'sideways' not supported"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn groupby_rank_rejects_invalid_na_option() {
+        let df = DataFrame::from_dict(
+            &["g", "v"],
+            vec![
+                (
+                    "g",
+                    vec![Scalar::Utf8("a".to_owned()), Scalar::Utf8("a".to_owned())],
+                ),
+                ("v", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+            ],
+        )
+        .unwrap();
+
+        let err = df
+            .groupby(&["g"])
+            .unwrap()
+            .rank("average", true, "sideways")
+            .expect_err("expected invalid na_option error");
+        assert!(
+            err.to_string().contains("na_option 'sideways' not supported"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
     fn groupby_shift() {
         let df = DataFrame::from_dict(
             &["g", "v"],
@@ -43433,6 +43505,54 @@ mod tests {
         let counts = gb.count().unwrap();
         assert_eq!(counts.column().values()[0], Scalar::Int64(2));
         assert_eq!(counts.column().values()[1], Scalar::Int64(2));
+    }
+
+    #[test]
+    fn test_series_groupby_rank_rejects_invalid_method() {
+        let values = Series::from_values(
+            "sales",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Float64(10.0), Scalar::Float64(20.0)],
+        )
+        .unwrap();
+        let groups = Series::from_values(
+            "region",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Utf8("A".into()), Scalar::Utf8("A".into())],
+        )
+        .unwrap();
+        let gb = values.groupby(&groups).unwrap();
+        let err = gb
+            .rank("sideways", true, "keep")
+            .expect_err("expected invalid method error");
+        assert!(
+            err.to_string().contains("rank method 'sideways' not supported"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_series_groupby_rank_rejects_invalid_na_option() {
+        let values = Series::from_values(
+            "sales",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Float64(10.0), Scalar::Float64(20.0)],
+        )
+        .unwrap();
+        let groups = Series::from_values(
+            "region",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Utf8("A".into()), Scalar::Utf8("A".into())],
+        )
+        .unwrap();
+        let gb = values.groupby(&groups).unwrap();
+        let err = gb
+            .rank("average", true, "sideways")
+            .expect_err("expected invalid na_option error");
+        assert!(
+            err.to_string().contains("na_option 'sideways' not supported"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

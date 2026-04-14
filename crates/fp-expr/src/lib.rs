@@ -851,22 +851,21 @@ fn tokenize(input: &str) -> Result<Vec<Token>, ExprError> {
                     i += 1;
                 }
             }
-            '.' => {
-                if i + 1 < chars.len() && chars[i + 1].is_ascii_digit() {
-                    let start = i;
+            '.' if i + 1 < chars.len() && chars[i + 1].is_ascii_digit() => {
+                let start = i;
+                i += 1;
+                while i < chars.len() && (chars[i].is_ascii_digit() || chars[i] == '.') {
                     i += 1;
-                    while i < chars.len() && (chars[i].is_ascii_digit() || chars[i] == '.') {
-                        i += 1;
-                    }
-                    let num_str: String = chars[start..i].iter().collect();
-                    tokens.push(Token::Float(num_str.parse::<f64>().map_err(|_| {
-                        ExprError::ParseError(format!("invalid float: {num_str}"))
-                    })?));
-                } else {
-                    return Err(ExprError::ParseError(format!(
-                        "unexpected character: '{c}'"
-                    )));
                 }
+                let num_str: String = chars[start..i].iter().collect();
+                tokens.push(Token::Float(num_str.parse::<f64>().map_err(|_| {
+                    ExprError::ParseError(format!("invalid float: {num_str}"))
+                })?));
+            }
+            '.' => {
+                return Err(ExprError::ParseError(format!(
+                    "unexpected character: '{c}'"
+                )));
             }
             '*' => {
                 if i + 1 < chars.len() && chars[i + 1] == '*' {

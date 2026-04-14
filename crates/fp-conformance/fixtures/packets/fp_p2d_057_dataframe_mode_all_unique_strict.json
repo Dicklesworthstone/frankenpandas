@@ -1,27 +1,24 @@
 {
   "packet_id": "FP-P2D-057",
-  "case_id": "dataframe_mode_ties_strict",
+  "case_id": "dataframe_mode_all_unique_strict",
   "mode": "strict",
   "operation": "dataframe_mode",
   "frame": {
     "index": [
       { "kind": "int64", "value": 0 },
       { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 2 },
-      { "kind": "int64", "value": 3 }
+      { "kind": "int64", "value": 2 }
     ],
     "columns": {
       "a": [
+        { "kind": "int64", "value": 3 },
         { "kind": "int64", "value": 1 },
-        { "kind": "int64", "value": 1 },
-        { "kind": "int64", "value": 2 },
         { "kind": "int64", "value": 2 }
       ],
       "b": [
-        { "kind": "int64", "value": 3 },
-        { "kind": "int64", "value": 3 },
-        { "kind": "int64", "value": 3 },
-        { "kind": "int64", "value": 4 }
+        { "kind": "int64", "value": 10 },
+        { "kind": "int64", "value": 11 },
+        { "kind": "int64", "value": 12 }
       ]
     },
     "column_order": ["a", "b"]
@@ -29,16 +26,19 @@
   "expected_frame": {
     "index": [
       { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 }
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 }
     ],
     "columns": {
       "a": [
         { "kind": "int64", "value": 1 },
-        { "kind": "int64", "value": 2 }
+        { "kind": "int64", "value": 2 },
+        { "kind": "int64", "value": 3 }
       ],
       "b": [
-        { "kind": "int64", "value": 3 },
-        { "kind": "null", "value": "na_n" }
+        { "kind": "int64", "value": 10 },
+        { "kind": "int64", "value": 11 },
+        { "kind": "int64", "value": 12 }
       ]
     },
     "column_order": ["a", "b"]

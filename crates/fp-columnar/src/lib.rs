@@ -319,23 +319,22 @@ fn scalar_compare(left: &Scalar, right: &Scalar, op: ComparisonOp) -> Result<boo
     // Coerce differing numeric types to avoid precision loss (e.g. Bool vs Int64).
     let left_dtype = left.dtype();
     let right_dtype = right.dtype();
-    if left_dtype != right_dtype {
-        if let Ok(common) = fp_types::common_dtype(left_dtype, right_dtype) {
-            if common == DType::Int64 {
-                let l_cast = fp_types::cast_scalar(left, common)?;
-                let r_cast = fp_types::cast_scalar(right, common)?;
-                // Handle Int64 comparisons to avoid precision loss in f64 cast.
-                if let (Scalar::Int64(a), Scalar::Int64(b)) = (&l_cast, &r_cast) {
-                    return Ok(match op {
-                        ComparisonOp::Gt => a > b,
-                        ComparisonOp::Lt => a < b,
-                        ComparisonOp::Eq => a == b,
-                        ComparisonOp::Ne => a != b,
-                        ComparisonOp::Ge => a >= b,
-                        ComparisonOp::Le => a <= b,
-                    });
-                }
-            }
+    if left_dtype != right_dtype
+        && let Ok(common) = fp_types::common_dtype(left_dtype, right_dtype)
+        && common == DType::Int64
+    {
+        let l_cast = fp_types::cast_scalar(left, common)?;
+        let r_cast = fp_types::cast_scalar(right, common)?;
+        // Handle Int64 comparisons to avoid precision loss in f64 cast.
+        if let (Scalar::Int64(a), Scalar::Int64(b)) = (&l_cast, &r_cast) {
+            return Ok(match op {
+                ComparisonOp::Gt => a > b,
+                ComparisonOp::Lt => a < b,
+                ComparisonOp::Eq => a == b,
+                ComparisonOp::Ne => a != b,
+                ComparisonOp::Ge => a >= b,
+                ComparisonOp::Le => a <= b,
+            });
         }
     }
 
