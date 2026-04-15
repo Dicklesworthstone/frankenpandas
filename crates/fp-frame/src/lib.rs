@@ -16163,8 +16163,66 @@ impl DataFrame {
         }
     }
 
-    /// Internal: select rows by index positions.
-    fn take_rows(&self, indices: &[usize]) -> Result<Self, FrameError> {
+    fn normalize_take_indices(
+        indices: &[i64],
+        len: usize,
+        axis: usize,
+    ) -> Result<Vec<usize>, FrameError> {
+        let len_i64 = i64::try_from(len).map_err(|_| {
+            FrameError::CompatibilityRejected(format!(
+                "take: axis {axis} is too large to index safely"
+            ))
+        })?;
+        let mut normalized = Vec::with_capacity(indices.len());
+        for &idx in indices {
+            let resolved = if idx < 0 {
+                len_i64.checked_add(idx).unwrap_or(-1)
+            } else {
+                idx
+            };
+            if resolved < 0 || resolved >= len_i64 {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "take: index {idx} out of bounds for axis {axis} with size {len}"
+                )));
+            }
+            normalized.push(usize::try_from(resolved).unwrap_or(usize::MAX));
+        }
+        Ok(normalized)
+    }
+
+    /// Return the elements in the given positional indices along an axis.
+    ///
+    /// Matches `df.take(indices, axis=0|1)`, including negative indices from the end.
+    pub fn take(&self, indices: &[i64], axis: usize) -> Result<Self, FrameError> {
+        match axis {
+            0 => {
+                let normalized = Self::normalize_take_indices(indices, self.len(), 0)?;
+                self.take_rows(&normalized)
+            }
+            1 => {
+                let normalized =
+                    Self::normalize_take_indices(indices, self.column_order.len(), 1)?;
+                self.take_columns(&normalized)
+            }
+            _ => Err(FrameError::CompatibilityRejected(format!(
+                "take: axis must be 0 or 1 (got {axis})"
+            ))),
+        }
+    }
+
+    /// Helper for selecting rows by normalized non-negative positional indices.
+    ///
+    /// Used by `df.take(indices, axis=0)` after negative indices have been resolved.
+    pub fn take_rows(&self, indices: &[usize]) -> Result<Self, FrameError> {
+        let n = self.len();
+        for &idx in indices {
+            if idx >= n {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "take: index {} out of bounds for axis 0 with size {}",
+                    idx, n
+                )));
+            }
+        }
         let labels = self.index.labels();
         let new_labels: Vec<IndexLabel> = indices.iter().map(|&i| labels[i].clone()).collect();
         let mut result_cols = BTreeMap::new();
@@ -20693,6 +20751,24 @@ impl DataFrame {
             }
             Self::new_with_column_order(Index::new(new_labels), columns, self.column_order.clone())
         }
+    }
+
+    /// Helper for selecting columns by normalized non-negative positional indices.
+    ///
+    /// Used by `df.take(indices, axis=1)` after negative indices have been resolved.
+    pub fn take_columns(&self, indices: &[usize]) -> Result<Self, FrameError> {
+        let n = self.column_order.len();
+        let mut selected_cols = Vec::with_capacity(indices.len());
+        for &idx in indices {
+            if idx >= n {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "take: index {} out of bounds for axis 1 with size {}",
+                    idx, n
+                )));
+            }
+            selected_cols.push(self.column_order[idx].as_str());
+        }
+        self.select_columns(&selected_cols)
     }
 
     // ── DataFrame utility: isin / equals / first_valid_index / last_valid_index ──
@@ -33965,6 +34041,31 @@ mod tests {
         assert!(col.values()[0].is_missing());
         assert_eq!(col.values()[1], Scalar::Float64(1.0));
         assert_eq!(col.values()[2], Scalar::Float64(2.0));
+    }
+
+    #[test]
+    fn dataframe_shift_axis1() {
+        let df = DataFrame::from_dict(
+            &["a", "b", "c"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0)]),
+                ("c", vec![Scalar::Float64(100.0), Scalar::Float64(200.0)]),
+            ],
+        )
+        .unwrap();
+
+        let result = df.shift_axis1(1).unwrap();
+        let cola = result.column("a").unwrap();
+        let colb = result.column("b").unwrap();
+        let colc = result.column("c").unwrap();
+
+        assert!(cola.values()[0].is_missing());
+        assert!(cola.values()[1].is_missing());
+        assert_eq!(colb.values()[0], Scalar::Float64(1.0));
+        assert_eq!(colb.values()[1], Scalar::Float64(2.0));
+        assert_eq!(colc.values()[0], Scalar::Float64(10.0));
+        assert_eq!(colc.values()[1], Scalar::Float64(20.0));
     }
 
     #[test]
