@@ -657,6 +657,24 @@ def parse_constructor_index(payload: dict[str, Any], op_name: str) -> list[Any] 
     return [label_from_json(item) for item in raw]
 
 
+def parse_optional_string_list(
+    payload: dict[str, Any], key: str, op_name: str
+) -> list[str]:
+    raw = payload.get(key)
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise OracleError(f"{op_name} {key} must be a list when provided")
+
+    values: list[str] = []
+    for item in raw:
+        value = str(item).strip()
+        if not value:
+            raise OracleError(f"{op_name} {key} entries must be non-empty strings")
+        values.append(value)
+    return values
+
+
 def parse_constructor_matrix_rows(
     payload: dict[str, Any], op_name: str
 ) -> list[list[Any]]:
@@ -804,6 +822,37 @@ def op_dataframe_constructor_list_like(pd, payload: dict[str, Any]) -> dict[str,
         out = pd.DataFrame(matrix_rows, index=index, columns=column_order)
     except Exception as exc:
         raise OracleError(f"dataframe_constructor_list_like failed: {exc}") from exc
+
+    return {"expected_frame": dataframe_to_json(out)}
+
+
+def op_dataframe_melt(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    if frame_payload is None:
+        raise OracleError("dataframe_melt requires frame payload")
+
+    frame = dataframe_from_json(pd, frame_payload)
+    id_vars = parse_optional_string_list(payload, "melt_id_vars", "dataframe_melt")
+    value_vars = parse_optional_string_list(
+        payload, "melt_value_vars", "dataframe_melt"
+    )
+    var_name = payload.get("melt_var_name")
+    value_name = payload.get("melt_value_name")
+
+    kwargs: dict[str, Any] = {}
+    if id_vars:
+        kwargs["id_vars"] = id_vars
+    if value_vars:
+        kwargs["value_vars"] = value_vars
+    if var_name is not None:
+        kwargs["var_name"] = str(var_name)
+    if value_name is not None:
+        kwargs["value_name"] = str(value_name)
+
+    try:
+        out = frame.melt(**kwargs)
+    except Exception as exc:
+        raise OracleError(f"dataframe_melt failed: {exc}") from exc
 
     return {"expected_frame": dataframe_to_json(out)}
 
@@ -1264,6 +1313,7 @@ def dataframe_to_json(frame) -> dict[str, Any]:
             str(name): [scalar_to_json(v) for v in frame[name].tolist()]
             for name in frame.columns.tolist()
         },
+        "column_order": [str(name) for name in frame.columns.tolist()],
     }
 
 
@@ -2074,6 +2124,8 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_dataframe_head(pd, payload)
     if op in {"dataframe_tail", "data_frame_tail"}:
         return op_dataframe_tail(pd, payload)
+    if op in {"dataframe_melt", "data_frame_melt"}:
+        return op_dataframe_melt(pd, payload)
     if op in {"dataframe_isna", "data_frame_isna"}:
         return op_dataframe_isna(pd, payload)
     if op in {"dataframe_notna", "data_frame_notna"}:

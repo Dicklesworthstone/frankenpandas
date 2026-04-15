@@ -773,7 +773,10 @@ impl Column {
                         ArithmeticOp::Add => lhs_i64.wrapping_add(rhs_i64),
                         ArithmeticOp::Sub => lhs_i64.wrapping_sub(rhs_i64),
                         ArithmeticOp::Mul => lhs_i64.wrapping_mul(rhs_i64),
-                        ArithmeticOp::Div | ArithmeticOp::Mod | ArithmeticOp::Pow | ArithmeticOp::FloorDiv => unreachable!(),
+                        ArithmeticOp::Div
+                        | ArithmeticOp::Mod
+                        | ArithmeticOp::Pow
+                        | ArithmeticOp::FloorDiv => unreachable!(),
                     };
                     return Ok(Scalar::Int64(result));
                 }
@@ -1495,7 +1498,9 @@ mod tests {
         assert_eq!(modulo.dtype(), DType::Float64);
         assert!(matches!(modulo.values()[0], Scalar::Float64(v) if (v - 1.0).abs() < 1e-10));
         assert!(matches!(modulo.values()[1], Scalar::Float64(v) if (v - 2.0).abs() < 1e-10));
-        assert!(matches!(modulo.values()[2], Scalar::Float64(v) if (v - (-3.0_f64 % 2.0)).abs() < 1e-10));
+        assert!(
+            matches!(modulo.values()[2], Scalar::Float64(v) if (v - (-3.0_f64 % 2.0)).abs() < 1e-10)
+        );
 
         let pow = left.binary_numeric(&right, ArithmeticOp::Pow).expect("pow");
         assert_eq!(pow.dtype(), DType::Float64);
@@ -1521,12 +1526,8 @@ mod tests {
             Scalar::Int64(30),
         ])
         .expect("left");
-        let right = Column::from_values(vec![
-            Scalar::Int64(3),
-            Scalar::Int64(7),
-            Scalar::Int64(4),
-        ])
-        .expect("right");
+        let right = Column::from_values(vec![Scalar::Int64(3), Scalar::Int64(7), Scalar::Int64(4)])
+            .expect("right");
 
         let modulo = left.binary_numeric(&right, ArithmeticOp::Mod).expect("mod");
         assert_eq!(modulo.dtype(), DType::Int64, "mod should preserve Int64");

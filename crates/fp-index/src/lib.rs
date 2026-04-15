@@ -1150,10 +1150,9 @@ pub fn multi_way_align(indexes: &[&Index]) -> MultiAlignmentPlan {
     // then append unseen labels from subsequent indexes in encounter order.
     // This matches iterative align_union(sort=False) semantics while avoiding
     // the O(N*K) pairwise alignment cascade.
-    let mut seen: std::collections::HashSet<IndexLabel> =
-        std::collections::HashSet::with_capacity(
-            indexes.iter().map(|idx| idx.labels().len()).sum(),
-        );
+    let mut seen: std::collections::HashSet<IndexLabel> = std::collections::HashSet::with_capacity(
+        indexes.iter().map(|idx| idx.labels().len()).sum(),
+    );
     let mut union_labels: Vec<IndexLabel> = Vec::new();
     for idx in indexes {
         for label in idx.labels() {

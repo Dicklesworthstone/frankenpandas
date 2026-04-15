@@ -16,7 +16,7 @@ use fp_index::{
     validate_alignment_plan,
 };
 use fp_runtime::{DecisionAction, EvidenceLedger, RuntimePolicy};
-use fp_types::{DType, NullKind, Scalar};
+use fp_types::{DType, NullKind, Scalar, common_dtype};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use thiserror::Error;
@@ -7012,12 +7012,17 @@ impl SeriesGroupBy<'_> {
     /// `method`: "average" (default), "min", "max", "first", "dense"
     /// `ascending`: rank direction (default true = smallest gets rank 1)
     /// `na_option`: "keep" (NaN stays NaN), "top" (NaN gets lowest ranks), "bottom" (NaN gets highest ranks)
-    pub fn rank(&self, method: &str, ascending: bool, na_option: &str) -> Result<Series, FrameError> {
+    pub fn rank(
+        &self,
+        method: &str,
+        ascending: bool,
+        na_option: &str,
+    ) -> Result<Series, FrameError> {
         validate_rank_method(method)?;
         validate_rank_na_option(na_option)?;
         let (_order, order_keys, groups) = self.build_groups();
         let mut ranks = vec![Scalar::Null(NullKind::NaN); self.series.len()];
-        
+
         for key in &order_keys {
             let indices = &groups[key];
             let mut null_pos = Vec::new();
@@ -7045,10 +7050,13 @@ impl SeriesGroupBy<'_> {
                     let mut i = 0;
                     while i < sortable.len() {
                         let mut j = i + 1;
-                        while j < sortable.len() && (sortable[j].1 - sortable[i].1).abs() < f64::EPSILON {
+                        while j < sortable.len()
+                            && (sortable[j].1 - sortable[i].1).abs() < f64::EPSILON
+                        {
                             j += 1;
                         }
-                        let avg: f64 = ((i + 1)..=j).map(|r| r as f64).sum::<f64>() / (j - i) as f64;
+                        let avg: f64 =
+                            ((i + 1)..=j).map(|r| r as f64).sum::<f64>() / (j - i) as f64;
                         for item in &sortable[i..j] {
                             ranks[item.0] = Scalar::Float64(avg);
                         }
@@ -7059,7 +7067,9 @@ impl SeriesGroupBy<'_> {
                     let mut i = 0;
                     while i < sortable.len() {
                         let mut j = i + 1;
-                        while j < sortable.len() && (sortable[j].1 - sortable[i].1).abs() < f64::EPSILON {
+                        while j < sortable.len()
+                            && (sortable[j].1 - sortable[i].1).abs() < f64::EPSILON
+                        {
                             j += 1;
                         }
                         let min_rank = (i + 1) as f64;
@@ -7073,7 +7083,9 @@ impl SeriesGroupBy<'_> {
                     let mut i = 0;
                     while i < sortable.len() {
                         let mut j = i + 1;
-                        while j < sortable.len() && (sortable[j].1 - sortable[i].1).abs() < f64::EPSILON {
+                        while j < sortable.len()
+                            && (sortable[j].1 - sortable[i].1).abs() < f64::EPSILON
+                        {
                             j += 1;
                         }
                         let max_rank = j as f64;
@@ -7094,7 +7106,9 @@ impl SeriesGroupBy<'_> {
                     while i < sortable.len() {
                         dense_rank += 1;
                         let mut j = i + 1;
-                        while j < sortable.len() && (sortable[j].1 - sortable[i].1).abs() < f64::EPSILON {
+                        while j < sortable.len()
+                            && (sortable[j].1 - sortable[i].1).abs() < f64::EPSILON
+                        {
                             j += 1;
                         }
                         for item in &sortable[i..j] {
@@ -7130,8 +7144,12 @@ impl SeriesGroupBy<'_> {
                 _ => {}
             }
         }
-        
-        Series::from_values(self.series.name(), self.series.index.labels().to_vec(), ranks)
+
+        Series::from_values(
+            self.series.name(),
+            self.series.index.labels().to_vec(),
+            ranks,
+        )
     }
 
     /// Standard deviation of each group (ddof=1).
@@ -14490,11 +14508,16 @@ impl DataFrame {
             let src = &self.columns[vv];
             value_vals.extend_from_slice(src.values());
         }
-        // Determine the common dtype for the value column
+        // Determine a common dtype across all melted value columns so mixed
+        // numeric inputs promote the same way pandas does.
         let value_dtype = if actual_value_vars.is_empty() {
             DType::Float64
         } else {
-            self.columns[&actual_value_vars[0]].dtype()
+            actual_value_vars
+                .iter()
+                .map(|name| self.columns[name].dtype())
+                .try_fold(DType::Null, common_dtype)
+                .map_err(|err| FrameError::CompatibilityRejected(err.to_string()))?
         };
         result_cols.insert(
             val_col_name.to_string(),
@@ -21458,7 +21481,12 @@ impl DataFrameGroupBy<'_> {
     /// `method`: "average" (default), "min", "max", "first", "dense"
     /// `ascending`: rank direction (default true = smallest gets rank 1)
     /// `na_option`: "keep" (NaN stays NaN), "top" (NaN gets lowest ranks), "bottom" (NaN gets highest ranks)
-    pub fn rank(&self, method: &str, ascending: bool, na_option: &str) -> Result<DataFrame, FrameError> {
+    pub fn rank(
+        &self,
+        method: &str,
+        ascending: bool,
+        na_option: &str,
+    ) -> Result<DataFrame, FrameError> {
         validate_rank_method(method)?;
         validate_rank_na_option(na_option)?;
         self.transform_groups(|vals| {
@@ -21489,10 +21517,13 @@ impl DataFrameGroupBy<'_> {
                     let mut i = 0;
                     while i < sortable.len() {
                         let mut j = i + 1;
-                        while j < sortable.len() && (sortable[j].1 - sortable[i].1).abs() < f64::EPSILON {
+                        while j < sortable.len()
+                            && (sortable[j].1 - sortable[i].1).abs() < f64::EPSILON
+                        {
                             j += 1;
                         }
-                        let avg: f64 = ((i + 1)..=j).map(|r| r as f64).sum::<f64>() / (j - i) as f64;
+                        let avg: f64 =
+                            ((i + 1)..=j).map(|r| r as f64).sum::<f64>() / (j - i) as f64;
                         for item in &sortable[i..j] {
                             ranks[item.0] = avg;
                         }
@@ -21503,7 +21534,9 @@ impl DataFrameGroupBy<'_> {
                     let mut i = 0;
                     while i < sortable.len() {
                         let mut j = i + 1;
-                        while j < sortable.len() && (sortable[j].1 - sortable[i].1).abs() < f64::EPSILON {
+                        while j < sortable.len()
+                            && (sortable[j].1 - sortable[i].1).abs() < f64::EPSILON
+                        {
                             j += 1;
                         }
                         let min_rank = (i + 1) as f64;
@@ -21517,7 +21550,9 @@ impl DataFrameGroupBy<'_> {
                     let mut i = 0;
                     while i < sortable.len() {
                         let mut j = i + 1;
-                        while j < sortable.len() && (sortable[j].1 - sortable[i].1).abs() < f64::EPSILON {
+                        while j < sortable.len()
+                            && (sortable[j].1 - sortable[i].1).abs() < f64::EPSILON
+                        {
                             j += 1;
                         }
                         let max_rank = j as f64;
@@ -21538,7 +21573,9 @@ impl DataFrameGroupBy<'_> {
                     while i < sortable.len() {
                         dense_rank += 1;
                         let mut j = i + 1;
-                        while j < sortable.len() && (sortable[j].1 - sortable[i].1).abs() < f64::EPSILON {
+                        while j < sortable.len()
+                            && (sortable[j].1 - sortable[i].1).abs() < f64::EPSILON
+                        {
                             j += 1;
                         }
                         for item in &sortable[i..j] {
@@ -21572,13 +21609,16 @@ impl DataFrameGroupBy<'_> {
                 _ => {}
             }
 
-            ranks.into_iter().map(|r| {
-                if r.is_nan() {
-                    Scalar::Null(NullKind::NaN)
-                } else {
-                    Scalar::Float64(r)
-                }
-            }).collect()
+            ranks
+                .into_iter()
+                .map(|r| {
+                    if r.is_nan() {
+                        Scalar::Null(NullKind::NaN)
+                    } else {
+                        Scalar::Float64(r)
+                    }
+                })
+                .collect()
         })
     }
 
@@ -30300,6 +30340,40 @@ mod tests {
         assert!(melted.columns.contains_key("col_value"));
     }
 
+    #[test]
+    fn dataframe_melt_promotes_mixed_numeric_value_vars() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "id",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![Scalar::Utf8("row1".into()), Scalar::Utf8("row2".into())],
+            )
+            .unwrap(),
+            Series::from_values(
+                "ints",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![Scalar::Int64(1), Scalar::Int64(2)],
+            )
+            .unwrap(),
+            Series::from_values(
+                "floats",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![Scalar::Float64(2.5), Scalar::Float64(3.5)],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let melted = df.melt(&["id"], &["ints", "floats"], None, None).unwrap();
+        let values = melted.columns["value"].values();
+
+        assert_eq!(melted.columns["value"].dtype(), DType::Float64);
+        assert_eq!(values[0], Scalar::Float64(1.0));
+        assert_eq!(values[1], Scalar::Float64(2.0));
+        assert_eq!(values[2], Scalar::Float64(2.5));
+        assert_eq!(values[3], Scalar::Float64(3.5));
+    }
+
     // ── pivot_table tests ──
 
     #[test]
@@ -37181,7 +37255,11 @@ mod tests {
         )
         .unwrap();
 
-        let result = df.groupby(&["g"]).unwrap().rank("average", true, "keep").unwrap();
+        let result = df
+            .groupby(&["g"])
+            .unwrap()
+            .rank("average", true, "keep")
+            .unwrap();
         let v = result.column_as_series("v").unwrap();
         // Within group a: 30 -> rank 3, 10 -> rank 1, 20 -> rank 2
         assert_eq!(v.values()[0], Scalar::Float64(3.0));
@@ -37209,7 +37287,8 @@ mod tests {
             .rank("sideways", true, "keep")
             .expect_err("expected invalid method error");
         assert!(
-            err.to_string().contains("rank method 'sideways' not supported"),
+            err.to_string()
+                .contains("rank method 'sideways' not supported"),
             "unexpected error: {err}"
         );
     }
@@ -37234,7 +37313,8 @@ mod tests {
             .rank("average", true, "sideways")
             .expect_err("expected invalid na_option error");
         assert!(
-            err.to_string().contains("na_option 'sideways' not supported"),
+            err.to_string()
+                .contains("na_option 'sideways' not supported"),
             "unexpected error: {err}"
         );
     }
@@ -43526,7 +43606,8 @@ mod tests {
             .rank("sideways", true, "keep")
             .expect_err("expected invalid method error");
         assert!(
-            err.to_string().contains("rank method 'sideways' not supported"),
+            err.to_string()
+                .contains("rank method 'sideways' not supported"),
             "unexpected error: {err}"
         );
     }
@@ -43550,7 +43631,8 @@ mod tests {
             .rank("average", true, "sideways")
             .expect_err("expected invalid na_option error");
         assert!(
-            err.to_string().contains("na_option 'sideways' not supported"),
+            err.to_string()
+                .contains("na_option 'sideways' not supported"),
             "unexpected error: {err}"
         );
     }

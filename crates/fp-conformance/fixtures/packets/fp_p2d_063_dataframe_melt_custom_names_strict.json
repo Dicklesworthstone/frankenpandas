@@ -1,0 +1,41 @@
+{
+  "packet_id": "FP-P2D-063",
+  "case_id": "dataframe_melt_custom_names_strict",
+  "mode": "strict",
+  "operation": "dataframe_melt",
+  "melt_id_vars": ["key"],
+  "melt_value_vars": ["a"],
+  "melt_var_name": "col_name",
+  "melt_value_name": "col_value",
+  "frame": {
+    "index": [
+      { "kind": "int64", "value": 0 }
+    ],
+    "columns": {
+      "key": [
+        { "kind": "utf8", "value": "k" }
+      ],
+      "a": [
+        { "kind": "float64", "value": 1.0 }
+      ]
+    },
+    "column_order": ["key", "a"]
+  },
+  "expected_frame": {
+    "index": [
+      { "kind": "int64", "value": 0 }
+    ],
+    "columns": {
+      "key": [
+        { "kind": "utf8", "value": "k" }
+      ],
+      "col_name": [
+        { "kind": "utf8", "value": "a" }
+      ],
+      "col_value": [
+        { "kind": "float64", "value": 1.0 }
+      ]
+    },
+    "column_order": ["key", "col_name", "col_value"]
+  }
+}

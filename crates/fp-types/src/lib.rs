@@ -129,13 +129,19 @@ impl Scalar {
     pub fn semantic_cmp(&self, other: &Self) -> std::cmp::Ordering {
         match (self, other) {
             (Self::Int64(a), Self::Int64(b)) => a.cmp(b),
-            (Self::Float64(a), Self::Float64(b)) => a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal),
+            (Self::Float64(a), Self::Float64(b)) => {
+                a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+            }
             (Self::Utf8(a), Self::Utf8(b)) => a.cmp(b),
             (Self::Bool(a), Self::Bool(b)) => a.cmp(b),
             (Self::Null(a), Self::Null(b)) => a.cmp(b),
             // Cross-numeric comparison
-            (Self::Int64(a), Self::Float64(b)) => (*a as f64).partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal),
-            (Self::Float64(a), Self::Int64(b)) => a.partial_cmp(&(*b as f64)).unwrap_or(std::cmp::Ordering::Equal),
+            (Self::Int64(a), Self::Float64(b)) => (*a as f64)
+                .partial_cmp(b)
+                .unwrap_or(std::cmp::Ordering::Equal),
+            (Self::Float64(a), Self::Int64(b)) => a
+                .partial_cmp(&(*b as f64))
+                .unwrap_or(std::cmp::Ordering::Equal),
             // Fallback to debug representation for inconsistent types
             (a, b) => format!("{a:?}").cmp(&format!("{b:?}")),
         }
@@ -327,10 +333,26 @@ pub fn nanmin(values: &[Scalar]) -> Scalar {
         }
         match (min, v) {
             (None, _) => min = Some(v),
-            (Some(Scalar::Int64(a)), Scalar::Int64(b)) => if b < a { min = Some(v) },
-            (Some(Scalar::Float64(a)), Scalar::Float64(b)) => if *b < *a { min = Some(v) },
-            (Some(Scalar::Utf8(a)), Scalar::Utf8(b)) => if b < a { min = Some(v) },
-            (Some(Scalar::Bool(a)), Scalar::Bool(b)) => if b < a { min = Some(v) },
+            (Some(Scalar::Int64(a)), Scalar::Int64(b)) => {
+                if b < a {
+                    min = Some(v)
+                }
+            }
+            (Some(Scalar::Float64(a)), Scalar::Float64(b)) => {
+                if *b < *a {
+                    min = Some(v)
+                }
+            }
+            (Some(Scalar::Utf8(a)), Scalar::Utf8(b)) => {
+                if b < a {
+                    min = Some(v)
+                }
+            }
+            (Some(Scalar::Bool(a)), Scalar::Bool(b)) => {
+                if b < a {
+                    min = Some(v)
+                }
+            }
             (Some(a), b) => {
                 if let (Ok(af), Ok(bf)) = (a.to_f64(), b.to_f64())
                     && bf < af
@@ -354,10 +376,26 @@ pub fn nanmax(values: &[Scalar]) -> Scalar {
         }
         match (max, v) {
             (None, _) => max = Some(v),
-            (Some(Scalar::Int64(a)), Scalar::Int64(b)) => if b > a { max = Some(v) },
-            (Some(Scalar::Float64(a)), Scalar::Float64(b)) => if *b > *a { max = Some(v) },
-            (Some(Scalar::Utf8(a)), Scalar::Utf8(b)) => if b > a { max = Some(v) },
-            (Some(Scalar::Bool(a)), Scalar::Bool(b)) => if b > a { max = Some(v) },
+            (Some(Scalar::Int64(a)), Scalar::Int64(b)) => {
+                if b > a {
+                    max = Some(v)
+                }
+            }
+            (Some(Scalar::Float64(a)), Scalar::Float64(b)) => {
+                if *b > *a {
+                    max = Some(v)
+                }
+            }
+            (Some(Scalar::Utf8(a)), Scalar::Utf8(b)) => {
+                if b > a {
+                    max = Some(v)
+                }
+            }
+            (Some(Scalar::Bool(a)), Scalar::Bool(b)) => {
+                if b > a {
+                    max = Some(v)
+                }
+            }
             (Some(a), b) => {
                 if let (Ok(af), Ok(bf)) = (a.to_f64(), b.to_f64())
                     && bf > af

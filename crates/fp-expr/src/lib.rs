@@ -823,7 +823,8 @@ fn tokenize(input: &str) -> Result<Vec<Token>, ExprError> {
                 {
                     let start = i;
                     let mut scan = i + 1;
-                    while scan < chars.len() && (chars[scan].is_ascii_digit() || chars[scan] == '.') {
+                    while scan < chars.len() && (chars[scan].is_ascii_digit() || chars[scan] == '.')
+                    {
                         scan += 1;
                     }
                     let mut after = scan;
@@ -2350,7 +2351,10 @@ mod tests {
                 matches!(*left, Expr::FloorDiv { .. }),
                 "expected FloorDiv, got {left:?}"
             );
-            if let Expr::FloorDiv { left: inner_left, .. } = *left {
+            if let Expr::FloorDiv {
+                left: inner_left, ..
+            } = *left
+            {
                 assert!(
                     matches!(*inner_left, Expr::Pow { .. }),
                     "expected Pow, got {inner_left:?}"
@@ -2587,12 +2591,8 @@ mod tests {
         let mut ledger = EvidenceLedger::new();
 
         let frame = fp_frame::DataFrame::from_series(vec![
-            fp_frame::Series::from_values(
-                "anchor",
-                vec![0_i64.into()],
-                vec![Scalar::Int64(1)],
-            )
-            .unwrap(),
+            fp_frame::Series::from_values("anchor", vec![0_i64.into()], vec![Scalar::Int64(1)])
+                .unwrap(),
         ])
         .unwrap();
 

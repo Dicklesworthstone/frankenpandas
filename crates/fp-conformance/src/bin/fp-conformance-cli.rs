@@ -108,14 +108,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if case.status != fp_conformance::CaseStatus::Fail {
                     continue;
                 }
-                let mismatch = case
-                    .mismatch
-                    .as_deref()
-                    .unwrap_or("<no mismatch details>");
-                let class = case
-                    .mismatch_class
-                    .as_deref()
-                    .unwrap_or("<none>");
+                let mismatch = case.mismatch.as_deref().unwrap_or("<no mismatch details>");
+                let class = case.mismatch_class.as_deref().unwrap_or("<none>");
                 println!(
                     "  mismatch case={} op={:?} class={} details={}",
                     case.case_id, case.operation, class, mismatch

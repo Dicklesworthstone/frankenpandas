@@ -15,12 +15,13 @@
 | DataFrame Selection | 4 | 35 | ✅ Core |
 | DataFrame Merge/Join | 3 | 48 | ✅ Core |
 | DataFrame Transform | 8 | 32 | ✅ Core |
+| DataFrame Reshape | 1 | 4 | ⚠️ Started |
 | DataFrame Aggregation | 4 | 10 | ⚠️ Light |
 | GroupBy | 10 | 24 | ⚠️ Light |
 | Index Operations | 5 | 14 | ✅ Core |
 | NaN Aggregations | 7 | 17 | ✅ Core |
 | IO (CSV) | 1 | 16 | ✅ Core |
-| **Total** | **69** | **463** | **Partial** |
+| **Total** | **70** | **467** | **Partial** |
 
 ## Operation Coverage Detail
 
@@ -51,7 +52,7 @@
 | series_join | 4 | ✅ | Join types |
 | series_concat | 2 | ⚠️ | Needs more cases |
 
-### DataFrame Operations (Fixtures: 270)
+### DataFrame Operations (Fixtures: 274)
 
 | Operation | Fixtures | Status | Notes |
 |-----------|:--------:|:------:|-------|
@@ -79,6 +80,7 @@
 | dataframe_count | 4 | ⚠️ | Axis options |
 | dataframe_diff | 4 | ⚠️ | Period options |
 | dataframe_pct_change | 3 | ⚠️ | Period options |
+| dataframe_melt | 4 | ⚠️ | Basic reshape parity started |
 | dataframe_duplicated | 3 | ⚠️ | Subset options |
 | dataframe_drop_duplicates | 3 | ⚠️ | Keep options |
 | dataframe_set_index | 3 | ⚠️ | Column to index |
@@ -224,7 +226,7 @@ python3 crates/fp-conformance/oracle/pandas_oracle.py \
 | P0: Core arithmetic/selection | 95% | ~85% | Add edge cases |
 | P1: Merge/Join/Concat | 90% | ~80% | Add validation modes |
 | P2: GroupBy | 80% | ~40% | Major expansion needed |
-| P3: Reshape (pivot/melt) | 70% | 0% | Not started |
+| P3: Reshape (pivot/melt) | 70% | ~10% | Melt started; pivot/stack/unstack still open |
 | P4: Window functions | 60% | 0% | Not started |
 | P5: IO formats | 50% | ~15% | CSV only |
 
@@ -232,6 +234,6 @@ python3 crates/fp-conformance/oracle/pandas_oracle.py \
 
 1. **High priority:** Add more GroupBy edge case fixtures
 2. **High priority:** Add Series diff/pct_change fixtures
-3. **Medium:** Add DataFrame reshape (pivot, melt) fixtures
+3. **Medium:** Expand reshape coverage beyond melt into pivot/pivot_table/stack/unstack
 4. **Medium:** Add rolling/expanding window fixtures
 5. **Low:** Add additional IO format support (JSON, Parquet)

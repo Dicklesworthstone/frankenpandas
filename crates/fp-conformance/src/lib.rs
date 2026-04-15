@@ -297,6 +297,8 @@ pub enum FixtureOperation {
     DataFrameDiff,
     #[serde(rename = "dataframe_pct_change", alias = "data_frame_pct_change")]
     DataFramePctChange,
+    #[serde(rename = "dataframe_melt", alias = "data_frame_melt")]
+    DataFrameMelt,
     // FP-P2D-014: DataFrame merge/join/concat parity matrix
     #[serde(rename = "dataframe_merge", alias = "data_frame_merge")]
     DataFrameMerge,
@@ -401,6 +403,7 @@ impl FixtureOperation {
             Self::DataFrameSortValues => "dataframe_sort_values",
             Self::DataFrameDiff => "dataframe_diff",
             Self::DataFramePctChange => "dataframe_pct_change",
+            Self::DataFrameMelt => "dataframe_melt",
             Self::DataFrameMerge => "dataframe_merge",
             Self::DataFrameMergeIndex => "dataframe_merge_index",
             Self::DataFrameMergeAsof => "dataframe_merge_asof",
@@ -623,6 +626,14 @@ pub struct PacketFixture {
     pub loc_labels: Option<Vec<IndexLabel>>,
     #[serde(default)]
     pub iloc_positions: Option<Vec<i64>>,
+    #[serde(default)]
+    pub melt_id_vars: Option<Vec<String>>,
+    #[serde(default)]
+    pub melt_value_vars: Option<Vec<String>>,
+    #[serde(default)]
+    pub melt_var_name: Option<String>,
+    #[serde(default)]
+    pub melt_value_name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1418,6 +1429,14 @@ struct OracleRequest {
     loc_labels: Option<Vec<IndexLabel>>,
     #[serde(default)]
     iloc_positions: Option<Vec<i64>>,
+    #[serde(default)]
+    melt_id_vars: Option<Vec<String>>,
+    #[serde(default)]
+    melt_value_vars: Option<Vec<String>>,
+    #[serde(default)]
+    melt_var_name: Option<String>,
+    #[serde(default)]
+    melt_value_name: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -4566,7 +4585,8 @@ fn run_fixture_operation(
         | FixtureOperation::DataFrameSortIndex
         | FixtureOperation::DataFrameSortValues
         | FixtureOperation::DataFrameDiff
-        | FixtureOperation::DataFramePctChange => {
+        | FixtureOperation::DataFramePctChange
+        | FixtureOperation::DataFrameMelt => {
             let actual = execute_dataframe_fixture_operation(fixture);
             match expected {
                 ResolvedExpected::Frame(frame) => compare_dataframe_expected(&actual?, &frame),
@@ -4803,7 +4823,8 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::DataFrameSortIndex
         | FixtureOperation::DataFrameSortValues
         | FixtureOperation::DataFrameDiff
-        | FixtureOperation::DataFramePctChange => fixture
+        | FixtureOperation::DataFramePctChange
+        | FixtureOperation::DataFrameMelt => fixture
             .expected_frame
             .clone()
             .map(ResolvedExpected::Frame)
@@ -4918,6 +4939,10 @@ fn capture_live_oracle_expected(
         csv_input: fixture.csv_input.clone(),
         loc_labels: fixture.loc_labels.clone(),
         iloc_positions: fixture.iloc_positions.clone(),
+        melt_id_vars: fixture.melt_id_vars.clone(),
+        melt_value_vars: fixture.melt_value_vars.clone(),
+        melt_var_name: fixture.melt_var_name.clone(),
+        melt_value_name: fixture.melt_value_name.clone(),
     };
     let input = serde_json::to_vec(&payload)?;
 
@@ -5087,7 +5112,8 @@ fn capture_live_oracle_expected(
         | FixtureOperation::DataFrameSortIndex
         | FixtureOperation::DataFrameSortValues
         | FixtureOperation::DataFrameDiff
-        | FixtureOperation::DataFramePctChange => response
+        | FixtureOperation::DataFramePctChange
+        | FixtureOperation::DataFrameMelt => response
             .expected_frame
             .map(ResolvedExpected::Frame)
             .ok_or_else(|| HarnessError::FixtureFormat("oracle omitted expected_frame".to_owned())),
@@ -5343,9 +5369,10 @@ fn execute_dataframe_merge_asof_fixture_operation(
     let right = build_dataframe(require_frame_right(fixture)?)
         .map_err(|err| format!("right frame build failed: {err}"))?;
 
-    let on = fixture.merge_on.as_deref().ok_or_else(|| {
-        "merge_on field required for dataframe_merge_asof".to_owned()
-    })?;
+    let on = fixture
+        .merge_on
+        .as_deref()
+        .ok_or_else(|| "merge_on field required for dataframe_merge_asof".to_owned())?;
 
     let direction_str = fixture.direction.as_deref().unwrap_or("backward");
     let direction = match direction_str {
@@ -5489,6 +5516,28 @@ fn resolve_duplicate_subset(fixture: &PacketFixture) -> Result<Option<Vec<String
                 .collect::<Result<Vec<_>, _>>()
         })
         .transpose()
+}
+
+fn resolve_optional_string_list(
+    values: Option<&Vec<String>>,
+    field_name: &str,
+) -> Result<Vec<String>, String> {
+    values
+        .map(|items| {
+            items
+                .iter()
+                .map(|item| {
+                    let trimmed = item.trim();
+                    if trimmed.is_empty() {
+                        Err(format!("{field_name} entries must be non-empty strings"))
+                    } else {
+                        Ok(trimmed.to_owned())
+                    }
+                })
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .transpose()
+        .map(|items| items.unwrap_or_default())
 }
 
 fn resolve_duplicate_keep(fixture: &PacketFixture) -> Result<DuplicateKeep, String> {
@@ -5958,6 +6007,24 @@ fn execute_dataframe_fixture_operation(fixture: &PacketFixture) -> Result<DataFr
                     .map_err(|err| err.to_string())
             }
         }
+        FixtureOperation::DataFrameMelt => {
+            let frame = build_dataframe(require_frame(fixture)?)
+                .map_err(|err| format!("frame build failed: {err}"))?;
+            let id_vars =
+                resolve_optional_string_list(fixture.melt_id_vars.as_ref(), "melt_id_vars")?;
+            let value_vars =
+                resolve_optional_string_list(fixture.melt_value_vars.as_ref(), "melt_value_vars")?;
+            let id_var_refs = id_vars.iter().map(String::as_str).collect::<Vec<_>>();
+            let value_var_refs = value_vars.iter().map(String::as_str).collect::<Vec<_>>();
+            frame
+                .melt(
+                    &id_var_refs,
+                    &value_var_refs,
+                    fixture.melt_var_name.as_deref(),
+                    fixture.melt_value_name.as_deref(),
+                )
+                .map_err(|err| err.to_string())
+        }
         FixtureOperation::DataFrameIsNa => {
             let frame = build_dataframe(require_frame(fixture)?)
                 .map_err(|err| format!("frame build failed: {err}"))?;
@@ -5989,7 +6056,8 @@ fn execute_dataframe_fixture_operation(fixture: &PacketFixture) -> Result<DataFr
             let method = fixture.rank_method.as_deref().unwrap_or("average");
             let na_option = fixture.rank_na_option.as_deref().unwrap_or("keep");
             let ascending = resolve_sort_ascending(fixture);
-            frame.rank(method, ascending, na_option)
+            frame
+                .rank(method, ascending, na_option)
                 .map_err(|err| err.to_string())
         }
         FixtureOperation::DataFrameFillNa => {
@@ -7042,7 +7110,11 @@ fn execute_and_compare_differential(
                     ));
                 }
             };
-            Ok(diff_bool(actual, expected, fixture.operation.operation_name()))
+            Ok(diff_bool(
+                actual,
+                expected,
+                fixture.operation.operation_name(),
+            ))
         }
         FixtureOperation::IndexFirstPositions => {
             let index = require_index(fixture)?;
@@ -7381,7 +7453,9 @@ fn execute_and_compare_differential(
                         ComparisonCategory::Value,
                         DriftLevel::Critical,
                         "series_diff.error",
-                        format!("expected series_diff error containing '{substr}', got '{message}'"),
+                        format!(
+                            "expected series_diff error containing '{substr}', got '{message}'"
+                        ),
                     )],
                     Ok(_) => vec![make_drift_record(
                         ComparisonCategory::Value,
@@ -7774,9 +7848,7 @@ fn execute_and_compare_differential(
                         "expected dataframe_mode to fail but operation succeeded".to_owned(),
                     )],
                 }),
-                _ => Err(
-                    "expected_frame or expected_error required for dataframe_mode".to_owned(),
-                ),
+                _ => Err("expected_frame or expected_error required for dataframe_mode".to_owned()),
             }
         }
         FixtureOperation::DataFrameRank => {
@@ -7816,9 +7888,7 @@ fn execute_and_compare_differential(
                         "expected dataframe_rank to fail but operation succeeded".to_owned(),
                     )],
                 }),
-                _ => Err(
-                    "expected_frame or expected_error required for dataframe_rank".to_owned(),
-                ),
+                _ => Err("expected_frame or expected_error required for dataframe_rank".to_owned()),
             }
         }
         FixtureOperation::DataFrameDuplicated => {
@@ -8168,7 +8238,8 @@ fn execute_and_compare_differential(
         | FixtureOperation::DataFrameSortIndex
         | FixtureOperation::DataFrameSortValues
         | FixtureOperation::DataFrameDiff
-        | FixtureOperation::DataFramePctChange => {
+        | FixtureOperation::DataFramePctChange
+        | FixtureOperation::DataFrameMelt => {
             let actual = execute_dataframe_fixture_operation(fixture);
             match expected {
                 ResolvedExpected::Frame(frame) => Ok(diff_dataframe(&actual?, &frame)),

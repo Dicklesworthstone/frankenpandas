@@ -1297,14 +1297,14 @@ fn merge_asof_grouped(
     // Validate by columns exist
     for col in by_cols {
         if left.columns().get(col).is_none() {
-            return Err(JoinError::Frame(FrameError::CompatibilityRejected(format!(
-                "merge_asof: 'by' column '{col}' not found in left"
-            ))));
+            return Err(JoinError::Frame(FrameError::CompatibilityRejected(
+                format!("merge_asof: 'by' column '{col}' not found in left"),
+            )));
         }
         if right.columns().get(col).is_none() {
-            return Err(JoinError::Frame(FrameError::CompatibilityRejected(format!(
-                "merge_asof: 'by' column '{col}' not found in right"
-            ))));
+            return Err(JoinError::Frame(FrameError::CompatibilityRejected(
+                format!("merge_asof: 'by' column '{col}' not found in right"),
+            )));
         }
     }
 
@@ -1381,10 +1381,7 @@ fn merge_asof_grouped(
         };
 
         // Extract right values for this group
-        let group_right_vals: Vec<f64> = group_indices
-            .iter()
-            .map(|&i| right_vals[i])
-            .collect();
+        let group_right_vals: Vec<f64> = group_indices.iter().map(|&i| right_vals[i]).collect();
 
         // Compute match within group
         let group_matches = compute_asof_matches(
@@ -4214,10 +4211,7 @@ mod tests {
 
         let quote_col_no_exact = result_no_exact.columns.get("quote").unwrap();
         // 1 has no previous right key, should be null
-        assert!(matches!(
-            quote_col_no_exact.values()[0],
-            Scalar::Null(_)
-        ));
+        assert!(matches!(quote_col_no_exact.values()[0], Scalar::Null(_)));
         // 2 should match previous (1)
         assert_eq!(quote_col_no_exact.values()[1], Scalar::Float64(100.0));
         // 3 should match previous (2)

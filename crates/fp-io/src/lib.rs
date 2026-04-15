@@ -187,25 +187,8 @@ pub fn write_csv_string(frame: &DataFrame) -> Result<String, IoError> {
 /// Default NA values recognized by pandas read_csv.
 /// See: https://pandas.pydata.org/docs/reference/api/pandas.read_csv.html
 const PANDAS_DEFAULT_NA_VALUES: &[&str] = &[
-    "",
-    "#N/A",
-    "#N/A N/A",
-    "#NA",
-    "-1.#IND",
-    "-1.#QNAN",
-    "-NaN",
-    "-nan",
-    "1.#IND",
-    "1.#QNAN",
-    "<NA>",
-    "N/A",
-    "NA",
-    "NULL",
-    "NaN",
-    "None",
-    "n/a",
-    "nan",
-    "null",
+    "", "#N/A", "#N/A N/A", "#NA", "-1.#IND", "-1.#QNAN", "-NaN", "-nan", "1.#IND", "1.#QNAN",
+    "<NA>", "N/A", "NA", "NULL", "NaN", "None", "n/a", "nan", "null",
 ];
 
 fn is_pandas_default_na(s: &str) -> bool {
@@ -407,11 +390,11 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
         for (idx, col) in columns.iter_mut().enumerate() {
             let field = record.get(idx).unwrap_or_default();
             col.push(parse_scalar_with_options(
-                    field,
-                    options.na_filter,
-                    options.keep_default_na,
-                    &options.na_values,
-                ));
+                field,
+                options.na_filter,
+                options.keep_default_na,
+                &options.na_values,
+            ));
         }
         row_count += 1;
     }
@@ -1431,9 +1414,8 @@ fn arrow_array_to_scalars(arr: &dyn Array, dt: &ArrowDataType) -> Result<Vec<Sca
                             arrow::datatypes::TimestampMicrosecondType,
                         >(typed.value(i))
                         {
-                            scalars.push(Scalar::Utf8(
-                                dt.format("%Y-%m-%d %H:%M:%S%.6f").to_string(),
-                            ));
+                            scalars
+                                .push(Scalar::Utf8(dt.format("%Y-%m-%d %H:%M:%S%.6f").to_string()));
                         } else {
                             scalars.push(Scalar::Null(NullKind::NaT));
                         }
@@ -1453,9 +1435,8 @@ fn arrow_array_to_scalars(arr: &dyn Array, dt: &ArrowDataType) -> Result<Vec<Sca
                             arrow::datatypes::TimestampNanosecondType,
                         >(typed.value(i))
                         {
-                            scalars.push(Scalar::Utf8(
-                                dt.format("%Y-%m-%d %H:%M:%S%.9f").to_string(),
-                            ));
+                            scalars
+                                .push(Scalar::Utf8(dt.format("%Y-%m-%d %H:%M:%S%.9f").to_string()));
                         } else {
                             scalars.push(Scalar::Null(NullKind::NaT));
                         }

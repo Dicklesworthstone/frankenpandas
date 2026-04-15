@@ -1331,10 +1331,7 @@ mod tests {
 
         // Duplicate-label alignment expands to a cartesian product of duplicate positions.
         assert_eq!(out.index().labels(), &["a".into(), "b".into()]);
-        assert_eq!(
-            out.values(),
-            &[Scalar::Float64(6.0), Scalar::Float64(3.0)]
-        );
+        assert_eq!(out.values(), &[Scalar::Float64(6.0), Scalar::Float64(3.0)]);
     }
 
     #[test]
