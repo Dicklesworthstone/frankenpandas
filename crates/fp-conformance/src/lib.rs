@@ -898,7 +898,8 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::DataFrameSortValues
         | FixtureOperation::DataFrameRank
         | FixtureOperation::DataFrameDiff
-        | FixtureOperation::DataFramePctChange => &["CC-004"],
+        | FixtureOperation::DataFramePctChange
+        | FixtureOperation::DataFrameMelt => &["CC-004"],
     }
 }
 
@@ -4879,7 +4880,7 @@ fn capture_live_oracle_expected(
 ) -> Result<ResolvedExpected, HarnessError> {
     let expects_error = fixture.expected_error_contains.is_some();
 
-    if !config.oracle_root.exists() {
+    if !config.oracle_root.exists() && !config.allow_system_pandas_fallback {
         return Err(HarnessError::OracleUnavailable(format!(
             "legacy oracle root does not exist: {}",
             config.oracle_root.display()
