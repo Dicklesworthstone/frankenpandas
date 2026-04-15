@@ -16200,8 +16200,7 @@ impl DataFrame {
                 self.take_rows(&normalized)
             }
             1 => {
-                let normalized =
-                    Self::normalize_take_indices(indices, self.column_order.len(), 1)?;
+                let normalized = Self::normalize_take_indices(indices, self.column_order.len(), 1)?;
                 self.take_columns(&normalized)
             }
             _ => Err(FrameError::CompatibilityRejected(format!(
@@ -34066,6 +34065,79 @@ mod tests {
         assert_eq!(colb.values()[1], Scalar::Float64(2.0));
         assert_eq!(colc.values()[0], Scalar::Float64(10.0));
         assert_eq!(colc.values()[1], Scalar::Float64(20.0));
+    }
+
+    #[test]
+    fn dataframe_take_axis0_supports_negative_indices() {
+        let df = DataFrame::from_dict_with_index(
+            vec![
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Utf8("x".into()),
+                        Scalar::Utf8("y".into()),
+                        Scalar::Utf8("z".into()),
+                    ],
+                ),
+            ],
+            vec![
+                IndexLabel::Int64(10),
+                IndexLabel::Int64(20),
+                IndexLabel::Int64(30),
+            ],
+        )
+        .unwrap();
+
+        let result = df.take(&[-1, -3], 0).unwrap();
+
+        assert_eq!(
+            result.index.labels(),
+            &[IndexLabel::Int64(30), IndexLabel::Int64(10)]
+        );
+        let col_a = result.column("a").unwrap();
+        let col_b = result.column("b").unwrap();
+        assert_eq!(col_a.values()[0], Scalar::Float64(3.0));
+        assert_eq!(col_a.values()[1], Scalar::Float64(1.0));
+        assert_eq!(col_b.values()[0], Scalar::Utf8("z".into()));
+        assert_eq!(col_b.values()[1], Scalar::Utf8("x".into()));
+        assert!(df.take(&[3], 0).is_err());
+    }
+
+    #[test]
+    fn dataframe_take_axis1_supports_negative_indices() {
+        let df = DataFrame::from_dict(
+            &["a", "b", "c"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0)]),
+                ("c", vec![Scalar::Float64(100.0), Scalar::Float64(200.0)]),
+            ],
+        )
+        .unwrap();
+
+        let result = df.take(&[-1, -3], 1).unwrap();
+        let column_names = result
+            .column_names()
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
+
+        assert_eq!(column_names, vec!["c".to_owned(), "a".to_owned()]);
+        let col_c = result.column("c").unwrap();
+        let col_a = result.column("a").unwrap();
+        assert_eq!(col_c.values()[0], Scalar::Float64(100.0));
+        assert_eq!(col_c.values()[1], Scalar::Float64(200.0));
+        assert_eq!(col_a.values()[0], Scalar::Float64(1.0));
+        assert_eq!(col_a.values()[1], Scalar::Float64(2.0));
+        assert!(df.take(&[0], 2).is_err());
     }
 
     #[test]

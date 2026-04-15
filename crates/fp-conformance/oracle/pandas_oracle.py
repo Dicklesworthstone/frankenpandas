@@ -1284,6 +1284,21 @@ def op_series_shift(pd, payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def op_dataframe_shift(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    if frame_payload is None:
+        raise OracleError("dataframe_shift requires frame payload")
+
+    periods = payload.get("shift_periods", 1)
+    axis = payload.get("shift_axis", 0)
+    if axis not in (0, 1):
+        raise OracleError(f"dataframe_shift shift_axis must be 0 or 1 (got {axis!r})")
+
+    frame = dataframe_from_json(pd, frame_payload)
+    out = frame.shift(periods=int(periods), axis=axis)
+    return {"expected_frame": dataframe_to_json(out)}
+
+
 def op_series_pct_change(pd, payload: dict[str, Any]) -> dict[str, Any]:
     left = payload.get("left")
     if left is None:
@@ -1400,6 +1415,31 @@ def op_dataframe_iloc(pd, payload: dict[str, Any]) -> dict[str, Any]:
         out = frame.iloc[positions]
     except IndexError as exc:
         raise OracleError(f"dataframe_iloc position lookup failed: {exc}") from exc
+
+    return {"expected_frame": dataframe_to_json(out)}
+
+
+def op_dataframe_take(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    take_indices = payload.get("take_indices")
+    axis = payload.get("take_axis", 0)
+    if frame_payload is None:
+        raise OracleError("dataframe_take requires frame payload")
+    if not isinstance(take_indices, list):
+        raise OracleError("dataframe_take requires take_indices list payload")
+    if axis not in (0, 1):
+        raise OracleError(f"dataframe_take take_axis must be 0 or 1 (got {axis!r})")
+
+    frame = dataframe_from_json(pd, frame_payload)
+    try:
+        indices = [int(value) for value in take_indices]
+    except Exception as exc:  # pragma: no cover - defensive conversion
+        raise OracleError(f"dataframe_take indices must be integers: {exc}") from exc
+
+    try:
+        out = frame.take(indices, axis=axis)
+    except IndexError as exc:
+        raise OracleError(f"dataframe_take position lookup failed: {exc}") from exc
 
     return {"expected_frame": dataframe_to_json(out)}
 
@@ -2173,6 +2213,8 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_dataframe_loc(pd, payload)
     if op == "dataframe_iloc":
         return op_dataframe_iloc(pd, payload)
+    if op in {"dataframe_take", "data_frame_take"}:
+        return op_dataframe_take(pd, payload)
     if op in {"dataframe_head", "data_frame_head"}:
         return op_dataframe_head(pd, payload)
     if op in {"dataframe_tail", "data_frame_tail"}:
@@ -2193,6 +2235,8 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_dataframe_mode(pd, payload)
     if op in {"dataframe_rank", "data_frame_rank"}:
         return op_dataframe_rank(pd, payload)
+    if op in {"dataframe_shift", "data_frame_shift"}:
+        return op_dataframe_shift(pd, payload)
     if op in {"dataframe_fillna", "data_frame_fillna"}:
         return op_dataframe_fillna(pd, payload)
     if op in {"dataframe_dropna", "data_frame_dropna"}:

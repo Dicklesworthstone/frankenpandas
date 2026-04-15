@@ -252,6 +252,8 @@ pub enum FixtureOperation {
     DataFrameLoc,
     #[serde(rename = "dataframe_iloc", alias = "data_frame_iloc")]
     DataFrameIloc,
+    #[serde(rename = "dataframe_take", alias = "data_frame_take")]
+    DataFrameTake,
     #[serde(rename = "dataframe_head", alias = "data_frame_head")]
     DataFrameHead,
     #[serde(rename = "dataframe_tail", alias = "data_frame_tail")]
@@ -297,6 +299,8 @@ pub enum FixtureOperation {
     DataFrameSortValues,
     #[serde(rename = "dataframe_diff", alias = "data_frame_diff")]
     DataFrameDiff,
+    #[serde(rename = "dataframe_shift", alias = "data_frame_shift")]
+    DataFrameShift,
     #[serde(rename = "dataframe_pct_change", alias = "data_frame_pct_change")]
     DataFramePctChange,
     #[serde(rename = "dataframe_melt", alias = "data_frame_melt")]
@@ -386,6 +390,7 @@ impl FixtureOperation {
             Self::SeriesIloc => "series_iloc",
             Self::DataFrameLoc => "dataframe_loc",
             Self::DataFrameIloc => "dataframe_iloc",
+            Self::DataFrameTake => "dataframe_take",
             Self::DataFrameHead => "dataframe_head",
             Self::DataFrameTail => "dataframe_tail",
             Self::DataFrameIsNa => "dataframe_isna",
@@ -405,6 +410,7 @@ impl FixtureOperation {
             Self::DataFrameSortIndex => "dataframe_sort_index",
             Self::DataFrameSortValues => "dataframe_sort_values",
             Self::DataFrameDiff => "dataframe_diff",
+            Self::DataFrameShift => "dataframe_shift",
             Self::DataFramePctChange => "dataframe_pct_change",
             Self::DataFrameMelt => "dataframe_melt",
             Self::DataFrameMerge => "dataframe_merge",
@@ -591,6 +597,8 @@ pub struct PacketFixture {
     #[serde(default)]
     pub shift_periods: Option<i64>,
     #[serde(default)]
+    pub shift_axis: Option<usize>,
+    #[serde(default)]
     pub pct_change_periods: Option<i64>,
     #[serde(default)]
     pub diff_axis: Option<usize>,
@@ -637,6 +645,10 @@ pub struct PacketFixture {
     pub loc_labels: Option<Vec<IndexLabel>>,
     #[serde(default)]
     pub iloc_positions: Option<Vec<i64>>,
+    #[serde(default)]
+    pub take_indices: Option<Vec<i64>>,
+    #[serde(default)]
+    pub take_axis: Option<usize>,
     #[serde(default)]
     pub melt_id_vars: Option<Vec<String>>,
     #[serde(default)]
@@ -900,6 +912,7 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::SeriesIloc
         | FixtureOperation::DataFrameLoc
         | FixtureOperation::DataFrameIloc
+        | FixtureOperation::DataFrameTake
         | FixtureOperation::DataFrameHead
         | FixtureOperation::DataFrameTail
         | FixtureOperation::DataFrameSetIndex
@@ -910,6 +923,7 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::DataFrameSortValues
         | FixtureOperation::DataFrameRank
         | FixtureOperation::DataFrameDiff
+        | FixtureOperation::DataFrameShift
         | FixtureOperation::DataFramePctChange
         | FixtureOperation::DataFrameMelt => &["CC-004"],
     }
@@ -1415,6 +1429,8 @@ struct OracleRequest {
     #[serde(default)]
     pub shift_periods: Option<i64>,
     #[serde(default)]
+    pub shift_axis: Option<usize>,
+    #[serde(default)]
     pub pct_change_periods: Option<i64>,
     #[serde(default)]
     pub diff_axis: Option<usize>,
@@ -1450,6 +1466,10 @@ struct OracleRequest {
     loc_labels: Option<Vec<IndexLabel>>,
     #[serde(default)]
     iloc_positions: Option<Vec<i64>>,
+    #[serde(default)]
+    take_indices: Option<Vec<i64>>,
+    #[serde(default)]
+    take_axis: Option<usize>,
     #[serde(default)]
     melt_id_vars: Option<Vec<String>>,
     #[serde(default)]
@@ -4571,6 +4591,31 @@ fn run_fixture_operation(
                 ),
             }
         }
+        FixtureOperation::DataFrameTake => {
+            let actual = execute_dataframe_fixture_operation(fixture);
+            match expected {
+                ResolvedExpected::Frame(frame) => compare_dataframe_expected(&actual?, &frame),
+                ResolvedExpected::ErrorContains(substr) => match actual {
+                    Err(message) if message.contains(&substr) => Ok(()),
+                    Err(message) => Err(format!(
+                        "expected dataframe_take error containing '{substr}', got '{message}'"
+                    )),
+                    Ok(_) => Err(format!(
+                        "expected dataframe_take to fail with error containing '{substr}'"
+                    )),
+                },
+                ResolvedExpected::ErrorAny => {
+                    if actual.is_err() {
+                        Ok(())
+                    } else {
+                        Err("expected dataframe_take to fail but operation succeeded".to_owned())
+                    }
+                }
+                _ => Err(
+                    "expected_frame or expected_error is required for dataframe_take".to_owned(),
+                ),
+            }
+        }
         FixtureOperation::DataFrameHead => {
             let frame = require_frame(fixture)?;
             let n = fixture
@@ -4648,6 +4693,7 @@ fn run_fixture_operation(
         | FixtureOperation::DataFrameSortIndex
         | FixtureOperation::DataFrameSortValues
         | FixtureOperation::DataFrameDiff
+        | FixtureOperation::DataFrameShift
         | FixtureOperation::DataFramePctChange
         | FixtureOperation::DataFrameMelt => {
             let actual = execute_dataframe_fixture_operation(fixture);
@@ -4859,6 +4905,7 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
             }),
         FixtureOperation::DataFrameLoc
         | FixtureOperation::DataFrameIloc
+        | FixtureOperation::DataFrameTake
         | FixtureOperation::DataFrameHead
         | FixtureOperation::DataFrameTail
         | FixtureOperation::DataFrameMode
@@ -4887,6 +4934,7 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::DataFrameSortIndex
         | FixtureOperation::DataFrameSortValues
         | FixtureOperation::DataFrameDiff
+        | FixtureOperation::DataFrameShift
         | FixtureOperation::DataFramePctChange
         | FixtureOperation::DataFrameMelt => fixture
             .expected_frame
@@ -4989,6 +5037,7 @@ fn capture_live_oracle_expected(
         tail_n: fixture.tail_n,
         diff_periods: fixture.diff_periods,
         shift_periods: fixture.shift_periods,
+        shift_axis: fixture.shift_axis,
         pct_change_periods: fixture.pct_change_periods,
         diff_axis: fixture.diff_axis,
         rank_method: fixture.rank_method.clone(),
@@ -5007,6 +5056,8 @@ fn capture_live_oracle_expected(
         csv_input: fixture.csv_input.clone(),
         loc_labels: fixture.loc_labels.clone(),
         iloc_positions: fixture.iloc_positions.clone(),
+        take_indices: fixture.take_indices.clone(),
+        take_axis: fixture.take_axis,
         melt_id_vars: fixture.melt_id_vars.clone(),
         melt_value_vars: fixture.melt_value_vars.clone(),
         melt_var_name: fixture.melt_var_name.clone(),
@@ -5153,6 +5204,7 @@ fn capture_live_oracle_expected(
             }),
         FixtureOperation::DataFrameLoc
         | FixtureOperation::DataFrameIloc
+        | FixtureOperation::DataFrameTake
         | FixtureOperation::DataFrameHead
         | FixtureOperation::DataFrameTail
         | FixtureOperation::DataFrameMode
@@ -5181,6 +5233,7 @@ fn capture_live_oracle_expected(
         | FixtureOperation::DataFrameSortIndex
         | FixtureOperation::DataFrameSortValues
         | FixtureOperation::DataFrameDiff
+        | FixtureOperation::DataFrameShift
         | FixtureOperation::DataFramePctChange
         | FixtureOperation::DataFrameMelt => response
             .expected_frame
@@ -5541,6 +5594,13 @@ fn require_iloc_positions(fixture: &PacketFixture) -> Result<&Vec<i64>, String> 
         .ok_or_else(|| "iloc_positions is required for iloc operations".to_owned())
 }
 
+fn require_take_indices(fixture: &PacketFixture) -> Result<&Vec<i64>, String> {
+    fixture
+        .take_indices
+        .as_ref()
+        .ok_or_else(|| "take_indices is required for dataframe_take".to_owned())
+}
+
 fn require_sort_column(fixture: &PacketFixture) -> Result<&str, String> {
     fixture
         .sort_column
@@ -5640,6 +5700,24 @@ fn resolve_rank_axis(fixture: &PacketFixture) -> Result<usize, String> {
         axis @ (0 | 1) => Ok(axis),
         axis => Err(format!(
             "rank_axis must be 0 or 1 for dataframe_rank (got {axis})"
+        )),
+    }
+}
+
+fn resolve_take_axis(fixture: &PacketFixture) -> Result<usize, String> {
+    match fixture.take_axis.unwrap_or(0) {
+        axis @ (0 | 1) => Ok(axis),
+        axis => Err(format!(
+            "take_axis must be 0 or 1 for dataframe_take (got {axis})"
+        )),
+    }
+}
+
+fn resolve_shift_axis(fixture: &PacketFixture) -> Result<usize, String> {
+    match fixture.shift_axis.unwrap_or(0) {
+        axis @ (0 | 1) => Ok(axis),
+        axis => Err(format!(
+            "shift_axis must be 0 or 1 for dataframe_shift (got {axis})"
         )),
     }
 }
@@ -6067,6 +6145,17 @@ fn execute_dataframe_fixture_operation(fixture: &PacketFixture) -> Result<DataFr
                 frame.diff(periods).map_err(|err| err.to_string())
             }
         }
+        FixtureOperation::DataFrameShift => {
+            let frame = build_dataframe(require_frame(fixture)?)
+                .map_err(|err| format!("frame build failed: {err}"))?;
+            let periods = fixture.shift_periods.unwrap_or(1);
+            let axis = resolve_shift_axis(fixture)?;
+            if axis == 1 {
+                frame.shift_axis1(periods).map_err(|err| err.to_string())
+            } else {
+                frame.shift(periods).map_err(|err| err.to_string())
+            }
+        }
         FixtureOperation::DataFramePctChange => {
             let frame = build_dataframe(require_frame(fixture)?)
                 .map_err(|err| format!("frame build failed: {err}"))?;
@@ -6193,6 +6282,13 @@ fn execute_dataframe_fixture_operation(fixture: &PacketFixture) -> Result<DataFr
                     resolve_drop_duplicates_ignore_index(fixture),
                 )
                 .map_err(|err| err.to_string())
+        }
+        FixtureOperation::DataFrameTake => {
+            let frame = build_dataframe(require_frame(fixture)?)
+                .map_err(|err| format!("frame build failed: {err}"))?;
+            let indices = require_take_indices(fixture)?;
+            let axis = resolve_take_axis(fixture)?;
+            frame.take(indices, axis).map_err(|err| err.to_string())
         }
         _ => Err(format!(
             "unsupported dataframe operation for fixture execution: {:?}",
@@ -8312,6 +8408,39 @@ fn execute_and_compare_differential(
                 _ => Err("expected_frame or expected_error required for dataframe_iloc".to_owned()),
             }
         }
+        FixtureOperation::DataFrameTake => {
+            let actual = execute_dataframe_fixture_operation(fixture);
+            match expected {
+                ResolvedExpected::Frame(frame) => Ok(diff_dataframe(&actual?, &frame)),
+                ResolvedExpected::ErrorContains(substr) => Ok(match actual {
+                    Err(message) if message.contains(&substr) => Vec::new(),
+                    Err(message) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "dataframe_take.error",
+                        format!(
+                            "expected dataframe_take error containing '{substr}', got '{message}'"
+                        ),
+                    )],
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "dataframe_take.error",
+                        "expected dataframe_take to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                ResolvedExpected::ErrorAny => Ok(match actual {
+                    Err(_) => Vec::new(),
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "dataframe_take.error",
+                        "expected dataframe_take to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                _ => Err("expected_frame or expected_error required for dataframe_take".to_owned()),
+            }
+        }
         FixtureOperation::DataFrameHead => {
             let frame = require_frame(fixture)?;
             let n = fixture
@@ -8405,6 +8534,7 @@ fn execute_and_compare_differential(
         | FixtureOperation::DataFrameSortIndex
         | FixtureOperation::DataFrameSortValues
         | FixtureOperation::DataFrameDiff
+        | FixtureOperation::DataFrameShift
         | FixtureOperation::DataFramePctChange
         | FixtureOperation::DataFrameMelt => {
             let actual = execute_dataframe_fixture_operation(fixture);
@@ -11291,6 +11421,179 @@ mod tests {
         if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
             eprintln!(
                 "live pandas unavailable; skipping dataframe rank axis=1 oracle test: {message}"
+            );
+            return;
+        }
+
+        let expected = expected_result.expect("live oracle expected");
+        assert!(
+            matches!(&expected, super::ResolvedExpected::Frame(_)),
+            "expected live oracle frame payload, got {expected:?}"
+        );
+        let super::ResolvedExpected::Frame(expected) = expected else {
+            return;
+        };
+
+        let actual = super::execute_dataframe_fixture_operation(&fixture).expect("actual frame");
+        super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
+    }
+
+    #[test]
+    fn live_oracle_dataframe_shift_axis1_matches_pandas() {
+        let mut cfg = HarnessConfig::default_paths();
+        cfg.allow_system_pandas_fallback = false;
+
+        let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+            "packet_id": "FP-P2D-066",
+            "case_id": "dataframe_shift_axis1_live",
+            "mode": "strict",
+            "operation": "dataframe_shift",
+            "oracle_source": "live_legacy_pandas",
+            "shift_periods": 1,
+            "shift_axis": 1,
+            "frame": {
+                "index": [
+                    { "kind": "int64", "value": 0 },
+                    { "kind": "int64", "value": 1 }
+                ],
+                "column_order": ["a", "b", "c"],
+                "columns": {
+                    "a": [
+                        { "kind": "float64", "value": 1.0 },
+                        { "kind": "float64", "value": 2.0 }
+                    ],
+                    "b": [
+                        { "kind": "float64", "value": 10.0 },
+                        { "kind": "float64", "value": 20.0 }
+                    ],
+                    "c": [
+                        { "kind": "float64", "value": 100.0 },
+                        { "kind": "float64", "value": 200.0 }
+                    ]
+                }
+            }
+        }))
+        .expect("fixture");
+
+        let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+        if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+            eprintln!(
+                "live pandas unavailable; skipping dataframe shift axis=1 oracle test: {message}"
+            );
+            return;
+        }
+
+        let expected = expected_result.expect("live oracle expected");
+        assert!(
+            matches!(&expected, super::ResolvedExpected::Frame(_)),
+            "expected live oracle frame payload, got {expected:?}"
+        );
+        let super::ResolvedExpected::Frame(expected) = expected else {
+            return;
+        };
+
+        let actual = super::execute_dataframe_fixture_operation(&fixture).expect("actual frame");
+        super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
+    }
+
+    #[test]
+    fn live_oracle_dataframe_take_axis0_negative_indices_matches_pandas() {
+        let mut cfg = HarnessConfig::default_paths();
+        cfg.allow_system_pandas_fallback = false;
+
+        let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+            "packet_id": "FP-P2D-067",
+            "case_id": "dataframe_take_axis0_negative_indices_live",
+            "mode": "strict",
+            "operation": "dataframe_take",
+            "oracle_source": "live_legacy_pandas",
+            "take_indices": [-1, -3],
+            "take_axis": 0,
+            "frame": {
+                "index": [
+                    { "kind": "int64", "value": 10 },
+                    { "kind": "int64", "value": 20 },
+                    { "kind": "int64", "value": 30 }
+                ],
+                "column_order": ["a", "b"],
+                "columns": {
+                    "a": [
+                        { "kind": "float64", "value": 1.0 },
+                        { "kind": "float64", "value": 2.0 },
+                        { "kind": "float64", "value": 3.0 }
+                    ],
+                    "b": [
+                        { "kind": "utf8", "value": "x" },
+                        { "kind": "utf8", "value": "y" },
+                        { "kind": "utf8", "value": "z" }
+                    ]
+                }
+            }
+        }))
+        .expect("fixture");
+
+        let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+        if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+            eprintln!(
+                "live pandas unavailable; skipping dataframe take axis=0 oracle test: {message}"
+            );
+            return;
+        }
+
+        let expected = expected_result.expect("live oracle expected");
+        assert!(
+            matches!(&expected, super::ResolvedExpected::Frame(_)),
+            "expected live oracle frame payload, got {expected:?}"
+        );
+        let super::ResolvedExpected::Frame(expected) = expected else {
+            return;
+        };
+
+        let actual = super::execute_dataframe_fixture_operation(&fixture).expect("actual frame");
+        super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
+    }
+
+    #[test]
+    fn live_oracle_dataframe_take_axis1_matches_pandas() {
+        let mut cfg = HarnessConfig::default_paths();
+        cfg.allow_system_pandas_fallback = false;
+
+        let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+            "packet_id": "FP-P2D-067",
+            "case_id": "dataframe_take_axis1_live",
+            "mode": "strict",
+            "operation": "dataframe_take",
+            "oracle_source": "live_legacy_pandas",
+            "take_indices": [1, 2],
+            "take_axis": 1,
+            "frame": {
+                "index": [
+                    { "kind": "int64", "value": 0 },
+                    { "kind": "int64", "value": 1 }
+                ],
+                "column_order": ["a", "b", "c"],
+                "columns": {
+                    "a": [
+                        { "kind": "float64", "value": 1.0 },
+                        { "kind": "float64", "value": 2.0 }
+                    ],
+                    "b": [
+                        { "kind": "float64", "value": 10.0 },
+                        { "kind": "float64", "value": 20.0 }
+                    ],
+                    "c": [
+                        { "kind": "float64", "value": 100.0 },
+                        { "kind": "float64", "value": 200.0 }
+                    ]
+                }
+            }
+        }))
+        .expect("fixture");
+
+        let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+        if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+            eprintln!(
+                "live pandas unavailable; skipping dataframe take axis=1 oracle test: {message}"
             );
             return;
         }
