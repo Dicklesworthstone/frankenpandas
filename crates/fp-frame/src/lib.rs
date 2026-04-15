@@ -14790,6 +14790,57 @@ impl DataFrame {
         })
     }
 
+    /// Ranks values across columns for each row independently.
+    ///
+    /// Matches `pd.DataFrame.rank(axis=1)`.
+    pub fn rank_axis1(
+        &self,
+        method: &str,
+        ascending: bool,
+        na_option: &str,
+    ) -> Result<Self, FrameError> {
+        let n_cols = self.column_order.len();
+        let n_rows = self.len();
+
+        if n_cols == 0 {
+            return Ok(self.clone());
+        }
+
+        let mut out_cols_data: Vec<Vec<Scalar>> = vec![Vec::with_capacity(n_rows); n_cols];
+
+        for row_idx in 0..n_rows {
+            // Collect row values
+            let mut row_vals = Vec::with_capacity(n_cols);
+            for col_name in &self.column_order {
+                row_vals.push(self.columns[col_name].values()[row_idx].clone());
+            }
+
+            // Rank the row (using a temporary Series to access the same logic)
+            let row_idx_labels: Vec<fp_index::IndexLabel> = (0..n_cols as i64)
+                .map(fp_index::IndexLabel::Int64)
+                .collect();
+            let row_series = Series::from_values("row", row_idx_labels, row_vals)?;
+            let ranked_row_series = row_series.rank(method, ascending, na_option)?;
+
+            // Scatter back to columns
+            for (col_idx, val) in ranked_row_series.column().values().iter().enumerate() {
+                out_cols_data[col_idx].push(val.clone());
+            }
+        }
+
+        let mut out_columns = BTreeMap::new();
+        for (i, name) in self.column_order.iter().enumerate() {
+            let col = Column::from_values(std::mem::take(&mut out_cols_data[i]))?;
+            out_columns.insert(name.clone(), col);
+        }
+
+        Ok(Self {
+            columns: out_columns,
+            column_order: self.column_order.clone(),
+            index: self.index.clone(),
+        })
+    }
+
     /// Unpivot (melt) a DataFrame from wide to long format.
     ///
     /// `id_vars`: columns to keep as identifiers
@@ -19022,6 +19073,36 @@ impl DataFrame {
         self.apply_per_column(|s| s.shift(periods))
     }
 
+    /// Shift index horizontally by desired number of periods.
+    ///
+    /// Matches `pd.DataFrame.shift(periods, axis=1)`.
+    pub fn shift_axis1(&self, periods: i64) -> Result<Self, FrameError> {
+        let n_cols = self.column_order.len();
+        if n_cols == 0 {
+            return Ok(self.clone());
+        }
+
+        let mut out_cols = std::collections::BTreeMap::new();
+        let missing_val = fp_types::Scalar::Null(fp_types::NullKind::NaN);
+
+        for (i, name) in self.column_order.iter().enumerate() {
+            let src_idx = i as i64 - periods;
+            let col = if src_idx >= 0 && (src_idx as usize) < n_cols {
+                let src_name = &self.column_order[src_idx as usize];
+                self.columns[src_name].clone()
+            } else {
+                Column::from_values(vec![missing_val.clone(); self.len()])?
+            };
+            out_cols.insert(name.clone(), col);
+        }
+
+        Ok(Self {
+            index: self.index.clone(),
+            column_order: self.column_order.clone(),
+            columns: out_cols,
+        })
+    }
+
     /// Absolute value per column.
     ///
     /// Matches `pd.DataFrame.abs()`.
@@ -22220,15 +22301,15 @@ impl DataFrameGroupBy<'_> {
     /// GroupBy pct_change within each group.
     ///
     /// Matches `df.groupby(col).pct_change()`.
-    pub fn pct_change(&self) -> Result<DataFrame, FrameError> {
+    pub fn pct_change(&self, periods: usize) -> Result<DataFrame, FrameError> {
         self.transform_groups(|vals| {
             vals.iter()
                 .enumerate()
                 .map(|(i, v)| {
-                    if i == 0 {
+                    if i < periods {
                         return Scalar::Null(NullKind::NaN);
                     }
-                    let prev = &vals[i - 1];
+                    let prev = &vals[i - periods];
                     if v.is_missing() || prev.is_missing() {
                         return Scalar::Null(NullKind::NaN);
                     }
@@ -22818,7 +22899,7 @@ impl DataFrameGroupBy<'_> {
     ///
     /// Matches `pd.GroupBy.ffill()`. Within each group, fills NaN values
     /// with the preceding non-NaN value.
-    pub fn ffill(&self) -> Result<DataFrame, FrameError> {
+    pub fn ffill(&self, limit: Option<usize>) -> Result<DataFrame, FrameError> {
         let (group_order, groups) = self.build_groups();
         let value_cols: Vec<String> = self
             .df
@@ -22840,13 +22921,18 @@ impl DataFrameGroupBy<'_> {
                 for gkey in &group_order {
                     let indices = &groups[gkey];
                     let mut last_valid: Option<Scalar> = None;
+                    let mut consecutive_fills: usize = 0;
                     for &idx in indices {
                         if vals[idx].is_missing() {
                             if let Some(ref lv) = last_valid {
-                                vals[idx] = lv.clone();
+                                consecutive_fills += 1;
+                                if limit.is_none_or(|l| consecutive_fills <= l) {
+                                    vals[idx] = lv.clone();
+                                }
                             }
                         } else {
                             last_valid = Some(vals[idx].clone());
+                            consecutive_fills = 0;
                         }
                     }
                 }
@@ -22866,7 +22952,7 @@ impl DataFrameGroupBy<'_> {
     ///
     /// Matches `pd.GroupBy.bfill()`. Within each group, fills NaN values
     /// with the next non-NaN value.
-    pub fn bfill(&self) -> Result<DataFrame, FrameError> {
+    pub fn bfill(&self, limit: Option<usize>) -> Result<DataFrame, FrameError> {
         let (group_order, groups) = self.build_groups();
         let value_cols: Vec<String> = self
             .df
@@ -22886,14 +22972,19 @@ impl DataFrameGroupBy<'_> {
                 for gkey in &group_order {
                     let indices = &groups[gkey];
                     let mut last_valid: Option<Scalar> = None;
+                    let mut consecutive_fills: usize = 0;
                     // Scan backwards
                     for &idx in indices.iter().rev() {
                         if vals[idx].is_missing() {
                             if let Some(ref lv) = last_valid {
-                                vals[idx] = lv.clone();
+                                consecutive_fills += 1;
+                                if limit.is_none_or(|l| consecutive_fills <= l) {
+                                    vals[idx] = lv.clone();
+                                }
                             }
                         } else {
                             last_valid = Some(vals[idx].clone());
+                            consecutive_fills = 0;
                         }
                     }
                 }
@@ -38455,7 +38546,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = df.groupby(&["g"]).unwrap().pct_change().unwrap();
+        let result = df.groupby(&["g"]).unwrap().pct_change(1).unwrap();
         let v = result.column_as_series("v").unwrap();
         assert!(v.values()[0].is_missing()); // first: NaN
         // (110-100)/100 = 0.1
@@ -42097,7 +42188,7 @@ mod tests {
             ],
         )
         .unwrap();
-        let result = df.groupby(&["grp"]).unwrap().ffill().unwrap();
+        let result = df.groupby(&["grp"]).unwrap().ffill(None).unwrap();
         // Group "a": [1.0, NaN] -> [1.0, 1.0] (ffill within group)
         assert_eq!(result.columns["val"].values()[0], Scalar::Float64(1.0));
         assert_eq!(result.columns["val"].values()[1], Scalar::Float64(1.0));
@@ -42132,7 +42223,7 @@ mod tests {
             ],
         )
         .unwrap();
-        let result = df.groupby(&["grp"]).unwrap().bfill().unwrap();
+        let result = df.groupby(&["grp"]).unwrap().bfill(None).unwrap();
         // Group "a": [NaN, 2.0] -> [2.0, 2.0] (bfill within group)
         assert_eq!(result.columns["val"].values()[0], Scalar::Float64(2.0));
         assert_eq!(result.columns["val"].values()[1], Scalar::Float64(2.0));
