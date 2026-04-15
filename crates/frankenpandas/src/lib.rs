@@ -25,7 +25,9 @@ pub use fp_index::{
     MultiIndexOrIndex,
 };
 
-pub use fp_frame::{CategoricalAccessor, CategoricalMetadata, DataFrame, FrameError, Series};
+pub use fp_frame::{
+    CategoricalAccessor, CategoricalMetadata, DataFrame, FrameError, Series, ToDatetimeOptions,
+};
 
 // ── Module-level functions (like pd.concat, pd.to_datetime, etc.) ────
 
@@ -38,7 +40,9 @@ pub use fp_frame::{
 pub use fp_frame::to_numeric;
 pub use fp_frame::{cut, qcut};
 pub use fp_frame::{timedelta_total_seconds, to_timedelta};
-pub use fp_frame::{to_datetime, to_datetime_with_format, to_datetime_with_unit};
+pub use fp_frame::{
+    to_datetime, to_datetime_with_format, to_datetime_with_options, to_datetime_with_unit,
+};
 
 // ── IO functions ────────────────────────────────────────────────────────
 

@@ -9890,6 +9890,10 @@ fn format_naive_datetime(value: NaiveDateTime) -> String {
     rendered
 }
 
+fn format_utc_datetime(value: NaiveDateTime) -> String {
+    format!("{}+00:00", format_naive_datetime(value))
+}
+
 fn format_aware_datetime(value: DateTime<FixedOffset>, zone_name: Option<&str>) -> String {
     let mut rendered = format!(
         "{}{}",
@@ -10230,7 +10234,15 @@ pub fn to_numeric(series: &Series) -> Result<Series, FrameError> {
 ///
 /// Missing/unparseable values become `Null`.
 pub fn to_datetime(series: &Series) -> Result<Series, FrameError> {
-    to_datetime_with_options(series, None, None)
+    to_datetime_with_options(series, ToDatetimeOptions::default())
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ToDatetimeOptions<'a> {
+    pub format: Option<&'a str>,
+    pub unit: Option<&'a str>,
+    pub utc: bool,
+    pub origin: Option<&'a str>,
 }
 
 /// Convert to datetime with an explicit format string.
@@ -10240,7 +10252,13 @@ pub fn to_datetime_with_format(
     series: &Series,
     format: Option<&str>,
 ) -> Result<Series, FrameError> {
-    to_datetime_with_options(series, format, None)
+    to_datetime_with_options(
+        series,
+        ToDatetimeOptions {
+            format,
+            ..ToDatetimeOptions::default()
+        },
+    )
 }
 
 /// Convert numeric epoch values using an explicit unit.
@@ -10248,24 +10266,39 @@ pub fn to_datetime_with_format(
 /// Matches the numeric `unit=` slice of `pd.to_datetime(series, unit=...)`
 /// for Unix-origin conversions.
 pub fn to_datetime_with_unit(series: &Series, unit: &str) -> Result<Series, FrameError> {
-    to_datetime_with_options(series, None, Some(unit))
+    to_datetime_with_options(
+        series,
+        ToDatetimeOptions {
+            unit: Some(unit),
+            ..ToDatetimeOptions::default()
+        },
+    )
 }
 
-fn to_datetime_with_options(
+/// Convert to datetime with explicit pandas-like options.
+///
+/// Supports the current FrankenPandas `format=`, `unit=`, `utc=`, and
+/// string-based `origin=` surface. `origin=` requires an explicit `unit=`.
+pub fn to_datetime_with_options(
     series: &Series,
-    format: Option<&str>,
-    unit: Option<&str>,
+    options: ToDatetimeOptions<'_>,
 ) -> Result<Series, FrameError> {
-    let parsed_unit = unit.map(DatetimeUnit::parse).transpose()?;
+    let parsed_unit = options.unit.map(DatetimeUnit::parse).transpose()?;
+    if options.origin.is_some() && parsed_unit.is_none() {
+        return Err(FrameError::CompatibilityRejected(
+            "to_datetime origin requires explicit unit".to_owned(),
+        ));
+    }
+    let origin = resolve_datetime_origin(options.origin)?;
     let mut converted = Vec::with_capacity(series.len());
 
     for val in series.values() {
         let result = if let Some(unit) = parsed_unit {
-            parse_datetime_scalar_with_unit(val, unit)
+            parse_datetime_scalar_with_unit(val, unit, origin, options.utc)
         } else {
-            match val {
+            let parsed = match val {
                 Scalar::Null(_) => Scalar::Null(NullKind::NaT),
-                Scalar::Utf8(s) => parse_datetime_string(s, format),
+                Scalar::Utf8(s) => parse_datetime_string(s, options.format),
                 Scalar::Int64(epoch) => {
                     // Auto-detect: values > 1e11 are likely milliseconds, else seconds.
                     let secs = if epoch.unsigned_abs() > 100_000_000_000 {
@@ -10273,16 +10306,21 @@ fn to_datetime_with_options(
                     } else {
                         *epoch
                     };
-                    format_unix_timestamp(secs, 0)
+                    format_unix_timestamp(secs, 0, false)
                 }
                 Scalar::Float64(v) => {
                     if v.is_nan() || v.is_infinite() {
                         Scalar::Null(NullKind::NaT)
                     } else {
-                        format_unix_timestamp(*v as i64, 0)
+                        format_unix_timestamp(*v as i64, 0, false)
                     }
                 }
                 _ => Scalar::Null(NullKind::NaT),
+            };
+            if options.utc {
+                normalize_datetime_scalar_to_utc(parsed)
+            } else {
+                parsed
             }
         };
         converted.push(result);
@@ -10318,7 +10356,17 @@ impl DatetimeUnit {
         }
     }
 
-    fn nanos_per_unit(self) -> f64 {
+    fn nanos_per_unit_i128(self) -> i128 {
+        match self {
+            Self::Days => 86_400_i128 * 1_000_000_000_i128,
+            Self::Seconds => 1_000_000_000_i128,
+            Self::Milliseconds => 1_000_000_i128,
+            Self::Microseconds => 1_000_i128,
+            Self::Nanoseconds => 1_i128,
+        }
+    }
+
+    fn nanos_per_unit_f64(self) -> f64 {
         match self {
             Self::Days => 86_400_f64 * 1_000_000_000_f64,
             Self::Seconds => 1_000_000_000_f64,
@@ -10329,19 +10377,83 @@ impl DatetimeUnit {
     }
 }
 
-fn parse_datetime_scalar_with_unit(value: &Scalar, unit: DatetimeUnit) -> Scalar {
+#[derive(Debug, Clone, Copy)]
+struct DatetimeOrigin {
+    secs: i64,
+    nanos: u32,
+}
+
+impl DatetimeOrigin {
+    const fn unix() -> Self {
+        Self { secs: 0, nanos: 0 }
+    }
+
+    fn parse(origin: &str) -> Result<Self, FrameError> {
+        let trimmed = origin.trim();
+        if trimmed.is_empty() {
+            return Err(FrameError::CompatibilityRejected(
+                "to_datetime origin cannot be empty".to_owned(),
+            ));
+        }
+        if trimmed.eq_ignore_ascii_case("unix") {
+            return Ok(Self::unix());
+        }
+        if let Some(aware) = parse_fixed_offset_datetime(trimmed) {
+            return Ok(Self {
+                secs: aware.timestamp(),
+                nanos: aware.timestamp_subsec_nanos(),
+            });
+        }
+
+        let normalized = match parse_datetime_string(trimmed, None) {
+            Scalar::Utf8(value) => value,
+            _ => {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "invalid to_datetime origin '{trimmed}'"
+                )));
+            }
+        };
+        let naive = parse_naive_datetime_value(&normalized).map_err(|_| {
+            FrameError::CompatibilityRejected(format!("invalid to_datetime origin '{trimmed}'"))
+        })?;
+        Ok(Self {
+            secs: naive.and_utc().timestamp(),
+            nanos: naive.and_utc().timestamp_subsec_nanos(),
+        })
+    }
+
+    fn total_nanos(self) -> Option<i128> {
+        i128::from(self.secs)
+            .checked_mul(1_000_000_000_i128)
+            .and_then(|value| value.checked_add(i128::from(self.nanos)))
+    }
+}
+
+fn resolve_datetime_origin(origin: Option<&str>) -> Result<DatetimeOrigin, FrameError> {
+    match origin {
+        Some(origin) => DatetimeOrigin::parse(origin),
+        None => Ok(DatetimeOrigin::unix()),
+    }
+}
+
+fn parse_datetime_scalar_with_unit(
+    value: &Scalar,
+    unit: DatetimeUnit,
+    origin: DatetimeOrigin,
+    utc: bool,
+) -> Scalar {
     match value {
         Scalar::Null(_) => Scalar::Null(NullKind::NaT),
-        Scalar::Int64(epoch) => parse_epoch_i64_with_unit(*epoch, unit),
-        Scalar::Float64(epoch) => parse_epoch_f64_with_unit(*epoch, unit),
+        Scalar::Int64(epoch) => parse_epoch_i64_with_unit(*epoch, unit, origin, utc),
+        Scalar::Float64(epoch) => parse_epoch_f64_with_unit(*epoch, unit, origin, utc),
         Scalar::Utf8(raw) => {
             let trimmed = raw.trim();
             if trimmed.is_empty() {
                 Scalar::Null(NullKind::NaT)
             } else if let Ok(epoch) = trimmed.parse::<i64>() {
-                parse_epoch_i64_with_unit(epoch, unit)
+                parse_epoch_i64_with_unit(epoch, unit, origin, utc)
             } else if let Ok(epoch) = trimmed.parse::<f64>() {
-                parse_epoch_f64_with_unit(epoch, unit)
+                parse_epoch_f64_with_unit(epoch, unit, origin, utc)
             } else {
                 Scalar::Null(NullKind::NaT)
             }
@@ -10350,62 +10462,89 @@ fn parse_datetime_scalar_with_unit(value: &Scalar, unit: DatetimeUnit) -> Scalar
     }
 }
 
-fn parse_epoch_i64_with_unit(epoch: i64, unit: DatetimeUnit) -> Scalar {
-    match unit {
-        DatetimeUnit::Days => epoch
-            .checked_mul(86_400)
-            .map_or(Scalar::Null(NullKind::NaT), |secs| {
-                format_unix_timestamp(secs, 0)
-            }),
-        DatetimeUnit::Seconds => format_unix_timestamp(epoch, 0),
-        DatetimeUnit::Milliseconds => {
-            let secs = epoch.div_euclid(1_000);
-            let nanos = u32::try_from(epoch.rem_euclid(1_000)).unwrap_or_default() * 1_000_000;
-            format_unix_timestamp(secs, nanos)
-        }
-        DatetimeUnit::Microseconds => {
-            let secs = epoch.div_euclid(1_000_000);
-            let nanos = u32::try_from(epoch.rem_euclid(1_000_000)).unwrap_or_default() * 1_000;
-            format_unix_timestamp(secs, nanos)
-        }
-        DatetimeUnit::Nanoseconds => {
-            let secs = epoch.div_euclid(1_000_000_000);
-            let nanos = u32::try_from(epoch.rem_euclid(1_000_000_000)).unwrap_or_default();
-            format_unix_timestamp(secs, nanos)
-        }
-    }
+fn parse_epoch_i64_with_unit(
+    epoch: i64,
+    unit: DatetimeUnit,
+    origin: DatetimeOrigin,
+    utc: bool,
+) -> Scalar {
+    let Some(offset_nanos) = i128::from(epoch).checked_mul(unit.nanos_per_unit_i128()) else {
+        return Scalar::Null(NullKind::NaT);
+    };
+    format_timestamp_from_nanos(origin, offset_nanos, utc)
 }
 
-fn parse_epoch_f64_with_unit(epoch: f64, unit: DatetimeUnit) -> Scalar {
+fn parse_epoch_f64_with_unit(
+    epoch: f64,
+    unit: DatetimeUnit,
+    origin: DatetimeOrigin,
+    utc: bool,
+) -> Scalar {
     if epoch.is_nan() || epoch.is_infinite() {
         return Scalar::Null(NullKind::NaT);
     }
 
-    let total_nanos = epoch * unit.nanos_per_unit();
-    if !total_nanos.is_finite() {
+    let offset_nanos = epoch * unit.nanos_per_unit_f64();
+    if !offset_nanos.is_finite() {
         return Scalar::Null(NullKind::NaT);
     }
 
-    let rounded_nanos = total_nanos.round();
+    let rounded_nanos = offset_nanos.round();
     if rounded_nanos < i128::MIN as f64 || rounded_nanos > i128::MAX as f64 {
         return Scalar::Null(NullKind::NaT);
     }
 
-    let nanos = rounded_nanos as i128;
-    let secs = nanos.div_euclid(1_000_000_000);
-    let subsec = nanos.rem_euclid(1_000_000_000);
+    format_timestamp_from_nanos(origin, rounded_nanos as i128, utc)
+}
+
+fn format_timestamp_from_nanos(origin: DatetimeOrigin, offset_nanos: i128, utc: bool) -> Scalar {
+    let Some(base_nanos) = origin.total_nanos() else {
+        return Scalar::Null(NullKind::NaT);
+    };
+    let Some(total_nanos) = base_nanos.checked_add(offset_nanos) else {
+        return Scalar::Null(NullKind::NaT);
+    };
+    let secs = total_nanos.div_euclid(1_000_000_000);
+    let subsec = total_nanos.rem_euclid(1_000_000_000);
     let Ok(secs) = i64::try_from(secs) else {
         return Scalar::Null(NullKind::NaT);
     };
     let Ok(subsec) = u32::try_from(subsec) else {
         return Scalar::Null(NullKind::NaT);
     };
-    format_unix_timestamp(secs, subsec)
+    format_unix_timestamp(secs, subsec, utc)
 }
 
-fn format_unix_timestamp(secs: i64, nanos: u32) -> Scalar {
+fn format_unix_timestamp(secs: i64, nanos: u32, utc: bool) -> Scalar {
     match Utc.timestamp_opt(secs, nanos) {
-        LocalResult::Single(dt) => Scalar::Utf8(format_naive_datetime(dt.naive_utc())),
+        LocalResult::Single(dt) => Scalar::Utf8(if utc {
+            format_utc_datetime(dt.naive_utc())
+        } else {
+            format_naive_datetime(dt.naive_utc())
+        }),
+        _ => Scalar::Null(NullKind::NaT),
+    }
+}
+
+fn normalize_datetime_scalar_to_utc(value: Scalar) -> Scalar {
+    match value {
+        Scalar::Null(_) => Scalar::Null(NullKind::NaT),
+        Scalar::Utf8(rendered) => {
+            if has_tz_suffix(&rendered) {
+                return parse_tz_aware_datetime(&rendered).map_or_else(
+                    |_| Scalar::Null(NullKind::NaT),
+                    |parsed| {
+                        Scalar::Utf8(format_utc_datetime(
+                            parsed.fixed.with_timezone(&Utc).naive_utc(),
+                        ))
+                    },
+                );
+            }
+            parse_naive_datetime_value(&rendered).map_or_else(
+                |_| Scalar::Null(NullKind::NaT),
+                |naive| Scalar::Utf8(format_utc_datetime(naive)),
+            )
+        }
         _ => Scalar::Null(NullKind::NaT),
     }
 }
@@ -19529,11 +19668,119 @@ impl DataFrame {
         self.apply_all_columns(|s| s.ffill(limit))
     }
 
+    /// Forward-fill missing values across columns for each row.
+    ///
+    /// Matches `pd.DataFrame.ffill(axis=1)`.
+    pub fn ffill_axis1(&self, limit: Option<usize>) -> Result<Self, FrameError> {
+        let n_rows = self.len();
+        let n_cols = self.column_order.len();
+
+        let mut out_cols_data: Vec<Vec<Scalar>> = vec![Vec::with_capacity(n_rows); n_cols];
+
+        for row_idx in 0..n_rows {
+            let mut last_valid: Option<&Scalar> = None;
+            let mut consecutive_fills: usize = 0;
+
+            for (col_idx, name) in self.column_order.iter().enumerate() {
+                let val = &self.columns[name].values()[row_idx];
+
+                let out_val = if val.is_missing() {
+                    if let Some(fill) = last_valid {
+                        consecutive_fills += 1;
+                        if limit.is_none_or(|l| consecutive_fills <= l) {
+                            fill.clone()
+                        } else {
+                            val.clone()
+                        }
+                    } else {
+                        val.clone()
+                    }
+                } else {
+                    last_valid = Some(val);
+                    consecutive_fills = 0;
+                    val.clone()
+                };
+
+                out_cols_data[col_idx].push(out_val);
+            }
+        }
+
+        let mut out_columns = std::collections::BTreeMap::new();
+        for (i, name) in self.column_order.iter().enumerate() {
+            let col = Column::new(
+                self.columns[name].dtype(),
+                std::mem::take(&mut out_cols_data[i]),
+            )?;
+            out_columns.insert(name.clone(), col);
+        }
+
+        Ok(Self {
+            index: self.index.clone(),
+            column_order: self.column_order.clone(),
+            columns: out_columns,
+        })
+    }
+
     /// Back-fill missing values per column.
     ///
     /// Matches `pd.DataFrame.bfill()`. Applies to all columns.
     pub fn bfill(&self, limit: Option<usize>) -> Result<Self, FrameError> {
         self.apply_all_columns(|s| s.bfill(limit))
+    }
+
+    /// Back-fill missing values across columns for each row.
+    ///
+    /// Matches `pd.DataFrame.bfill(axis=1)`.
+    pub fn bfill_axis1(&self, limit: Option<usize>) -> Result<Self, FrameError> {
+        let n_rows = self.len();
+        let n_cols = self.column_order.len();
+
+        let mut out_cols_data: Vec<Vec<Scalar>> =
+            vec![vec![Scalar::Null(NullKind::NaN); n_rows]; n_cols];
+
+        for row_idx in 0..n_rows {
+            let mut next_valid: Option<&Scalar> = None;
+            let mut consecutive_fills: usize = 0;
+
+            for (col_idx, out_col) in out_cols_data.iter_mut().enumerate().rev() {
+                let name = &self.column_order[col_idx];
+                let val = &self.columns[name].values()[row_idx];
+
+                let out_val = if val.is_missing() {
+                    if let Some(fill) = next_valid {
+                        consecutive_fills += 1;
+                        if limit.is_none_or(|l| consecutive_fills <= l) {
+                            fill.clone()
+                        } else {
+                            val.clone()
+                        }
+                    } else {
+                        val.clone()
+                    }
+                } else {
+                    next_valid = Some(val);
+                    consecutive_fills = 0;
+                    val.clone()
+                };
+
+                out_col[row_idx] = out_val;
+            }
+        }
+
+        let mut out_columns = std::collections::BTreeMap::new();
+        for (i, name) in self.column_order.iter().enumerate() {
+            let col = Column::new(
+                self.columns[name].dtype(),
+                std::mem::take(&mut out_cols_data[i]),
+            )?;
+            out_columns.insert(name.clone(), col);
+        }
+
+        Ok(Self {
+            index: self.index.clone(),
+            column_order: self.column_order.clone(),
+            columns: out_columns,
+        })
     }
 
     /// Linearly interpolate missing values per numeric column.
@@ -46754,6 +47001,105 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "compatibility gate rejected operation: unsupported to_datetime unit 'minutes'"
+        );
+    }
+
+    #[test]
+    fn to_datetime_with_options_custom_origin_shifts_explicit_unit_values() {
+        let s = Series::from_values(
+            "epoch_d",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Float64(2.5)],
+        )
+        .unwrap();
+        let result = super::to_datetime_with_options(
+            &s,
+            super::ToDatetimeOptions {
+                unit: Some("D"),
+                origin: Some("1960-01-01"),
+                ..super::ToDatetimeOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            result.values(),
+            &[
+                Scalar::Utf8("1960-01-02 00:00:00".into()),
+                Scalar::Utf8("1960-01-03 12:00:00".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn to_datetime_with_options_origin_requires_explicit_unit() {
+        let s = Series::from_values("epoch", vec![0_i64.into()], vec![Scalar::Int64(1)]).unwrap();
+        let err = super::to_datetime_with_options(
+            &s,
+            super::ToDatetimeOptions {
+                origin: Some("1960-01-01"),
+                ..super::ToDatetimeOptions::default()
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "compatibility gate rejected operation: to_datetime origin requires explicit unit"
+        );
+    }
+
+    #[test]
+    fn to_datetime_with_options_utc_localizes_naive_values() {
+        let s = Series::from_values(
+            "ts",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![
+                Scalar::Utf8("2024-01-15 10:30:00".into()),
+                Scalar::Utf8("2024-01-16".into()),
+            ],
+        )
+        .unwrap();
+        let result = super::to_datetime_with_options(
+            &s,
+            super::ToDatetimeOptions {
+                utc: true,
+                ..super::ToDatetimeOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            result.values(),
+            &[
+                Scalar::Utf8("2024-01-15 10:30:00+00:00".into()),
+                Scalar::Utf8("2024-01-16 00:00:00+00:00".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn to_datetime_with_options_utc_converts_offset_aware_values() {
+        let s = Series::from_values(
+            "ts",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![
+                Scalar::Utf8("2024-01-15 10:30:00+05:30".into()),
+                Scalar::Utf8("2024-01-15T10:30:00Z".into()),
+            ],
+        )
+        .unwrap();
+        let result = super::to_datetime_with_options(
+            &s,
+            super::ToDatetimeOptions {
+                utc: true,
+                ..super::ToDatetimeOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            result.values(),
+            &[
+                Scalar::Utf8("2024-01-15 05:00:00+00:00".into()),
+                Scalar::Utf8("2024-01-15 10:30:00+00:00".into()),
+            ]
         );
     }
 

@@ -597,12 +597,22 @@ def op_series_to_datetime(pd, payload: dict[str, Any]) -> dict[str, Any]:
     left = payload.get("left")
     series = fixture_series_from_payload(pd, left, "series_to_datetime")
     unit = payload.get("datetime_unit")
+    origin = payload.get("datetime_origin")
+    utc = payload.get("datetime_utc")
 
     kwargs: dict[str, Any] = {"errors": "coerce"}
     if unit is not None:
         if not isinstance(unit, str) or unit.strip() == "":
             raise OracleError("series_to_datetime datetime_unit must be a non-empty string")
         kwargs["unit"] = unit
+    if origin is not None:
+        if not isinstance(origin, str) or origin.strip() == "":
+            raise OracleError("series_to_datetime datetime_origin must be a non-empty string")
+        kwargs["origin"] = origin
+    if utc is not None:
+        if not isinstance(utc, bool):
+            raise OracleError("series_to_datetime datetime_utc must be a boolean")
+        kwargs["utc"] = utc
 
     try:
         out = pd.to_datetime(series, **kwargs)
