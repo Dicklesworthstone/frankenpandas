@@ -27,7 +27,7 @@
       { "kind": "int64", "value": 3 }
     ],
     "values": [
-      { "kind": "null", "value": "null" },
+      { "kind": "null", "value": "na_n" },
       { "kind": "float64", "value": 0.5 },
       { "kind": "float64", "value": -0.2 },
       { "kind": "float64", "value": 0.6666666666666666 }
