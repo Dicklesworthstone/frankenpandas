@@ -27,6 +27,7 @@ pub use fp_index::{
 
 pub use fp_frame::{
     CategoricalAccessor, CategoricalMetadata, DataFrame, FrameError, Series, ToDatetimeOptions,
+    ToDatetimeOrigin,
 };
 
 // ── Module-level functions (like pd.concat, pd.to_datetime, etc.) ────

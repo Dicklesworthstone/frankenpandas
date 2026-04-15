@@ -577,7 +577,7 @@ pub struct PacketFixture {
     #[serde(default)]
     pub datetime_unit: Option<String>,
     #[serde(default)]
-    pub datetime_origin: Option<String>,
+    pub datetime_origin: Option<serde_json::Value>,
     #[serde(default)]
     pub datetime_utc: Option<bool>,
     #[serde(default)]
@@ -1401,7 +1401,7 @@ struct OracleRequest {
     #[serde(default)]
     datetime_unit: Option<String>,
     #[serde(default)]
-    datetime_origin: Option<String>,
+    datetime_origin: Option<serde_json::Value>,
     #[serde(default)]
     datetime_utc: Option<bool>,
     #[serde(default)]
@@ -3440,16 +3440,20 @@ fn run_fixture_operation(
         FixtureOperation::SeriesToDatetime => {
             let left = require_left_series(fixture)?;
             let series = build_series(left)?;
-            let actual = fp_frame::to_datetime_with_options(
-                &series,
-                fp_frame::ToDatetimeOptions {
-                    format: None,
-                    unit: fixture.datetime_unit.as_deref(),
-                    utc: fixture.datetime_utc.unwrap_or(false),
-                    origin: fixture.datetime_origin.as_deref(),
+            let actual = resolve_datetime_origin_option(fixture.datetime_origin.as_ref()).and_then(
+                |origin| {
+                    fp_frame::to_datetime_with_options(
+                        &series,
+                        fp_frame::ToDatetimeOptions {
+                            format: None,
+                            unit: fixture.datetime_unit.as_deref(),
+                            utc: fixture.datetime_utc.unwrap_or(false),
+                            origin,
+                        },
+                    )
+                    .map_err(|err| err.to_string())
                 },
-            )
-            .map_err(|err| err.to_string());
+            );
             match expected {
                 ResolvedExpected::Series(series) => compare_series_expected(&actual?, &series),
                 ResolvedExpected::ErrorContains(substr) => match actual {
@@ -6442,6 +6446,34 @@ fn build_series(series: &FixtureSeries) -> Result<Series, String> {
     .map_err(|err| err.to_string())
 }
 
+fn resolve_datetime_origin_option(
+    origin: Option<&serde_json::Value>,
+) -> Result<Option<fp_frame::ToDatetimeOrigin<'_>>, String> {
+    match origin {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(value)) => {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                Err("series_to_datetime datetime_origin must be non-empty".to_owned())
+            } else {
+                Ok(Some(fp_frame::ToDatetimeOrigin::Str(trimmed)))
+            }
+        }
+        Some(serde_json::Value::Number(value)) => {
+            if let Some(int_value) = value.as_i64() {
+                Ok(Some(fp_frame::ToDatetimeOrigin::Int(int_value)))
+            } else if let Some(float_value) = value.as_f64() {
+                Ok(Some(fp_frame::ToDatetimeOrigin::Float(float_value)))
+            } else {
+                Err("series_to_datetime datetime_origin number is out of range".to_owned())
+            }
+        }
+        Some(_) => {
+            Err("series_to_datetime datetime_origin must be a string, integer, or float".to_owned())
+        }
+    }
+}
+
 fn build_dataframe(frame: &FixtureDataFrame) -> Result<DataFrame, String> {
     let mut columns = Vec::new();
     let mut seen = BTreeSet::new();
@@ -6865,16 +6897,20 @@ fn execute_and_compare_differential(
         FixtureOperation::SeriesToDatetime => {
             let left = require_left_series(fixture)?;
             let series = build_series(left)?;
-            let actual = fp_frame::to_datetime_with_options(
-                &series,
-                fp_frame::ToDatetimeOptions {
-                    format: None,
-                    unit: fixture.datetime_unit.as_deref(),
-                    utc: fixture.datetime_utc.unwrap_or(false),
-                    origin: fixture.datetime_origin.as_deref(),
+            let actual = resolve_datetime_origin_option(fixture.datetime_origin.as_ref()).and_then(
+                |origin| {
+                    fp_frame::to_datetime_with_options(
+                        &series,
+                        fp_frame::ToDatetimeOptions {
+                            format: None,
+                            unit: fixture.datetime_unit.as_deref(),
+                            utc: fixture.datetime_utc.unwrap_or(false),
+                            origin,
+                        },
+                    )
+                    .map_err(|err| err.to_string())
                 },
-            )
-            .map_err(|err| err.to_string());
+            );
             match expected {
                 ResolvedExpected::Series(series) => Ok(diff_series(&actual?, &series)),
                 ResolvedExpected::ErrorContains(substr) => Ok(match actual {
@@ -11276,7 +11312,122 @@ mod tests {
             &super::build_series(fixture.left.as_ref().expect("left")).expect("series"),
             fp_frame::ToDatetimeOptions {
                 unit: fixture.datetime_unit.as_deref(),
-                origin: fixture.datetime_origin.as_deref(),
+                origin: super::resolve_datetime_origin_option(fixture.datetime_origin.as_ref())
+                    .expect("datetime origin"),
+                ..fp_frame::ToDatetimeOptions::default()
+            },
+        )
+        .expect("actual series");
+        super::compare_series_expected(&actual, &expected).expect("pandas parity");
+    }
+
+    #[test]
+    fn live_oracle_series_to_datetime_numeric_origin_matches_pandas() {
+        let mut cfg = HarnessConfig::default_paths();
+        cfg.allow_system_pandas_fallback = false;
+
+        let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+            "packet_id": "FP-P2D-064",
+            "case_id": "series_to_datetime_numeric_origin_live",
+            "mode": "strict",
+            "operation": "series_to_datetime",
+            "oracle_source": "live_legacy_pandas",
+            "datetime_unit": "D",
+            "datetime_origin": 2,
+            "left": {
+                "name": "epoch_d",
+                "index": [
+                    { "kind": "int64", "value": 0 },
+                    { "kind": "int64", "value": 1 }
+                ],
+                "values": [
+                    { "kind": "int64", "value": 0 },
+                    { "kind": "float64", "value": 1.5 }
+                ]
+            }
+        }))
+        .expect("fixture");
+
+        let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+        if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+            eprintln!(
+                "live pandas unavailable; skipping to_datetime numeric-origin oracle test: {message}"
+            );
+            return;
+        }
+
+        let expected = expected_result.expect("live oracle expected");
+        assert!(
+            matches!(&expected, super::ResolvedExpected::Series(_)),
+            "expected live oracle series payload, got {expected:?}"
+        );
+        let super::ResolvedExpected::Series(expected) = expected else {
+            return;
+        };
+
+        let actual = fp_frame::to_datetime_with_options(
+            &super::build_series(fixture.left.as_ref().expect("left")).expect("series"),
+            fp_frame::ToDatetimeOptions {
+                unit: fixture.datetime_unit.as_deref(),
+                origin: super::resolve_datetime_origin_option(fixture.datetime_origin.as_ref())
+                    .expect("datetime origin"),
+                ..fp_frame::ToDatetimeOptions::default()
+            },
+        )
+        .expect("actual series");
+        super::compare_series_expected(&actual, &expected).expect("pandas parity");
+    }
+
+    #[test]
+    fn live_oracle_series_to_datetime_julian_origin_matches_pandas() {
+        let mut cfg = HarnessConfig::default_paths();
+        cfg.allow_system_pandas_fallback = false;
+
+        let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+            "packet_id": "FP-P2D-064",
+            "case_id": "series_to_datetime_julian_origin_live",
+            "mode": "strict",
+            "operation": "series_to_datetime",
+            "oracle_source": "live_legacy_pandas",
+            "datetime_unit": "D",
+            "datetime_origin": "julian",
+            "left": {
+                "name": "julian_d",
+                "index": [
+                    { "kind": "int64", "value": 0 },
+                    { "kind": "int64", "value": 1 }
+                ],
+                "values": [
+                    { "kind": "float64", "value": 2451544.5 },
+                    { "kind": "float64", "value": 2451545.0 }
+                ]
+            }
+        }))
+        .expect("fixture");
+
+        let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+        if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+            eprintln!(
+                "live pandas unavailable; skipping to_datetime julian-origin oracle test: {message}"
+            );
+            return;
+        }
+
+        let expected = expected_result.expect("live oracle expected");
+        assert!(
+            matches!(&expected, super::ResolvedExpected::Series(_)),
+            "expected live oracle series payload, got {expected:?}"
+        );
+        let super::ResolvedExpected::Series(expected) = expected else {
+            return;
+        };
+
+        let actual = fp_frame::to_datetime_with_options(
+            &super::build_series(fixture.left.as_ref().expect("left")).expect("series"),
+            fp_frame::ToDatetimeOptions {
+                unit: fixture.datetime_unit.as_deref(),
+                origin: super::resolve_datetime_origin_option(fixture.datetime_origin.as_ref())
+                    .expect("datetime origin"),
                 ..fp_frame::ToDatetimeOptions::default()
             },
         )

@@ -10237,12 +10237,19 @@ pub fn to_datetime(series: &Series) -> Result<Series, FrameError> {
     to_datetime_with_options(series, ToDatetimeOptions::default())
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum ToDatetimeOrigin<'a> {
+    Str(&'a str),
+    Int(i64),
+    Float(f64),
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ToDatetimeOptions<'a> {
     pub format: Option<&'a str>,
     pub unit: Option<&'a str>,
     pub utc: bool,
-    pub origin: Option<&'a str>,
+    pub origin: Option<ToDatetimeOrigin<'a>>,
 }
 
 /// Convert to datetime with an explicit format string.
@@ -10278,7 +10285,7 @@ pub fn to_datetime_with_unit(series: &Series, unit: &str) -> Result<Series, Fram
 /// Convert to datetime with explicit pandas-like options.
 ///
 /// Supports the current FrankenPandas `format=`, `unit=`, `utc=`, and
-/// string-based `origin=` surface. `origin=` requires an explicit `unit=`.
+/// pandas-style `origin=` surface. `origin=` requires an explicit `unit=`.
 pub fn to_datetime_with_options(
     series: &Series,
     options: ToDatetimeOptions<'_>,
@@ -10289,7 +10296,7 @@ pub fn to_datetime_with_options(
             "to_datetime origin requires explicit unit".to_owned(),
         ));
     }
-    let origin = resolve_datetime_origin(options.origin)?;
+    let origin = resolve_datetime_origin(options.origin, parsed_unit)?;
     let mut converted = Vec::with_capacity(series.len());
 
     for val in series.values() {
@@ -10384,11 +10391,13 @@ struct DatetimeOrigin {
 }
 
 impl DatetimeOrigin {
+    const JULIAN_UNIX_OFFSET_SECS: i64 = -210_866_760_000;
+
     const fn unix() -> Self {
         Self { secs: 0, nanos: 0 }
     }
 
-    fn parse(origin: &str) -> Result<Self, FrameError> {
+    fn parse_str(origin: &str, unit: Option<DatetimeUnit>) -> Result<Self, FrameError> {
         let trimmed = origin.trim();
         if trimmed.is_empty() {
             return Err(FrameError::CompatibilityRejected(
@@ -10397,6 +10406,17 @@ impl DatetimeOrigin {
         }
         if trimmed.eq_ignore_ascii_case("unix") {
             return Ok(Self::unix());
+        }
+        if trimmed.eq_ignore_ascii_case("julian") {
+            if unit != Some(DatetimeUnit::Days) {
+                return Err(FrameError::CompatibilityRejected(
+                    "origin='julian' requires unit='D'".to_owned(),
+                ));
+            }
+            return Ok(Self {
+                secs: Self::JULIAN_UNIX_OFFSET_SECS,
+                nanos: 0,
+            });
         }
         if let Some(aware) = parse_fixed_offset_datetime(trimmed) {
             return Ok(Self {
@@ -10422,6 +10442,50 @@ impl DatetimeOrigin {
         })
     }
 
+    fn from_i64(origin: i64, unit: DatetimeUnit) -> Result<Self, FrameError> {
+        let Some(total_nanos) = i128::from(origin).checked_mul(unit.nanos_per_unit_i128()) else {
+            return Err(FrameError::CompatibilityRejected(
+                "invalid to_datetime origin".to_owned(),
+            ));
+        };
+        Self::from_total_nanos(total_nanos)
+    }
+
+    fn from_f64(origin: f64, unit: DatetimeUnit) -> Result<Self, FrameError> {
+        if origin.is_nan() || origin.is_infinite() {
+            return Err(FrameError::CompatibilityRejected(
+                "invalid to_datetime origin".to_owned(),
+            ));
+        }
+
+        let total_nanos = origin * unit.nanos_per_unit_f64();
+        if !total_nanos.is_finite() {
+            return Err(FrameError::CompatibilityRejected(
+                "invalid to_datetime origin".to_owned(),
+            ));
+        }
+        let rounded_nanos = total_nanos.round();
+        if rounded_nanos < i128::MIN as f64 || rounded_nanos > i128::MAX as f64 {
+            return Err(FrameError::CompatibilityRejected(
+                "invalid to_datetime origin".to_owned(),
+            ));
+        }
+
+        Self::from_total_nanos(rounded_nanos as i128)
+    }
+
+    fn from_total_nanos(total_nanos: i128) -> Result<Self, FrameError> {
+        let secs = total_nanos.div_euclid(1_000_000_000);
+        let nanos = total_nanos.rem_euclid(1_000_000_000);
+        let secs = i64::try_from(secs).map_err(|_| {
+            FrameError::CompatibilityRejected("invalid to_datetime origin".to_owned())
+        })?;
+        let nanos = u32::try_from(nanos).map_err(|_| {
+            FrameError::CompatibilityRejected("invalid to_datetime origin".to_owned())
+        })?;
+        Ok(Self { secs, nanos })
+    }
+
     fn total_nanos(self) -> Option<i128> {
         i128::from(self.secs)
             .checked_mul(1_000_000_000_i128)
@@ -10429,9 +10493,28 @@ impl DatetimeOrigin {
     }
 }
 
-fn resolve_datetime_origin(origin: Option<&str>) -> Result<DatetimeOrigin, FrameError> {
+fn resolve_datetime_origin(
+    origin: Option<ToDatetimeOrigin<'_>>,
+    unit: Option<DatetimeUnit>,
+) -> Result<DatetimeOrigin, FrameError> {
     match origin {
-        Some(origin) => DatetimeOrigin::parse(origin),
+        Some(ToDatetimeOrigin::Str(origin)) => DatetimeOrigin::parse_str(origin, unit),
+        Some(ToDatetimeOrigin::Int(origin)) => {
+            let unit = unit.ok_or_else(|| {
+                FrameError::CompatibilityRejected(
+                    "to_datetime origin requires explicit unit".to_owned(),
+                )
+            })?;
+            DatetimeOrigin::from_i64(origin, unit)
+        }
+        Some(ToDatetimeOrigin::Float(origin)) => {
+            let unit = unit.ok_or_else(|| {
+                FrameError::CompatibilityRejected(
+                    "to_datetime origin requires explicit unit".to_owned(),
+                )
+            })?;
+            DatetimeOrigin::from_f64(origin, unit)
+        }
         None => Ok(DatetimeOrigin::unix()),
     }
 }
@@ -47016,7 +47099,7 @@ mod tests {
             &s,
             super::ToDatetimeOptions {
                 unit: Some("D"),
-                origin: Some("1960-01-01"),
+                origin: Some(super::ToDatetimeOrigin::Str("1960-01-01")),
                 ..super::ToDatetimeOptions::default()
             },
         )
@@ -47036,7 +47119,7 @@ mod tests {
         let err = super::to_datetime_with_options(
             &s,
             super::ToDatetimeOptions {
-                origin: Some("1960-01-01"),
+                origin: Some(super::ToDatetimeOrigin::Str("1960-01-01")),
                 ..super::ToDatetimeOptions::default()
             },
         )
@@ -47044,6 +47127,77 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "compatibility gate rejected operation: to_datetime origin requires explicit unit"
+        );
+    }
+
+    #[test]
+    fn to_datetime_with_options_numeric_origin_offsets_from_unix_epoch() {
+        let s = Series::from_values(
+            "epoch_d",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(0), Scalar::Float64(1.5)],
+        )
+        .unwrap();
+        let result = super::to_datetime_with_options(
+            &s,
+            super::ToDatetimeOptions {
+                unit: Some("D"),
+                origin: Some(super::ToDatetimeOrigin::Int(2)),
+                ..super::ToDatetimeOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            result.values(),
+            &[
+                Scalar::Utf8("1970-01-03 00:00:00".into()),
+                Scalar::Utf8("1970-01-04 12:00:00".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn to_datetime_with_options_julian_origin_maps_julian_days() {
+        let s = Series::from_values(
+            "julian",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Float64(2_451_544.5), Scalar::Float64(2_451_545.0)],
+        )
+        .unwrap();
+        let result = super::to_datetime_with_options(
+            &s,
+            super::ToDatetimeOptions {
+                unit: Some("D"),
+                origin: Some(super::ToDatetimeOrigin::Str("julian")),
+                ..super::ToDatetimeOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            result.values(),
+            &[
+                Scalar::Utf8("2000-01-01 00:00:00".into()),
+                Scalar::Utf8("2000-01-01 12:00:00".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn to_datetime_with_options_julian_origin_requires_day_unit() {
+        let s = Series::from_values("julian", vec![0_i64.into()], vec![Scalar::Int64(2_451_545)])
+            .unwrap();
+        let err = super::to_datetime_with_options(
+            &s,
+            super::ToDatetimeOptions {
+                unit: Some("s"),
+                origin: Some(super::ToDatetimeOrigin::Str("julian")),
+                ..super::ToDatetimeOptions::default()
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "compatibility gate rejected operation: origin='julian' requires unit='D'"
         );
     }
 

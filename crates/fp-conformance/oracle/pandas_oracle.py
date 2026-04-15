@@ -606,8 +606,15 @@ def op_series_to_datetime(pd, payload: dict[str, Any]) -> dict[str, Any]:
             raise OracleError("series_to_datetime datetime_unit must be a non-empty string")
         kwargs["unit"] = unit
     if origin is not None:
-        if not isinstance(origin, str) or origin.strip() == "":
-            raise OracleError("series_to_datetime datetime_origin must be a non-empty string")
+        if isinstance(origin, str):
+            if origin.strip() == "":
+                raise OracleError(
+                    "series_to_datetime datetime_origin must be a non-empty string"
+                )
+        elif isinstance(origin, bool) or not isinstance(origin, (int, float)):
+            raise OracleError(
+                "series_to_datetime datetime_origin must be a string, integer, or float"
+            )
         kwargs["origin"] = origin
     if utc is not None:
         if not isinstance(utc, bool):
