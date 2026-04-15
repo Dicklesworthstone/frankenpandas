@@ -30812,6 +30812,57 @@ mod tests {
         assert_eq!(ranked.columns["b"].values()[2], Scalar::Float64(2.0));
     }
 
+    #[test]
+    fn dataframe_rank_axis1_basic() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "a",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![
+                    Scalar::Float64(3.0),
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(5.0),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "b",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(2.0),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "c",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![
+                    Scalar::Null(NullKind::NaN),
+                    Scalar::Float64(2.0),
+                    Scalar::Float64(4.0),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let ranked = df.rank_axis1("average", true, "keep").unwrap();
+
+        assert_eq!(ranked.columns["a"].values()[0], Scalar::Float64(2.0));
+        assert_eq!(ranked.columns["b"].values()[0], Scalar::Float64(1.0));
+        assert!(ranked.columns["c"].values()[0].is_missing());
+
+        assert_eq!(ranked.columns["a"].values()[1], Scalar::Float64(1.5));
+        assert_eq!(ranked.columns["b"].values()[1], Scalar::Float64(1.5));
+        assert_eq!(ranked.columns["c"].values()[1], Scalar::Float64(3.0));
+
+        assert_eq!(ranked.columns["a"].values()[2], Scalar::Float64(3.0));
+        assert_eq!(ranked.columns["b"].values()[2], Scalar::Float64(1.0));
+        assert_eq!(ranked.columns["c"].values()[2], Scalar::Float64(2.0));
+    }
+
     // ── melt tests ──
 
     #[test]

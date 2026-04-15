@@ -599,6 +599,8 @@ pub struct PacketFixture {
     #[serde(default)]
     pub rank_na_option: Option<String>,
     #[serde(default)]
+    pub rank_axis: Option<usize>,
+    #[serde(default)]
     pub sort_column: Option<String>,
     #[serde(default)]
     pub sort_ascending: Option<bool>,
@@ -1420,6 +1422,8 @@ struct OracleRequest {
     pub rank_method: Option<String>,
     #[serde(default)]
     pub rank_na_option: Option<String>,
+    #[serde(default)]
+    pub rank_axis: Option<usize>,
     #[serde(default)]
     pub sort_column: Option<String>,
     #[serde(default)]
@@ -4320,9 +4324,13 @@ fn run_fixture_operation(
             let method = fixture.rank_method.as_deref().unwrap_or("average");
             let na_option = fixture.rank_na_option.as_deref().unwrap_or("keep");
             let ascending = resolve_sort_ascending(fixture);
-            let actual = frame
-                .rank(method, ascending, na_option)
-                .map_err(|err| err.to_string());
+            let axis = resolve_rank_axis(fixture)?;
+            let actual = if axis == 1 {
+                frame.rank_axis1(method, ascending, na_option)
+            } else {
+                frame.rank(method, ascending, na_option)
+            }
+            .map_err(|err| err.to_string());
             match expected {
                 ResolvedExpected::Frame(frame) => compare_dataframe_expected(&actual?, &frame),
                 ResolvedExpected::ErrorContains(substr) => match actual {
@@ -4985,6 +4993,7 @@ fn capture_live_oracle_expected(
         diff_axis: fixture.diff_axis,
         rank_method: fixture.rank_method.clone(),
         rank_na_option: fixture.rank_na_option.clone(),
+        rank_axis: fixture.rank_axis,
         sort_column: fixture.sort_column.clone(),
         sort_ascending: fixture.sort_ascending,
         concat_axis: fixture.concat_axis,
@@ -5626,6 +5635,15 @@ fn resolve_sort_ascending(fixture: &PacketFixture) -> bool {
     fixture.sort_ascending.unwrap_or(true)
 }
 
+fn resolve_rank_axis(fixture: &PacketFixture) -> Result<usize, String> {
+    match fixture.rank_axis.unwrap_or(0) {
+        axis @ (0 | 1) => Ok(axis),
+        axis => Err(format!(
+            "rank_axis must be 0 or 1 for dataframe_rank (got {axis})"
+        )),
+    }
+}
+
 fn normalize_head_take(n: i64, len: usize) -> usize {
     if n >= 0 {
         usize::try_from(n).unwrap_or(usize::MAX).min(len)
@@ -6116,9 +6134,16 @@ fn execute_dataframe_fixture_operation(fixture: &PacketFixture) -> Result<DataFr
             let method = fixture.rank_method.as_deref().unwrap_or("average");
             let na_option = fixture.rank_na_option.as_deref().unwrap_or("keep");
             let ascending = resolve_sort_ascending(fixture);
-            frame
-                .rank(method, ascending, na_option)
-                .map_err(|err| err.to_string())
+            let axis = resolve_rank_axis(fixture)?;
+            if axis == 1 {
+                frame
+                    .rank_axis1(method, ascending, na_option)
+                    .map_err(|err| err.to_string())
+            } else {
+                frame
+                    .rank(method, ascending, na_option)
+                    .map_err(|err| err.to_string())
+            }
         }
         FixtureOperation::DataFrameFillNa => {
             let frame = build_dataframe(require_frame(fixture)?)
@@ -7995,9 +8020,13 @@ fn execute_and_compare_differential(
             let method = fixture.rank_method.as_deref().unwrap_or("average");
             let na_option = fixture.rank_na_option.as_deref().unwrap_or("keep");
             let ascending = resolve_sort_ascending(fixture);
-            let actual = frame
-                .rank(method, ascending, na_option)
-                .map_err(|err| err.to_string());
+            let axis = resolve_rank_axis(fixture)?;
+            let actual = if axis == 1 {
+                frame.rank_axis1(method, ascending, na_option)
+            } else {
+                frame.rank(method, ascending, na_option)
+            }
+            .map_err(|err| err.to_string());
             match expected {
                 ResolvedExpected::Frame(frame) => Ok(diff_dataframe(&actual?, &frame)),
                 ResolvedExpected::ErrorContains(substr) => Ok(match actual {
@@ -11213,6 +11242,70 @@ mod tests {
         )
         .expect("actual series");
         super::compare_series_expected(&actual, &expected).expect("pandas parity");
+    }
+
+    #[test]
+    fn live_oracle_dataframe_rank_axis1_matches_pandas() {
+        let mut cfg = HarnessConfig::default_paths();
+        cfg.allow_system_pandas_fallback = false;
+
+        let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+            "packet_id": "FP-P2D-065",
+            "case_id": "dataframe_rank_axis1_live",
+            "mode": "strict",
+            "operation": "dataframe_rank",
+            "oracle_source": "live_legacy_pandas",
+            "rank_axis": 1,
+            "rank_method": "average",
+            "rank_na_option": "keep",
+            "sort_ascending": true,
+            "frame": {
+                "index": [
+                    { "kind": "int64", "value": 0 },
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "int64", "value": 2 }
+                ],
+                "column_order": ["a", "b", "c"],
+                "columns": {
+                    "a": [
+                        { "kind": "float64", "value": 3.0 },
+                        { "kind": "float64", "value": 1.0 },
+                        { "kind": "float64", "value": 5.0 }
+                    ],
+                    "b": [
+                        { "kind": "float64", "value": 1.0 },
+                        { "kind": "float64", "value": 1.0 },
+                        { "kind": "float64", "value": 2.0 }
+                    ],
+                    "c": [
+                        { "kind": "null", "value": "na_n" },
+                        { "kind": "float64", "value": 2.0 },
+                        { "kind": "float64", "value": 4.0 }
+                    ]
+                }
+            }
+        }))
+        .expect("fixture");
+
+        let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+        if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+            eprintln!(
+                "live pandas unavailable; skipping dataframe rank axis=1 oracle test: {message}"
+            );
+            return;
+        }
+
+        let expected = expected_result.expect("live oracle expected");
+        assert!(
+            matches!(&expected, super::ResolvedExpected::Frame(_)),
+            "expected live oracle frame payload, got {expected:?}"
+        );
+        let super::ResolvedExpected::Frame(expected) = expected else {
+            return;
+        };
+
+        let actual = super::execute_dataframe_fixture_operation(&fixture).expect("actual frame");
+        super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
     }
 
     #[test]

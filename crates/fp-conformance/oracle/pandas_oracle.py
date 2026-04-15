@@ -1515,9 +1515,14 @@ def op_dataframe_rank(pd, payload: dict[str, Any]) -> dict[str, Any]:
     ascending = payload.get("sort_ascending")
     if ascending is None:
         ascending = True
+    axis = payload.get("rank_axis")
+    if axis is None:
+        axis = 0
+    if axis not in (0, 1):
+        raise OracleError(f"dataframe_rank rank_axis must be 0 or 1 (got {axis!r})")
 
     frame = dataframe_from_json(pd, frame_payload)
-    out = frame.rank(method=method, ascending=ascending, na_option=na_option)
+    out = frame.rank(method=method, ascending=ascending, na_option=na_option, axis=axis)
     return {"expected_frame": dataframe_to_json(out)}
 
 
