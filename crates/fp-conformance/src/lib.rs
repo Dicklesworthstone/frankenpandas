@@ -260,6 +260,8 @@ pub enum FixtureOperation {
     DataFrameIloc,
     #[serde(rename = "dataframe_take", alias = "data_frame_take")]
     DataFrameTake,
+    #[serde(rename = "dataframe_asof", alias = "data_frame_asof")]
+    DataFrameAsof,
     #[serde(rename = "dataframe_at_time", alias = "data_frame_at_time")]
     DataFrameAtTime,
     #[serde(rename = "dataframe_between_time", alias = "data_frame_between_time")]
@@ -404,6 +406,7 @@ impl FixtureOperation {
             Self::DataFrameLoc => "dataframe_loc",
             Self::DataFrameIloc => "dataframe_iloc",
             Self::DataFrameTake => "dataframe_take",
+            Self::DataFrameAsof => "dataframe_asof",
             Self::DataFrameAtTime => "dataframe_at_time",
             Self::DataFrameBetweenTime => "dataframe_between_time",
             Self::DataFrameHead => "dataframe_head",
@@ -664,6 +667,8 @@ pub struct PacketFixture {
     pub take_indices: Option<Vec<i64>>,
     #[serde(default)]
     pub take_axis: Option<usize>,
+    #[serde(default)]
+    pub asof_label: Option<IndexLabel>,
     #[serde(default)]
     pub time_value: Option<String>,
     #[serde(default)]
@@ -937,6 +942,7 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::DataFrameLoc
         | FixtureOperation::DataFrameIloc
         | FixtureOperation::DataFrameTake
+        | FixtureOperation::DataFrameAsof
         | FixtureOperation::DataFrameAtTime
         | FixtureOperation::DataFrameBetweenTime
         | FixtureOperation::DataFrameHead
@@ -1496,6 +1502,8 @@ struct OracleRequest {
     take_indices: Option<Vec<i64>>,
     #[serde(default)]
     take_axis: Option<usize>,
+    #[serde(default)]
+    asof_label: Option<IndexLabel>,
     #[serde(default)]
     time_value: Option<String>,
     #[serde(default)]
@@ -4739,6 +4747,31 @@ fn run_fixture_operation(
                 ),
             }
         }
+        FixtureOperation::DataFrameAsof => {
+            let actual = execute_dataframe_asof_fixture_operation(fixture);
+            match expected {
+                ResolvedExpected::Series(series) => compare_series_expected(&actual?, &series),
+                ResolvedExpected::ErrorContains(substr) => match actual {
+                    Err(message) if message.contains(&substr) => Ok(()),
+                    Err(message) => Err(format!(
+                        "expected dataframe_asof error containing '{substr}', got '{message}'"
+                    )),
+                    Ok(_) => Err(format!(
+                        "expected dataframe_asof to fail with error containing '{substr}'"
+                    )),
+                },
+                ResolvedExpected::ErrorAny => {
+                    if actual.is_err() {
+                        Ok(())
+                    } else {
+                        Err("expected dataframe_asof to fail but operation succeeded".to_owned())
+                    }
+                }
+                _ => Err(
+                    "expected_series or expected_error is required for dataframe_asof".to_owned(),
+                ),
+            }
+        }
         FixtureOperation::DataFrameAtTime => {
             let actual = execute_dataframe_fixture_operation(fixture);
             match expected {
@@ -5063,6 +5096,7 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::SeriesTake
         | FixtureOperation::SeriesAtTime
         | FixtureOperation::SeriesBetweenTime
+        | FixtureOperation::DataFrameAsof
         | FixtureOperation::DataFrameCount
         | FixtureOperation::DataFrameDuplicated
         | FixtureOperation::GroupByMean
@@ -5240,6 +5274,7 @@ fn capture_live_oracle_expected(
         iloc_positions: fixture.iloc_positions.clone(),
         take_indices: fixture.take_indices.clone(),
         take_axis: fixture.take_axis,
+        asof_label: fixture.asof_label.clone(),
         time_value: fixture.time_value.clone(),
         start_time: fixture.start_time.clone(),
         end_time: fixture.end_time.clone(),
@@ -5374,6 +5409,7 @@ fn capture_live_oracle_expected(
         | FixtureOperation::SeriesTake
         | FixtureOperation::SeriesAtTime
         | FixtureOperation::SeriesBetweenTime
+        | FixtureOperation::DataFrameAsof
         | FixtureOperation::DataFrameCount
         | FixtureOperation::DataFrameDuplicated
         | FixtureOperation::GroupByMean
@@ -5789,6 +5825,13 @@ fn require_take_indices(fixture: &PacketFixture) -> Result<&Vec<i64>, String> {
         .take_indices
         .as_ref()
         .ok_or_else(|| "take_indices is required for take operations".to_owned())
+}
+
+fn require_asof_label(fixture: &PacketFixture) -> Result<&IndexLabel, String> {
+    fixture
+        .asof_label
+        .as_ref()
+        .ok_or_else(|| "asof_label is required for dataframe_asof".to_owned())
 }
 
 fn require_time_value(fixture: &PacketFixture) -> Result<&str, String> {
@@ -6520,6 +6563,18 @@ fn execute_dataframe_fixture_operation(fixture: &PacketFixture) -> Result<DataFr
             fixture.operation
         )),
     }
+}
+
+fn execute_dataframe_asof_fixture_operation(fixture: &PacketFixture) -> Result<Series, String> {
+    let frame = build_dataframe(require_frame(fixture)?)
+        .map_err(|err| format!("frame build failed: {err}"))?;
+    let subset = resolve_duplicate_subset(fixture)?;
+    let subset_refs = subset
+        .as_ref()
+        .map(|columns| columns.iter().map(String::as_str).collect::<Vec<_>>());
+    frame
+        .asof(require_asof_label(fixture)?, subset_refs.as_deref())
+        .map_err(|err| err.to_string())
 }
 
 fn execute_dataframe_merge_fixture_operation(
@@ -8779,6 +8834,41 @@ fn execute_and_compare_differential(
                     )],
                 }),
                 _ => Err("expected_frame or expected_error required for dataframe_take".to_owned()),
+            }
+        }
+        FixtureOperation::DataFrameAsof => {
+            let actual = execute_dataframe_asof_fixture_operation(fixture);
+            match expected {
+                ResolvedExpected::Series(series) => Ok(diff_series(&actual?, &series)),
+                ResolvedExpected::ErrorContains(substr) => Ok(match actual {
+                    Err(message) if message.contains(&substr) => Vec::new(),
+                    Err(message) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "dataframe_asof.error",
+                        format!(
+                            "expected dataframe_asof error containing '{substr}', got '{message}'"
+                        ),
+                    )],
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "dataframe_asof.error",
+                        "expected dataframe_asof to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                ResolvedExpected::ErrorAny => Ok(match actual {
+                    Err(_) => Vec::new(),
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "dataframe_asof.error",
+                        "expected dataframe_asof to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                _ => {
+                    Err("expected_series or expected_error required for dataframe_asof".to_owned())
+                }
             }
         }
         FixtureOperation::DataFrameAtTime => {
@@ -12022,6 +12112,175 @@ mod tests {
 
         let actual = super::execute_dataframe_fixture_operation(&fixture).expect("actual frame");
         super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
+    }
+
+    #[test]
+    fn live_oracle_dataframe_at_time_matches_pandas() {
+        let mut cfg = HarnessConfig::default_paths();
+        cfg.allow_system_pandas_fallback = false;
+
+        let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+            "packet_id": "FP-P2D-067",
+            "case_id": "dataframe_at_time_live",
+            "mode": "strict",
+            "operation": "dataframe_at_time",
+            "oracle_source": "live_legacy_pandas",
+            "time_value": "10:00:00",
+            "frame": {
+                "index": [
+                    { "kind": "utf8", "value": "2024-01-01T10:00:00" },
+                    { "kind": "utf8", "value": "2024-01-02T10:00:00" },
+                    { "kind": "utf8", "value": "2024-01-03T14:30:00" }
+                ],
+                "column_order": ["a", "b"],
+                "columns": {
+                    "a": [
+                        { "kind": "int64", "value": 1 },
+                        { "kind": "int64", "value": 2 },
+                        { "kind": "int64", "value": 3 }
+                    ],
+                    "b": [
+                        { "kind": "utf8", "value": "x" },
+                        { "kind": "utf8", "value": "y" },
+                        { "kind": "utf8", "value": "z" }
+                    ]
+                }
+            }
+        }))
+        .expect("fixture");
+
+        let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+        if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+            eprintln!("live pandas unavailable; skipping dataframe at_time oracle test: {message}");
+            return;
+        }
+
+        let expected = expected_result.expect("live oracle expected");
+        assert!(
+            matches!(&expected, super::ResolvedExpected::Frame(_)),
+            "expected live oracle frame payload, got {expected:?}"
+        );
+        let super::ResolvedExpected::Frame(expected) = expected else {
+            return;
+        };
+
+        let actual = super::execute_dataframe_fixture_operation(&fixture).expect("actual frame");
+        super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
+    }
+
+    #[test]
+    fn live_oracle_dataframe_between_time_matches_pandas() {
+        let mut cfg = HarnessConfig::default_paths();
+        cfg.allow_system_pandas_fallback = false;
+
+        let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+            "packet_id": "FP-P2D-067",
+            "case_id": "dataframe_between_time_live",
+            "mode": "strict",
+            "operation": "dataframe_between_time",
+            "oracle_source": "live_legacy_pandas",
+            "start_time": "09:00:00",
+            "end_time": "16:00:00",
+            "frame": {
+                "index": [
+                    { "kind": "utf8", "value": "2024-01-01T08:00:00" },
+                    { "kind": "utf8", "value": "2024-01-01T12:30:00" },
+                    { "kind": "utf8", "value": "2024-01-01T15:00:00" },
+                    { "kind": "utf8", "value": "2024-01-01T20:00:00" }
+                ],
+                "column_order": ["a", "b"],
+                "columns": {
+                    "a": [
+                        { "kind": "int64", "value": 1 },
+                        { "kind": "int64", "value": 2 },
+                        { "kind": "int64", "value": 3 },
+                        { "kind": "int64", "value": 4 }
+                    ],
+                    "b": [
+                        { "kind": "utf8", "value": "w" },
+                        { "kind": "utf8", "value": "x" },
+                        { "kind": "utf8", "value": "y" },
+                        { "kind": "utf8", "value": "z" }
+                    ]
+                }
+            }
+        }))
+        .expect("fixture");
+
+        let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+        if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+            eprintln!(
+                "live pandas unavailable; skipping dataframe between_time oracle test: {message}"
+            );
+            return;
+        }
+
+        let expected = expected_result.expect("live oracle expected");
+        assert!(
+            matches!(&expected, super::ResolvedExpected::Frame(_)),
+            "expected live oracle frame payload, got {expected:?}"
+        );
+        let super::ResolvedExpected::Frame(expected) = expected else {
+            return;
+        };
+
+        let actual = super::execute_dataframe_fixture_operation(&fixture).expect("actual frame");
+        super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
+    }
+
+    #[test]
+    fn live_oracle_dataframe_asof_matches_pandas() {
+        let mut cfg = HarnessConfig::default_paths();
+        cfg.allow_system_pandas_fallback = false;
+
+        let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+            "packet_id": "FP-P2D-067",
+            "case_id": "dataframe_asof_live",
+            "mode": "strict",
+            "operation": "dataframe_asof",
+            "oracle_source": "live_legacy_pandas",
+            "asof_label": { "kind": "utf8", "value": "2024-01-02T10:00:00" },
+            "subset": ["b"],
+            "frame": {
+                "index": [
+                    { "kind": "utf8", "value": "2024-01-01T10:00:00" },
+                    { "kind": "utf8", "value": "2024-01-02T10:00:00" },
+                    { "kind": "utf8", "value": "2024-01-03T10:00:00" }
+                ],
+                "column_order": ["a", "b"],
+                "columns": {
+                    "a": [
+                        { "kind": "int64", "value": 1 },
+                        { "kind": "int64", "value": 2 },
+                        { "kind": "int64", "value": 3 }
+                    ],
+                    "b": [
+                        { "kind": "float64", "value": 10.0 },
+                        { "kind": "null", "value": "na_n" },
+                        { "kind": "float64", "value": 30.0 }
+                    ]
+                }
+            }
+        }))
+        .expect("fixture");
+
+        let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+        if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+            eprintln!("live pandas unavailable; skipping dataframe asof oracle test: {message}");
+            return;
+        }
+
+        let expected = expected_result.expect("live oracle expected");
+        assert!(
+            matches!(&expected, super::ResolvedExpected::Series(_)),
+            "expected live oracle series payload, got {expected:?}"
+        );
+        let super::ResolvedExpected::Series(expected) = expected else {
+            return;
+        };
+
+        let actual = super::execute_dataframe_asof_fixture_operation(&fixture).expect("actual");
+        super::compare_series_expected(&actual, &expected).expect("pandas parity");
     }
 
     #[test]

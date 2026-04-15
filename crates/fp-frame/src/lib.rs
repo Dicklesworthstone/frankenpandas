@@ -20921,6 +20921,83 @@ impl DataFrame {
         None
     }
 
+    /// Return the last row(s) without any NaNs before `where`.
+    ///
+    /// Matches `df.asof(where, subset=...)`.
+    pub fn asof(&self, label: &IndexLabel, subset: Option<&[&str]>) -> Result<Series, FrameError> {
+        let labels = self.index.labels();
+        if labels.is_empty() {
+            let nan_vals = vec![Scalar::Null(NullKind::NaN); self.column_order.len()];
+            let new_labels = self
+                .column_order
+                .iter()
+                .map(|s| IndexLabel::Utf8(s.clone()))
+                .collect();
+            return Series::from_values(label.to_string(), new_labels, nan_vals);
+        }
+
+        let pos = match labels.binary_search(label) {
+            Ok(i) => i,
+            Err(i) => {
+                if i == 0 {
+                    let nan_vals = vec![Scalar::Null(NullKind::NaN); self.column_order.len()];
+                    let new_labels = self
+                        .column_order
+                        .iter()
+                        .map(|s| IndexLabel::Utf8(s.clone()))
+                        .collect();
+                    return Series::from_values(label.to_string(), new_labels, nan_vals);
+                }
+                i - 1
+            }
+        };
+
+        let check_cols: Vec<&str> = match subset {
+            Some(cols) => {
+                for &c in cols {
+                    if !self.columns.contains_key(c) {
+                        return Err(FrameError::CompatibilityRejected(format!(
+                            "asof: subset column '{c}' not found"
+                        )));
+                    }
+                }
+                cols.to_vec()
+            }
+            None => self.column_order.iter().map(|s| s.as_str()).collect(),
+        };
+
+        for i in (0..=pos).rev() {
+            let mut valid = true;
+            for col_name in &check_cols {
+                let val = &self.columns[*col_name].values()[i];
+                if val.is_missing() {
+                    valid = false;
+                    break;
+                }
+            }
+            if valid {
+                let mut out_vals = Vec::with_capacity(self.column_order.len());
+                for name in &self.column_order {
+                    out_vals.push(self.columns[name].values()[i].clone());
+                }
+                let new_labels = self
+                    .column_order
+                    .iter()
+                    .map(|s| IndexLabel::Utf8(s.clone()))
+                    .collect();
+                return Series::from_values(labels[i].to_string(), new_labels, out_vals);
+            }
+        }
+
+        let nan_vals = vec![Scalar::Null(NullKind::NaN); self.column_order.len()];
+        let new_labels = self
+            .column_order
+            .iter()
+            .map(|s| IndexLabel::Utf8(s.clone()))
+            .collect();
+        Series::from_values(label.to_string(), new_labels, nan_vals)
+    }
+
     // ── Crosstab ────────────────────────────────────────────────────
 
     /// Compute a crosstab (contingency table) from two columns.
@@ -39072,6 +39149,80 @@ mod tests {
 
         let result = df.at_time("10:00:00").unwrap();
         assert_eq!(result.len(), 2); // Two rows at 10:00
+    }
+
+    #[test]
+    fn df_asof_exact_match_returns_row() {
+        let df = DataFrame::from_dict_with_index(
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                (
+                    "b",
+                    vec![Scalar::Utf8("x".to_string()), Scalar::Utf8("y".to_string())],
+                ),
+            ],
+            vec!["2024-01-01T10:00:00".into(), "2024-01-02T10:00:00".into()],
+        )
+        .unwrap();
+
+        let result = df
+            .asof(&IndexLabel::Utf8("2024-01-02T10:00:00".to_string()), None)
+            .unwrap();
+        assert_eq!(result.column().values()[0], Scalar::Int64(2));
+        assert_eq!(result.column().values()[1], Scalar::Utf8("y".to_string()));
+    }
+
+    #[test]
+    fn df_asof_subset_skips_missing_rows() {
+        let df = DataFrame::from_dict_with_index(
+            vec![
+                (
+                    "a",
+                    vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Null(NullKind::NaN),
+                        Scalar::Float64(30.0),
+                    ],
+                ),
+            ],
+            vec![
+                "2024-01-01T10:00:00".into(),
+                "2024-01-02T10:00:00".into(),
+                "2024-01-03T10:00:00".into(),
+            ],
+        )
+        .unwrap();
+
+        let result = df
+            .asof(
+                &IndexLabel::Utf8("2024-01-02T10:00:00".to_string()),
+                Some(&["b"]),
+            )
+            .unwrap();
+        assert_eq!(result.column().values()[0], Scalar::Float64(1.0));
+        assert_eq!(result.column().values()[1], Scalar::Float64(10.0));
+    }
+
+    #[test]
+    fn df_asof_before_start_returns_nan_row() {
+        let df = DataFrame::from_dict_with_index(
+            vec![
+                ("a", vec![Scalar::Int64(1)]),
+                ("b", vec![Scalar::Float64(2.0)]),
+            ],
+            vec!["2024-01-02T10:00:00".into()],
+        )
+        .unwrap();
+
+        let result = df
+            .asof(&IndexLabel::Utf8("2024-01-01T10:00:00".to_string()), None)
+            .unwrap();
+        assert_eq!(result.column().values()[0], Scalar::Null(NullKind::NaN));
+        assert_eq!(result.column().values()[1], Scalar::Null(NullKind::NaN));
     }
 
     // ── DataFrame to_latex test ──

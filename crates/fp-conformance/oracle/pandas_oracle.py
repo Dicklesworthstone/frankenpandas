@@ -1527,6 +1527,75 @@ def op_dataframe_take(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return {"expected_frame": dataframe_to_json(out)}
 
 
+def op_dataframe_asof(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    asof_label = payload.get("asof_label")
+    subset = payload.get("subset")
+    if frame_payload is None:
+        raise OracleError("dataframe_asof requires frame payload")
+    if asof_label is None:
+        raise OracleError("dataframe_asof requires asof_label payload")
+    if subset is not None and not isinstance(subset, list):
+        raise OracleError("dataframe_asof subset must be a list when provided")
+
+    frame = dataframe_from_json(pd, frame_payload)
+    frame.index = pd.DatetimeIndex(frame.index)
+    label = label_from_json(asof_label)
+    subset_columns = None
+    if subset is not None:
+        subset_columns = []
+        for entry in subset:
+            if not isinstance(entry, str) or not entry.strip():
+                raise OracleError("dataframe_asof subset entries must be non-empty strings")
+            subset_columns.append(entry.strip())
+
+    try:
+        out = frame.asof(label, subset=subset_columns)
+    except Exception as exc:
+        raise OracleError(f"dataframe_asof selection failed: {exc}") from exc
+
+    return {"expected_series": series_to_expected(out)}
+
+
+def op_dataframe_at_time(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    time_value = payload.get("time_value")
+    if frame_payload is None:
+        raise OracleError("dataframe_at_time requires frame payload")
+    if not isinstance(time_value, str) or not time_value:
+        raise OracleError("dataframe_at_time requires non-empty time_value payload")
+
+    frame = dataframe_from_json(pd, frame_payload)
+    frame.index = pd.DatetimeIndex(frame.index)
+    try:
+        out = frame.at_time(time_value)
+    except Exception as exc:
+        raise OracleError(f"dataframe_at_time selection failed: {exc}") from exc
+
+    return {"expected_frame": dataframe_to_json(out)}
+
+
+def op_dataframe_between_time(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    start_time = payload.get("start_time")
+    end_time = payload.get("end_time")
+    if frame_payload is None:
+        raise OracleError("dataframe_between_time requires frame payload")
+    if not isinstance(start_time, str) or not start_time:
+        raise OracleError("dataframe_between_time requires non-empty start_time payload")
+    if not isinstance(end_time, str) or not end_time:
+        raise OracleError("dataframe_between_time requires non-empty end_time payload")
+
+    frame = dataframe_from_json(pd, frame_payload)
+    frame.index = pd.DatetimeIndex(frame.index)
+    try:
+        out = frame.between_time(start_time, end_time)
+    except Exception as exc:
+        raise OracleError(f"dataframe_between_time selection failed: {exc}") from exc
+
+    return {"expected_frame": dataframe_to_json(out)}
+
+
 def op_dataframe_head(pd, payload: dict[str, Any]) -> dict[str, Any]:
     frame_payload = payload.get("frame")
     head_n = payload.get("head_n")
@@ -2304,6 +2373,12 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_dataframe_iloc(pd, payload)
     if op in {"dataframe_take", "data_frame_take"}:
         return op_dataframe_take(pd, payload)
+    if op in {"dataframe_asof", "data_frame_asof"}:
+        return op_dataframe_asof(pd, payload)
+    if op in {"dataframe_at_time", "data_frame_at_time"}:
+        return op_dataframe_at_time(pd, payload)
+    if op in {"dataframe_between_time", "data_frame_between_time"}:
+        return op_dataframe_between_time(pd, payload)
     if op in {"dataframe_head", "data_frame_head"}:
         return op_dataframe_head(pd, payload)
     if op in {"dataframe_tail", "data_frame_tail"}:
