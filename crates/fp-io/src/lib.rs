@@ -66,7 +66,17 @@ pub enum JsonOrient {
 pub struct CsvReadOptions {
     pub delimiter: u8,
     pub has_headers: bool,
+    /// Additional NA values to recognize beyond the pandas defaults.
     pub na_values: Vec<String>,
+    /// Whether to include the default NaN values when parsing data.
+    /// If `na_values` are specified and `keep_default_na` is false, only the
+    /// specified `na_values` will be treated as NA.
+    /// Matches pandas `keep_default_na` parameter. Default: true.
+    pub keep_default_na: bool,
+    /// Detect missing value markers (empty strings and the value of na_values).
+    /// In data without any NAs, passing `na_filter=false` can improve performance.
+    /// Matches pandas `na_filter` parameter. Default: true.
+    pub na_filter: bool,
     pub index_col: Option<String>,
     /// Read only these columns (by name). `None` means read all.
     /// Matches pandas `usecols` parameter.
@@ -89,6 +99,8 @@ impl Default for CsvReadOptions {
             delimiter: b',',
             has_headers: true,
             na_values: Vec::new(),
+            keep_default_na: true,
+            na_filter: true,
             index_col: None,
             usecols: None,
             nrows: None,
@@ -172,13 +184,32 @@ pub fn write_csv_string(frame: &DataFrame) -> Result<String, IoError> {
     Ok(String::from_utf8(bytes)?)
 }
 
+/// Default NA values recognized by pandas read_csv.
+/// See: https://pandas.pydata.org/docs/reference/api/pandas.read_csv.html
+const PANDAS_DEFAULT_NA_VALUES: &[&str] = &[
+    "",
+    "#N/A",
+    "#N/A N/A",
+    "#NA",
+    "-1.#IND",
+    "-1.#QNAN",
+    "-NaN",
+    "-nan",
+    "1.#IND",
+    "1.#QNAN",
+    "<NA>",
+    "N/A",
+    "NA",
+    "NULL",
+    "NaN",
+    "None",
+    "n/a",
+    "nan",
+    "null",
+];
+
 fn is_pandas_default_na(s: &str) -> bool {
-    matches!(
-        s,
-        "" | "#N/A" | "#N/A N/A" | "#NA" | "-1.#IND" | "-1.#QNAN" | "-NaN" | "-nan"
-            | "1.#IND" | "1.#QNAN" | "<NA>" | "N/A" | "NA" | "NULL" | "NaN" | "n/a" | "nan"
-            | "null"
-    )
+    PANDAS_DEFAULT_NA_VALUES.contains(&s)
 }
 
 fn parse_scalar(field: &str) -> Scalar {
@@ -219,11 +250,28 @@ fn scalar_to_csv(scalar: &Scalar) -> String {
     }
 }
 
-fn parse_scalar_with_na(field: &str, na_values: &[String]) -> Scalar {
+/// Parse a field with NA value handling respecting pandas options.
+///
+/// - `na_filter`: If false, skip NA detection entirely for performance
+/// - `keep_default_na`: If true, use pandas default NA values
+/// - `na_values`: Additional NA values to recognize
+fn parse_scalar_with_options(
+    field: &str,
+    na_filter: bool,
+    keep_default_na: bool,
+    na_values: &[String],
+) -> Scalar {
     let trimmed = field.trim();
-    if is_pandas_default_na(trimmed) || na_values.iter().any(|na| na == trimmed) {
-        return Scalar::Null(NullKind::Null);
+
+    // Check NA values only if na_filter is enabled
+    if na_filter {
+        let is_default_na = keep_default_na && is_pandas_default_na(trimmed);
+        let is_custom_na = na_values.iter().any(|na| na == trimmed);
+        if is_default_na || is_custom_na {
+            return Scalar::Null(NullKind::Null);
+        }
     }
+
     if let Ok(value) = trimmed.parse::<i64>() {
         return Scalar::Int64(value);
     }
@@ -333,7 +381,12 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
         if (row_count as usize) < max_rows {
             for (idx, col) in columns.iter_mut().enumerate() {
                 let field = first_record.get(idx).unwrap_or_default();
-                col.push(parse_scalar_with_na(field, &options.na_values));
+                col.push(parse_scalar_with_options(
+                    field,
+                    options.na_filter,
+                    options.keep_default_na,
+                    &options.na_values,
+                ));
             }
             row_count += 1;
         }
@@ -353,7 +406,12 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
         let record = row?;
         for (idx, col) in columns.iter_mut().enumerate() {
             let field = record.get(idx).unwrap_or_default();
-            col.push(parse_scalar_with_na(field, &options.na_values));
+            col.push(parse_scalar_with_options(
+                    field,
+                    options.na_filter,
+                    options.keep_default_na,
+                    &options.na_values,
+                ));
         }
         row_count += 1;
     }
@@ -2625,6 +2683,50 @@ mod tests {
         assert!(b.values()[0].is_missing());
         assert!(b.values()[1].is_missing());
         assert_eq!(b.values()[2], Scalar::Utf8("valid".into()));
+    }
+
+    #[test]
+    fn csv_none_is_default_na() {
+        // "None" is a pandas default NA value (Python's None)
+        let input = "a,b\n1,None\n2,valid\n";
+        let frame = read_csv_str(input).expect("parse");
+        let b = frame.column("b").unwrap();
+        assert!(b.values()[0].is_missing(), "None should be parsed as NA");
+        assert_eq!(b.values()[1], Scalar::Utf8("valid".into()));
+    }
+
+    #[test]
+    fn csv_keep_default_na_false() {
+        // With keep_default_na=false, only custom na_values are recognized
+        let input = "a,b\n1,NA\n2,CUSTOM\n3,valid\n";
+        let opts = CsvReadOptions {
+            na_values: vec!["CUSTOM".into()],
+            keep_default_na: false,
+            ..Default::default()
+        };
+        let frame = read_csv_with_options(input, &opts).expect("parse");
+        let b = frame.column("b").unwrap();
+        // "NA" should NOT be missing because keep_default_na=false
+        assert_eq!(b.values()[0], Scalar::Utf8("NA".into()));
+        // "CUSTOM" should be missing because it's in na_values
+        assert!(b.values()[1].is_missing());
+        assert_eq!(b.values()[2], Scalar::Utf8("valid".into()));
+    }
+
+    #[test]
+    fn csv_na_filter_false() {
+        // With na_filter=false, no NA detection at all (for performance)
+        let input = "a,b\n1,NA\n2,\n3,None\n";
+        let opts = CsvReadOptions {
+            na_filter: false,
+            ..Default::default()
+        };
+        let frame = read_csv_with_options(input, &opts).expect("parse");
+        let b = frame.column("b").unwrap();
+        // All values should be kept as strings, no NA detection
+        assert_eq!(b.values()[0], Scalar::Utf8("NA".into()));
+        assert_eq!(b.values()[1], Scalar::Utf8("".into()));
+        assert_eq!(b.values()[2], Scalar::Utf8("None".into()));
     }
 
     #[test]
