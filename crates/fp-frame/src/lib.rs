@@ -3654,19 +3654,19 @@ impl Series {
 
     /// Select elements by integer positions.
     ///
-    /// Matches `pd.Series.take(indices)`. Negative indices are not supported.
-    pub fn take(&self, indices: &[usize]) -> Result<Self, FrameError> {
+    /// Matches `pd.Series.take(indices)`, including negative indices from the end.
+    pub fn take(&self, indices: &[i64]) -> Result<Self, FrameError> {
         let n = self.len();
         let mut labels = Vec::with_capacity(indices.len());
         let mut values = Vec::with_capacity(indices.len());
         for &idx in indices {
-            if idx >= n {
-                return Err(FrameError::CompatibilityRejected(format!(
+            let normalized = normalize_iloc_position(idx, n).map_err(|_| {
+                FrameError::CompatibilityRejected(format!(
                     "take index {idx} out of bounds for length {n}"
-                )));
-            }
-            labels.push(self.index.labels()[idx].clone());
-            values.push(self.column.values()[idx].clone());
+                ))
+            })?;
+            labels.push(self.index.labels()[normalized].clone());
+            values.push(self.column.values()[normalized].clone());
         }
         Self::from_values(self.name.clone(), labels, values)
     }
@@ -4673,6 +4673,48 @@ impl Series {
         let new_labels = labels[start..end].to_vec();
         let new_values = self.column.values()[start..end].to_vec();
         Self::from_values(self.name.clone(), new_labels, new_values)
+    }
+
+    /// Select rows where the time component exactly matches the given time.
+    ///
+    /// Matches `s.at_time(time)`.
+    pub fn at_time(&self, time: &str) -> Result<Self, FrameError> {
+        let labels = self.index.labels();
+        let mut keep = Vec::new();
+
+        for (i, label) in labels.iter().enumerate() {
+            if let IndexLabel::Utf8(s) = label {
+                let time_part = DataFrame::extract_time(s);
+                if let Some(ref t) = time_part {
+                    if t.as_str() == time {
+                        keep.push(i);
+                    }
+                }
+            }
+        }
+
+        self.reorder_by_positions(&keep)
+    }
+
+    /// Select rows where the time component is between start and end.
+    ///
+    /// Matches `s.between_time(start_time, end_time)`.
+    pub fn between_time(&self, start: &str, end: &str) -> Result<Self, FrameError> {
+        let labels = self.index.labels();
+        let mut keep = Vec::new();
+
+        for (i, label) in labels.iter().enumerate() {
+            if let IndexLabel::Utf8(s) = label {
+                let time_part = DataFrame::extract_time(s);
+                if let Some(ref t) = time_part {
+                    if t.as_str() >= start && t.as_str() <= end {
+                        keep.push(i);
+                    }
+                }
+            }
+        }
+
+        self.reorder_by_positions(&keep)
     }
 
     /// Select initial rows from a DatetimeIndex up to an offset.
@@ -36704,10 +36746,80 @@ mod tests {
     }
 
     #[test]
+    fn series_take_negative_indices() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Float64(10.0),
+                Scalar::Float64(20.0),
+                Scalar::Float64(30.0),
+                Scalar::Float64(40.0),
+            ],
+        )
+        .unwrap();
+
+        let result = s.take(&[-1, -3]).unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result.index.labels(), &[3_i64.into(), 1_i64.into()]);
+        assert_eq!(result.values()[0], Scalar::Float64(40.0));
+        assert_eq!(result.values()[1], Scalar::Float64(20.0));
+    }
+
+    #[test]
     fn series_take_out_of_bounds() {
         let s = Series::from_values("x", vec![0_i64.into()], vec![Scalar::Float64(1.0)]).unwrap();
 
         assert!(s.take(&[5]).is_err());
+        assert!(s.take(&[-2]).is_err());
+    }
+
+    #[test]
+    fn series_between_time() {
+        let s = Series::from_values(
+            "x",
+            vec![
+                "2024-01-01T08:00:00".into(),
+                "2024-01-01T12:30:00".into(),
+                "2024-01-01T15:00:00".into(),
+                "2024-01-01T20:00:00".into(),
+            ],
+            vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+                Scalar::Int64(4),
+            ],
+        )
+        .unwrap();
+
+        let result = s.between_time("09:00:00", "16:00:00").unwrap();
+        assert_eq!(
+            result.index.labels(),
+            &["2024-01-01T12:30:00".into(), "2024-01-01T15:00:00".into()]
+        );
+        assert_eq!(result.values(), &[Scalar::Int64(2), Scalar::Int64(3)]);
+    }
+
+    #[test]
+    fn series_at_time() {
+        let s = Series::from_values(
+            "x",
+            vec![
+                "2024-01-01T10:00:00".into(),
+                "2024-01-02T10:00:00".into(),
+                "2024-01-03T14:30:00".into(),
+            ],
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+        )
+        .unwrap();
+
+        let result = s.at_time("10:00:00").unwrap();
+        assert_eq!(
+            result.index.labels(),
+            &["2024-01-01T10:00:00".into(), "2024-01-02T10:00:00".into()]
+        );
+        assert_eq!(result.values(), &[Scalar::Int64(1), Scalar::Int64(2)]);
     }
 
     #[test]

@@ -959,6 +959,36 @@ def op_series_iloc(pd, payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def op_series_take(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    take_indices = payload.get("take_indices")
+    if left is None:
+        raise OracleError("series_take requires left payload")
+    if not isinstance(take_indices, list):
+        raise OracleError("series_take requires take_indices list payload")
+
+    index = [label_from_json(item) for item in left["index"]]
+    values = [scalar_from_json(item) for item in left["values"]]
+
+    try:
+        indices = [int(value) for value in take_indices]
+    except Exception as exc:  # pragma: no cover - defensive conversion
+        raise OracleError(f"series_take indices must be integers: {exc}") from exc
+
+    series = pd.Series(values, index=index, name=left.get("name", "series"))
+    try:
+        out = series.take(indices)
+    except IndexError as exc:
+        raise OracleError(f"series_take position lookup failed: {exc}") from exc
+
+    return {
+        "expected_series": {
+            "index": [label_to_json(v) for v in out.index.tolist()],
+            "values": [scalar_to_json(v) for v in out.tolist()],
+        }
+    }
+
+
 def op_series_filter(pd, payload: dict[str, Any]) -> dict[str, Any]:
     left = payload.get("left")
     right = payload.get("right")
@@ -2173,6 +2203,8 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_series_loc(pd, payload)
     if op == "series_iloc":
         return op_series_iloc(pd, payload)
+    if op == "series_take":
+        return op_series_take(pd, payload)
     if op == "series_filter":
         return op_series_filter(pd, payload)
     if op == "series_head":
