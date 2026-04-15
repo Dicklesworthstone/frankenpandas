@@ -260,6 +260,10 @@ pub enum FixtureOperation {
     DataFrameIloc,
     #[serde(rename = "dataframe_take", alias = "data_frame_take")]
     DataFrameTake,
+    #[serde(rename = "dataframe_at_time", alias = "data_frame_at_time")]
+    DataFrameAtTime,
+    #[serde(rename = "dataframe_between_time", alias = "data_frame_between_time")]
+    DataFrameBetweenTime,
     #[serde(rename = "dataframe_head", alias = "data_frame_head")]
     DataFrameHead,
     #[serde(rename = "dataframe_tail", alias = "data_frame_tail")]
@@ -400,6 +404,8 @@ impl FixtureOperation {
             Self::DataFrameLoc => "dataframe_loc",
             Self::DataFrameIloc => "dataframe_iloc",
             Self::DataFrameTake => "dataframe_take",
+            Self::DataFrameAtTime => "dataframe_at_time",
+            Self::DataFrameBetweenTime => "dataframe_between_time",
             Self::DataFrameHead => "dataframe_head",
             Self::DataFrameTail => "dataframe_tail",
             Self::DataFrameIsNa => "dataframe_isna",
@@ -931,6 +937,8 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::DataFrameLoc
         | FixtureOperation::DataFrameIloc
         | FixtureOperation::DataFrameTake
+        | FixtureOperation::DataFrameAtTime
+        | FixtureOperation::DataFrameBetweenTime
         | FixtureOperation::DataFrameHead
         | FixtureOperation::DataFrameTail
         | FixtureOperation::DataFrameSetIndex
@@ -4731,6 +4739,60 @@ fn run_fixture_operation(
                 ),
             }
         }
+        FixtureOperation::DataFrameAtTime => {
+            let actual = execute_dataframe_fixture_operation(fixture);
+            match expected {
+                ResolvedExpected::Frame(frame) => compare_dataframe_expected(&actual?, &frame),
+                ResolvedExpected::ErrorContains(substr) => match actual {
+                    Err(message) if message.contains(&substr) => Ok(()),
+                    Err(message) => Err(format!(
+                        "expected dataframe_at_time error containing '{substr}', got '{message}'"
+                    )),
+                    Ok(_) => Err(format!(
+                        "expected dataframe_at_time to fail with error containing '{substr}'"
+                    )),
+                },
+                ResolvedExpected::ErrorAny => {
+                    if actual.is_err() {
+                        Ok(())
+                    } else {
+                        Err("expected dataframe_at_time to fail but operation succeeded".to_owned())
+                    }
+                }
+                _ => Err(
+                    "expected_frame or expected_error is required for dataframe_at_time".to_owned(),
+                ),
+            }
+        }
+        FixtureOperation::DataFrameBetweenTime => {
+            let actual = execute_dataframe_fixture_operation(fixture);
+            match expected {
+                ResolvedExpected::Frame(frame) => compare_dataframe_expected(&actual?, &frame),
+                ResolvedExpected::ErrorContains(substr) => match actual {
+                    Err(message) if message.contains(&substr) => Ok(()),
+                    Err(message) => Err(format!(
+                        "expected dataframe_between_time error containing '{substr}', got '{message}'"
+                    )),
+                    Ok(_) => Err(format!(
+                        "expected dataframe_between_time to fail with error containing '{substr}'"
+                    )),
+                },
+                ResolvedExpected::ErrorAny => {
+                    if actual.is_err() {
+                        Ok(())
+                    } else {
+                        Err(
+                            "expected dataframe_between_time to fail but operation succeeded"
+                                .to_owned(),
+                        )
+                    }
+                }
+                _ => Err(
+                    "expected_frame or expected_error is required for dataframe_between_time"
+                        .to_owned(),
+                ),
+            }
+        }
         FixtureOperation::DataFrameHead => {
             let frame = require_frame(fixture)?;
             let n = fixture
@@ -5024,6 +5086,8 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         FixtureOperation::DataFrameLoc
         | FixtureOperation::DataFrameIloc
         | FixtureOperation::DataFrameTake
+        | FixtureOperation::DataFrameAtTime
+        | FixtureOperation::DataFrameBetweenTime
         | FixtureOperation::DataFrameHead
         | FixtureOperation::DataFrameTail
         | FixtureOperation::DataFrameMode
@@ -5329,6 +5393,8 @@ fn capture_live_oracle_expected(
         FixtureOperation::DataFrameLoc
         | FixtureOperation::DataFrameIloc
         | FixtureOperation::DataFrameTake
+        | FixtureOperation::DataFrameAtTime
+        | FixtureOperation::DataFrameBetweenTime
         | FixtureOperation::DataFrameHead
         | FixtureOperation::DataFrameTail
         | FixtureOperation::DataFrameMode
@@ -6434,6 +6500,20 @@ fn execute_dataframe_fixture_operation(fixture: &PacketFixture) -> Result<DataFr
             let indices = require_take_indices(fixture)?;
             let axis = resolve_take_axis(fixture)?;
             frame.take(indices, axis).map_err(|err| err.to_string())
+        }
+        FixtureOperation::DataFrameAtTime => {
+            let frame = build_dataframe(require_frame(fixture)?)
+                .map_err(|err| format!("frame build failed: {err}"))?;
+            frame
+                .at_time(require_time_value(fixture)?)
+                .map_err(|err| err.to_string())
+        }
+        FixtureOperation::DataFrameBetweenTime => {
+            let frame = build_dataframe(require_frame(fixture)?)
+                .map_err(|err| format!("frame build failed: {err}"))?;
+            frame
+                .between_time(require_start_time(fixture)?, require_end_time(fixture)?)
+                .map_err(|err| err.to_string())
         }
         _ => Err(format!(
             "unsupported dataframe operation for fixture execution: {:?}",
@@ -8699,6 +8779,79 @@ fn execute_and_compare_differential(
                     )],
                 }),
                 _ => Err("expected_frame or expected_error required for dataframe_take".to_owned()),
+            }
+        }
+        FixtureOperation::DataFrameAtTime => {
+            let actual = execute_dataframe_fixture_operation(fixture);
+            match expected {
+                ResolvedExpected::Frame(frame) => Ok(diff_dataframe(&actual?, &frame)),
+                ResolvedExpected::ErrorContains(substr) => Ok(match actual {
+                    Err(message) if message.contains(&substr) => Vec::new(),
+                    Err(message) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "dataframe_at_time.error",
+                        format!(
+                            "expected dataframe_at_time error containing '{substr}', got '{message}'"
+                        ),
+                    )],
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "dataframe_at_time.error",
+                        "expected dataframe_at_time to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                ResolvedExpected::ErrorAny => Ok(match actual {
+                    Err(_) => Vec::new(),
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "dataframe_at_time.error",
+                        "expected dataframe_at_time to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                _ => Err(
+                    "expected_frame or expected_error required for dataframe_at_time".to_owned(),
+                ),
+            }
+        }
+        FixtureOperation::DataFrameBetweenTime => {
+            let actual = execute_dataframe_fixture_operation(fixture);
+            match expected {
+                ResolvedExpected::Frame(frame) => Ok(diff_dataframe(&actual?, &frame)),
+                ResolvedExpected::ErrorContains(substr) => Ok(match actual {
+                    Err(message) if message.contains(&substr) => Vec::new(),
+                    Err(message) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "dataframe_between_time.error",
+                        format!(
+                            "expected dataframe_between_time error containing '{substr}', got '{message}'"
+                        ),
+                    )],
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "dataframe_between_time.error",
+                        "expected dataframe_between_time to fail but operation succeeded"
+                            .to_owned(),
+                    )],
+                }),
+                ResolvedExpected::ErrorAny => Ok(match actual {
+                    Err(_) => Vec::new(),
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "dataframe_between_time.error",
+                        "expected dataframe_between_time to fail but operation succeeded"
+                            .to_owned(),
+                    )],
+                }),
+                _ => Err(
+                    "expected_frame or expected_error required for dataframe_between_time"
+                        .to_owned(),
+                ),
             }
         }
         FixtureOperation::DataFrameHead => {
