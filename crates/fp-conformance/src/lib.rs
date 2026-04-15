@@ -10888,6 +10888,147 @@ mod tests {
     }
 
     #[test]
+    fn live_oracle_series_constructor_mixed_utf8_numeric_reports_object_values() {
+        let mut cfg = HarnessConfig::default_paths();
+        cfg.allow_system_pandas_fallback = false;
+
+        let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+            "packet_id": "FP-P2D-017",
+            "case_id": "series_constructor_utf8_numeric_object_live",
+            "mode": "strict",
+            "operation": "series_constructor",
+            "oracle_source": "live_legacy_pandas",
+            "left": {
+                "name": "bad_mix",
+                "index": [
+                    { "kind": "int64", "value": 0 },
+                    { "kind": "int64", "value": 1 }
+                ],
+                "values": [
+                    { "kind": "utf8", "value": "x" },
+                    { "kind": "int64", "value": 1 }
+                ]
+            }
+        }))
+        .expect("fixture");
+
+        let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+        if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+            eprintln!(
+                "live pandas unavailable; skipping mixed object series oracle test: {message}"
+            );
+            return;
+        }
+        assert!(
+            expected_result.is_ok(),
+            "live oracle expected: {expected_result:?}"
+        );
+        let expected = match expected_result {
+            Ok(expected) => expected,
+            Err(super::HarnessError::OracleUnavailable(_)) => return,
+            Err(_) => return,
+        };
+        assert!(
+            matches!(&expected, super::ResolvedExpected::Series(_)),
+            "expected live oracle to return series payload: {expected:?}"
+        );
+        let series = if let super::ResolvedExpected::Series(series) = expected {
+            series
+        } else {
+            return;
+        };
+
+        assert_eq!(series.index, vec![0_i64.into(), 1_i64.into()]);
+        assert_eq!(
+            series.values,
+            vec![
+                fp_types::Scalar::Utf8("x".to_owned()),
+                fp_types::Scalar::Int64(1),
+            ]
+        );
+    }
+
+    #[test]
+    fn live_oracle_dataframe_from_series_mixed_utf8_numeric_reports_object_gap() {
+        let mut cfg = HarnessConfig::default_paths();
+        cfg.allow_system_pandas_fallback = false;
+
+        let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+            "packet_id": "FP-P2D-017",
+            "case_id": "dataframe_from_series_utf8_numeric_object_live",
+            "mode": "strict",
+            "operation": "dataframe_from_series",
+            "oracle_source": "live_legacy_pandas",
+            "left": {
+                "name": "bad",
+                "index": [
+                    { "kind": "int64", "value": 0 },
+                    { "kind": "int64", "value": 1 }
+                ],
+                "values": [
+                    { "kind": "utf8", "value": "x" },
+                    { "kind": "int64", "value": 1 }
+                ]
+            }
+        }))
+        .expect("fixture");
+
+        let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+        if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+            eprintln!(
+                "live pandas unavailable; skipping mixed object dataframe oracle test: {message}"
+            );
+            return;
+        }
+        assert!(
+            expected_result.is_ok(),
+            "live oracle expected: {expected_result:?}"
+        );
+        let expected = match expected_result {
+            Ok(expected) => expected,
+            Err(super::HarnessError::OracleUnavailable(_)) => return,
+            Err(_) => return,
+        };
+        assert!(
+            matches!(&expected, super::ResolvedExpected::Frame(_)),
+            "expected live oracle to return dataframe payload: {expected:?}"
+        );
+        let frame = if let super::ResolvedExpected::Frame(frame) = expected {
+            frame
+        } else {
+            return;
+        };
+
+        assert_eq!(frame.index, vec![0_i64.into(), 1_i64.into()]);
+        assert_eq!(
+            frame.columns.get("bad"),
+            Some(&vec![
+                fp_types::Scalar::Utf8("x".to_owned()),
+                fp_types::Scalar::Int64(1),
+            ])
+        );
+
+        let diff = super::run_differential_fixture(
+            &cfg,
+            &fixture,
+            &SuiteOptions {
+                packet_filter: None,
+                oracle_mode: OracleMode::LiveLegacyPandas,
+            },
+        )
+        .expect("differential report");
+        assert_eq!(diff.status, CaseStatus::Fail);
+        assert_eq!(diff.oracle_source, FixtureOracleSource::LiveLegacyPandas);
+        assert!(
+            diff.drift_records.iter().any(|record| {
+                record.level == DriftLevel::Critical
+                    && record.message.contains("no compatible common type")
+            }),
+            "expected structured drift for mixed object constructor gap: {diff:?}"
+        );
+    }
+
+    #[test]
     fn live_oracle_unavailable_propagates_without_fallback() {
         let mut cfg = HarnessConfig::default_paths();
         cfg.oracle_root = "/__fp_missing_legacy_oracle__/pandas".into();

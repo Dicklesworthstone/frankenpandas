@@ -37,6 +37,14 @@
 - **Tests affected:** `csv_none_is_default_na`
 - **Review date:** 2026-04-15
 
+### DISC-005: Mixed string/numeric constructors need pandas object-dtype parity
+- **Reference:** `pd.Series(["x", 1])` and `pd.concat([pd.Series(["x", 1])], axis=1)` preserve heterogeneous values under pandas `object` dtype
+- **Our impl:** `Series::from_values` / `DataFrame::from_series` currently reject mixed string/numeric payloads via `common_dtype`
+- **Impact:** Constructor parity is incomplete for heterogeneous object-backed columns
+- **Resolution:** WILL-FIX - conformance harness now captures the upstream object contract and the current structured drift
+- **Tests affected:** `live_oracle_series_constructor_mixed_utf8_numeric_reports_object_values`, `live_oracle_dataframe_from_series_mixed_utf8_numeric_reports_object_gap`, `series_constructor_utf8_numeric_error_strict`, `dataframe_from_series_utf8_numeric_error_strict`
+- **Review date:** 2026-04-15
+
 ## Resolved Divergences
 
 _(None yet - newly established tracking)_
