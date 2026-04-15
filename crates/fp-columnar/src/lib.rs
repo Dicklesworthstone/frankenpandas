@@ -463,8 +463,20 @@ fn vectorized_binary_i64(
         ArithmeticOp::Add => |a, b| a.wrapping_add(b),
         ArithmeticOp::Sub => |a, b| a.wrapping_sub(b),
         ArithmeticOp::Mul => |a, b| a.wrapping_mul(b),
-        ArithmeticOp::Mod => |a, b| a.rem_euclid(b),
-        ArithmeticOp::FloorDiv => |a, b| a.div_euclid(b),
+        ArithmeticOp::Mod => |a, b| {
+            if a == i64::MIN && b == -1 {
+                0
+            } else {
+                a.rem_euclid(b)
+            }
+        },
+        ArithmeticOp::FloorDiv => |a, b| {
+            if a == i64::MIN && b == -1 {
+                i64::MIN
+            } else {
+                a.div_euclid(b)
+            }
+        },
         ArithmeticOp::Div | ArithmeticOp::Pow => unreachable!("handled by early return above"),
     };
 
