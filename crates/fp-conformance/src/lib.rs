@@ -264,6 +264,16 @@ pub enum FixtureOperation {
     DataFrameIloc,
     #[serde(rename = "dataframe_take", alias = "data_frame_take")]
     DataFrameTake,
+    #[serde(
+        rename = "dataframe_groupby_idxmin",
+        alias = "data_frame_groupby_idxmin"
+    )]
+    DataFrameGroupByIdxMin,
+    #[serde(
+        rename = "dataframe_groupby_idxmax",
+        alias = "data_frame_groupby_idxmax"
+    )]
+    DataFrameGroupByIdxMax,
     #[serde(rename = "dataframe_asof", alias = "data_frame_asof")]
     DataFrameAsof,
     #[serde(rename = "dataframe_at_time", alias = "data_frame_at_time")]
@@ -414,6 +424,8 @@ impl FixtureOperation {
             Self::DataFrameLoc => "dataframe_loc",
             Self::DataFrameIloc => "dataframe_iloc",
             Self::DataFrameTake => "dataframe_take",
+            Self::DataFrameGroupByIdxMin => "dataframe_groupby_idxmin",
+            Self::DataFrameGroupByIdxMax => "dataframe_groupby_idxmax",
             Self::DataFrameAsof => "dataframe_asof",
             Self::DataFrameAtTime => "dataframe_at_time",
             Self::DataFrameBetweenTime => "dataframe_between_time",
@@ -547,6 +559,8 @@ pub struct PacketFixture {
     pub right: Option<FixtureSeries>,
     #[serde(default)]
     pub groupby_keys: Option<Vec<FixtureSeries>>,
+    #[serde(default)]
+    pub groupby_columns: Option<Vec<String>>,
     #[serde(default)]
     pub frame: Option<FixtureDataFrame>,
     #[serde(default)]
@@ -957,6 +971,8 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::DataFrameLoc
         | FixtureOperation::DataFrameIloc
         | FixtureOperation::DataFrameTake
+        | FixtureOperation::DataFrameGroupByIdxMin
+        | FixtureOperation::DataFrameGroupByIdxMax
         | FixtureOperation::DataFrameAsof
         | FixtureOperation::DataFrameAtTime
         | FixtureOperation::DataFrameBetweenTime
@@ -1427,6 +1443,8 @@ struct OracleRequest {
     right: Option<FixtureSeries>,
     #[serde(default)]
     groupby_keys: Option<Vec<FixtureSeries>>,
+    #[serde(default)]
+    groupby_columns: Option<Vec<String>>,
     frame: Option<FixtureDataFrame>,
     frame_right: Option<FixtureDataFrame>,
     #[serde(default)]
@@ -4824,6 +4842,64 @@ fn run_fixture_operation(
                 ),
             }
         }
+        FixtureOperation::DataFrameGroupByIdxMin => {
+            let actual = execute_dataframe_fixture_operation(fixture);
+            match expected {
+                ResolvedExpected::Frame(frame) => compare_dataframe_expected(&actual?, &frame),
+                ResolvedExpected::ErrorContains(substr) => match actual {
+                    Err(message) if message.contains(&substr) => Ok(()),
+                    Err(message) => Err(format!(
+                        "expected dataframe_groupby_idxmin error containing '{substr}', got '{message}'"
+                    )),
+                    Ok(_) => Err(format!(
+                        "expected dataframe_groupby_idxmin to fail with error containing '{substr}'"
+                    )),
+                },
+                ResolvedExpected::ErrorAny => {
+                    if actual.is_err() {
+                        Ok(())
+                    } else {
+                        Err(
+                            "expected dataframe_groupby_idxmin to fail but operation succeeded"
+                                .to_owned(),
+                        )
+                    }
+                }
+                _ => Err(
+                    "expected_frame or expected_error is required for dataframe_groupby_idxmin"
+                        .to_owned(),
+                ),
+            }
+        }
+        FixtureOperation::DataFrameGroupByIdxMax => {
+            let actual = execute_dataframe_fixture_operation(fixture);
+            match expected {
+                ResolvedExpected::Frame(frame) => compare_dataframe_expected(&actual?, &frame),
+                ResolvedExpected::ErrorContains(substr) => match actual {
+                    Err(message) if message.contains(&substr) => Ok(()),
+                    Err(message) => Err(format!(
+                        "expected dataframe_groupby_idxmax error containing '{substr}', got '{message}'"
+                    )),
+                    Ok(_) => Err(format!(
+                        "expected dataframe_groupby_idxmax to fail with error containing '{substr}'"
+                    )),
+                },
+                ResolvedExpected::ErrorAny => {
+                    if actual.is_err() {
+                        Ok(())
+                    } else {
+                        Err(
+                            "expected dataframe_groupby_idxmax to fail but operation succeeded"
+                                .to_owned(),
+                        )
+                    }
+                }
+                _ => Err(
+                    "expected_frame or expected_error is required for dataframe_groupby_idxmax"
+                        .to_owned(),
+                ),
+            }
+        }
         FixtureOperation::DataFrameAsof => {
             let actual = execute_dataframe_asof_fixture_operation(fixture);
             match expected {
@@ -5234,6 +5310,8 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         FixtureOperation::DataFrameLoc
         | FixtureOperation::DataFrameIloc
         | FixtureOperation::DataFrameTake
+        | FixtureOperation::DataFrameGroupByIdxMin
+        | FixtureOperation::DataFrameGroupByIdxMax
         | FixtureOperation::DataFrameAtTime
         | FixtureOperation::DataFrameBetweenTime
         | FixtureOperation::DataFrameHead
@@ -5340,6 +5418,7 @@ fn capture_live_oracle_expected(
         left: fixture.left.clone(),
         right: fixture.right.clone(),
         groupby_keys: fixture.groupby_keys.clone(),
+        groupby_columns: fixture.groupby_columns.clone(),
         frame: fixture.frame.clone(),
         frame_right: fixture.frame_right.clone(),
         dict_columns: fixture.dict_columns.clone(),
@@ -5552,6 +5631,8 @@ fn capture_live_oracle_expected(
         FixtureOperation::DataFrameLoc
         | FixtureOperation::DataFrameIloc
         | FixtureOperation::DataFrameTake
+        | FixtureOperation::DataFrameGroupByIdxMin
+        | FixtureOperation::DataFrameGroupByIdxMax
         | FixtureOperation::DataFrameAtTime
         | FixtureOperation::DataFrameBetweenTime
         | FixtureOperation::DataFrameHead
@@ -5948,6 +6029,19 @@ fn require_take_indices(fixture: &PacketFixture) -> Result<&Vec<i64>, String> {
         .take_indices
         .as_ref()
         .ok_or_else(|| "take_indices is required for take operations".to_owned())
+}
+
+fn require_groupby_columns(
+    fixture: &PacketFixture,
+    operation_name: &str,
+) -> Result<Vec<String>, String> {
+    let columns =
+        resolve_optional_string_list(fixture.groupby_columns.as_ref(), "groupby_columns")?;
+    if columns.is_empty() {
+        Err(format!("groupby_columns is required for {operation_name}"))
+    } else {
+        Ok(columns)
+    }
 }
 
 fn require_asof_label(fixture: &PacketFixture) -> Result<&IndexLabel, String> {
@@ -6700,6 +6794,12 @@ fn execute_dataframe_fixture_operation(fixture: &PacketFixture) -> Result<DataFr
             let axis = resolve_take_axis(fixture)?;
             frame.take(indices, axis).map_err(|err| err.to_string())
         }
+        FixtureOperation::DataFrameGroupByIdxMin => {
+            execute_dataframe_groupby_fixture_operation(fixture, false)
+        }
+        FixtureOperation::DataFrameGroupByIdxMax => {
+            execute_dataframe_groupby_fixture_operation(fixture, true)
+        }
         FixtureOperation::DataFrameAtTime => {
             let frame = build_dataframe(require_frame(fixture)?)
                 .map_err(|err| format!("frame build failed: {err}"))?;
@@ -6718,6 +6818,32 @@ fn execute_dataframe_fixture_operation(fixture: &PacketFixture) -> Result<DataFr
             "unsupported dataframe operation for fixture execution: {:?}",
             fixture.operation
         )),
+    }
+}
+
+fn execute_dataframe_groupby_fixture_operation(
+    fixture: &PacketFixture,
+    use_idxmax: bool,
+) -> Result<DataFrame, String> {
+    let frame = build_dataframe(require_frame(fixture)?)
+        .map_err(|err| format!("frame build failed: {err}"))?;
+    let operation_name = if use_idxmax {
+        "dataframe_groupby_idxmax"
+    } else {
+        "dataframe_groupby_idxmin"
+    };
+    let groupby_columns = require_groupby_columns(fixture, operation_name)?;
+    let groupby_refs = groupby_columns
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let groupby = frame
+        .groupby(&groupby_refs)
+        .map_err(|err| err.to_string())?;
+    if use_idxmax {
+        groupby.idxmax().map_err(|err| err.to_string())
+    } else {
+        groupby.idxmin().map_err(|err| err.to_string())
     }
 }
 
@@ -9077,6 +9203,82 @@ fn execute_and_compare_differential(
                     )],
                 }),
                 _ => Err("expected_frame or expected_error required for dataframe_take".to_owned()),
+            }
+        }
+        FixtureOperation::DataFrameGroupByIdxMin => {
+            let actual = execute_dataframe_fixture_operation(fixture);
+            match expected {
+                ResolvedExpected::Frame(frame) => Ok(diff_dataframe(&actual?, &frame)),
+                ResolvedExpected::ErrorContains(substr) => Ok(match actual {
+                    Err(message) if message.contains(&substr) => Vec::new(),
+                    Err(message) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "dataframe_groupby_idxmin.error",
+                        format!(
+                            "expected dataframe_groupby_idxmin error containing '{substr}', got '{message}'"
+                        ),
+                    )],
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "dataframe_groupby_idxmin.error",
+                        "expected dataframe_groupby_idxmin to fail but operation succeeded"
+                            .to_owned(),
+                    )],
+                }),
+                ResolvedExpected::ErrorAny => Ok(match actual {
+                    Err(_) => Vec::new(),
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "dataframe_groupby_idxmin.error",
+                        "expected dataframe_groupby_idxmin to fail but operation succeeded"
+                            .to_owned(),
+                    )],
+                }),
+                _ => Err(
+                    "expected_frame or expected_error required for dataframe_groupby_idxmin"
+                        .to_owned(),
+                ),
+            }
+        }
+        FixtureOperation::DataFrameGroupByIdxMax => {
+            let actual = execute_dataframe_fixture_operation(fixture);
+            match expected {
+                ResolvedExpected::Frame(frame) => Ok(diff_dataframe(&actual?, &frame)),
+                ResolvedExpected::ErrorContains(substr) => Ok(match actual {
+                    Err(message) if message.contains(&substr) => Vec::new(),
+                    Err(message) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "dataframe_groupby_idxmax.error",
+                        format!(
+                            "expected dataframe_groupby_idxmax error containing '{substr}', got '{message}'"
+                        ),
+                    )],
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "dataframe_groupby_idxmax.error",
+                        "expected dataframe_groupby_idxmax to fail but operation succeeded"
+                            .to_owned(),
+                    )],
+                }),
+                ResolvedExpected::ErrorAny => Ok(match actual {
+                    Err(_) => Vec::new(),
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "dataframe_groupby_idxmax.error",
+                        "expected dataframe_groupby_idxmax to fail but operation succeeded"
+                            .to_owned(),
+                    )],
+                }),
+                _ => Err(
+                    "expected_frame or expected_error required for dataframe_groupby_idxmax"
+                        .to_owned(),
+                ),
             }
         }
         FixtureOperation::DataFrameAsof => {
@@ -12373,6 +12575,136 @@ mod tests {
         if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
             eprintln!(
                 "live pandas unavailable; skipping dataframe take axis=1 oracle test: {message}"
+            );
+            return;
+        }
+
+        let expected = expected_result.expect("live oracle expected");
+        assert!(
+            matches!(&expected, super::ResolvedExpected::Frame(_)),
+            "expected live oracle frame payload, got {expected:?}"
+        );
+        let super::ResolvedExpected::Frame(expected) = expected else {
+            return;
+        };
+
+        let actual = super::execute_dataframe_fixture_operation(&fixture).expect("actual frame");
+        super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
+    }
+
+    #[test]
+    fn live_oracle_dataframe_groupby_idxmin_matches_pandas() {
+        let mut cfg = HarnessConfig::default_paths();
+        cfg.allow_system_pandas_fallback = false;
+
+        let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+            "packet_id": "FP-P2D-068",
+            "case_id": "dataframe_groupby_idxmin_live",
+            "mode": "strict",
+            "operation": "dataframe_groupby_idxmin",
+            "oracle_source": "live_legacy_pandas",
+            "groupby_columns": ["grp"],
+            "frame": {
+                "index": [
+                    { "kind": "utf8", "value": "r0" },
+                    { "kind": "utf8", "value": "r1" },
+                    { "kind": "utf8", "value": "r2" },
+                    { "kind": "utf8", "value": "r3" }
+                ],
+                "column_order": ["grp", "val", "all_na"],
+                "columns": {
+                    "grp": [
+                        { "kind": "utf8", "value": "a" },
+                        { "kind": "utf8", "value": "a" },
+                        { "kind": "utf8", "value": "b" },
+                        { "kind": "utf8", "value": "b" }
+                    ],
+                    "val": [
+                        { "kind": "float64", "value": 2.0 },
+                        { "kind": "float64", "value": 1.0 },
+                        { "kind": "float64", "value": 5.0 },
+                        { "kind": "float64", "value": 4.0 }
+                    ],
+                    "all_na": [
+                        { "kind": "null", "value": "na_n" },
+                        { "kind": "null", "value": "na_n" },
+                        { "kind": "null", "value": "na_n" },
+                        { "kind": "null", "value": "na_n" }
+                    ]
+                }
+            }
+        }))
+        .expect("fixture");
+
+        let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+        if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+            eprintln!(
+                "live pandas unavailable; skipping dataframe groupby idxmin oracle test: {message}"
+            );
+            return;
+        }
+
+        let expected = expected_result.expect("live oracle expected");
+        assert!(
+            matches!(&expected, super::ResolvedExpected::Frame(_)),
+            "expected live oracle frame payload, got {expected:?}"
+        );
+        let super::ResolvedExpected::Frame(expected) = expected else {
+            return;
+        };
+
+        let actual = super::execute_dataframe_fixture_operation(&fixture).expect("actual frame");
+        super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
+    }
+
+    #[test]
+    fn live_oracle_dataframe_groupby_idxmax_matches_pandas() {
+        let mut cfg = HarnessConfig::default_paths();
+        cfg.allow_system_pandas_fallback = false;
+
+        let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+            "packet_id": "FP-P2D-069",
+            "case_id": "dataframe_groupby_idxmax_live",
+            "mode": "strict",
+            "operation": "dataframe_groupby_idxmax",
+            "oracle_source": "live_legacy_pandas",
+            "groupby_columns": ["grp"],
+            "frame": {
+                "index": [
+                    { "kind": "utf8", "value": "r0" },
+                    { "kind": "utf8", "value": "r1" },
+                    { "kind": "utf8", "value": "r2" },
+                    { "kind": "utf8", "value": "r3" }
+                ],
+                "column_order": ["grp", "val", "all_na"],
+                "columns": {
+                    "grp": [
+                        { "kind": "utf8", "value": "a" },
+                        { "kind": "utf8", "value": "a" },
+                        { "kind": "utf8", "value": "b" },
+                        { "kind": "utf8", "value": "b" }
+                    ],
+                    "val": [
+                        { "kind": "float64", "value": 2.0 },
+                        { "kind": "float64", "value": 1.0 },
+                        { "kind": "float64", "value": 5.0 },
+                        { "kind": "float64", "value": 4.0 }
+                    ],
+                    "all_na": [
+                        { "kind": "null", "value": "na_n" },
+                        { "kind": "null", "value": "na_n" },
+                        { "kind": "null", "value": "na_n" },
+                        { "kind": "null", "value": "na_n" }
+                    ]
+                }
+            }
+        }))
+        .expect("fixture");
+
+        let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+        if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+            eprintln!(
+                "live pandas unavailable; skipping dataframe groupby idxmax oracle test: {message}"
             );
             return;
         }

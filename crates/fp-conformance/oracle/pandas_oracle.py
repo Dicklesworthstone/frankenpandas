@@ -1581,6 +1581,56 @@ def op_dataframe_take(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return {"expected_frame": dataframe_to_json(out)}
 
 
+def op_dataframe_groupby_idxmin(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    groupby_columns = payload.get("groupby_columns")
+    if frame_payload is None:
+        raise OracleError("dataframe_groupby_idxmin requires frame payload")
+    if not isinstance(groupby_columns, list) or not groupby_columns:
+        raise OracleError("dataframe_groupby_idxmin requires non-empty groupby_columns list")
+
+    columns: list[str] = []
+    for entry in groupby_columns:
+        if not isinstance(entry, str) or not entry.strip():
+            raise OracleError(
+                "dataframe_groupby_idxmin groupby_columns entries must be non-empty strings"
+            )
+        columns.append(entry.strip())
+
+    frame = dataframe_from_json(pd, frame_payload)
+    try:
+        out = frame.groupby(columns).idxmin()
+    except Exception as exc:
+        raise OracleError(f"dataframe_groupby_idxmin failed: {exc}") from exc
+
+    return {"expected_frame": dataframe_to_json(out)}
+
+
+def op_dataframe_groupby_idxmax(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    groupby_columns = payload.get("groupby_columns")
+    if frame_payload is None:
+        raise OracleError("dataframe_groupby_idxmax requires frame payload")
+    if not isinstance(groupby_columns, list) or not groupby_columns:
+        raise OracleError("dataframe_groupby_idxmax requires non-empty groupby_columns list")
+
+    columns: list[str] = []
+    for entry in groupby_columns:
+        if not isinstance(entry, str) or not entry.strip():
+            raise OracleError(
+                "dataframe_groupby_idxmax groupby_columns entries must be non-empty strings"
+            )
+        columns.append(entry.strip())
+
+    frame = dataframe_from_json(pd, frame_payload)
+    try:
+        out = frame.groupby(columns).idxmax()
+    except Exception as exc:
+        raise OracleError(f"dataframe_groupby_idxmax failed: {exc}") from exc
+
+    return {"expected_frame": dataframe_to_json(out)}
+
+
 def op_dataframe_asof(pd, payload: dict[str, Any]) -> dict[str, Any]:
     frame_payload = payload.get("frame")
     asof_label = payload.get("asof_label")
@@ -2444,6 +2494,10 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_dataframe_iloc(pd, payload)
     if op in {"dataframe_take", "data_frame_take"}:
         return op_dataframe_take(pd, payload)
+    if op in {"dataframe_groupby_idxmin", "data_frame_groupby_idxmin"}:
+        return op_dataframe_groupby_idxmin(pd, payload)
+    if op in {"dataframe_groupby_idxmax", "data_frame_groupby_idxmax"}:
+        return op_dataframe_groupby_idxmax(pd, payload)
     if op in {"dataframe_asof", "data_frame_asof"}:
         return op_dataframe_asof(pd, payload)
     if op in {"dataframe_at_time", "data_frame_at_time"}:
