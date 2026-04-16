@@ -21633,6 +21633,124 @@ impl DataFrameGroupBy<'_> {
         self.aggregate("median")
     }
 
+    /// GroupBy idxmin. Returns the index label of the minimum value for each group.
+    pub fn idxmin(&self) -> Result<DataFrame, FrameError> {
+        let (group_order, groups) = self.build_groups();
+        let value_cols: Vec<String> = self
+            .df
+            .column_order
+            .iter()
+            .filter(|c| !self.by.contains(c))
+            .cloned()
+            .collect();
+        let n_groups = group_order.len();
+
+        let mut labels = Vec::with_capacity(n_groups);
+        for gkey in &group_order {
+            let first_row = groups[gkey][0];
+            labels.push(self.group_key_label(first_row));
+        }
+
+        let mut result_cols = BTreeMap::new();
+        let mut col_order = Vec::new();
+
+        let orig_labels = self.df.index.labels();
+
+        for col_name in &value_cols {
+            let col = &self.df.columns[col_name];
+            let mut agg_vals = Vec::with_capacity(n_groups);
+
+            for gkey in &group_order {
+                let row_indices = &groups[gkey];
+                let mut best_idx: Option<usize> = None;
+                let mut best_val = f64::INFINITY;
+
+                for &idx in row_indices {
+                    let val = &col.values()[idx];
+                    if val.is_missing() {
+                        continue;
+                    }
+                    if let Ok(v) = val.to_f64()
+                        && v < best_val
+                    {
+                        best_val = v;
+                        best_idx = Some(idx);
+                    }
+                }
+
+                if let Some(idx) = best_idx {
+                    agg_vals.push(Scalar::Utf8(orig_labels[idx].to_string()));
+                } else {
+                    agg_vals.push(Scalar::Null(NullKind::NaN));
+                }
+            }
+
+            result_cols.insert(col_name.clone(), Column::from_values(agg_vals)?);
+            col_order.push(col_name.clone());
+        }
+
+        self.format_output(result_cols, col_order, labels, &group_order, &groups)
+    }
+
+    /// GroupBy idxmax. Returns the index label of the maximum value for each group.
+    pub fn idxmax(&self) -> Result<DataFrame, FrameError> {
+        let (group_order, groups) = self.build_groups();
+        let value_cols: Vec<String> = self
+            .df
+            .column_order
+            .iter()
+            .filter(|c| !self.by.contains(c))
+            .cloned()
+            .collect();
+        let n_groups = group_order.len();
+
+        let mut labels = Vec::with_capacity(n_groups);
+        for gkey in &group_order {
+            let first_row = groups[gkey][0];
+            labels.push(self.group_key_label(first_row));
+        }
+
+        let mut result_cols = BTreeMap::new();
+        let mut col_order = Vec::new();
+
+        let orig_labels = self.df.index.labels();
+
+        for col_name in &value_cols {
+            let col = &self.df.columns[col_name];
+            let mut agg_vals = Vec::with_capacity(n_groups);
+
+            for gkey in &group_order {
+                let row_indices = &groups[gkey];
+                let mut best_idx: Option<usize> = None;
+                let mut best_val = f64::NEG_INFINITY;
+
+                for &idx in row_indices {
+                    let val = &col.values()[idx];
+                    if val.is_missing() {
+                        continue;
+                    }
+                    if let Ok(v) = val.to_f64()
+                        && v > best_val
+                    {
+                        best_val = v;
+                        best_idx = Some(idx);
+                    }
+                }
+
+                if let Some(idx) = best_idx {
+                    agg_vals.push(Scalar::Utf8(orig_labels[idx].to_string()));
+                } else {
+                    agg_vals.push(Scalar::Null(NullKind::NaN));
+                }
+            }
+
+            result_cols.insert(col_name.clone(), Column::from_values(agg_vals)?);
+            col_order.push(col_name.clone());
+        }
+
+        self.format_output(result_cols, col_order, labels, &group_order, &groups)
+    }
+
     /// GroupBy first.
     pub fn first(&self) -> Result<DataFrame, FrameError> {
         self.aggregate("first")
@@ -32620,6 +32738,123 @@ mod tests {
         // Group "a": 2*3=6; Group "b": 4*5=20
         assert_eq!(result.columns["val"].values()[0], Scalar::Float64(6.0));
         assert_eq!(result.columns["val"].values()[1], Scalar::Float64(20.0));
+    }
+
+    #[test]
+    fn dataframe_groupby_idxmin_idxmax() {
+        let labels = vec![
+            IndexLabel::Utf8("r0".into()),
+            IndexLabel::Utf8("r1".into()),
+            IndexLabel::Utf8("r2".into()),
+            IndexLabel::Utf8("r3".into()),
+        ];
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "grp",
+                labels.clone(),
+                vec![
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("b".into()),
+                    Scalar::Utf8("b".into()),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "val",
+                labels.clone(),
+                vec![
+                    Scalar::Float64(2.0),
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(5.0),
+                    Scalar::Float64(4.0),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "all_na",
+                labels,
+                vec![
+                    Scalar::Null(NullKind::NaN),
+                    Scalar::Null(NullKind::NaN),
+                    Scalar::Null(NullKind::NaN),
+                    Scalar::Null(NullKind::NaN),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let idxmin = df.groupby(&["grp"]).unwrap().idxmin().unwrap();
+        assert_eq!(
+            idxmin.index().labels(),
+            &[IndexLabel::Utf8("a".into()), IndexLabel::Utf8("b".into())]
+        );
+        assert_eq!(
+            idxmin.columns["val"].values(),
+            &[Scalar::Utf8("r1".into()), Scalar::Utf8("r3".into())]
+        );
+        assert!(idxmin.columns["all_na"].values()[0].is_missing());
+        assert!(idxmin.columns["all_na"].values()[1].is_missing());
+
+        let idxmax = df.groupby(&["grp"]).unwrap().idxmax().unwrap();
+        assert_eq!(
+            idxmax.index().labels(),
+            &[IndexLabel::Utf8("a".into()), IndexLabel::Utf8("b".into())]
+        );
+        assert_eq!(
+            idxmax.columns["val"].values(),
+            &[Scalar::Utf8("r0".into()), Scalar::Utf8("r2".into())]
+        );
+        assert!(idxmax.columns["all_na"].values()[0].is_missing());
+        assert!(idxmax.columns["all_na"].values()[1].is_missing());
+    }
+
+    #[test]
+    fn dataframe_groupby_idxmin_idxmax_uses_first_tie() {
+        let labels = vec![
+            IndexLabel::Utf8("r0".into()),
+            IndexLabel::Utf8("r1".into()),
+            IndexLabel::Utf8("r2".into()),
+            IndexLabel::Utf8("r3".into()),
+        ];
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "grp",
+                labels.clone(),
+                vec![
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("b".into()),
+                    Scalar::Utf8("b".into()),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "val",
+                labels,
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(9.0),
+                    Scalar::Float64(9.0),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let idxmin = df.groupby(&["grp"]).unwrap().idxmin().unwrap();
+        assert_eq!(
+            idxmin.columns["val"].values(),
+            &[Scalar::Utf8("r0".into()), Scalar::Utf8("r2".into())]
+        );
+
+        let idxmax = df.groupby(&["grp"]).unwrap().idxmax().unwrap();
+        assert_eq!(
+            idxmax.columns["val"].values(),
+            &[Scalar::Utf8("r0".into()), Scalar::Utf8("r2".into())]
+        );
     }
 
     #[test]
