@@ -1571,6 +1571,23 @@ def op_series_extractall(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return {"expected_frame": dataframe_to_json(out)}
 
 
+def op_series_extract_df(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    if left is None:
+        raise OracleError("series_extract_df requires left payload")
+    regex_pattern = payload.get("regex_pattern")
+    if not isinstance(regex_pattern, str) or regex_pattern == "":
+        raise OracleError("series_extract_df requires non-empty regex_pattern")
+
+    series = fixture_series_from_payload(pd, left, "series_extract_df")
+    try:
+        out = series.str.extract(regex_pattern, expand=True)
+    except Exception as exc:
+        raise OracleError(f"series_extract_df failed: {exc}") from exc
+
+    return {"expected_frame": dataframe_to_json(out)}
+
+
 def dataframe_from_json(pd, payload: dict[str, Any]):
     index_raw = payload.get("index")
     columns_raw = payload.get("columns")
@@ -2978,6 +2995,8 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_series_shift(pd, payload)
     if op == "series_pct_change":
         return op_series_pct_change(pd, payload)
+    if op == "series_extract_df":
+        return op_series_extract_df(pd, payload)
     if op == "series_extractall":
         return op_series_extractall(pd, payload)
     if op == "dataframe_loc":
