@@ -1,0 +1,65 @@
+{
+  "packet_id": "FP-P2D-090",
+  "case_id": "dataframe_combine_first_left_precedence_hardened",
+  "mode": "hardened",
+  "operation": "dataframe_combine_first",
+  "frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 }
+    ],
+    "column_order": ["a", "b"],
+    "columns": {
+      "a": [
+        { "kind": "utf8", "value": "left-a0" },
+        { "kind": "utf8", "value": "left-a1" }
+      ],
+      "b": [
+        { "kind": "utf8", "value": "left-b0" },
+        { "kind": "utf8", "value": "left-b1" }
+      ]
+    }
+  },
+  "frame_right": {
+    "index": [
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 }
+    ],
+    "column_order": ["a", "c"],
+    "columns": {
+      "a": [
+        { "kind": "utf8", "value": "right-a1" },
+        { "kind": "utf8", "value": "right-a2" }
+      ],
+      "c": [
+        { "kind": "utf8", "value": "see1" },
+        { "kind": "utf8", "value": "see2" }
+      ]
+    }
+  },
+  "expected_frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 }
+    ],
+    "column_order": ["a", "b", "c"],
+    "columns": {
+      "a": [
+        { "kind": "utf8", "value": "left-a0" },
+        { "kind": "utf8", "value": "left-a1" },
+        { "kind": "utf8", "value": "right-a2" }
+      ],
+      "b": [
+        { "kind": "utf8", "value": "left-b0" },
+        { "kind": "utf8", "value": "left-b1" },
+        { "kind": "null", "value": "na_n" }
+      ],
+      "c": [
+        { "kind": "null", "value": "na_n" },
+        { "kind": "utf8", "value": "see1" },
+        { "kind": "utf8", "value": "see2" }
+      ]
+    }
+  }
+}

@@ -593,6 +593,16 @@ def op_series_constructor(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return {"expected_series": series_to_expected(series)}
 
 
+def op_series_combine_first(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = fixture_series_from_payload(pd, payload.get("left"), "series_combine_first")
+    right = fixture_series_from_payload(pd, payload.get("right"), "series_combine_first")
+    try:
+        out = left.combine_first(right)
+    except Exception as exc:
+        raise OracleError(f"series_combine_first failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
 def op_series_to_datetime(pd, payload: dict[str, Any]) -> dict[str, Any]:
     left = payload.get("left")
     series = fixture_series_from_payload(pd, left, "series_to_datetime")
@@ -2849,6 +2859,22 @@ def op_dataframe_merge_ordered(pd, payload: dict[str, Any]) -> dict[str, Any]:
         raise OracleError(f"dataframe_merge_ordered failed: {exc}") from exc
     return {"expected_frame": dataframe_to_json(out)}
 
+
+def op_dataframe_combine_first(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    frame_right_payload = payload.get("frame_right")
+    if frame_payload is None or frame_right_payload is None:
+        raise OracleError("dataframe_combine_first requires frame and frame_right payloads")
+
+    left = dataframe_from_json(pd, frame_payload)
+    right = dataframe_from_json(pd, frame_right_payload)
+    try:
+        out = left.combine_first(right)
+    except Exception as exc:
+        raise OracleError(f"dataframe_combine_first failed: {exc}") from exc
+    return {"expected_frame": dataframe_to_json(out)}
+
+
 def op_dataframe_concat(pd, payload: dict[str, Any]) -> dict[str, Any]:
     frame_payload = payload.get("frame")
     frame_right_payload = payload.get("frame_right")
@@ -2905,6 +2931,8 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_series_join(pd, payload)
     if op == "series_constructor":
         return op_series_constructor(pd, payload)
+    if op == "series_combine_first":
+        return op_series_combine_first(pd, payload)
     if op in {"series_to_datetime", "to_datetime"}:
         return op_series_to_datetime(pd, payload)
     if op in {"dataframe_from_series", "data_frame_from_series"}:
@@ -3127,6 +3155,8 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_dataframe_merge_asof(pd, payload)
     if op in {"dataframe_merge_ordered", "data_frame_merge_ordered"}:
         return op_dataframe_merge_ordered(pd, payload)
+    if op in {"dataframe_combine_first", "data_frame_combine_first"}:
+        return op_dataframe_combine_first(pd, payload)
     if op in {"dataframe_concat", "data_frame_concat"}:
         return op_dataframe_concat(pd, payload)
     raise OracleError(f"unsupported operation: {op!r}")

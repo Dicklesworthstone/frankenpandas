@@ -1,0 +1,46 @@
+{
+  "packet_id": "FP-P2D-090",
+  "case_id": "series_combine_first_left_precedence_hardened",
+  "mode": "hardened",
+  "operation": "series_combine_first",
+  "left": {
+    "name": "primary",
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 }
+    ],
+    "values": [
+      { "kind": "utf8", "value": "left-0" },
+      { "kind": "null", "value": "null" },
+      { "kind": "utf8", "value": "left-2" }
+    ]
+  },
+  "right": {
+    "name": "fallback",
+    "index": [
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 3 }
+    ],
+    "values": [
+      { "kind": "utf8", "value": "right-1" },
+      { "kind": "utf8", "value": "right-2" },
+      { "kind": "utf8", "value": "right-3" }
+    ]
+  },
+  "expected_series": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 3 }
+    ],
+    "values": [
+      { "kind": "utf8", "value": "left-0" },
+      { "kind": "utf8", "value": "right-1" },
+      { "kind": "utf8", "value": "left-2" },
+      { "kind": "utf8", "value": "right-3" }
+    ]
+  }
+}

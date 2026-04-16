@@ -163,6 +163,8 @@ pub enum FixtureOperation {
     SeriesConstructor,
     #[serde(rename = "series_to_datetime", alias = "to_datetime")]
     SeriesToDatetime,
+    #[serde(rename = "series_to_timedelta", alias = "to_timedelta")]
+    SeriesToTimedelta,
     #[serde(rename = "dataframe_from_series", alias = "data_frame_from_series")]
     DataFrameFromSeries,
     #[serde(rename = "dataframe_from_dict", alias = "data_frame_from_dict")]
@@ -200,6 +202,11 @@ pub enum FixtureOperation {
     IndexFirstPositions,
     // FP-P2C-006: Join + concat
     SeriesConcat,
+    #[serde(
+        rename = "series_combine_first",
+        alias = "series_combine_first_default"
+    )]
+    SeriesCombineFirst,
     // FP-P2C-007: Missingness + nanops
     NanSum,
     NanMean,
@@ -397,6 +404,8 @@ pub enum FixtureOperation {
     DataFrameMergeOrdered,
     #[serde(rename = "dataframe_concat", alias = "data_frame_concat")]
     DataFrameConcat,
+    #[serde(rename = "dataframe_combine_first", alias = "data_frame_combine_first")]
+    DataFrameCombineFirst,
     // FP-P2C-011: Full GroupBy aggregate matrix
     #[serde(rename = "groupby_mean", alias = "group_by_mean")]
     GroupByMean,
@@ -429,6 +438,7 @@ impl FixtureOperation {
             Self::SeriesJoin => "series_join",
             Self::SeriesConstructor => "series_constructor",
             Self::SeriesToDatetime => "series_to_datetime",
+            Self::SeriesToTimedelta => "series_to_timedelta",
             Self::DataFrameFromSeries => "dataframe_from_series",
             Self::DataFrameFromDict => "dataframe_from_dict",
             Self::DataFrameFromRecords => "dataframe_from_records",
@@ -443,6 +453,7 @@ impl FixtureOperation {
             Self::IndexIsMonotonicDecreasing => "index_is_monotonic_decreasing",
             Self::IndexFirstPositions => "index_first_positions",
             Self::SeriesConcat => "series_concat",
+            Self::SeriesCombineFirst => "series_combine_first",
             Self::NanSum => "nan_sum",
             Self::NanMean => "nan_mean",
             Self::NanMin => "nan_min",
@@ -532,6 +543,7 @@ impl FixtureOperation {
             Self::DataFrameMergeAsof => "dataframe_merge_asof",
             Self::DataFrameMergeOrdered => "dataframe_merge_ordered",
             Self::DataFrameConcat => "dataframe_concat",
+            Self::DataFrameCombineFirst => "dataframe_combine_first",
             Self::GroupByMean => "groupby_mean",
             Self::GroupByCount => "groupby_count",
             Self::GroupByMin => "groupby_min",
@@ -985,6 +997,7 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::SeriesDiv => &["CC-004", "CC-005"],
         FixtureOperation::SeriesConstructor
         | FixtureOperation::SeriesToDatetime
+        | FixtureOperation::SeriesToTimedelta
         | FixtureOperation::DataFrameFromDict
         | FixtureOperation::DataFrameFromRecords
         | FixtureOperation::DataFrameConstructorKwargs
@@ -993,11 +1006,13 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::DataFrameConstructorListLike => &["CC-001", "CC-003", "CC-005"],
         FixtureOperation::SeriesJoin
         | FixtureOperation::SeriesConcat
+        | FixtureOperation::SeriesCombineFirst
         | FixtureOperation::DataFrameMerge
         | FixtureOperation::DataFrameMergeIndex
         | FixtureOperation::DataFrameMergeAsof
         | FixtureOperation::DataFrameMergeOrdered
-        | FixtureOperation::DataFrameConcat => &["CC-006"],
+        | FixtureOperation::DataFrameConcat
+        | FixtureOperation::DataFrameCombineFirst => &["CC-006"],
         FixtureOperation::DataFrameFromSeries => &["CC-003", "CC-005", "CC-006"],
         FixtureOperation::GroupBySum
         | FixtureOperation::GroupByMean
@@ -3700,6 +3715,31 @@ fn run_fixture_operation(
                 ),
             }
         }
+        FixtureOperation::SeriesToTimedelta => {
+            let left = require_left_series(fixture)?;
+            let series = build_series(left)?;
+            let actual = fp_frame::to_timedelta(&series).map_err(|err| err.to_string());
+            match expected {
+                ResolvedExpected::Series(series) => compare_series_expected(&actual?, &series),
+                ResolvedExpected::ErrorContains(substr) => match actual {
+                    Err(message) if message.contains(&substr) => Ok(()),
+                    Err(message) => Err(format!(
+                        "expected series_to_timedelta error containing '{substr}', got '{message}'"
+                    )),
+                    Ok(_) => Err(format!(
+                        "expected series_to_timedelta to fail with error containing '{substr}'"
+                    )),
+                },
+                ResolvedExpected::ErrorAny => match actual {
+                    Err(_) => Ok(()),
+                    Ok(_) => Err("expected series_to_timedelta to fail".to_owned()),
+                },
+                _ => Err(
+                    "expected_series or expected_error is required for series_to_timedelta"
+                        .to_owned(),
+                ),
+            }
+        }
         FixtureOperation::DataFrameFromSeries => {
             let actual = execute_dataframe_from_series_fixture_operation(fixture);
             match expected {
@@ -3954,6 +3994,9 @@ fn run_fixture_operation(
                 _ => return Err("expected_series is required for series_concat".to_owned()),
             };
             compare_series_expected(&actual, &expected)
+        }
+        FixtureOperation::SeriesCombineFirst => {
+            Err("combine_first operations not yet implemented in conformance harness".to_owned())
         }
         FixtureOperation::NanSum
         | FixtureOperation::NanMean
@@ -5721,7 +5764,8 @@ fn run_fixture_operation(
         | FixtureOperation::DataFrameDiff
         | FixtureOperation::DataFrameShift
         | FixtureOperation::DataFramePctChange
-        | FixtureOperation::DataFrameMelt => {
+        | FixtureOperation::DataFrameMelt
+        | FixtureOperation::DataFrameCombineFirst => {
             let actual = execute_dataframe_fixture_operation(fixture);
             match expected {
                 ResolvedExpected::Frame(frame) => compare_dataframe_expected(&actual?, &frame),
@@ -5892,6 +5936,7 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         FixtureOperation::SeriesConcat
         | FixtureOperation::SeriesConstructor
         | FixtureOperation::SeriesToDatetime
+        | FixtureOperation::SeriesToTimedelta
         | FixtureOperation::FillNa
         | FixtureOperation::DropNa
         | FixtureOperation::SeriesFilter
@@ -5935,7 +5980,8 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::GroupByLast
         | FixtureOperation::GroupByStd
         | FixtureOperation::GroupByVar
-        | FixtureOperation::GroupByMedian => fixture
+        | FixtureOperation::GroupByMedian
+        | FixtureOperation::SeriesCombineFirst => fixture
             .expected_series
             .clone()
             .map(ResolvedExpected::Series)
@@ -5994,7 +6040,8 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::DataFrameDiff
         | FixtureOperation::DataFrameShift
         | FixtureOperation::DataFramePctChange
-        | FixtureOperation::DataFrameMelt => fixture
+        | FixtureOperation::DataFrameMelt
+        | FixtureOperation::DataFrameCombineFirst => fixture
             .expected_frame
             .clone()
             .map(ResolvedExpected::Frame)
@@ -6240,6 +6287,7 @@ fn capture_live_oracle_expected(
         FixtureOperation::SeriesConcat
         | FixtureOperation::SeriesConstructor
         | FixtureOperation::SeriesToDatetime
+        | FixtureOperation::SeriesToTimedelta
         | FixtureOperation::FillNa
         | FixtureOperation::DropNa
         | FixtureOperation::SeriesFilter
@@ -6283,7 +6331,8 @@ fn capture_live_oracle_expected(
         | FixtureOperation::GroupByLast
         | FixtureOperation::GroupByStd
         | FixtureOperation::GroupByVar
-        | FixtureOperation::GroupByMedian => response
+        | FixtureOperation::GroupByMedian
+        | FixtureOperation::SeriesCombineFirst => response
             .expected_series
             .map(ResolvedExpected::Series)
             .ok_or_else(|| {
@@ -6342,7 +6391,8 @@ fn capture_live_oracle_expected(
         | FixtureOperation::DataFrameDiff
         | FixtureOperation::DataFrameShift
         | FixtureOperation::DataFramePctChange
-        | FixtureOperation::DataFrameMelt => response
+        | FixtureOperation::DataFrameMelt
+        | FixtureOperation::DataFrameCombineFirst => response
             .expected_frame
             .map(ResolvedExpected::Frame)
             .ok_or_else(|| HarnessError::FixtureFormat("oracle omitted expected_frame".to_owned())),
@@ -7415,6 +7465,13 @@ fn execute_dataframe_fixture_operation(fixture: &PacketFixture) -> Result<DataFr
             concat_dataframes_with_axis_join(&[&left, &right], axis, join)
                 .map_err(|err| err.to_string())
         }
+        FixtureOperation::DataFrameCombineFirst => {
+            let left = build_dataframe(require_frame(fixture)?)
+                .map_err(|err| format!("left frame build failed: {err}"))?;
+            let right = build_dataframe(require_frame_right(fixture)?)
+                .map_err(|err| format!("right frame build failed: {err}"))?;
+            left.combine_first(&right).map_err(|err| err.to_string())
+        }
         FixtureOperation::DataFrameSortIndex => {
             let frame = build_dataframe(require_frame(fixture)?)
                 .map_err(|err| format!("frame build failed: {err}"))?;
@@ -7737,6 +7794,16 @@ fn execute_series_repeat_fixture_operation(fixture: &PacketFixture) -> Result<Se
     series
         .repeat_by(&repeat_counts)
         .map_err(|err| err.to_string())
+}
+
+fn execute_series_combine_first_fixture_operation(
+    fixture: &PacketFixture,
+) -> Result<Series, String> {
+    let left = require_left_series(fixture)?;
+    let right = require_right_series(fixture)?;
+    let left = build_series(left).map_err(|err| format!("left series build failed: {err}"))?;
+    let right = build_series(right).map_err(|err| format!("right series build failed: {err}"))?;
+    left.combine_first(&right).map_err(|err| err.to_string())
 }
 
 fn execute_series_module_utility_fixture_operation(
@@ -8535,6 +8602,43 @@ fn execute_and_compare_differential(
                 }),
                 _ => Err(
                     "expected_series or expected_error required for series_to_datetime".to_owned(),
+                ),
+            }
+        }
+        FixtureOperation::SeriesToTimedelta => {
+            let left = require_left_series(fixture)?;
+            let series = build_series(left)?;
+            let actual = fp_frame::to_timedelta(&series).map_err(|err| err.to_string());
+            match expected {
+                ResolvedExpected::Series(series) => Ok(diff_series(&actual?, &series)),
+                ResolvedExpected::ErrorContains(substr) => Ok(match actual {
+                    Err(message) if message.contains(&substr) => Vec::new(),
+                    Err(message) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_to_timedelta.error",
+                        format!(
+                            "expected series_to_timedelta error containing '{substr}', got '{message}'"
+                        ),
+                    )],
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_to_timedelta.error",
+                        "expected series_to_timedelta to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                ResolvedExpected::ErrorAny => Ok(match actual {
+                    Err(_) => Vec::new(),
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_to_timedelta.error",
+                        "expected series_to_timedelta to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                _ => Err(
+                    "expected_series or expected_error required for series_to_timedelta".to_owned(),
                 ),
             }
         }
@@ -9801,6 +9905,13 @@ fn execute_and_compare_differential(
                 _ => Err("expected_series or expected_error required for series_repeat".to_owned()),
             }
         }
+        FixtureOperation::SeriesCombineFirst => {
+            let actual = execute_series_combine_first_fixture_operation(fixture);
+            match expected {
+                ResolvedExpected::Series(s) => Ok(diff_series(&actual?, &s)),
+                _ => Err("expected_series required for series_combine_first".to_owned()),
+            }
+        }
         FixtureOperation::SeriesToNumeric
         | FixtureOperation::SeriesCut
         | FixtureOperation::SeriesQcut => {
@@ -11060,7 +11171,8 @@ fn execute_and_compare_differential(
         | FixtureOperation::DataFrameDiff
         | FixtureOperation::DataFrameShift
         | FixtureOperation::DataFramePctChange
-        | FixtureOperation::DataFrameMelt => {
+        | FixtureOperation::DataFrameMelt
+        | FixtureOperation::DataFrameCombineFirst => {
             let actual = execute_dataframe_fixture_operation(fixture);
             match expected {
                 ResolvedExpected::Frame(frame) => Ok(diff_dataframe(&actual?, &frame)),
@@ -13574,6 +13686,19 @@ mod tests {
     }
 
     #[test]
+    fn packet_filter_runs_combine_first_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2D-090", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-090"));
+        assert!(
+            report.fixture_count >= 4,
+            "expected FP-P2D-090 combine_first fixtures"
+        );
+        assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
     fn grouped_reports_are_partitioned_per_packet() {
         let cfg = HarnessConfig::default_paths();
         let reports = run_packets_grouped(&cfg, &SuiteOptions::default()).expect("grouped");
@@ -13910,6 +14035,129 @@ mod tests {
 
         let actual = super::execute_dataframe_merge_ordered_fixture_operation(&fixture)
             .expect("actual frame");
+        super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
+    }
+
+    #[test]
+    fn live_oracle_series_combine_first_utf8_matches_pandas() {
+        let mut cfg = HarnessConfig::default_paths();
+        cfg.allow_system_pandas_fallback = false;
+
+        let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+            "packet_id": "FP-P2D-090",
+            "case_id": "series_combine_first_utf8_live",
+            "mode": "strict",
+            "operation": "series_combine_first",
+            "oracle_source": "live_legacy_pandas",
+            "left": {
+                "name": "primary",
+                "index": [
+                    { "kind": "int64", "value": 0 },
+                    { "kind": "int64", "value": 1 }
+                ],
+                "values": [
+                    { "kind": "utf8", "value": "alpha" },
+                    { "kind": "null", "value": "null" }
+                ]
+            },
+            "right": {
+                "name": "fallback",
+                "index": [
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "int64", "value": 2 }
+                ],
+                "values": [
+                    { "kind": "utf8", "value": "beta" },
+                    { "kind": "utf8", "value": "gamma" }
+                ]
+            }
+        }))
+        .expect("fixture");
+
+        let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+        if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+            eprintln!(
+                "live pandas unavailable; skipping series combine_first oracle test: {message}"
+            );
+            return;
+        }
+
+        let expected = expected_result.expect("live oracle expected");
+        assert!(
+            matches!(&expected, super::ResolvedExpected::Series(_)),
+            "expected live oracle series payload, got {expected:?}"
+        );
+        let super::ResolvedExpected::Series(expected) = expected else {
+            return;
+        };
+
+        let actual =
+            super::execute_series_combine_first_fixture_operation(&fixture).expect("actual series");
+        super::compare_series_expected(&actual, &expected).expect("pandas parity");
+    }
+
+    #[test]
+    fn live_oracle_dataframe_combine_first_object_matches_pandas() {
+        let mut cfg = HarnessConfig::default_paths();
+        cfg.allow_system_pandas_fallback = false;
+
+        let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+            "packet_id": "FP-P2D-090",
+            "case_id": "dataframe_combine_first_object_live",
+            "mode": "strict",
+            "operation": "dataframe_combine_first",
+            "oracle_source": "live_legacy_pandas",
+            "frame": {
+                "index": [
+                    { "kind": "int64", "value": 0 },
+                    { "kind": "int64", "value": 1 }
+                ],
+                "column_order": ["a"],
+                "columns": {
+                    "a": [
+                        { "kind": "utf8", "value": "alpha" },
+                        { "kind": "null", "value": "null" }
+                    ]
+                }
+            },
+            "frame_right": {
+                "index": [
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "int64", "value": 2 }
+                ],
+                "column_order": ["a", "b"],
+                "columns": {
+                    "a": [
+                        { "kind": "utf8", "value": "beta" },
+                        { "kind": "utf8", "value": "gamma" }
+                    ],
+                    "b": [
+                        { "kind": "utf8", "value": "bee" },
+                        { "kind": "utf8", "value": "cee" }
+                    ]
+                }
+            }
+        }))
+        .expect("fixture");
+
+        let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+        if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+            eprintln!(
+                "live pandas unavailable; skipping dataframe combine_first oracle test: {message}"
+            );
+            return;
+        }
+
+        let expected = expected_result.expect("live oracle expected");
+        assert!(
+            matches!(&expected, super::ResolvedExpected::Frame(_)),
+            "expected live oracle frame payload, got {expected:?}"
+        );
+        let super::ResolvedExpected::Frame(expected) = expected else {
+            return;
+        };
+
+        let actual = super::execute_dataframe_fixture_operation(&fixture).expect("actual frame");
         super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
     }
 
@@ -18411,5 +18659,89 @@ mod tests {
         assert_eq!(report.violations[0].rule_id, "G2");
         assert!(report.violations[0].repro_cmd.contains("cargo clippy"));
         assert_eq!(report.violations[0].errors.len(), 1);
+    }
+
+    #[test]
+    fn to_timedelta_int64_seconds_converts() {
+        use fp_frame::{Series, to_timedelta};
+        use fp_index::IndexLabel;
+        use fp_types::{NullKind, Scalar};
+
+        let input = Series::from_values(
+            "duration_s".to_owned(),
+            vec![
+                IndexLabel::Int64(0),
+                IndexLabel::Int64(1),
+                IndexLabel::Int64(2),
+            ],
+            vec![
+                Scalar::Int64(3661),
+                Scalar::Int64(90061),
+                Scalar::Null(NullKind::Null),
+            ],
+        )
+        .unwrap();
+
+        let result = to_timedelta(&input).expect("to_timedelta should succeed");
+        assert_eq!(result.len(), 3);
+
+        let values = result.values();
+        assert_eq!(values[0], Scalar::Utf8("01:01:01".to_owned()));
+        assert_eq!(values[1], Scalar::Utf8("1 days 01:01:01".to_owned()));
+        assert!(values[2].is_missing(), "null input should produce NaT");
+    }
+
+    #[test]
+    fn to_timedelta_string_hms_parses() {
+        use fp_frame::{Series, to_timedelta};
+        use fp_index::IndexLabel;
+        use fp_types::Scalar;
+
+        let input = Series::from_values(
+            "td_str".to_owned(),
+            vec![
+                IndexLabel::Int64(0),
+                IndexLabel::Int64(1),
+                IndexLabel::Int64(2),
+            ],
+            vec![
+                Scalar::Utf8("02:30:45".to_owned()),
+                Scalar::Utf8("3 days 04:15:30".to_owned()),
+                Scalar::Utf8("5 hours".to_owned()),
+            ],
+        )
+        .unwrap();
+
+        let result = to_timedelta(&input).expect("to_timedelta should succeed");
+        assert_eq!(result.len(), 3);
+
+        let values = result.values();
+        assert_eq!(values[0], Scalar::Utf8("02:30:45".to_owned()));
+        assert_eq!(values[1], Scalar::Utf8("3 days 04:15:30".to_owned()));
+        assert_eq!(values[2], Scalar::Utf8("05:00:00".to_owned()));
+    }
+
+    #[test]
+    fn to_timedelta_invalid_string_returns_nat() {
+        use fp_frame::{Series, to_timedelta};
+        use fp_index::IndexLabel;
+        use fp_types::Scalar;
+
+        let input = Series::from_values(
+            "bad_td".to_owned(),
+            vec![IndexLabel::Int64(0), IndexLabel::Int64(1)],
+            vec![
+                Scalar::Utf8("not a duration".to_owned()),
+                Scalar::Utf8("".to_owned()),
+            ],
+        )
+        .unwrap();
+
+        let result = to_timedelta(&input).expect("to_timedelta should succeed");
+        assert_eq!(result.len(), 2);
+
+        let values = result.values();
+        assert!(values[0].is_missing(), "invalid string should produce NaT");
+        assert!(values[1].is_missing(), "empty string should produce NaT");
     }
 }
