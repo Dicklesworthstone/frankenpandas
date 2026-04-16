@@ -7707,10 +7707,32 @@ impl StringAccessor<'_> {
         self.apply_str(|s| Scalar::Utf8(s.trim().to_string()), self.series.name())
     }
 
+    /// Strip leading and trailing characters in `to_strip`.
+    ///
+    /// Matches `pd.Series.str.strip(chars)`.
+    pub fn strip_chars(&self, to_strip: &str) -> Result<Series, FrameError> {
+        let chars: Vec<char> = to_strip.chars().collect();
+        self.apply_str(
+            |s| Scalar::Utf8(s.trim_matches(|c| chars.contains(&c)).to_string()),
+            self.series.name(),
+        )
+    }
+
     /// Strip leading whitespace.
     pub fn lstrip(&self) -> Result<Series, FrameError> {
         self.apply_str(
             |s| Scalar::Utf8(s.trim_start().to_string()),
+            self.series.name(),
+        )
+    }
+
+    /// Strip leading characters in `to_strip`.
+    ///
+    /// Matches `pd.Series.str.lstrip(chars)`.
+    pub fn lstrip_chars(&self, to_strip: &str) -> Result<Series, FrameError> {
+        let chars: Vec<char> = to_strip.chars().collect();
+        self.apply_str(
+            |s| Scalar::Utf8(s.trim_start_matches(|c| chars.contains(&c)).to_string()),
             self.series.name(),
         )
     }
@@ -7723,9 +7745,30 @@ impl StringAccessor<'_> {
         )
     }
 
+    /// Strip trailing characters in `to_strip`.
+    ///
+    /// Matches `pd.Series.str.rstrip(chars)`.
+    pub fn rstrip_chars(&self, to_strip: &str) -> Result<Series, FrameError> {
+        let chars: Vec<char> = to_strip.chars().collect();
+        self.apply_str(
+            |s| Scalar::Utf8(s.trim_end_matches(|c| chars.contains(&c)).to_string()),
+            self.series.name(),
+        )
+    }
+
     /// Check whether each string contains a pattern.
     pub fn contains(&self, pat: &str) -> Result<Series, FrameError> {
         self.apply_str(|s| Scalar::Bool(s.contains(pat)), self.series.name())
+    }
+
+    /// Check whether each string contains any of the given patterns.
+    ///
+    /// Matches `pd.Series.str.contains('|'.join(pats), regex=True)` but for literals.
+    pub fn contains_any(&self, pats: &[&str]) -> Result<Series, FrameError> {
+        self.apply_str(
+            |s| Scalar::Bool(pats.iter().any(|p| s.contains(p))),
+            self.series.name(),
+        )
     }
 
     /// Replace occurrences of a pattern with a replacement string.
@@ -7738,9 +7781,29 @@ impl StringAccessor<'_> {
         self.apply_str(|s| Scalar::Bool(s.starts_with(pat)), self.series.name())
     }
 
+    /// Check whether each string starts with any of the given prefixes.
+    ///
+    /// Matches `pd.Series.str.startswith((p1, p2, ...))`.
+    pub fn startswith_any(&self, pats: &[&str]) -> Result<Series, FrameError> {
+        self.apply_str(
+            |s| Scalar::Bool(pats.iter().any(|p| s.starts_with(p))),
+            self.series.name(),
+        )
+    }
+
     /// Check whether each string ends with a suffix.
     pub fn endswith(&self, pat: &str) -> Result<Series, FrameError> {
         self.apply_str(|s| Scalar::Bool(s.ends_with(pat)), self.series.name())
+    }
+
+    /// Check whether each string ends with any of the given suffixes.
+    ///
+    /// Matches `pd.Series.str.endswith((s1, s2, ...))`.
+    pub fn endswith_any(&self, pats: &[&str]) -> Result<Series, FrameError> {
+        self.apply_str(
+            |s| Scalar::Bool(pats.iter().any(|p| s.ends_with(p))),
+            self.series.name(),
+        )
     }
 
     /// Get the length of each string (character count, not byte count).
