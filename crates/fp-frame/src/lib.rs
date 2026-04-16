@@ -5594,6 +5594,18 @@ impl Series {
         Self::from_values(self.name(), self.index().labels().to_vec(), new_vals)
     }
 
+    pub fn map_dict(&self, mapping: &BTreeMap<Scalar, Scalar>) -> Result<Self, FrameError> {
+        let mut out = Vec::with_capacity(self.len());
+        for val in self.column().values() {
+            if let Some((_, mapped)) = mapping.iter().find(|(key, _)| *key == val) {
+                out.push(mapped.clone());
+            } else {
+                out.push(Scalar::Null(NullKind::NaN));
+            }
+        }
+        Self::from_values(self.name(), self.index().labels().to_vec(), out)
+    }
+
     /// Map values using a dictionary (HashMap).
     ///
     /// Values not found in the map become NaN (like pandas `Series.map(dict)`).
@@ -7885,6 +7897,104 @@ impl StringAccessor<'_> {
         )
     }
 
+    /// Split each string by a separator and return a DataFrame.
+    ///
+    /// Matches `pd.Series.str.split(pat, expand=True)`.
+    pub fn split_df(&self, pat: &str) -> Result<DataFrame, FrameError> {
+        let mut row_parts = Vec::new();
+        let mut max_parts = 0;
+        for val in self.series.column().values() {
+            match val {
+                Scalar::Utf8(s) => {
+                    let parts: Vec<Scalar> = s.split(pat).map(|p| Scalar::Utf8(p.to_string())).collect();
+                    max_parts = max_parts.max(parts.len());
+                    row_parts.push(parts);
+                }
+                _ => {
+                    row_parts.push(Vec::new());
+                }
+            }
+        }
+
+        let mut out_cols_data: Vec<Vec<Scalar>> = vec![Vec::with_capacity(self.series.len()); max_parts];
+        for parts in row_parts {
+            for i in 0..max_parts {
+                if i < parts.len() {
+                    out_cols_data[i].push(parts[i].clone());
+                } else {
+                    out_cols_data[i].push(Scalar::Null(NullKind::NaN));
+                }
+            }
+        }
+
+        let mut out_columns = BTreeMap::new();
+        let mut col_order = Vec::new();
+        for i in 0..max_parts {
+            let col_name = format!("{}", i);
+            let col = Column::from_values(std::mem::take(&mut out_cols_data[i]))?;
+            out_columns.insert(col_name.clone(), col);
+            col_order.push(col_name);
+        }
+
+        Ok(DataFrame::new_with_column_order(
+            self.series.index().clone(),
+            out_columns,
+            col_order,
+        )?)
+    }
+
+    /// Split each string from the right and return a DataFrame.
+    ///
+    /// Matches `pd.Series.str.rsplit(pat, expand=True)`.
+    pub fn rsplit_df(&self, pat: &str, n: Option<usize>) -> Result<DataFrame, FrameError> {
+        let mut row_parts = Vec::new();
+        let mut max_parts = 0;
+        for val in self.series.column().values() {
+            match val {
+                Scalar::Utf8(s) => {
+                    let parts: Vec<Scalar> = if let Some(limit) = n {
+                        s.rsplitn(limit + 1, pat).map(|p| Scalar::Utf8(p.to_string())).collect()
+                    } else {
+                        s.rsplit(pat).map(|p| Scalar::Utf8(p.to_string())).collect()
+                    };
+                    let mut parts = parts;
+                    parts.reverse(); // rsplit returns in reverse order
+                    max_parts = max_parts.max(parts.len());
+                    row_parts.push(parts);
+                }
+                _ => {
+                    row_parts.push(Vec::new());
+                }
+            }
+        }
+
+        let mut out_cols_data: Vec<Vec<Scalar>> = vec![Vec::with_capacity(self.series.len()); max_parts];
+        for parts in row_parts {
+            for i in 0..max_parts {
+                if i < parts.len() {
+                    out_cols_data[i].push(parts[i].clone());
+                } else {
+                    out_cols_data[i].push(Scalar::Null(NullKind::NaN));
+                }
+            }
+        }
+
+        let mut out_columns = BTreeMap::new();
+        let mut col_order = Vec::new();
+        for i in 0..max_parts {
+            let col_name = format!("{}", i);
+            let col = Column::from_values(std::mem::take(&mut out_cols_data[i]))?;
+            out_columns.insert(col_name.clone(), col);
+            col_order.push(col_name);
+        }
+
+        Ok(DataFrame::new_with_column_order(
+            self.series.index().clone(),
+            out_columns,
+            col_order,
+        )?)
+    }
+
     /// Count the number of parts when splitting by pattern.
     ///
     /// Matches `pd.Series.str.split(pat).str.len()`. Returns Int64 count.
@@ -8090,8 +8200,10 @@ impl StringAccessor<'_> {
 
         let mut out_columns = BTreeMap::new();
         let mut col_order = Vec::new();
+        let capture_names: Vec<Option<&str>> = re.capture_names().skip(1).collect();
+
         for i in 0..n_groups {
-            let col_name = format!("{}", i);
+            let col_name = capture_names[i].map(|s| s.to_string()).unwrap_or_else(|| format!("{}", i));
             let col = Column::from_values(std::mem::take(&mut out_cols_data[i]))?;
             out_columns.insert(col_name.clone(), col);
             col_order.push(col_name);
