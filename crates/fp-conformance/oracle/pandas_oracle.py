@@ -1631,6 +1631,56 @@ def op_dataframe_groupby_idxmax(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return {"expected_frame": dataframe_to_json(out)}
 
 
+def op_dataframe_groupby_cumcount(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    groupby_columns = payload.get("groupby_columns")
+    if frame_payload is None:
+        raise OracleError("dataframe_groupby_cumcount requires frame payload")
+    if not isinstance(groupby_columns, list) or not groupby_columns:
+        raise OracleError("dataframe_groupby_cumcount requires non-empty groupby_columns list")
+
+    columns: list[str] = []
+    for entry in groupby_columns:
+        if not isinstance(entry, str) or not entry.strip():
+            raise OracleError(
+                "dataframe_groupby_cumcount groupby_columns entries must be non-empty strings"
+            )
+        columns.append(entry.strip())
+
+    frame = dataframe_from_json(pd, frame_payload)
+    try:
+        out = frame.groupby(columns).cumcount()
+    except Exception as exc:
+        raise OracleError(f"dataframe_groupby_cumcount failed: {exc}") from exc
+
+    return {"expected_series": series_to_expected(out)}
+
+
+def op_dataframe_groupby_ngroup(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    groupby_columns = payload.get("groupby_columns")
+    if frame_payload is None:
+        raise OracleError("dataframe_groupby_ngroup requires frame payload")
+    if not isinstance(groupby_columns, list) or not groupby_columns:
+        raise OracleError("dataframe_groupby_ngroup requires non-empty groupby_columns list")
+
+    columns: list[str] = []
+    for entry in groupby_columns:
+        if not isinstance(entry, str) or not entry.strip():
+            raise OracleError(
+                "dataframe_groupby_ngroup groupby_columns entries must be non-empty strings"
+            )
+        columns.append(entry.strip())
+
+    frame = dataframe_from_json(pd, frame_payload)
+    try:
+        out = frame.groupby(columns).ngroup()
+    except Exception as exc:
+        raise OracleError(f"dataframe_groupby_ngroup failed: {exc}") from exc
+
+    return {"expected_series": series_to_expected(out)}
+
+
 def op_dataframe_asof(pd, payload: dict[str, Any]) -> dict[str, Any]:
     frame_payload = payload.get("frame")
     asof_label = payload.get("asof_label")
@@ -2498,6 +2548,10 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_dataframe_groupby_idxmin(pd, payload)
     if op in {"dataframe_groupby_idxmax", "data_frame_groupby_idxmax"}:
         return op_dataframe_groupby_idxmax(pd, payload)
+    if op in {"dataframe_groupby_cumcount", "data_frame_groupby_cumcount"}:
+        return op_dataframe_groupby_cumcount(pd, payload)
+    if op in {"dataframe_groupby_ngroup", "data_frame_groupby_ngroup"}:
+        return op_dataframe_groupby_ngroup(pd, payload)
     if op in {"dataframe_asof", "data_frame_asof"}:
         return op_dataframe_asof(pd, payload)
     if op in {"dataframe_at_time", "data_frame_at_time"}:
