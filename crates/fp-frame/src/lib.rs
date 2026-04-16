@@ -4256,6 +4256,36 @@ impl Series {
         Self::from_values(self.name.clone(), labels, values)
     }
 
+    /// Select rows matching the given index key.
+    ///
+    /// Matches `s.xs(key)`. Returns all rows whose index matches `key`.
+    pub fn xs(&self, key: &IndexLabel) -> Result<Self, FrameError> {
+        let labels = self.index.labels();
+        let matching: Vec<usize> = labels
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| *l == key)
+            .map(|(i, _)| i)
+            .collect();
+        
+        if matching.is_empty() {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "xs: key '{key:?}' not found in index"
+            )));
+        }
+
+        self.reorder_by_positions(&matching)
+    }
+
+    /// Return Series with dropped index level(s).
+    ///
+    /// Matches `s.droplevel(0)` for single-level index.
+    pub fn droplevel(&self) -> Result<Self, FrameError> {
+        let n = self.len();
+        let new_labels: Vec<IndexLabel> = (0..n).map(|i| (i as i64).into()).collect();
+        Self::new(self.name.clone(), Index::new(new_labels), self.column.clone())
+    }
+
     /// Unstack a Series with string-composite index into a DataFrame.
     ///
     /// Matches `pd.Series.unstack()`. Expects index labels in the format
@@ -13291,6 +13321,22 @@ impl DataFrame {
             order.reverse();
         }
         self.reorder_rows_by_positions(&order)
+    }
+
+    /// Sort the DataFrame by column names (axis=1).
+    ///
+    /// Matches `df.sort_index(axis=1, ascending=...)`.
+    pub fn sort_index_axis1(&self, ascending: bool) -> Result<Self, FrameError> {
+        let mut order: Vec<usize> = (0..self.column_order.len()).collect();
+        order.sort_by(|&a, &b| {
+            if ascending {
+                self.column_order[a].cmp(&self.column_order[b])
+            } else {
+                self.column_order[b].cmp(&self.column_order[a])
+            }
+        });
+        let sorted_cols: Vec<&str> = order.iter().map(|&i| self.column_order[i].as_str()).collect();
+        self.select_columns(&sorted_cols)
     }
 
     /// Return a new DataFrame sorted by a column's values.
