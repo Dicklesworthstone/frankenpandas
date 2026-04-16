@@ -267,6 +267,8 @@ pub enum FixtureOperation {
     SeriesAtTime,
     #[serde(rename = "series_between_time", alias = "series_between_time_default")]
     SeriesBetweenTime,
+    #[serde(rename = "series_extractall", alias = "series_str_extractall")]
+    SeriesExtractAll,
     #[serde(rename = "dataframe_loc", alias = "data_frame_loc")]
     DataFrameLoc,
     #[serde(rename = "dataframe_iloc", alias = "data_frame_iloc")]
@@ -472,6 +474,7 @@ impl FixtureOperation {
             Self::SeriesTake => "series_take",
             Self::SeriesAtTime => "series_at_time",
             Self::SeriesBetweenTime => "series_between_time",
+            Self::SeriesExtractAll => "series_extractall",
             Self::DataFrameLoc => "dataframe_loc",
             Self::DataFrameIloc => "dataframe_iloc",
             Self::DataFrameTake => "dataframe_take",
@@ -777,6 +780,8 @@ pub struct PacketFixture {
     #[serde(default)]
     pub end_time: Option<String>,
     #[serde(default)]
+    pub regex_pattern: Option<String>,
+    #[serde(default)]
     pub melt_id_vars: Option<Vec<String>>,
     #[serde(default)]
     pub melt_value_vars: Option<Vec<String>>,
@@ -1047,6 +1052,7 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::SeriesTake
         | FixtureOperation::SeriesAtTime
         | FixtureOperation::SeriesBetweenTime
+        | FixtureOperation::SeriesExtractAll
         | FixtureOperation::DataFrameLoc
         | FixtureOperation::DataFrameIloc
         | FixtureOperation::DataFrameTake
@@ -1647,6 +1653,8 @@ struct OracleRequest {
     start_time: Option<String>,
     #[serde(default)]
     end_time: Option<String>,
+    #[serde(default)]
+    regex_pattern: Option<String>,
     #[serde(default)]
     melt_id_vars: Option<Vec<String>>,
     #[serde(default)]
@@ -4909,6 +4917,31 @@ fn run_fixture_operation(
                 ),
             }
         }
+        FixtureOperation::SeriesExtractAll => {
+            let actual = execute_dataframe_fixture_operation(fixture);
+            match expected {
+                ResolvedExpected::Frame(frame) => compare_dataframe_expected(&actual?, &frame),
+                ResolvedExpected::ErrorContains(substr) => match actual {
+                    Err(message) if message.contains(&substr) => Ok(()),
+                    Err(message) => Err(format!(
+                        "expected series_extractall error containing '{substr}', got '{message}'"
+                    )),
+                    Ok(_) => Err(format!(
+                        "expected series_extractall to fail with error containing '{substr}'"
+                    )),
+                },
+                ResolvedExpected::ErrorAny => {
+                    if actual.is_err() {
+                        Ok(())
+                    } else {
+                        Err("expected series_extractall to fail but operation succeeded".to_owned())
+                    }
+                }
+                _ => Err(
+                    "expected_frame or expected_error is required for series_extractall".to_owned(),
+                ),
+            }
+        }
         FixtureOperation::DataFrameLoc => {
             let frame = require_frame(fixture)?;
             let labels = require_loc_labels(fixture)?;
@@ -5811,6 +5844,7 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
                 ))
             }),
         FixtureOperation::DataFrameLoc
+        | FixtureOperation::SeriesExtractAll
         | FixtureOperation::DataFrameIloc
         | FixtureOperation::DataFrameTake
         | FixtureOperation::DataFrameXs
@@ -5991,6 +6025,7 @@ fn capture_live_oracle_expected(
         time_value: fixture.time_value.clone(),
         start_time: fixture.start_time.clone(),
         end_time: fixture.end_time.clone(),
+        regex_pattern: fixture.regex_pattern.clone(),
         melt_id_vars: fixture.melt_id_vars.clone(),
         melt_value_vars: fixture.melt_value_vars.clone(),
         melt_var_name: fixture.melt_var_name.clone(),
@@ -6153,6 +6188,7 @@ fn capture_live_oracle_expected(
             .map(ResolvedExpected::Bool)
             .ok_or_else(|| HarnessError::FixtureFormat("oracle omitted expected_bool".to_owned())),
         FixtureOperation::DataFrameLoc
+        | FixtureOperation::SeriesExtractAll
         | FixtureOperation::DataFrameIloc
         | FixtureOperation::DataFrameTake
         | FixtureOperation::DataFrameXs
@@ -6649,6 +6685,16 @@ fn require_time_value(fixture: &PacketFixture) -> Result<&str, String> {
         .time_value
         .as_deref()
         .ok_or_else(|| "time_value is required for at_time operations".to_owned())
+}
+
+fn require_regex_pattern<'a>(
+    fixture: &'a PacketFixture,
+    operation_name: &str,
+) -> Result<&'a str, String> {
+    fixture
+        .regex_pattern
+        .as_deref()
+        .ok_or_else(|| format!("regex_pattern is required for {operation_name}"))
 }
 
 fn require_start_time(fixture: &PacketFixture) -> Result<&str, String> {
@@ -7195,6 +7241,15 @@ const INDEX_MERGE_KEY_COLUMN: &str = "__index_key";
 
 fn execute_dataframe_fixture_operation(fixture: &PacketFixture) -> Result<DataFrame, String> {
     match fixture.operation {
+        FixtureOperation::SeriesExtractAll => {
+            let left = require_left_series(fixture)?;
+            let pattern = require_regex_pattern(fixture, "series_extractall")?;
+            let series = build_series(left).map_err(|err| format!("series build failed: {err}"))?;
+            series
+                .str()
+                .extractall(pattern)
+                .map_err(|err| err.to_string())
+        }
         FixtureOperation::DataFrameMerge => {
             execute_dataframe_merge_fixture_operation(fixture, false)
         }
@@ -9852,6 +9907,41 @@ fn execute_and_compare_differential(
                 }),
                 _ => Err(
                     "expected_series or expected_error required for series_between_time".to_owned(),
+                ),
+            }
+        }
+        FixtureOperation::SeriesExtractAll => {
+            let actual = execute_dataframe_fixture_operation(fixture);
+            match expected {
+                ResolvedExpected::Frame(frame) => Ok(diff_dataframe(&actual?, &frame)),
+                ResolvedExpected::ErrorContains(substr) => Ok(match actual {
+                    Err(message) if message.contains(&substr) => Vec::new(),
+                    Err(message) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_extractall.error",
+                        format!(
+                            "expected series_extractall error containing '{substr}', got '{message}'"
+                        ),
+                    )],
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_extractall.error",
+                        "expected series_extractall to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                ResolvedExpected::ErrorAny => Ok(match actual {
+                    Err(_) => Vec::new(),
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_extractall.error",
+                        "expected series_extractall to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                _ => Err(
+                    "expected_frame or expected_error required for series_extractall".to_owned(),
                 ),
             }
         }
@@ -15463,6 +15553,51 @@ mod tests {
         );
         super::compare_series_expected(&actual.expect("actual series"), &expected)
             .expect("pandas parity");
+    }
+
+    #[test]
+    fn live_oracle_series_extractall_matches_pandas() {
+        let mut cfg = HarnessConfig::default_paths();
+        cfg.allow_system_pandas_fallback = false;
+
+        let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+            "packet_id": "FP-P2D-086",
+            "case_id": "series_extractall_live",
+            "mode": "strict",
+            "operation": "series_extractall",
+            "oracle_source": "live_legacy_pandas",
+            "regex_pattern": "([a-z])(\\d)",
+            "left": {
+                "name": "tokens",
+                "index": [
+                    { "kind": "int64", "value": 0 },
+                    { "kind": "int64", "value": 1 }
+                ],
+                "values": [
+                    { "kind": "utf8", "value": "a1b2" },
+                    { "kind": "utf8", "value": "c3" }
+                ]
+            }
+        }))
+        .expect("fixture");
+
+        let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+        if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+            eprintln!("live pandas unavailable; skipping series extractall oracle test: {message}");
+            return;
+        }
+
+        let expected = expected_result.expect("live oracle expected");
+        assert!(
+            matches!(&expected, super::ResolvedExpected::Frame(_)),
+            "expected live oracle frame payload, got {expected:?}"
+        );
+        let super::ResolvedExpected::Frame(expected) = expected else {
+            return;
+        };
+
+        let actual = super::execute_dataframe_fixture_operation(&fixture).expect("actual frame");
+        super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
     }
 
     #[test]

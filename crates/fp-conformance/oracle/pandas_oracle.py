@@ -1554,6 +1554,23 @@ def op_series_pct_change(pd, payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def op_series_extractall(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    if left is None:
+        raise OracleError("series_extractall requires left payload")
+    regex_pattern = payload.get("regex_pattern")
+    if not isinstance(regex_pattern, str) or regex_pattern == "":
+        raise OracleError("series_extractall requires non-empty regex_pattern")
+
+    series = fixture_series_from_payload(pd, left, "series_extractall")
+    try:
+        out = normalize_series_extractall_frame(series.str.extractall(regex_pattern))
+    except Exception as exc:
+        raise OracleError(f"series_extractall failed: {exc}") from exc
+
+    return {"expected_frame": dataframe_to_json(out)}
+
+
 def dataframe_from_json(pd, payload: dict[str, Any]):
     index_raw = payload.get("index")
     columns_raw = payload.get("columns")
@@ -1612,6 +1629,24 @@ def dataframe_to_json(frame) -> dict[str, Any]:
         },
         "column_order": [str(name) for name in frame.columns.tolist()],
     }
+
+
+def rust_debug_index_label(value: Any) -> str:
+    if isinstance(value, int):
+        return f"Int64({value})"
+    return f"Utf8({json.dumps(str(value), ensure_ascii=False)})"
+
+
+def normalize_series_extractall_frame(frame):
+    out = frame.copy()
+    out.columns = [str(i) for i, _ in enumerate(out.columns.tolist())]
+    out.index = [
+        f"{rust_debug_index_label(label[0])}, {label[1]}"
+        if isinstance(label, tuple) and len(label) == 2
+        else str(label)
+        for label in out.index.tolist()
+    ]
+    return out
 
 
 def normalize_groupby_ohlc_frame(frame):
@@ -2943,6 +2978,8 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_series_shift(pd, payload)
     if op == "series_pct_change":
         return op_series_pct_change(pd, payload)
+    if op == "series_extractall":
+        return op_series_extractall(pd, payload)
     if op == "dataframe_loc":
         return op_dataframe_loc(pd, payload)
     if op in {"dataframe_xs", "data_frame_xs"}:
