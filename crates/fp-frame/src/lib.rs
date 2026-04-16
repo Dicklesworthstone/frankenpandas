@@ -23436,29 +23436,26 @@ impl DataFrameGroupBy<'_> {
 
         let mut result_cols = BTreeMap::new();
 
-        // Initialize with original values
-        for col_name in &self.df.column_order {
+        for col_name in &value_cols {
             let col = &self.df.columns[col_name];
             let mut vals = col.values().to_vec();
 
-            if value_cols.contains(col_name) {
-                // Forward-fill within each group
-                for gkey in &group_order {
-                    let indices = &groups[gkey];
-                    let mut last_valid: Option<Scalar> = None;
-                    let mut consecutive_fills: usize = 0;
-                    for &idx in indices {
-                        if vals[idx].is_missing() {
-                            if let Some(ref lv) = last_valid {
-                                consecutive_fills += 1;
-                                if limit.is_none_or(|l| consecutive_fills <= l) {
-                                    vals[idx] = lv.clone();
-                                }
+            // Forward-fill within each group.
+            for gkey in &group_order {
+                let indices = &groups[gkey];
+                let mut last_valid: Option<Scalar> = None;
+                let mut consecutive_fills: usize = 0;
+                for &idx in indices {
+                    if vals[idx].is_missing() {
+                        if let Some(ref lv) = last_valid {
+                            consecutive_fills += 1;
+                            if limit.is_none_or(|l| consecutive_fills <= l) {
+                                vals[idx] = lv.clone();
                             }
-                        } else {
-                            last_valid = Some(vals[idx].clone());
-                            consecutive_fills = 0;
                         }
+                    } else {
+                        last_valid = Some(vals[idx].clone());
+                        consecutive_fills = 0;
                     }
                 }
             }
@@ -23468,7 +23465,7 @@ impl DataFrameGroupBy<'_> {
 
         Ok(DataFrame {
             columns: result_cols,
-            column_order: self.df.column_order.clone(),
+            column_order: value_cols,
             index: self.df.index.clone(),
         })
     }
@@ -23489,28 +23486,26 @@ impl DataFrameGroupBy<'_> {
 
         let mut result_cols = BTreeMap::new();
 
-        for col_name in &self.df.column_order {
+        for col_name in &value_cols {
             let col = &self.df.columns[col_name];
             let mut vals = col.values().to_vec();
 
-            if value_cols.contains(col_name) {
-                for gkey in &group_order {
-                    let indices = &groups[gkey];
-                    let mut last_valid: Option<Scalar> = None;
-                    let mut consecutive_fills: usize = 0;
-                    // Scan backwards
-                    for &idx in indices.iter().rev() {
-                        if vals[idx].is_missing() {
-                            if let Some(ref lv) = last_valid {
-                                consecutive_fills += 1;
-                                if limit.is_none_or(|l| consecutive_fills <= l) {
-                                    vals[idx] = lv.clone();
-                                }
+            for gkey in &group_order {
+                let indices = &groups[gkey];
+                let mut last_valid: Option<Scalar> = None;
+                let mut consecutive_fills: usize = 0;
+                // Scan backwards.
+                for &idx in indices.iter().rev() {
+                    if vals[idx].is_missing() {
+                        if let Some(ref lv) = last_valid {
+                            consecutive_fills += 1;
+                            if limit.is_none_or(|l| consecutive_fills <= l) {
+                                vals[idx] = lv.clone();
                             }
-                        } else {
-                            last_valid = Some(vals[idx].clone());
-                            consecutive_fills = 0;
                         }
+                    } else {
+                        last_valid = Some(vals[idx].clone());
+                        consecutive_fills = 0;
                     }
                 }
             }
@@ -23520,7 +23515,7 @@ impl DataFrameGroupBy<'_> {
 
         Ok(DataFrame {
             columns: result_cols,
-            column_order: self.df.column_order.clone(),
+            column_order: value_cols,
             index: self.df.index.clone(),
         })
     }
@@ -43251,6 +43246,8 @@ mod tests {
         )
         .unwrap();
         let result = df.groupby(&["grp"]).unwrap().ffill(None).unwrap();
+        assert_eq!(result.column_order.as_slice(), &[String::from("val")]);
+        assert!(!result.columns.contains_key("grp"));
         // Group "a": [1.0, NaN] -> [1.0, 1.0] (ffill within group)
         assert_eq!(result.columns["val"].values()[0], Scalar::Float64(1.0));
         assert_eq!(result.columns["val"].values()[1], Scalar::Float64(1.0));
@@ -43286,6 +43283,8 @@ mod tests {
         )
         .unwrap();
         let result = df.groupby(&["grp"]).unwrap().bfill(None).unwrap();
+        assert_eq!(result.column_order.as_slice(), &[String::from("val")]);
+        assert!(!result.columns.contains_key("grp"));
         // Group "a": [NaN, 2.0] -> [2.0, 2.0] (bfill within group)
         assert_eq!(result.columns["val"].values()[0], Scalar::Float64(2.0));
         assert_eq!(result.columns["val"].values()[1], Scalar::Float64(2.0));

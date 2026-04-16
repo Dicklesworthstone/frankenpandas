@@ -287,15 +287,9 @@ pub enum FixtureOperation {
     DataFrameGroupByAny,
     #[serde(rename = "dataframe_groupby_all", alias = "data_frame_groupby_all")]
     DataFrameGroupByAll,
-    #[serde(
-        rename = "dataframe_groupby_ffill",
-        alias = "data_frame_groupby_ffill"
-    )]
+    #[serde(rename = "dataframe_groupby_ffill", alias = "data_frame_groupby_ffill")]
     DataFrameGroupByFfill,
-    #[serde(
-        rename = "dataframe_groupby_bfill",
-        alias = "data_frame_groupby_bfill"
-    )]
+    #[serde(rename = "dataframe_groupby_bfill", alias = "data_frame_groupby_bfill")]
     DataFrameGroupByBfill,
     #[serde(
         rename = "dataframe_groupby_cumcount",
@@ -13756,6 +13750,144 @@ mod tests {
         if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
             eprintln!(
                 "live pandas unavailable; skipping dataframe groupby all oracle test: {message}"
+            );
+            return;
+        }
+
+        let expected = expected_result.expect("live oracle expected");
+        assert!(
+            matches!(&expected, super::ResolvedExpected::Frame(_)),
+            "expected live oracle frame payload, got {expected:?}"
+        );
+        let super::ResolvedExpected::Frame(expected) = expected else {
+            return;
+        };
+
+        let actual = super::execute_dataframe_fixture_operation(&fixture).expect("actual frame");
+        super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
+    }
+
+    #[test]
+    fn live_oracle_dataframe_groupby_ffill_matches_pandas() {
+        let mut cfg = HarnessConfig::default_paths();
+        cfg.allow_system_pandas_fallback = false;
+
+        let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+            "packet_id": "FP-P2D-079",
+            "case_id": "dataframe_groupby_ffill_live",
+            "mode": "strict",
+            "operation": "dataframe_groupby_ffill",
+            "oracle_source": "live_legacy_pandas",
+            "groupby_columns": ["grp"],
+            "frame": {
+                "index": [
+                    { "kind": "utf8", "value": "r0" },
+                    { "kind": "utf8", "value": "r1" },
+                    { "kind": "utf8", "value": "r2" },
+                    { "kind": "utf8", "value": "r3" },
+                    { "kind": "utf8", "value": "r4" }
+                ],
+                "column_order": ["grp", "val", "other"],
+                "columns": {
+                    "grp": [
+                        { "kind": "utf8", "value": "a" },
+                        { "kind": "utf8", "value": "a" },
+                        { "kind": "utf8", "value": "b" },
+                        { "kind": "utf8", "value": "b" },
+                        { "kind": "utf8", "value": "a" }
+                    ],
+                    "val": [
+                        { "kind": "float64", "value": 1.0 },
+                        { "kind": "null", "value": "na_n" },
+                        { "kind": "null", "value": "na_n" },
+                        { "kind": "float64", "value": 4.0 },
+                        { "kind": "null", "value": "na_n" }
+                    ],
+                    "other": [
+                        { "kind": "null", "value": "na_n" },
+                        { "kind": "float64", "value": 2.0 },
+                        { "kind": "float64", "value": 3.0 },
+                        { "kind": "null", "value": "na_n" },
+                        { "kind": "null", "value": "na_n" }
+                    ]
+                }
+            }
+        }))
+        .expect("fixture");
+
+        let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+        if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+            eprintln!(
+                "live pandas unavailable; skipping dataframe groupby ffill oracle test: {message}"
+            );
+            return;
+        }
+
+        let expected = expected_result.expect("live oracle expected");
+        assert!(
+            matches!(&expected, super::ResolvedExpected::Frame(_)),
+            "expected live oracle frame payload, got {expected:?}"
+        );
+        let super::ResolvedExpected::Frame(expected) = expected else {
+            return;
+        };
+
+        let actual = super::execute_dataframe_fixture_operation(&fixture).expect("actual frame");
+        super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
+    }
+
+    #[test]
+    fn live_oracle_dataframe_groupby_bfill_matches_pandas() {
+        let mut cfg = HarnessConfig::default_paths();
+        cfg.allow_system_pandas_fallback = false;
+
+        let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+            "packet_id": "FP-P2D-080",
+            "case_id": "dataframe_groupby_bfill_live",
+            "mode": "strict",
+            "operation": "dataframe_groupby_bfill",
+            "oracle_source": "live_legacy_pandas",
+            "groupby_columns": ["grp"],
+            "frame": {
+                "index": [
+                    { "kind": "utf8", "value": "r0" },
+                    { "kind": "utf8", "value": "r1" },
+                    { "kind": "utf8", "value": "r2" },
+                    { "kind": "utf8", "value": "r3" },
+                    { "kind": "utf8", "value": "r4" }
+                ],
+                "column_order": ["grp", "val", "other"],
+                "columns": {
+                    "grp": [
+                        { "kind": "utf8", "value": "a" },
+                        { "kind": "utf8", "value": "a" },
+                        { "kind": "utf8", "value": "b" },
+                        { "kind": "utf8", "value": "b" },
+                        { "kind": "utf8", "value": "a" }
+                    ],
+                    "val": [
+                        { "kind": "null", "value": "na_n" },
+                        { "kind": "float64", "value": 2.0 },
+                        { "kind": "float64", "value": 3.0 },
+                        { "kind": "null", "value": "na_n" },
+                        { "kind": "null", "value": "na_n" }
+                    ],
+                    "other": [
+                        { "kind": "null", "value": "na_n" },
+                        { "kind": "null", "value": "na_n" },
+                        { "kind": "float64", "value": 5.0 },
+                        { "kind": "null", "value": "na_n" },
+                        { "kind": "float64", "value": 9.0 }
+                    ]
+                }
+            }
+        }))
+        .expect("fixture");
+
+        let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+        if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+            eprintln!(
+                "live pandas unavailable; skipping dataframe groupby bfill oracle test: {message}"
             );
             return;
         }
