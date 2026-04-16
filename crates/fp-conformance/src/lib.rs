@@ -257,6 +257,8 @@ pub enum FixtureOperation {
     SeriesShift,
     #[serde(rename = "series_pct_change", alias = "series_pct_change_default")]
     SeriesPctChange,
+    #[serde(rename = "series_xs", alias = "series_xs_default")]
+    SeriesXs,
     SeriesLoc,
     SeriesIloc,
     #[serde(rename = "series_take", alias = "series_take_default")]
@@ -307,6 +309,8 @@ pub enum FixtureOperation {
     DataFrameHead,
     #[serde(rename = "dataframe_tail", alias = "data_frame_tail")]
     DataFrameTail,
+    #[serde(rename = "dataframe_xs", alias = "data_frame_xs")]
+    DataFrameXs,
     #[serde(rename = "dataframe_isna", alias = "data_frame_isna")]
     DataFrameIsNa,
     #[serde(rename = "dataframe_notna", alias = "data_frame_notna")]
@@ -440,6 +444,7 @@ impl FixtureOperation {
             Self::SeriesFillNa => "series_fillna",
             Self::SeriesDropNa => "series_dropna",
             Self::SeriesCount => "series_count",
+            Self::SeriesXs => "series_xs",
             Self::SeriesLoc => "series_loc",
             Self::SeriesIloc => "series_iloc",
             Self::SeriesTake => "series_take",
@@ -460,6 +465,7 @@ impl FixtureOperation {
             Self::DataFrameBool => "dataframe_bool",
             Self::DataFrameHead => "dataframe_head",
             Self::DataFrameTail => "dataframe_tail",
+            Self::DataFrameXs => "dataframe_xs",
             Self::DataFrameIsNa => "dataframe_isna",
             Self::DataFrameNotNa => "dataframe_notna",
             Self::DataFrameIsNull => "dataframe_isnull",
@@ -720,6 +726,8 @@ pub struct PacketFixture {
     pub repeat_n: Option<i64>,
     #[serde(default)]
     pub repeat_counts: Option<Vec<i64>>,
+    #[serde(default)]
+    pub xs_key: Option<IndexLabel>,
     #[serde(default)]
     pub cut_bins: Option<usize>,
     #[serde(default)]
@@ -998,6 +1006,7 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::SeriesDiff
         | FixtureOperation::SeriesShift
         | FixtureOperation::SeriesPctChange
+        | FixtureOperation::SeriesXs
         | FixtureOperation::SeriesLoc
         | FixtureOperation::SeriesIloc
         | FixtureOperation::SeriesTake
@@ -1018,6 +1027,7 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::DataFrameBool
         | FixtureOperation::DataFrameHead
         | FixtureOperation::DataFrameTail
+        | FixtureOperation::DataFrameXs
         | FixtureOperation::DataFrameSetIndex
         | FixtureOperation::DataFrameResetIndex
         | FixtureOperation::DataFrameDuplicated
@@ -1577,6 +1587,8 @@ struct OracleRequest {
     repeat_n: Option<i64>,
     #[serde(default)]
     repeat_counts: Option<Vec<i64>>,
+    #[serde(default)]
+    xs_key: Option<IndexLabel>,
     #[serde(default)]
     cut_bins: Option<usize>,
     #[serde(default)]
@@ -4767,6 +4779,29 @@ fn run_fixture_operation(
                 }
             }
         }
+        FixtureOperation::SeriesXs => {
+            let actual = execute_series_xs_fixture_operation(fixture);
+            match expected {
+                ResolvedExpected::Series(series) => compare_series_expected(&actual?, &series),
+                ResolvedExpected::ErrorContains(substr) => match actual {
+                    Err(message) if message.contains(&substr) => Ok(()),
+                    Err(message) => Err(format!(
+                        "expected series_xs error containing '{substr}', got '{message}'"
+                    )),
+                    Ok(_) => Err(format!(
+                        "expected series_xs to fail with error containing '{substr}'"
+                    )),
+                },
+                ResolvedExpected::ErrorAny => {
+                    if actual.is_err() {
+                        Ok(())
+                    } else {
+                        Err("expected series_xs to fail but operation succeeded".to_owned())
+                    }
+                }
+                _ => Err("expected_series or expected_error is required for series_xs".to_owned()),
+            }
+        }
         FixtureOperation::SeriesAtTime => {
             let left = require_left_series(fixture)?;
             let time = require_time_value(fixture)?;
@@ -4913,6 +4948,29 @@ fn run_fixture_operation(
                 _ => Err(
                     "expected_frame or expected_error is required for dataframe_take".to_owned(),
                 ),
+            }
+        }
+        FixtureOperation::DataFrameXs => {
+            let actual = execute_dataframe_fixture_operation(fixture);
+            match expected {
+                ResolvedExpected::Frame(frame) => compare_dataframe_expected(&actual?, &frame),
+                ResolvedExpected::ErrorContains(substr) => match actual {
+                    Err(message) if message.contains(&substr) => Ok(()),
+                    Err(message) => Err(format!(
+                        "expected dataframe_xs error containing '{substr}', got '{message}'"
+                    )),
+                    Ok(_) => Err(format!(
+                        "expected dataframe_xs to fail with error containing '{substr}'"
+                    )),
+                },
+                ResolvedExpected::ErrorAny => {
+                    if actual.is_err() {
+                        Ok(())
+                    } else {
+                        Err("expected dataframe_xs to fail but operation succeeded".to_owned())
+                    }
+                }
+                _ => Err("expected_frame or expected_error is required for dataframe_xs".to_owned()),
             }
         }
         FixtureOperation::DataFrameGroupByIdxMin => {
@@ -5463,6 +5521,7 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::SeriesDiff
         | FixtureOperation::SeriesShift
         | FixtureOperation::SeriesPctChange
+        | FixtureOperation::SeriesXs
         | FixtureOperation::SeriesIsNa
         | FixtureOperation::SeriesNotNa
         | FixtureOperation::SeriesIsNull
@@ -5504,6 +5563,7 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         FixtureOperation::DataFrameLoc
         | FixtureOperation::DataFrameIloc
         | FixtureOperation::DataFrameTake
+        | FixtureOperation::DataFrameXs
         | FixtureOperation::DataFrameGroupByIdxMin
         | FixtureOperation::DataFrameGroupByIdxMax
         | FixtureOperation::DataFrameGroupByAny
@@ -5664,6 +5724,7 @@ fn capture_live_oracle_expected(
         take_indices: fixture.take_indices.clone(),
         repeat_n: fixture.repeat_n,
         repeat_counts: fixture.repeat_counts.clone(),
+        xs_key: fixture.xs_key.clone(),
         cut_bins: fixture.cut_bins,
         qcut_quantiles: fixture.qcut_quantiles,
         take_axis: fixture.take_axis,
@@ -5793,6 +5854,7 @@ fn capture_live_oracle_expected(
         | FixtureOperation::SeriesDiff
         | FixtureOperation::SeriesShift
         | FixtureOperation::SeriesPctChange
+        | FixtureOperation::SeriesXs
         | FixtureOperation::SeriesIsNa
         | FixtureOperation::SeriesNotNa
         | FixtureOperation::SeriesIsNull
@@ -5834,6 +5896,7 @@ fn capture_live_oracle_expected(
         FixtureOperation::DataFrameLoc
         | FixtureOperation::DataFrameIloc
         | FixtureOperation::DataFrameTake
+        | FixtureOperation::DataFrameXs
         | FixtureOperation::DataFrameGroupByIdxMin
         | FixtureOperation::DataFrameGroupByIdxMax
         | FixtureOperation::DataFrameGroupByAny
@@ -6246,6 +6309,16 @@ fn require_qcut_quantiles(fixture: &PacketFixture) -> Result<usize, String> {
     fixture
         .qcut_quantiles
         .ok_or_else(|| "qcut_quantiles is required for series_qcut".to_owned())
+}
+
+fn require_xs_key<'a>(
+    fixture: &'a PacketFixture,
+    operation_name: &str,
+) -> Result<&'a IndexLabel, String> {
+    fixture
+        .xs_key
+        .as_ref()
+        .ok_or_else(|| format!("xs_key is required for {operation_name}"))
 }
 
 fn require_groupby_columns(
@@ -7011,6 +7084,13 @@ fn execute_dataframe_fixture_operation(fixture: &PacketFixture) -> Result<DataFr
             let axis = resolve_take_axis(fixture)?;
             frame.take(indices, axis).map_err(|err| err.to_string())
         }
+        FixtureOperation::DataFrameXs => {
+            let frame = build_dataframe(require_frame(fixture)?)
+                .map_err(|err| format!("frame build failed: {err}"))?;
+            frame
+                .xs(require_xs_key(fixture, "dataframe_xs")?)
+                .map_err(|err| err.to_string())
+        }
         FixtureOperation::DataFrameGroupByIdxMin => {
             execute_dataframe_groupby_frame_fixture_operation(fixture, "dataframe_groupby_idxmin")
         }
@@ -7138,6 +7218,13 @@ fn execute_series_module_utility_fixture_operation(
             "unsupported series module utility operation for fixture execution: {other:?}"
         )),
     }
+}
+
+fn execute_series_xs_fixture_operation(fixture: &PacketFixture) -> Result<Series, String> {
+    let series = build_series(require_left_series(fixture)?)?;
+    series
+        .xs(require_xs_key(fixture, "series_xs")?)
+        .map_err(|err| err.to_string())
 }
 
 fn execute_dataframe_bool_fixture_operation(fixture: &PacketFixture) -> Result<bool, String> {
@@ -9213,6 +9300,39 @@ fn execute_and_compare_differential(
                 )),
             }
         }
+        FixtureOperation::SeriesXs => {
+            let actual = execute_series_xs_fixture_operation(fixture);
+            match expected {
+                ResolvedExpected::Series(series) => Ok(diff_series(&actual?, &series)),
+                ResolvedExpected::ErrorContains(substr) => Ok(match actual {
+                    Err(message) if message.contains(&substr) => Vec::new(),
+                    Err(message) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_xs.error",
+                        format!(
+                            "expected series_xs error containing '{substr}', got '{message}'"
+                        ),
+                    )],
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_xs.error",
+                        "expected series_xs to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                ResolvedExpected::ErrorAny => Ok(match actual {
+                    Err(_) => Vec::new(),
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_xs.error",
+                        "expected series_xs to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                _ => Err("expected_series or expected_error required for series_xs".to_owned()),
+            }
+        }
         FixtureOperation::SeriesLoc => {
             let left = require_left_series(fixture)?;
             let labels = require_loc_labels(fixture)?;
@@ -9505,6 +9625,39 @@ fn execute_and_compare_differential(
                     )],
                 }),
                 _ => Err("expected_frame or expected_error required for dataframe_take".to_owned()),
+            }
+        }
+        FixtureOperation::DataFrameXs => {
+            let actual = execute_dataframe_fixture_operation(fixture);
+            match expected {
+                ResolvedExpected::Frame(frame) => Ok(diff_dataframe(&actual?, &frame)),
+                ResolvedExpected::ErrorContains(substr) => Ok(match actual {
+                    Err(message) if message.contains(&substr) => Vec::new(),
+                    Err(message) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "dataframe_xs.error",
+                        format!(
+                            "expected dataframe_xs error containing '{substr}', got '{message}'"
+                        ),
+                    )],
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "dataframe_xs.error",
+                        "expected dataframe_xs to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                ResolvedExpected::ErrorAny => Ok(match actual {
+                    Err(_) => Vec::new(),
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "dataframe_xs.error",
+                        "expected dataframe_xs to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                _ => Err("expected_frame or expected_error required for dataframe_xs".to_owned()),
             }
         }
         FixtureOperation::DataFrameGroupByIdxMin => {

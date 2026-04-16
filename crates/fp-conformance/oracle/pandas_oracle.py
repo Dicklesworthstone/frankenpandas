@@ -1396,6 +1396,36 @@ def op_series_qcut(pd, payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def op_series_xs(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    xs_key = payload.get("xs_key")
+    if left is None:
+        raise OracleError("series_xs requires left payload")
+    if xs_key is None:
+        raise OracleError("series_xs requires xs_key payload")
+
+    index = [label_from_json(item) for item in left["index"]]
+    values = [scalar_from_json(item) for item in left["values"]]
+    key = label_from_json(xs_key)
+    series = pd.Series(values, index=index, name=left.get("name", "series"))
+    try:
+        out = series.xs(key)
+    except Exception as exc:
+        raise OracleError(f"series_xs failed: {exc}") from exc
+
+    if not hasattr(out, "index") or not hasattr(out, "tolist"):
+        raise OracleError(
+            "series_xs currently requires duplicate-label selections that return a Series"
+        )
+
+    return {
+        "expected_series": {
+            "index": [label_to_json(v) for v in out.index.tolist()],
+            "values": [scalar_to_json(v) for v in out.tolist()],
+        }
+    }
+
+
 def op_series_value_counts(pd, payload: dict[str, Any]) -> dict[str, Any]:
     left = payload.get("left")
     if left is None:
@@ -1599,6 +1629,29 @@ def op_dataframe_loc(pd, payload: dict[str, Any]) -> dict[str, Any]:
         out = frame.loc[labels]
     except KeyError as exc:
         raise OracleError(f"dataframe_loc label lookup failed: {exc}") from exc
+
+    return {"expected_frame": dataframe_to_json(out)}
+
+
+def op_dataframe_xs(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    xs_key = payload.get("xs_key")
+    if frame_payload is None:
+        raise OracleError("dataframe_xs requires frame payload")
+    if xs_key is None:
+        raise OracleError("dataframe_xs requires xs_key payload")
+
+    frame = dataframe_from_json(pd, frame_payload)
+    key = label_from_json(xs_key)
+    try:
+        out = frame.xs(key)
+    except Exception as exc:
+        raise OracleError(f"dataframe_xs failed: {exc}") from exc
+
+    if not hasattr(out, "columns"):
+        raise OracleError(
+            "dataframe_xs currently requires duplicate-label selections that return a DataFrame"
+        )
 
     return {"expected_frame": dataframe_to_json(out)}
 
