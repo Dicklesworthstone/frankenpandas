@@ -13893,26 +13893,24 @@ mod tests {
         }))
         .expect("fixture");
 
-        let diff_result = super::run_differential_fixture(
-            &cfg,
-            &fixture,
-            &SuiteOptions {
-                packet_filter: None,
-                oracle_mode: OracleMode::LiveLegacyPandas,
-            },
-        );
-        if let Err(super::HarnessError::OracleUnavailable(message)) = &diff_result {
+        let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+        if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
             eprintln!("live pandas unavailable; skipping merge_ordered oracle test: {message}");
             return;
         }
 
-        let diff = diff_result.expect("differential report");
-        assert_eq!(diff.status, CaseStatus::Pass);
-        assert_eq!(diff.oracle_source, FixtureOracleSource::LiveLegacyPandas);
+        let expected = expected_result.expect("live oracle expected");
         assert!(
-            diff.drift_records.is_empty(),
-            "expected no drift for merge_ordered parity: {diff:?}"
+            matches!(&expected, super::ResolvedExpected::Frame(_)),
+            "expected live oracle frame payload, got {expected:?}"
         );
+        let super::ResolvedExpected::Frame(expected) = expected else {
+            return;
+        };
+
+        let actual = super::execute_dataframe_merge_ordered_fixture_operation(&fixture)
+            .expect("actual frame");
+        super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
     }
 
     #[test]

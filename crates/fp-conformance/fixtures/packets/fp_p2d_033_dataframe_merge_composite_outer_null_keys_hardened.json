@@ -74,16 +74,16 @@
         { "kind": "utf8", "value": "b" }
       ],
       "left_v": [
-        { "kind": "int64", "value": 10 },
-        { "kind": "int64", "value": 30 },
-        { "kind": "null", "value": "null" },
-        { "kind": "int64", "value": 20 }
+        { "kind": "float64", "value": 10.0 },
+        { "kind": "float64", "value": 30.0 },
+        { "kind": "null", "value": "na_n" },
+        { "kind": "float64", "value": 20.0 }
       ],
       "right_v": [
-        { "kind": "int64", "value": 100 },
-        { "kind": "null", "value": "null" },
-        { "kind": "int64", "value": 300 },
-        { "kind": "int64", "value": 200 }
+        { "kind": "float64", "value": 100.0 },
+        { "kind": "null", "value": "na_n" },
+        { "kind": "float64", "value": 300.0 },
+        { "kind": "float64", "value": 200.0 }
       ]
     }
   }

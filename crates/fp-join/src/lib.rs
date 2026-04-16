@@ -226,6 +226,42 @@ fn estimate_intermediate_bytes(output_rows: usize) -> usize {
     )
 }
 
+fn reindex_outer_join_column(
+    column: &Column,
+    positions: &[Option<usize>],
+) -> Result<Column, JoinError> {
+    if !matches!(
+        column.dtype(),
+        fp_types::DType::Int64 | fp_types::DType::Float64
+    ) {
+        return Ok(column.reindex_by_positions(positions)?);
+    }
+
+    let has_missing = positions
+        .iter()
+        .any(|slot| slot.is_none_or(|idx| idx >= column.len()));
+    if !has_missing {
+        return Ok(column.reindex_by_positions(positions)?);
+    }
+
+    let values = positions
+        .iter()
+        .map(|slot| match slot {
+            Some(idx) => column
+                .values()
+                .get(*idx)
+                .cloned()
+                .unwrap_or(fp_types::Scalar::Null(fp_types::NullKind::NaN)),
+            None => fp_types::Scalar::Null(fp_types::NullKind::NaN),
+        })
+        .map(|value| {
+            fp_types::cast_scalar_owned(value, fp_types::DType::Float64).map_err(ColumnError::from)
+        })
+        .collect::<Result<Vec<_>, ColumnError>>()?;
+
+    Ok(Column::new(fp_types::DType::Float64, values)?)
+}
+
 fn join_series_with_global_allocator(
     left: &Series,
     right: &Series,
@@ -299,8 +335,16 @@ fn join_series_with_global_allocator(
         }
     }
 
-    let left_values = left.column().reindex_by_positions(&left_positions)?;
-    let right_values = right.column().reindex_by_positions(&right_positions)?;
+    let left_values = if matches!(join_type, JoinType::Outer) {
+        reindex_outer_join_column(left.column(), &left_positions)?
+    } else {
+        left.column().reindex_by_positions(&left_positions)?
+    };
+    let right_values = if matches!(join_type, JoinType::Outer) {
+        reindex_outer_join_column(right.column(), &right_positions)?
+    } else {
+        right.column().reindex_by_positions(&right_positions)?
+    };
 
     Ok(JoinedSeries {
         index: Index::new(out_labels),
@@ -380,12 +424,19 @@ fn join_series_with_arena(
         }
     }
 
-    let left_values = left
-        .column()
-        .reindex_by_positions(left_positions.as_slice())?;
-    let right_values = right
-        .column()
-        .reindex_by_positions(right_positions.as_slice())?;
+    let left_values = if matches!(join_type, JoinType::Outer) {
+        reindex_outer_join_column(left.column(), left_positions.as_slice())?
+    } else {
+        left.column()
+            .reindex_by_positions(left_positions.as_slice())?
+    };
+    let right_values = if matches!(join_type, JoinType::Outer) {
+        reindex_outer_join_column(right.column(), right_positions.as_slice())?
+    } else {
+        right
+            .column()
+            .reindex_by_positions(right_positions.as_slice())?
+    };
 
     Ok(JoinedSeries {
         index: Index::new(out_labels),
@@ -924,15 +975,20 @@ pub fn merge_dataframes_on_with_options(
                     Column::from_values(values)?,
                 )?;
             } else {
-                insert_merged_output_column(
-                    &mut columns,
-                    name.clone(),
-                    col.reindex_by_positions(&left_positions)?,
-                )?;
+                let key_column = if matches!(join_type, JoinType::Outer) {
+                    reindex_outer_join_column(col, &left_positions)?
+                } else {
+                    col.reindex_by_positions(&left_positions)?
+                };
+                insert_merged_output_column(&mut columns, name.clone(), key_column)?;
             }
             continue;
         }
-        let reindexed = col.reindex_by_positions(&left_positions)?;
+        let reindexed = if matches!(join_type, JoinType::Outer) {
+            reindex_outer_join_column(col, &left_positions)?
+        } else {
+            col.reindex_by_positions(&left_positions)?
+        };
         let out_name = if right_col_names.contains(name) {
             apply_merge_suffix(name, suffixes.left.as_deref())
         } else {
@@ -949,7 +1005,11 @@ pub fn merge_dataframes_on_with_options(
             // Shared same-name key already emitted from the left side.
             continue;
         }
-        let reindexed = col.reindex_by_positions(&right_positions)?;
+        let reindexed = if matches!(join_type, JoinType::Outer) {
+            reindex_outer_join_column(col, &right_positions)?
+        } else {
+            col.reindex_by_positions(&right_positions)?
+        };
         let out_name = if left_col_names.contains(name) {
             apply_merge_suffix(name, suffixes.right.as_deref())
         } else {
@@ -2104,17 +2164,17 @@ mod tests {
         assert_eq!(
             out.left_values.values(),
             &[
-                Scalar::Int64(1),
-                Scalar::Int64(2),
-                Scalar::Null(NullKind::Null)
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Null(NullKind::NaN)
             ]
         );
         assert_eq!(
             out.right_values.values(),
             &[
-                Scalar::Null(NullKind::Null),
-                Scalar::Int64(20),
-                Scalar::Int64(30)
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(20.0),
+                Scalar::Float64(30.0)
             ]
         );
     }
@@ -2999,17 +3059,17 @@ mod tests {
         assert_eq!(
             merged.columns.get("left_v").unwrap().values(),
             &[
-                Scalar::Int64(10),
-                Scalar::Int64(20),
-                Scalar::Null(NullKind::Null)
+                Scalar::Float64(10.0),
+                Scalar::Float64(20.0),
+                Scalar::Null(NullKind::NaN)
             ]
         );
         assert_eq!(
             merged.columns.get("right_v").unwrap().values(),
             &[
-                Scalar::Null(NullKind::Null),
-                Scalar::Int64(200),
-                Scalar::Int64(300)
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(200.0),
+                Scalar::Float64(300.0)
             ]
         );
     }
@@ -3105,7 +3165,7 @@ mod tests {
         );
         assert_eq!(
             merged.columns.get("left_v").unwrap().values(),
-            &[Scalar::Int64(10), Scalar::Null(NullKind::Null)]
+            &[Scalar::Float64(10.0), Scalar::Null(NullKind::NaN)]
         );
         assert_eq!(
             merged.columns.get("right_v").unwrap().values(),
@@ -3278,37 +3338,37 @@ mod tests {
         assert_eq!(
             merged.columns.get("lk1").unwrap().values(),
             &[
-                Scalar::Int64(1),
-                Scalar::Int64(2),
-                Scalar::Int64(3),
-                Scalar::Null(NullKind::Null)
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+                Scalar::Null(NullKind::NaN)
             ]
         );
         assert_eq!(
             merged.columns.get("rk1").unwrap().values(),
             &[
-                Scalar::Int64(1),
-                Scalar::Int64(2),
-                Scalar::Null(NullKind::Null),
-                Scalar::Int64(4)
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(4.0)
             ]
         );
         assert_eq!(
             merged.columns.get("left_v").unwrap().values(),
             &[
-                Scalar::Int64(10),
-                Scalar::Int64(20),
-                Scalar::Int64(30),
-                Scalar::Null(NullKind::Null)
+                Scalar::Float64(10.0),
+                Scalar::Float64(20.0),
+                Scalar::Float64(30.0),
+                Scalar::Null(NullKind::NaN)
             ]
         );
         assert_eq!(
             merged.columns.get("right_v").unwrap().values(),
             &[
-                Scalar::Int64(100),
-                Scalar::Int64(200),
-                Scalar::Null(NullKind::Null),
-                Scalar::Int64(400)
+                Scalar::Float64(100.0),
+                Scalar::Float64(200.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(400.0)
             ]
         );
     }
@@ -4468,14 +4528,18 @@ mod tests {
         );
         assert_eq!(
             frame.column("left_val").unwrap().values(),
-            &[Scalar::Int64(10), Scalar::Int64(10), Scalar::Int64(30),]
+            &[
+                Scalar::Float64(10.0),
+                Scalar::Float64(10.0),
+                Scalar::Float64(30.0),
+            ]
         );
         assert_eq!(
             frame.column("right_val").unwrap().values(),
             &[
-                Scalar::Null(NullKind::Null),
-                Scalar::Int64(200),
-                Scalar::Int64(300),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(200.0),
+                Scalar::Float64(300.0),
             ]
         );
     }

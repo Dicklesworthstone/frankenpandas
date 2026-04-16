@@ -84,28 +84,28 @@
         { "kind": "int64", "value": 1 }
       ],
       "left_v": [
-        { "kind": "int64", "value": 120 },
-        { "kind": "int64", "value": 210 },
-        { "kind": "int64", "value": 220 },
-        { "kind": "null", "value": "null" }
+        { "kind": "float64", "value": 120.0 },
+        { "kind": "float64", "value": 210.0 },
+        { "kind": "float64", "value": 220.0 },
+        { "kind": "null", "value": "na_n" }
       ],
       "right_v": [
-        { "kind": "int64", "value": 102 },
-        { "kind": "int64", "value": 201 },
-        { "kind": "null", "value": "null" },
-        { "kind": "int64", "value": 301 }
+        { "kind": "float64", "value": 102.0 },
+        { "kind": "float64", "value": 201.0 },
+        { "kind": "null", "value": "na_n" },
+        { "kind": "float64", "value": 301.0 }
       ],
       "shared_left": [
-        { "kind": "int64", "value": 20 },
-        { "kind": "int64", "value": 30 },
-        { "kind": "int64", "value": 10 },
-        { "kind": "null", "value": "null" }
+        { "kind": "float64", "value": 20.0 },
+        { "kind": "float64", "value": 30.0 },
+        { "kind": "float64", "value": 10.0 },
+        { "kind": "null", "value": "na_n" }
       ],
       "shared_right": [
-        { "kind": "int64", "value": 700 },
-        { "kind": "int64", "value": 800 },
-        { "kind": "null", "value": "null" },
-        { "kind": "int64", "value": 900 }
+        { "kind": "float64", "value": 700.0 },
+        { "kind": "float64", "value": 800.0 },
+        { "kind": "null", "value": "na_n" },
+        { "kind": "float64", "value": 900.0 }
       ]
     }
   }

@@ -56,14 +56,14 @@
         { "kind": "int64", "value": 3 }
       ],
       "left_v": [
-        { "kind": "int64", "value": 10 },
-        { "kind": "int64", "value": 20 },
-        { "kind": "null", "value": "null" }
+        { "kind": "float64", "value": 10.0 },
+        { "kind": "float64", "value": 20.0 },
+        { "kind": "null", "value": "na_n" }
       ],
       "right_v": [
-        { "kind": "int64", "value": 100 },
-        { "kind": "null", "value": "null" },
-        { "kind": "int64", "value": 300 }
+        { "kind": "float64", "value": 100.0 },
+        { "kind": "null", "value": "na_n" },
+        { "kind": "float64", "value": 300.0 }
       ]
     }
   }
