@@ -18,5 +18,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_json_io"
+path = "fuzz_targets/fuzz_json_io.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

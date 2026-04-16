@@ -116,12 +116,16 @@ Each fuzz target corresponds to a threat surface. Targets are defined as `fuzz_t
 | `fuzz_join_series` | fp-join | `join_series()` | `(Series, Series, JoinType)` | ADV-3 |
 | `fuzz_groupby_sum` | fp-groupby | `groupby_sum()` | `(Series, Series, GroupByOptions)` | ADV-4 |
 | `fuzz_fixture_parse` | fp-conformance | `serde_json::from_str::<PacketFixture>()` | `&[u8]` (raw JSON bytes) | ADV-5 |
+| `fuzz_json_io` | fp-io | `read_json_str()` / `read_jsonl_str()` | `&[u8]` (raw JSON / JSONL text bytes) | ADV-5 |
 | `fuzz_column_arith` | fp-columnar | `Column::binary_numeric()` | `(Column, Column, BinaryOp)` | ADV-4 |
 
 Implemented entrypoint:
 
 - `fuzz_fixture_parse` target: `fuzz/fuzz_targets/fuzz_fixture_parse.rs`
 - seed corpus: `crates/fp-conformance/fixtures/adversarial/fuzz_corpus/fuzz_fixture_parse/`
+- `fuzz_json_io` target: `fuzz/fuzz_targets/fuzz_json_io.rs`
+- seed corpus: `crates/fp-conformance/fixtures/adversarial/fuzz_corpus/fuzz_json_io/`
+- exercises all `JsonOrient` parse paths plus `read_jsonl_str()` with round-trip checks
 
 ### 2.2 Structured Fuzz Input via `Arbitrary`
 
@@ -190,6 +194,10 @@ cargo +nightly fuzz run fuzz_csv_parse crates/fp-conformance/fixtures/adversaria
 # Packet fixture parser target
 cargo +nightly fuzz run fuzz_fixture_parse \
   crates/fp-conformance/fixtures/adversarial/fuzz_corpus/fuzz_fixture_parse/
+
+# JSON / JSONL ingestion target
+cargo +nightly fuzz run fuzz_json_io \
+  crates/fp-conformance/fixtures/adversarial/fuzz_corpus/fuzz_json_io/
 ```
 
 ---

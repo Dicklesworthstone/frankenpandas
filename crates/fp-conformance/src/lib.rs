@@ -19,7 +19,10 @@ use fp_groupby::{
 use fp_index::{
     AlignmentPlan, DuplicateKeep, Index, IndexLabel, align_union, validate_alignment_plan,
 };
-use fp_io::{read_csv_str, write_csv_string};
+use fp_io::{
+    IoError as FpIoError, JsonOrient, read_csv_str, read_json_str, read_jsonl_str,
+    write_csv_string, write_json_string, write_jsonl_string,
+};
 use fp_join::{
     JoinType, MergeExecutionOptions, MergeValidateMode, join_series,
     merge_dataframes_on_with_options, merge_ordered,
@@ -3592,6 +3595,80 @@ pub fn fuzz_fixture_parse_bytes(input: &[u8]) -> Result<(), HarnessError> {
     );
 
     Ok(())
+}
+
+fn assert_json_roundtrip(frame: &DataFrame, orient: JsonOrient) -> Result<(), FpIoError> {
+    let encoded = write_json_string(frame, orient)?;
+    let reparsed = read_json_str(&encoded, orient)?;
+    if !frame.equals(&reparsed) {
+        return Err(FpIoError::JsonFormat(format!(
+            "json {:?} round-trip drifted after parse/write/reparse",
+            orient
+        )));
+    }
+    Ok(())
+}
+
+fn assert_jsonl_roundtrip(frame: &DataFrame) -> Result<(), FpIoError> {
+    let encoded = write_jsonl_string(frame)?;
+    let reparsed = read_jsonl_str(&encoded)?;
+    if !frame.equals(&reparsed) {
+        return Err(FpIoError::JsonFormat(
+            "jsonl round-trip drifted after parse/write/reparse".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+/// Structure-aware fuzz entrypoint for the `fp-io` JSON and JSONL readers.
+///
+/// The same textual payload is exercised across all supported JSON orients plus
+/// JSONL. Any semantic parser error is acceptable, but successful parses must
+/// survive a write/reparse round-trip without panicking or drifting.
+pub fn fuzz_json_io_bytes(input: &[u8]) -> Result<(), FpIoError> {
+    let input = String::from_utf8_lossy(input);
+    let mut first_err = None;
+    let mut saw_success = false;
+
+    for orient in [
+        JsonOrient::Records,
+        JsonOrient::Columns,
+        JsonOrient::Index,
+        JsonOrient::Split,
+        JsonOrient::Values,
+    ] {
+        match read_json_str(&input, orient) {
+            Ok(frame) => {
+                saw_success = true;
+                assert_json_roundtrip(&frame, orient)?;
+            }
+            Err(err) => {
+                if first_err.is_none() {
+                    first_err = Some(err);
+                }
+            }
+        }
+    }
+
+    match read_jsonl_str(&input) {
+        Ok(frame) => {
+            saw_success = true;
+            assert_jsonl_roundtrip(&frame)?;
+        }
+        Err(err) => {
+            if first_err.is_none() {
+                first_err = Some(err);
+            }
+        }
+    }
+
+    if saw_success {
+        Ok(())
+    } else {
+        Err(first_err.unwrap_or_else(|| {
+            FpIoError::JsonFormat("json fuzz input did not exercise any parser".to_owned())
+        }))
+    }
 }
 
 fn list_fixture_files(root: &Path) -> Result<Vec<PathBuf>, HarnessError> {
@@ -13196,13 +13273,13 @@ mod tests {
         build_compat_closure_e2e_scenario_report, build_compat_closure_final_evidence_pack,
         build_differential_report, build_differential_validation_log, build_failure_forensics,
         enforce_packet_gates, evaluate_ci_gate, evaluate_parity_gate, fuzz_fixture_parse_bytes,
-        generate_raptorq_sidecar, run_ci_pipeline, run_differential_by_id, run_differential_suite,
-        run_e2e_suite, run_fault_injection_validation_by_id, run_packet_by_id, run_packet_suite,
-        run_packet_suite_with_options, run_packets_grouped, run_raptorq_decode_recovery_drill,
-        run_smoke, verify_all_sidecars_ci, verify_packet_sidecar_integrity,
-        write_compat_closure_e2e_scenario_report, write_compat_closure_final_evidence_pack,
-        write_differential_validation_log, write_fault_injection_validation_report,
-        write_packet_artifacts,
+        fuzz_json_io_bytes, generate_raptorq_sidecar, run_ci_pipeline, run_differential_by_id,
+        run_differential_suite, run_e2e_suite, run_fault_injection_validation_by_id,
+        run_packet_by_id, run_packet_suite, run_packet_suite_with_options, run_packets_grouped,
+        run_raptorq_decode_recovery_drill, run_smoke, verify_all_sidecars_ci,
+        verify_packet_sidecar_integrity, write_compat_closure_e2e_scenario_report,
+        write_compat_closure_final_evidence_pack, write_differential_validation_log,
+        write_fault_injection_validation_report, write_packet_artifacts,
     };
     use fp_runtime::RuntimeMode;
 
@@ -13360,6 +13437,40 @@ mod tests {
             .expect_err("invalid json should error");
         assert!(
             matches!(err, super::HarnessError::Json(_)),
+            "expected JSON parse error, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn fuzz_json_io_bytes_accepts_records_seed_fixture() {
+        let seed = include_bytes!(
+            "../fixtures/adversarial/fuzz_corpus/fuzz_json_io/records_valid_seed.json"
+        );
+        fuzz_json_io_bytes(seed).expect("records fuzz seed should parse");
+    }
+
+    #[test]
+    fn fuzz_json_io_bytes_accepts_split_seed_fixture() {
+        let seed = include_bytes!(
+            "../fixtures/adversarial/fuzz_corpus/fuzz_json_io/split_valid_seed.json"
+        );
+        fuzz_json_io_bytes(seed).expect("split fuzz seed should parse");
+    }
+
+    #[test]
+    fn fuzz_json_io_bytes_accepts_jsonl_seed_fixture() {
+        let seed = include_bytes!(
+            "../fixtures/adversarial/fuzz_corpus/fuzz_json_io/jsonl_valid_seed.jsonl"
+        );
+        fuzz_json_io_bytes(seed).expect("jsonl fuzz seed should parse");
+    }
+
+    #[test]
+    fn fuzz_json_io_bytes_reports_invalid_json() {
+        let err = fuzz_json_io_bytes(br#"{"records": ["unterminated""#)
+            .expect_err("invalid json should error");
+        assert!(
+            matches!(err, fp_io::IoError::Json(_)),
             "expected JSON parse error, got {err:?}"
         );
     }
