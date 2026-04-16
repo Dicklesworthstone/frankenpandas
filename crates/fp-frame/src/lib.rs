@@ -768,6 +768,14 @@ impl Series {
         self.clone()
     }
 
+    /// Return the Series index.
+    ///
+    /// Matches `pd.Series.keys()`. This is an alias for the index.
+    #[must_use]
+    pub fn keys(&self) -> Index {
+        self.index.clone()
+    }
+
     /// Core binary arithmetic: align indexes, reindex columns, apply op.
     fn binary_op_with_policy(
         &self,
@@ -12506,6 +12514,14 @@ impl DataFrame {
     #[must_use]
     pub fn copy(&self) -> Self {
         self.clone()
+    }
+
+    /// Return the DataFrame info axis.
+    ///
+    /// Matches `pd.DataFrame.keys()`. This is an alias for the column labels.
+    #[must_use]
+    pub fn keys(&self) -> Index {
+        Index::from_utf8(self.column_order.clone())
     }
 
     #[must_use]
@@ -39397,6 +39413,20 @@ mod tests {
     }
 
     #[test]
+    fn df_keys_returns_column_index() {
+        let df = DataFrame::from_dict(
+            &["b", "a"],
+            vec![("b", vec![Scalar::Int64(1)]), ("a", vec![Scalar::Int64(2)])],
+        )
+        .unwrap();
+
+        assert_eq!(
+            df.keys(),
+            Index::from_utf8(vec!["b".to_string(), "a".to_string()])
+        );
+    }
+
+    #[test]
     fn df_to_html() {
         let df = DataFrame::from_dict(
             &["x", "y"],
@@ -44505,6 +44535,18 @@ mod tests {
         )
         .unwrap();
         assert!(s2.item().is_err());
+    }
+
+    #[test]
+    fn test_series_keys_aliases_index() {
+        let s = Series::from_values(
+            "vals",
+            vec![10_i64.into(), IndexLabel::Utf8("x".to_string())],
+            vec![Scalar::Int64(1), Scalar::Int64(2)],
+        )
+        .unwrap();
+
+        assert_eq!(s.keys(), s.index().clone());
     }
 
     #[test]
