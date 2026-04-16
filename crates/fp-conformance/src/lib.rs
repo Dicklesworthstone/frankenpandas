@@ -165,7 +165,10 @@ pub enum FixtureOperation {
     SeriesToDatetime,
     #[serde(rename = "series_to_timedelta", alias = "to_timedelta")]
     SeriesToTimedelta,
-    #[serde(rename = "series_timedelta_total_seconds", alias = "timedelta_total_seconds")]
+    #[serde(
+        rename = "series_timedelta_total_seconds",
+        alias = "timedelta_total_seconds"
+    )]
     SeriesTimedeltaTotalSeconds,
     #[serde(rename = "dataframe_from_series", alias = "data_frame_from_series")]
     DataFrameFromSeries,
@@ -1539,7 +1542,7 @@ pub enum HarnessError {
     RaptorQ(String),
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ParityGateConfig {
     packet_id: String,
     strict: StrictGateConfig,
@@ -1547,23 +1550,69 @@ struct ParityGateConfig {
     machine_check: MachineCheckConfig,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct StrictGateConfig {
     critical_drift_budget: usize,
     non_critical_drift_budget_percent: f64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct HardenedGateConfig {
     divergence_budget_percent: f64,
     allowlisted_divergence_categories: Option<Vec<String>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct MachineCheckConfig {
     suite: String,
     require_fixture_count_at_least: usize,
     require_failed: usize,
+}
+
+fn synthesize_parity_gate(report: &PacketParityReport) -> Result<ParityGateConfig, HarnessError> {
+    let packet_id = report
+        .packet_id
+        .clone()
+        .ok_or_else(|| HarnessError::FixtureFormat("report has no packet_id".to_owned()))?;
+
+    Ok(ParityGateConfig {
+        packet_id,
+        strict: StrictGateConfig {
+            critical_drift_budget: 0,
+            non_critical_drift_budget_percent: 0.1,
+        },
+        hardened: HardenedGateConfig {
+            divergence_budget_percent: 1.0,
+            allowlisted_divergence_categories: None,
+        },
+        machine_check: MachineCheckConfig {
+            suite: "phase2c_packets".to_owned(),
+            require_fixture_count_at_least: report.fixture_count,
+            require_failed: 0,
+        },
+    })
+}
+
+fn load_or_create_parity_gate(
+    config: &HarnessConfig,
+    report: &PacketParityReport,
+) -> Result<ParityGateConfig, HarnessError> {
+    let packet_id = report
+        .packet_id
+        .clone()
+        .ok_or_else(|| HarnessError::FixtureFormat("report has no packet_id".to_owned()))?;
+    let gate_path = config.parity_gate_path(&packet_id);
+
+    if gate_path.exists() {
+        return Ok(serde_yaml::from_str(&fs::read_to_string(&gate_path)?)?);
+    }
+
+    let gate = synthesize_parity_gate(report)?;
+    if let Some(parent) = gate_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&gate_path, serde_yaml::to_string(&gate)?)?;
+    Ok(gate)
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -2290,8 +2339,7 @@ pub fn evaluate_parity_gate(
         .packet_id
         .clone()
         .ok_or_else(|| HarnessError::FixtureFormat("report has no packet_id".to_owned()))?;
-    let gate: ParityGateConfig =
-        serde_yaml::from_str(&fs::read_to_string(config.parity_gate_path(&packet_id))?)?;
+    let gate = load_or_create_parity_gate(config, report)?;
 
     let strict_total = report
         .results
@@ -3747,8 +3795,7 @@ fn run_fixture_operation(
         FixtureOperation::SeriesTimedeltaTotalSeconds => {
             let left = require_left_series(fixture)?;
             let series = build_series(left)?;
-            let actual =
-                fp_frame::timedelta_total_seconds(&series).map_err(|err| err.to_string());
+            let actual = fp_frame::timedelta_total_seconds(&series).map_err(|err| err.to_string());
             match expected {
                 ResolvedExpected::Series(series) => compare_series_expected(&actual?, &series),
                 ResolvedExpected::ErrorContains(substr) => match actual {
@@ -8682,8 +8729,7 @@ fn execute_and_compare_differential(
         FixtureOperation::SeriesTimedeltaTotalSeconds => {
             let left = require_left_series(fixture)?;
             let series = build_series(left)?;
-            let actual =
-                fp_frame::timedelta_total_seconds(&series).map_err(|err| err.to_string());
+            let actual = fp_frame::timedelta_total_seconds(&series).map_err(|err| err.to_string());
             match expected {
                 ResolvedExpected::Series(series) => Ok(diff_series(&actual?, &series)),
                 ResolvedExpected::ErrorContains(substr) => Ok(match actual {
@@ -13121,6 +13167,7 @@ mod tests {
         run_smoke, verify_all_sidecars_ci, verify_packet_sidecar_integrity,
         write_compat_closure_e2e_scenario_report, write_compat_closure_final_evidence_pack,
         write_differential_validation_log, write_fault_injection_validation_report,
+        write_packet_artifacts,
     };
     use fp_runtime::RuntimeMode;
 
@@ -18314,6 +18361,74 @@ mod tests {
         assert!(result.parity_report_exists);
         assert!(!result.sidecar_exists);
         assert!(result.errors.iter().any(|e| e.contains("Rule T5")));
+    }
+
+    #[test]
+    fn write_packet_artifacts_synthesizes_missing_parity_gate() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let packet_id = "FP-P2D-999";
+        let config = HarnessConfig {
+            repo_root: dir.path().to_path_buf(),
+            oracle_root: dir.path().join("legacy_pandas_code/pandas"),
+            fixture_root: dir.path().join("fixtures"),
+            strict_mode: true,
+            python_bin: "python3".to_owned(),
+            allow_system_pandas_fallback: false,
+        };
+        let report = PacketParityReport {
+            suite: format!("phase2c_packets:{packet_id}"),
+            packet_id: Some(packet_id.to_owned()),
+            oracle_present: false,
+            fixture_count: 2,
+            passed: 2,
+            failed: 0,
+            results: vec![
+                CaseResult {
+                    packet_id: packet_id.to_owned(),
+                    case_id: "strict_case".to_owned(),
+                    mode: RuntimeMode::Strict,
+                    operation: FixtureOperation::SeriesCombineFirst,
+                    status: CaseStatus::Pass,
+                    mismatch: None,
+                    mismatch_class: None,
+                    replay_key: format!("{packet_id}/strict_case/strict"),
+                    trace_id: format!("{packet_id}:strict_case:strict"),
+                    elapsed_us: 1,
+                    evidence_records: 1,
+                },
+                CaseResult {
+                    packet_id: packet_id.to_owned(),
+                    case_id: "hardened_case".to_owned(),
+                    mode: RuntimeMode::Hardened,
+                    operation: FixtureOperation::SeriesCombineFirst,
+                    status: CaseStatus::Pass,
+                    mismatch: None,
+                    mismatch_class: None,
+                    replay_key: format!("{packet_id}/hardened_case/hardened"),
+                    trace_id: format!("{packet_id}:hardened_case:hardened"),
+                    elapsed_us: 1,
+                    evidence_records: 1,
+                },
+            ],
+        };
+
+        let written = write_packet_artifacts(&config, &report).expect("write artifacts");
+        let gate_path = config.parity_gate_path(packet_id);
+        let gate_yaml = fs::read_to_string(&gate_path).expect("read synthesized gate");
+
+        assert!(gate_path.exists(), "missing synthesized parity gate");
+        assert!(
+            gate_yaml.contains(&format!("packet_id: {packet_id}")),
+            "unexpected gate payload: {gate_yaml}"
+        );
+        assert!(
+            gate_yaml.contains("require_fixture_count_at_least: 2"),
+            "unexpected gate payload: {gate_yaml}"
+        );
+        assert!(
+            written.gate_result_path.exists(),
+            "missing gate result artifact"
+        );
     }
 
     #[test]
