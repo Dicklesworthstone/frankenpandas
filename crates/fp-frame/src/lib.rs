@@ -18457,6 +18457,13 @@ impl DataFrame {
         Series::from_values("nunique".to_owned(), self.index.labels().to_vec(), values)
     }
 
+    /// Count unique non-null values per row (axis=1).
+    ///
+    /// Matches `pd.DataFrame.nunique(axis=1)`.
+    pub fn nunique_axis1(&self) -> Result<Series, FrameError> {
+        self.nunique_axis(1)
+    }
+
     /// Index label of the minimum value per numeric column.
     ///
     /// Matches `pd.DataFrame.idxmin()`.
