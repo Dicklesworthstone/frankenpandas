@@ -2297,6 +2297,12 @@ impl Series {
         true
     }
 
+    /// Alias for is_monotonic_increasing.
+    #[must_use]
+    pub fn is_monotonic(&self) -> bool {
+        self.is_monotonic_increasing()
+    }
+
     /// Check if values are monotonically decreasing (non-increasing).
     ///
     /// Matches `pd.Series.is_monotonic_decreasing`.
