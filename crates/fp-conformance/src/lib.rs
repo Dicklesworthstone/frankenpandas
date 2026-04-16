@@ -10,6 +10,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use fp_columnar::Column;
 use fp_frame::{
     ConcatJoin, DataFrame, FrameError, Series, concat_dataframes_with_axis_join, concat_series,
+    cut, qcut, to_numeric,
 };
 use fp_groupby::{
     GroupByOptions, groupby_count, groupby_first, groupby_last, groupby_max, groupby_mean,
@@ -224,6 +225,12 @@ pub enum FixtureOperation {
     SeriesBool,
     #[serde(rename = "series_repeat", alias = "series_repeat_default")]
     SeriesRepeat,
+    #[serde(rename = "series_to_numeric", alias = "series_to_numeric_default")]
+    SeriesToNumeric,
+    #[serde(rename = "series_cut", alias = "series_cut_default")]
+    SeriesCut,
+    #[serde(rename = "series_qcut", alias = "series_qcut_default")]
+    SeriesQcut,
     #[serde(rename = "series_value_counts", alias = "series_value_counts_default")]
     SeriesValueCounts,
     #[serde(rename = "series_sort_index", alias = "series_sort_index_default")]
@@ -420,6 +427,9 @@ impl FixtureOperation {
             Self::SeriesAll => "series_all",
             Self::SeriesBool => "series_bool",
             Self::SeriesRepeat => "series_repeat",
+            Self::SeriesToNumeric => "series_to_numeric",
+            Self::SeriesCut => "series_cut",
+            Self::SeriesQcut => "series_qcut",
             Self::SeriesValueCounts => "series_value_counts",
             Self::SeriesSortIndex => "series_sort_index",
             Self::SeriesSortValues => "series_sort_values",
@@ -711,6 +721,10 @@ pub struct PacketFixture {
     #[serde(default)]
     pub repeat_counts: Option<Vec<i64>>,
     #[serde(default)]
+    pub cut_bins: Option<usize>,
+    #[serde(default)]
+    pub qcut_quantiles: Option<usize>,
+    #[serde(default)]
     pub take_axis: Option<usize>,
     #[serde(default)]
     pub asof_label: Option<IndexLabel>,
@@ -954,6 +968,9 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::DataFrameMode => &["CC-005"],
         FixtureOperation::FillNa
         | FixtureOperation::DropNa
+        | FixtureOperation::SeriesToNumeric
+        | FixtureOperation::SeriesCut
+        | FixtureOperation::SeriesQcut
         | FixtureOperation::SeriesIsNa
         | FixtureOperation::SeriesNotNa
         | FixtureOperation::SeriesIsNull
@@ -1560,6 +1577,10 @@ struct OracleRequest {
     repeat_n: Option<i64>,
     #[serde(default)]
     repeat_counts: Option<Vec<i64>>,
+    #[serde(default)]
+    cut_bins: Option<usize>,
+    #[serde(default)]
+    qcut_quantiles: Option<usize>,
     #[serde(default)]
     take_axis: Option<usize>,
     #[serde(default)]
@@ -4634,6 +4655,34 @@ fn run_fixture_operation(
                 ),
             }
         }
+        FixtureOperation::SeriesToNumeric
+        | FixtureOperation::SeriesCut
+        | FixtureOperation::SeriesQcut => {
+            let actual = execute_series_module_utility_fixture_operation(fixture);
+            let op_name = fixture.operation.operation_name();
+            match expected {
+                ResolvedExpected::Series(series) => compare_series_expected(&actual?, &series),
+                ResolvedExpected::ErrorContains(substr) => match actual {
+                    Err(message) if message.contains(&substr) => Ok(()),
+                    Err(message) => Err(format!(
+                        "expected {op_name} error containing '{substr}', got '{message}'"
+                    )),
+                    Ok(_) => Err(format!(
+                        "expected {op_name} to fail with error containing '{substr}'"
+                    )),
+                },
+                ResolvedExpected::ErrorAny => {
+                    if actual.is_err() {
+                        Ok(())
+                    } else {
+                        Err(format!("expected {op_name} to fail but operation succeeded"))
+                    }
+                }
+                _ => Err(format!(
+                    "expected_series or expected_error is required for {op_name}"
+                )),
+            }
+        }
         FixtureOperation::SeriesLoc => {
             let left = require_left_series(fixture)?;
             let labels = require_loc_labels(fixture)?;
@@ -5422,6 +5471,9 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::SeriesIloc
         | FixtureOperation::SeriesTake
         | FixtureOperation::SeriesRepeat
+        | FixtureOperation::SeriesToNumeric
+        | FixtureOperation::SeriesCut
+        | FixtureOperation::SeriesQcut
         | FixtureOperation::SeriesAtTime
         | FixtureOperation::SeriesBetweenTime
         | FixtureOperation::DataFrameGroupByCumcount
@@ -5610,6 +5662,8 @@ fn capture_live_oracle_expected(
         take_indices: fixture.take_indices.clone(),
         repeat_n: fixture.repeat_n,
         repeat_counts: fixture.repeat_counts.clone(),
+        cut_bins: fixture.cut_bins,
+        qcut_quantiles: fixture.qcut_quantiles,
         take_axis: fixture.take_axis,
         asof_label: fixture.asof_label.clone(),
         time_value: fixture.time_value.clone(),
@@ -5747,6 +5801,9 @@ fn capture_live_oracle_expected(
         | FixtureOperation::SeriesIloc
         | FixtureOperation::SeriesTake
         | FixtureOperation::SeriesRepeat
+        | FixtureOperation::SeriesToNumeric
+        | FixtureOperation::SeriesCut
+        | FixtureOperation::SeriesQcut
         | FixtureOperation::SeriesAtTime
         | FixtureOperation::SeriesBetweenTime
         | FixtureOperation::DataFrameGroupByCumcount
@@ -6175,6 +6232,18 @@ fn require_take_indices(fixture: &PacketFixture) -> Result<&Vec<i64>, String> {
         .take_indices
         .as_ref()
         .ok_or_else(|| "take_indices is required for take operations".to_owned())
+}
+
+fn require_cut_bins(fixture: &PacketFixture) -> Result<usize, String> {
+    fixture
+        .cut_bins
+        .ok_or_else(|| "cut_bins is required for series_cut".to_owned())
+}
+
+fn require_qcut_quantiles(fixture: &PacketFixture) -> Result<usize, String> {
+    fixture
+        .qcut_quantiles
+        .ok_or_else(|| "qcut_quantiles is required for series_qcut".to_owned())
 }
 
 fn require_groupby_columns(
@@ -7049,6 +7118,20 @@ fn execute_series_repeat_fixture_operation(fixture: &PacketFixture) -> Result<Se
     series
         .repeat_by(&repeat_counts)
         .map_err(|err| err.to_string())
+}
+
+fn execute_series_module_utility_fixture_operation(fixture: &PacketFixture) -> Result<Series, String> {
+    let series = build_series(require_left_series(fixture)?)?;
+    match fixture.operation {
+        FixtureOperation::SeriesToNumeric => to_numeric(&series).map_err(|err| err.to_string()),
+        FixtureOperation::SeriesCut => cut(&series, require_cut_bins(fixture)?).map_err(|err| err.to_string()),
+        FixtureOperation::SeriesQcut => {
+            qcut(&series, require_qcut_quantiles(fixture)?).map_err(|err| err.to_string())
+        }
+        other => Err(format!(
+            "unsupported series module utility operation for fixture execution: {other:?}"
+        )),
+    }
 }
 
 fn execute_dataframe_bool_fixture_operation(fixture: &PacketFixture) -> Result<bool, String> {
@@ -9086,6 +9169,42 @@ fn execute_and_compare_differential(
                     )],
                 }),
                 _ => Err("expected_series or expected_error required for series_repeat".to_owned()),
+            }
+        }
+        FixtureOperation::SeriesToNumeric
+        | FixtureOperation::SeriesCut
+        | FixtureOperation::SeriesQcut => {
+            let actual = execute_series_module_utility_fixture_operation(fixture);
+            let op_name = fixture.operation.operation_name();
+            match expected {
+                ResolvedExpected::Series(series) => Ok(diff_series(&actual?, &series)),
+                ResolvedExpected::ErrorContains(substr) => Ok(match actual {
+                    Err(message) if message.contains(&substr) => Vec::new(),
+                    Err(message) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        format!("{op_name}.error"),
+                        format!("expected {op_name} error containing '{substr}', got '{message}'"),
+                    )],
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        format!("{op_name}.error"),
+                        format!("expected {op_name} to fail but operation succeeded"),
+                    )],
+                }),
+                ResolvedExpected::ErrorAny => Ok(match actual {
+                    Err(_) => Vec::new(),
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        format!("{op_name}.error"),
+                        format!("expected {op_name} to fail but operation succeeded"),
+                    )],
+                }),
+                _ => Err(format!(
+                    "expected_series or expected_error required for {op_name}"
+                )),
             }
         }
         FixtureOperation::SeriesLoc => {
