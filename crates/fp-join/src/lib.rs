@@ -1124,6 +1124,54 @@ pub trait DataFrameMergeExt {
         direction: &str,
         options: MergeAsofOptions,
     ) -> Result<MergedDataFrame, JoinError>;
+
+    /// Perform an ordered merge (outer join + sort by keys).
+    ///
+    /// Matches `pd.merge_ordered(left, right, on=keys, fill_method=...)`.
+    fn merge_ordered(
+        &self,
+        other: &fp_frame::DataFrame,
+        on: &[&str],
+        fill_method: Option<&str>,
+    ) -> Result<MergedDataFrame, JoinError>;
+}
+
+/// Perform an ordered merge of two DataFrames.
+///
+/// Matches `pd.merge_ordered(left, right, on=keys, fill_method=...)`.
+/// Performs an outer join and ensures the result is sorted by the join keys.
+pub fn merge_ordered(
+    left: &fp_frame::DataFrame,
+    right: &fp_frame::DataFrame,
+    on: &[&str],
+    fill_method: Option<&str>,
+) -> Result<MergedDataFrame, JoinError> {
+    let mut options = MergeExecutionOptions::default();
+    options.sort = true;
+    let merged = merge_dataframes_on_with_options(left, right, on, on, JoinType::Outer, options)?;
+
+    if let Some(method) = fill_method {
+        // Convert to DataFrame to apply fill
+        let mut df = fp_frame::DataFrame::new(merged.index.clone(), merged.columns.clone())
+            .map_err(JoinError::Frame)?;
+
+        df = match method {
+            "ffill" => df.ffill(None).map_err(JoinError::Frame)?,
+            "bfill" => df.bfill(None).map_err(JoinError::Frame)?,
+            _ => {
+                return Err(JoinError::Frame(FrameError::CompatibilityRejected(format!(
+                    "merge_ordered: unknown fill_method '{method}'"
+                ))));
+            }
+        };
+
+        Ok(MergedDataFrame {
+            index: df.index().clone(),
+            columns: df.columns().clone(),
+        })
+    } else {
+        Ok(merged)
+    }
 }
 
 /// Direction for asof merge matching.
@@ -1769,6 +1817,15 @@ impl DataFrameMergeExt for fp_frame::DataFrame {
             }
         };
         crate::merge_asof_with_options(self, other, on, dir, options)
+    }
+
+    fn merge_ordered(
+        &self,
+        other: &fp_frame::DataFrame,
+        on: &[&str],
+        fill_method: Option<&str>,
+    ) -> Result<MergedDataFrame, JoinError> {
+        crate::merge_ordered(self, other, on, fill_method)
     }
 }
 
