@@ -21593,6 +21593,75 @@ impl DataFrameGroupBy<'_> {
         self.format_output(result_cols, col_order, labels, &group_order, &groups)
     }
 
+    /// GroupBy quantile.
+    pub fn quantile(&self, q: f64) -> Result<DataFrame, FrameError> {
+        if !(0.0..=1.0).contains(&q) {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "quantile must be between 0 and 1, got {q}"
+            )));
+        }
+
+        let (group_order, groups) = self.build_groups();
+        let value_cols: Vec<String> = self
+            .df
+            .column_order
+            .iter()
+            .filter(|c| !self.by.contains(c))
+            .cloned()
+            .collect();
+        let n_groups = group_order.len();
+
+        let mut labels = Vec::with_capacity(n_groups);
+        for gkey in &group_order {
+            let first_row = groups[gkey][0];
+            labels.push(self.group_key_label(first_row));
+        }
+
+        let mut result_cols = BTreeMap::new();
+        let mut col_order = Vec::new();
+
+        for col_name in &value_cols {
+            let col = &self.df.columns[col_name];
+            let mut agg_vals = Vec::with_capacity(n_groups);
+
+            for gkey in &group_order {
+                let row_indices = &groups[gkey];
+                let mut group_vals: Vec<f64> = row_indices
+                    .iter()
+                    .filter_map(|&i| {
+                        let v = &col.values()[i];
+                        if v.is_missing() {
+                            None
+                        } else {
+                            v.to_f64().ok()
+                        }
+                    })
+                    .collect();
+
+                let agg_val = if group_vals.is_empty() {
+                    Scalar::Null(NullKind::NaN)
+                } else {
+                    group_vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                    let pos = q * (group_vals.len() - 1) as f64;
+                    let lo = pos.floor() as usize;
+                    let hi = pos.ceil() as usize;
+                    let q_val = if lo == hi || hi >= group_vals.len() {
+                        group_vals[lo]
+                    } else {
+                        group_vals[lo] + (group_vals[hi] - group_vals[lo]) * (pos - lo as f64)
+                    };
+                    Scalar::Float64(q_val)
+                };
+                agg_vals.push(agg_val);
+            }
+
+            result_cols.insert(col_name.clone(), Column::from_values(agg_vals)?);
+            col_order.push(col_name.clone());
+        }
+
+        self.format_output(result_cols, col_order, labels, &group_order, &groups)
+    }
+
     /// GroupBy sum.
     pub fn sum(&self) -> Result<DataFrame, FrameError> {
         self.aggregate("sum")
