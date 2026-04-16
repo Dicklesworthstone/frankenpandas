@@ -1327,6 +1327,75 @@ def op_series_bool(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return {"expected_bool": out}
 
 
+def op_series_to_numeric(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    if left is None:
+        raise OracleError("series_to_numeric requires left payload")
+
+    index = [label_from_json(item) for item in left["index"]]
+    values = [scalar_from_json(item) for item in left["values"]]
+    series = pd.Series(values, index=index, name=left.get("name", "series"))
+    try:
+        out = pd.to_numeric(series, errors="coerce")
+    except Exception as exc:
+        raise OracleError(f"series_to_numeric failed: {exc}") from exc
+
+    return {
+        "expected_series": {
+            "index": [label_to_json(v) for v in out.index.tolist()],
+            "values": [scalar_to_json(v) for v in out.tolist()],
+        }
+    }
+
+
+def op_series_cut(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    bins = payload.get("cut_bins")
+    if left is None:
+        raise OracleError("series_cut requires left payload")
+    if bins is None:
+        raise OracleError("series_cut requires cut_bins payload")
+
+    index = [label_from_json(item) for item in left["index"]]
+    values = [scalar_from_json(item) for item in left["values"]]
+    series = pd.Series(values, index=index, name=left.get("name", "series"))
+    try:
+        out = pd.cut(series, bins=int(bins))
+    except Exception as exc:
+        raise OracleError(f"series_cut failed: {exc}") from exc
+
+    return {
+        "expected_series": {
+            "index": [label_to_json(v) for v in out.index.tolist()],
+            "values": [scalar_to_json(v) for v in out.tolist()],
+        }
+    }
+
+
+def op_series_qcut(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    quantiles = payload.get("qcut_quantiles")
+    if left is None:
+        raise OracleError("series_qcut requires left payload")
+    if quantiles is None:
+        raise OracleError("series_qcut requires qcut_quantiles payload")
+
+    index = [label_from_json(item) for item in left["index"]]
+    values = [scalar_from_json(item) for item in left["values"]]
+    series = pd.Series(values, index=index, name=left.get("name", "series"))
+    try:
+        out = pd.qcut(series, q=int(quantiles))
+    except Exception as exc:
+        raise OracleError(f"series_qcut failed: {exc}") from exc
+
+    return {
+        "expected_series": {
+            "index": [label_to_json(v) for v in out.index.tolist()],
+            "values": [scalar_to_json(v) for v in out.tolist()],
+        }
+    }
+
+
 def op_series_value_counts(pd, payload: dict[str, Any]) -> dict[str, Any]:
     left = payload.get("left")
     if left is None:
@@ -2576,6 +2645,12 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_series_all(pd, payload)
     if op == "series_bool":
         return op_series_bool(pd, payload)
+    if op == "series_to_numeric":
+        return op_series_to_numeric(pd, payload)
+    if op == "series_cut":
+        return op_series_cut(pd, payload)
+    if op == "series_qcut":
+        return op_series_qcut(pd, payload)
     if op == "series_value_counts":
         return op_series_value_counts(pd, payload)
     if op == "series_sort_index":

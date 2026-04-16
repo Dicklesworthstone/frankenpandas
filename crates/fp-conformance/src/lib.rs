@@ -4675,7 +4675,9 @@ fn run_fixture_operation(
                     if actual.is_err() {
                         Ok(())
                     } else {
-                        Err(format!("expected {op_name} to fail but operation succeeded"))
+                        Err(format!(
+                            "expected {op_name} to fail but operation succeeded"
+                        ))
                     }
                 }
                 _ => Err(format!(
@@ -7120,11 +7122,15 @@ fn execute_series_repeat_fixture_operation(fixture: &PacketFixture) -> Result<Se
         .map_err(|err| err.to_string())
 }
 
-fn execute_series_module_utility_fixture_operation(fixture: &PacketFixture) -> Result<Series, String> {
+fn execute_series_module_utility_fixture_operation(
+    fixture: &PacketFixture,
+) -> Result<Series, String> {
     let series = build_series(require_left_series(fixture)?)?;
     match fixture.operation {
         FixtureOperation::SeriesToNumeric => to_numeric(&series).map_err(|err| err.to_string()),
-        FixtureOperation::SeriesCut => cut(&series, require_cut_bins(fixture)?).map_err(|err| err.to_string()),
+        FixtureOperation::SeriesCut => {
+            cut(&series, require_cut_bins(fixture)?).map_err(|err| err.to_string())
+        }
         FixtureOperation::SeriesQcut => {
             qcut(&series, require_qcut_quantiles(fixture)?).map_err(|err| err.to_string())
         }
@@ -13766,6 +13772,155 @@ mod tests {
         };
 
         let actual = super::execute_series_repeat_fixture_operation(&fixture).expect("actual");
+        super::compare_series_expected(&actual, &expected).expect("pandas parity");
+    }
+
+    #[test]
+    fn live_oracle_series_to_numeric_matches_pandas() {
+        let mut cfg = HarnessConfig::default_paths();
+        cfg.allow_system_pandas_fallback = false;
+
+        let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+            "packet_id": "FP-P2D-074",
+            "case_id": "series_to_numeric_live",
+            "mode": "strict",
+            "operation": "series_to_numeric",
+            "oracle_source": "live_legacy_pandas",
+            "left": {
+                "name": "raw",
+                "index": [
+                    { "kind": "int64", "value": 0 },
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "int64", "value": 2 },
+                    { "kind": "int64", "value": 3 }
+                ],
+                "values": [
+                    { "kind": "utf8", "value": "1" },
+                    { "kind": "utf8", "value": "2.5" },
+                    { "kind": "utf8", "value": "bad" },
+                    { "kind": "bool", "value": true }
+                ]
+            }
+        }))
+        .expect("fixture");
+
+        let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+        if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+            eprintln!("live pandas unavailable; skipping series to_numeric oracle test: {message}");
+            return;
+        }
+
+        let expected = expected_result.expect("live oracle expected");
+        assert!(
+            matches!(&expected, super::ResolvedExpected::Series(_)),
+            "expected live oracle series payload, got {expected:?}"
+        );
+        let super::ResolvedExpected::Series(expected) = expected else {
+            return;
+        };
+
+        let actual =
+            super::execute_series_module_utility_fixture_operation(&fixture).expect("actual");
+        super::compare_series_expected(&actual, &expected).expect("pandas parity");
+    }
+
+    #[test]
+    fn live_oracle_series_cut_matches_pandas() {
+        let mut cfg = HarnessConfig::default_paths();
+        cfg.allow_system_pandas_fallback = false;
+
+        let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+            "packet_id": "FP-P2D-075",
+            "case_id": "series_cut_live",
+            "mode": "strict",
+            "operation": "series_cut",
+            "oracle_source": "live_legacy_pandas",
+            "cut_bins": 3,
+            "left": {
+                "name": "nums",
+                "index": [
+                    { "kind": "int64", "value": 0 },
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "int64", "value": 2 },
+                    { "kind": "int64", "value": 3 }
+                ],
+                "values": [
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "int64", "value": 4 },
+                    { "kind": "int64", "value": 7 },
+                    { "kind": "null", "value": "na_n" }
+                ]
+            }
+        }))
+        .expect("fixture");
+
+        let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+        if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+            eprintln!("live pandas unavailable; skipping series cut oracle test: {message}");
+            return;
+        }
+
+        let expected = expected_result.expect("live oracle expected");
+        assert!(
+            matches!(&expected, super::ResolvedExpected::Series(_)),
+            "expected live oracle series payload, got {expected:?}"
+        );
+        let super::ResolvedExpected::Series(expected) = expected else {
+            return;
+        };
+
+        let actual =
+            super::execute_series_module_utility_fixture_operation(&fixture).expect("actual");
+        super::compare_series_expected(&actual, &expected).expect("pandas parity");
+    }
+
+    #[test]
+    fn live_oracle_series_qcut_matches_pandas() {
+        let mut cfg = HarnessConfig::default_paths();
+        cfg.allow_system_pandas_fallback = false;
+
+        let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+            "packet_id": "FP-P2D-076",
+            "case_id": "series_qcut_live",
+            "mode": "strict",
+            "operation": "series_qcut",
+            "oracle_source": "live_legacy_pandas",
+            "qcut_quantiles": 2,
+            "left": {
+                "name": "nums",
+                "index": [
+                    { "kind": "int64", "value": 0 },
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "int64", "value": 2 },
+                    { "kind": "int64", "value": 3 }
+                ],
+                "values": [
+                    { "kind": "int64", "value": 10 },
+                    { "kind": "int64", "value": 20 },
+                    { "kind": "int64", "value": 30 },
+                    { "kind": "null", "value": "na_n" }
+                ]
+            }
+        }))
+        .expect("fixture");
+
+        let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+        if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+            eprintln!("live pandas unavailable; skipping series qcut oracle test: {message}");
+            return;
+        }
+
+        let expected = expected_result.expect("live oracle expected");
+        assert!(
+            matches!(&expected, super::ResolvedExpected::Series(_)),
+            "expected live oracle series payload, got {expected:?}"
+        );
+        let super::ResolvedExpected::Series(expected) = expected else {
+            return;
+        };
+
+        let actual =
+            super::execute_series_module_utility_fixture_operation(&fixture).expect("actual");
         super::compare_series_expected(&actual, &expected).expect("pandas parity");
     }
 
