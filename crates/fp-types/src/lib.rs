@@ -414,13 +414,11 @@ pub fn nanmin(values: &[Scalar]) -> Scalar {
                     min = Some(v)
                 }
             }
-            (Some(a), b) => {
-                if let (Ok(af), Ok(bf)) = (a.to_f64(), b.to_f64())
-                    && bf < af
-                {
-                    min = Some(v);
-                }
-            }
+            (Some(a), b) => match (a.to_f64(), b.to_f64()) {
+                (Ok(af), Ok(bf)) if bf < af => min = Some(v),
+                (Ok(_), Ok(_)) => {}
+                _ => return Scalar::Null(NullKind::NaN),
+            },
         }
     }
     match min {
@@ -457,13 +455,11 @@ pub fn nanmax(values: &[Scalar]) -> Scalar {
                     max = Some(v)
                 }
             }
-            (Some(a), b) => {
-                if let (Ok(af), Ok(bf)) = (a.to_f64(), b.to_f64())
-                    && bf > af
-                {
-                    max = Some(v);
-                }
-            }
+            (Some(a), b) => match (a.to_f64(), b.to_f64()) {
+                (Ok(af), Ok(bf)) if bf > af => max = Some(v),
+                (Ok(_), Ok(_)) => {}
+                _ => return Scalar::Null(NullKind::NaN),
+            },
         }
     }
     match max {
@@ -761,6 +757,24 @@ mod tests {
     fn nanmin_nanmax_empty_returns_nan() {
         assert!(super::nanmin(&[]).is_missing());
         assert!(super::nanmax(&[]).is_missing());
+    }
+
+    #[test]
+    fn nanmin_nanmax_mixed_incompatible_types_returns_nan() {
+        let vals = vec![Scalar::Int64(5), Scalar::Utf8("hello".into())];
+        assert!(super::nanmin(&vals).is_missing());
+        assert!(super::nanmax(&vals).is_missing());
+
+        let vals2 = vec![Scalar::Utf8("a".into()), Scalar::Float64(3.0)];
+        assert!(super::nanmin(&vals2).is_missing());
+        assert!(super::nanmax(&vals2).is_missing());
+    }
+
+    #[test]
+    fn nanmin_nanmax_compatible_numeric_types_ok() {
+        let vals = vec![Scalar::Int64(5), Scalar::Float64(3.0), Scalar::Bool(true)];
+        assert_eq!(super::nanmin(&vals), Scalar::Bool(true));
+        assert_eq!(super::nanmax(&vals), Scalar::Int64(5));
     }
 
     #[test]
