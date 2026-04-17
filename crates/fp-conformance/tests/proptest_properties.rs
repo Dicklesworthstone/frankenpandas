@@ -1372,6 +1372,38 @@ fn int64_values(series: &Series) -> Result<Vec<i64>, String> {
         .collect()
 }
 
+fn scalar_for_label<'a>(series: &'a Series, label: &IndexLabel) -> Option<&'a Scalar> {
+    series
+        .index()
+        .labels()
+        .iter()
+        .zip(series.values())
+        .find_map(|(candidate, value)| (candidate == label).then_some(value))
+}
+
+fn expected_shifted_sum_series(sum: &Series, count: &Series, delta: f64) -> Series {
+    let values = sum
+        .values()
+        .iter()
+        .zip(sum.index().labels())
+        .map(|(value, label)| {
+            let count = scalar_for_label(count, label)
+                .expect("count output must include each reduced sum label");
+            Scalar::Float64(
+                value
+                    .to_f64()
+                    .expect("sum output must be numeric for non-missing columns")
+                    + count
+                        .to_f64()
+                        .expect("count output must be numeric for reduced columns")
+                        * delta,
+            )
+        })
+        .collect::<Vec<_>>();
+    Series::from_values(sum.name().to_owned(), sum.index().labels().to_vec(), values)
+        .expect("expected shifted sum series must construct")
+}
+
 fn invert_bool_series(series: &Series) -> Result<Series, String> {
     let values = bool_values(series)?
         .into_iter()
@@ -6397,6 +6429,161 @@ proptest! {
             "dataframe fillna(v).count_na() must be zero per column"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Property: sum metamorphic invariants
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(100))]
+
+    /// Negating numeric values must negate `Series::sum()`.
+    #[test]
+    fn prop_series_sum_is_sign_symmetric(
+        series in arb_variable_numeric_series("sum", 12),
+    ) {
+        let baseline = series
+            .sum()
+            .expect("Series::sum() must succeed for numeric inputs");
+        let flipped = sign_flip_series(&series)
+            .sum()
+            .expect("Series::sum() must succeed after sign flip");
+        let expected = sign_flip_numeric_scalar(&baseline);
+        prop_assert!(
+            approx_equal_scalar(&flipped, &expected),
+            "series sum(-x) must equal -sum(x)"
+        );
+    }
+
+    /// Translating numeric values by `c` must shift `Series::sum()` by `c * count()`.
+    #[test]
+    fn prop_series_sum_is_translation_covariant(
+        series in arb_variable_numeric_series("sum", 12),
+        delta in -1_000.0f64..1_000.0,
+    ) {
+        let baseline = series
+            .sum()
+            .expect("Series::sum() must succeed for numeric inputs");
+        let shifted = shift_series(&series, delta)
+            .sum()
+            .expect("Series::sum() must succeed after translation");
+        let expected = Scalar::Float64(
+            baseline
+                .to_f64()
+                .expect("Series::sum() output must be numeric")
+                + delta * series.count() as f64,
+        );
+        prop_assert!(
+            approx_equal_scalar(&shifted, &expected),
+            "series sum(x + c) must equal sum(x) + c * count(x)"
+        );
+    }
+
+    /// Filling missing values with zero must preserve `Series::sum()`.
+    #[test]
+    fn prop_series_fillna_zero_preserves_sum(
+        series in arb_variable_numeric_series("sum", 12),
+    ) {
+        let baseline = series
+            .sum()
+            .expect("Series::sum() must succeed for numeric inputs");
+        let filled = series
+            .fillna(&Scalar::Int64(0))
+            .expect("Series::fillna() must succeed for numeric inputs")
+            .sum()
+            .expect("Series::sum() must succeed after fillna(0)");
+        prop_assert!(
+            approx_equal_scalar(&baseline, &filled),
+            "series fillna(0).sum() must equal sum()"
+        );
+    }
+
+    /// Negating numeric cells must negate every component of `DataFrame::sum()`.
+    #[test]
+    fn prop_dataframe_sum_is_sign_symmetric(
+        df in arb_numeric_dataframe(8),
+    ) {
+        let baseline = df
+            .sum()
+            .expect("DataFrame::sum() must succeed for numeric inputs");
+        let flipped = sign_flip_dataframe(&df)
+            .sum()
+            .expect("DataFrame::sum() must succeed after sign flip");
+        let expected = sign_flip_series(&baseline);
+        prop_assert!(
+            approx_equal_series(&flipped, &expected),
+            "dataframe sum(-x) must equal -sum(x) per column"
+        );
+    }
+
+    /// Translating numeric cells by `c` must shift each column sum by `c * count()`.
+    #[test]
+    fn prop_dataframe_sum_is_translation_covariant(
+        df in arb_numeric_dataframe(8),
+        delta in -1_000.0f64..1_000.0,
+    ) {
+        let baseline = df
+            .sum()
+            .expect("DataFrame::sum() must succeed for numeric inputs");
+        let counts = df
+            .count()
+            .expect("DataFrame::count() must succeed for numeric inputs");
+        let shifted = shift_dataframe(&df, delta)
+            .sum()
+            .expect("DataFrame::sum() must succeed after translation");
+        let expected = expected_shifted_sum_series(&baseline, &counts, delta);
+        prop_assert!(
+            approx_equal_series(&shifted, &expected),
+            "dataframe sum(x + c) must equal sum(x) + c * count(x) per column"
+        );
+    }
+
+    /// Filling missing values with zero must preserve every component of `DataFrame::sum()`.
+    #[test]
+    fn prop_dataframe_fillna_zero_preserves_sum(
+        df in arb_numeric_dataframe(8),
+    ) {
+        let baseline = df
+            .sum()
+            .expect("DataFrame::sum() must succeed for numeric inputs");
+        let filled = df
+            .fillna(&Scalar::Int64(0))
+            .expect("DataFrame::fillna() must succeed for numeric inputs")
+            .sum()
+            .expect("DataFrame::sum() must succeed after fillna(0)");
+        let preserved = Series::from_values(
+            baseline.name().to_owned(),
+            baseline.index().labels().to_vec(),
+            baseline
+                .index()
+                .labels()
+                .iter()
+                .map(|label| {
+                    scalar_for_label(&filled, label)
+                        .expect("fillna(0).sum() must retain every baseline sum label")
+                        .clone()
+                })
+                .collect::<Vec<_>>(),
+        )
+        .expect("projected fillna(0) sum must construct");
+        prop_assert!(
+            approx_equal_series(&baseline, &preserved),
+            "dataframe fillna(0).sum() must preserve every existing sum component"
+        );
+
+        for label in filled.index().labels() {
+            if scalar_for_label(&baseline, label).is_none() {
+                let extra = scalar_for_label(&filled, label)
+                    .expect("filled sum label must resolve to a value");
+                prop_assert!(
+                    approx_equal_scalar(extra, &Scalar::Float64(0.0)),
+                    "fillna(0) may only introduce zero-sum columns into DataFrame::sum() output"
+                );
+            }
+        }
+    }
+
 }
 
 // ---------------------------------------------------------------------------
