@@ -772,6 +772,56 @@ fn drop_dataframe_columns(df: &DataFrame, columns: &[String]) -> DataFrame {
         .expect("DataFrame::drop(axis=1) must succeed for existing column labels")
 }
 
+fn arb_head_tail_count(len: usize) -> impl Strategy<Value = i64> {
+    let upper = i64::try_from(len.saturating_add(3)).expect("head/tail bound must fit in i64");
+    0..=upper
+}
+
+fn arb_series_head_tail_case(
+    name: &'static str,
+    max_len: usize,
+) -> impl Strategy<Value = (Series, i64)> {
+    (1..=max_len).prop_flat_map(move |len| {
+        arb_numeric_series(name, len)
+            .prop_flat_map(move |series| (Just(series), arb_head_tail_count(len)))
+    })
+}
+
+fn arb_series_head_tail_composition_case(
+    name: &'static str,
+    max_len: usize,
+) -> impl Strategy<Value = (Series, i64, i64)> {
+    (1..=max_len).prop_flat_map(move |len| {
+        arb_numeric_series(name, len).prop_flat_map(move |series| {
+            (
+                Just(series),
+                arb_head_tail_count(len),
+                arb_head_tail_count(len),
+            )
+        })
+    })
+}
+
+fn arb_dataframe_head_tail_case(max_rows: usize) -> impl Strategy<Value = (DataFrame, i64)> {
+    (1..=max_rows).prop_flat_map(|nrows| {
+        arb_numeric_dataframe(nrows).prop_flat_map(move |df| (Just(df), arb_head_tail_count(nrows)))
+    })
+}
+
+fn arb_dataframe_head_tail_composition_case(
+    max_rows: usize,
+) -> impl Strategy<Value = (DataFrame, i64, i64)> {
+    (1..=max_rows).prop_flat_map(|nrows| {
+        arb_numeric_dataframe(nrows).prop_flat_map(move |df| {
+            (
+                Just(df),
+                arb_head_tail_count(nrows),
+                arb_head_tail_count(nrows),
+            )
+        })
+    })
+}
+
 fn normalize_take_position(idx: i64, len: usize) -> usize {
     let len_i64 = i64::try_from(len).expect("take length must fit in i64");
     let resolved = if idx < 0 {
@@ -4884,6 +4934,123 @@ proptest! {
         prop_assert!(
             approx_equal_dataframe(&flipped_then_dropped, &expected),
             "dataframe column drop must commute with sign flipping"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Property: head / tail metamorphic invariants
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(100))]
+
+    /// Nested Series head calls must collapse to the smaller requested prefix.
+    #[test]
+    fn prop_series_head_composes(
+        (series, first, second) in arb_series_head_tail_composition_case("head", 12),
+    ) {
+        let nested = series
+            .head(first)
+            .and_then(|head| head.head(second))
+            .expect("nested Series::head() must succeed");
+        let direct = series
+            .head(first.min(second))
+            .expect("direct Series::head() must succeed");
+        prop_assert!(
+            approx_equal_series(&nested, &direct),
+            "series head(head(x, n1), n2) must equal head(x, min(n1, n2))"
+        );
+    }
+
+    /// Nested Series tail calls must collapse to the smaller requested suffix.
+    #[test]
+    fn prop_series_tail_composes(
+        (series, first, second) in arb_series_head_tail_composition_case("tail", 12),
+    ) {
+        let nested = series
+            .tail(first)
+            .and_then(|tail| tail.tail(second))
+            .expect("nested Series::tail() must succeed");
+        let direct = series
+            .tail(first.min(second))
+            .expect("direct Series::tail() must succeed");
+        prop_assert!(
+            approx_equal_series(&nested, &direct),
+            "series tail(tail(x, n1), n2) must equal tail(x, min(n1, n2))"
+        );
+    }
+
+    /// Reversing a headed Series must match tailing the reversed Series.
+    #[test]
+    fn prop_series_head_reverse_dual_to_tail(
+        (series, n) in arb_series_head_tail_case("head_tail", 12),
+    ) {
+        let reversed_head = reverse_series(
+            &series
+                .head(n)
+                .expect("Series::head() must succeed before reversing"),
+        );
+        let tail_on_reversed = reverse_series(&series)
+            .tail(n)
+            .expect("Series::tail() must succeed on reversed input");
+        prop_assert!(
+            approx_equal_series(&reversed_head, &tail_on_reversed),
+            "reverse(head(x, n)) must equal tail(reverse(x), n)"
+        );
+    }
+
+    /// Nested DataFrame head calls must collapse to the smaller requested prefix.
+    #[test]
+    fn prop_dataframe_head_composes(
+        (df, first, second) in arb_dataframe_head_tail_composition_case(8),
+    ) {
+        let nested = df
+            .head(first)
+            .and_then(|head| head.head(second))
+            .expect("nested DataFrame::head() must succeed");
+        let direct = df
+            .head(first.min(second))
+            .expect("direct DataFrame::head() must succeed");
+        prop_assert!(
+            approx_equal_dataframe(&nested, &direct),
+            "dataframe head(head(x, n1), n2) must equal head(x, min(n1, n2))"
+        );
+    }
+
+    /// Nested DataFrame tail calls must collapse to the smaller requested suffix.
+    #[test]
+    fn prop_dataframe_tail_composes(
+        (df, first, second) in arb_dataframe_head_tail_composition_case(8),
+    ) {
+        let nested = df
+            .tail(first)
+            .and_then(|tail| tail.tail(second))
+            .expect("nested DataFrame::tail() must succeed");
+        let direct = df
+            .tail(first.min(second))
+            .expect("direct DataFrame::tail() must succeed");
+        prop_assert!(
+            approx_equal_dataframe(&nested, &direct),
+            "dataframe tail(tail(x, n1), n2) must equal tail(x, min(n1, n2))"
+        );
+    }
+
+    /// Reversing a headed DataFrame must match tailing the reversed DataFrame.
+    #[test]
+    fn prop_dataframe_head_reverse_dual_to_tail(
+        (df, n) in arb_dataframe_head_tail_case(8),
+    ) {
+        let reversed_head = reverse_dataframe_rows(
+            &df.head(n)
+                .expect("DataFrame::head() must succeed before reversing"),
+        );
+        let tail_on_reversed = reverse_dataframe_rows(&df)
+            .tail(n)
+            .expect("DataFrame::tail() must succeed on reversed input");
+        prop_assert!(
+            approx_equal_dataframe(&reversed_head, &tail_on_reversed),
+            "reverse(head(x, n)) must equal tail(reverse(x), n) for dataframes"
         );
     }
 }
