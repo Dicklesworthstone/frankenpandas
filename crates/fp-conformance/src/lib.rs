@@ -245,6 +245,8 @@ pub enum FixtureOperation {
     SeriesToNumeric,
     #[serde(rename = "series_convert_dtypes", alias = "series_convert_dtypes_default")]
     SeriesConvertDtypes,
+    #[serde(rename = "series_astype", alias = "series_astype_default")]
+    SeriesAstype,
     #[serde(rename = "series_cut", alias = "series_cut_default")]
     SeriesCut,
     #[serde(rename = "series_qcut", alias = "series_qcut_default")]
@@ -486,6 +488,7 @@ impl FixtureOperation {
             Self::SeriesRepeat => "series_repeat",
             Self::SeriesToNumeric => "series_to_numeric",
             Self::SeriesConvertDtypes => "series_convert_dtypes",
+            Self::SeriesAstype => "series_astype",
             Self::SeriesCut => "series_cut",
             Self::SeriesQcut => "series_qcut",
             Self::SeriesValueCounts => "series_value_counts",
@@ -1058,6 +1061,7 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::DropNa
         | FixtureOperation::SeriesToNumeric
         | FixtureOperation::SeriesConvertDtypes
+        | FixtureOperation::SeriesAstype
         | FixtureOperation::SeriesCut
         | FixtureOperation::SeriesQcut
         | FixtureOperation::SeriesIsNa
@@ -5093,6 +5097,7 @@ fn run_fixture_operation(
         }
         FixtureOperation::SeriesToNumeric
         | FixtureOperation::SeriesConvertDtypes
+        | FixtureOperation::SeriesAstype
         | FixtureOperation::SeriesCut
         | FixtureOperation::SeriesQcut => {
             let actual = execute_series_module_utility_fixture_operation(fixture);
@@ -6276,6 +6281,7 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::SeriesRepeat
         | FixtureOperation::SeriesToNumeric
         | FixtureOperation::SeriesConvertDtypes
+        | FixtureOperation::SeriesAstype
         | FixtureOperation::SeriesCut
         | FixtureOperation::SeriesQcut
         | FixtureOperation::SeriesAtTime
@@ -6629,6 +6635,7 @@ fn capture_live_oracle_expected(
         | FixtureOperation::SeriesRepeat
         | FixtureOperation::SeriesToNumeric
         | FixtureOperation::SeriesConvertDtypes
+        | FixtureOperation::SeriesAstype
         | FixtureOperation::SeriesCut
         | FixtureOperation::SeriesQcut
         | FixtureOperation::SeriesAtTime
@@ -8132,6 +8139,14 @@ fn execute_series_module_utility_fixture_operation(
         FixtureOperation::SeriesToNumeric => to_numeric(&series).map_err(|err| err.to_string()),
         FixtureOperation::SeriesConvertDtypes => {
             series.convert_dtypes().map_err(|err| err.to_string())
+        }
+        FixtureOperation::SeriesAstype => {
+            let dtype_spec = fixture
+                .constructor_dtype
+                .as_deref()
+                .ok_or_else(|| "constructor_dtype required for series_astype".to_owned())?;
+            let target_dtype = parse_constructor_dtype_spec(dtype_spec)?;
+            series.astype(target_dtype).map_err(|err| err.to_string())
         }
         FixtureOperation::SeriesCut => {
             cut(&series, require_cut_bins(fixture)?).map_err(|err| err.to_string())
@@ -10275,6 +10290,7 @@ fn execute_and_compare_differential(
         }
         FixtureOperation::SeriesToNumeric
         | FixtureOperation::SeriesConvertDtypes
+        | FixtureOperation::SeriesAstype
         | FixtureOperation::SeriesCut
         | FixtureOperation::SeriesQcut => {
             let actual = execute_series_module_utility_fixture_operation(fixture);
