@@ -47,6 +47,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_ipc_stream_io"
+path = "fuzz_targets/fuzz_ipc_stream_io.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_common_dtype"
 path = "fuzz_targets/fuzz_common_dtype.rs"
 test = false

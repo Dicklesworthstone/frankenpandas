@@ -119,6 +119,7 @@ Each fuzz target corresponds to a threat surface. Targets are defined as `fuzz_t
 | `fuzz_json_io` | fp-io | `read_json_str()` / `read_jsonl_str()` | `&[u8]` (raw JSON / JSONL text bytes) | ADV-5 |
 | `fuzz_excel_io` | fp-io | `read_excel_bytes()` | `&[u8]` (raw workbook bytes) | ADV-1 |
 | `fuzz_feather_io` | fp-io | `read_feather_bytes()` | `&[u8]` (raw Feather bytes or synthesized frame seed) | ADV-1 |
+| `fuzz_ipc_stream_io` | fp-io | `read_ipc_stream_bytes()` | `&[u8]` (raw Arrow IPC stream bytes or synthesized frame seed) | ADV-1 |
 | `fuzz_column_arith` | fp-columnar | `Column::binary_numeric()` | `(Column, Column, BinaryOp)` | ADV-4 |
 
 Implemented entrypoint:
@@ -137,6 +138,9 @@ Implemented entrypoint:
 - `fuzz_feather_io` target: `fuzz/fuzz_targets/fuzz_feather_io.rs`
 - seed corpus: `crates/fp-conformance/fixtures/adversarial/fuzz_corpus/feather_io/`
 - uses a dual-mode input envelope to either feed raw bytes into `read_feather_bytes()` or synthesize a tiny typed `DataFrame`, serialize it with `write_feather_bytes()`, and then verify Feather round-trip stability
+- `fuzz_ipc_stream_io` target: `fuzz/fuzz_targets/fuzz_ipc_stream_io.rs`
+- seed corpus: `crates/fp-conformance/fixtures/adversarial/fuzz_corpus/ipc_stream_io/`
+- uses the same dual-mode input envelope to either feed raw bytes into `read_ipc_stream_bytes()` or synthesize a tiny typed `DataFrame`, serialize it with `write_ipc_stream_bytes()`, and then verify Arrow IPC stream round-trip stability
 - `fuzz_common_dtype` target: `fuzz/fuzz_targets/fuzz_common_dtype.rs`
 - seed corpus: `crates/fp-conformance/fixtures/adversarial/fuzz_corpus/common_dtype/`
 - projects raw bytes onto `DType × DType` pairs and checks symmetry plus promotion idempotence for `common_dtype()`
@@ -410,6 +414,8 @@ crates/fp-conformance/
           ...
         feather_io/
           ...
+        ipc_stream_io/
+          ...
         series_add/
           ...
         join_series/
@@ -433,6 +439,7 @@ fuzz/                                     # cargo-fuzz workspace (future)
     fuzz_groupby_sum.rs
     fuzz_fixture_parse.rs
     fuzz_feather_io.rs
+    fuzz_ipc_stream_io.rs
     fuzz_column_arith.rs
   artifacts/                              # Raw crash artifacts (gitignored)
   corpus/                                 # Fuzz corpus growth (gitignored)

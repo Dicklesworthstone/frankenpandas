@@ -254,6 +254,8 @@ pub enum FixtureOperation {
     SeriesAstype,
     #[serde(rename = "series_clip", alias = "series_clip_default")]
     SeriesClip,
+    #[serde(rename = "series_abs", alias = "series_abs_default")]
+    SeriesAbs,
     #[serde(rename = "series_cut", alias = "series_cut_default")]
     SeriesCut,
     #[serde(rename = "series_qcut", alias = "series_qcut_default")]
@@ -497,6 +499,7 @@ impl FixtureOperation {
             Self::SeriesConvertDtypes => "series_convert_dtypes",
             Self::SeriesAstype => "series_astype",
             Self::SeriesClip => "series_clip",
+            Self::SeriesAbs => "series_abs",
             Self::SeriesCut => "series_cut",
             Self::SeriesQcut => "series_qcut",
             Self::SeriesValueCounts => "series_value_counts",
@@ -1075,6 +1078,7 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::SeriesConvertDtypes
         | FixtureOperation::SeriesAstype
         | FixtureOperation::SeriesClip
+        | FixtureOperation::SeriesAbs
         | FixtureOperation::SeriesCut
         | FixtureOperation::SeriesQcut
         | FixtureOperation::SeriesIsNa
@@ -6166,6 +6170,7 @@ fn run_fixture_operation(
         | FixtureOperation::SeriesConvertDtypes
         | FixtureOperation::SeriesAstype
         | FixtureOperation::SeriesClip
+        | FixtureOperation::SeriesAbs
         | FixtureOperation::SeriesCut
         | FixtureOperation::SeriesQcut => {
             let actual = execute_series_module_utility_fixture_operation(fixture);
@@ -7529,6 +7534,7 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::SeriesConvertDtypes
         | FixtureOperation::SeriesAstype
         | FixtureOperation::SeriesClip
+        | FixtureOperation::SeriesAbs
         | FixtureOperation::SeriesCut
         | FixtureOperation::SeriesQcut
         | FixtureOperation::SeriesAtTime
@@ -7884,6 +7890,7 @@ fn capture_live_oracle_expected(
         | FixtureOperation::SeriesConvertDtypes
         | FixtureOperation::SeriesAstype
         | FixtureOperation::SeriesClip
+        | FixtureOperation::SeriesAbs
         | FixtureOperation::SeriesCut
         | FixtureOperation::SeriesQcut
         | FixtureOperation::SeriesAtTime
@@ -9399,6 +9406,7 @@ fn execute_series_module_utility_fixture_operation(
         FixtureOperation::SeriesClip => series
             .clip(fixture.clip_lower, fixture.clip_upper)
             .map_err(|err| err.to_string()),
+        FixtureOperation::SeriesAbs => series.abs().map_err(|err| err.to_string()),
         FixtureOperation::SeriesCut => {
             cut(&series, require_cut_bins(fixture)?).map_err(|err| err.to_string())
         }
@@ -11543,6 +11551,7 @@ fn execute_and_compare_differential(
         | FixtureOperation::SeriesConvertDtypes
         | FixtureOperation::SeriesAstype
         | FixtureOperation::SeriesClip
+        | FixtureOperation::SeriesAbs
         | FixtureOperation::SeriesCut
         | FixtureOperation::SeriesQcut => {
             let actual = execute_series_module_utility_fixture_operation(fixture);
