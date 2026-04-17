@@ -3324,6 +3324,236 @@ proptest! {
 }
 
 // ---------------------------------------------------------------------------
+// Property: ffill / bfill metamorphic invariants
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(100))]
+
+    /// Unlimited forward fill is idempotent for Series.
+    #[test]
+    fn prop_series_ffill_without_limit_is_idempotent(
+        series in arb_numeric_series("ffill", 12),
+    ) {
+        let once = series
+            .ffill(None)
+            .expect("Series::ffill(None) must succeed for numeric inputs");
+        let twice = once
+            .ffill(None)
+            .expect("Series::ffill(None) must succeed on an already filled series");
+        prop_assert!(
+            once.equals(&twice),
+            "series ffill(None) must be idempotent"
+        );
+    }
+
+    /// Unlimited backward fill is idempotent for Series.
+    #[test]
+    fn prop_series_bfill_without_limit_is_idempotent(
+        series in arb_numeric_series("bfill", 12),
+    ) {
+        let once = series
+            .bfill(None)
+            .expect("Series::bfill(None) must succeed for numeric inputs");
+        let twice = once
+            .bfill(None)
+            .expect("Series::bfill(None) must succeed on an already filled series");
+        prop_assert!(
+            once.equals(&twice),
+            "series bfill(None) must be idempotent"
+        );
+    }
+
+    /// Translating a Series commutes with unlimited forward fill.
+    #[test]
+    fn prop_series_ffill_is_translation_covariant(
+        series in arb_numeric_series("ffill", 12),
+        delta in -10.0f64..10.0,
+    ) {
+        let baseline = series
+            .ffill(None)
+            .expect("Series::ffill(None) must succeed for numeric inputs");
+        let shifted_input = shift_series(&series, delta);
+        let shifted_fill = shifted_input
+            .ffill(None)
+            .expect("Series::ffill(None) must succeed after translation");
+        let expected = shift_series(&baseline, delta);
+        prop_assert!(
+            approx_equal_series(&shifted_fill, &expected),
+            "series ffill(x + c) must equal ffill(x) + c"
+        );
+    }
+
+    /// Translating a Series commutes with unlimited backward fill.
+    #[test]
+    fn prop_series_bfill_is_translation_covariant(
+        series in arb_numeric_series("bfill", 12),
+        delta in -10.0f64..10.0,
+    ) {
+        let baseline = series
+            .bfill(None)
+            .expect("Series::bfill(None) must succeed for numeric inputs");
+        let shifted_input = shift_series(&series, delta);
+        let shifted_fill = shifted_input
+            .bfill(None)
+            .expect("Series::bfill(None) must succeed after translation");
+        let expected = shift_series(&baseline, delta);
+        prop_assert!(
+            approx_equal_series(&shifted_fill, &expected),
+            "series bfill(x + c) must equal bfill(x) + c"
+        );
+    }
+
+    /// Unlimited forward fill is idempotent for DataFrames.
+    #[test]
+    fn prop_dataframe_ffill_without_limit_is_idempotent(
+        df in arb_numeric_dataframe(8),
+    ) {
+        let once = df
+            .ffill(None)
+            .expect("DataFrame::ffill(None) must succeed for numeric inputs");
+        let twice = once
+            .ffill(None)
+            .expect("DataFrame::ffill(None) must succeed on an already filled frame");
+        prop_assert!(
+            once.equals(&twice),
+            "dataframe ffill(None) must be idempotent"
+        );
+    }
+
+    /// Unlimited backward fill is idempotent for DataFrames.
+    #[test]
+    fn prop_dataframe_bfill_without_limit_is_idempotent(
+        df in arb_numeric_dataframe(8),
+    ) {
+        let once = df
+            .bfill(None)
+            .expect("DataFrame::bfill(None) must succeed for numeric inputs");
+        let twice = once
+            .bfill(None)
+            .expect("DataFrame::bfill(None) must succeed on an already filled frame");
+        prop_assert!(
+            once.equals(&twice),
+            "dataframe bfill(None) must be idempotent"
+        );
+    }
+
+    /// Translating a DataFrame commutes with unlimited forward fill.
+    #[test]
+    fn prop_dataframe_ffill_is_translation_covariant(
+        df in arb_numeric_dataframe(8),
+        delta in -10.0f64..10.0,
+    ) {
+        let baseline = df
+            .ffill(None)
+            .expect("DataFrame::ffill(None) must succeed for numeric inputs");
+        let shifted_input = shift_dataframe(&df, delta);
+        let shifted_fill = shifted_input
+            .ffill(None)
+            .expect("DataFrame::ffill(None) must succeed after translation");
+        let expected = shift_dataframe(&baseline, delta);
+        prop_assert!(
+            approx_equal_dataframe(&shifted_fill, &expected),
+            "dataframe ffill(x + c) must equal ffill(x) + c"
+        );
+    }
+
+    /// Translating a DataFrame commutes with unlimited backward fill.
+    #[test]
+    fn prop_dataframe_bfill_is_translation_covariant(
+        df in arb_numeric_dataframe(8),
+        delta in -10.0f64..10.0,
+    ) {
+        let baseline = df
+            .bfill(None)
+            .expect("DataFrame::bfill(None) must succeed for numeric inputs");
+        let shifted_input = shift_dataframe(&df, delta);
+        let shifted_fill = shifted_input
+            .bfill(None)
+            .expect("DataFrame::bfill(None) must succeed after translation");
+        let expected = shift_dataframe(&baseline, delta);
+        prop_assert!(
+            approx_equal_dataframe(&shifted_fill, &expected),
+            "dataframe bfill(x + c) must equal bfill(x) + c"
+        );
+    }
+
+    /// Unlimited axis-1 forward fill is idempotent for DataFrames.
+    #[test]
+    fn prop_dataframe_ffill_axis1_without_limit_is_idempotent(
+        df in arb_numeric_dataframe(8),
+    ) {
+        let once = df
+            .ffill_axis1(None)
+            .expect("DataFrame::ffill_axis1(None) must succeed for numeric inputs");
+        let twice = once
+            .ffill_axis1(None)
+            .expect("DataFrame::ffill_axis1(None) must succeed on an already filled frame");
+        prop_assert!(
+            once.equals(&twice),
+            "dataframe ffill_axis1(None) must be idempotent"
+        );
+    }
+
+    /// Unlimited axis-1 backward fill is idempotent for DataFrames.
+    #[test]
+    fn prop_dataframe_bfill_axis1_without_limit_is_idempotent(
+        df in arb_numeric_dataframe(8),
+    ) {
+        let once = df
+            .bfill_axis1(None)
+            .expect("DataFrame::bfill_axis1(None) must succeed for numeric inputs");
+        let twice = once
+            .bfill_axis1(None)
+            .expect("DataFrame::bfill_axis1(None) must succeed on an already filled frame");
+        prop_assert!(
+            once.equals(&twice),
+            "dataframe bfill_axis1(None) must be idempotent"
+        );
+    }
+
+    /// Translating a DataFrame commutes with unlimited axis-1 forward fill.
+    #[test]
+    fn prop_dataframe_ffill_axis1_is_translation_covariant(
+        df in arb_numeric_dataframe(8),
+        delta in -10.0f64..10.0,
+    ) {
+        let baseline = df
+            .ffill_axis1(None)
+            .expect("DataFrame::ffill_axis1(None) must succeed for numeric inputs");
+        let shifted_input = shift_dataframe(&df, delta);
+        let shifted_fill = shifted_input
+            .ffill_axis1(None)
+            .expect("DataFrame::ffill_axis1(None) must succeed after translation");
+        let expected = shift_dataframe(&baseline, delta);
+        prop_assert!(
+            approx_equal_dataframe(&shifted_fill, &expected),
+            "dataframe ffill_axis1(x + c) must equal ffill_axis1(x) + c"
+        );
+    }
+
+    /// Translating a DataFrame commutes with unlimited axis-1 backward fill.
+    #[test]
+    fn prop_dataframe_bfill_axis1_is_translation_covariant(
+        df in arb_numeric_dataframe(8),
+        delta in -10.0f64..10.0,
+    ) {
+        let baseline = df
+            .bfill_axis1(None)
+            .expect("DataFrame::bfill_axis1(None) must succeed for numeric inputs");
+        let shifted_input = shift_dataframe(&df, delta);
+        let shifted_fill = shifted_input
+            .bfill_axis1(None)
+            .expect("DataFrame::bfill_axis1(None) must succeed after translation");
+        let expected = shift_dataframe(&baseline, delta);
+        prop_assert!(
+            approx_equal_dataframe(&shifted_fill, &expected),
+            "dataframe bfill_axis1(x + c) must equal bfill_axis1(x) + c"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Property: rank metamorphic invariants
 // ---------------------------------------------------------------------------
 

@@ -20565,10 +20565,7 @@ impl DataFrame {
 
         let mut out_columns = std::collections::BTreeMap::new();
         for (i, name) in self.column_order.iter().enumerate() {
-            let col = Column::new(
-                self.columns[name].dtype(),
-                std::mem::take(&mut out_cols_data[i]),
-            )?;
+            let col = Column::from_values(std::mem::take(&mut out_cols_data[i]))?;
             out_columns.insert(name.clone(), col);
         }
 
@@ -20627,10 +20624,7 @@ impl DataFrame {
 
         let mut out_columns = std::collections::BTreeMap::new();
         for (i, name) in self.column_order.iter().enumerate() {
-            let col = Column::new(
-                self.columns[name].dtype(),
-                std::mem::take(&mut out_cols_data[i]),
-            )?;
+            let col = Column::from_values(std::mem::take(&mut out_cols_data[i]))?;
             out_columns.insert(name.clone(), col);
         }
 
@@ -38627,6 +38621,42 @@ mod tests {
         assert_eq!(col.values()[0], Scalar::Float64(2.0));
         assert_eq!(col.values()[1], Scalar::Float64(2.0));
         assert!(col.values()[2].is_missing());
+    }
+
+    #[test]
+    fn df_ffill_axis1_promotes_target_column_for_float_fill() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.5), Scalar::Float64(9.0)]),
+                ("b", vec![Scalar::Null(NullKind::NaN), Scalar::Int64(2)]),
+            ],
+        )
+        .unwrap();
+
+        let result = df.ffill_axis1(None).unwrap();
+        let col_b = result.column_as_series("b").unwrap();
+        assert_eq!(col_b.column().dtype(), DType::Float64);
+        assert_eq!(col_b.values()[0], Scalar::Float64(1.5));
+        assert_eq!(col_b.values()[1], Scalar::Float64(2.0));
+    }
+
+    #[test]
+    fn df_bfill_axis1_promotes_target_column_for_float_fill() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Null(NullKind::NaN), Scalar::Int64(1)]),
+                ("b", vec![Scalar::Float64(2.5), Scalar::Float64(8.0)]),
+            ],
+        )
+        .unwrap();
+
+        let result = df.bfill_axis1(None).unwrap();
+        let col_a = result.column_as_series("a").unwrap();
+        assert_eq!(col_a.column().dtype(), DType::Float64);
+        assert_eq!(col_a.values()[0], Scalar::Float64(2.5));
+        assert_eq!(col_a.values()[1], Scalar::Float64(1.0));
     }
 
     #[test]
