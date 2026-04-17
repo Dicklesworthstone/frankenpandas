@@ -1,0 +1,22 @@
+{
+  "packet_id": "FP-P2D-087",
+  "case_id": "series_extractall_no_match_hardened",
+  "mode": "hardened",
+  "operation": "series_extractall",
+  "regex_pattern": "(\\d+)",
+  "left": {
+    "name": "strings",
+    "index": [
+      { "kind": "int64", "value": 0 }
+    ],
+    "values": [
+      { "kind": "utf8", "value": "no_digits_here" }
+    ]
+  },
+  "expected_frame": {
+    "index": [],
+    "columns": {
+      "0": []
+    }
+  }
+}

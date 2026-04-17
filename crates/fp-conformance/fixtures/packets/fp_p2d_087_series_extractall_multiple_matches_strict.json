@@ -1,0 +1,30 @@
+{
+  "packet_id": "FP-P2D-087",
+  "case_id": "series_extractall_multiple_matches_strict",
+  "mode": "strict",
+  "operation": "series_extractall",
+  "regex_pattern": "(\\d+)",
+  "left": {
+    "name": "strings",
+    "index": [
+      { "kind": "int64", "value": 0 }
+    ],
+    "values": [
+      { "kind": "utf8", "value": "a1b2c3" }
+    ]
+  },
+  "expected_frame": {
+    "index": [
+      { "kind": "utf8", "value": "Int64(0), 0" },
+      { "kind": "utf8", "value": "Int64(0), 1" },
+      { "kind": "utf8", "value": "Int64(0), 2" }
+    ],
+    "columns": {
+      "0": [
+        { "kind": "utf8", "value": "1" },
+        { "kind": "utf8", "value": "2" },
+        { "kind": "utf8", "value": "3" }
+      ]
+    }
+  }
+}
