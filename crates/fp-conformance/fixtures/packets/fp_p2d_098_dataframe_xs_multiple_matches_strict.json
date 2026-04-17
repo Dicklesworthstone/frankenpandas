@@ -1,0 +1,33 @@
+{
+  "packet_id": "FP-P2D-098",
+  "case_id": "dataframe_xs_multiple_matches_strict",
+  "mode": "strict",
+  "operation": "dataframe_xs",
+  "xs_key": { "kind": "int64", "value": 1 },
+  "frame": {
+    "index": [
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 1 }
+    ],
+    "columns": {
+      "val": [
+        { "kind": "int64", "value": 100 },
+        { "kind": "int64", "value": 200 },
+        { "kind": "int64", "value": 300 }
+      ]
+    }
+  },
+  "expected_frame": {
+    "index": [
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 1 }
+    ],
+    "columns": {
+      "val": [
+        { "kind": "int64", "value": 100 },
+        { "kind": "int64", "value": 300 }
+      ]
+    }
+  }
+}
