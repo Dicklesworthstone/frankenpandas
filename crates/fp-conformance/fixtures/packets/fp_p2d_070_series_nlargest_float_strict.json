@@ -1,0 +1,32 @@
+{
+  "packet_id": "FP-P2D-070",
+  "case_id": "series_nlargest_float_strict",
+  "mode": "strict",
+  "operation": "series_nlargest",
+  "nlargest_n": 2,
+  "left": {
+    "name": "floats",
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 3 }
+    ],
+    "values": [
+      { "kind": "float64", "value": 1.5 },
+      { "kind": "float64", "value": 3.7 },
+      { "kind": "float64", "value": 2.2 },
+      { "kind": "float64", "value": 4.1 }
+    ]
+  },
+  "expected_series": {
+    "index": [
+      { "kind": "int64", "value": 3 },
+      { "kind": "int64", "value": 1 }
+    ],
+    "values": [
+      { "kind": "float64", "value": 4.1 },
+      { "kind": "float64", "value": 3.7 }
+    ]
+  }
+}

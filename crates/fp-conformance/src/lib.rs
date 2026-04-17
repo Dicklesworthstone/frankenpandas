@@ -266,6 +266,10 @@ pub enum FixtureOperation {
     SeriesCummax,
     #[serde(rename = "series_cummin", alias = "series_cummin_default")]
     SeriesCummin,
+    #[serde(rename = "series_nlargest", alias = "series_nlargest_default")]
+    SeriesNlargest,
+    #[serde(rename = "series_nsmallest", alias = "series_nsmallest_default")]
+    SeriesNsmallest,
     #[serde(rename = "series_cut", alias = "series_cut_default")]
     SeriesCut,
     #[serde(rename = "series_qcut", alias = "series_qcut_default")]
@@ -515,6 +519,8 @@ impl FixtureOperation {
             Self::SeriesCumprod => "series_cumprod",
             Self::SeriesCummax => "series_cummax",
             Self::SeriesCummin => "series_cummin",
+            Self::SeriesNlargest => "series_nlargest",
+            Self::SeriesNsmallest => "series_nsmallest",
             Self::SeriesCut => "series_cut",
             Self::SeriesQcut => "series_qcut",
             Self::SeriesValueCounts => "series_value_counts",
@@ -765,6 +771,8 @@ pub struct PacketFixture {
     pub clip_upper: Option<f64>,
     #[serde(default)]
     pub round_decimals: Option<i32>,
+    #[serde(default)]
+    pub nlargest_n: Option<usize>,
     #[serde(default)]
     pub head_n: Option<i64>,
     #[serde(default)]
@@ -1101,6 +1109,8 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::SeriesCumprod
         | FixtureOperation::SeriesCummax
         | FixtureOperation::SeriesCummin
+        | FixtureOperation::SeriesNlargest
+        | FixtureOperation::SeriesNsmallest
         | FixtureOperation::SeriesCut
         | FixtureOperation::SeriesQcut
         | FixtureOperation::SeriesIsNa
@@ -6231,6 +6241,8 @@ fn run_fixture_operation(
         | FixtureOperation::SeriesCumprod
         | FixtureOperation::SeriesCummax
         | FixtureOperation::SeriesCummin
+        | FixtureOperation::SeriesNlargest
+        | FixtureOperation::SeriesNsmallest
         | FixtureOperation::SeriesCut
         | FixtureOperation::SeriesQcut => {
             let actual = execute_series_module_utility_fixture_operation(fixture);
@@ -7600,6 +7612,8 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::SeriesCumprod
         | FixtureOperation::SeriesCummax
         | FixtureOperation::SeriesCummin
+        | FixtureOperation::SeriesNlargest
+        | FixtureOperation::SeriesNsmallest
         | FixtureOperation::SeriesCut
         | FixtureOperation::SeriesQcut
         | FixtureOperation::SeriesAtTime
@@ -7961,6 +7975,8 @@ fn capture_live_oracle_expected(
         | FixtureOperation::SeriesCumprod
         | FixtureOperation::SeriesCummax
         | FixtureOperation::SeriesCummin
+        | FixtureOperation::SeriesNlargest
+        | FixtureOperation::SeriesNsmallest
         | FixtureOperation::SeriesCut
         | FixtureOperation::SeriesQcut
         | FixtureOperation::SeriesAtTime
@@ -9485,6 +9501,18 @@ fn execute_series_module_utility_fixture_operation(
         FixtureOperation::SeriesCumprod => series.cumprod().map_err(|err| err.to_string()),
         FixtureOperation::SeriesCummax => series.cummax().map_err(|err| err.to_string()),
         FixtureOperation::SeriesCummin => series.cummin().map_err(|err| err.to_string()),
+        FixtureOperation::SeriesNlargest => {
+            let n = fixture
+                .nlargest_n
+                .ok_or_else(|| "nlargest_n required for series_nlargest".to_owned())?;
+            series.nlargest(n).map_err(|err| err.to_string())
+        }
+        FixtureOperation::SeriesNsmallest => {
+            let n = fixture
+                .nlargest_n
+                .ok_or_else(|| "nlargest_n required for series_nsmallest".to_owned())?;
+            series.nsmallest(n).map_err(|err| err.to_string())
+        }
         FixtureOperation::SeriesCut => {
             cut(&series, require_cut_bins(fixture)?).map_err(|err| err.to_string())
         }
@@ -11635,6 +11663,8 @@ fn execute_and_compare_differential(
         | FixtureOperation::SeriesCumprod
         | FixtureOperation::SeriesCummax
         | FixtureOperation::SeriesCummin
+        | FixtureOperation::SeriesNlargest
+        | FixtureOperation::SeriesNsmallest
         | FixtureOperation::SeriesCut
         | FixtureOperation::SeriesQcut => {
             let actual = execute_series_module_utility_fixture_operation(fixture);
@@ -16066,6 +16096,32 @@ mod tests {
         assert!(
             report.fixture_count >= 3,
             "expected FP-P2D-069 series_cummin fixtures"
+        );
+        assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
+    fn packet_filter_runs_series_nlargest_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2D-070", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-070"));
+        assert!(
+            report.fixture_count >= 3,
+            "expected FP-P2D-070 series_nlargest fixtures"
+        );
+        assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
+    fn packet_filter_runs_series_nsmallest_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2D-071", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-071"));
+        assert!(
+            report.fixture_count >= 3,
+            "expected FP-P2D-071 series_nsmallest fixtures"
         );
         assert!(report.is_green(), "expected report green: {report:?}");
     }
