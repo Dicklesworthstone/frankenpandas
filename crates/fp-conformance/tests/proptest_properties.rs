@@ -2006,6 +2006,125 @@ proptest! {
 }
 
 // ---------------------------------------------------------------------------
+// Property: Shift metamorphic invariants (frankenpandas-xd9)
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(100))]
+
+    /// Shifting a Series by zero periods must be the identity transform.
+    #[test]
+    fn prop_series_shift_zero_is_identity(series in arb_variable_numeric_series("shift", 12)) {
+        let shifted = series
+            .shift(0)
+            .expect("series zero-shift should always succeed");
+
+        prop_assert!(
+            shifted.equals(&series),
+            "series shift(0) must preserve every row"
+        );
+    }
+
+    /// Same-direction Series shifts must compose additively.
+    #[test]
+    fn prop_series_shift_same_direction_composes(
+        series in arb_variable_numeric_series("shift", 12),
+        first in 0i64..10,
+        second in 0i64..10,
+        negative in proptest::bool::ANY,
+    ) {
+        let first = if negative { -first } else { first };
+        let second = if negative { -second } else { second };
+        let twice = series
+            .shift(first)
+            .and_then(|shifted| shifted.shift(second))
+            .expect("composed series shifts should succeed");
+        let direct = series
+            .shift(first + second)
+            .expect("direct series shift should succeed");
+
+        prop_assert!(
+            twice.equals(&direct),
+            "same-direction series shifts must compose additively"
+        );
+    }
+
+    /// Shifting a DataFrame by zero periods must be the identity transform.
+    #[test]
+    fn prop_dataframe_shift_zero_is_identity(df in arb_numeric_dataframe(8)) {
+        let shifted = df
+            .shift(0)
+            .expect("dataframe zero-shift should always succeed");
+
+        prop_assert!(
+            shifted.equals(&df),
+            "dataframe shift(0) must preserve every cell"
+        );
+    }
+
+    /// Same-direction DataFrame row shifts must compose additively.
+    #[test]
+    fn prop_dataframe_shift_same_direction_composes(
+        df in arb_numeric_dataframe(8),
+        first in 0i64..10,
+        second in 0i64..10,
+        negative in proptest::bool::ANY,
+    ) {
+        let first = if negative { -first } else { first };
+        let second = if negative { -second } else { second };
+        let twice = df
+            .shift(first)
+            .and_then(|shifted| shifted.shift(second))
+            .expect("composed dataframe row shifts should succeed");
+        let direct = df
+            .shift(first + second)
+            .expect("direct dataframe row shift should succeed");
+
+        prop_assert!(
+            twice.equals(&direct),
+            "same-direction dataframe row shifts must compose additively"
+        );
+    }
+
+    /// Horizontally shifting a DataFrame by zero periods must be the identity transform.
+    #[test]
+    fn prop_dataframe_shift_axis1_zero_is_identity(df in arb_numeric_dataframe(8)) {
+        let shifted = df
+            .shift_axis1(0)
+            .expect("dataframe axis=1 zero-shift should always succeed");
+
+        prop_assert!(
+            shifted.equals(&df),
+            "dataframe shift_axis1(0) must preserve every cell"
+        );
+    }
+
+    /// Same-direction DataFrame axis=1 shifts must compose additively.
+    #[test]
+    fn prop_dataframe_shift_axis1_same_direction_composes(
+        df in arb_numeric_dataframe(8),
+        first in 0i64..6,
+        second in 0i64..6,
+        negative in proptest::bool::ANY,
+    ) {
+        let first = if negative { -first } else { first };
+        let second = if negative { -second } else { second };
+        let twice = df
+            .shift_axis1(first)
+            .and_then(|shifted| shifted.shift_axis1(second))
+            .expect("composed dataframe axis=1 shifts should succeed");
+        let direct = df
+            .shift_axis1(first + second)
+            .expect("direct dataframe axis=1 shift should succeed");
+
+        prop_assert!(
+            twice.equals(&direct),
+            "same-direction dataframe axis=1 shifts must compose additively"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Property: Feather (Arrow IPC) round-trip invariants (frankenpandas-44y)
 // ---------------------------------------------------------------------------
 
