@@ -1,0 +1,25 @@
+{
+  "packet_id": "FP-P2D-104",
+  "case_id": "dataframe_groupby_get_group_not_found_hardened",
+  "mode": "hardened",
+  "operation": "dataframe_groupby_get_group",
+  "groupby_columns": ["grp"],
+  "group_name": "missing",
+  "frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 }
+    ],
+    "columns": {
+      "grp": [
+        { "kind": "utf8", "value": "a" },
+        { "kind": "utf8", "value": "b" }
+      ],
+      "val": [
+        { "kind": "int64", "value": 100 },
+        { "kind": "int64", "value": 200 }
+      ]
+    }
+  },
+  "expected_error_contains": "not found"
+}
