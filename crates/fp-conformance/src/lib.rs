@@ -256,6 +256,8 @@ pub enum FixtureOperation {
     SeriesClip,
     #[serde(rename = "series_abs", alias = "series_abs_default")]
     SeriesAbs,
+    #[serde(rename = "series_round", alias = "series_round_default")]
+    SeriesRound,
     #[serde(rename = "series_cut", alias = "series_cut_default")]
     SeriesCut,
     #[serde(rename = "series_qcut", alias = "series_qcut_default")]
@@ -500,6 +502,7 @@ impl FixtureOperation {
             Self::SeriesAstype => "series_astype",
             Self::SeriesClip => "series_clip",
             Self::SeriesAbs => "series_abs",
+            Self::SeriesRound => "series_round",
             Self::SeriesCut => "series_cut",
             Self::SeriesQcut => "series_qcut",
             Self::SeriesValueCounts => "series_value_counts",
@@ -748,6 +751,8 @@ pub struct PacketFixture {
     pub clip_lower: Option<f64>,
     #[serde(default)]
     pub clip_upper: Option<f64>,
+    #[serde(default)]
+    pub round_decimals: Option<i32>,
     #[serde(default)]
     pub head_n: Option<i64>,
     #[serde(default)]
@@ -1079,6 +1084,7 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::SeriesAstype
         | FixtureOperation::SeriesClip
         | FixtureOperation::SeriesAbs
+        | FixtureOperation::SeriesRound
         | FixtureOperation::SeriesCut
         | FixtureOperation::SeriesQcut
         | FixtureOperation::SeriesIsNa
@@ -6204,6 +6210,7 @@ fn run_fixture_operation(
         | FixtureOperation::SeriesAstype
         | FixtureOperation::SeriesClip
         | FixtureOperation::SeriesAbs
+        | FixtureOperation::SeriesRound
         | FixtureOperation::SeriesCut
         | FixtureOperation::SeriesQcut => {
             let actual = execute_series_module_utility_fixture_operation(fixture);
@@ -7568,6 +7575,7 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::SeriesAstype
         | FixtureOperation::SeriesClip
         | FixtureOperation::SeriesAbs
+        | FixtureOperation::SeriesRound
         | FixtureOperation::SeriesCut
         | FixtureOperation::SeriesQcut
         | FixtureOperation::SeriesAtTime
@@ -7924,6 +7932,7 @@ fn capture_live_oracle_expected(
         | FixtureOperation::SeriesAstype
         | FixtureOperation::SeriesClip
         | FixtureOperation::SeriesAbs
+        | FixtureOperation::SeriesRound
         | FixtureOperation::SeriesCut
         | FixtureOperation::SeriesQcut
         | FixtureOperation::SeriesAtTime
@@ -9440,6 +9449,10 @@ fn execute_series_module_utility_fixture_operation(
             .clip(fixture.clip_lower, fixture.clip_upper)
             .map_err(|err| err.to_string()),
         FixtureOperation::SeriesAbs => series.abs().map_err(|err| err.to_string()),
+        FixtureOperation::SeriesRound => {
+            let decimals = fixture.round_decimals.unwrap_or(0);
+            series.round(decimals).map_err(|err| err.to_string())
+        }
         FixtureOperation::SeriesCut => {
             cut(&series, require_cut_bins(fixture)?).map_err(|err| err.to_string())
         }
@@ -11585,6 +11598,7 @@ fn execute_and_compare_differential(
         | FixtureOperation::SeriesAstype
         | FixtureOperation::SeriesClip
         | FixtureOperation::SeriesAbs
+        | FixtureOperation::SeriesRound
         | FixtureOperation::SeriesCut
         | FixtureOperation::SeriesQcut => {
             let actual = execute_series_module_utility_fixture_operation(fixture);
@@ -15951,6 +15965,19 @@ mod tests {
         assert!(
             report.fixture_count >= 3,
             "expected FP-P2D-064 series_abs fixtures"
+        );
+        assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
+    fn packet_filter_runs_series_round_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2D-065", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-065"));
+        assert!(
+            report.fixture_count >= 3,
+            "expected FP-P2D-065 series_round fixtures"
         );
         assert!(report.is_green(), "expected report green: {report:?}");
     }
