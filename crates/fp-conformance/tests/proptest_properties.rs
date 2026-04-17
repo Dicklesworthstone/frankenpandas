@@ -6587,6 +6587,126 @@ proptest! {
 }
 
 // ---------------------------------------------------------------------------
+// Property: mean metamorphic invariants
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(100))]
+
+    /// Negating numeric values must negate `Series::mean()`.
+    #[test]
+    fn prop_series_mean_is_sign_symmetric(
+        series in arb_variable_numeric_series("mean", 12),
+    ) {
+        let baseline = series
+            .mean()
+            .expect("Series::mean() must succeed for numeric inputs");
+        let flipped = sign_flip_series(&series)
+            .mean()
+            .expect("Series::mean() must succeed after sign flip");
+        let expected = sign_flip_numeric_scalar(&baseline);
+        prop_assert!(
+            approx_equal_scalar(&flipped, &expected),
+            "series mean(-x) must equal -mean(x)"
+        );
+    }
+
+    /// Translating numeric values by `c` must shift `Series::mean()` by `c`.
+    #[test]
+    fn prop_series_mean_is_translation_covariant(
+        series in arb_variable_numeric_series("mean", 12),
+        delta in -1_000.0f64..1_000.0,
+    ) {
+        let baseline = series
+            .mean()
+            .expect("Series::mean() must succeed for numeric inputs");
+        let shifted = shift_series(&series, delta)
+            .mean()
+            .expect("Series::mean() must succeed after translation");
+        let expected = shift_numeric_scalar(&baseline, delta);
+        prop_assert!(
+            approx_equal_scalar(&shifted, &expected),
+            "series mean(x + c) must equal mean(x) + c"
+        );
+    }
+
+    /// Scaling numeric values by a positive factor must scale `Series::mean()` by the same factor.
+    #[test]
+    fn prop_series_mean_scales_linearly(
+        series in arb_variable_numeric_series("mean", 12),
+        factor in 0.0f64..1_000.0,
+    ) {
+        let baseline = series
+            .mean()
+            .expect("Series::mean() must succeed for numeric inputs");
+        let scaled = scale_series(&series, factor)
+            .mean()
+            .expect("Series::mean() must succeed after scaling");
+        let expected = scale_numeric_scalar(&baseline, factor);
+        prop_assert!(
+            approx_equal_scalar(&scaled, &expected),
+            "series mean(kx) must equal k * mean(x) for nonnegative k"
+        );
+    }
+
+    /// Negating numeric cells must negate every component of `DataFrame::mean()`.
+    #[test]
+    fn prop_dataframe_mean_is_sign_symmetric(
+        df in arb_numeric_dataframe(8),
+    ) {
+        let baseline = df
+            .mean()
+            .expect("DataFrame::mean() must succeed for numeric inputs");
+        let flipped = sign_flip_dataframe(&df)
+            .mean()
+            .expect("DataFrame::mean() must succeed after sign flip");
+        let expected = sign_flip_series(&baseline);
+        prop_assert!(
+            approx_equal_series(&flipped, &expected),
+            "dataframe mean(-x) must equal -mean(x) per column"
+        );
+    }
+
+    /// Translating numeric cells by `c` must shift every component of `DataFrame::mean()` by `c`.
+    #[test]
+    fn prop_dataframe_mean_is_translation_covariant(
+        df in arb_numeric_dataframe(8),
+        delta in -1_000.0f64..1_000.0,
+    ) {
+        let baseline = df
+            .mean()
+            .expect("DataFrame::mean() must succeed for numeric inputs");
+        let shifted = shift_dataframe(&df, delta)
+            .mean()
+            .expect("DataFrame::mean() must succeed after translation");
+        let expected = shift_series(&baseline, delta);
+        prop_assert!(
+            approx_equal_series(&shifted, &expected),
+            "dataframe mean(x + c) must equal mean(x) + c per column"
+        );
+    }
+
+    /// Scaling numeric cells by a positive factor must scale every component of `DataFrame::mean()`.
+    #[test]
+    fn prop_dataframe_mean_scales_linearly(
+        df in arb_numeric_dataframe(8),
+        factor in 0.0f64..1_000.0,
+    ) {
+        let baseline = df
+            .mean()
+            .expect("DataFrame::mean() must succeed for numeric inputs");
+        let scaled = scale_dataframe(&df, factor)
+            .mean()
+            .expect("DataFrame::mean() must succeed after scaling");
+        let expected = scale_series(&baseline, factor);
+        prop_assert!(
+            approx_equal_series(&scaled, &expected),
+            "dataframe mean(kx) must equal k * mean(x) per column for nonnegative k"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Property: isin metamorphic invariants
 // ---------------------------------------------------------------------------
 
