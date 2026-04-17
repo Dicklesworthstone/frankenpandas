@@ -1,0 +1,38 @@
+{
+  "packet_id": "FP-P2D-084",
+  "case_id": "series_partition_df_multi_char_sep_hardened",
+  "mode": "hardened",
+  "operation": "series_partition_df",
+  "string_sep": "::",
+  "left": {
+    "name": "strings",
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 }
+    ],
+    "values": [
+      { "kind": "utf8", "value": "foo::bar::baz" },
+      { "kind": "utf8", "value": "single" }
+    ]
+  },
+  "expected_frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 }
+    ],
+    "columns": {
+      "0": [
+        { "kind": "utf8", "value": "foo" },
+        { "kind": "utf8", "value": "single" }
+      ],
+      "1": [
+        { "kind": "utf8", "value": "::" },
+        { "kind": "utf8", "value": "" }
+      ],
+      "2": [
+        { "kind": "utf8", "value": "bar::baz" },
+        { "kind": "utf8", "value": "" }
+      ]
+    }
+  }
+}

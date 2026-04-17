@@ -7661,9 +7661,6 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::SeriesQcut
         | FixtureOperation::SeriesAtTime
         | FixtureOperation::SeriesBetweenTime
-        | FixtureOperation::SeriesPartitionDf
-        | FixtureOperation::SeriesRpartitionDf
-        | FixtureOperation::SeriesExtractDf
         | FixtureOperation::DataFrameGroupByCumcount
         | FixtureOperation::DataFrameGroupByNgroup
         | FixtureOperation::DataFrameAsof
@@ -7742,7 +7739,10 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::DataFrameShift
         | FixtureOperation::DataFramePctChange
         | FixtureOperation::DataFrameMelt
-        | FixtureOperation::DataFrameCombineFirst => fixture
+        | FixtureOperation::DataFrameCombineFirst
+        | FixtureOperation::SeriesPartitionDf
+        | FixtureOperation::SeriesRpartitionDf
+        | FixtureOperation::SeriesExtractDf => fixture
             .expected_frame
             .clone()
             .map(ResolvedExpected::Frame)
@@ -8029,9 +8029,6 @@ fn capture_live_oracle_expected(
         | FixtureOperation::SeriesQcut
         | FixtureOperation::SeriesAtTime
         | FixtureOperation::SeriesBetweenTime
-        | FixtureOperation::SeriesPartitionDf
-        | FixtureOperation::SeriesRpartitionDf
-        | FixtureOperation::SeriesExtractDf
         | FixtureOperation::DataFrameGroupByCumcount
         | FixtureOperation::DataFrameGroupByNgroup
         | FixtureOperation::DataFrameAsof
@@ -8110,7 +8107,10 @@ fn capture_live_oracle_expected(
         | FixtureOperation::DataFrameShift
         | FixtureOperation::DataFramePctChange
         | FixtureOperation::DataFrameMelt
-        | FixtureOperation::DataFrameCombineFirst => response
+        | FixtureOperation::DataFrameCombineFirst
+        | FixtureOperation::SeriesPartitionDf
+        | FixtureOperation::SeriesRpartitionDf
+        | FixtureOperation::SeriesExtractDf => response
             .expected_frame
             .map(ResolvedExpected::Frame)
             .ok_or_else(|| HarnessError::FixtureFormat("oracle omitted expected_frame".to_owned())),
@@ -16369,6 +16369,19 @@ mod tests {
         assert!(
             report.fixture_count >= 3,
             "expected FP-P2D-083 series_to_numeric fixtures"
+        );
+        assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
+    fn packet_filter_runs_series_partition_df_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2D-084", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-084"));
+        assert!(
+            report.fixture_count >= 3,
+            "expected FP-P2D-084 series_partition_df fixtures"
         );
         assert!(report.is_green(), "expected report green: {report:?}");
     }
