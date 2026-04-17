@@ -38,8 +38,8 @@ use fp_runtime::{
     RaptorQMetadata, RuntimeMode, RuntimePolicy, ScrubStatus,
 };
 use fp_types::{
-    DType, NullKind, Scalar, dropna, fill_na, nancount, nanmax, nanmean, nanmin, nanstd, nansum,
-    nanvar,
+    DType, NullKind, Scalar, common_dtype, dropna, fill_na, nancount, nanmax, nanmean, nanmin,
+    nanstd, nansum, nanvar,
 };
 use raptorq::{Decoder, Encoder, EncodingPacket, ObjectTransmissionInformation};
 use serde::{Deserialize, Serialize};
@@ -3620,6 +3620,16 @@ fn assert_excel_roundtrip(frame: &DataFrame) -> Result<(), FpIoError> {
     Ok(())
 }
 
+fn fuzz_dtype_from_byte(byte: u8) -> DType {
+    match byte % 5 {
+        0 => DType::Null,
+        1 => DType::Bool,
+        2 => DType::Int64,
+        3 => DType::Float64,
+        _ => DType::Utf8,
+    }
+}
+
 fn assert_json_roundtrip(frame: &DataFrame, orient: JsonOrient) -> Result<(), FpIoError> {
     let encoded = write_json_string(frame, orient)?;
     let reparsed = read_json_str(&encoded, orient)?;
@@ -3660,6 +3670,69 @@ pub fn fuzz_csv_parse_bytes(input: &[u8]) -> Result<(), FpIoError> {
 pub fn fuzz_excel_io_bytes(input: &[u8]) -> Result<(), FpIoError> {
     let frame = read_excel_bytes(input, &ExcelReadOptions::default())?;
     assert_excel_roundtrip(&frame)
+}
+
+/// Structure-aware fuzz entrypoint for the `fp-types` common-dtype lattice.
+///
+/// Two input bytes are projected onto `DType` variants. Incompatible pairs are
+/// acceptable, but compatibility must remain symmetric and successful
+/// promotions must remain idempotent.
+pub fn fuzz_common_dtype_bytes(input: &[u8]) -> Result<(), String> {
+    let [left_tag, right_tag, ..] = input else {
+        return Ok(());
+    };
+
+    let left = fuzz_dtype_from_byte(*left_tag);
+    let right = fuzz_dtype_from_byte(*right_tag);
+
+    let forward = common_dtype(left, right);
+    let reverse = common_dtype(right, left);
+
+    match (forward, reverse) {
+        (Ok(common), Ok(reverse_common)) => {
+            if common != reverse_common {
+                return Err(format!(
+                    "common_dtype symmetry mismatch: left={left:?} right={right:?} \
+                     forward={common:?} reverse={reverse_common:?}"
+                ));
+            }
+
+            let left_idempotent = common_dtype(common, left).map_err(|err| {
+                format!(
+                    "common_dtype lost left compatibility: left={left:?} right={right:?} \
+                     common={common:?} err={err}"
+                )
+            })?;
+            if left_idempotent != common {
+                return Err(format!(
+                    "common_dtype left idempotence mismatch: left={left:?} right={right:?} \
+                     common={common:?} got={left_idempotent:?}"
+                ));
+            }
+
+            let right_idempotent = common_dtype(common, right).map_err(|err| {
+                format!(
+                    "common_dtype lost right compatibility: left={left:?} right={right:?} \
+                     common={common:?} err={err}"
+                )
+            })?;
+            if right_idempotent != common {
+                return Err(format!(
+                    "common_dtype right idempotence mismatch: left={left:?} right={right:?} \
+                     common={common:?} got={right_idempotent:?}"
+                ));
+            }
+        }
+        (Err(_), Err(_)) => {}
+        (left_result, right_result) => {
+            return Err(format!(
+                "common_dtype compatibility mismatch: left={left:?} right={right:?} \
+                 forward={left_result:?} reverse={right_result:?}"
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 /// Structure-aware fuzz entrypoint for the `fp-io` JSON and JSONL readers.
@@ -13314,8 +13387,8 @@ mod tests {
         SuiteOptions, append_phase2c_drift_history, build_ci_forensics_report,
         build_compat_closure_e2e_scenario_report, build_compat_closure_final_evidence_pack,
         build_differential_report, build_differential_validation_log, build_failure_forensics,
-        enforce_packet_gates, evaluate_ci_gate, evaluate_parity_gate, fuzz_csv_parse_bytes,
-        fuzz_excel_io_bytes, fuzz_fixture_parse_bytes, fuzz_json_io_bytes,
+        enforce_packet_gates, evaluate_ci_gate, evaluate_parity_gate, fuzz_common_dtype_bytes,
+        fuzz_csv_parse_bytes, fuzz_excel_io_bytes, fuzz_fixture_parse_bytes, fuzz_json_io_bytes,
         generate_raptorq_sidecar, run_ci_pipeline, run_differential_by_id, run_differential_suite,
         run_e2e_suite, run_fault_injection_validation_by_id, run_packet_by_id, run_packet_suite,
         run_packet_suite_with_options, run_packets_grouped, run_raptorq_decode_recovery_drill,
@@ -13527,6 +13600,30 @@ mod tests {
             matches!(err, fp_io::IoError::Excel(_)),
             "expected Excel parse error, got {err:?}"
         );
+    }
+
+    #[test]
+    fn fuzz_common_dtype_bytes_accepts_identical_dtype_seed() {
+        let seed = include_bytes!(
+            "../fixtures/adversarial/fuzz_corpus/common_dtype/identical_int64_seed.bin"
+        );
+        fuzz_common_dtype_bytes(seed).expect("identical dtype seed should satisfy invariants");
+    }
+
+    #[test]
+    fn fuzz_common_dtype_bytes_accepts_numeric_promotion_seed() {
+        let seed = include_bytes!(
+            "../fixtures/adversarial/fuzz_corpus/common_dtype/numeric_promotion_seed.bin"
+        );
+        fuzz_common_dtype_bytes(seed).expect("numeric promotion seed should satisfy invariants");
+    }
+
+    #[test]
+    fn fuzz_common_dtype_bytes_accepts_incompatible_seed() {
+        let seed = include_bytes!(
+            "../fixtures/adversarial/fuzz_corpus/common_dtype/incompatible_utf8_bool_seed.bin"
+        );
+        fuzz_common_dtype_bytes(seed).expect("incompatible seed should still preserve symmetry");
     }
 
     #[test]

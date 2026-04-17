@@ -133,6 +133,9 @@ Implemented entrypoint:
 - `fuzz_excel_io` target: `fuzz/fuzz_targets/fuzz_excel_io.rs`
 - seed corpus: `crates/fp-conformance/fixtures/adversarial/fuzz_corpus/excel_io/`
 - exercises `read_excel_bytes()` with a write/reparse oracle via `write_excel_bytes()`
+- `fuzz_common_dtype` target: `fuzz/fuzz_targets/fuzz_common_dtype.rs`
+- seed corpus: `crates/fp-conformance/fixtures/adversarial/fuzz_corpus/common_dtype/`
+- projects raw bytes onto `DType × DType` pairs and checks symmetry plus promotion idempotence for `common_dtype()`
 
 ### 2.2 Structured Fuzz Input via `Arbitrary`
 
