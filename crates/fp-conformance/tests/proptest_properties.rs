@@ -2335,6 +2335,154 @@ proptest! {
 }
 
 // ---------------------------------------------------------------------------
+// Property: cumulative extrema metamorphic invariants
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(100))]
+
+    /// Series cummax is idempotent.
+    #[test]
+    fn prop_series_cummax_is_idempotent(series in arb_numeric_series("cummax", 12)) {
+        let once = series
+            .cummax()
+            .expect("Series::cummax() must succeed for numeric inputs");
+        let twice = once
+            .cummax()
+            .expect("Series::cummax() must succeed on its own output");
+        prop_assert!(
+            once.equals(&twice),
+            "series cummax must be idempotent"
+        );
+    }
+
+    /// Series cummin is idempotent.
+    #[test]
+    fn prop_series_cummin_is_idempotent(series in arb_numeric_series("cummin", 12)) {
+        let once = series
+            .cummin()
+            .expect("Series::cummin() must succeed for numeric inputs");
+        let twice = once
+            .cummin()
+            .expect("Series::cummin() must succeed on its own output");
+        prop_assert!(
+            once.equals(&twice),
+            "series cummin must be idempotent"
+        );
+    }
+
+    /// Negating a Series before cummin must negate the cummax result.
+    #[test]
+    fn prop_series_cummax_cummin_are_sign_dual(
+        series in arb_numeric_series("cumextrema", 12),
+    ) {
+        let cummax = series
+            .cummax()
+            .expect("Series::cummax() must succeed for numeric inputs");
+        let flipped = sign_flip_series(&series);
+        let flipped_cummin = flipped
+            .cummin()
+            .expect("Series::cummin() must succeed after sign flipping");
+        let expected = sign_flip_series(&cummax);
+        prop_assert!(
+            flipped_cummin.equals(&expected),
+            "series cummin(-x) must equal -cummax(x)"
+        );
+    }
+
+    /// Negating a Series before cummax must negate the cummin result.
+    #[test]
+    fn prop_series_cummin_cummax_are_sign_dual(
+        series in arb_numeric_series("cumextrema", 12),
+    ) {
+        let cummin = series
+            .cummin()
+            .expect("Series::cummin() must succeed for numeric inputs");
+        let flipped = sign_flip_series(&series);
+        let flipped_cummax = flipped
+            .cummax()
+            .expect("Series::cummax() must succeed after sign flipping");
+        let expected = sign_flip_series(&cummin);
+        prop_assert!(
+            flipped_cummax.equals(&expected),
+            "series cummax(-x) must equal -cummin(x)"
+        );
+    }
+
+    /// DataFrame cummax is idempotent.
+    #[test]
+    fn prop_dataframe_cummax_is_idempotent(df in arb_numeric_dataframe(8)) {
+        let once = df
+            .cummax()
+            .expect("DataFrame::cummax() must succeed for numeric inputs");
+        let twice = once
+            .cummax()
+            .expect("DataFrame::cummax() must succeed on its own output");
+        prop_assert!(
+            once.equals(&twice),
+            "dataframe cummax must be idempotent"
+        );
+    }
+
+    /// DataFrame cummin is idempotent.
+    #[test]
+    fn prop_dataframe_cummin_is_idempotent(df in arb_numeric_dataframe(8)) {
+        let once = df
+            .cummin()
+            .expect("DataFrame::cummin() must succeed for numeric inputs");
+        let twice = once
+            .cummin()
+            .expect("DataFrame::cummin() must succeed on its own output");
+        prop_assert!(
+            once.equals(&twice),
+            "dataframe cummin must be idempotent"
+        );
+    }
+
+    /// Negating a DataFrame before cummin must negate the cummax result.
+    #[test]
+    fn prop_dataframe_cummax_cummin_are_sign_dual(df in arb_numeric_dataframe(8)) {
+        let cummax = df
+            .cummax()
+            .expect("DataFrame::cummax() must succeed for numeric inputs");
+        let flipped = df
+            .mul_scalar(-1.0)
+            .expect("DataFrame::mul_scalar(-1.0) must succeed for numeric inputs");
+        let flipped_cummin = flipped
+            .cummin()
+            .expect("DataFrame::cummin() must succeed after sign flipping");
+        let expected = cummax
+            .mul_scalar(-1.0)
+            .expect("cummax dataframe must support sign flipping");
+        prop_assert!(
+            flipped_cummin.equals(&expected),
+            "dataframe cummin(-x) must equal -cummax(x)"
+        );
+    }
+
+    /// Negating a DataFrame before cummax must negate the cummin result.
+    #[test]
+    fn prop_dataframe_cummin_cummax_are_sign_dual(df in arb_numeric_dataframe(8)) {
+        let cummin = df
+            .cummin()
+            .expect("DataFrame::cummin() must succeed for numeric inputs");
+        let flipped = df
+            .mul_scalar(-1.0)
+            .expect("DataFrame::mul_scalar(-1.0) must succeed for numeric inputs");
+        let flipped_cummax = flipped
+            .cummax()
+            .expect("DataFrame::cummax() must succeed after sign flipping");
+        let expected = cummin
+            .mul_scalar(-1.0)
+            .expect("cummin dataframe must support sign flipping");
+        prop_assert!(
+            flipped_cummax.equals(&expected),
+            "dataframe cummax(-x) must equal -cummin(x)"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Property: Sampling metamorphic invariants (frankenpandas-ags)
 // ---------------------------------------------------------------------------
 
