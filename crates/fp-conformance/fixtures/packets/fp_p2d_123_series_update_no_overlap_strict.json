@@ -1,0 +1,43 @@
+{
+  "packet_id": "FP-P2D-123",
+  "case_id": "series_update_no_overlap_strict",
+  "mode": "strict",
+  "operation": "series_update",
+  "left": {
+    "name": "x",
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 }
+    ],
+    "values": [
+      { "kind": "int64", "value": 10 },
+      { "kind": "int64", "value": 20 },
+      { "kind": "int64", "value": 30 }
+    ]
+  },
+  "right": {
+    "name": "y",
+    "index": [
+      { "kind": "int64", "value": 5 },
+      { "kind": "int64", "value": 6 }
+    ],
+    "values": [
+      { "kind": "int64", "value": 50 },
+      { "kind": "int64", "value": 60 }
+    ]
+  },
+  "expected_series": {
+    "name": "x",
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 }
+    ],
+    "values": [
+      { "kind": "int64", "value": 10 },
+      { "kind": "int64", "value": 20 },
+      { "kind": "int64", "value": 30 }
+    ]
+  }
+}
