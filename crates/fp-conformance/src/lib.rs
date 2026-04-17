@@ -308,6 +308,8 @@ pub enum FixtureOperation {
     SeriesMode,
     #[serde(rename = "series_rank", alias = "series_rank_default")]
     SeriesRank,
+    #[serde(rename = "series_describe", alias = "series_describe_default")]
+    SeriesDescribe,
     #[serde(rename = "series_diff", alias = "series_diff_default")]
     SeriesDiff,
     #[serde(rename = "series_shift", alias = "series_shift_default")]
@@ -554,6 +556,7 @@ impl FixtureOperation {
             Self::SeriesCount => "series_count",
             Self::SeriesMode => "series_mode",
             Self::SeriesRank => "series_rank",
+            Self::SeriesDescribe => "series_describe",
             Self::SeriesXs => "series_xs",
             Self::SeriesLoc => "series_loc",
             Self::SeriesIloc => "series_iloc",
@@ -1174,6 +1177,7 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::SeriesPctChange
         | FixtureOperation::SeriesMode
         | FixtureOperation::SeriesRank
+        | FixtureOperation::SeriesDescribe
         | FixtureOperation::SeriesXs
         | FixtureOperation::SeriesLoc
         | FixtureOperation::SeriesIloc
@@ -5897,6 +5901,33 @@ fn run_fixture_operation(
                 }
             }
         }
+        FixtureOperation::SeriesDescribe => {
+            let left = require_left_series(fixture)?;
+            let series = build_series(left)?;
+            let actual = series.describe().map_err(|err| err.to_string());
+            match expected {
+                ResolvedExpected::Series(series) => compare_series_expected(&actual?, &series),
+                ResolvedExpected::ErrorContains(substr) => match actual {
+                    Err(message) if message.contains(&substr) => Ok(()),
+                    Err(message) => Err(format!(
+                        "expected series_describe error containing '{substr}', got '{message}'"
+                    )),
+                    Ok(_) => Err(format!(
+                        "expected series_describe to fail with error containing '{substr}'"
+                    )),
+                },
+                ResolvedExpected::ErrorAny => {
+                    if actual.is_err() {
+                        Ok(())
+                    } else {
+                        Err("expected series_describe to fail but operation succeeded".to_owned())
+                    }
+                }
+                _ => {
+                    Err("expected_series or expected_error is required for series_describe".to_owned())
+                }
+            }
+        }
         FixtureOperation::SeriesIsNa => {
             let left = require_left_series(fixture)?;
             let series = build_series(left)?;
@@ -7702,6 +7733,7 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::SeriesPctChange
         | FixtureOperation::SeriesMode
         | FixtureOperation::SeriesRank
+        | FixtureOperation::SeriesDescribe
         | FixtureOperation::SeriesXs
         | FixtureOperation::SeriesIsNa
         | FixtureOperation::SeriesNotNa
@@ -8072,6 +8104,7 @@ fn capture_live_oracle_expected(
         | FixtureOperation::SeriesPctChange
         | FixtureOperation::SeriesMode
         | FixtureOperation::SeriesRank
+        | FixtureOperation::SeriesDescribe
         | FixtureOperation::SeriesXs
         | FixtureOperation::SeriesIsNa
         | FixtureOperation::SeriesNotNa
@@ -11357,6 +11390,41 @@ fn execute_and_compare_differential(
                     )],
                 }),
                 _ => Err("expected_series or expected_error required for series_rank".to_owned()),
+            }
+        }
+        FixtureOperation::SeriesDescribe => {
+            let left = require_left_series(fixture)?;
+            let series = build_series(left)?;
+            let actual = series.describe().map_err(|err| err.to_string());
+            match expected {
+                ResolvedExpected::Series(s) => Ok(diff_series(&actual?, &s)),
+                ResolvedExpected::ErrorContains(substr) => Ok(match actual {
+                    Err(message) if message.contains(&substr) => Vec::new(),
+                    Err(message) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_describe.error",
+                        format!(
+                            "expected series_describe error containing '{substr}', got '{message}'"
+                        ),
+                    )],
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_describe.error",
+                        "expected series_describe to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                ResolvedExpected::ErrorAny => Ok(match actual {
+                    Err(_) => Vec::new(),
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_describe.error",
+                        "expected series_describe to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                _ => Err("expected_series or expected_error required for series_describe".to_owned()),
             }
         }
         FixtureOperation::SeriesIsNa => {
@@ -16931,6 +16999,19 @@ mod tests {
         assert!(
             report.fixture_count >= 3,
             "expected FP-P2D-116 series_rank fixtures"
+        );
+        assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
+    fn packet_filter_runs_series_describe_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2D-117", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-117"));
+        assert!(
+            report.fixture_count >= 3,
+            "expected FP-P2D-117 series_describe fixtures"
         );
         assert!(report.is_green(), "expected report green: {report:?}");
     }
