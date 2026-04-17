@@ -1,0 +1,29 @@
+{
+  "packet_id": "FP-P2D-094",
+  "case_id": "dataframe_asof_string_index_hardened",
+  "mode": "hardened",
+  "operation": "dataframe_asof",
+  "asof_label": { "kind": "utf8", "value": "2024-01-15" },
+  "frame": {
+    "index": [
+      { "kind": "utf8", "value": "2024-01-10" },
+      { "kind": "utf8", "value": "2024-01-15" },
+      { "kind": "utf8", "value": "2024-01-20" }
+    ],
+    "columns": {
+      "price": [
+        { "kind": "float64", "value": 100.0 },
+        { "kind": "float64", "value": 105.0 },
+        { "kind": "float64", "value": 110.0 }
+      ]
+    }
+  },
+  "expected_series": {
+    "index": [
+      { "kind": "utf8", "value": "price" }
+    ],
+    "values": [
+      { "kind": "float64", "value": 105.0 }
+    ]
+  }
+}
