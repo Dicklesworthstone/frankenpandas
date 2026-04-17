@@ -1,0 +1,38 @@
+{
+  "packet_id": "FP-P2D-085",
+  "case_id": "series_rpartition_df_not_found_strict",
+  "mode": "strict",
+  "operation": "series_rpartition_df",
+  "string_sep": "@",
+  "left": {
+    "name": "strings",
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 }
+    ],
+    "values": [
+      { "kind": "utf8", "value": "hello" },
+      { "kind": "utf8", "value": "world" }
+    ]
+  },
+  "expected_frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 }
+    ],
+    "columns": {
+      "0": [
+        { "kind": "utf8", "value": "" },
+        { "kind": "utf8", "value": "" }
+      ],
+      "1": [
+        { "kind": "utf8", "value": "" },
+        { "kind": "utf8", "value": "" }
+      ],
+      "2": [
+        { "kind": "utf8", "value": "hello" },
+        { "kind": "utf8", "value": "world" }
+      ]
+    }
+  }
+}
