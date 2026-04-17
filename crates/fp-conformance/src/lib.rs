@@ -312,6 +312,8 @@ pub enum FixtureOperation {
     SeriesDescribe,
     #[serde(rename = "series_duplicated", alias = "series_duplicated_default")]
     SeriesDuplicated,
+    #[serde(rename = "series_drop_duplicates", alias = "series_drop_duplicates_default")]
+    SeriesDropDuplicates,
     #[serde(rename = "series_diff", alias = "series_diff_default")]
     SeriesDiff,
     #[serde(rename = "series_shift", alias = "series_shift_default")]
@@ -560,6 +562,7 @@ impl FixtureOperation {
             Self::SeriesRank => "series_rank",
             Self::SeriesDescribe => "series_describe",
             Self::SeriesDuplicated => "series_duplicated",
+            Self::SeriesDropDuplicates => "series_drop_duplicates",
             Self::SeriesXs => "series_xs",
             Self::SeriesLoc => "series_loc",
             Self::SeriesIloc => "series_iloc",
@@ -1182,6 +1185,7 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::SeriesRank
         | FixtureOperation::SeriesDescribe
         | FixtureOperation::SeriesDuplicated
+        | FixtureOperation::SeriesDropDuplicates
         | FixtureOperation::SeriesXs
         | FixtureOperation::SeriesLoc
         | FixtureOperation::SeriesIloc
@@ -5961,6 +5965,35 @@ fn run_fixture_operation(
                 ),
             }
         }
+        FixtureOperation::SeriesDropDuplicates => {
+            let left = require_left_series(fixture)?;
+            let series = build_series(left)?;
+            let keep = resolve_duplicate_keep(fixture)?;
+            let actual = series.drop_duplicates_keep(keep).map_err(|err| err.to_string());
+            match expected {
+                ResolvedExpected::Series(series) => compare_series_expected(&actual?, &series),
+                ResolvedExpected::ErrorContains(substr) => match actual {
+                    Err(message) if message.contains(&substr) => Ok(()),
+                    Err(message) => Err(format!(
+                        "expected series_drop_duplicates error containing '{substr}', got '{message}'"
+                    )),
+                    Ok(_) => Err(format!(
+                        "expected series_drop_duplicates to fail with error containing '{substr}'"
+                    )),
+                },
+                ResolvedExpected::ErrorAny => {
+                    if actual.is_err() {
+                        Ok(())
+                    } else {
+                        Err("expected series_drop_duplicates to fail but operation succeeded".to_owned())
+                    }
+                }
+                _ => {
+                    Err("expected_series or expected_error is required for series_drop_duplicates"
+                        .to_owned())
+                }
+            }
+        }
         FixtureOperation::SeriesIsNa => {
             let left = require_left_series(fixture)?;
             let series = build_series(left)?;
@@ -7768,6 +7801,7 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::SeriesRank
         | FixtureOperation::SeriesDescribe
         | FixtureOperation::SeriesDuplicated
+        | FixtureOperation::SeriesDropDuplicates
         | FixtureOperation::SeriesXs
         | FixtureOperation::SeriesIsNa
         | FixtureOperation::SeriesNotNa
@@ -8140,6 +8174,7 @@ fn capture_live_oracle_expected(
         | FixtureOperation::SeriesRank
         | FixtureOperation::SeriesDescribe
         | FixtureOperation::SeriesDuplicated
+        | FixtureOperation::SeriesDropDuplicates
         | FixtureOperation::SeriesXs
         | FixtureOperation::SeriesIsNa
         | FixtureOperation::SeriesNotNa
@@ -11500,6 +11535,42 @@ fn execute_and_compare_differential(
                 _ => Err(
                     "expected_series or expected_error required for series_duplicated".to_owned(),
                 ),
+            }
+        }
+        FixtureOperation::SeriesDropDuplicates => {
+            let left = require_left_series(fixture)?;
+            let series = build_series(left)?;
+            let keep = resolve_duplicate_keep(fixture)?;
+            let actual = series.drop_duplicates_keep(keep).map_err(|err| err.to_string());
+            match expected {
+                ResolvedExpected::Series(s) => Ok(diff_series(&actual?, &s)),
+                ResolvedExpected::ErrorContains(substr) => Ok(match actual {
+                    Err(message) if message.contains(&substr) => Vec::new(),
+                    Err(message) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_drop_duplicates.error",
+                        format!(
+                            "expected series_drop_duplicates error containing '{substr}', got '{message}'"
+                        ),
+                    )],
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_drop_duplicates.error",
+                        "expected series_drop_duplicates to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                ResolvedExpected::ErrorAny => Ok(match actual {
+                    Err(_) => Vec::new(),
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_drop_duplicates.error",
+                        "expected series_drop_duplicates to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                _ => Err("expected_series or expected_error required for series_drop_duplicates".to_owned()),
             }
         }
         FixtureOperation::SeriesIsNa => {
@@ -17100,6 +17171,19 @@ mod tests {
         assert!(
             report.fixture_count >= 3,
             "expected FP-P2D-118 series_duplicated fixtures"
+        );
+        assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
+    fn packet_filter_runs_series_drop_duplicates_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2D-119", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-119"));
+        assert!(
+            report.fixture_count >= 3,
+            "expected FP-P2D-119 series_drop_duplicates fixtures"
         );
         assert!(report.is_green(), "expected report green: {report:?}");
     }
