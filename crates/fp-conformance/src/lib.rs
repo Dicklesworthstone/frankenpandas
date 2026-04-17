@@ -22,8 +22,9 @@ use fp_index::{
 };
 use fp_io::{
     ExcelReadOptions, IoError as FpIoError, JsonOrient, read_csv_str, read_excel_bytes,
-    read_feather_bytes, read_json_str, read_jsonl_str, write_csv_string, write_excel_bytes,
-    write_feather_bytes, write_json_string, write_jsonl_string,
+    read_feather_bytes, read_ipc_stream_bytes, read_json_str, read_jsonl_str, write_csv_string,
+    write_excel_bytes, write_feather_bytes, write_ipc_stream_bytes, write_json_string,
+    write_jsonl_string,
 };
 use fp_join::{
     JoinExecutionOptions, JoinType, JoinedSeries, MergeExecutionOptions, MergeValidateMode,
@@ -251,6 +252,8 @@ pub enum FixtureOperation {
     SeriesConvertDtypes,
     #[serde(rename = "series_astype", alias = "series_astype_default")]
     SeriesAstype,
+    #[serde(rename = "series_clip", alias = "series_clip_default")]
+    SeriesClip,
     #[serde(rename = "series_cut", alias = "series_cut_default")]
     SeriesCut,
     #[serde(rename = "series_qcut", alias = "series_qcut_default")]
@@ -493,6 +496,7 @@ impl FixtureOperation {
             Self::SeriesToNumeric => "series_to_numeric",
             Self::SeriesConvertDtypes => "series_convert_dtypes",
             Self::SeriesAstype => "series_astype",
+            Self::SeriesClip => "series_clip",
             Self::SeriesCut => "series_cut",
             Self::SeriesQcut => "series_qcut",
             Self::SeriesValueCounts => "series_value_counts",
@@ -737,6 +741,10 @@ pub struct PacketFixture {
     pub datetime_utc: Option<bool>,
     #[serde(default)]
     pub fill_value: Option<Scalar>,
+    #[serde(default)]
+    pub clip_lower: Option<f64>,
+    #[serde(default)]
+    pub clip_upper: Option<f64>,
     #[serde(default)]
     pub head_n: Option<i64>,
     #[serde(default)]
@@ -1066,6 +1074,7 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::SeriesToNumeric
         | FixtureOperation::SeriesConvertDtypes
         | FixtureOperation::SeriesAstype
+        | FixtureOperation::SeriesClip
         | FixtureOperation::SeriesCut
         | FixtureOperation::SeriesQcut
         | FixtureOperation::SeriesIsNa
@@ -3643,6 +3652,17 @@ fn assert_feather_roundtrip(frame: &DataFrame) -> Result<(), FpIoError> {
     Ok(())
 }
 
+fn assert_ipc_stream_roundtrip(frame: &DataFrame) -> Result<(), FpIoError> {
+    let encoded = write_ipc_stream_bytes(frame)?;
+    let reparsed = read_ipc_stream_bytes(&encoded)?;
+    if !frame.equals(&reparsed) {
+        return Err(FpIoError::Io(std::io::Error::other(
+            "ipc stream round-trip drifted after parse/write/reparse",
+        )));
+    }
+    Ok(())
+}
+
 fn fuzz_dtype_from_byte(byte: u8) -> DType {
     match byte % 5 {
         0 => DType::Null,
@@ -3849,6 +3869,28 @@ pub fn fuzz_feather_io_bytes(input: &[u8]) -> Result<(), FpIoError> {
     } else {
         let frame = fuzz_feather_frame_from_bytes(payload)?;
         assert_feather_roundtrip(&frame)
+    }
+}
+
+/// Structure-aware fuzz entrypoint for the `fp-io` Arrow IPC stream reader.
+///
+/// Inputs use the same dual-mode envelope as `fuzz_feather_io_bytes()`. Raw
+/// mode (`tag % 2 == 0`) feeds the remaining bytes directly into
+/// `read_ipc_stream_bytes()`, where parser errors are acceptable but
+/// successful parses must round-trip. Synth mode projects bytes into a tiny
+/// typed `DataFrame`, serializes it with `write_ipc_stream_bytes()`, then
+/// checks the reader against that valid payload.
+pub fn fuzz_ipc_stream_io_bytes(input: &[u8]) -> Result<(), FpIoError> {
+    let Some((&mode, payload)) = input.split_first() else {
+        return Ok(());
+    };
+
+    if mode % 2 == 0 {
+        let frame = read_ipc_stream_bytes(payload)?;
+        assert_ipc_stream_roundtrip(&frame)
+    } else {
+        let frame = fuzz_feather_frame_from_bytes(payload)?;
+        assert_ipc_stream_roundtrip(&frame)
     }
 }
 
@@ -6123,6 +6165,7 @@ fn run_fixture_operation(
         FixtureOperation::SeriesToNumeric
         | FixtureOperation::SeriesConvertDtypes
         | FixtureOperation::SeriesAstype
+        | FixtureOperation::SeriesClip
         | FixtureOperation::SeriesCut
         | FixtureOperation::SeriesQcut => {
             let actual = execute_series_module_utility_fixture_operation(fixture);
@@ -7485,6 +7528,7 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::SeriesToNumeric
         | FixtureOperation::SeriesConvertDtypes
         | FixtureOperation::SeriesAstype
+        | FixtureOperation::SeriesClip
         | FixtureOperation::SeriesCut
         | FixtureOperation::SeriesQcut
         | FixtureOperation::SeriesAtTime
@@ -7839,6 +7883,7 @@ fn capture_live_oracle_expected(
         | FixtureOperation::SeriesToNumeric
         | FixtureOperation::SeriesConvertDtypes
         | FixtureOperation::SeriesAstype
+        | FixtureOperation::SeriesClip
         | FixtureOperation::SeriesCut
         | FixtureOperation::SeriesQcut
         | FixtureOperation::SeriesAtTime
@@ -9351,6 +9396,9 @@ fn execute_series_module_utility_fixture_operation(
             let target_dtype = parse_constructor_dtype_spec(dtype_spec)?;
             series.astype(target_dtype).map_err(|err| err.to_string())
         }
+        FixtureOperation::SeriesClip => series
+            .clip(fixture.clip_lower, fixture.clip_upper)
+            .map_err(|err| err.to_string()),
         FixtureOperation::SeriesCut => {
             cut(&series, require_cut_bins(fixture)?).map_err(|err| err.to_string())
         }
@@ -11494,6 +11542,7 @@ fn execute_and_compare_differential(
         FixtureOperation::SeriesToNumeric
         | FixtureOperation::SeriesConvertDtypes
         | FixtureOperation::SeriesAstype
+        | FixtureOperation::SeriesClip
         | FixtureOperation::SeriesCut
         | FixtureOperation::SeriesQcut => {
             let actual = execute_series_module_utility_fixture_operation(fixture);
@@ -14620,9 +14669,10 @@ mod tests {
         enforce_packet_gates, evaluate_ci_gate, evaluate_parity_gate, fuzz_column_arith_bytes,
         fuzz_common_dtype_bytes, fuzz_csv_parse_bytes, fuzz_excel_io_bytes, fuzz_feather_io_bytes,
         fuzz_fixture_parse_bytes, fuzz_groupby_sum_bytes, fuzz_index_align_bytes,
-        fuzz_join_series_bytes, fuzz_json_io_bytes, fuzz_scalar_cast_bytes, fuzz_series_add_bytes,
-        generate_raptorq_sidecar, run_ci_pipeline, run_differential_by_id, run_differential_suite,
-        run_e2e_suite, run_fault_injection_validation_by_id, run_packet_by_id, run_packet_suite,
+        fuzz_ipc_stream_io_bytes, fuzz_join_series_bytes, fuzz_json_io_bytes,
+        fuzz_scalar_cast_bytes, fuzz_series_add_bytes, generate_raptorq_sidecar, run_ci_pipeline,
+        run_differential_by_id, run_differential_suite, run_e2e_suite,
+        run_fault_injection_validation_by_id, run_packet_by_id, run_packet_suite,
         run_packet_suite_with_options, run_packets_grouped, run_raptorq_decode_recovery_drill,
         run_smoke, verify_all_sidecars_ci, verify_packet_sidecar_integrity,
         write_compat_closure_e2e_scenario_report, write_compat_closure_final_evidence_pack,
@@ -14877,6 +14927,57 @@ mod tests {
         let seed =
             include_bytes!("../fixtures/adversarial/fuzz_corpus/feather_io/invalid_text_seed.bin");
         let err = fuzz_feather_io_bytes(seed).expect_err("invalid feather bytes should error");
+        assert!(
+            matches!(err, fp_io::IoError::Arrow(_)),
+            "expected Arrow parse error, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn fuzz_ipc_stream_io_bytes_accepts_synthesized_seed_fixture() {
+        let seed = include_bytes!(
+            "../fixtures/adversarial/fuzz_corpus/ipc_stream_io/synthesized_valid_seed.bin"
+        );
+        fuzz_ipc_stream_io_bytes(seed).expect("synthesized IPC stream seed should parse");
+    }
+
+    #[test]
+    fn fuzz_ipc_stream_io_bytes_accepts_runtime_raw_ipc_stream_bytes() {
+        let frame = fp_frame::DataFrame::from_dict(
+            &["ints", "strings"],
+            vec![
+                (
+                    "ints",
+                    vec![
+                        fp_types::Scalar::Int64(4),
+                        fp_types::Scalar::Null(fp_types::NullKind::Null),
+                        fp_types::Scalar::Int64(-2),
+                    ],
+                ),
+                (
+                    "strings",
+                    vec![
+                        fp_types::Scalar::Utf8("alpha".to_owned()),
+                        fp_types::Scalar::Null(fp_types::NullKind::Null),
+                        fp_types::Scalar::Utf8("beta".to_owned()),
+                    ],
+                ),
+            ],
+        )
+        .expect("frame");
+        let mut seed = vec![0];
+        seed.extend(fp_io::write_ipc_stream_bytes(&frame).expect("write IPC stream bytes"));
+
+        fuzz_ipc_stream_io_bytes(&seed).expect("raw IPC stream payload should parse");
+    }
+
+    #[test]
+    fn fuzz_ipc_stream_io_bytes_reports_invalid_raw_bytes() {
+        let seed = include_bytes!(
+            "../fixtures/adversarial/fuzz_corpus/ipc_stream_io/invalid_text_seed.bin"
+        );
+        let err =
+            fuzz_ipc_stream_io_bytes(seed).expect_err("invalid IPC stream bytes should error");
         assert!(
             matches!(err, fp_io::IoError::Arrow(_)),
             "expected Arrow parse error, got {err:?}"
