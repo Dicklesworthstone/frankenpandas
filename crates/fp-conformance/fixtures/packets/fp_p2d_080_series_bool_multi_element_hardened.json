@@ -1,0 +1,18 @@
+{
+  "packet_id": "FP-P2D-080",
+  "case_id": "series_bool_multi_element_hardened",
+  "mode": "hardened",
+  "operation": "series_bool",
+  "left": {
+    "name": "vals",
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 }
+    ],
+    "values": [
+      { "kind": "bool", "value": true },
+      { "kind": "bool", "value": false }
+    ]
+  },
+  "expected_error_contains": "exactly one element"
+}
