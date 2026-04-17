@@ -243,7 +243,10 @@ pub enum FixtureOperation {
     SeriesRepeat,
     #[serde(rename = "series_to_numeric", alias = "series_to_numeric_default")]
     SeriesToNumeric,
-    #[serde(rename = "series_convert_dtypes", alias = "series_convert_dtypes_default")]
+    #[serde(
+        rename = "series_convert_dtypes",
+        alias = "series_convert_dtypes_default"
+    )]
     SeriesConvertDtypes,
     #[serde(rename = "series_astype", alias = "series_astype_default")]
     SeriesAstype,
@@ -3638,6 +3641,26 @@ fn fuzz_dtype_from_byte(byte: u8) -> DType {
     }
 }
 
+fn fuzz_index_label_from_byte(byte: u8) -> IndexLabel {
+    match byte {
+        b'0'..=b'9' => IndexLabel::Int64(i64::from((byte - b'0') % 4)),
+        b'a'..=b'z' => IndexLabel::Utf8(char::from(b'a' + ((byte - b'a') % 4)).to_string()),
+        b'A'..=b'Z' => IndexLabel::Utf8(char::from(b'a' + ((byte - b'A') % 4)).to_string()),
+        _ if byte.is_multiple_of(2) => IndexLabel::Int64(i64::from(byte % 4)),
+        _ => IndexLabel::Utf8(char::from(b'a' + (byte % 4)).to_string()),
+    }
+}
+
+fn fuzz_index_from_bytes(bytes: &[u8]) -> Index {
+    Index::new(
+        bytes
+            .iter()
+            .take(32)
+            .map(|byte| fuzz_index_label_from_byte(*byte))
+            .collect(),
+    )
+}
+
 fn assert_json_roundtrip(frame: &DataFrame, orient: JsonOrient) -> Result<(), FpIoError> {
     let encoded = write_json_string(frame, orient)?;
     let reparsed = read_json_str(&encoded, orient)?;
@@ -6134,6 +6157,184 @@ fn run_fixture_operation(
             compare_series_expected(&actual, &expected)
         }
     }
+}
+
+/// Structure-aware fuzz entrypoint for `fp-index` outer alignment semantics.
+///
+/// Input is split at the first `|` byte into left/right index payloads. Each
+/// payload byte is projected onto a small `IndexLabel` domain so fuzzing
+/// naturally exercises duplicates, overlap, and mixed Int64/Utf8 labels.
+pub fn fuzz_index_align_bytes(input: &[u8]) -> Result<(), String> {
+    let Some(split_at) = input.iter().position(|byte| *byte == b'|') else {
+        return Ok(());
+    };
+
+    let left = fuzz_index_from_bytes(&input[..split_at]);
+    let right = fuzz_index_from_bytes(&input[split_at + 1..]);
+    let plan = align_union(&left, &right);
+    validate_alignment_plan(&plan).map_err(|err| err.to_string())?;
+
+    let mut output_counts = BTreeMap::<IndexLabel, usize>::new();
+    let mut left_position_counts = BTreeMap::<IndexLabel, BTreeMap<usize, usize>>::new();
+    let mut right_position_counts = BTreeMap::<IndexLabel, BTreeMap<usize, usize>>::new();
+
+    for row in 0..plan.union_index.len() {
+        let label = &plan.union_index.labels()[row];
+        *output_counts.entry(label.clone()).or_default() += 1;
+
+        match plan.left_positions[row] {
+            Some(left_pos) => {
+                let actual = left.labels().get(left_pos).ok_or_else(|| {
+                    format!("left position out of bounds: row={row} pos={left_pos}")
+                })?;
+                if actual != label {
+                    return Err(format!(
+                        "left alignment label mismatch: row={row} pos={left_pos} \
+                         output={label:?} actual={actual:?}"
+                    ));
+                }
+                *left_position_counts
+                    .entry(label.clone())
+                    .or_default()
+                    .entry(left_pos)
+                    .or_default() += 1;
+            }
+            None if left.labels().iter().any(|candidate| candidate == label) => {
+                return Err(format!(
+                    "left position missing despite label presence: row={row} label={label:?}"
+                ));
+            }
+            None => {}
+        }
+
+        match plan.right_positions[row] {
+            Some(right_pos) => {
+                let actual = right.labels().get(right_pos).ok_or_else(|| {
+                    format!("right position out of bounds: row={row} pos={right_pos}")
+                })?;
+                if actual != label {
+                    return Err(format!(
+                        "right alignment label mismatch: row={row} pos={right_pos} \
+                         output={label:?} actual={actual:?}"
+                    ));
+                }
+                *right_position_counts
+                    .entry(label.clone())
+                    .or_default()
+                    .entry(right_pos)
+                    .or_default() += 1;
+            }
+            None if right.labels().iter().any(|candidate| candidate == label) => {
+                return Err(format!(
+                    "right position missing despite label presence: row={row} label={label:?}"
+                ));
+            }
+            None => {}
+        }
+    }
+
+    let mut left_counts = BTreeMap::<IndexLabel, usize>::new();
+    let mut right_counts = BTreeMap::<IndexLabel, usize>::new();
+    let mut left_expected_position_counts = BTreeMap::<IndexLabel, BTreeMap<usize, usize>>::new();
+    let mut right_expected_position_counts = BTreeMap::<IndexLabel, BTreeMap<usize, usize>>::new();
+
+    for (position, label) in left.labels().iter().enumerate() {
+        *left_counts.entry(label.clone()).or_default() += 1;
+        left_expected_position_counts
+            .entry(label.clone())
+            .or_default()
+            .insert(position, 0);
+    }
+
+    for (position, label) in right.labels().iter().enumerate() {
+        *right_counts.entry(label.clone()).or_default() += 1;
+        right_expected_position_counts
+            .entry(label.clone())
+            .or_default()
+            .insert(position, 0);
+    }
+
+    let labels = left_counts
+        .keys()
+        .chain(right_counts.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+
+    for label in labels {
+        let left_count = *left_counts.get(&label).unwrap_or(&0);
+        let right_count = *right_counts.get(&label).unwrap_or(&0);
+        let expected_output_count = match (left_count, right_count) {
+            (0, count) => count,
+            (count, 0) => count,
+            (left_count, right_count) => left_count * right_count,
+        };
+        let actual_output_count = *output_counts.get(&label).unwrap_or(&0);
+        if actual_output_count != expected_output_count {
+            return Err(format!(
+                "alignment multiplicity mismatch for {label:?}: expected={expected_output_count} \
+                 actual={actual_output_count} left_count={left_count} right_count={right_count}"
+            ));
+        }
+
+        if left_count > 0 && right_count > 0 {
+            if let Some(expected_counts) = left_expected_position_counts.get_mut(&label) {
+                for count in expected_counts.values_mut() {
+                    *count = right_count;
+                }
+            }
+            if let Some(expected_counts) = right_expected_position_counts.get_mut(&label) {
+                for count in expected_counts.values_mut() {
+                    *count = left_count;
+                }
+            }
+        } else if right_count == 0 {
+            if let Some(expected_counts) = left_expected_position_counts.get_mut(&label) {
+                for count in expected_counts.values_mut() {
+                    *count = 1;
+                }
+            }
+            right_expected_position_counts.remove(&label);
+        } else {
+            left_expected_position_counts.remove(&label);
+            if let Some(expected_counts) = right_expected_position_counts.get_mut(&label) {
+                for count in expected_counts.values_mut() {
+                    *count = 1;
+                }
+            }
+        }
+
+        let actual_left = left_position_counts
+            .get(&label)
+            .cloned()
+            .unwrap_or_default();
+        let expected_left = left_expected_position_counts
+            .get(&label)
+            .cloned()
+            .unwrap_or_default();
+        if actual_left != expected_left {
+            return Err(format!(
+                "left position multiplicity mismatch for {label:?}: \
+                 expected={expected_left:?} actual={actual_left:?}"
+            ));
+        }
+
+        let actual_right = right_position_counts
+            .get(&label)
+            .cloned()
+            .unwrap_or_default();
+        let expected_right = right_expected_position_counts
+            .get(&label)
+            .cloned()
+            .unwrap_or_default();
+        if actual_right != expected_right {
+            return Err(format!(
+                "right position multiplicity mismatch for {label:?}: \
+                 expected={expected_right:?} actual={actual_right:?}"
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 fn resolve_expected(
@@ -13415,9 +13616,10 @@ mod tests {
         build_compat_closure_e2e_scenario_report, build_compat_closure_final_evidence_pack,
         build_differential_report, build_differential_validation_log, build_failure_forensics,
         enforce_packet_gates, evaluate_ci_gate, evaluate_parity_gate, fuzz_common_dtype_bytes,
-        fuzz_csv_parse_bytes, fuzz_excel_io_bytes, fuzz_fixture_parse_bytes, fuzz_json_io_bytes,
-        generate_raptorq_sidecar, run_ci_pipeline, run_differential_by_id, run_differential_suite,
-        run_e2e_suite, run_fault_injection_validation_by_id, run_packet_by_id, run_packet_suite,
+        fuzz_csv_parse_bytes, fuzz_excel_io_bytes, fuzz_fixture_parse_bytes,
+        fuzz_index_align_bytes, fuzz_json_io_bytes, generate_raptorq_sidecar, run_ci_pipeline,
+        run_differential_by_id, run_differential_suite, run_e2e_suite,
+        run_fault_injection_validation_by_id, run_packet_by_id, run_packet_suite,
         run_packet_suite_with_options, run_packets_grouped, run_raptorq_decode_recovery_drill,
         run_smoke, verify_all_sidecars_ci, verify_packet_sidecar_integrity,
         write_compat_closure_e2e_scenario_report, write_compat_closure_final_evidence_pack,
@@ -13651,6 +13853,31 @@ mod tests {
             "../fixtures/adversarial/fuzz_corpus/common_dtype/incompatible_utf8_bool_seed.bin"
         );
         fuzz_common_dtype_bytes(seed).expect("incompatible seed should still preserve symmetry");
+    }
+
+    #[test]
+    fn fuzz_index_align_bytes_accepts_unique_overlap_seed() {
+        let seed = include_bytes!(
+            "../fixtures/adversarial/fuzz_corpus/index_align/unique_overlap_seed.bin"
+        );
+        fuzz_index_align_bytes(seed).expect("unique-overlap seed should satisfy invariants");
+    }
+
+    #[test]
+    fn fuzz_index_align_bytes_accepts_duplicate_cross_product_seed() {
+        let seed = include_bytes!(
+            "../fixtures/adversarial/fuzz_corpus/index_align/duplicate_cross_product_seed.bin"
+        );
+        fuzz_index_align_bytes(seed)
+            .expect("duplicate seed should satisfy multiplicity invariants");
+    }
+
+    #[test]
+    fn fuzz_index_align_bytes_accepts_utf8_right_only_seed() {
+        let seed = include_bytes!(
+            "../fixtures/adversarial/fuzz_corpus/index_align/utf8_right_only_seed.bin"
+        );
+        fuzz_index_align_bytes(seed).expect("utf8 right-only seed should satisfy invariants");
     }
 
     #[test]

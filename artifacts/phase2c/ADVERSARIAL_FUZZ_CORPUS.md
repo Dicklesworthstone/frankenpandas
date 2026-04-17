@@ -136,6 +136,9 @@ Implemented entrypoint:
 - `fuzz_common_dtype` target: `fuzz/fuzz_targets/fuzz_common_dtype.rs`
 - seed corpus: `crates/fp-conformance/fixtures/adversarial/fuzz_corpus/common_dtype/`
 - projects raw bytes onto `DType × DType` pairs and checks symmetry plus promotion idempotence for `common_dtype()`
+- `fuzz_index_align` target: `fuzz/fuzz_targets/fuzz_index_align.rs`
+- seed corpus: `crates/fp-conformance/fixtures/adversarial/fuzz_corpus/index_align/`
+- splits inputs at `|`, projects payload bytes onto small mixed `IndexLabel` domains, and checks outer-alignment multiplicity plus position invariants for `align_union()`
 
 ### 2.2 Structured Fuzz Input via `Arbitrary`
 

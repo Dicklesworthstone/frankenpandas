@@ -46,5 +46,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_index_align"
+path = "fuzz_targets/fuzz_index_align.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]
