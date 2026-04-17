@@ -111,6 +111,13 @@ fn arb_unique_numeric_series(name: &'static str, len: usize) -> impl Strategy<Va
     )
 }
 
+fn arb_variable_unique_numeric_series(
+    name: &'static str,
+    max_len: usize,
+) -> impl Strategy<Value = Series> {
+    (1..=max_len).prop_flat_map(move |len| arb_unique_numeric_series(name, len))
+}
+
 /// Generate a pair of numeric series with independently chosen lengths (1..max_len).
 fn arb_series_pair(max_len: usize) -> impl Strategy<Value = (Series, Series)> {
     (1..=max_len, 1..=max_len).prop_flat_map(|(len_a, len_b)| {
@@ -286,6 +293,95 @@ fn reverse_dataframe_rows(df: &DataFrame) -> DataFrame {
         column_order,
     )
     .expect("reversed dataframe must construct")
+}
+
+fn fresh_missing_index_label(existing: &[IndexLabel], salt: usize) -> IndexLabel {
+    let mut nonce = salt;
+    loop {
+        let candidate = IndexLabel::Utf8(format!("__missing_{nonce}"));
+        if !existing.contains(&candidate) {
+            return candidate;
+        }
+        nonce += 1;
+    }
+}
+
+fn reindex_intermediate_labels(labels: &[IndexLabel]) -> Vec<IndexLabel> {
+    let missing_a = fresh_missing_index_label(labels, 0);
+    let mut seen = labels.to_vec();
+    seen.push(missing_a.clone());
+    let missing_b = fresh_missing_index_label(&seen, 1);
+
+    let mut intermediate = labels.to_vec();
+    intermediate.push(missing_a);
+    intermediate.push(missing_b);
+    intermediate
+}
+
+fn reindex_target_labels(labels: &[IndexLabel]) -> Vec<IndexLabel> {
+    let intermediate = reindex_intermediate_labels(labels);
+    let missing_a = intermediate[labels.len()].clone();
+    let missing_b = intermediate[labels.len() + 1].clone();
+
+    let mut target = labels.iter().cloned().rev().collect::<Vec<_>>();
+    target.push(missing_b);
+    target.push(missing_a);
+    if let Some(first) = labels.first() {
+        target.push(first.clone());
+    }
+    target
+}
+
+fn fresh_missing_column_name(existing: &[String], salt: usize) -> String {
+    let mut nonce = salt;
+    loop {
+        let candidate = format!("__missing_col_{nonce}");
+        if !existing.iter().any(|name| name == &candidate) {
+            return candidate;
+        }
+        nonce += 1;
+    }
+}
+
+fn reindex_intermediate_columns(columns: &[String]) -> Vec<String> {
+    let missing_a = fresh_missing_column_name(columns, 0);
+    let mut seen = columns.to_vec();
+    seen.push(missing_a.clone());
+    let missing_b = fresh_missing_column_name(&seen, 1);
+
+    let mut intermediate = columns.to_vec();
+    intermediate.push(missing_a);
+    intermediate.push(missing_b);
+    intermediate
+}
+
+fn reindex_target_columns(columns: &[String]) -> Vec<String> {
+    let intermediate = reindex_intermediate_columns(columns);
+    let missing_a = intermediate[columns.len()].clone();
+    let missing_b = intermediate[columns.len() + 1].clone();
+
+    let mut target = columns.iter().cloned().rev().collect::<Vec<_>>();
+    target.push(missing_b);
+    target.push(missing_a);
+    target
+}
+
+fn reindex_axis1_from_names(df: &DataFrame, columns: &[String]) -> DataFrame {
+    df.reindex_axis(
+        columns
+            .iter()
+            .cloned()
+            .map(IndexLabel::Utf8)
+            .collect::<Vec<_>>(),
+        1,
+    )
+    .expect("DataFrame::reindex_axis(axis=1) must succeed")
+}
+
+fn reindex_columns_from_names(df: &DataFrame, columns: &[String]) -> DataFrame {
+    let refs = columns.iter().map(String::as_str).collect::<Vec<_>>();
+    df.reindex_columns(&refs)
+        .expect("DataFrame::reindex_columns() must succeed")
 }
 
 fn negate_condition_scalar(value: &Scalar) -> Scalar {
@@ -3698,6 +3794,261 @@ proptest! {
         prop_assert!(
             approx_equal_dataframe(&descending, &expected),
             "dataframe sort_index(ascending=false) must equal reversing sort_index(ascending=true) for unique-index inputs"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Property: reindex metamorphic invariants
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(100))]
+
+    /// Reindexing a uniquely indexed Series to its own labels must be identity.
+    #[test]
+    fn prop_series_reindex_self_is_identity(
+        series in arb_variable_unique_numeric_series("reindex", 12),
+    ) {
+        let own_labels = series.index().labels().to_vec();
+        let reindexed = series
+            .reindex(own_labels)
+            .expect("Series::reindex(self.index) must succeed for unique-index inputs");
+        prop_assert!(
+            approx_equal_series(&series, &reindexed),
+            "series reindexing to its own labels must be identity"
+        );
+    }
+
+    /// Series reindex_like must match direct reindexing to the other index.
+    #[test]
+    fn prop_series_reindex_like_matches_direct_reindex(
+        (source, other) in arb_unique_series_pair(12),
+    ) {
+        let via_like = source
+            .reindex_like(&other)
+            .expect("Series::reindex_like() must succeed for unique-index sources");
+        let direct = source
+            .reindex(other.index().labels().to_vec())
+            .expect("Series::reindex() must succeed for unique-index sources");
+        prop_assert!(
+            approx_equal_series(&via_like, &direct),
+            "series reindex_like must equal direct reindex(other.index)"
+        );
+    }
+
+    /// Reindexing and sign-flipping a uniquely indexed Series must commute.
+    #[test]
+    fn prop_series_reindex_commutes_with_sign_flip(
+        series in arb_variable_unique_numeric_series("reindex", 12),
+    ) {
+        let target = reindex_target_labels(series.index().labels());
+        let baseline = series
+            .reindex(target.clone())
+            .expect("Series::reindex() must succeed for unique-index inputs");
+        let flipped_then_reindexed = sign_flip_series(&series)
+            .reindex(target)
+            .expect("Series::reindex() must succeed after sign flipping");
+        let expected = sign_flip_series(&baseline);
+        prop_assert!(
+            approx_equal_series(&flipped_then_reindexed, &expected),
+            "series reindex must commute with sign flipping"
+        );
+    }
+
+    /// Reindexing through a unique intermediate superset must collapse to the direct target reindex.
+    #[test]
+    fn prop_series_reindex_composes_through_unique_intermediate_superset(
+        series in arb_variable_unique_numeric_series("reindex", 12),
+    ) {
+        let intermediate = reindex_intermediate_labels(series.index().labels());
+        let target = reindex_target_labels(series.index().labels());
+        let direct = series
+            .reindex(target.clone())
+            .expect("Series::reindex(target) must succeed for unique-index inputs");
+        let via_intermediate = series
+            .reindex(intermediate)
+            .and_then(|reindexed| reindexed.reindex(target))
+            .expect("Series::reindex() composition must succeed through a unique intermediate");
+        prop_assert!(
+            approx_equal_series(&direct, &via_intermediate),
+            "series reindex through a unique intermediate superset must equal direct reindex"
+        );
+    }
+
+    /// pad is an alias for ffill in Series reindex_with_method.
+    #[test]
+    fn prop_series_reindex_ffill_aliases_pad(
+        series in arb_variable_unique_numeric_series("reindex", 12),
+    ) {
+        let target = reindex_target_labels(series.index().labels());
+        let ffill = series
+            .reindex_with_method(target.clone(), "ffill")
+            .expect("Series::reindex_with_method(ffill) must succeed");
+        let pad = series
+            .reindex_with_method(target, "pad")
+            .expect("Series::reindex_with_method(pad) must succeed");
+        prop_assert!(
+            approx_equal_series(&ffill, &pad),
+            "series reindex_with_method('pad') must equal reindex_with_method('ffill')"
+        );
+    }
+
+    /// backfill is an alias for bfill in Series reindex_with_method.
+    #[test]
+    fn prop_series_reindex_bfill_aliases_backfill(
+        series in arb_variable_unique_numeric_series("reindex", 12),
+    ) {
+        let target = reindex_target_labels(series.index().labels());
+        let bfill = series
+            .reindex_with_method(target.clone(), "bfill")
+            .expect("Series::reindex_with_method(bfill) must succeed");
+        let backfill = series
+            .reindex_with_method(target, "backfill")
+            .expect("Series::reindex_with_method(backfill) must succeed");
+        prop_assert!(
+            approx_equal_series(&bfill, &backfill),
+            "series reindex_with_method('backfill') must equal reindex_with_method('bfill')"
+        );
+    }
+
+    /// Reindexing a uniquely indexed DataFrame to its own labels must be identity.
+    #[test]
+    fn prop_dataframe_reindex_self_is_identity(
+        df in arb_combine_first_dataframe(8),
+    ) {
+        let own_labels = df.index().labels().to_vec();
+        let reindexed = df
+            .reindex(own_labels)
+            .expect("DataFrame::reindex(self.index) must succeed for unique-index inputs");
+        prop_assert!(
+            approx_equal_dataframe(&df, &reindexed),
+            "dataframe reindexing to its own labels must be identity"
+        );
+    }
+
+    /// Reindexing and sign-flipping a uniquely indexed DataFrame must commute.
+    #[test]
+    fn prop_dataframe_reindex_commutes_with_sign_flip(
+        df in arb_combine_first_dataframe(8),
+    ) {
+        let target = reindex_target_labels(df.index().labels());
+        let baseline = df
+            .reindex(target.clone())
+            .expect("DataFrame::reindex() must succeed for unique-index inputs");
+        let flipped_then_reindexed = sign_flip_dataframe(&df)
+            .reindex(target)
+            .expect("DataFrame::reindex() must succeed after sign flipping");
+        let expected = sign_flip_dataframe(&baseline);
+        prop_assert!(
+            approx_equal_dataframe(&flipped_then_reindexed, &expected),
+            "dataframe reindex must commute with sign flipping"
+        );
+    }
+
+    /// Reindexing a DataFrame through a unique intermediate superset must collapse to the direct target reindex.
+    #[test]
+    fn prop_dataframe_reindex_composes_through_unique_intermediate_superset(
+        df in arb_combine_first_dataframe(8),
+    ) {
+        let intermediate = reindex_intermediate_labels(df.index().labels());
+        let target = reindex_target_labels(df.index().labels());
+        let direct = df
+            .reindex(target.clone())
+            .expect("DataFrame::reindex(target) must succeed for unique-index inputs");
+        let via_intermediate = df
+            .reindex(intermediate)
+            .and_then(|reindexed| reindexed.reindex(target))
+            .expect("DataFrame::reindex() composition must succeed through a unique intermediate");
+        prop_assert!(
+            approx_equal_dataframe(&direct, &via_intermediate),
+            "dataframe reindex through a unique intermediate superset must equal direct reindex"
+        );
+    }
+
+    /// pad is an alias for ffill in DataFrame reindex_with_method.
+    #[test]
+    fn prop_dataframe_reindex_ffill_aliases_pad(
+        df in arb_combine_first_dataframe(8),
+    ) {
+        let target = reindex_target_labels(df.index().labels());
+        let ffill = df
+            .reindex_with_method(target.clone(), "ffill")
+            .expect("DataFrame::reindex_with_method(ffill) must succeed");
+        let pad = df
+            .reindex_with_method(target, "pad")
+            .expect("DataFrame::reindex_with_method(pad) must succeed");
+        prop_assert!(
+            approx_equal_dataframe(&ffill, &pad),
+            "dataframe reindex_with_method('pad') must equal reindex_with_method('ffill')"
+        );
+    }
+
+    /// backfill is an alias for bfill in DataFrame reindex_with_method.
+    #[test]
+    fn prop_dataframe_reindex_bfill_aliases_backfill(
+        df in arb_combine_first_dataframe(8),
+    ) {
+        let target = reindex_target_labels(df.index().labels());
+        let bfill = df
+            .reindex_with_method(target.clone(), "bfill")
+            .expect("DataFrame::reindex_with_method(bfill) must succeed");
+        let backfill = df
+            .reindex_with_method(target, "backfill")
+            .expect("DataFrame::reindex_with_method(backfill) must succeed");
+        prop_assert!(
+            approx_equal_dataframe(&bfill, &backfill),
+            "dataframe reindex_with_method('backfill') must equal reindex_with_method('bfill')"
+        );
+    }
+
+    /// DataFrame reindex_axis(axis=1) must match reindex_columns for the same unique target columns.
+    #[test]
+    fn prop_dataframe_reindex_axis1_matches_reindex_columns(
+        df in arb_combine_first_dataframe(8),
+    ) {
+        let own_columns = df.column_names().into_iter().cloned().collect::<Vec<_>>();
+        let target_columns = reindex_target_columns(&own_columns);
+        let via_axis = reindex_axis1_from_names(&df, &target_columns);
+        let via_columns = reindex_columns_from_names(&df, &target_columns);
+        prop_assert!(
+            approx_equal_dataframe(&via_axis, &via_columns),
+            "dataframe reindex_axis(axis=1) must match reindex_columns"
+        );
+    }
+
+    /// Reindexing DataFrame columns and sign-flipping must commute.
+    #[test]
+    fn prop_dataframe_reindex_axis1_commutes_with_sign_flip(
+        df in arb_combine_first_dataframe(8),
+    ) {
+        let own_columns = df.column_names().into_iter().cloned().collect::<Vec<_>>();
+        let target_columns = reindex_target_columns(&own_columns);
+        let baseline = reindex_axis1_from_names(&df, &target_columns);
+        let flipped_then_reindexed = reindex_axis1_from_names(&sign_flip_dataframe(&df), &target_columns);
+        let expected = sign_flip_dataframe(&baseline);
+        prop_assert!(
+            approx_equal_dataframe(&flipped_then_reindexed, &expected),
+            "dataframe column reindex must commute with sign flipping"
+        );
+    }
+
+    /// Reindexing DataFrame columns through a unique intermediate superset must collapse to the direct target reindex.
+    #[test]
+    fn prop_dataframe_reindex_axis1_composes_through_unique_intermediate_superset(
+        df in arb_combine_first_dataframe(8),
+    ) {
+        let own_columns = df.column_names().into_iter().cloned().collect::<Vec<_>>();
+        let intermediate_columns = reindex_intermediate_columns(&own_columns);
+        let target_columns = reindex_target_columns(&own_columns);
+        let direct = reindex_axis1_from_names(&df, &target_columns);
+        let via_intermediate = reindex_axis1_from_names(
+            &reindex_axis1_from_names(&df, &intermediate_columns),
+            &target_columns,
+        );
+        prop_assert!(
+            approx_equal_dataframe(&direct, &via_intermediate),
+            "dataframe column reindex through a unique intermediate superset must equal direct reindex"
         );
     }
 }
