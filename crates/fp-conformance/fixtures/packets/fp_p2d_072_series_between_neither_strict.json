@@ -1,0 +1,42 @@
+{
+  "packet_id": "FP-P2D-072",
+  "case_id": "series_between_neither_strict",
+  "mode": "strict",
+  "operation": "series_between",
+  "between_left": { "kind": "int64", "value": 2 },
+  "between_right": { "kind": "int64", "value": 4 },
+  "between_inclusive": "neither",
+  "left": {
+    "name": "nums",
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 3 },
+      { "kind": "int64", "value": 4 }
+    ],
+    "values": [
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 3 },
+      { "kind": "int64", "value": 4 },
+      { "kind": "int64", "value": 5 }
+    ]
+  },
+  "expected_series": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 3 },
+      { "kind": "int64", "value": 4 }
+    ],
+    "values": [
+      { "kind": "bool", "value": false },
+      { "kind": "bool", "value": false },
+      { "kind": "bool", "value": true },
+      { "kind": "bool", "value": false },
+      { "kind": "bool", "value": false }
+    ]
+  }
+}

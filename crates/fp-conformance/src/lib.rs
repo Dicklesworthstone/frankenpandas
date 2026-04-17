@@ -270,6 +270,8 @@ pub enum FixtureOperation {
     SeriesNlargest,
     #[serde(rename = "series_nsmallest", alias = "series_nsmallest_default")]
     SeriesNsmallest,
+    #[serde(rename = "series_between", alias = "series_between_default")]
+    SeriesBetween,
     #[serde(rename = "series_cut", alias = "series_cut_default")]
     SeriesCut,
     #[serde(rename = "series_qcut", alias = "series_qcut_default")]
@@ -521,6 +523,7 @@ impl FixtureOperation {
             Self::SeriesCummin => "series_cummin",
             Self::SeriesNlargest => "series_nlargest",
             Self::SeriesNsmallest => "series_nsmallest",
+            Self::SeriesBetween => "series_between",
             Self::SeriesCut => "series_cut",
             Self::SeriesQcut => "series_qcut",
             Self::SeriesValueCounts => "series_value_counts",
@@ -773,6 +776,12 @@ pub struct PacketFixture {
     pub round_decimals: Option<i32>,
     #[serde(default)]
     pub nlargest_n: Option<usize>,
+    #[serde(default)]
+    pub between_left: Option<Scalar>,
+    #[serde(default)]
+    pub between_right: Option<Scalar>,
+    #[serde(default)]
+    pub between_inclusive: Option<String>,
     #[serde(default)]
     pub head_n: Option<i64>,
     #[serde(default)]
@@ -1111,6 +1120,7 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::SeriesCummin
         | FixtureOperation::SeriesNlargest
         | FixtureOperation::SeriesNsmallest
+        | FixtureOperation::SeriesBetween
         | FixtureOperation::SeriesCut
         | FixtureOperation::SeriesQcut
         | FixtureOperation::SeriesIsNa
@@ -6243,6 +6253,7 @@ fn run_fixture_operation(
         | FixtureOperation::SeriesCummin
         | FixtureOperation::SeriesNlargest
         | FixtureOperation::SeriesNsmallest
+        | FixtureOperation::SeriesBetween
         | FixtureOperation::SeriesCut
         | FixtureOperation::SeriesQcut => {
             let actual = execute_series_module_utility_fixture_operation(fixture);
@@ -7614,6 +7625,7 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::SeriesCummin
         | FixtureOperation::SeriesNlargest
         | FixtureOperation::SeriesNsmallest
+        | FixtureOperation::SeriesBetween
         | FixtureOperation::SeriesCut
         | FixtureOperation::SeriesQcut
         | FixtureOperation::SeriesAtTime
@@ -7977,6 +7989,7 @@ fn capture_live_oracle_expected(
         | FixtureOperation::SeriesCummin
         | FixtureOperation::SeriesNlargest
         | FixtureOperation::SeriesNsmallest
+        | FixtureOperation::SeriesBetween
         | FixtureOperation::SeriesCut
         | FixtureOperation::SeriesQcut
         | FixtureOperation::SeriesAtTime
@@ -9512,6 +9525,20 @@ fn execute_series_module_utility_fixture_operation(
                 .nlargest_n
                 .ok_or_else(|| "nlargest_n required for series_nsmallest".to_owned())?;
             series.nsmallest(n).map_err(|err| err.to_string())
+        }
+        FixtureOperation::SeriesBetween => {
+            let left = fixture
+                .between_left
+                .as_ref()
+                .ok_or_else(|| "between_left required for series_between".to_owned())?;
+            let right = fixture
+                .between_right
+                .as_ref()
+                .ok_or_else(|| "between_right required for series_between".to_owned())?;
+            let inclusive = fixture.between_inclusive.as_deref().unwrap_or("both");
+            series
+                .between(left, right, inclusive)
+                .map_err(|err| err.to_string())
         }
         FixtureOperation::SeriesCut => {
             cut(&series, require_cut_bins(fixture)?).map_err(|err| err.to_string())
@@ -11665,6 +11692,7 @@ fn execute_and_compare_differential(
         | FixtureOperation::SeriesCummin
         | FixtureOperation::SeriesNlargest
         | FixtureOperation::SeriesNsmallest
+        | FixtureOperation::SeriesBetween
         | FixtureOperation::SeriesCut
         | FixtureOperation::SeriesQcut => {
             let actual = execute_series_module_utility_fixture_operation(fixture);
@@ -16122,6 +16150,19 @@ mod tests {
         assert!(
             report.fixture_count >= 3,
             "expected FP-P2D-071 series_nsmallest fixtures"
+        );
+        assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
+    fn packet_filter_runs_series_between_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2D-072", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-072"));
+        assert!(
+            report.fixture_count >= 3,
+            "expected FP-P2D-072 series_between fixtures"
         );
         assert!(report.is_green(), "expected report green: {report:?}");
     }
