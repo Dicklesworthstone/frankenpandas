@@ -13,8 +13,9 @@ use fp_frame::{
     cut, qcut, to_numeric,
 };
 use fp_groupby::{
-    GroupByOptions, groupby_count, groupby_first, groupby_last, groupby_max, groupby_mean,
-    groupby_median, groupby_min, groupby_std, groupby_sum, groupby_var,
+    GroupByExecutionOptions, GroupByOptions, groupby_count, groupby_first, groupby_last,
+    groupby_max, groupby_mean, groupby_median, groupby_min, groupby_std, groupby_sum,
+    groupby_sum_with_options, groupby_var,
 };
 use fp_index::{
     AlignmentPlan, DuplicateKeep, Index, IndexLabel, align_union, validate_alignment_plan,
@@ -4008,6 +4009,180 @@ pub fn fuzz_series_add_bytes(input: &[u8]) -> Result<(), String> {
              left={left:?} right={right:?} forward_rows={normalized_forward:?} \
              reverse_rows={normalized_reverse:?}"
         ));
+    }
+
+    Ok(())
+}
+
+fn fuzz_groupby_key_scalar_from_bytes(bytes: &[u8]) -> Scalar {
+    let tag = bytes.first().copied().unwrap_or_default();
+    let payload = bytes.get(1).copied().unwrap_or_default();
+
+    match tag % 4 {
+        0 => Scalar::Null(NullKind::Null),
+        1 => Scalar::Int64(i64::from(payload % 4)),
+        2 => Scalar::Int64(i64::from(payload % 7) - 3),
+        _ => Scalar::Int64(0),
+    }
+}
+
+fn fuzz_groupby_value_scalar_from_bytes(bytes: &[u8]) -> Scalar {
+    let tag = bytes.first().copied().unwrap_or_default();
+    let payload = bytes.get(1).copied().unwrap_or_default();
+
+    match tag % 5 {
+        0 => Scalar::Null(NullKind::Null),
+        1 => Scalar::Int64(i64::from(payload % 9) - 4),
+        2 => Scalar::Float64(f64::from(i8::from_ne_bytes([payload])) / 4.0),
+        3 => Scalar::Float64(0.0),
+        _ => Scalar::Float64(1.5),
+    }
+}
+
+fn fuzz_groupby_series_from_bytes<F>(
+    name: &str,
+    bytes: &[u8],
+    scalar_from_bytes: F,
+) -> Result<Series, FrameError>
+where
+    F: Fn(&[u8]) -> Scalar,
+{
+    let mut labels = Vec::new();
+    let mut values = Vec::new();
+
+    for chunk in bytes.chunks(3).take(12) {
+        let Some((&label_tag, scalar_bytes)) = chunk.split_first() else {
+            continue;
+        };
+        labels.push(fuzz_index_label_from_byte(label_tag));
+        values.push(scalar_from_bytes(scalar_bytes));
+    }
+
+    Series::from_values(name, labels, values)
+}
+
+/// Structure-aware fuzz entrypoint for `groupby_sum()` invariants.
+///
+/// The first byte selects `dropna`; remaining bytes are split at `|` (or
+/// midpoint) into key/value series payloads. The harness projects these into
+/// bounded Int64-or-null keys plus numeric-or-missing values, then requires the
+/// global, arena, and forced-fallback execution paths to agree exactly.
+pub fn fuzz_groupby_sum_bytes(input: &[u8]) -> Result<(), String> {
+    let Some((&option_tag, payload)) = input.split_first() else {
+        return Ok(());
+    };
+
+    let (key_bytes, value_bytes) =
+        if let Some(split_at) = payload.iter().position(|byte| *byte == b'|') {
+            (&payload[..split_at], &payload[split_at + 1..])
+        } else {
+            payload.split_at(payload.len() / 2)
+        };
+
+    let keys =
+        fuzz_groupby_series_from_bytes("keys", key_bytes, fuzz_groupby_key_scalar_from_bytes)
+            .map_err(|err| format!("key series projection failed: {err:?}"))?;
+    let values =
+        fuzz_groupby_series_from_bytes("values", value_bytes, fuzz_groupby_value_scalar_from_bytes)
+            .map_err(|err| format!("value series projection failed: {err:?}"))?;
+
+    let options = GroupByOptions {
+        dropna: option_tag % 2 == 0,
+    };
+    let policy = RuntimePolicy::hardened(Some(100_000));
+
+    let mut global_ledger = EvidenceLedger::new();
+    let global = groupby_sum_with_options(
+        &keys,
+        &values,
+        options,
+        &policy,
+        &mut global_ledger,
+        GroupByExecutionOptions {
+            use_arena: false,
+            arena_budget_bytes: 0,
+        },
+    );
+
+    let mut arena_ledger = EvidenceLedger::new();
+    let arena = groupby_sum_with_options(
+        &keys,
+        &values,
+        options,
+        &policy,
+        &mut arena_ledger,
+        GroupByExecutionOptions::default(),
+    );
+
+    let mut fallback_ledger = EvidenceLedger::new();
+    let fallback = groupby_sum_with_options(
+        &keys,
+        &values,
+        options,
+        &policy,
+        &mut fallback_ledger,
+        GroupByExecutionOptions {
+            use_arena: true,
+            arena_budget_bytes: 1,
+        },
+    );
+
+    match (global, arena, fallback) {
+        (Ok(global), Ok(arena), Ok(fallback)) => {
+            if !global.equals(&arena) {
+                return Err(format!(
+                    "arena groupby result drifted from global: \
+                     keys={keys:?} values={values:?} options={options:?} \
+                     global={global:?} arena={arena:?}"
+                ));
+            }
+            if !global.equals(&fallback) {
+                return Err(format!(
+                    "fallback groupby result drifted from global: \
+                     keys={keys:?} values={values:?} options={options:?} \
+                     global={global:?} fallback={fallback:?}"
+                ));
+            }
+
+            if global.index().len() != global.values().len() {
+                return Err(format!(
+                    "groupby result index/value length mismatch: \
+                     index_len={} value_len={}",
+                    global.index().len(),
+                    global.values().len()
+                ));
+            }
+
+            let alignment = align_union(keys.index(), values.index());
+            if global.index().len() > alignment.left_positions.len() {
+                return Err(format!(
+                    "groupby emitted more groups than aligned rows: \
+                     groups={} aligned_rows={}",
+                    global.index().len(),
+                    alignment.left_positions.len()
+                ));
+            }
+
+            if options.dropna
+                && global
+                    .index()
+                    .labels()
+                    .iter()
+                    .any(|label| matches!(label, IndexLabel::Utf8(text) if text == "<null>"))
+            {
+                return Err(format!(
+                    "dropna=true emitted a null group label: result={global:?}"
+                ));
+            }
+        }
+        (Err(_), Err(_), Err(_)) => {}
+        (global_result, arena_result, fallback_result) => {
+            return Err(format!(
+                "groupby execution-path error mismatch: keys={keys:?} values={values:?} \
+                 options={options:?} global={global_result:?} arena={arena_result:?} \
+                 fallback={fallback_result:?}"
+            ));
+        }
     }
 
     Ok(())
@@ -13864,14 +14039,14 @@ mod tests {
         build_differential_report, build_differential_validation_log, build_failure_forensics,
         enforce_packet_gates, evaluate_ci_gate, evaluate_parity_gate, fuzz_common_dtype_bytes,
         fuzz_csv_parse_bytes, fuzz_excel_io_bytes, fuzz_fixture_parse_bytes,
-        fuzz_index_align_bytes, fuzz_json_io_bytes, fuzz_scalar_cast_bytes, fuzz_series_add_bytes,
-        generate_raptorq_sidecar, run_ci_pipeline, run_differential_by_id, run_differential_suite,
-        run_e2e_suite, run_fault_injection_validation_by_id, run_packet_by_id, run_packet_suite,
-        run_packet_suite_with_options, run_packets_grouped, run_raptorq_decode_recovery_drill,
-        run_smoke, verify_all_sidecars_ci, verify_packet_sidecar_integrity,
-        write_compat_closure_e2e_scenario_report, write_compat_closure_final_evidence_pack,
-        write_differential_validation_log, write_fault_injection_validation_report,
-        write_packet_artifacts,
+        fuzz_groupby_sum_bytes, fuzz_index_align_bytes, fuzz_json_io_bytes, fuzz_scalar_cast_bytes,
+        fuzz_series_add_bytes, generate_raptorq_sidecar, run_ci_pipeline, run_differential_by_id,
+        run_differential_suite, run_e2e_suite, run_fault_injection_validation_by_id,
+        run_packet_by_id, run_packet_suite, run_packet_suite_with_options, run_packets_grouped,
+        run_raptorq_decode_recovery_drill, run_smoke, verify_all_sidecars_ci,
+        verify_packet_sidecar_integrity, write_compat_closure_e2e_scenario_report,
+        write_compat_closure_final_evidence_pack, write_differential_validation_log,
+        write_fault_injection_validation_report, write_packet_artifacts,
     };
     use fp_runtime::RuntimeMode;
 
@@ -14150,6 +14325,29 @@ mod tests {
             "../fixtures/adversarial/fuzz_corpus/series_add/missing_alignment_seed.bin"
         );
         fuzz_series_add_bytes(seed).expect("missing alignment seed should satisfy invariants");
+    }
+
+    #[test]
+    fn fuzz_groupby_sum_bytes_accepts_dropna_true_seed() {
+        let seed =
+            include_bytes!("../fixtures/adversarial/fuzz_corpus/groupby_sum/dropna_true_seed.bin");
+        fuzz_groupby_sum_bytes(seed).expect("dropna=true seed should satisfy invariants");
+    }
+
+    #[test]
+    fn fuzz_groupby_sum_bytes_accepts_dropna_false_null_group_seed() {
+        let seed = include_bytes!(
+            "../fixtures/adversarial/fuzz_corpus/groupby_sum/dropna_false_null_group_seed.bin"
+        );
+        fuzz_groupby_sum_bytes(seed)
+            .expect("dropna=false null-group seed should satisfy invariants");
+    }
+
+    #[test]
+    fn fuzz_groupby_sum_bytes_accepts_alignment_seed() {
+        let seed =
+            include_bytes!("../fixtures/adversarial/fuzz_corpus/groupby_sum/alignment_seed.bin");
+        fuzz_groupby_sum_bytes(seed).expect("alignment seed should satisfy invariants");
     }
 
     #[test]

@@ -145,6 +145,9 @@ Implemented entrypoint:
 - `fuzz_series_add` target: `fuzz/fuzz_targets/fuzz_series_add.rs`
 - seed corpus: `crates/fp-conformance/fixtures/adversarial/fuzz_corpus/series_add/`
 - splits inputs at `|`, projects bounded numeric/missing `Series` pairs, and checks `Series::add()` success, union-label preservation, index/value length parity, and commutativity after row normalization
+- `fuzz_groupby_sum` target: `fuzz/fuzz_targets/fuzz_groupby_sum.rs`
+- seed corpus: `crates/fp-conformance/fixtures/adversarial/fuzz_corpus/groupby_sum/`
+- splits inputs at `|`, projects Int64-or-null key series plus numeric value series, and checks `groupby_sum()` global, arena, and forced-fallback execution paths stay isomorphic under both `dropna` modes
 
 ### 2.2 Structured Fuzz Input via `Arbitrary`
 
@@ -396,6 +399,8 @@ crates/fp-conformance/
         scalar_cast/
           ...
         series_add/
+          ...
+        groupby_sum/
           ...
     packets/                              # Promoted regression fixtures
       fp_p2c_{NNN}_fuzz_*.json
