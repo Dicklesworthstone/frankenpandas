@@ -194,6 +194,24 @@ fn sign_flip_series_for_abs(series: &Series) -> Series {
     .expect("sign-flipped series must construct")
 }
 
+fn sorted_bounds(a: f64, b: f64) -> (f64, f64) {
+    if a <= b { (a, b) } else { (b, a) }
+}
+
+fn nested_clip_bounds(
+    outer_a: f64,
+    outer_b: f64,
+    inner_frac_a: f64,
+    inner_frac_b: f64,
+) -> (f64, f64, f64, f64) {
+    let (outer_lower, outer_upper) = sorted_bounds(outer_a, outer_b);
+    let width = outer_upper - outer_lower;
+    let (inner_start, inner_end) = sorted_bounds(inner_frac_a, inner_frac_b);
+    let inner_lower = outer_lower + width * inner_start;
+    let inner_upper = outer_lower + width * inner_end;
+    (outer_lower, outer_upper, inner_lower, inner_upper)
+}
+
 fn poison_series_right_cells_for_combine_first(left: &Series, right: &Series) -> Series {
     let left_lookup: std::collections::BTreeMap<&IndexLabel, &Scalar> = left
         .index()
@@ -536,6 +554,102 @@ proptest! {
                 }
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Property: clip metamorphic invariants
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(100))]
+
+    /// Series clip with the same bounds is idempotent.
+    #[test]
+    fn prop_series_clip_is_idempotent(
+        series in arb_numeric_series("clip", 12),
+        bound_a in -1e6_f64..1e6_f64,
+        bound_b in -1e6_f64..1e6_f64,
+    ) {
+        let (lower, upper) = sorted_bounds(bound_a, bound_b);
+        let once = series
+            .clip(Some(lower), Some(upper))
+            .expect("Series::clip() must succeed for numeric inputs");
+        let twice = once
+            .clip(Some(lower), Some(upper))
+            .expect("Series::clip() must succeed on its own output");
+        prop_assert!(
+            once.equals(&twice),
+            "series clip must be idempotent for fixed bounds"
+        );
+    }
+
+    /// Tightening clip bounds in a second pass must equal clipping directly to the tighter interval.
+    #[test]
+    fn prop_series_clip_nested_bounds_compose(
+        series in arb_numeric_series("clip", 12),
+        outer_a in -1e6_f64..1e6_f64,
+        outer_b in -1e6_f64..1e6_f64,
+        inner_frac_a in 0.0f64..1.0,
+        inner_frac_b in 0.0f64..1.0,
+    ) {
+        let (outer_lower, outer_upper, inner_lower, inner_upper) =
+            nested_clip_bounds(outer_a, outer_b, inner_frac_a, inner_frac_b);
+        let staged = series
+            .clip(Some(outer_lower), Some(outer_upper))
+            .and_then(|clipped| clipped.clip(Some(inner_lower), Some(inner_upper)))
+            .expect("Series::clip() composition must succeed");
+        let direct = series
+            .clip(Some(inner_lower), Some(inner_upper))
+            .expect("Series::clip() must succeed for nested bounds");
+        prop_assert!(
+            staged.equals(&direct),
+            "series clip should compose to the tighter interval"
+        );
+    }
+
+    /// DataFrame clip with the same bounds is idempotent.
+    #[test]
+    fn prop_dataframe_clip_is_idempotent(
+        df in arb_numeric_dataframe(8),
+        bound_a in -1e6_f64..1e6_f64,
+        bound_b in -1e6_f64..1e6_f64,
+    ) {
+        let (lower, upper) = sorted_bounds(bound_a, bound_b);
+        let once = df
+            .clip(Some(lower), Some(upper))
+            .expect("DataFrame::clip() must succeed for numeric inputs");
+        let twice = once
+            .clip(Some(lower), Some(upper))
+            .expect("DataFrame::clip() must succeed on its own output");
+        prop_assert!(
+            once.equals(&twice),
+            "dataframe clip must be idempotent for fixed bounds"
+        );
+    }
+
+    /// Tightening DataFrame clip bounds in a second pass must equal clipping directly to the tighter interval.
+    #[test]
+    fn prop_dataframe_clip_nested_bounds_compose(
+        df in arb_numeric_dataframe(8),
+        outer_a in -1e6_f64..1e6_f64,
+        outer_b in -1e6_f64..1e6_f64,
+        inner_frac_a in 0.0f64..1.0,
+        inner_frac_b in 0.0f64..1.0,
+    ) {
+        let (outer_lower, outer_upper, inner_lower, inner_upper) =
+            nested_clip_bounds(outer_a, outer_b, inner_frac_a, inner_frac_b);
+        let staged = df
+            .clip(Some(outer_lower), Some(outer_upper))
+            .and_then(|clipped| clipped.clip(Some(inner_lower), Some(inner_upper)))
+            .expect("DataFrame::clip() composition must succeed");
+        let direct = df
+            .clip(Some(inner_lower), Some(inner_upper))
+            .expect("DataFrame::clip() must succeed for nested bounds");
+        prop_assert!(
+            staged.equals(&direct),
+            "dataframe clip should compose to the tighter interval"
+        );
     }
 }
 
