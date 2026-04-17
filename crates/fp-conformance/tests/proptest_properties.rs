@@ -457,6 +457,130 @@ fn reconstruct_pct_change_axis1_dataframe(df: &DataFrame, periods: i64) -> DataF
         .expect("reconstructed pct_change_axis1 dataframe must construct")
 }
 
+fn non_missing_prefix_counts(values: &[Scalar]) -> Vec<usize> {
+    let mut seen = 0usize;
+    values
+        .iter()
+        .map(|value| {
+            if !value.is_missing() {
+                seen += 1;
+            }
+            seen
+        })
+        .collect()
+}
+
+fn scale_cumprod_output_value(value: &Scalar, factor: f64, exponent: usize) -> Scalar {
+    if value.is_missing() {
+        Scalar::Null(NullKind::NaN)
+    } else {
+        Scalar::Float64(
+            value
+                .to_f64()
+                .expect("cumprod output must be numeric for non-missing values")
+                * factor.powi(exponent as i32),
+        )
+    }
+}
+
+fn expected_scaled_cumprod_series(input: &Series, factor: f64) -> Series {
+    let baseline = input
+        .cumprod()
+        .expect("Series::cumprod() must succeed while scaling expected output");
+    let counts = non_missing_prefix_counts(input.values());
+    let values = baseline
+        .values()
+        .iter()
+        .zip(counts)
+        .map(|(value, exponent)| scale_cumprod_output_value(value, factor, exponent))
+        .collect::<Vec<_>>();
+    Series::from_values(
+        baseline.name().to_owned(),
+        baseline.index().labels().to_vec(),
+        values,
+    )
+    .expect("scaled expected cumprod series must construct")
+}
+
+fn expected_scaled_cumprod_dataframe(df: &DataFrame, factor: f64) -> DataFrame {
+    let baseline = df
+        .cumprod()
+        .expect("DataFrame::cumprod() must succeed while scaling expected output");
+    let column_order = baseline
+        .column_names()
+        .into_iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut columns = std::collections::BTreeMap::new();
+
+    for name in &column_order {
+        let input_column = df.column(name).expect("input dataframe column must exist");
+        let baseline_column = baseline
+            .column(name)
+            .expect("baseline cumprod dataframe column must exist");
+        let counts = non_missing_prefix_counts(input_column.values());
+        let values = baseline_column
+            .values()
+            .iter()
+            .zip(counts)
+            .map(|(value, exponent)| scale_cumprod_output_value(value, factor, exponent))
+            .collect::<Vec<_>>();
+        columns.insert(
+            name.clone(),
+            fp_columnar::Column::from_values(values)
+                .expect("scaled expected cumprod dataframe column must construct"),
+        );
+    }
+
+    DataFrame::new_with_column_order(df.index().clone(), columns, column_order)
+        .expect("scaled expected cumprod dataframe must construct")
+}
+
+fn expected_scaled_cumprod_axis1_dataframe(df: &DataFrame, factor: f64) -> DataFrame {
+    let baseline = df
+        .cumprod_axis1()
+        .expect("DataFrame::cumprod_axis1() must succeed while scaling expected output");
+    let column_order = baseline
+        .column_names()
+        .into_iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut per_column = column_order
+        .iter()
+        .map(|_| Vec::with_capacity(df.index().len()))
+        .collect::<Vec<_>>();
+
+    for row_idx in 0..df.index().len() {
+        let mut exponent = 0usize;
+        for (col_idx, name) in column_order.iter().enumerate() {
+            let input_value = &df
+                .column(name)
+                .expect("input dataframe column must exist")
+                .values()[row_idx];
+            if !input_value.is_missing() {
+                exponent += 1;
+            }
+            let baseline_value = &baseline
+                .column(name)
+                .expect("baseline cumprod_axis1 dataframe column must exist")
+                .values()[row_idx];
+            per_column[col_idx].push(scale_cumprod_output_value(baseline_value, factor, exponent));
+        }
+    }
+
+    let mut columns = std::collections::BTreeMap::new();
+    for (name, values) in column_order.iter().cloned().zip(per_column) {
+        columns.insert(
+            name,
+            fp_columnar::Column::from_values(values)
+                .expect("scaled expected cumprod_axis1 dataframe column must construct"),
+        );
+    }
+
+    DataFrame::new_with_column_order(df.index().clone(), columns, column_order)
+        .expect("scaled expected cumprod_axis1 dataframe must construct")
+}
+
 fn arb_between_inclusive() -> impl Strategy<Value = &'static str> {
     prop_oneof![Just("both"), Just("neither"), Just("left"), Just("right"),]
 }
@@ -3823,6 +3947,131 @@ proptest! {
         prop_assert!(
             flipped_cummax.equals(&expected),
             "dataframe cummax(-x) must equal -cummin(x)"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Property: cumsum / cumprod metamorphic invariants
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(100))]
+
+    /// Scaling a Series by a non-zero factor must scale cumsum linearly.
+    #[test]
+    fn prop_series_cumsum_scales_linearly(
+        series in arb_numeric_series("cumsum", 12),
+        factor_raw in prop_oneof![(-3i8..=-1i8), (1i8..=3i8)],
+    ) {
+        let factor = f64::from(factor_raw);
+        let baseline = series
+            .cumsum()
+            .expect("Series::cumsum() must succeed for numeric inputs");
+        let scaled_input = scale_series(&series, factor);
+        let scaled_cumsum = scaled_input
+            .cumsum()
+            .expect("Series::cumsum() must succeed after scaling");
+        let expected = scale_series(&baseline, factor);
+        prop_assert!(
+            approx_equal_series(&scaled_cumsum, &expected),
+            "series cumsum(kx) must equal k * cumsum(x)"
+        );
+    }
+
+    /// Scaling a Series by a non-zero factor must scale cumprod by prefix powers.
+    #[test]
+    fn prop_series_cumprod_scales_by_prefix_power(
+        series in arb_numeric_series("cumprod", 12),
+        factor_raw in prop_oneof![(-3i8..=-1i8), (1i8..=3i8)],
+    ) {
+        let factor = f64::from(factor_raw);
+        let scaled_input = scale_series(&series, factor);
+        let scaled_cumprod = scaled_input
+            .cumprod()
+            .expect("Series::cumprod() must succeed after scaling");
+        let expected = expected_scaled_cumprod_series(&series, factor);
+        prop_assert!(
+            approx_equal_series(&scaled_cumprod, &expected),
+            "series cumprod(kx) must equal k^n * cumprod(x) at each non-missing prefix"
+        );
+    }
+
+    /// Scaling a DataFrame by a non-zero factor must scale per-column cumsum linearly.
+    #[test]
+    fn prop_dataframe_cumsum_scales_linearly(
+        df in arb_numeric_dataframe(8),
+        factor_raw in prop_oneof![(-3i8..=-1i8), (1i8..=3i8)],
+    ) {
+        let factor = f64::from(factor_raw);
+        let baseline = df
+            .cumsum()
+            .expect("DataFrame::cumsum() must succeed for numeric inputs");
+        let scaled_input = scale_dataframe(&df, factor);
+        let scaled_cumsum = scaled_input
+            .cumsum()
+            .expect("DataFrame::cumsum() must succeed after scaling");
+        let expected = scale_dataframe(&baseline, factor);
+        prop_assert!(
+            approx_equal_dataframe(&scaled_cumsum, &expected),
+            "dataframe cumsum(kx) must equal k * cumsum(x)"
+        );
+    }
+
+    /// Scaling a DataFrame by a non-zero factor must scale per-column cumprod by prefix powers.
+    #[test]
+    fn prop_dataframe_cumprod_scales_by_prefix_power(
+        df in arb_numeric_dataframe(8),
+        factor_raw in prop_oneof![(-3i8..=-1i8), (1i8..=3i8)],
+    ) {
+        let factor = f64::from(factor_raw);
+        let scaled_input = scale_dataframe(&df, factor);
+        let scaled_cumprod = scaled_input
+            .cumprod()
+            .expect("DataFrame::cumprod() must succeed after scaling");
+        let expected = expected_scaled_cumprod_dataframe(&df, factor);
+        prop_assert!(
+            approx_equal_dataframe(&scaled_cumprod, &expected),
+            "dataframe cumprod(kx) must equal k^n * cumprod(x) for each column prefix"
+        );
+    }
+
+    /// Scaling a DataFrame by a non-zero factor must scale row-wise cumsum linearly.
+    #[test]
+    fn prop_dataframe_cumsum_axis1_scales_linearly(
+        df in arb_numeric_dataframe(8),
+        factor_raw in prop_oneof![(-3i8..=-1i8), (1i8..=3i8)],
+    ) {
+        let factor = f64::from(factor_raw);
+        let baseline = df
+            .cumsum_axis1()
+            .expect("DataFrame::cumsum_axis1() must succeed for numeric inputs");
+        let scaled_input = scale_dataframe(&df, factor);
+        let scaled_cumsum = scaled_input
+            .cumsum_axis1()
+            .expect("DataFrame::cumsum_axis1() must succeed after scaling");
+        let expected = scale_dataframe(&baseline, factor);
+        prop_assert!(
+            approx_equal_dataframe(&scaled_cumsum, &expected),
+            "dataframe cumsum_axis1(kx) must equal k * cumsum_axis1(x)"
+        );
+    }
+
+    /// Scaling a DataFrame by a non-zero factor must scale row-wise cumprod by prefix powers.
+    #[test]
+    fn prop_dataframe_cumprod_axis1_scales_by_prefix_power(
+        df in arb_numeric_dataframe(8),
+        factor_raw in prop_oneof![(-3i8..=-1i8), (1i8..=3i8)],
+    ) {
+        let factor = f64::from(factor_raw);
+        let scaled_input = scale_dataframe(&df, factor);
+        let scaled_cumprod = scaled_input
+            .cumprod_axis1()
+            .expect("DataFrame::cumprod_axis1() must succeed after scaling");
+        let expected = expected_scaled_cumprod_axis1_dataframe(&df, factor);
+        prop_assert!(
+            approx_equal_dataframe(&scaled_cumprod, &expected),
+            "dataframe cumprod_axis1(kx) must equal k^n * cumprod_axis1(x) within each row"
         );
     }
 }
