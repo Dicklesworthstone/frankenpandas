@@ -1,0 +1,51 @@
+{
+  "packet_id": "FP-P2D-120",
+  "case_id": "series_where_default_nan_hardened",
+  "mode": "hardened",
+  "operation": "series_where",
+  "left": {
+    "name": "data",
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 3 }
+    ],
+    "values": [
+      { "kind": "float64", "value": 10.0 },
+      { "kind": "float64", "value": 20.0 },
+      { "kind": "float64", "value": 30.0 },
+      { "kind": "float64", "value": 40.0 }
+    ]
+  },
+  "right": {
+    "name": "mask",
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 3 }
+    ],
+    "values": [
+      { "kind": "bool", "value": false },
+      { "kind": "bool", "value": true },
+      { "kind": "bool", "value": false },
+      { "kind": "bool", "value": true }
+    ]
+  },
+  "expected_series": {
+    "name": "data",
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 3 }
+    ],
+    "values": [
+      { "kind": "null", "value": "na_n" },
+      { "kind": "float64", "value": 20.0 },
+      { "kind": "null", "value": "na_n" },
+      { "kind": "float64", "value": 40.0 }
+    ]
+  }
+}
