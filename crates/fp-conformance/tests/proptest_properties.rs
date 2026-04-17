@@ -384,6 +384,50 @@ fn reindex_columns_from_names(df: &DataFrame, columns: &[String]) -> DataFrame {
         .expect("DataFrame::reindex_columns() must succeed")
 }
 
+fn fresh_rename_column_names(columns: &[String]) -> Vec<String> {
+    let mut seen = columns.to_vec();
+    (0..columns.len())
+        .map(|salt| {
+            let candidate = fresh_missing_column_name(&seen, salt);
+            seen.push(candidate.clone());
+            candidate
+        })
+        .collect()
+}
+
+fn rename_columns_from_names(df: &DataFrame, target_names: &[String]) -> DataFrame {
+    let current_names = df.column_names().into_iter().cloned().collect::<Vec<_>>();
+    let pairs = current_names
+        .iter()
+        .map(String::as_str)
+        .zip(target_names.iter().map(String::as_str))
+        .collect::<Vec<_>>();
+    df.rename_columns(&pairs)
+        .expect("DataFrame::rename_columns() must succeed for fresh unique names")
+}
+
+fn fresh_rename_index_labels(labels: &[IndexLabel]) -> Vec<IndexLabel> {
+    let mut seen = labels.to_vec();
+    (0..labels.len())
+        .map(|salt| {
+            let candidate = fresh_missing_index_label(&seen, salt);
+            seen.push(candidate.clone());
+            candidate
+        })
+        .collect()
+}
+
+fn rename_index_from_labels(df: &DataFrame, target_labels: &[IndexLabel]) -> DataFrame {
+    let pairs = df
+        .index()
+        .labels()
+        .iter()
+        .cloned()
+        .zip(target_labels.iter().cloned())
+        .collect::<Vec<_>>();
+    df.rename_index(&pairs)
+}
+
 fn normalize_take_position(idx: i64, len: usize) -> usize {
     let len_i64 = i64::try_from(len).expect("take length must fit in i64");
     let resolved = if idx < 0 {
@@ -4242,6 +4286,201 @@ proptest! {
         prop_assert!(
             approx_equal_dataframe(&direct, &via_intermediate),
             "dataframe column reindex through a unique intermediate superset must equal direct reindex"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Property: rename metamorphic invariants
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(100))]
+
+    /// Renaming a Series twice must collapse to the last name.
+    #[test]
+    fn prop_series_rename_overwrite_composes(
+        (series, first_name, second_name) in (1..=12usize).prop_flat_map(|len| {
+            (
+                arb_numeric_series("rename", len),
+                "[a-z]{1,8}",
+                "[a-z]{1,8}",
+            )
+        }),
+    ) {
+        let nested = series
+            .rename(&first_name)
+            .and_then(|renamed| renamed.rename(&second_name))
+            .expect("nested Series::rename() must succeed");
+        let direct = series
+            .rename(&second_name)
+            .expect("direct Series::rename() must succeed");
+        prop_assert!(
+            approx_equal_series(&nested, &direct),
+            "series rename(name1).rename(name2) must equal rename(name2)"
+        );
+    }
+
+    /// Renaming a Series must commute with sign flipping because it only changes metadata.
+    #[test]
+    fn prop_series_rename_commutes_with_sign_flip(
+        (series, new_name) in (1..=12usize)
+            .prop_flat_map(|len| (arb_numeric_series("rename", len), "[a-z]{1,8}")),
+    ) {
+        let renamed = series
+            .rename(&new_name)
+            .expect("Series::rename() must succeed");
+        let flipped_then_renamed = sign_flip_series(&series)
+            .rename(&new_name)
+            .expect("Series::rename() must succeed after sign flipping");
+        let expected = sign_flip_series(&renamed);
+        prop_assert!(
+            approx_equal_series(&flipped_then_renamed, &expected),
+            "series rename(name) must commute with sign flipping"
+        );
+    }
+
+    /// Renaming a Series must commute with take because positional selection is name-blind.
+    #[test]
+    fn prop_series_rename_commutes_with_take(
+        (series, indices, new_name) in (1..=12usize).prop_flat_map(|len| {
+            (
+                arb_numeric_series("rename", len),
+                arb_take_positions_for_len(len, 12),
+                "[a-z]{1,8}",
+            )
+        }),
+    ) {
+        let renamed_then_taken = series
+            .rename(&new_name)
+            .and_then(|renamed| renamed.take(&indices))
+            .expect("Series::rename().take() must succeed");
+        let taken_then_renamed = series
+            .take(&indices)
+            .and_then(|taken| taken.rename(&new_name))
+            .expect("Series::take().rename() must succeed");
+        prop_assert!(
+            approx_equal_series(&renamed_then_taken, &taken_then_renamed),
+            "series rename(name) must commute with take(indices)"
+        );
+    }
+
+    /// Injective DataFrame column renames must compose by composing the renaming functions.
+    #[test]
+    fn prop_dataframe_rename_columns_composes_injective_prefixes(
+        df in arb_combine_first_dataframe(8),
+    ) {
+        let nested = df
+            .rename_with(|name| format!("first_{name}"))
+            .and_then(|renamed| renamed.rename_with(|name| format!("second_{name}")))
+            .expect("nested DataFrame::rename_with() must succeed for injective prefixes");
+        let direct = df
+            .rename_with(|name| format!("second_first_{name}"))
+            .expect("direct DataFrame::rename_with() must succeed for injective prefixes");
+        prop_assert!(
+            approx_equal_dataframe(&nested, &direct),
+            "nested injective column renames must equal the directly composed rename"
+        );
+    }
+
+    /// DataFrame rename_columns(mapping) must match rename_with() for the same complete fresh renaming.
+    #[test]
+    fn prop_dataframe_rename_columns_mapping_matches_rename_with(
+        df in arb_combine_first_dataframe(8),
+    ) {
+        let current_names = df.column_names().into_iter().cloned().collect::<Vec<_>>();
+        let target_names = fresh_rename_column_names(&current_names);
+        let rename_map = current_names
+            .iter()
+            .cloned()
+            .zip(target_names.iter().cloned())
+            .collect::<std::collections::HashMap<_, _>>();
+        let via_mapping = rename_columns_from_names(&df, &target_names);
+        let via_function = df
+            .rename_with(|name| {
+                rename_map
+                    .get(name)
+                    .expect("complete column rename map must cover every column")
+                    .clone()
+            })
+            .expect("DataFrame::rename_with() must succeed for complete fresh renaming");
+        prop_assert!(
+            approx_equal_dataframe(&via_mapping, &via_function),
+            "dataframe rename_columns(mapping) must match rename_with() on the same complete renaming"
+        );
+    }
+
+    /// Renaming DataFrame columns must commute with sign flipping because it only changes metadata.
+    #[test]
+    fn prop_dataframe_rename_columns_commutes_with_sign_flip(
+        df in arb_combine_first_dataframe(8),
+    ) {
+        let current_names = df.column_names().into_iter().cloned().collect::<Vec<_>>();
+        let target_names = fresh_rename_column_names(&current_names);
+        let renamed = rename_columns_from_names(&df, &target_names);
+        let flipped_then_renamed = rename_columns_from_names(&sign_flip_dataframe(&df), &target_names);
+        let expected = sign_flip_dataframe(&renamed);
+        prop_assert!(
+            approx_equal_dataframe(&flipped_then_renamed, &expected),
+            "dataframe column rename must commute with sign flipping"
+        );
+    }
+
+    /// DataFrame index renames over unique labels must compose through the final target labels.
+    #[test]
+    fn prop_dataframe_rename_index_composes(
+        df in arb_combine_first_dataframe(8),
+    ) {
+        let original_labels = df.index().labels().to_vec();
+        let first_labels = fresh_rename_index_labels(&original_labels);
+        let first = rename_index_from_labels(&df, &first_labels);
+        let second_labels = fresh_rename_index_labels(&first_labels);
+        let nested = rename_index_from_labels(&first, &second_labels);
+        let direct = rename_index_from_labels(&df, &second_labels);
+        prop_assert!(
+            approx_equal_dataframe(&nested, &direct),
+            "nested dataframe index renames must equal the directly composed rename"
+        );
+    }
+
+    /// DataFrame rename_index(mapping) must match rename_index_with() for the same complete fresh renaming.
+    #[test]
+    fn prop_dataframe_rename_index_mapping_matches_rename_with(
+        df in arb_combine_first_dataframe(8),
+    ) {
+        let current_labels = df.index().labels().to_vec();
+        let target_labels = fresh_rename_index_labels(&current_labels);
+        let rename_map = current_labels
+            .iter()
+            .cloned()
+            .zip(target_labels.iter().cloned())
+            .collect::<std::collections::HashMap<_, _>>();
+        let via_mapping = rename_index_from_labels(&df, &target_labels);
+        let via_function = df.rename_index_with(|label| {
+            rename_map
+                .get(label)
+                .expect("complete index rename map must cover every label")
+                .clone()
+        });
+        prop_assert!(
+            approx_equal_dataframe(&via_mapping, &via_function),
+            "dataframe rename_index(mapping) must match rename_index_with() on the same complete renaming"
+        );
+    }
+
+    /// Renaming DataFrame index labels must commute with sign flipping because it only changes metadata.
+    #[test]
+    fn prop_dataframe_rename_index_commutes_with_sign_flip(
+        df in arb_combine_first_dataframe(8),
+    ) {
+        let current_labels = df.index().labels().to_vec();
+        let target_labels = fresh_rename_index_labels(&current_labels);
+        let renamed = rename_index_from_labels(&df, &target_labels);
+        let flipped_then_renamed = rename_index_from_labels(&sign_flip_dataframe(&df), &target_labels);
+        let expected = sign_flip_dataframe(&renamed);
+        prop_assert!(
+            approx_equal_dataframe(&flipped_then_renamed, &expected),
+            "dataframe index rename must commute with sign flipping"
         );
     }
 }
