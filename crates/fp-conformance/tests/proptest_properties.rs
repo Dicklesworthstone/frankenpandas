@@ -357,6 +357,72 @@ fn approx_equal_dataframe(lhs: &DataFrame, rhs: &DataFrame) -> bool {
         })
 }
 
+fn reconstruct_pct_change_scalar(delta: &Scalar, previous: &Scalar) -> Scalar {
+    if delta.is_missing() || previous.is_missing() {
+        return Scalar::Null(NullKind::NaN);
+    }
+
+    match (delta.to_f64(), previous.to_f64()) {
+        (Ok(diff), Ok(prev)) => Scalar::Float64(diff / prev),
+        _ => Scalar::Null(NullKind::NaN),
+    }
+}
+
+fn reconstruct_pct_change_series(series: &Series, periods: usize) -> Series {
+    let diff = series
+        .diff(periods as i64)
+        .expect("Series::diff() must succeed while reconstructing pct_change");
+    let shifted = series
+        .shift(periods as i64)
+        .expect("Series::shift() must succeed while reconstructing pct_change");
+    let values = diff
+        .values()
+        .iter()
+        .zip(shifted.values())
+        .map(|(delta, previous)| reconstruct_pct_change_scalar(delta, previous))
+        .collect::<Vec<_>>();
+    Series::from_values(
+        series.name().to_owned(),
+        series.index().labels().to_vec(),
+        values,
+    )
+    .expect("reconstructed pct_change series must construct")
+}
+
+fn reconstruct_pct_change_dataframe(df: &DataFrame, periods: usize) -> DataFrame {
+    let diff = df
+        .diff(periods as i64)
+        .expect("DataFrame::diff() must succeed while reconstructing pct_change");
+    let shifted = df
+        .shift(periods as i64)
+        .expect("DataFrame::shift() must succeed while reconstructing pct_change");
+
+    let column_order = df.column_names().into_iter().cloned().collect::<Vec<_>>();
+    let mut columns = std::collections::BTreeMap::new();
+    for name in &column_order {
+        let diff_col = diff
+            .column(name)
+            .expect("diff dataframe column listed in order must exist");
+        let shifted_col = shifted
+            .column(name)
+            .expect("shifted dataframe column listed in order must exist");
+        let values = diff_col
+            .values()
+            .iter()
+            .zip(shifted_col.values())
+            .map(|(delta, previous)| reconstruct_pct_change_scalar(delta, previous))
+            .collect::<Vec<_>>();
+        columns.insert(
+            name.clone(),
+            fp_columnar::Column::from_values(values)
+                .expect("reconstructed pct_change dataframe column must construct"),
+        );
+    }
+
+    DataFrame::new_with_column_order(df.index().clone(), columns, column_order)
+        .expect("reconstructed pct_change dataframe must construct")
+}
+
 fn arb_between_inclusive() -> impl Strategy<Value = &'static str> {
     prop_oneof![Just("both"), Just("neither"), Just("left"), Just("right"),]
 }
@@ -2977,6 +3043,124 @@ proptest! {
         prop_assert!(
             flipped_diff.equals(&expected),
             "dataframe diff(-x) must equal -diff(x)"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Property: pct_change metamorphic invariants
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(100))]
+
+    /// Scaling a Series by a positive factor must not change pct_change.
+    #[test]
+    fn prop_series_pct_change_is_positive_scale_invariant(
+        series in arb_numeric_series("pct_change", 12),
+        periods in 1usize..=3,
+        factor in 0.25f64..5.0,
+    ) {
+        let baseline = series
+            .pct_change(periods)
+            .expect("Series::pct_change() must succeed for numeric inputs");
+        let scaled = scale_series(&series, factor);
+        let scaled_change = scaled
+            .pct_change(periods)
+            .expect("Series::pct_change() must succeed after positive scaling");
+        prop_assert!(
+            approx_equal_series(&baseline, &scaled_change),
+            "series pct_change(kx) must equal pct_change(x) for positive k"
+        );
+    }
+
+    /// Negating a Series must not change pct_change.
+    #[test]
+    fn prop_series_pct_change_is_sign_flip_invariant(
+        series in arb_numeric_series("pct_change", 12),
+        periods in 1usize..=3,
+    ) {
+        let baseline = series
+            .pct_change(periods)
+            .expect("Series::pct_change() must succeed for numeric inputs");
+        let flipped = sign_flip_series(&series);
+        let flipped_change = flipped
+            .pct_change(periods)
+            .expect("Series::pct_change() must succeed after sign flipping");
+        prop_assert!(
+            approx_equal_series(&baseline, &flipped_change),
+            "series pct_change(-x) must equal pct_change(x)"
+        );
+    }
+
+    /// Series pct_change must agree with diff(periods) / shift(periods).
+    #[test]
+    fn prop_series_pct_change_matches_diff_over_shift(
+        series in arb_numeric_series("pct_change", 12),
+        periods in 1usize..=3,
+    ) {
+        let observed = series
+            .pct_change(periods)
+            .expect("Series::pct_change() must succeed for numeric inputs");
+        let reconstructed = reconstruct_pct_change_series(&series, periods);
+        prop_assert!(
+            approx_equal_series(&observed, &reconstructed),
+            "series pct_change must match diff(periods) / shift(periods)"
+        );
+    }
+
+    /// Scaling a DataFrame by a positive factor must not change pct_change.
+    #[test]
+    fn prop_dataframe_pct_change_is_positive_scale_invariant(
+        df in arb_numeric_dataframe(8),
+        periods in 1usize..=3,
+        factor in 0.25f64..5.0,
+    ) {
+        let baseline = df
+            .pct_change(periods)
+            .expect("DataFrame::pct_change() must succeed for numeric inputs");
+        let scaled = scale_dataframe(&df, factor);
+        let scaled_change = scaled
+            .pct_change(periods)
+            .expect("DataFrame::pct_change() must succeed after positive scaling");
+        prop_assert!(
+            approx_equal_dataframe(&baseline, &scaled_change),
+            "dataframe pct_change(kx) must equal pct_change(x) for positive k"
+        );
+    }
+
+    /// Negating a DataFrame must not change pct_change.
+    #[test]
+    fn prop_dataframe_pct_change_is_sign_flip_invariant(
+        df in arb_numeric_dataframe(8),
+        periods in 1usize..=3,
+    ) {
+        let baseline = df
+            .pct_change(periods)
+            .expect("DataFrame::pct_change() must succeed for numeric inputs");
+        let flipped = sign_flip_dataframe(&df);
+        let flipped_change = flipped
+            .pct_change(periods)
+            .expect("DataFrame::pct_change() must succeed after sign flipping");
+        prop_assert!(
+            approx_equal_dataframe(&baseline, &flipped_change),
+            "dataframe pct_change(-x) must equal pct_change(x)"
+        );
+    }
+
+    /// DataFrame pct_change must agree with per-column diff(periods) / shift(periods).
+    #[test]
+    fn prop_dataframe_pct_change_matches_diff_over_shift(
+        df in arb_numeric_dataframe(8),
+        periods in 1usize..=3,
+    ) {
+        let observed = df
+            .pct_change(periods)
+            .expect("DataFrame::pct_change() must succeed for numeric inputs");
+        let reconstructed = reconstruct_pct_change_dataframe(&df, periods);
+        prop_assert!(
+            approx_equal_dataframe(&observed, &reconstructed),
+            "dataframe pct_change must match diff(periods) / shift(periods)"
         );
     }
 }
