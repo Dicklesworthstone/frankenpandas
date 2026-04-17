@@ -1,0 +1,41 @@
+{
+  "packet_id": "FP-P2D-118",
+  "case_id": "series_duplicated_keep_first_strict",
+  "mode": "strict",
+  "operation": "series_duplicated",
+  "keep": "first",
+  "left": {
+    "name": "values",
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 3 },
+      { "kind": "int64", "value": 4 }
+    ],
+    "values": [
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 3 },
+      { "kind": "int64", "value": 1 }
+    ]
+  },
+  "expected_series": {
+    "name": "values",
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 3 },
+      { "kind": "int64", "value": 4 }
+    ],
+    "values": [
+      { "kind": "bool", "value": false },
+      { "kind": "bool", "value": false },
+      { "kind": "bool", "value": true },
+      { "kind": "bool", "value": false },
+      { "kind": "bool", "value": true }
+    ]
+  }
+}
