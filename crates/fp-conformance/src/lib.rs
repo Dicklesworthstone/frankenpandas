@@ -22,8 +22,8 @@ use fp_index::{
 };
 use fp_io::{
     ExcelReadOptions, IoError as FpIoError, JsonOrient, read_csv_str, read_excel_bytes,
-    read_json_str, read_jsonl_str, write_csv_string, write_excel_bytes, write_json_string,
-    write_jsonl_string,
+    read_feather_bytes, read_json_str, read_jsonl_str, write_csv_string, write_excel_bytes,
+    write_feather_bytes, write_json_string, write_jsonl_string,
 };
 use fp_join::{
     JoinExecutionOptions, JoinType, JoinedSeries, MergeExecutionOptions, MergeValidateMode,
@@ -3632,6 +3632,17 @@ fn assert_excel_roundtrip(frame: &DataFrame) -> Result<(), FpIoError> {
     Ok(())
 }
 
+fn assert_feather_roundtrip(frame: &DataFrame) -> Result<(), FpIoError> {
+    let encoded = write_feather_bytes(frame)?;
+    let reparsed = read_feather_bytes(&encoded)?;
+    if !frame.equals(&reparsed) {
+        return Err(FpIoError::Io(std::io::Error::other(
+            "feather round-trip drifted after parse/write/reparse",
+        )));
+    }
+    Ok(())
+}
+
 fn fuzz_dtype_from_byte(byte: u8) -> DType {
     match byte % 5 {
         0 => DType::Null,
@@ -3745,6 +3756,100 @@ pub fn fuzz_csv_parse_bytes(input: &[u8]) -> Result<(), FpIoError> {
 pub fn fuzz_excel_io_bytes(input: &[u8]) -> Result<(), FpIoError> {
     let frame = read_excel_bytes(input, &ExcelReadOptions::default())?;
     assert_excel_roundtrip(&frame)
+}
+
+fn fuzz_feather_dtype_from_byte(byte: u8) -> DType {
+    match byte % 4 {
+        0 => DType::Bool,
+        1 => DType::Int64,
+        2 => DType::Float64,
+        _ => DType::Utf8,
+    }
+}
+
+fn fuzz_feather_scalar_for_dtype(dtype: DType, bytes: &[u8]) -> Scalar {
+    let tag = bytes.first().copied().unwrap_or_default();
+    let payload = bytes.get(1).copied().unwrap_or_default();
+
+    if tag % 5 == 0 {
+        return Scalar::missing_for_dtype(dtype);
+    }
+
+    match dtype {
+        DType::Bool => Scalar::Bool(payload % 2 == 1),
+        DType::Int64 => Scalar::Int64(i64::from(payload % 11) - 5),
+        DType::Float64 => Scalar::Float64(match payload % 6 {
+            0 => 0.0,
+            1 => 1.0,
+            2 => -1.0,
+            3 => 1.5,
+            4 => f64::NAN,
+            _ => -0.0,
+        }),
+        DType::Utf8 => Scalar::Utf8(format!(
+            "s{}{}",
+            char::from(b'a' + (payload % 26)),
+            payload % 4
+        )),
+        DType::Null => Scalar::Null(NullKind::Null),
+    }
+}
+
+fn fuzz_feather_frame_from_bytes(bytes: &[u8]) -> Result<DataFrame, FpIoError> {
+    let row_count = usize::from(bytes.first().copied().unwrap_or(2) % 4) + 1;
+    let column_count = usize::from(bytes.get(1).copied().unwrap_or(1) % 3) + 1;
+    let byte_at = |idx: usize| -> u8 { bytes.get(idx).copied().unwrap_or_default() };
+
+    let index = Index::new(
+        (0..row_count)
+            .map(|idx| IndexLabel::Int64(idx as i64))
+            .collect::<Vec<_>>(),
+    );
+
+    let mut columns = BTreeMap::new();
+    let mut column_order = Vec::new();
+
+    for col_idx in 0..column_count {
+        let dtype = fuzz_feather_dtype_from_byte(byte_at(2 + col_idx));
+        let name = format!("c{col_idx}");
+        let values = (0..row_count)
+            .map(|row_idx| {
+                fuzz_feather_scalar_for_dtype(
+                    dtype,
+                    &[
+                        byte_at(8 + col_idx * 11 + row_idx * 2),
+                        byte_at(9 + col_idx * 11 + row_idx * 2),
+                    ],
+                )
+            })
+            .collect::<Vec<_>>();
+        let column = Column::new(dtype, values)?;
+        column_order.push(name.clone());
+        columns.insert(name, column);
+    }
+
+    DataFrame::new_with_column_order(index, columns, column_order).map_err(FpIoError::from)
+}
+
+/// Structure-aware fuzz entrypoint for the `fp-io` Feather reader.
+///
+/// Inputs use a dual-mode envelope. Raw mode (`tag % 2 == 0`) feeds the
+/// remaining bytes directly into `read_feather_bytes()`, where parser errors
+/// are acceptable but successful parses must round-trip. Synth mode projects
+/// bytes into a tiny typed `DataFrame`, serializes it with
+/// `write_feather_bytes()`, then checks the reader against that valid payload.
+pub fn fuzz_feather_io_bytes(input: &[u8]) -> Result<(), FpIoError> {
+    let Some((&mode, payload)) = input.split_first() else {
+        return Ok(());
+    };
+
+    if mode % 2 == 0 {
+        let frame = read_feather_bytes(payload)?;
+        assert_feather_roundtrip(&frame)
+    } else {
+        let frame = fuzz_feather_frame_from_bytes(payload)?;
+        assert_feather_roundtrip(&frame)
+    }
 }
 
 /// Structure-aware fuzz entrypoint for the `fp-types` common-dtype lattice.
@@ -14513,7 +14618,7 @@ mod tests {
         build_compat_closure_e2e_scenario_report, build_compat_closure_final_evidence_pack,
         build_differential_report, build_differential_validation_log, build_failure_forensics,
         enforce_packet_gates, evaluate_ci_gate, evaluate_parity_gate, fuzz_column_arith_bytes,
-        fuzz_common_dtype_bytes, fuzz_csv_parse_bytes, fuzz_excel_io_bytes,
+        fuzz_common_dtype_bytes, fuzz_csv_parse_bytes, fuzz_excel_io_bytes, fuzz_feather_io_bytes,
         fuzz_fixture_parse_bytes, fuzz_groupby_sum_bytes, fuzz_index_align_bytes,
         fuzz_join_series_bytes, fuzz_json_io_bytes, fuzz_scalar_cast_bytes, fuzz_series_add_bytes,
         generate_raptorq_sidecar, run_ci_pipeline, run_differential_by_id, run_differential_suite,
@@ -14726,6 +14831,55 @@ mod tests {
         assert!(
             matches!(err, fp_io::IoError::Excel(_)),
             "expected Excel parse error, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn fuzz_feather_io_bytes_accepts_synthesized_seed_fixture() {
+        let seed = include_bytes!(
+            "../fixtures/adversarial/fuzz_corpus/feather_io/synthesized_valid_seed.bin"
+        );
+        fuzz_feather_io_bytes(seed).expect("synthesized feather seed should parse");
+    }
+
+    #[test]
+    fn fuzz_feather_io_bytes_accepts_runtime_raw_feather_bytes() {
+        let frame = fp_frame::DataFrame::from_dict(
+            &["ints", "floats"],
+            vec![
+                (
+                    "ints",
+                    vec![
+                        fp_types::Scalar::Int64(7),
+                        fp_types::Scalar::Null(fp_types::NullKind::Null),
+                        fp_types::Scalar::Int64(-3),
+                    ],
+                ),
+                (
+                    "floats",
+                    vec![
+                        fp_types::Scalar::Float64(1.5),
+                        fp_types::Scalar::Null(fp_types::NullKind::NaN),
+                        fp_types::Scalar::Float64(-0.0),
+                    ],
+                ),
+            ],
+        )
+        .expect("frame");
+        let mut seed = vec![0];
+        seed.extend(fp_io::write_feather_bytes(&frame).expect("write feather bytes"));
+
+        fuzz_feather_io_bytes(&seed).expect("raw feather payload should parse");
+    }
+
+    #[test]
+    fn fuzz_feather_io_bytes_reports_invalid_raw_bytes() {
+        let seed =
+            include_bytes!("../fixtures/adversarial/fuzz_corpus/feather_io/invalid_text_seed.bin");
+        let err = fuzz_feather_io_bytes(seed).expect_err("invalid feather bytes should error");
+        assert!(
+            matches!(err, fp_io::IoError::Arrow(_)),
+            "expected Arrow parse error, got {err:?}"
         );
     }
 

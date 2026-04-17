@@ -40,6 +40,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_feather_io"
+path = "fuzz_targets/fuzz_feather_io.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_common_dtype"
 path = "fuzz_targets/fuzz_common_dtype.rs"
 test = false
