@@ -1,0 +1,33 @@
+{
+  "packet_id": "FP-P2D-099",
+  "case_id": "dataframe_take_negative_indices_strict",
+  "mode": "strict",
+  "operation": "dataframe_take",
+  "take_indices": [-1, -2],
+  "frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 }
+    ],
+    "columns": {
+      "val": [
+        { "kind": "int64", "value": 100 },
+        { "kind": "int64", "value": 200 },
+        { "kind": "int64", "value": 300 }
+      ]
+    }
+  },
+  "expected_frame": {
+    "index": [
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 1 }
+    ],
+    "columns": {
+      "val": [
+        { "kind": "int64", "value": 300 },
+        { "kind": "int64", "value": 200 }
+      ]
+    }
+  }
+}
