@@ -19033,6 +19033,19 @@ mod tests {
     }
 
     #[test]
+    fn packet_filter_runs_dataframe_shift_axis1_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2D-144", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-144"));
+        assert!(
+            report.fixture_count >= 4,
+            "expected FP-P2D-144 dataframe shift axis1 fixtures"
+        );
+        assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
     fn packet_filter_runs_dataframe_merge_ordered_packet() {
         let cfg = HarnessConfig::default_paths();
         let report =
