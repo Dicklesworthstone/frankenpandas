@@ -5405,12 +5405,22 @@ impl Series {
     /// `ascending`: rank direction (default true = smallest gets rank 1)
     /// `na_option`: "keep" (NaN stays NaN), "top" (NaN gets lowest ranks), "bottom" (NaN gets highest ranks)
     pub fn rank(&self, method: &str, ascending: bool, na_option: &str) -> Result<Self, FrameError> {
-        let vals = self.column().values();
-        let len = vals.len();
+        self.rank_with_pct(method, ascending, na_option, false)
+    }
 
-        // Separate null and non-null indices
+    /// Rank values in the Series and optionally scale them to percentile ranks.
+    pub fn rank_with_pct(
+        &self,
+        method: &str,
+        ascending: bool,
+        na_option: &str,
+        pct: bool,
+    ) -> Result<Self, FrameError> {
+        validate_rank_method(method)?;
+        validate_rank_na_option(na_option)?;
+        let vals = self.column().values();
         let mut null_positions = Vec::new();
-        let mut sortable: Vec<(usize, f64)> = Vec::new();
+        let mut sortable = Vec::new();
 
         for (i, v) in vals.iter().enumerate() {
             if v.is_missing() {
@@ -5422,135 +5432,17 @@ impl Series {
             }
         }
 
-        // Sort by value; stable sort preserves original order for ties
-        if ascending {
-            sortable.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-        } else {
-            sortable.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        }
+        let ranked = rank_numeric_positions(
+            vals.len(),
+            sortable,
+            &null_positions,
+            method,
+            ascending,
+            na_option,
+            pct,
+        );
 
-        // Assign ranks based on method
-        let mut ranks = vec![f64::NAN; len];
-
-        match method {
-            "average" => {
-                let mut i = 0;
-                while i < sortable.len() {
-                    let mut j = i + 1;
-                    while j < sortable.len() && (sortable[j].1 - sortable[i].1).abs() < f64::EPSILON
-                    {
-                        j += 1;
-                    }
-                    // Positions i..j have equal values; average rank
-                    let avg: f64 = ((i + 1)..=(j)).map(|r| r as f64).sum::<f64>() / (j - i) as f64;
-                    for item in &sortable[i..j] {
-                        ranks[item.0] = avg;
-                    }
-                    i = j;
-                }
-            }
-            "min" => {
-                let mut i = 0;
-                while i < sortable.len() {
-                    let mut j = i + 1;
-                    while j < sortable.len() && (sortable[j].1 - sortable[i].1).abs() < f64::EPSILON
-                    {
-                        j += 1;
-                    }
-                    let min_rank = (i + 1) as f64;
-                    for item in &sortable[i..j] {
-                        ranks[item.0] = min_rank;
-                    }
-                    i = j;
-                }
-            }
-            "max" => {
-                let mut i = 0;
-                while i < sortable.len() {
-                    let mut j = i + 1;
-                    while j < sortable.len() && (sortable[j].1 - sortable[i].1).abs() < f64::EPSILON
-                    {
-                        j += 1;
-                    }
-                    let max_rank = j as f64;
-                    for item in &sortable[i..j] {
-                        ranks[item.0] = max_rank;
-                    }
-                    i = j;
-                }
-            }
-            "first" => {
-                for (rank_idx, item) in sortable.iter().enumerate() {
-                    ranks[item.0] = (rank_idx + 1) as f64;
-                }
-            }
-            "dense" => {
-                let mut dense_rank = 0u64;
-                let mut i = 0;
-                while i < sortable.len() {
-                    dense_rank += 1;
-                    let mut j = i + 1;
-                    while j < sortable.len() && (sortable[j].1 - sortable[i].1).abs() < f64::EPSILON
-                    {
-                        j += 1;
-                    }
-                    for item in &sortable[i..j] {
-                        ranks[item.0] = dense_rank as f64;
-                    }
-                    i = j;
-                }
-            }
-            _ => {
-                return Err(FrameError::CompatibilityRejected(format!(
-                    "rank method '{method}' not supported"
-                )));
-            }
-        }
-
-        // Handle na_option
-        match na_option {
-            "keep" => {
-                // nulls stay as NaN — already set
-            }
-            "top" => {
-                // NaN values get the lowest ranks (1, 2, ...)
-                // Shift all existing ranks up by null count
-                let null_count = null_positions.len();
-                for r in &mut ranks {
-                    if !r.is_nan() {
-                        *r += null_count as f64;
-                    }
-                }
-                for (i, &pos) in null_positions.iter().enumerate() {
-                    ranks[pos] = (i + 1) as f64;
-                }
-            }
-            "bottom" => {
-                // NaN values get the highest ranks
-                let non_null_count = sortable.len();
-                for (i, &pos) in null_positions.iter().enumerate() {
-                    ranks[pos] = (non_null_count + i + 1) as f64;
-                }
-            }
-            _ => {
-                return Err(FrameError::CompatibilityRejected(format!(
-                    "na_option '{na_option}' not supported"
-                )));
-            }
-        }
-
-        let out: Vec<Scalar> = ranks
-            .into_iter()
-            .map(|r| {
-                if r.is_nan() {
-                    Scalar::Null(NullKind::NaN)
-                } else {
-                    Scalar::Float64(r)
-                }
-            })
-            .collect();
-
-        Self::from_values(self.name(), self.index().labels().to_vec(), out)
+        Self::from_values(self.name(), self.index().labels().to_vec(), ranked)
     }
 
     /// Compute the Pearson correlation with another Series.
@@ -7375,6 +7267,119 @@ fn validate_rank_na_option(na_option: &str) -> Result<(), FrameError> {
     }
 }
 
+fn rank_numeric_positions(
+    len: usize,
+    mut sortable: Vec<(usize, f64)>,
+    null_positions: &[usize],
+    method: &str,
+    ascending: bool,
+    na_option: &str,
+    pct: bool,
+) -> Vec<Scalar> {
+    if ascending {
+        sortable.sort_by(|a, b| a.1.total_cmp(&b.1));
+    } else {
+        sortable.sort_by(|a, b| b.1.total_cmp(&a.1));
+    }
+
+    let mut ranks = vec![f64::NAN; len];
+    let mut distinct_non_null = 0usize;
+    let mut i = 0usize;
+
+    while i < sortable.len() {
+        let mut j = i + 1;
+        while j < sortable.len() && sortable[j].1 == sortable[i].1 {
+            j += 1;
+        }
+
+        distinct_non_null += 1;
+        let start_rank = (i + 1) as f64;
+        let end_rank = j as f64;
+
+        match method {
+            "average" => {
+                let avg_rank = (start_rank + end_rank) / 2.0;
+                for item in &sortable[i..j] {
+                    ranks[item.0] = avg_rank;
+                }
+            }
+            "min" => {
+                for item in &sortable[i..j] {
+                    ranks[item.0] = start_rank;
+                }
+            }
+            "max" => {
+                for item in &sortable[i..j] {
+                    ranks[item.0] = end_rank;
+                }
+            }
+            "first" => {
+                for (offset, item) in sortable[i..j].iter().enumerate() {
+                    ranks[item.0] = (i + offset + 1) as f64;
+                }
+            }
+            "dense" => {
+                let dense_rank = distinct_non_null as f64;
+                for item in &sortable[i..j] {
+                    ranks[item.0] = dense_rank;
+                }
+            }
+            _ => unreachable!("rank method should be validated before ranking"),
+        }
+
+        i = j;
+    }
+
+    match na_option {
+        "keep" => {}
+        "top" => {
+            let null_count = null_positions.len();
+            for rank in &mut ranks {
+                if !rank.is_nan() {
+                    *rank += null_count as f64;
+                }
+            }
+            for (i, &pos) in null_positions.iter().enumerate() {
+                ranks[pos] = (i + 1) as f64;
+            }
+        }
+        "bottom" => {
+            let non_null_count = sortable.len();
+            for (i, &pos) in null_positions.iter().enumerate() {
+                ranks[pos] = (non_null_count + i + 1) as f64;
+            }
+        }
+        _ => unreachable!("rank na_option should be validated before ranking"),
+    }
+
+    if pct {
+        let divisor = if method == "dense" {
+            distinct_non_null
+        } else {
+            sortable.len()
+        };
+        if divisor != 0 {
+            let divisor = divisor as f64;
+            for rank in &mut ranks {
+                if !rank.is_nan() {
+                    *rank /= divisor;
+                }
+            }
+        }
+    }
+
+    ranks
+        .into_iter()
+        .map(|rank| {
+            if rank.is_nan() {
+                Scalar::Null(NullKind::NaN)
+            } else {
+                Scalar::Float64(rank)
+            }
+        })
+        .collect()
+}
+
 impl SeriesGroupBy<'_> {
     /// Build groups as (key_label -> Vec<row_index>).
     fn build_groups(
@@ -7500,6 +7505,17 @@ impl SeriesGroupBy<'_> {
         ascending: bool,
         na_option: &str,
     ) -> Result<Series, FrameError> {
+        self.rank_with_pct(method, ascending, na_option, false)
+    }
+
+    /// Rank values within each group and optionally scale them to percentile ranks.
+    pub fn rank_with_pct(
+        &self,
+        method: &str,
+        ascending: bool,
+        na_option: &str,
+        pct: bool,
+    ) -> Result<Series, FrameError> {
         validate_rank_method(method)?;
         validate_rank_na_option(na_option)?;
         let (_order, order_keys, groups) = self.build_groups();
@@ -7507,123 +7523,31 @@ impl SeriesGroupBy<'_> {
 
         for key in &order_keys {
             let indices = &groups[key];
-            let mut null_pos = Vec::new();
-            let mut sortable: Vec<(usize, f64)> = Vec::new();
+            let mut null_positions = Vec::new();
+            let mut sortable = Vec::new();
 
-            for &i in indices {
-                let v = &self.series.column.values()[i];
+            for (local_idx, &series_idx) in indices.iter().enumerate() {
+                let v = &self.series.column.values()[series_idx];
                 if v.is_missing() {
-                    null_pos.push(i);
+                    null_positions.push(local_idx);
                 } else if let Ok(f) = v.to_f64() {
-                    sortable.push((i, f));
+                    sortable.push((local_idx, f));
                 } else {
-                    null_pos.push(i);
+                    null_positions.push(local_idx);
                 }
             }
 
-            if ascending {
-                sortable.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-            } else {
-                sortable.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-            }
-
-            match method {
-                "average" => {
-                    let mut i = 0;
-                    while i < sortable.len() {
-                        let mut j = i + 1;
-                        while j < sortable.len()
-                            && (sortable[j].1 - sortable[i].1).abs() < f64::EPSILON
-                        {
-                            j += 1;
-                        }
-                        let avg: f64 =
-                            ((i + 1)..=j).map(|r| r as f64).sum::<f64>() / (j - i) as f64;
-                        for item in &sortable[i..j] {
-                            ranks[item.0] = Scalar::Float64(avg);
-                        }
-                        i = j;
-                    }
-                }
-                "min" => {
-                    let mut i = 0;
-                    while i < sortable.len() {
-                        let mut j = i + 1;
-                        while j < sortable.len()
-                            && (sortable[j].1 - sortable[i].1).abs() < f64::EPSILON
-                        {
-                            j += 1;
-                        }
-                        let min_rank = (i + 1) as f64;
-                        for item in &sortable[i..j] {
-                            ranks[item.0] = Scalar::Float64(min_rank);
-                        }
-                        i = j;
-                    }
-                }
-                "max" => {
-                    let mut i = 0;
-                    while i < sortable.len() {
-                        let mut j = i + 1;
-                        while j < sortable.len()
-                            && (sortable[j].1 - sortable[i].1).abs() < f64::EPSILON
-                        {
-                            j += 1;
-                        }
-                        let max_rank = j as f64;
-                        for item in &sortable[i..j] {
-                            ranks[item.0] = Scalar::Float64(max_rank);
-                        }
-                        i = j;
-                    }
-                }
-                "first" => {
-                    for (rank_idx, item) in sortable.iter().enumerate() {
-                        ranks[item.0] = Scalar::Float64((rank_idx + 1) as f64);
-                    }
-                }
-                "dense" => {
-                    let mut dense_rank = 0u64;
-                    let mut i = 0;
-                    while i < sortable.len() {
-                        dense_rank += 1;
-                        let mut j = i + 1;
-                        while j < sortable.len()
-                            && (sortable[j].1 - sortable[i].1).abs() < f64::EPSILON
-                        {
-                            j += 1;
-                        }
-                        for item in &sortable[i..j] {
-                            ranks[item.0] = Scalar::Float64(dense_rank as f64);
-                        }
-                        i = j;
-                    }
-                }
-                _ => {}
-            }
-
-            match na_option {
-                "keep" => {}
-                "top" => {
-                    let null_count = null_pos.len();
-                    for &i in indices {
-                        if let Scalar::Float64(r) = &mut ranks[i]
-                            && !r.is_nan()
-                        {
-                            *r += null_count as f64;
-                        }
-                    }
-                    for (i, &pos) in null_pos.iter().enumerate() {
-                        ranks[pos] = Scalar::Float64((i + 1) as f64);
-                    }
-                }
-                "bottom" => {
-                    let non_null_count = sortable.len();
-                    for (i, &pos) in null_pos.iter().enumerate() {
-                        ranks[pos] = Scalar::Float64((non_null_count + i + 1) as f64);
-                    }
-                }
-                _ => {}
+            let group_ranks = rank_numeric_positions(
+                indices.len(),
+                sortable,
+                &null_positions,
+                method,
+                ascending,
+                na_option,
+                pct,
+            );
+            for (local_idx, value) in group_ranks.into_iter().enumerate() {
+                ranks[indices[local_idx]] = value;
             }
         }
 
@@ -8336,7 +8260,7 @@ impl StringAccessor<'_> {
         )
     }
 
-    /// Capitalize the first character of each string.
+    /// Capitalize the first character and lowercase the rest (pandas behavior).
     pub fn capitalize(&self) -> Result<Series, FrameError> {
         self.apply_str(
             |s| {
@@ -8345,7 +8269,7 @@ impl StringAccessor<'_> {
                     None => Scalar::Utf8(String::new()),
                     Some(c) => {
                         let upper: String = c.to_uppercase().collect();
-                        let rest: String = chars.collect();
+                        let rest: String = chars.flat_map(|c| c.to_lowercase()).collect();
                         Scalar::Utf8(format!("{upper}{rest}"))
                     }
                 }
@@ -15743,13 +15667,24 @@ impl DataFrame {
     ///
     /// Applies `Series::rank` independently to each column.
     pub fn rank(&self, method: &str, ascending: bool, na_option: &str) -> Result<Self, FrameError> {
+        self.rank_with_pct(method, ascending, na_option, false)
+    }
+
+    /// Rank values in each column of the DataFrame and optionally scale them to percentile ranks.
+    pub fn rank_with_pct(
+        &self,
+        method: &str,
+        ascending: bool,
+        na_option: &str,
+        pct: bool,
+    ) -> Result<Self, FrameError> {
         let mut ranked_cols = BTreeMap::new();
         for col_name in &self.column_order {
             let col = self.columns.get(col_name).ok_or_else(|| {
                 FrameError::CompatibilityRejected(format!("missing column: {col_name}"))
             })?;
             let series = Series::new(col_name, self.index.clone(), col.clone())?;
-            let ranked = series.rank(method, ascending, na_option)?;
+            let ranked = series.rank_with_pct(method, ascending, na_option, pct)?;
             ranked_cols.insert(col_name.clone(), ranked.column().clone());
         }
         Ok(Self {
@@ -15767,6 +15702,17 @@ impl DataFrame {
         method: &str,
         ascending: bool,
         na_option: &str,
+    ) -> Result<Self, FrameError> {
+        self.rank_axis1_with_pct(method, ascending, na_option, false)
+    }
+
+    /// Rank values across columns for each row and optionally scale them to percentile ranks.
+    pub fn rank_axis1_with_pct(
+        &self,
+        method: &str,
+        ascending: bool,
+        na_option: &str,
+        pct: bool,
     ) -> Result<Self, FrameError> {
         let n_cols = self.column_order.len();
         let n_rows = self.len();
@@ -15789,7 +15735,7 @@ impl DataFrame {
                 .map(fp_index::IndexLabel::Int64)
                 .collect();
             let row_series = Series::from_values("row", row_idx_labels, row_vals)?;
-            let ranked_row_series = row_series.rank(method, ascending, na_option)?;
+            let ranked_row_series = row_series.rank_with_pct(method, ascending, na_option, pct)?;
 
             // Scatter back to columns
             for (col_idx, val) in ranked_row_series.column().values().iter().enumerate() {
@@ -23513,138 +23459,42 @@ impl DataFrameGroupBy<'_> {
         ascending: bool,
         na_option: &str,
     ) -> Result<DataFrame, FrameError> {
+        self.rank_with_pct(method, ascending, na_option, false)
+    }
+
+    /// GroupBy rank within each group and optionally scale the ranks to percentiles.
+    pub fn rank_with_pct(
+        &self,
+        method: &str,
+        ascending: bool,
+        na_option: &str,
+        pct: bool,
+    ) -> Result<DataFrame, FrameError> {
         validate_rank_method(method)?;
         validate_rank_na_option(na_option)?;
         self.transform_groups(|vals| {
-            let n = vals.len();
-            let mut null_pos = Vec::new();
-            let mut sortable: Vec<(usize, f64)> = Vec::new();
+            let mut null_positions = Vec::new();
+            let mut sortable = Vec::new();
 
             for (i, v) in vals.iter().enumerate() {
                 if v.is_missing() {
-                    null_pos.push(i);
+                    null_positions.push(i);
                 } else if let Ok(f) = v.to_f64() {
                     sortable.push((i, f));
                 } else {
-                    null_pos.push(i);
+                    null_positions.push(i);
                 }
             }
 
-            if ascending {
-                sortable.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-            } else {
-                sortable.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-            }
-
-            let mut ranks = vec![f64::NAN; n];
-
-            match method {
-                "average" => {
-                    let mut i = 0;
-                    while i < sortable.len() {
-                        let mut j = i + 1;
-                        while j < sortable.len()
-                            && (sortable[j].1 - sortable[i].1).abs() < f64::EPSILON
-                        {
-                            j += 1;
-                        }
-                        let avg: f64 =
-                            ((i + 1)..=j).map(|r| r as f64).sum::<f64>() / (j - i) as f64;
-                        for item in &sortable[i..j] {
-                            ranks[item.0] = avg;
-                        }
-                        i = j;
-                    }
-                }
-                "min" => {
-                    let mut i = 0;
-                    while i < sortable.len() {
-                        let mut j = i + 1;
-                        while j < sortable.len()
-                            && (sortable[j].1 - sortable[i].1).abs() < f64::EPSILON
-                        {
-                            j += 1;
-                        }
-                        let min_rank = (i + 1) as f64;
-                        for item in &sortable[i..j] {
-                            ranks[item.0] = min_rank;
-                        }
-                        i = j;
-                    }
-                }
-                "max" => {
-                    let mut i = 0;
-                    while i < sortable.len() {
-                        let mut j = i + 1;
-                        while j < sortable.len()
-                            && (sortable[j].1 - sortable[i].1).abs() < f64::EPSILON
-                        {
-                            j += 1;
-                        }
-                        let max_rank = j as f64;
-                        for item in &sortable[i..j] {
-                            ranks[item.0] = max_rank;
-                        }
-                        i = j;
-                    }
-                }
-                "first" => {
-                    for (rank_idx, item) in sortable.iter().enumerate() {
-                        ranks[item.0] = (rank_idx + 1) as f64;
-                    }
-                }
-                "dense" => {
-                    let mut dense_rank = 0u64;
-                    let mut i = 0;
-                    while i < sortable.len() {
-                        dense_rank += 1;
-                        let mut j = i + 1;
-                        while j < sortable.len()
-                            && (sortable[j].1 - sortable[i].1).abs() < f64::EPSILON
-                        {
-                            j += 1;
-                        }
-                        for item in &sortable[i..j] {
-                            ranks[item.0] = dense_rank as f64;
-                        }
-                        i = j;
-                    }
-                }
-                _ => {}
-            }
-
-            match na_option {
-                "keep" => {}
-                "top" => {
-                    let null_count = null_pos.len();
-                    for r in &mut ranks {
-                        if !r.is_nan() {
-                            *r += null_count as f64;
-                        }
-                    }
-                    for (i, &pos) in null_pos.iter().enumerate() {
-                        ranks[pos] = (i + 1) as f64;
-                    }
-                }
-                "bottom" => {
-                    let non_null_count = sortable.len();
-                    for (i, &pos) in null_pos.iter().enumerate() {
-                        ranks[pos] = (non_null_count + i + 1) as f64;
-                    }
-                }
-                _ => {}
-            }
-
-            ranks
-                .into_iter()
-                .map(|r| {
-                    if r.is_nan() {
-                        Scalar::Null(NullKind::NaN)
-                    } else {
-                        Scalar::Float64(r)
-                    }
-                })
-                .collect()
+            rank_numeric_positions(
+                vals.len(),
+                sortable,
+                &null_positions,
+                method,
+                ascending,
+                na_option,
+                pct,
+            )
         })
     }
 
@@ -32240,6 +32090,67 @@ mod tests {
     }
 
     #[test]
+    fn series_rank_pct_average_scales_by_non_null_count() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Float64(3.0),
+                Scalar::Float64(1.0),
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+            ],
+        )
+        .unwrap();
+
+        let ranked = s.rank_with_pct("average", true, "keep", true).unwrap();
+        assert!(matches!(ranked.values()[0], Scalar::Float64(v) if (v - 1.0).abs() < 1e-12));
+        assert!(matches!(ranked.values()[1], Scalar::Float64(v) if (v - 0.375).abs() < 1e-12));
+        assert!(matches!(ranked.values()[2], Scalar::Float64(v) if (v - 0.375).abs() < 1e-12));
+        assert!(matches!(ranked.values()[3], Scalar::Float64(v) if (v - 0.75).abs() < 1e-12));
+    }
+
+    #[test]
+    fn series_rank_pct_dense_uses_distinct_non_null_count() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Float64(3.0),
+                Scalar::Float64(1.0),
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+            ],
+        )
+        .unwrap();
+
+        let ranked = s.rank_with_pct("dense", true, "keep", true).unwrap();
+        assert!(matches!(ranked.values()[0], Scalar::Float64(v) if (v - 1.0).abs() < 1e-12));
+        assert!(matches!(ranked.values()[1], Scalar::Float64(v) if (v - (1.0 / 3.0)).abs() < 1e-12));
+        assert!(matches!(ranked.values()[2], Scalar::Float64(v) if (v - (1.0 / 3.0)).abs() < 1e-12));
+        assert!(matches!(ranked.values()[3], Scalar::Float64(v) if (v - (2.0 / 3.0)).abs() < 1e-12));
+    }
+
+    #[test]
+    fn series_rank_pct_top_uses_non_null_denominator() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Float64(2.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(1.0),
+            ],
+        )
+        .unwrap();
+
+        let ranked = s.rank_with_pct("average", true, "top", true).unwrap();
+        assert!(matches!(ranked.values()[0], Scalar::Float64(v) if (v - 1.5).abs() < 1e-12));
+        assert!(matches!(ranked.values()[1], Scalar::Float64(v) if (v - 0.5).abs() < 1e-12));
+        assert!(matches!(ranked.values()[2], Scalar::Float64(v) if (v - 1.0).abs() < 1e-12));
+    }
+
+    #[test]
     fn series_rank_descending() {
         let s = Series::from_values(
             "x",
@@ -32398,6 +32309,42 @@ mod tests {
         assert_eq!(ranked.columns["a"].values()[2], Scalar::Float64(3.0));
         assert_eq!(ranked.columns["b"].values()[2], Scalar::Float64(1.0));
         assert_eq!(ranked.columns["c"].values()[2], Scalar::Float64(2.0));
+    }
+
+    #[test]
+    fn dataframe_rank_axis1_pct_dense_uses_row_distinct_count() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "a",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![Scalar::Float64(3.0), Scalar::Null(NullKind::NaN)],
+            )
+            .unwrap(),
+            Series::from_values(
+                "b",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![Scalar::Float64(1.0), Scalar::Float64(5.0)],
+            )
+            .unwrap(),
+            Series::from_values(
+                "c",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![Scalar::Float64(1.0), Scalar::Float64(7.0)],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let ranked = df
+            .rank_axis1_with_pct("dense", true, "keep", true)
+            .unwrap();
+
+        assert!(matches!(ranked.columns["a"].values()[0], Scalar::Float64(v) if (v - 1.0).abs() < 1e-12));
+        assert!(matches!(ranked.columns["b"].values()[0], Scalar::Float64(v) if (v - 0.5).abs() < 1e-12));
+        assert!(matches!(ranked.columns["c"].values()[0], Scalar::Float64(v) if (v - 0.5).abs() < 1e-12));
+        assert!(ranked.columns["a"].values()[1].is_missing());
+        assert!(matches!(ranked.columns["b"].values()[1], Scalar::Float64(v) if (v - 0.5).abs() < 1e-12));
+        assert!(matches!(ranked.columns["c"].values()[1], Scalar::Float64(v) if (v - 1.0).abs() < 1e-12));
     }
 
     // ── melt tests ──
@@ -39979,6 +39926,48 @@ mod tests {
         assert_eq!(v.values()[0], Scalar::Float64(3.0));
         assert_eq!(v.values()[1], Scalar::Float64(1.0));
         assert_eq!(v.values()[2], Scalar::Float64(2.0));
+    }
+
+    #[test]
+    fn groupby_rank_pct_dense_uses_group_distinct_count() {
+        let df = DataFrame::from_dict(
+            &["g", "v"],
+            vec![
+                (
+                    "g",
+                    vec![
+                        Scalar::Utf8("a".to_owned()),
+                        Scalar::Utf8("a".to_owned()),
+                        Scalar::Utf8("a".to_owned()),
+                        Scalar::Utf8("b".to_owned()),
+                        Scalar::Utf8("b".to_owned()),
+                    ],
+                ),
+                (
+                    "v",
+                    vec![
+                        Scalar::Int64(10),
+                        Scalar::Int64(10),
+                        Scalar::Int64(20),
+                        Scalar::Int64(5),
+                        Scalar::Int64(7),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let result = df
+            .groupby(&["g"])
+            .unwrap()
+            .rank_with_pct("dense", true, "keep", true)
+            .unwrap();
+        let v = result.column_as_series("v").unwrap();
+        assert!(matches!(v.values()[0], Scalar::Float64(x) if (x - 0.5).abs() < 1e-12));
+        assert!(matches!(v.values()[1], Scalar::Float64(x) if (x - 0.5).abs() < 1e-12));
+        assert!(matches!(v.values()[2], Scalar::Float64(x) if (x - 1.0).abs() < 1e-12));
+        assert!(matches!(v.values()[3], Scalar::Float64(x) if (x - 0.5).abs() < 1e-12));
+        assert!(matches!(v.values()[4], Scalar::Float64(x) if (x - 1.0).abs() < 1e-12));
     }
 
     #[test]

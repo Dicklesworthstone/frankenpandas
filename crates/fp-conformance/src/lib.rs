@@ -435,6 +435,18 @@ pub enum FixtureOperation {
         alias = "series_str_get_dummies_default"
     )]
     SeriesStrGetDummies,
+    #[serde(rename = "series_str_lower", alias = "series_str_lower_default")]
+    SeriesStrLower,
+    #[serde(rename = "series_str_upper", alias = "series_str_upper_default")]
+    SeriesStrUpper,
+    #[serde(rename = "series_str_capitalize", alias = "series_str_capitalize_default")]
+    SeriesStrCapitalize,
+    #[serde(rename = "series_str_strip", alias = "series_str_strip_default")]
+    SeriesStrStrip,
+    #[serde(rename = "series_str_len", alias = "series_str_len_default")]
+    SeriesStrLen,
+    #[serde(rename = "series_str_contains", alias = "series_str_contains_default")]
+    SeriesStrContains,
     #[serde(rename = "dataframe_loc", alias = "data_frame_loc")]
     DataFrameLoc,
     #[serde(rename = "dataframe_iloc", alias = "data_frame_iloc")]
@@ -801,6 +813,12 @@ impl FixtureOperation {
             Self::SeriesExtractDf => "series_extract_df",
             Self::SeriesExtractAll => "series_extractall",
             Self::SeriesStrGetDummies => "series_str_get_dummies",
+            Self::SeriesStrLower => "series_str_lower",
+            Self::SeriesStrUpper => "series_str_upper",
+            Self::SeriesStrCapitalize => "series_str_capitalize",
+            Self::SeriesStrStrip => "series_str_strip",
+            Self::SeriesStrLen => "series_str_len",
+            Self::SeriesStrContains => "series_str_contains",
             Self::DataFrameLoc => "dataframe_loc",
             Self::DataFrameIloc => "dataframe_iloc",
             Self::DataFrameTake => "dataframe_take",
@@ -1109,6 +1127,8 @@ pub struct PacketFixture {
     pub rank_na_option: Option<String>,
     #[serde(default)]
     pub rank_axis: Option<usize>,
+    #[serde(default)]
+    pub rank_pct: Option<bool>,
     #[serde(default)]
     pub corr_method: Option<String>,
     #[serde(default)]
@@ -1529,6 +1549,12 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::SeriesBetween
         | FixtureOperation::SeriesCut
         | FixtureOperation::SeriesQcut
+        | FixtureOperation::SeriesStrLower
+        | FixtureOperation::SeriesStrUpper
+        | FixtureOperation::SeriesStrCapitalize
+        | FixtureOperation::SeriesStrStrip
+        | FixtureOperation::SeriesStrLen
+        | FixtureOperation::SeriesStrContains
         | FixtureOperation::SeriesIsNa
         | FixtureOperation::SeriesNotNa
         | FixtureOperation::SeriesIsNull
@@ -2230,6 +2256,8 @@ struct OracleRequest {
     pub rank_na_option: Option<String>,
     #[serde(default)]
     pub rank_axis: Option<usize>,
+    #[serde(default)]
+    pub rank_pct: Option<bool>,
     #[serde(default)]
     pub corr_method: Option<String>,
     #[serde(default)]
@@ -6402,8 +6430,9 @@ fn run_fixture_operation(
             let method = fixture.rank_method.as_deref().unwrap_or("average");
             let ascending = resolve_sort_ascending(fixture);
             let na_option = fixture.rank_na_option.as_deref().unwrap_or("keep");
+            let pct = resolve_rank_pct(fixture);
             let actual = series
-                .rank(method, ascending, na_option)
+                .rank_with_pct(method, ascending, na_option, pct)
                 .map_err(|err| err.to_string());
             match expected {
                 ResolvedExpected::Series(series) => compare_series_expected(&actual?, &series),
@@ -7052,10 +7081,11 @@ fn run_fixture_operation(
             let na_option = fixture.rank_na_option.as_deref().unwrap_or("keep");
             let ascending = resolve_sort_ascending(fixture);
             let axis = resolve_rank_axis(fixture)?;
+            let pct = resolve_rank_pct(fixture);
             let actual = if axis == 1 {
-                frame.rank_axis1(method, ascending, na_option)
+                frame.rank_axis1_with_pct(method, ascending, na_option, pct)
             } else {
-                frame.rank(method, ascending, na_option)
+                frame.rank_with_pct(method, ascending, na_option, pct)
             }
             .map_err(|err| err.to_string());
             match expected {
@@ -7255,7 +7285,13 @@ fn run_fixture_operation(
         | FixtureOperation::SeriesNsmallest
         | FixtureOperation::SeriesBetween
         | FixtureOperation::SeriesCut
-        | FixtureOperation::SeriesQcut => {
+        | FixtureOperation::SeriesQcut
+        | FixtureOperation::SeriesStrLower
+        | FixtureOperation::SeriesStrUpper
+        | FixtureOperation::SeriesStrCapitalize
+        | FixtureOperation::SeriesStrStrip
+        | FixtureOperation::SeriesStrLen
+        | FixtureOperation::SeriesStrContains => {
             let actual = execute_series_module_utility_fixture_operation(fixture);
             let op_name = fixture.operation.operation_name();
             match expected {
@@ -8765,6 +8801,12 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::SeriesBetween
         | FixtureOperation::SeriesCut
         | FixtureOperation::SeriesQcut
+        | FixtureOperation::SeriesStrLower
+        | FixtureOperation::SeriesStrUpper
+        | FixtureOperation::SeriesStrCapitalize
+        | FixtureOperation::SeriesStrStrip
+        | FixtureOperation::SeriesStrLen
+        | FixtureOperation::SeriesStrContains
         | FixtureOperation::SeriesAtTime
         | FixtureOperation::SeriesBetweenTime
         | FixtureOperation::DataFrameGroupByCumcount
@@ -9033,6 +9075,7 @@ fn capture_live_oracle_expected(
         rank_method: fixture.rank_method.clone(),
         rank_na_option: fixture.rank_na_option.clone(),
         rank_axis: fixture.rank_axis,
+        rank_pct: fixture.rank_pct,
         corr_method: fixture.corr_method.clone(),
         corr_min_periods: fixture.corr_min_periods,
         sort_column: fixture.sort_column.clone(),
@@ -9247,6 +9290,12 @@ fn capture_live_oracle_expected(
         | FixtureOperation::SeriesBetween
         | FixtureOperation::SeriesCut
         | FixtureOperation::SeriesQcut
+        | FixtureOperation::SeriesStrLower
+        | FixtureOperation::SeriesStrUpper
+        | FixtureOperation::SeriesStrCapitalize
+        | FixtureOperation::SeriesStrStrip
+        | FixtureOperation::SeriesStrLen
+        | FixtureOperation::SeriesStrContains
         | FixtureOperation::SeriesAtTime
         | FixtureOperation::SeriesBetweenTime
         | FixtureOperation::DataFrameGroupByCumcount
@@ -10047,6 +10096,10 @@ fn resolve_rank_axis(fixture: &PacketFixture) -> Result<usize, String> {
             "rank_axis must be 0 or 1 for dataframe_rank (got {axis})"
         )),
     }
+}
+
+fn resolve_rank_pct(fixture: &PacketFixture) -> bool {
+    fixture.rank_pct.unwrap_or(false)
 }
 
 fn resolve_take_axis(fixture: &PacketFixture) -> Result<usize, String> {
@@ -11176,13 +11229,14 @@ fn execute_dataframe_fixture_operation(fixture: &PacketFixture) -> Result<DataFr
             let na_option = fixture.rank_na_option.as_deref().unwrap_or("keep");
             let ascending = resolve_sort_ascending(fixture);
             let axis = resolve_rank_axis(fixture)?;
+            let pct = resolve_rank_pct(fixture);
             if axis == 1 {
                 frame
-                    .rank_axis1(method, ascending, na_option)
+                    .rank_axis1_with_pct(method, ascending, na_option, pct)
                     .map_err(|err| err.to_string())
             } else {
                 frame
-                    .rank(method, ascending, na_option)
+                    .rank_with_pct(method, ascending, na_option, pct)
                     .map_err(|err| err.to_string())
             }
         }
@@ -11609,6 +11663,28 @@ fn execute_series_module_utility_fixture_operation(
         }
         FixtureOperation::SeriesQcut => {
             qcut(&series, require_qcut_quantiles(fixture)?).map_err(|err| err.to_string())
+        }
+        FixtureOperation::SeriesStrLower => {
+            series.str().lower().map_err(|err| err.to_string())
+        }
+        FixtureOperation::SeriesStrUpper => {
+            series.str().upper().map_err(|err| err.to_string())
+        }
+        FixtureOperation::SeriesStrCapitalize => {
+            series.str().capitalize().map_err(|err| err.to_string())
+        }
+        FixtureOperation::SeriesStrStrip => {
+            series.str().strip().map_err(|err| err.to_string())
+        }
+        FixtureOperation::SeriesStrLen => {
+            series.str().len().map_err(|err| err.to_string())
+        }
+        FixtureOperation::SeriesStrContains => {
+            let pattern = fixture
+                .regex_pattern
+                .as_deref()
+                .ok_or_else(|| "regex_pattern required for series_str_contains".to_owned())?;
+            series.str().contains(pattern).map_err(|err| err.to_string())
         }
         other => Err(format!(
             "unsupported series module utility operation for fixture execution: {other:?}"
@@ -13262,8 +13338,9 @@ fn execute_and_compare_differential(
             let method = fixture.rank_method.as_deref().unwrap_or("average");
             let ascending = resolve_sort_ascending(fixture);
             let na_option = fixture.rank_na_option.as_deref().unwrap_or("keep");
+            let pct = resolve_rank_pct(fixture);
             let actual = series
-                .rank(method, ascending, na_option)
+                .rank_with_pct(method, ascending, na_option, pct)
                 .map_err(|err| err.to_string());
             match expected {
                 ResolvedExpected::Series(s) => Ok(diff_series(&actual?, &s)),
@@ -14022,10 +14099,11 @@ fn execute_and_compare_differential(
             let na_option = fixture.rank_na_option.as_deref().unwrap_or("keep");
             let ascending = resolve_sort_ascending(fixture);
             let axis = resolve_rank_axis(fixture)?;
+            let pct = resolve_rank_pct(fixture);
             let actual = if axis == 1 {
-                frame.rank_axis1(method, ascending, na_option)
+                frame.rank_axis1_with_pct(method, ascending, na_option, pct)
             } else {
-                frame.rank(method, ascending, na_option)
+                frame.rank_with_pct(method, ascending, na_option, pct)
             }
             .map_err(|err| err.to_string());
             match expected {
@@ -14254,7 +14332,13 @@ fn execute_and_compare_differential(
         | FixtureOperation::SeriesNsmallest
         | FixtureOperation::SeriesBetween
         | FixtureOperation::SeriesCut
-        | FixtureOperation::SeriesQcut => {
+        | FixtureOperation::SeriesQcut
+        | FixtureOperation::SeriesStrLower
+        | FixtureOperation::SeriesStrUpper
+        | FixtureOperation::SeriesStrCapitalize
+        | FixtureOperation::SeriesStrStrip
+        | FixtureOperation::SeriesStrLen
+        | FixtureOperation::SeriesStrContains => {
             let actual = execute_series_module_utility_fixture_operation(fixture);
             let op_name = fixture.operation.operation_name();
             match expected {
@@ -18219,7 +18303,7 @@ mod tests {
             run_packet_by_id(&cfg, "FP-P2C-005", OracleMode::FixtureExpected).expect("report");
         assert_eq!(report.packet_id.as_deref(), Some("FP-P2C-005"));
         assert!(
-            report.fixture_count >= 3,
+            report.fixture_count >= 4,
             "expected groupby packet fixtures"
         );
         assert!(report.is_green());
@@ -18232,7 +18316,7 @@ mod tests {
             run_packet_by_id(&cfg, "FP-P2C-011", OracleMode::FixtureExpected).expect("report");
         assert_eq!(report.packet_id.as_deref(), Some("FP-P2C-011"));
         assert!(
-            report.fixture_count >= 12,
+            report.fixture_count >= 23,
             "expected FP-P2C-011 aggregate matrix fixtures"
         );
         assert!(report.is_green(), "expected report green: {report:?}");
@@ -20749,6 +20833,68 @@ mod tests {
     }
 
     #[test]
+    fn live_oracle_series_rank_pct_dense_matches_pandas() {
+        let mut cfg = HarnessConfig::default_paths();
+        cfg.allow_system_pandas_fallback = false;
+
+        let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+            "packet_id": "FP-P2D-LIVE-SERIES-RANK-PCT",
+            "case_id": "series_rank_pct_dense_live",
+            "mode": "strict",
+            "operation": "series_rank",
+            "oracle_source": "live_legacy_pandas",
+            "rank_method": "dense",
+            "rank_na_option": "keep",
+            "rank_pct": true,
+            "sort_ascending": true,
+            "left": {
+                "name": "vals",
+                "index": [
+                    { "kind": "int64", "value": 0 },
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "int64", "value": 2 },
+                    { "kind": "int64", "value": 3 },
+                    { "kind": "int64", "value": 4 }
+                ],
+                "values": [
+                    { "kind": "float64", "value": 3.0 },
+                    { "kind": "float64", "value": 1.0 },
+                    { "kind": "float64", "value": 1.0 },
+                    { "kind": "float64", "value": 2.0 },
+                    { "kind": "null", "value": "na_n" }
+                ]
+            }
+        }))
+        .expect("fixture");
+
+        let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+        if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+            eprintln!("live pandas unavailable; skipping series rank pct oracle test: {message}");
+            return;
+        }
+
+        let expected = expected_result.expect("live oracle expected");
+        assert!(
+            matches!(&expected, super::ResolvedExpected::Series(_)),
+            "expected live oracle series payload, got {expected:?}"
+        );
+        let super::ResolvedExpected::Series(expected) = expected else {
+            return;
+        };
+
+        let actual = super::build_series(fixture.left.as_ref().expect("left"))
+            .expect("series")
+            .rank_with_pct(
+                fixture.rank_method.as_deref().expect("rank_method"),
+                super::resolve_sort_ascending(&fixture),
+                fixture.rank_na_option.as_deref().expect("rank_na_option"),
+                super::resolve_rank_pct(&fixture),
+            )
+            .expect("actual series");
+        super::compare_series_expected(&actual, &expected).expect("pandas parity");
+    }
+
+    #[test]
     fn live_oracle_dataframe_rank_axis1_matches_pandas() {
         let mut cfg = HarnessConfig::default_paths();
         cfg.allow_system_pandas_fallback = false;
@@ -20795,6 +20941,67 @@ mod tests {
         if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
             eprintln!(
                 "live pandas unavailable; skipping dataframe rank axis=1 oracle test: {message}"
+            );
+            return;
+        }
+
+        let expected = expected_result.expect("live oracle expected");
+        assert!(
+            matches!(&expected, super::ResolvedExpected::Frame(_)),
+            "expected live oracle frame payload, got {expected:?}"
+        );
+        let super::ResolvedExpected::Frame(expected) = expected else {
+            return;
+        };
+
+        let actual = super::execute_dataframe_fixture_operation(&fixture).expect("actual frame");
+        super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
+    }
+
+    #[test]
+    fn live_oracle_dataframe_rank_axis1_pct_dense_matches_pandas() {
+        let mut cfg = HarnessConfig::default_paths();
+        cfg.allow_system_pandas_fallback = false;
+
+        let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+            "packet_id": "FP-P2D-LIVE-DATAFRAME-RANK-PCT",
+            "case_id": "dataframe_rank_axis1_pct_dense_live",
+            "mode": "strict",
+            "operation": "dataframe_rank",
+            "oracle_source": "live_legacy_pandas",
+            "rank_axis": 1,
+            "rank_method": "dense",
+            "rank_na_option": "keep",
+            "rank_pct": true,
+            "sort_ascending": true,
+            "frame": {
+                "index": [
+                    { "kind": "int64", "value": 0 },
+                    { "kind": "int64", "value": 1 }
+                ],
+                "column_order": ["a", "b", "c"],
+                "columns": {
+                    "a": [
+                        { "kind": "float64", "value": 3.0 },
+                        { "kind": "null", "value": "na_n" }
+                    ],
+                    "b": [
+                        { "kind": "float64", "value": 1.0 },
+                        { "kind": "float64", "value": 5.0 }
+                    ],
+                    "c": [
+                        { "kind": "float64", "value": 1.0 },
+                        { "kind": "float64", "value": 7.0 }
+                    ]
+                }
+            }
+        }))
+        .expect("fixture");
+
+        let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+        if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+            eprintln!(
+                "live pandas unavailable; skipping dataframe rank pct axis=1 oracle test: {message}"
             );
             return;
         }
