@@ -297,6 +297,14 @@ pub enum FixtureOperation {
     DataFrameCummax,
     #[serde(rename = "dataframe_cummin", alias = "dataframe_cummin_default")]
     DataFrameCummin,
+    #[serde(rename = "dataframe_astype", alias = "dataframe_astype_default")]
+    DataFrameAstype,
+    #[serde(rename = "dataframe_clip", alias = "dataframe_clip_default")]
+    DataFrameClip,
+    #[serde(rename = "dataframe_abs", alias = "dataframe_abs_default")]
+    DataFrameAbs,
+    #[serde(rename = "dataframe_round", alias = "dataframe_round_default")]
+    DataFrameRound,
     #[serde(rename = "series_cut", alias = "series_cut_default")]
     SeriesCut,
     #[serde(rename = "series_qcut", alias = "series_qcut_default")]
@@ -646,6 +654,10 @@ impl FixtureOperation {
             Self::DataFrameCumprod => "dataframe_cumprod",
             Self::DataFrameCummax => "dataframe_cummax",
             Self::DataFrameCummin => "dataframe_cummin",
+            Self::DataFrameAstype => "dataframe_astype",
+            Self::DataFrameClip => "dataframe_clip",
+            Self::DataFrameAbs => "dataframe_abs",
+            Self::DataFrameRound => "dataframe_round",
             Self::SeriesCut => "series_cut",
             Self::SeriesQcut => "series_qcut",
             Self::SeriesValueCounts => "series_value_counts",
@@ -1316,7 +1328,11 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::DataFrameCumsum
         | FixtureOperation::DataFrameCumprod
         | FixtureOperation::DataFrameCummax
-        | FixtureOperation::DataFrameCummin => &["CC-005"],
+        | FixtureOperation::DataFrameCummin
+        | FixtureOperation::DataFrameAstype
+        | FixtureOperation::DataFrameClip
+        | FixtureOperation::DataFrameAbs
+        | FixtureOperation::DataFrameRound => &["CC-005"],
         FixtureOperation::FillNa
         | FixtureOperation::DropNa
         | FixtureOperation::SeriesToNumeric
@@ -1984,6 +2000,8 @@ struct OracleRequest {
     #[serde(default)]
     fill_value: Option<Scalar>,
     #[serde(default)]
+    constructor_dtype: Option<String>,
+    #[serde(default)]
     datetime_unit: Option<String>,
     #[serde(default)]
     datetime_origin: Option<serde_json::Value>,
@@ -2003,6 +2021,12 @@ struct OracleRequest {
     pub pct_change_periods: Option<i64>,
     #[serde(default)]
     pub diff_axis: Option<usize>,
+    #[serde(default)]
+    pub clip_lower: Option<f64>,
+    #[serde(default)]
+    pub clip_upper: Option<f64>,
+    #[serde(default)]
+    pub round_decimals: Option<i32>,
     #[serde(default)]
     pub rank_method: Option<String>,
     #[serde(default)]
@@ -6652,7 +6676,11 @@ fn run_fixture_operation(
         | FixtureOperation::DataFrameCumsum
         | FixtureOperation::DataFrameCumprod
         | FixtureOperation::DataFrameCummax
-        | FixtureOperation::DataFrameCummin => {
+        | FixtureOperation::DataFrameCummin
+        | FixtureOperation::DataFrameAstype
+        | FixtureOperation::DataFrameClip
+        | FixtureOperation::DataFrameAbs
+        | FixtureOperation::DataFrameRound => {
             let frame = build_dataframe(require_frame(fixture)?)
                 .map_err(|err| format!("frame build failed: {err}"))?;
             let op_name = fixture.operation.operation_name();
@@ -6662,9 +6690,24 @@ fn run_fixture_operation(
                 FixtureOperation::DataFrameCumprod => frame.cumprod(),
                 FixtureOperation::DataFrameCummax => frame.cummax(),
                 FixtureOperation::DataFrameCummin => frame.cummin(),
+                FixtureOperation::DataFrameAstype => {
+                    let dtype_spec = fixture
+                        .constructor_dtype
+                        .as_deref()
+                        .ok_or_else(|| "constructor_dtype required for dataframe_astype".to_owned())
+                        .and_then(parse_constructor_dtype_spec);
+                    dtype_spec.and_then(|dtype| frame.astype(dtype).map_err(|err| err.to_string()))
+                }
+                FixtureOperation::DataFrameClip => frame
+                    .clip(fixture.clip_lower, fixture.clip_upper)
+                    .map_err(|err| err.to_string()),
+                FixtureOperation::DataFrameAbs => frame.abs().map_err(|err| err.to_string()),
+                FixtureOperation::DataFrameRound => {
+                    let decimals = fixture.round_decimals.unwrap_or(0);
+                    frame.round(decimals).map_err(|err| err.to_string())
+                }
                 _ => unreachable!(),
-            }
-            .map_err(|err| err.to_string());
+            };
             match expected {
                 ResolvedExpected::Frame(frame) => compare_dataframe_expected(&actual?, &frame),
                 ResolvedExpected::ErrorContains(substr) => match actual {
@@ -8460,6 +8503,10 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::DataFrameCumprod
         | FixtureOperation::DataFrameCummax
         | FixtureOperation::DataFrameCummin
+        | FixtureOperation::DataFrameAstype
+        | FixtureOperation::DataFrameClip
+        | FixtureOperation::DataFrameAbs
+        | FixtureOperation::DataFrameRound
         | FixtureOperation::DataFrameRank
         | FixtureOperation::DataFrameFromSeries
         | FixtureOperation::DataFrameFromDict
@@ -8604,6 +8651,7 @@ fn capture_live_oracle_expected(
         merge_suffixes: fixture.merge_suffixes.clone(),
         merge_sort: fixture.merge_sort,
         fill_value: fixture.fill_value.clone(),
+        constructor_dtype: fixture.constructor_dtype.clone(),
         datetime_unit: fixture.datetime_unit.clone(),
         datetime_origin: fixture.datetime_origin.clone(),
         datetime_utc: fixture.datetime_utc,
@@ -8614,6 +8662,9 @@ fn capture_live_oracle_expected(
         shift_axis: fixture.shift_axis,
         pct_change_periods: fixture.pct_change_periods,
         diff_axis: fixture.diff_axis,
+        clip_lower: fixture.clip_lower,
+        clip_upper: fixture.clip_upper,
+        round_decimals: fixture.round_decimals,
         rank_method: fixture.rank_method.clone(),
         rank_na_option: fixture.rank_na_option.clone(),
         rank_axis: fixture.rank_axis,
@@ -8884,6 +8935,10 @@ fn capture_live_oracle_expected(
         | FixtureOperation::DataFrameCumprod
         | FixtureOperation::DataFrameCummax
         | FixtureOperation::DataFrameCummin
+        | FixtureOperation::DataFrameAstype
+        | FixtureOperation::DataFrameClip
+        | FixtureOperation::DataFrameAbs
+        | FixtureOperation::DataFrameRound
         | FixtureOperation::DataFrameRank
         | FixtureOperation::DataFrameFromSeries
         | FixtureOperation::DataFrameFromDict
@@ -10572,6 +10627,34 @@ fn execute_dataframe_fixture_operation(fixture: &PacketFixture) -> Result<DataFr
             let frame = build_dataframe(require_frame(fixture)?)
                 .map_err(|err| format!("frame build failed: {err}"))?;
             frame.cummin().map_err(|err| err.to_string())
+        }
+        FixtureOperation::DataFrameAstype => {
+            let frame = build_dataframe(require_frame(fixture)?)
+                .map_err(|err| format!("frame build failed: {err}"))?;
+            let dtype_spec = fixture
+                .constructor_dtype
+                .as_deref()
+                .ok_or_else(|| "constructor_dtype required for dataframe_astype".to_owned())?;
+            let target_dtype = parse_constructor_dtype_spec(dtype_spec)?;
+            frame.astype(target_dtype).map_err(|err| err.to_string())
+        }
+        FixtureOperation::DataFrameClip => {
+            let frame = build_dataframe(require_frame(fixture)?)
+                .map_err(|err| format!("frame build failed: {err}"))?;
+            frame
+                .clip(fixture.clip_lower, fixture.clip_upper)
+                .map_err(|err| err.to_string())
+        }
+        FixtureOperation::DataFrameAbs => {
+            let frame = build_dataframe(require_frame(fixture)?)
+                .map_err(|err| format!("frame build failed: {err}"))?;
+            frame.abs().map_err(|err| err.to_string())
+        }
+        FixtureOperation::DataFrameRound => {
+            let frame = build_dataframe(require_frame(fixture)?)
+                .map_err(|err| format!("frame build failed: {err}"))?;
+            let decimals = fixture.round_decimals.unwrap_or(0);
+            frame.round(decimals).map_err(|err| err.to_string())
         }
         FixtureOperation::DataFrameRank => {
             let frame = build_dataframe(require_frame(fixture)?)
@@ -14791,6 +14874,10 @@ fn execute_and_compare_differential(
         | FixtureOperation::DataFrameCumprod
         | FixtureOperation::DataFrameCummax
         | FixtureOperation::DataFrameCummin
+        | FixtureOperation::DataFrameAstype
+        | FixtureOperation::DataFrameClip
+        | FixtureOperation::DataFrameAbs
+        | FixtureOperation::DataFrameRound
         | FixtureOperation::DataFrameMelt
         | FixtureOperation::DataFramePivotTable
         | FixtureOperation::DataFrameStack
