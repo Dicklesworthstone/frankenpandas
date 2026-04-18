@@ -19925,6 +19925,19 @@ mod tests {
     }
 
     #[test]
+    fn packet_filter_runs_dataframe_cov_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2D-147", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-147"));
+        assert!(
+            report.fixture_count >= 2,
+            "expected FP-P2D-147 dataframe cov fixtures"
+        );
+        assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
     fn packet_filter_runs_dataframe_sem_packet() {
         let cfg = HarnessConfig::default_paths();
         let report =
