@@ -1,0 +1,24 @@
+{
+  "packet_id": "FP-P2C-010",
+  "case_id": "series_head_zero_strict",
+  "mode": "strict",
+  "operation": "series_head",
+  "left": {
+    "name": "data",
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 }
+    ],
+    "values": [
+      { "kind": "int64", "value": 100 },
+      { "kind": "int64", "value": 200 },
+      { "kind": "int64", "value": 300 }
+    ]
+  },
+  "head_n": 0,
+  "expected_series": {
+    "index": [],
+    "values": []
+  }
+}
