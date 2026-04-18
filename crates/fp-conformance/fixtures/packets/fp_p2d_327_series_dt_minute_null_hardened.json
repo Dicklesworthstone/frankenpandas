@@ -1,0 +1,35 @@
+{
+  "packet_id": "FP-P2D-327",
+  "case_id": "series_dt_minute_null_hardened",
+  "mode": "hardened",
+  "operation": "series_dt_minute",
+  "left": {
+    "name": "datetimes",
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 3 }
+    ],
+    "values": [
+      { "kind": "utf8", "value": "2024-06-15T10:00:00" },
+      { "kind": "null", "value": "null" },
+      { "kind": "utf8", "value": "2024-06-15T10:30:45" },
+      { "kind": "utf8", "value": "2024-06-15T10:59:59" }
+    ]
+  },
+  "expected_series": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 3 }
+    ],
+    "values": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "null", "value": "null" },
+      { "kind": "int64", "value": 30 },
+      { "kind": "int64", "value": 59 }
+    ]
+  }
+}

@@ -1,0 +1,35 @@
+{
+  "packet_id": "FP-P2D-325",
+  "case_id": "series_dt_year_null_hardened",
+  "mode": "hardened",
+  "operation": "series_dt_year",
+  "left": {
+    "name": "dates",
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 3 }
+    ],
+    "values": [
+      { "kind": "utf8", "value": "2024-06-15T12:30:00" },
+      { "kind": "null", "value": "null" },
+      { "kind": "utf8", "value": "1900-01-01T00:00:00" },
+      { "kind": "utf8", "value": "2100-12-31T23:59:59" }
+    ]
+  },
+  "expected_series": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 3 }
+    ],
+    "values": [
+      { "kind": "int64", "value": 2024 },
+      { "kind": "null", "value": "null" },
+      { "kind": "int64", "value": 1900 },
+      { "kind": "int64", "value": 2100 }
+    ]
+  }
+}
