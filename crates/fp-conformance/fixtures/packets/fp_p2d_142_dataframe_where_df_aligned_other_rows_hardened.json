@@ -1,0 +1,66 @@
+{
+  "packet_id": "FP-P2D-142",
+  "case_id": "dataframe_where_df_aligned_other_rows_hardened",
+  "mode": "hardened",
+  "operation": "dataframe_where_df",
+  "frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 }
+    ],
+    "column_order": ["a"],
+    "columns": {
+      "a": [
+        { "kind": "int64", "value": 1 },
+        { "kind": "int64", "value": 2 },
+        { "kind": "int64", "value": 3 }
+      ]
+    }
+  },
+  "frame_right": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 }
+    ],
+    "column_order": ["a"],
+    "columns": {
+      "a": [
+        { "kind": "bool", "value": false },
+        { "kind": "bool", "value": true },
+        { "kind": "bool", "value": false }
+      ]
+    }
+  },
+  "frame_other": {
+    "index": [
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 0 }
+    ],
+    "column_order": ["a"],
+    "columns": {
+      "a": [
+        { "kind": "int64", "value": 300 },
+        { "kind": "int64", "value": 200 },
+        { "kind": "int64", "value": 100 }
+      ]
+    }
+  },
+  "expected_frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 }
+    ],
+    "column_order": ["a"],
+    "columns": {
+      "a": [
+        { "kind": "int64", "value": 100 },
+        { "kind": "int64", "value": 2 },
+        { "kind": "int64", "value": 300 }
+      ]
+    }
+  }
+}

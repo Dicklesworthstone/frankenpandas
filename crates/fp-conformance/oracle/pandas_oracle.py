@@ -3003,6 +3003,31 @@ def op_dataframe_where(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return {"expected_frame": dataframe_to_json(out)}
 
 
+def op_dataframe_where_df(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    cond_payload = payload.get("frame_right")
+    other_payload = payload.get("frame_other")
+    if frame_payload is None:
+        raise OracleError("dataframe_where_df requires frame payload")
+    if cond_payload is None:
+        raise OracleError("dataframe_where_df requires frame_right condition payload")
+    if other_payload is None:
+        raise OracleError("dataframe_where_df requires frame_other payload")
+
+    frame = dataframe_from_json(pd, frame_payload)
+    cond = dataframe_from_json(pd, cond_payload)
+    other = dataframe_from_json(pd, other_payload)
+    for column in frame.columns.tolist():
+        if column not in cond.columns.tolist():
+            raise OracleError(f"where_cond_df: condition missing column {column!r}")
+
+    try:
+        out = frame.where(cond, other=other)
+    except Exception as exc:
+        raise OracleError(f"dataframe_where_df failed: {exc}") from exc
+    return {"expected_frame": dataframe_to_json(out)}
+
+
 def op_dataframe_mask(pd, payload: dict[str, Any]) -> dict[str, Any]:
     frame_payload = payload.get("frame")
     cond_payload = payload.get("frame_right")
@@ -3757,6 +3782,8 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_dataframe_replace(pd, payload)
     if op in {"dataframe_where", "data_frame_where"}:
         return op_dataframe_where(pd, payload)
+    if op in {"dataframe_where_df", "data_frame_where_df"}:
+        return op_dataframe_where_df(pd, payload)
     if op in {"dataframe_mask", "data_frame_mask"}:
         return op_dataframe_mask(pd, payload)
     if op in {"dataframe_sort_index", "data_frame_sort_index"}:

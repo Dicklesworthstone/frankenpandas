@@ -502,6 +502,8 @@ pub enum FixtureOperation {
     DataFrameReplace,
     #[serde(rename = "dataframe_where", alias = "data_frame_where")]
     DataFrameWhere,
+    #[serde(rename = "dataframe_where_df", alias = "data_frame_where_df")]
+    DataFrameWhereDf,
     #[serde(rename = "dataframe_mask", alias = "data_frame_mask")]
     DataFrameMask,
     #[serde(rename = "dataframe_duplicated", alias = "data_frame_duplicated")]
@@ -768,6 +770,7 @@ impl FixtureOperation {
             Self::DataFrameDropColumns => "dataframe_drop_columns",
             Self::DataFrameReplace => "dataframe_replace",
             Self::DataFrameWhere => "dataframe_where",
+            Self::DataFrameWhereDf => "dataframe_where_df",
             Self::DataFrameMask => "dataframe_mask",
             Self::DataFrameDuplicated => "dataframe_duplicated",
             Self::DataFrameDropDuplicates => "dataframe_drop_duplicates",
@@ -928,6 +931,8 @@ pub struct PacketFixture {
     pub locals: Option<BTreeMap<String, Scalar>>,
     #[serde(default)]
     pub frame_right: Option<FixtureDataFrame>,
+    #[serde(default)]
+    pub frame_other: Option<FixtureDataFrame>,
     #[serde(default)]
     pub dict_columns: Option<BTreeMap<String, Vec<Scalar>>>,
     #[serde(default)]
@@ -1511,6 +1516,7 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::DataFrameDropColumns
         | FixtureOperation::DataFrameReplace
         | FixtureOperation::DataFrameWhere
+        | FixtureOperation::DataFrameWhereDf
         | FixtureOperation::DataFrameMask
         | FixtureOperation::DataFrameDuplicated
         | FixtureOperation::DataFrameDropDuplicates
@@ -2047,7 +2053,10 @@ struct OracleRequest {
     expr: Option<String>,
     #[serde(default)]
     locals: Option<BTreeMap<String, Scalar>>,
+    #[serde(default)]
     frame_right: Option<FixtureDataFrame>,
+    #[serde(default)]
+    frame_other: Option<FixtureDataFrame>,
     #[serde(default)]
     dict_columns: Option<BTreeMap<String, Vec<Scalar>>>,
     #[serde(default)]
@@ -8108,6 +8117,7 @@ fn run_fixture_operation(
         | FixtureOperation::DataFrameDropColumns
         | FixtureOperation::DataFrameReplace
         | FixtureOperation::DataFrameWhere
+        | FixtureOperation::DataFrameWhereDf
         | FixtureOperation::DataFrameMask
         | FixtureOperation::DataFrameDropDuplicates
         | FixtureOperation::DataFrameSortIndex
@@ -8648,6 +8658,7 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::DataFrameDropColumns
         | FixtureOperation::DataFrameReplace
         | FixtureOperation::DataFrameWhere
+        | FixtureOperation::DataFrameWhereDf
         | FixtureOperation::DataFrameMask
         | FixtureOperation::DataFrameDropDuplicates
         | FixtureOperation::DataFrameMerge
@@ -8761,6 +8772,7 @@ fn capture_live_oracle_expected(
         expr: fixture.expr.clone(),
         locals: fixture.locals.clone(),
         frame_right: fixture.frame_right.clone(),
+        frame_other: fixture.frame_other.clone(),
         dict_columns: fixture.dict_columns.clone(),
         column_order: fixture.column_order.clone(),
         records: fixture.records.clone(),
@@ -9102,6 +9114,7 @@ fn capture_live_oracle_expected(
         | FixtureOperation::DataFrameDropColumns
         | FixtureOperation::DataFrameReplace
         | FixtureOperation::DataFrameWhere
+        | FixtureOperation::DataFrameWhereDf
         | FixtureOperation::DataFrameMask
         | FixtureOperation::DataFrameDropDuplicates
         | FixtureOperation::DataFrameMerge
@@ -9200,6 +9213,13 @@ fn require_frame_right(fixture: &PacketFixture) -> Result<&FixtureDataFrame, Str
         .frame_right
         .as_ref()
         .ok_or_else(|| "missing frame_right fixture payload".to_owned())
+}
+
+fn require_frame_other(fixture: &PacketFixture) -> Result<&FixtureDataFrame, String> {
+    fixture
+        .frame_other
+        .as_ref()
+        .ok_or_else(|| "missing frame_other fixture payload".to_owned())
 }
 
 fn require_dict_columns(fixture: &PacketFixture) -> Result<&BTreeMap<String, Vec<Scalar>>, String> {
@@ -11010,6 +11030,17 @@ fn execute_dataframe_fixture_operation(fixture: &PacketFixture) -> Result<DataFr
                 .map_err(|err| format!("condition frame build failed: {err}"))?;
             frame
                 .where_cond(&cond, fixture.fill_value.as_ref())
+                .map_err(|err| err.to_string())
+        }
+        FixtureOperation::DataFrameWhereDf => {
+            let frame = build_dataframe(require_frame(fixture)?)
+                .map_err(|err| format!("frame build failed: {err}"))?;
+            let cond = build_dataframe(require_frame_right(fixture)?)
+                .map_err(|err| format!("condition frame build failed: {err}"))?;
+            let other = build_dataframe(require_frame_other(fixture)?)
+                .map_err(|err| format!("other frame build failed: {err}"))?;
+            frame
+                .where_cond_df(&cond, &other)
                 .map_err(|err| err.to_string())
         }
         FixtureOperation::DataFrameMask => {
@@ -15184,6 +15215,7 @@ fn execute_and_compare_differential(
         | FixtureOperation::DataFrameDropColumns
         | FixtureOperation::DataFrameReplace
         | FixtureOperation::DataFrameWhere
+        | FixtureOperation::DataFrameWhereDf
         | FixtureOperation::DataFrameMask
         | FixtureOperation::DataFrameDropDuplicates
         | FixtureOperation::DataFrameSortIndex
@@ -19341,6 +19373,19 @@ mod tests {
         assert!(
             report.fixture_count >= 4,
             "expected FP-P2D-141 dataframe mask fixtures"
+        );
+        assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
+    fn packet_filter_runs_dataframe_where_df_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2D-142", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-142"));
+        assert!(
+            report.fixture_count >= 5,
+            "expected FP-P2D-142 dataframe where_df fixtures"
         );
         assert!(report.is_green(), "expected report green: {report:?}");
     }
