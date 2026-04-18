@@ -568,6 +568,10 @@ pub enum FixtureOperation {
     SeriesDtCeil,
     #[serde(rename = "series_dt_round", alias = "series_dt_round_default")]
     SeriesDtRound,
+    #[serde(rename = "series_dt_month_name", alias = "series_dt_month_name_default")]
+    SeriesDtMonthName,
+    #[serde(rename = "series_dt_day_name", alias = "series_dt_day_name_default")]
+    SeriesDtDayName,
     #[serde(rename = "dataframe_loc", alias = "data_frame_loc")]
     DataFrameLoc,
     #[serde(rename = "dataframe_iloc", alias = "data_frame_iloc")]
@@ -1019,6 +1023,8 @@ impl FixtureOperation {
             Self::SeriesDtFloor => "series_dt_floor",
             Self::SeriesDtCeil => "series_dt_ceil",
             Self::SeriesDtRound => "series_dt_round",
+            Self::SeriesDtMonthName => "series_dt_month_name",
+            Self::SeriesDtDayName => "series_dt_day_name",
             Self::DataFrameLoc => "dataframe_loc",
             Self::DataFrameIloc => "dataframe_iloc",
             Self::DataFrameTake => "dataframe_take",
@@ -1862,6 +1868,8 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::SeriesDtFloor
         | FixtureOperation::SeriesDtCeil
         | FixtureOperation::SeriesDtRound
+        | FixtureOperation::SeriesDtMonthName
+        | FixtureOperation::SeriesDtDayName
         | FixtureOperation::SeriesIsNa
         | FixtureOperation::SeriesNotNa
         | FixtureOperation::SeriesIsNull
@@ -5665,6 +5673,7 @@ pub fn fuzz_groupby_sum_bytes(input: &[u8]) -> Result<(), String> {
 
     let options = GroupByOptions {
         dropna: option_tag % 2 == 0,
+        ..GroupByOptions::default()
     };
     let policy = RuntimePolicy::hardened(Some(100_000));
 
@@ -7667,7 +7676,9 @@ fn run_fixture_operation(
         | FixtureOperation::SeriesDtStrftime
         | FixtureOperation::SeriesDtFloor
         | FixtureOperation::SeriesDtCeil
-        | FixtureOperation::SeriesDtRound => {
+        | FixtureOperation::SeriesDtRound
+        | FixtureOperation::SeriesDtMonthName
+        | FixtureOperation::SeriesDtDayName => {
             let actual = execute_series_module_utility_fixture_operation(fixture);
             let op_name = fixture.operation.operation_name();
             match expected {
@@ -9252,6 +9263,8 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::SeriesDtFloor
         | FixtureOperation::SeriesDtCeil
         | FixtureOperation::SeriesDtRound
+        | FixtureOperation::SeriesDtMonthName
+        | FixtureOperation::SeriesDtDayName
         | FixtureOperation::SeriesAtTime
         | FixtureOperation::SeriesBetweenTime
         | FixtureOperation::DataFrameGroupByCumcount
@@ -9810,6 +9823,8 @@ fn capture_live_oracle_expected(
         | FixtureOperation::SeriesDtFloor
         | FixtureOperation::SeriesDtCeil
         | FixtureOperation::SeriesDtRound
+        | FixtureOperation::SeriesDtMonthName
+        | FixtureOperation::SeriesDtDayName
         | FixtureOperation::SeriesAtTime
         | FixtureOperation::SeriesBetweenTime
         | FixtureOperation::DataFrameGroupByCumcount
@@ -12588,6 +12603,12 @@ fn execute_series_module_utility_fixture_operation(
                 .ok_or_else(|| "series_dt_round requires dt_freq".to_string())?;
             series.dt().round(freq).map_err(|err| err.to_string())
         }
+        FixtureOperation::SeriesDtMonthName => {
+            series.dt().month_name().map_err(|err| err.to_string())
+        }
+        FixtureOperation::SeriesDtDayName => {
+            series.dt().day_name().map_err(|err| err.to_string())
+        }
         other => Err(format!(
             "unsupported series module utility operation for fixture execution: {other:?}"
         )),
@@ -15299,7 +15320,9 @@ fn execute_and_compare_differential(
         | FixtureOperation::SeriesDtStrftime
         | FixtureOperation::SeriesDtFloor
         | FixtureOperation::SeriesDtCeil
-        | FixtureOperation::SeriesDtRound => {
+        | FixtureOperation::SeriesDtRound
+        | FixtureOperation::SeriesDtMonthName
+        | FixtureOperation::SeriesDtDayName => {
             let actual = execute_series_module_utility_fixture_operation(fixture);
             let op_name = fixture.operation.operation_name();
             match expected {
