@@ -2206,6 +2206,25 @@ def op_dataframe_round(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return {"expected_frame": dataframe_to_json(out)}
 
 
+def op_dataframe_pivot(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    if frame_payload is None:
+        raise OracleError("dataframe_pivot requires frame payload")
+
+    frame = dataframe_from_json(pd, frame_payload)
+    values = parse_optional_string_list(payload, "pivot_values", "dataframe_pivot")
+    if len(values) != 1:
+        raise OracleError("dataframe_pivot requires exactly one pivot_values entry")
+    index = required_string_payload(payload, "pivot_index", "dataframe_pivot")
+    columns = required_string_payload(payload, "pivot_columns", "dataframe_pivot")
+
+    try:
+        out = frame.pivot(index=index, columns=columns, values=values[0])
+    except Exception as exc:
+        raise OracleError(f"dataframe_pivot failed: {exc}") from exc
+    return {"expected_frame": dataframe_to_json(out)}
+
+
 def op_dataframe_pivot_table(pd, payload: dict[str, Any]) -> dict[str, Any]:
     frame_payload = payload.get("frame")
     if frame_payload is None:
@@ -3955,6 +3974,8 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_dataframe_eval(pd, payload)
     if op in {"dataframe_query", "data_frame_query"}:
         return op_dataframe_query(pd, payload)
+    if op in {"dataframe_pivot", "data_frame_pivot"}:
+        return op_dataframe_pivot(pd, payload)
     if op in {"dataframe_pivot_table", "data_frame_pivot_table"}:
         return op_dataframe_pivot_table(pd, payload)
     if op in {"dataframe_stack", "data_frame_stack"}:

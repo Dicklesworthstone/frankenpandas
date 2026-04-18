@@ -1,0 +1,55 @@
+{
+  "packet_id": "FP-P2D-128",
+  "case_id": "dataframe_pivot_basic_strict",
+  "mode": "strict",
+  "operation": "dataframe_pivot",
+  "pivot_values": ["value"],
+  "pivot_index": "row",
+  "pivot_columns": "column",
+  "frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 3 }
+    ],
+    "columns": {
+      "row": [
+        { "kind": "utf8", "value": "A" },
+        { "kind": "utf8", "value": "A" },
+        { "kind": "utf8", "value": "B" },
+        { "kind": "utf8", "value": "B" }
+      ],
+      "column": [
+        { "kind": "utf8", "value": "x" },
+        { "kind": "utf8", "value": "y" },
+        { "kind": "utf8", "value": "x" },
+        { "kind": "utf8", "value": "y" }
+      ],
+      "value": [
+        { "kind": "int64", "value": 1 },
+        { "kind": "int64", "value": 2 },
+        { "kind": "int64", "value": 3 },
+        { "kind": "int64", "value": 4 }
+      ]
+    },
+    "column_order": ["row", "column", "value"]
+  },
+  "expected_frame": {
+    "index": [
+      { "kind": "utf8", "value": "A" },
+      { "kind": "utf8", "value": "B" }
+    ],
+    "columns": {
+      "x": [
+        { "kind": "int64", "value": 1 },
+        { "kind": "int64", "value": 3 }
+      ],
+      "y": [
+        { "kind": "int64", "value": 2 },
+        { "kind": "int64", "value": 4 }
+      ]
+    },
+    "column_order": ["x", "y"]
+  }
+}

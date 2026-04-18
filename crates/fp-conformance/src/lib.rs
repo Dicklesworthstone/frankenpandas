@@ -582,6 +582,8 @@ pub enum FixtureOperation {
     DataFramePctChange,
     #[serde(rename = "dataframe_melt", alias = "data_frame_melt")]
     DataFrameMelt,
+    #[serde(rename = "dataframe_pivot", alias = "data_frame_pivot")]
+    DataFramePivot,
     #[serde(rename = "dataframe_pivot_table", alias = "data_frame_pivot_table")]
     DataFramePivotTable,
     #[serde(rename = "dataframe_stack", alias = "data_frame_stack")]
@@ -857,6 +859,7 @@ impl FixtureOperation {
             Self::DataFrameShift => "dataframe_shift",
             Self::DataFramePctChange => "dataframe_pct_change",
             Self::DataFrameMelt => "dataframe_melt",
+            Self::DataFramePivot => "dataframe_pivot",
             Self::DataFramePivotTable => "dataframe_pivot_table",
             Self::DataFrameStack => "dataframe_stack",
             Self::DataFrameTranspose => "dataframe_transpose",
@@ -1631,6 +1634,7 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::DataFrameShift
         | FixtureOperation::DataFramePctChange
         | FixtureOperation::DataFrameMelt
+        | FixtureOperation::DataFramePivot
         | FixtureOperation::DataFramePivotTable
         | FixtureOperation::DataFrameStack
         | FixtureOperation::DataFrameTranspose
@@ -8324,6 +8328,7 @@ fn run_fixture_operation(
         | FixtureOperation::DataFrameShift
         | FixtureOperation::DataFramePctChange
         | FixtureOperation::DataFrameMelt
+        | FixtureOperation::DataFramePivot
         | FixtureOperation::DataFramePivotTable
         | FixtureOperation::DataFrameStack
         | FixtureOperation::DataFrameTranspose
@@ -8893,6 +8898,7 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::DataFrameShift
         | FixtureOperation::DataFramePctChange
         | FixtureOperation::DataFrameMelt
+        | FixtureOperation::DataFramePivot
         | FixtureOperation::DataFramePivotTable
         | FixtureOperation::DataFrameStack
         | FixtureOperation::DataFrameTranspose
@@ -9374,6 +9380,7 @@ fn capture_live_oracle_expected(
         | FixtureOperation::DataFrameShift
         | FixtureOperation::DataFramePctChange
         | FixtureOperation::DataFrameMelt
+        | FixtureOperation::DataFramePivot
         | FixtureOperation::DataFramePivotTable
         | FixtureOperation::DataFrameStack
         | FixtureOperation::DataFrameTranspose
@@ -10974,6 +10981,28 @@ fn execute_dataframe_fixture_operation(fixture: &PacketFixture) -> Result<DataFr
                     fixture.melt_var_name.as_deref(),
                     fixture.melt_value_name.as_deref(),
                 )
+                .map_err(|err| err.to_string())
+        }
+        FixtureOperation::DataFramePivot => {
+            let frame = build_dataframe(require_frame(fixture)?)
+                .map_err(|err| format!("frame build failed: {err}"))?;
+            let values =
+                resolve_optional_string_list(fixture.pivot_values.as_ref(), "pivot_values")?;
+            let [value] = values.as_slice() else {
+                return Err(
+                    "pivot_values must contain exactly one value for dataframe_pivot".to_owned(),
+                );
+            };
+            let index = fixture
+                .pivot_index
+                .as_deref()
+                .ok_or_else(|| "pivot_index is required for dataframe_pivot".to_owned())?;
+            let columns = fixture
+                .pivot_columns
+                .as_deref()
+                .ok_or_else(|| "pivot_columns is required for dataframe_pivot".to_owned())?;
+            frame
+                .pivot(index, columns, value)
                 .map_err(|err| err.to_string())
         }
         FixtureOperation::DataFramePivotTable => {
@@ -15612,6 +15641,7 @@ fn execute_and_compare_differential(
         | FixtureOperation::DataFrameCov
         | FixtureOperation::DataFrameRound
         | FixtureOperation::DataFrameMelt
+        | FixtureOperation::DataFramePivot
         | FixtureOperation::DataFramePivotTable
         | FixtureOperation::DataFrameStack
         | FixtureOperation::DataFrameTranspose
@@ -19684,8 +19714,8 @@ mod tests {
             run_packet_by_id(&cfg, "FP-P2D-128", OracleMode::FixtureExpected).expect("report");
         assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-128"));
         assert!(
-            report.fixture_count >= 10,
-            "expected FP-P2D-128 reshape/dummy fixtures"
+            report.fixture_count >= 12,
+            "expected FP-P2D-128 reshape/pivot/dummy fixtures"
         );
         assert!(report.is_green(), "expected report green: {report:?}");
     }
