@@ -17,8 +17,8 @@
         { "kind": "float64", "value": 2.5 }
       ],
       "b": [
-        { "kind": "string", "value": "x" },
-        { "kind": "string", "value": "y" }
+        { "kind": "utf8", "value": "x" },
+        { "kind": "utf8", "value": "y" }
       ]
     }
   },
@@ -34,8 +34,8 @@
         { "kind": "float64", "value": 2.5 }
       ],
       "b": [
-        { "kind": "string", "value": "x" },
-        { "kind": "string", "value": "y" }
+        { "kind": "utf8", "value": "x" },
+        { "kind": "utf8", "value": "y" }
       ]
     }
   }
