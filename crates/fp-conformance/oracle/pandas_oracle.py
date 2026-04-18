@@ -1682,13 +1682,22 @@ def dataframe_from_json(pd, payload: dict[str, Any]):
 
 
 def dataframe_to_json(frame) -> dict[str, Any]:
+    columns: dict[str, list[dict[str, Any]]] = {}
+    column_order: list[str] = []
+    for position, name in enumerate(frame.columns.tolist()):
+        key = str(name)
+        values = [scalar_to_json(v) for v in frame.iloc[:, position].tolist()]
+        if key in columns and columns[key] != values:
+            raise OracleError(
+                f"duplicate column label {key!r} has non-identical values and cannot be represented"
+            )
+        columns[key] = values
+        column_order.append(key)
+
     return {
         "index": [label_to_json(v) for v in frame.index.tolist()],
-        "columns": {
-            str(name): [scalar_to_json(v) for v in frame[name].tolist()]
-            for name in frame.columns.tolist()
-        },
-        "column_order": [str(name) for name in frame.columns.tolist()],
+        "columns": columns,
+        "column_order": column_order,
     }
 
 
@@ -2910,6 +2919,24 @@ def op_dataframe_reindex(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return {"expected_frame": dataframe_to_json(out)}
 
 
+def op_dataframe_reindex_columns(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    columns = payload.get("reindex_columns")
+    if frame_payload is None:
+        raise OracleError("dataframe_reindex_columns requires frame payload")
+    if not isinstance(columns, list):
+        raise OracleError("dataframe_reindex_columns requires reindex_columns list")
+    if not all(isinstance(column, str) for column in columns):
+        raise OracleError("dataframe_reindex_columns entries must be strings")
+
+    frame = dataframe_from_json(pd, frame_payload)
+    try:
+        out = frame.reindex(columns=columns)
+    except Exception as exc:
+        raise OracleError(f"dataframe_reindex_columns failed: {exc}") from exc
+    return {"expected_frame": dataframe_to_json(out)}
+
+
 def _resolve_sort_ascending(payload: dict[str, Any], op_name: str) -> bool:
     raw = payload.get("sort_ascending")
     if raw is None:
@@ -3631,6 +3658,8 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_dataframe_rename_columns(pd, payload)
     if op in {"dataframe_reindex", "data_frame_reindex"}:
         return op_dataframe_reindex(pd, payload)
+    if op in {"dataframe_reindex_columns", "data_frame_reindex_columns"}:
+        return op_dataframe_reindex_columns(pd, payload)
     if op in {"dataframe_sort_index", "data_frame_sort_index"}:
         return op_dataframe_sort_index(pd, payload)
     if op in {"dataframe_sort_values", "data_frame_sort_values"}:

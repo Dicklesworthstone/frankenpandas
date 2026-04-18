@@ -1,0 +1,45 @@
+{
+  "packet_id": "FP-P2D-137",
+  "case_id": "dataframe_reindex_columns_reorder_subset_strict",
+  "mode": "strict",
+  "operation": "dataframe_reindex_columns",
+  "reindex_columns": ["c", "a"],
+  "frame": {
+    "index": [
+      { "kind": "string", "value": "r1" },
+      { "kind": "string", "value": "r2" }
+    ],
+    "column_order": ["a", "b", "c"],
+    "columns": {
+      "a": [
+        { "kind": "int64", "value": 1 },
+        { "kind": "int64", "value": 2 }
+      ],
+      "b": [
+        { "kind": "string", "value": "x" },
+        { "kind": "string", "value": "y" }
+      ],
+      "c": [
+        { "kind": "bool", "value": true },
+        { "kind": "bool", "value": false }
+      ]
+    }
+  },
+  "expected_frame": {
+    "index": [
+      { "kind": "string", "value": "r1" },
+      { "kind": "string", "value": "r2" }
+    ],
+    "column_order": ["c", "a"],
+    "columns": {
+      "c": [
+        { "kind": "bool", "value": true },
+        { "kind": "bool", "value": false }
+      ],
+      "a": [
+        { "kind": "int64", "value": 1 },
+        { "kind": "int64", "value": 2 }
+      ]
+    }
+  }
+}
