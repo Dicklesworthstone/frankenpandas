@@ -28,9 +28,9 @@
   },
   "expected_series": {
     "index": [
-      { "kind": "tuple", "value": [{"kind": "float64", "value": 1.0}, {"kind": "float64", "value": 1.0}] },
-      { "kind": "tuple", "value": [{"kind": "float64", "value": 1.0}, {"kind": "float64", "value": 2.0}] },
-      { "kind": "tuple", "value": [{"kind": "float64", "value": 2.0}, {"kind": "float64", "value": 2.0}] }
+      { "kind": "utf8", "value": "1, 1" },
+      { "kind": "utf8", "value": "1, 2" },
+      { "kind": "utf8", "value": "2, 2" }
     ],
     "values": [
       { "kind": "int64", "value": 2 },

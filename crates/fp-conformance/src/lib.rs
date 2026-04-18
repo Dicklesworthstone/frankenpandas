@@ -343,9 +343,15 @@ pub enum FixtureOperation {
     DataFrameNunique,
     #[serde(rename = "dataframe_quantile", alias = "dataframe_quantile_default")]
     DataFrameQuantile,
-    #[serde(rename = "dataframe_value_counts", alias = "dataframe_value_counts_default")]
+    #[serde(
+        rename = "dataframe_value_counts",
+        alias = "dataframe_value_counts_default"
+    )]
     DataFrameValueCounts,
-    #[serde(rename = "dataframe_memory_usage", alias = "dataframe_memory_usage_default")]
+    #[serde(
+        rename = "dataframe_memory_usage",
+        alias = "dataframe_memory_usage_default"
+    )]
     DataFrameMemoryUsage,
     #[serde(rename = "dataframe_round", alias = "dataframe_round_default")]
     DataFrameRound,
@@ -6920,13 +6926,23 @@ fn run_fixture_operation(
                 FixtureOperation::DataFrameVar => frame.var_agg().map_err(|err| err.to_string()),
                 FixtureOperation::DataFrameMin => frame.min_agg().map_err(|err| err.to_string()),
                 FixtureOperation::DataFrameMax => frame.max_agg().map_err(|err| err.to_string()),
-                FixtureOperation::DataFrameMedian => frame.median_agg().map_err(|err| err.to_string()),
+                FixtureOperation::DataFrameMedian => {
+                    frame.median_agg().map_err(|err| err.to_string())
+                }
                 FixtureOperation::DataFrameAny => frame.any().map_err(|err| err.to_string()),
                 FixtureOperation::DataFrameAll => frame.all().map_err(|err| err.to_string()),
-                FixtureOperation::DataFrameNunique => frame.nunique().map_err(|err| err.to_string()),
-                FixtureOperation::DataFrameQuantile => frame.quantile(0.5).map_err(|err| err.to_string()),
-                FixtureOperation::DataFrameValueCounts => frame.value_counts().map_err(|err| err.to_string()),
-                FixtureOperation::DataFrameMemoryUsage => frame.memory_usage().map_err(|err| err.to_string()),
+                FixtureOperation::DataFrameNunique => {
+                    frame.nunique().map_err(|err| err.to_string())
+                }
+                FixtureOperation::DataFrameQuantile => {
+                    frame.quantile(0.5).map_err(|err| err.to_string())
+                }
+                FixtureOperation::DataFrameValueCounts => {
+                    frame.value_counts().map_err(|err| err.to_string())
+                }
+                FixtureOperation::DataFrameMemoryUsage => {
+                    frame.memory_usage().map_err(|err| err.to_string())
+                }
                 _ => unreachable!(),
             };
             match expected {
@@ -13885,13 +13901,23 @@ fn execute_and_compare_differential(
                 FixtureOperation::DataFrameVar => frame.var_agg().map_err(|err| err.to_string()),
                 FixtureOperation::DataFrameMin => frame.min_agg().map_err(|err| err.to_string()),
                 FixtureOperation::DataFrameMax => frame.max_agg().map_err(|err| err.to_string()),
-                FixtureOperation::DataFrameMedian => frame.median_agg().map_err(|err| err.to_string()),
+                FixtureOperation::DataFrameMedian => {
+                    frame.median_agg().map_err(|err| err.to_string())
+                }
                 FixtureOperation::DataFrameAny => frame.any().map_err(|err| err.to_string()),
                 FixtureOperation::DataFrameAll => frame.all().map_err(|err| err.to_string()),
-                FixtureOperation::DataFrameNunique => frame.nunique().map_err(|err| err.to_string()),
-                FixtureOperation::DataFrameQuantile => frame.quantile(0.5).map_err(|err| err.to_string()),
-                FixtureOperation::DataFrameValueCounts => frame.value_counts().map_err(|err| err.to_string()),
-                FixtureOperation::DataFrameMemoryUsage => frame.memory_usage().map_err(|err| err.to_string()),
+                FixtureOperation::DataFrameNunique => {
+                    frame.nunique().map_err(|err| err.to_string())
+                }
+                FixtureOperation::DataFrameQuantile => {
+                    frame.quantile(0.5).map_err(|err| err.to_string())
+                }
+                FixtureOperation::DataFrameValueCounts => {
+                    frame.value_counts().map_err(|err| err.to_string())
+                }
+                FixtureOperation::DataFrameMemoryUsage => {
+                    frame.memory_usage().map_err(|err| err.to_string())
+                }
                 _ => unreachable!(),
             };
             match expected {
@@ -19855,6 +19881,45 @@ mod tests {
         assert!(
             report.fixture_count >= 1,
             "expected FP-P2D-155 dataframe var fixtures"
+        );
+        assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
+    fn packet_filter_runs_dataframe_value_counts_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2D-163", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-163"));
+        assert!(
+            report.fixture_count >= 1,
+            "expected FP-P2D-163 dataframe value_counts fixtures"
+        );
+        assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
+    fn packet_filter_runs_dataframe_head_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2D-165", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-165"));
+        assert!(
+            report.fixture_count >= 1,
+            "expected FP-P2D-165 dataframe head fixtures"
+        );
+        assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
+    fn packet_filter_runs_dataframe_tail_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2D-166", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-166"));
+        assert!(
+            report.fixture_count >= 1,
+            "expected FP-P2D-166 dataframe tail fixtures"
         );
         assert!(report.is_green(), "expected report green: {report:?}");
     }
