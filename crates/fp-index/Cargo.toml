@@ -6,5 +6,6 @@ license-file = "../../LICENSE"
 
 [dependencies]
 fp-types = { path = "../fp-types" }
+chrono = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }

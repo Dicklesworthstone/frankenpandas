@@ -584,6 +584,7 @@ fn index_label_to_json(label: &IndexLabel) -> serde_json::Value {
         IndexLabel::Int64(v) => serde_json::json!(*v),
         IndexLabel::Utf8(v) => serde_json::Value::String(v.clone()),
         IndexLabel::Timedelta64(ns) => serde_json::json!(*ns),
+        IndexLabel::Datetime64(ns) => serde_json::json!(*ns),
     }
 }
 

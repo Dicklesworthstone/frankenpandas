@@ -14,6 +14,7 @@ pub enum IndexLabel {
     Int64(i64),
     Utf8(String),
     Timedelta64(i64),
+    Datetime64(i64),
 }
 
 impl From<i64> for IndexLabel {
@@ -40,8 +41,20 @@ impl fmt::Display for IndexLabel {
             Self::Int64(v) => write!(f, "{v}"),
             Self::Utf8(v) => write!(f, "{v}"),
             Self::Timedelta64(v) => write!(f, "{}", Timedelta::format(*v)),
+            Self::Datetime64(v) => write!(f, "{}", format_datetime_ns(*v)),
         }
     }
+}
+
+pub fn format_datetime_ns(nanos: i64) -> String {
+    if nanos == i64::MIN {
+        return "NaT".to_owned();
+    }
+    let secs = nanos / 1_000_000_000;
+    let subsec_nanos = (nanos % 1_000_000_000).unsigned_abs() as u32;
+    let dt = chrono::DateTime::from_timestamp(secs, subsec_nanos)
+        .unwrap_or_else(|| chrono::DateTime::UNIX_EPOCH);
+    dt.format("%Y-%m-%d %H:%M:%S").to_string()
 }
 
 /// AG-13: Detected sort order of an index's labels.
@@ -58,6 +71,8 @@ enum SortOrder {
     AscendingUtf8,
     /// All labels are `Timedelta64` and strictly ascending (no duplicates).
     AscendingTimedelta64,
+    /// All labels are `Datetime64` and strictly ascending (no duplicates).
+    AscendingDatetime64,
 }
 
 /// Detect the sort order of the label slice.
@@ -67,6 +82,7 @@ fn detect_sort_order(labels: &[IndexLabel]) -> SortOrder {
             Some(IndexLabel::Int64(_)) | None => SortOrder::AscendingInt64,
             Some(IndexLabel::Utf8(_)) => SortOrder::AscendingUtf8,
             Some(IndexLabel::Timedelta64(_)) => SortOrder::AscendingTimedelta64,
+            Some(IndexLabel::Datetime64(_)) => SortOrder::AscendingDatetime64,
         };
     }
 
@@ -114,6 +130,23 @@ fn detect_sort_order(labels: &[IndexLabel]) -> SortOrder {
         });
         if is_sorted {
             return SortOrder::AscendingTimedelta64;
+        }
+    }
+
+    // Check if all Datetime64 and strictly ascending.
+    let all_dt = labels
+        .iter()
+        .all(|l| matches!(l, IndexLabel::Datetime64(_)));
+    if all_dt {
+        let is_sorted = labels.windows(2).all(|w| {
+            if let (IndexLabel::Datetime64(a), IndexLabel::Datetime64(b)) = (&w[0], &w[1]) {
+                a < b
+            } else {
+                false
+            }
+        });
+        if is_sorted {
+            return SortOrder::AscendingDatetime64;
         }
     }
 
@@ -182,6 +215,11 @@ impl Index {
     #[must_use]
     pub fn from_timedelta64(nanos: Vec<i64>) -> Self {
         Self::new(nanos.into_iter().map(IndexLabel::Timedelta64).collect())
+    }
+
+    #[must_use]
+    pub fn from_datetime64(nanos: Vec<i64>) -> Self {
+        Self::new(nanos.into_iter().map(IndexLabel::Datetime64).collect())
     }
 
     #[must_use]
@@ -352,6 +390,21 @@ impl Index {
                     self.labels
                         .binary_search_by(|label| {
                             if let IndexLabel::Timedelta64(v) = label {
+                                v.cmp(target)
+                            } else {
+                                std::cmp::Ordering::Less
+                            }
+                        })
+                        .ok()
+                } else {
+                    None
+                }
+            }
+            SortOrder::AscendingDatetime64 => {
+                if let IndexLabel::Datetime64(target) = needle {
+                    self.labels
+                        .binary_search_by(|label| {
+                            if let IndexLabel::Datetime64(v) = label {
                                 v.cmp(target)
                             } else {
                                 std::cmp::Ordering::Less
@@ -710,6 +763,7 @@ impl Index {
                         .parse::<i64>()
                         .map_or_else(|_| l.clone(), IndexLabel::Int64),
                     IndexLabel::Timedelta64(ns) => IndexLabel::Int64(*ns),
+                    IndexLabel::Datetime64(ns) => IndexLabel::Int64(*ns),
                 })
                 .collect(),
         ))
@@ -727,6 +781,7 @@ impl Index {
                     IndexLabel::Int64(v) => IndexLabel::Utf8(v.to_string()),
                     IndexLabel::Utf8(_) => l.clone(),
                     IndexLabel::Timedelta64(ns) => IndexLabel::Utf8(Timedelta::format(*ns)),
+                    IndexLabel::Datetime64(ns) => IndexLabel::Utf8(format_datetime_ns(*ns)),
                 })
                 .collect(),
         ))
@@ -1307,6 +1362,110 @@ pub fn timedelta_range(
 
     let nanos: Vec<i64> = (0..count).map(|i| start_ns + (i as i64) * freq).collect();
     let mut idx = Index::from_timedelta64(nanos);
+    if let Some(n) = name {
+        idx = idx.set_name(n);
+    }
+    Ok(idx)
+}
+
+// ── DatetimeIndex helpers ───────────────────────────────────────────────
+
+/// Error for date_range parameter combinations.
+#[derive(Debug, Clone, Error)]
+pub enum DateRangeError {
+    #[error("must specify at least two of start, end, periods")]
+    InsufficientParams,
+    #[error("freq must be positive")]
+    NonPositiveFreq,
+    #[error("cannot compute range: end < start with positive freq")]
+    InvalidRange,
+    #[error("invalid datetime string: {0}")]
+    ParseError(String),
+}
+
+/// Parse an ISO 8601 datetime string to nanoseconds since epoch.
+fn parse_datetime_to_nanos(s: &str) -> Result<i64, DateRangeError> {
+    use chrono::NaiveDateTime;
+
+    let trimmed = s.trim();
+
+    // Try full datetime format
+    if let Ok(dt) = NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%d %H:%M:%S") {
+        return Ok(dt.and_utc().timestamp_nanos_opt().unwrap_or(i64::MIN));
+    }
+    if let Ok(dt) = NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%dT%H:%M:%S") {
+        return Ok(dt.and_utc().timestamp_nanos_opt().unwrap_or(i64::MIN));
+    }
+
+    // Try date-only format (midnight)
+    if let Ok(date) = chrono::NaiveDate::parse_from_str(trimmed, "%Y-%m-%d") {
+        let dt = date.and_hms_opt(0, 0, 0).unwrap();
+        return Ok(dt.and_utc().timestamp_nanos_opt().unwrap_or(i64::MIN));
+    }
+
+    Err(DateRangeError::ParseError(trimmed.to_owned()))
+}
+
+/// Create a DatetimeIndex with evenly spaced values.
+///
+/// Analogous to `pd.date_range()`. Must specify at least two of:
+/// start, end, periods. Frequency defaults to 1 day.
+///
+/// # Examples
+/// ```
+/// use fp_index::date_range;
+/// use fp_types::Timedelta;
+///
+/// let idx = date_range(
+///     Some("2024-01-01"),
+///     None,
+///     Some(3),
+///     Timedelta::NANOS_PER_DAY,
+///     None,
+/// ).unwrap();
+/// assert_eq!(idx.len(), 3);
+/// ```
+pub fn date_range(
+    start: Option<&str>,
+    end: Option<&str>,
+    periods: Option<usize>,
+    freq: i64,
+    name: Option<&str>,
+) -> Result<Index, DateRangeError> {
+    if freq <= 0 {
+        return Err(DateRangeError::NonPositiveFreq);
+    }
+
+    let start_ns = start.map(parse_datetime_to_nanos).transpose()?;
+    let end_ns = end.map(parse_datetime_to_nanos).transpose()?;
+
+    let (start_val, count) = match (start_ns, end_ns, periods) {
+        (Some(s), Some(e), None) => {
+            if e < s {
+                return Err(DateRangeError::InvalidRange);
+            }
+            let n = ((e - s) / freq + 1) as usize;
+            (s, n)
+        }
+        (Some(s), None, Some(p)) => (s, p),
+        (None, Some(e), Some(p)) => {
+            let s = e - (p.saturating_sub(1) as i64) * freq;
+            (s, p)
+        }
+        (Some(s), Some(_e), Some(p)) => {
+            if p == 0 {
+                (s, 0)
+            } else if p == 1 {
+                (s, 1)
+            } else {
+                (s, p)
+            }
+        }
+        _ => return Err(DateRangeError::InsufficientParams),
+    };
+
+    let nanos: Vec<i64> = (0..count).map(|i| start_val + (i as i64) * freq).collect();
+    let mut idx = Index::from_datetime64(nanos);
     if let Some(n) = name {
         idx = idx.set_name(n);
     }

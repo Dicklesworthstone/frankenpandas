@@ -469,12 +469,23 @@ impl Ord for JoinKeyComponent {
             (Present(IndexLabel::Int64(a)), Present(IndexLabel::Int64(b))) => a.cmp(b),
             (Present(IndexLabel::Utf8(a)), Present(IndexLabel::Utf8(b))) => a.cmp(b),
             (Present(IndexLabel::Timedelta64(a)), Present(IndexLabel::Timedelta64(b))) => a.cmp(b),
+            (Present(IndexLabel::Datetime64(a)), Present(IndexLabel::Datetime64(b))) => a.cmp(b),
             (Present(IndexLabel::Int64(_)), Present(IndexLabel::Utf8(_))) => Ordering::Less,
             (Present(IndexLabel::Utf8(_)), Present(IndexLabel::Int64(_))) => Ordering::Greater,
             (Present(IndexLabel::Timedelta64(_)), Present(IndexLabel::Int64(_))) => Ordering::Greater,
             (Present(IndexLabel::Timedelta64(_)), Present(IndexLabel::Utf8(_))) => Ordering::Greater,
             (Present(IndexLabel::Int64(_)), Present(IndexLabel::Timedelta64(_))) => Ordering::Less,
             (Present(IndexLabel::Utf8(_)), Present(IndexLabel::Timedelta64(_))) => Ordering::Less,
+            (Present(IndexLabel::Datetime64(_)), Present(IndexLabel::Int64(_))) => Ordering::Greater,
+            (Present(IndexLabel::Datetime64(_)), Present(IndexLabel::Utf8(_))) => Ordering::Greater,
+            (Present(IndexLabel::Datetime64(_)), Present(IndexLabel::Timedelta64(_))) => {
+                Ordering::Greater
+            }
+            (Present(IndexLabel::Int64(_)), Present(IndexLabel::Datetime64(_))) => Ordering::Less,
+            (Present(IndexLabel::Utf8(_)), Present(IndexLabel::Datetime64(_))) => Ordering::Less,
+            (Present(IndexLabel::Timedelta64(_)), Present(IndexLabel::Datetime64(_))) => {
+                Ordering::Less
+            }
             (Present(IndexLabel::Int64(a)), FloatBits(bits)) => {
                 let ord = (*a as f64).total_cmp(&f64::from_bits(*bits));
                 if ord == Ordering::Equal {
@@ -500,6 +511,22 @@ impl Ord for JoinKeyComponent {
                 }
             }
             (FloatBits(bits), Present(IndexLabel::Timedelta64(a))) => {
+                let ord = f64::from_bits(*bits).total_cmp(&(*a as f64));
+                if ord == Ordering::Equal {
+                    Ordering::Greater
+                } else {
+                    ord
+                }
+            }
+            (Present(IndexLabel::Datetime64(a)), FloatBits(bits)) => {
+                let ord = (*a as f64).total_cmp(&f64::from_bits(*bits));
+                if ord == Ordering::Equal {
+                    Ordering::Less
+                } else {
+                    ord
+                }
+            }
+            (FloatBits(bits), Present(IndexLabel::Datetime64(a))) => {
                 let ord = f64::from_bits(*bits).total_cmp(&(*a as f64));
                 if ord == Ordering::Equal {
                     Ordering::Greater

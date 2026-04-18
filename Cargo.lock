@@ -735,6 +735,7 @@ dependencies = [
 name = "fp-index"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "fp-types",
  "serde",
  "thiserror",
