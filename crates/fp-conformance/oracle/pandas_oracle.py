@@ -2978,6 +2978,31 @@ def op_dataframe_replace(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return {"expected_frame": dataframe_to_json(out)}
 
 
+def op_dataframe_where(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    cond_payload = payload.get("frame_right")
+    if frame_payload is None:
+        raise OracleError("dataframe_where requires frame payload")
+    if cond_payload is None:
+        raise OracleError("dataframe_where requires frame_right condition payload")
+
+    frame = dataframe_from_json(pd, frame_payload)
+    cond = dataframe_from_json(pd, cond_payload)
+    for column in frame.columns.tolist():
+        if column not in cond.columns.tolist():
+            raise OracleError(f"where: condition missing column {column!r}")
+
+    fill_value = payload.get("fill_value")
+    try:
+        if fill_value is None:
+            out = frame.where(cond)
+        else:
+            out = frame.where(cond, other=scalar_from_json(fill_value))
+    except Exception as exc:
+        raise OracleError(f"dataframe_where failed: {exc}") from exc
+    return {"expected_frame": dataframe_to_json(out)}
+
+
 def _resolve_sort_ascending(payload: dict[str, Any], op_name: str) -> bool:
     raw = payload.get("sort_ascending")
     if raw is None:
@@ -3705,6 +3730,8 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_dataframe_drop_columns(pd, payload)
     if op in {"dataframe_replace", "data_frame_replace"}:
         return op_dataframe_replace(pd, payload)
+    if op in {"dataframe_where", "data_frame_where"}:
+        return op_dataframe_where(pd, payload)
     if op in {"dataframe_sort_index", "data_frame_sort_index"}:
         return op_dataframe_sort_index(pd, payload)
     if op in {"dataframe_sort_values", "data_frame_sort_values"}:

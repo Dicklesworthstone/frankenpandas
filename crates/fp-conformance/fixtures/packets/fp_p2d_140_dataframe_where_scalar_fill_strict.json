@@ -1,0 +1,67 @@
+{
+  "packet_id": "FP-P2D-140",
+  "case_id": "dataframe_where_scalar_fill_strict",
+  "mode": "strict",
+  "operation": "dataframe_where",
+  "fill_value": { "kind": "int64", "value": -1 },
+  "frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 }
+    ],
+    "column_order": ["a", "b"],
+    "columns": {
+      "a": [
+        { "kind": "int64", "value": 1 },
+        { "kind": "int64", "value": 2 },
+        { "kind": "int64", "value": 3 }
+      ],
+      "b": [
+        { "kind": "int64", "value": 10 },
+        { "kind": "int64", "value": 20 },
+        { "kind": "int64", "value": 30 }
+      ]
+    }
+  },
+  "frame_right": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 }
+    ],
+    "column_order": ["a", "b"],
+    "columns": {
+      "a": [
+        { "kind": "bool", "value": true },
+        { "kind": "bool", "value": false },
+        { "kind": "bool", "value": true }
+      ],
+      "b": [
+        { "kind": "bool", "value": false },
+        { "kind": "bool", "value": true },
+        { "kind": "bool", "value": false }
+      ]
+    }
+  },
+  "expected_frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 }
+    ],
+    "column_order": ["a", "b"],
+    "columns": {
+      "a": [
+        { "kind": "int64", "value": 1 },
+        { "kind": "int64", "value": -1 },
+        { "kind": "int64", "value": 3 }
+      ],
+      "b": [
+        { "kind": "int64", "value": -1 },
+        { "kind": "int64", "value": 20 },
+        { "kind": "int64", "value": -1 }
+      ]
+    }
+  }
+}
