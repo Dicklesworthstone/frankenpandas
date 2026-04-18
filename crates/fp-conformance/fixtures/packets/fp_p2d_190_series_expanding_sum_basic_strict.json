@@ -1,0 +1,39 @@
+{
+  "packet_id": "FP-P2D-190",
+  "case_id": "series_expanding_sum_basic_strict",
+  "mode": "strict",
+  "operation": "series_expanding_sum",
+  "left": {
+    "name": "values",
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 3 },
+      { "kind": "int64", "value": 4 }
+    ],
+    "values": [
+      { "kind": "float64", "value": 1.0 },
+      { "kind": "float64", "value": 2.0 },
+      { "kind": "float64", "value": 3.0 },
+      { "kind": "float64", "value": 4.0 },
+      { "kind": "float64", "value": 5.0 }
+    ]
+  },
+  "expected_series": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 3 },
+      { "kind": "int64", "value": 4 }
+    ],
+    "values": [
+      { "kind": "float64", "value": 1.0 },
+      { "kind": "float64", "value": 3.0 },
+      { "kind": "float64", "value": 6.0 },
+      { "kind": "float64", "value": 10.0 },
+      { "kind": "float64", "value": 15.0 }
+    ]
+  }
+}

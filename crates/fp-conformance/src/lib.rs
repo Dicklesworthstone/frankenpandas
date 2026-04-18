@@ -695,6 +695,18 @@ pub enum FixtureOperation {
         alias = "series_expanding_quantile_default"
     )]
     SeriesExpandingQuantile,
+    #[serde(rename = "series_expanding_sum", alias = "series_expanding_sum_default")]
+    SeriesExpandingSum,
+    #[serde(rename = "series_expanding_mean", alias = "series_expanding_mean_default")]
+    SeriesExpandingMean,
+    #[serde(rename = "series_expanding_min", alias = "series_expanding_min_default")]
+    SeriesExpandingMin,
+    #[serde(rename = "series_expanding_max", alias = "series_expanding_max_default")]
+    SeriesExpandingMax,
+    #[serde(rename = "series_expanding_std", alias = "series_expanding_std_default")]
+    SeriesExpandingStd,
+    #[serde(rename = "series_expanding_var", alias = "series_expanding_var_default")]
+    SeriesExpandingVar,
     #[serde(rename = "series_ewm_mean", alias = "series_ewm_mean_default")]
     SeriesEwmMean,
     // Resample operations
@@ -958,6 +970,12 @@ impl FixtureOperation {
             Self::SeriesRollingCount => "series_rolling_count",
             Self::SeriesExpandingCount => "series_expanding_count",
             Self::SeriesExpandingQuantile => "series_expanding_quantile",
+            Self::SeriesExpandingSum => "series_expanding_sum",
+            Self::SeriesExpandingMean => "series_expanding_mean",
+            Self::SeriesExpandingMin => "series_expanding_min",
+            Self::SeriesExpandingMax => "series_expanding_max",
+            Self::SeriesExpandingStd => "series_expanding_std",
+            Self::SeriesExpandingVar => "series_expanding_var",
             Self::SeriesEwmMean => "series_ewm_mean",
             Self::SeriesResampleSum => "series_resample_sum",
             Self::SeriesResampleMean => "series_resample_mean",
@@ -1741,6 +1759,12 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::SeriesRollingCount
         | FixtureOperation::SeriesExpandingCount
         | FixtureOperation::SeriesExpandingQuantile
+        | FixtureOperation::SeriesExpandingSum
+        | FixtureOperation::SeriesExpandingMean
+        | FixtureOperation::SeriesExpandingMin
+        | FixtureOperation::SeriesExpandingMax
+        | FixtureOperation::SeriesExpandingStd
+        | FixtureOperation::SeriesExpandingVar
         | FixtureOperation::SeriesEwmMean
         | FixtureOperation::SeriesResampleSum
         | FixtureOperation::SeriesResampleMean
@@ -8512,6 +8536,12 @@ fn run_fixture_operation(
         | FixtureOperation::SeriesRollingCount
         | FixtureOperation::SeriesExpandingCount
         | FixtureOperation::SeriesExpandingQuantile
+        | FixtureOperation::SeriesExpandingSum
+        | FixtureOperation::SeriesExpandingMean
+        | FixtureOperation::SeriesExpandingMin
+        | FixtureOperation::SeriesExpandingMax
+        | FixtureOperation::SeriesExpandingStd
+        | FixtureOperation::SeriesExpandingVar
         | FixtureOperation::SeriesEwmMean
         | FixtureOperation::SeriesResampleSum
         | FixtureOperation::SeriesResampleMean
@@ -8950,6 +8980,12 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::SeriesRollingCount
         | FixtureOperation::SeriesExpandingCount
         | FixtureOperation::SeriesExpandingQuantile
+        | FixtureOperation::SeriesExpandingSum
+        | FixtureOperation::SeriesExpandingMean
+        | FixtureOperation::SeriesExpandingMin
+        | FixtureOperation::SeriesExpandingMax
+        | FixtureOperation::SeriesExpandingStd
+        | FixtureOperation::SeriesExpandingVar
         | FixtureOperation::SeriesEwmMean
         | FixtureOperation::SeriesResampleSum
         | FixtureOperation::SeriesResampleMean
@@ -9455,6 +9491,12 @@ fn capture_live_oracle_expected(
         | FixtureOperation::SeriesRollingCount
         | FixtureOperation::SeriesExpandingCount
         | FixtureOperation::SeriesExpandingQuantile
+        | FixtureOperation::SeriesExpandingSum
+        | FixtureOperation::SeriesExpandingMean
+        | FixtureOperation::SeriesExpandingMin
+        | FixtureOperation::SeriesExpandingMax
+        | FixtureOperation::SeriesExpandingStd
+        | FixtureOperation::SeriesExpandingVar
         | FixtureOperation::SeriesEwmMean
         | FixtureOperation::SeriesResampleSum
         | FixtureOperation::SeriesResampleMean
@@ -10924,6 +10966,30 @@ fn execute_series_window_fixture_operation(
         FixtureOperation::SeriesExpandingCount => series
             .expanding(min_periods)
             .count()
+            .map_err(|err| err.to_string()),
+        FixtureOperation::SeriesExpandingSum => series
+            .expanding(min_periods)
+            .sum()
+            .map_err(|err| err.to_string()),
+        FixtureOperation::SeriesExpandingMean => series
+            .expanding(min_periods)
+            .mean()
+            .map_err(|err| err.to_string()),
+        FixtureOperation::SeriesExpandingMin => series
+            .expanding(min_periods)
+            .min()
+            .map_err(|err| err.to_string()),
+        FixtureOperation::SeriesExpandingMax => series
+            .expanding(min_periods)
+            .max()
+            .map_err(|err| err.to_string()),
+        FixtureOperation::SeriesExpandingStd => series
+            .expanding(min_periods)
+            .std()
+            .map_err(|err| err.to_string()),
+        FixtureOperation::SeriesExpandingVar => series
+            .expanding(min_periods)
+            .var()
             .map_err(|err| err.to_string()),
         FixtureOperation::SeriesExpandingQuantile => {
             let q = fixture.quantile_value.unwrap_or(0.5);
@@ -16025,6 +16091,12 @@ fn execute_and_compare_differential(
         | FixtureOperation::SeriesRollingCount
         | FixtureOperation::SeriesExpandingCount
         | FixtureOperation::SeriesExpandingQuantile
+        | FixtureOperation::SeriesExpandingSum
+        | FixtureOperation::SeriesExpandingMean
+        | FixtureOperation::SeriesExpandingMin
+        | FixtureOperation::SeriesExpandingMax
+        | FixtureOperation::SeriesExpandingStd
+        | FixtureOperation::SeriesExpandingVar
         | FixtureOperation::SeriesEwmMean
         | FixtureOperation::SeriesResampleSum
         | FixtureOperation::SeriesResampleMean
