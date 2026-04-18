@@ -170,9 +170,9 @@ impl Scalar {
                 value: v.clone(),
                 dtype: DType::Utf8,
             }),
-            Self::Timedelta64(v) if *v == Timedelta::NAT => {
-                Err(TypeError::ValueIsMissing { kind: NullKind::NaT })
-            }
+            Self::Timedelta64(v) if *v == Timedelta::NAT => Err(TypeError::ValueIsMissing {
+                kind: NullKind::NaT,
+            }),
             Self::Timedelta64(v) => Err(TypeError::NonNumericValue {
                 value: Timedelta::format(*v),
                 dtype: DType::Timedelta64,
@@ -451,9 +451,7 @@ impl Timedelta {
                 .ok_or_else(|| TimedeltaError::InvalidFormat(s.to_string()))?;
 
             let nanos = (num * multiplier as f64).round() as i64;
-            total = total
-                .checked_add(nanos)
-                .ok_or(TimedeltaError::Overflow)?;
+            total = total.checked_add(nanos).ok_or(TimedeltaError::Overflow)?;
         }
 
         if total == 0 && !s.trim().is_empty() && s.trim() != "0" {
@@ -535,23 +533,12 @@ impl Timedelta {
         let comp = Self::components(nanos);
         let sign = if nanos < 0 { "-" } else { "" };
 
-        let time_part = format!(
-            "{:02}:{:02}:{:02}",
-            comp.hours, comp.minutes, comp.seconds
-        );
+        let time_part = format!("{:02}:{:02}:{:02}", comp.hours, comp.minutes, comp.seconds);
 
-        let frac = comp.milliseconds * 1_000_000
-            + comp.microseconds * 1_000
-            + comp.nanoseconds;
+        let frac = comp.milliseconds * 1_000_000 + comp.microseconds * 1_000 + comp.nanoseconds;
 
         if frac > 0 {
-            format!(
-                "{}{} days {}.{:09}",
-                sign,
-                comp.days.abs(),
-                time_part,
-                frac
-            )
+            format!("{}{} days {}.{:09}", sign, comp.days.abs(), time_part, frac)
         } else {
             format!("{}{} days {}", sign, comp.days.abs(), time_part)
         }
@@ -1173,11 +1160,26 @@ mod tests {
     fn timedelta_parse_simple_units() {
         use super::Timedelta;
         assert_eq!(Timedelta::parse("1d").unwrap(), Timedelta::NANOS_PER_DAY);
-        assert_eq!(Timedelta::parse("2h").unwrap(), 2 * Timedelta::NANOS_PER_HOUR);
-        assert_eq!(Timedelta::parse("30m").unwrap(), 30 * Timedelta::NANOS_PER_MIN);
-        assert_eq!(Timedelta::parse("45s").unwrap(), 45 * Timedelta::NANOS_PER_SEC);
-        assert_eq!(Timedelta::parse("100ms").unwrap(), 100 * Timedelta::NANOS_PER_MILLI);
-        assert_eq!(Timedelta::parse("500us").unwrap(), 500 * Timedelta::NANOS_PER_MICRO);
+        assert_eq!(
+            Timedelta::parse("2h").unwrap(),
+            2 * Timedelta::NANOS_PER_HOUR
+        );
+        assert_eq!(
+            Timedelta::parse("30m").unwrap(),
+            30 * Timedelta::NANOS_PER_MIN
+        );
+        assert_eq!(
+            Timedelta::parse("45s").unwrap(),
+            45 * Timedelta::NANOS_PER_SEC
+        );
+        assert_eq!(
+            Timedelta::parse("100ms").unwrap(),
+            100 * Timedelta::NANOS_PER_MILLI
+        );
+        assert_eq!(
+            Timedelta::parse("500us").unwrap(),
+            500 * Timedelta::NANOS_PER_MICRO
+        );
         assert_eq!(Timedelta::parse("1000ns").unwrap(), 1000);
     }
 
@@ -1194,7 +1196,7 @@ mod tests {
     #[test]
     fn timedelta_parse_time_format() {
         use super::Timedelta;
-        let expected = 1 * Timedelta::NANOS_PER_HOUR
+        let expected = Timedelta::NANOS_PER_HOUR
             + 30 * Timedelta::NANOS_PER_MIN
             + 45 * Timedelta::NANOS_PER_SEC;
         assert_eq!(Timedelta::parse("01:30:45").unwrap(), expected);
@@ -1245,7 +1247,10 @@ mod tests {
     fn timedelta_format_basic() {
         use super::Timedelta;
         assert_eq!(Timedelta::format(Timedelta::NAT), "NaT");
-        assert_eq!(Timedelta::format(Timedelta::NANOS_PER_DAY), "1 days 00:00:00");
+        assert_eq!(
+            Timedelta::format(Timedelta::NANOS_PER_DAY),
+            "1 days 00:00:00"
+        );
         assert_eq!(
             Timedelta::format(Timedelta::NANOS_PER_DAY + 2 * Timedelta::NANOS_PER_HOUR),
             "1 days 02:00:00"
@@ -1254,7 +1259,7 @@ mod tests {
 
     #[test]
     fn timedelta_scalar_dtype() {
-        let td = Scalar::Timedelta64(86400_000_000_000);
+        let td = Scalar::Timedelta64(86_400_000_000_000);
         assert_eq!(td.dtype(), DType::Timedelta64);
     }
 

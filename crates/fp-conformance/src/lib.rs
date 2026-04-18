@@ -23941,11 +23941,11 @@ mod tests {
 
         let values = result.values();
         // 02:30:45 = 2*3600 + 30*60 + 45 = 9045 seconds
-        assert_eq!(values[0], Scalar::Timedelta64(9045_000_000_000));
+        assert_eq!(values[0], Scalar::Timedelta64(9_045_000_000_000));
         // 3d 4h 15m 30s = 3*86400 + 4*3600 + 15*60 + 30 = 274530 seconds
-        assert_eq!(values[1], Scalar::Timedelta64(274530_000_000_000));
+        assert_eq!(values[1], Scalar::Timedelta64(274_530_000_000_000));
         // 5hours = 5*3600 = 18000 seconds
-        assert_eq!(values[2], Scalar::Timedelta64(18000_000_000_000));
+        assert_eq!(values[2], Scalar::Timedelta64(18_000_000_000_000));
     }
 
     #[test]
@@ -23976,6 +23976,9 @@ mod tests {
 
         let values = result.values();
         assert!(values[0].is_missing(), "invalid string should produce NaT");
-        assert!(values[1].is_missing(), "malformed string should produce NaT");
+        assert!(
+            values[1].is_missing(),
+            "malformed string should produce NaT"
+        );
     }
 }
