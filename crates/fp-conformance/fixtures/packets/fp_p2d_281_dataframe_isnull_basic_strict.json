@@ -1,0 +1,46 @@
+{
+  "packet_id": "FP-P2D-281",
+  "case_id": "dataframe_isnull_basic_strict",
+  "mode": "strict",
+  "operation": "dataframe_isnull",
+  "frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 }
+    ],
+    "columns": {
+      "a": [
+        { "kind": "int64", "value": 1 },
+        { "kind": "null", "value": "null" },
+        { "kind": "int64", "value": 3 }
+      ],
+      "b": [
+        { "kind": "null", "value": "null" },
+        { "kind": "int64", "value": 20 },
+        { "kind": "int64", "value": 30 }
+      ]
+    },
+    "column_order": ["a", "b"]
+  },
+  "expected_frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 }
+    ],
+    "columns": {
+      "a": [
+        { "kind": "bool", "value": false },
+        { "kind": "bool", "value": true },
+        { "kind": "bool", "value": false }
+      ],
+      "b": [
+        { "kind": "bool", "value": true },
+        { "kind": "bool", "value": false },
+        { "kind": "bool", "value": false }
+      ]
+    },
+    "column_order": ["a", "b"]
+  }
+}
