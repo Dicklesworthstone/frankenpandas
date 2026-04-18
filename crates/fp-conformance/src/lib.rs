@@ -309,6 +309,10 @@ pub enum FixtureOperation {
     DataFrameCorr,
     #[serde(rename = "dataframe_cov", alias = "dataframe_cov_default")]
     DataFrameCov,
+    #[serde(rename = "dataframe_idxmin", alias = "dataframe_idxmin_default")]
+    DataFrameIdxmin,
+    #[serde(rename = "dataframe_idxmax", alias = "dataframe_idxmax_default")]
+    DataFrameIdxmax,
     #[serde(rename = "dataframe_round", alias = "dataframe_round_default")]
     DataFrameRound,
     #[serde(rename = "series_cut", alias = "series_cut_default")]
@@ -700,6 +704,8 @@ impl FixtureOperation {
             Self::DataFrameDescribe => "dataframe_describe",
             Self::DataFrameCorr => "dataframe_corr",
             Self::DataFrameCov => "dataframe_cov",
+            Self::DataFrameIdxmin => "dataframe_idxmin",
+            Self::DataFrameIdxmax => "dataframe_idxmax",
             Self::DataFrameRound => "dataframe_round",
             Self::SeriesCut => "series_cut",
             Self::SeriesQcut => "series_qcut",
@@ -1426,6 +1432,8 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::DataFrameDescribe
         | FixtureOperation::DataFrameCorr
         | FixtureOperation::DataFrameCov
+        | FixtureOperation::DataFrameIdxmin
+        | FixtureOperation::DataFrameIdxmax
         | FixtureOperation::DataFrameRound => &["CC-005"],
         FixtureOperation::FillNa
         | FixtureOperation::DropNa
@@ -6807,6 +6815,38 @@ fn run_fixture_operation(
                 ),
             }
         }
+        FixtureOperation::DataFrameIdxmin | FixtureOperation::DataFrameIdxmax => {
+            let frame = build_dataframe(require_frame(fixture)?)
+                .map_err(|err| format!("frame build failed: {err}"))?;
+            let op_name = fixture.operation.operation_name();
+            let actual = match fixture.operation {
+                FixtureOperation::DataFrameIdxmin => frame.idxmin().map_err(|err| err.to_string()),
+                FixtureOperation::DataFrameIdxmax => frame.idxmax().map_err(|err| err.to_string()),
+                _ => unreachable!(),
+            };
+            match expected {
+                ResolvedExpected::Series(series) => compare_series_expected(&actual?, &series),
+                ResolvedExpected::ErrorContains(substr) => match actual {
+                    Err(message) if message.contains(&substr) => Ok(()),
+                    Err(message) => Err(format!(
+                        "expected {op_name} error containing '{substr}', got '{message}'"
+                    )),
+                    Ok(_) => Err(format!(
+                        "expected {op_name} to fail with error containing '{substr}'"
+                    )),
+                },
+                ResolvedExpected::ErrorAny => {
+                    if actual.is_err() {
+                        Ok(())
+                    } else {
+                        Err(format!("expected {op_name} to fail but operation succeeded"))
+                    }
+                }
+                _ => Err(format!(
+                    "expected_series or expected_error is required for {op_name}"
+                )),
+            }
+        }
         FixtureOperation::DataFrameMode
         | FixtureOperation::DataFrameCumsum
         | FixtureOperation::DataFrameCumprod
@@ -8604,6 +8644,8 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::DataFrameAsof
         | FixtureOperation::DataFrameEval
         | FixtureOperation::DataFrameCount
+        | FixtureOperation::DataFrameIdxmin
+        | FixtureOperation::DataFrameIdxmax
         | FixtureOperation::DataFrameDuplicated
         | FixtureOperation::GroupByMean
         | FixtureOperation::GroupByCount
@@ -9066,6 +9108,8 @@ fn capture_live_oracle_expected(
         | FixtureOperation::DataFrameAsof
         | FixtureOperation::DataFrameEval
         | FixtureOperation::DataFrameCount
+        | FixtureOperation::DataFrameIdxmin
+        | FixtureOperation::DataFrameIdxmax
         | FixtureOperation::DataFrameDuplicated
         | FixtureOperation::GroupByMean
         | FixtureOperation::GroupByCount
@@ -13661,6 +13705,46 @@ fn execute_and_compare_differential(
                 _ => {
                     Err("expected_series or expected_error required for dataframe_count".to_owned())
                 }
+            }
+        }
+        FixtureOperation::DataFrameIdxmin | FixtureOperation::DataFrameIdxmax => {
+            let frame = build_dataframe(require_frame(fixture)?)
+                .map_err(|err| format!("frame build failed: {err}"))?;
+            let op_name = fixture.operation.operation_name();
+            let actual = match fixture.operation {
+                FixtureOperation::DataFrameIdxmin => frame.idxmin().map_err(|err| err.to_string()),
+                FixtureOperation::DataFrameIdxmax => frame.idxmax().map_err(|err| err.to_string()),
+                _ => unreachable!(),
+            };
+            match expected {
+                ResolvedExpected::Series(series) => Ok(diff_series(&actual?, &series)),
+                ResolvedExpected::ErrorContains(substr) => Ok(match actual {
+                    Err(message) if message.contains(&substr) => Vec::new(),
+                    Err(message) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        &format!("{op_name}.error"),
+                        format!("expected {op_name} error containing '{substr}', got '{message}'"),
+                    )],
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        &format!("{op_name}.error"),
+                        format!("expected {op_name} to fail but operation succeeded"),
+                    )],
+                }),
+                ResolvedExpected::ErrorAny => Ok(match actual {
+                    Err(_) => Vec::new(),
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        &format!("{op_name}.error"),
+                        format!("expected {op_name} to fail but operation succeeded"),
+                    )],
+                }),
+                _ => Err(format!(
+                    "expected_series or expected_error required for {op_name}"
+                )),
             }
         }
         FixtureOperation::DataFrameMode => {

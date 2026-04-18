@@ -1881,6 +1881,38 @@ def op_dataframe_cov(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return {"expected_frame": dataframe_to_json(out)}
 
 
+def op_dataframe_idxmin(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    if frame_payload is None:
+        raise OracleError("dataframe_idxmin requires frame payload")
+
+    frame = dataframe_from_json(pd, frame_payload)
+    axis = payload.get("idxmin_axis", 0)
+    skipna = payload.get("idxmin_skipna", True)
+
+    try:
+        out = frame.idxmin(axis=axis, skipna=skipna)
+    except Exception as exc:
+        raise OracleError(f"dataframe_idxmin failed: {exc}") from exc
+    return {"expected_series": series_to_json(out)}
+
+
+def op_dataframe_idxmax(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    if frame_payload is None:
+        raise OracleError("dataframe_idxmax requires frame payload")
+
+    frame = dataframe_from_json(pd, frame_payload)
+    axis = payload.get("idxmax_axis", 0)
+    skipna = payload.get("idxmax_skipna", True)
+
+    try:
+        out = frame.idxmax(axis=axis, skipna=skipna)
+    except Exception as exc:
+        raise OracleError(f"dataframe_idxmax failed: {exc}") from exc
+    return {"expected_series": series_to_json(out)}
+
+
 def op_dataframe_round(pd, payload: dict[str, Any]) -> dict[str, Any]:
     frame_payload = payload.get("frame")
     if frame_payload is None:
@@ -3842,6 +3874,10 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_dataframe_corr(pd, payload)
     if op in {"dataframe_cov", "data_frame_cov"}:
         return op_dataframe_cov(pd, payload)
+    if op in {"dataframe_idxmin", "data_frame_idxmin"}:
+        return op_dataframe_idxmin(pd, payload)
+    if op in {"dataframe_idxmax", "data_frame_idxmax"}:
+        return op_dataframe_idxmax(pd, payload)
     if op in {"dataframe_round", "data_frame_round"}:
         return op_dataframe_round(pd, payload)
     if op in {"dataframe_shift", "data_frame_shift"}:
