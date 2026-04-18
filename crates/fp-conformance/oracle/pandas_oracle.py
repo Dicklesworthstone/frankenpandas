@@ -1893,6 +1893,20 @@ def op_dataframe_stack(pd, payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def op_dataframe_transpose(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    if frame_payload is None:
+        raise OracleError("dataframe_transpose requires frame payload")
+
+    frame = dataframe_from_json(pd, frame_payload)
+    try:
+        out = frame.transpose()
+    except Exception as exc:
+        raise OracleError(f"dataframe_transpose failed: {exc}") from exc
+
+    return {"expected_frame": dataframe_to_json(out)}
+
+
 def op_series_unstack(pd, payload: dict[str, Any]) -> dict[str, Any]:
     left = payload.get("left")
     if left is None:
@@ -3257,6 +3271,8 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_dataframe_pivot_table(pd, payload)
     if op in {"dataframe_stack", "data_frame_stack"}:
         return op_dataframe_stack(pd, payload)
+    if op in {"dataframe_transpose", "data_frame_transpose"}:
+        return op_dataframe_transpose(pd, payload)
     if op in {"series_unstack", "series_unstack_default"}:
         return op_series_unstack(pd, payload)
     if op in {"dataframe_crosstab", "data_frame_crosstab"}:

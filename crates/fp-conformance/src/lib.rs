@@ -504,6 +504,8 @@ pub enum FixtureOperation {
     DataFramePivotTable,
     #[serde(rename = "dataframe_stack", alias = "data_frame_stack")]
     DataFrameStack,
+    #[serde(rename = "dataframe_transpose", alias = "data_frame_transpose")]
+    DataFrameTranspose,
     #[serde(rename = "dataframe_crosstab", alias = "data_frame_crosstab")]
     DataFrameCrosstab,
     #[serde(
@@ -740,6 +742,7 @@ impl FixtureOperation {
             Self::DataFrameMelt => "dataframe_melt",
             Self::DataFramePivotTable => "dataframe_pivot_table",
             Self::DataFrameStack => "dataframe_stack",
+            Self::DataFrameTranspose => "dataframe_transpose",
             Self::DataFrameCrosstab => "dataframe_crosstab",
             Self::DataFrameCrosstabNormalize => "dataframe_crosstab_normalize",
             Self::DataFrameGetDummies => "dataframe_get_dummies",
@@ -1444,6 +1447,7 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::DataFrameMelt
         | FixtureOperation::DataFramePivotTable
         | FixtureOperation::DataFrameStack
+        | FixtureOperation::DataFrameTranspose
         | FixtureOperation::DataFrameCrosstab
         | FixtureOperation::DataFrameCrosstabNormalize
         | FixtureOperation::DataFrameGetDummies
@@ -8007,6 +8011,7 @@ fn run_fixture_operation(
         | FixtureOperation::DataFrameMelt
         | FixtureOperation::DataFramePivotTable
         | FixtureOperation::DataFrameStack
+        | FixtureOperation::DataFrameTranspose
         | FixtureOperation::DataFrameCrosstab
         | FixtureOperation::DataFrameCrosstabNormalize
         | FixtureOperation::DataFrameGetDummies
@@ -8540,6 +8545,7 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::DataFrameMelt
         | FixtureOperation::DataFramePivotTable
         | FixtureOperation::DataFrameStack
+        | FixtureOperation::DataFrameTranspose
         | FixtureOperation::DataFrameCrosstab
         | FixtureOperation::DataFrameCrosstabNormalize
         | FixtureOperation::DataFrameGetDummies
@@ -8972,6 +8978,7 @@ fn capture_live_oracle_expected(
         | FixtureOperation::DataFrameMelt
         | FixtureOperation::DataFramePivotTable
         | FixtureOperation::DataFrameStack
+        | FixtureOperation::DataFrameTranspose
         | FixtureOperation::DataFrameCrosstab
         | FixtureOperation::DataFrameCrosstabNormalize
         | FixtureOperation::DataFrameGetDummies
@@ -10561,6 +10568,11 @@ fn execute_dataframe_fixture_operation(fixture: &PacketFixture) -> Result<DataFr
             let frame = build_dataframe(require_frame(fixture)?)
                 .map_err(|err| format!("frame build failed: {err}"))?;
             frame.stack().map_err(|err| err.to_string())
+        }
+        FixtureOperation::DataFrameTranspose => {
+            let frame = build_dataframe(require_frame(fixture)?)
+                .map_err(|err| format!("frame build failed: {err}"))?;
+            frame.transpose().map_err(|err| err.to_string())
         }
         FixtureOperation::DataFrameCrosstab => {
             let left = build_series(require_left_series(fixture)?)
@@ -14883,6 +14895,7 @@ fn execute_and_compare_differential(
         | FixtureOperation::DataFrameMelt
         | FixtureOperation::DataFramePivotTable
         | FixtureOperation::DataFrameStack
+        | FixtureOperation::DataFrameTranspose
         | FixtureOperation::DataFrameCrosstab
         | FixtureOperation::DataFrameCrosstabNormalize
         | FixtureOperation::DataFrameGetDummies
@@ -18876,6 +18889,19 @@ mod tests {
         assert!(
             report.fixture_count >= 6,
             "expected FP-P2D-130 dataframe numeric transform fixtures"
+        );
+        assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
+    fn packet_filter_runs_dataframe_transpose_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2D-131", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-131"));
+        assert!(
+            report.fixture_count >= 5,
+            "expected FP-P2D-131 dataframe transpose fixtures"
         );
         assert!(report.is_green(), "expected report green: {report:?}");
     }
