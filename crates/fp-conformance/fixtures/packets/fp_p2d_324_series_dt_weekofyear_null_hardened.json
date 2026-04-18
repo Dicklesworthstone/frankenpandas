@@ -1,0 +1,35 @@
+{
+  "packet_id": "FP-P2D-324",
+  "case_id": "series_dt_weekofyear_null_hardened",
+  "mode": "hardened",
+  "operation": "series_dt_weekofyear",
+  "left": {
+    "name": "dates",
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 3 }
+    ],
+    "values": [
+      { "kind": "utf8", "value": "2024-01-01T00:00:00" },
+      { "kind": "null", "value": "null" },
+      { "kind": "utf8", "value": "2024-06-15T00:00:00" },
+      { "kind": "utf8", "value": "2024-12-31T00:00:00" }
+    ]
+  },
+  "expected_series": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 3 }
+    ],
+    "values": [
+      { "kind": "int64", "value": 1 },
+      { "kind": "null", "value": "null" },
+      { "kind": "int64", "value": 24 },
+      { "kind": "int64", "value": 1 }
+    ]
+  }
+}
