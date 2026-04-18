@@ -1,0 +1,37 @@
+{
+  "packet_id": "FP-P2D-363",
+  "case_id": "dataframe_astype_str_to_float_hardened",
+  "mode": "hardened",
+  "operation": "dataframe_astype",
+  "constructor_dtype": "float64",
+  "frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 }
+    ],
+    "column_order": ["a"],
+    "columns": {
+      "a": [
+        { "kind": "utf8", "value": "1.5" },
+        { "kind": "null", "value": "null" },
+        { "kind": "utf8", "value": "3.5" }
+      ]
+    }
+  },
+  "expected_frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 }
+    ],
+    "column_order": ["a"],
+    "columns": {
+      "a": [
+        { "kind": "float64", "value": 1.5 },
+        { "kind": "null", "value": "null" },
+        { "kind": "float64", "value": 3.5 }
+      ]
+    }
+  }
+}

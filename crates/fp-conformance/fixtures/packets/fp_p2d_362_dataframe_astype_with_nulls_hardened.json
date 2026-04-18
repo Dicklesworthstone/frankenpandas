@@ -1,0 +1,53 @@
+{
+  "packet_id": "FP-P2D-362",
+  "case_id": "dataframe_astype_with_nulls_hardened",
+  "mode": "hardened",
+  "operation": "dataframe_astype",
+  "constructor_dtype": "float64",
+  "frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 3 }
+    ],
+    "column_order": ["nums", "vals"],
+    "columns": {
+      "nums": [
+        { "kind": "int64", "value": 10 },
+        { "kind": "null", "value": "null" },
+        { "kind": "int64", "value": 30 },
+        { "kind": "int64", "value": 40 }
+      ],
+      "vals": [
+        { "kind": "null", "value": "null" },
+        { "kind": "int64", "value": 2 },
+        { "kind": "null", "value": "null" },
+        { "kind": "int64", "value": 4 }
+      ]
+    }
+  },
+  "expected_frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 3 }
+    ],
+    "column_order": ["nums", "vals"],
+    "columns": {
+      "nums": [
+        { "kind": "float64", "value": 10.0 },
+        { "kind": "null", "value": "null" },
+        { "kind": "float64", "value": 30.0 },
+        { "kind": "float64", "value": 40.0 }
+      ],
+      "vals": [
+        { "kind": "null", "value": "null" },
+        { "kind": "float64", "value": 2.0 },
+        { "kind": "null", "value": "null" },
+        { "kind": "float64", "value": 4.0 }
+      ]
+    }
+  }
+}
