@@ -1202,14 +1202,28 @@ impl Series {
             };
             out.push(result);
         }
-        Self::from_values(format!("{}_ratio", self.name), self.index.labels().to_vec(), out)
+        Self::from_values(
+            format!("{}_ratio", self.name),
+            self.index.labels().to_vec(),
+            out,
+        )
     }
 
     /// Modulo of Timedelta64 Series by another Timedelta64.
     ///
     /// Matches `td1 % td2` in pandas.
     pub fn td_mod(&self, other: &Self) -> Result<Self, FrameError> {
-        self.td_binary_op(other, |a, b| if b == 0 { fp_types::Timedelta::NAT } else { a % b }, "td_mod")
+        self.td_binary_op(
+            other,
+            |a, b| {
+                if b == 0 {
+                    fp_types::Timedelta::NAT
+                } else {
+                    a % b
+                }
+            },
+            "td_mod",
+        )
     }
 
     /// Negate Timedelta64 Series (unary minus).
@@ -1251,7 +1265,11 @@ impl Series {
             };
             out.push(result);
         }
-        Self::from_values(format!("abs({})", self.name), self.index.labels().to_vec(), out)
+        Self::from_values(
+            format!("abs({})", self.name),
+            self.index.labels().to_vec(),
+            out,
+        )
     }
 
     fn td_binary_op<F>(&self, other: &Self, op: F, name: &str) -> Result<Self, FrameError>
@@ -1272,7 +1290,11 @@ impl Series {
             };
             out.push(result);
         }
-        Self::from_values(format!("{}_{}", self.name, name), self.index.labels().to_vec(), out)
+        Self::from_values(
+            format!("{}_{}", self.name, name),
+            self.index.labels().to_vec(),
+            out,
+        )
     }
 
     fn td_scalar_op<F>(&self, scalar: f64, op: F) -> Result<Self, FrameError>
@@ -1346,7 +1368,11 @@ impl Series {
             };
             out.push(result);
         }
-        Self::from_values(format!("{}_{}", self.name, name), self.index.labels().to_vec(), out)
+        Self::from_values(
+            format!("{}_{}", self.name, name),
+            self.index.labels().to_vec(),
+            out,
+        )
     }
 
     /// Return the number of elements in this Series.
@@ -5889,7 +5915,7 @@ impl Series {
                     Scalar::Float64(f) => f.to_string(),
                     Scalar::Bool(b) => b.to_string(),
                     Scalar::Timedelta64(n) if *n == Timedelta::NAT => {
-                        return Scalar::Null(NullKind::NaT)
+                        return Scalar::Null(NullKind::NaT);
                     }
                     Scalar::Timedelta64(n) => Timedelta::format(*n),
                     Scalar::Null(_) => return Scalar::Null(NullKind::NaN),
@@ -18166,8 +18192,12 @@ impl DataFrame {
                 match label {
                     IndexLabel::Int64(v) => out.push_str(&v.to_string()),
                     IndexLabel::Utf8(s) => out.push_str(&csv_escape(s, sep)),
-                    IndexLabel::Timedelta64(ns) => out.push_str(&csv_escape(&Timedelta::format(*ns), sep)),
-                    IndexLabel::Datetime64(ns) => out.push_str(&csv_escape(&format_datetime_ns(*ns), sep)),
+                    IndexLabel::Timedelta64(ns) => {
+                        out.push_str(&csv_escape(&Timedelta::format(*ns), sep))
+                    }
+                    IndexLabel::Datetime64(ns) => {
+                        out.push_str(&csv_escape(&format_datetime_ns(*ns), sep))
+                    }
                 }
                 out.push(sep);
             }
@@ -18240,8 +18270,12 @@ impl DataFrame {
                 match label {
                     IndexLabel::Int64(v) => out.push_str(&v.to_string()),
                     IndexLabel::Utf8(s) => out.push_str(&csv_escape(s, sep)),
-                    IndexLabel::Timedelta64(ns) => out.push_str(&csv_escape(&Timedelta::format(*ns), sep)),
-                    IndexLabel::Datetime64(ns) => out.push_str(&csv_escape(&format_datetime_ns(*ns), sep)),
+                    IndexLabel::Timedelta64(ns) => {
+                        out.push_str(&csv_escape(&Timedelta::format(*ns), sep))
+                    }
+                    IndexLabel::Datetime64(ns) => {
+                        out.push_str(&csv_escape(&format_datetime_ns(*ns), sep))
+                    }
                 }
                 out.push(sep);
             }
@@ -18256,9 +18290,7 @@ impl DataFrame {
                     Scalar::Int64(v) => out.push_str(&v.to_string()),
                     Scalar::Float64(v) => out.push_str(&v.to_string()),
                     Scalar::Utf8(s) => out.push_str(&csv_escape(s, sep)),
-                    Scalar::Timedelta64(v) if *v == Timedelta::NAT => {
-                        out.push_str(&na_rep_escaped)
-                    }
+                    Scalar::Timedelta64(v) if *v == Timedelta::NAT => out.push_str(&na_rep_escaped),
                     Scalar::Timedelta64(v) => out.push_str(&Timedelta::format(*v)),
                 }
             }
@@ -49370,12 +49402,8 @@ mod tests {
     #[test]
     fn to_timedelta_days_only() {
         use fp_types::Timedelta;
-        let s = Series::from_values(
-            "td",
-            vec![0_i64.into()],
-            vec![Scalar::Utf8("5d".into())],
-        )
-        .unwrap();
+        let s =
+            Series::from_values("td", vec![0_i64.into()], vec![Scalar::Utf8("5d".into())]).unwrap();
         let result = super::to_timedelta(&s).unwrap();
         let expected_ns = 5 * Timedelta::NANOS_PER_DAY;
         assert_eq!(result.values()[0], Scalar::Timedelta64(expected_ns));

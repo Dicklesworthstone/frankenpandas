@@ -472,11 +472,17 @@ impl Ord for JoinKeyComponent {
             (Present(IndexLabel::Datetime64(a)), Present(IndexLabel::Datetime64(b))) => a.cmp(b),
             (Present(IndexLabel::Int64(_)), Present(IndexLabel::Utf8(_))) => Ordering::Less,
             (Present(IndexLabel::Utf8(_)), Present(IndexLabel::Int64(_))) => Ordering::Greater,
-            (Present(IndexLabel::Timedelta64(_)), Present(IndexLabel::Int64(_))) => Ordering::Greater,
-            (Present(IndexLabel::Timedelta64(_)), Present(IndexLabel::Utf8(_))) => Ordering::Greater,
+            (Present(IndexLabel::Timedelta64(_)), Present(IndexLabel::Int64(_))) => {
+                Ordering::Greater
+            }
+            (Present(IndexLabel::Timedelta64(_)), Present(IndexLabel::Utf8(_))) => {
+                Ordering::Greater
+            }
             (Present(IndexLabel::Int64(_)), Present(IndexLabel::Timedelta64(_))) => Ordering::Less,
             (Present(IndexLabel::Utf8(_)), Present(IndexLabel::Timedelta64(_))) => Ordering::Less,
-            (Present(IndexLabel::Datetime64(_)), Present(IndexLabel::Int64(_))) => Ordering::Greater,
+            (Present(IndexLabel::Datetime64(_)), Present(IndexLabel::Int64(_))) => {
+                Ordering::Greater
+            }
             (Present(IndexLabel::Datetime64(_)), Present(IndexLabel::Utf8(_))) => Ordering::Greater,
             (Present(IndexLabel::Datetime64(_)), Present(IndexLabel::Timedelta64(_))) => {
                 Ordering::Greater
