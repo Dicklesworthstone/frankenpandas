@@ -1,0 +1,33 @@
+{
+  "packet_id": "FP-P2D-258",
+  "case_id": "series_str_findall_basic_strict",
+  "mode": "strict",
+  "operation": "series_str_findall",
+  "regex_pattern": "\\d+",
+  "str_findall_sep": ",",
+  "left": {
+    "name": "text",
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 }
+    ],
+    "values": [
+      { "kind": "utf8", "value": "a1b2c3" },
+      { "kind": "utf8", "value": "no numbers" },
+      { "kind": "utf8", "value": "42" }
+    ]
+  },
+  "expected_series": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 }
+    ],
+    "values": [
+      { "kind": "utf8", "value": "1,2,3" },
+      { "kind": "null", "value": "na_n" },
+      { "kind": "utf8", "value": "42" }
+    ]
+  }
+}
