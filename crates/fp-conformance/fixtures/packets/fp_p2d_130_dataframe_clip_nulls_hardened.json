@@ -39,7 +39,7 @@
     "columns": {
       "a": [
         { "kind": "float64", "value": -1.0 },
-        { "kind": "null", "value": "null" },
+        { "kind": "null", "value": "na_n" },
         { "kind": "float64", "value": 3.0 },
         { "kind": "float64", "value": 4.0 }
       ],
