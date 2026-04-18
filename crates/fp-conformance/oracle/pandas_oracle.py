@@ -1743,6 +1743,86 @@ def required_string_payload(payload: dict[str, Any], key: str, op_name: str) -> 
     return value.strip()
 
 
+def optional_float_payload(payload: dict[str, Any], key: str, op_name: str) -> float | None:
+    value = payload.get(key)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise OracleError(f"{op_name} {key} must be numeric when provided")
+    return float(value)
+
+
+def pandas_dtype_from_constructor_spec(dtype_spec: str) -> str:
+    normalized = dtype_spec.strip().lower()
+    if normalized in {"bool", "boolean"}:
+        return "bool"
+    if normalized in {"int64", "int", "i64"}:
+        return "int64"
+    if normalized in {"float64", "float", "f64"}:
+        return "float64"
+    if normalized in {"utf8", "string", "str"}:
+        return "string"
+    raise OracleError(f"unsupported constructor dtype {dtype_spec!r}")
+
+
+def op_dataframe_astype(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    if frame_payload is None:
+        raise OracleError("dataframe_astype requires frame payload")
+
+    dtype_spec = required_string_payload(payload, "constructor_dtype", "dataframe_astype")
+    frame = dataframe_from_json(pd, frame_payload)
+    try:
+        out = frame.astype(pandas_dtype_from_constructor_spec(dtype_spec))
+    except Exception as exc:
+        raise OracleError(f"dataframe_astype failed: {exc}") from exc
+    return {"expected_frame": dataframe_to_json(out)}
+
+
+def op_dataframe_clip(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    if frame_payload is None:
+        raise OracleError("dataframe_clip requires frame payload")
+
+    lower = optional_float_payload(payload, "clip_lower", "dataframe_clip")
+    upper = optional_float_payload(payload, "clip_upper", "dataframe_clip")
+    frame = dataframe_from_json(pd, frame_payload)
+    try:
+        out = frame.clip(lower=lower, upper=upper)
+    except Exception as exc:
+        raise OracleError(f"dataframe_clip failed: {exc}") from exc
+    return {"expected_frame": dataframe_to_json(out)}
+
+
+def op_dataframe_abs(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    if frame_payload is None:
+        raise OracleError("dataframe_abs requires frame payload")
+
+    frame = dataframe_from_json(pd, frame_payload)
+    try:
+        out = frame.abs()
+    except Exception as exc:
+        raise OracleError(f"dataframe_abs failed: {exc}") from exc
+    return {"expected_frame": dataframe_to_json(out)}
+
+
+def op_dataframe_round(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    if frame_payload is None:
+        raise OracleError("dataframe_round requires frame payload")
+
+    decimals = payload.get("round_decimals", 0)
+    if isinstance(decimals, bool) or not isinstance(decimals, int):
+        raise OracleError("dataframe_round round_decimals must be an integer when provided")
+    frame = dataframe_from_json(pd, frame_payload)
+    try:
+        out = frame.round(decimals=int(decimals))
+    except Exception as exc:
+        raise OracleError(f"dataframe_round failed: {exc}") from exc
+    return {"expected_frame": dataframe_to_json(out)}
+
+
 def op_dataframe_pivot_table(pd, payload: dict[str, Any]) -> dict[str, Any]:
     frame_payload = payload.get("frame")
     if frame_payload is None:
@@ -3355,6 +3435,14 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_dataframe_mode(pd, payload)
     if op in {"dataframe_rank", "data_frame_rank"}:
         return op_dataframe_rank(pd, payload)
+    if op in {"dataframe_astype", "data_frame_astype"}:
+        return op_dataframe_astype(pd, payload)
+    if op in {"dataframe_clip", "data_frame_clip"}:
+        return op_dataframe_clip(pd, payload)
+    if op in {"dataframe_abs", "data_frame_abs"}:
+        return op_dataframe_abs(pd, payload)
+    if op in {"dataframe_round", "data_frame_round"}:
+        return op_dataframe_round(pd, payload)
     if op in {"dataframe_shift", "data_frame_shift"}:
         return op_dataframe_shift(pd, payload)
     if op in {"dataframe_fillna", "data_frame_fillna"}:
