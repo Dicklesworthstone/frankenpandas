@@ -1,7 +1,7 @@
 # FrankenPandas Conformance Coverage
 
 > Coverage accounting for pandas API parity testing.
-> Generated: 2026-04-15
+> Generated: 2026-04-18
 
 ## Coverage Summary
 
@@ -15,13 +15,14 @@
 | DataFrame Selection | 4 | 35 | ✅ Core |
 | DataFrame Merge/Join | 3 | 48 | ✅ Core |
 | DataFrame Transform | 8 | 32 | ✅ Core |
-| DataFrame Reshape | 1 | 4 | ⚠️ Started |
+| DataFrame Reshape | 6 | 15 | ⚠️ Expanded |
 | DataFrame Aggregation | 4 | 10 | ⚠️ Light |
 | GroupBy | 10 | 24 | ⚠️ Light |
 | Index Operations | 5 | 14 | ✅ Core |
 | NaN Aggregations | 7 | 17 | ✅ Core |
-| IO (CSV) | 1 | 16 | ✅ Core |
-| **Total** | **70** | **467** | **Partial** |
+| Window Functions | 5 | 5 | ⚠️ Started |
+| IO Round-Trip | 5 | 24 | ⚠️ Started |
+| **Total** | **213** | **806** | **Partial** |
 
 ## Operation Coverage Detail
 
@@ -81,6 +82,11 @@
 | dataframe_diff | 4 | ⚠️ | Period options |
 | dataframe_pct_change | 3 | ⚠️ | Period options |
 | dataframe_melt | 4 | ⚠️ | Basic reshape parity started |
+| dataframe_pivot_table | 6 | ⚠️ | Sum/mean/fill/margins/multi-value cases |
+| dataframe_stack | 1 | ⚠️ | Basic wide-to-long case |
+| dataframe_crosstab | 2 | ⚠️ | Basic and null-label cases |
+| dataframe_crosstab_normalize | 1 | ⚠️ | Index-normalized case |
+| dataframe_get_dummies | 1 | ⚠️ | Basic indicator expansion |
 | dataframe_duplicated | 3 | ⚠️ | Subset options |
 | dataframe_drop_duplicates | 3 | ⚠️ | Keep options |
 | dataframe_set_index | 3 | ⚠️ | Column to index |
@@ -226,14 +232,14 @@ python3 crates/fp-conformance/oracle/pandas_oracle.py \
 | P0: Core arithmetic/selection | 95% | ~85% | Add edge cases |
 | P1: Merge/Join/Concat | 90% | ~80% | Add validation modes |
 | P2: GroupBy | 80% | ~40% | Major expansion needed |
-| P3: Reshape (pivot/melt) | 70% | ~10% | Melt started; pivot/stack/unstack still open |
-| P4: Window functions | 60% | 0% | Not started |
-| P5: IO formats | 50% | ~15% | CSV only |
+| P3: Reshape (pivot/melt) | 70% | ~35% | Pivot-table/crosstab/stack/series-unstack started; simple `DataFrame::pivot` and broader edge cases still open |
+| P4: Window functions | 60% | ~10% | Rolling/expanding/EWM started; broader parameter matrix still open |
+| P5: IO formats | 50% | ~25% | CSV plus JSON/Parquet/Excel/Feather round-trip fixtures started; SQL and option matrices still open |
 
 ## Next Actions
 
 1. **High priority:** Add more GroupBy edge case fixtures
 2. **High priority:** Add Series diff/pct_change fixtures
-3. **Medium:** Expand reshape coverage beyond melt into pivot/pivot_table/stack/unstack
-4. **Medium:** Add rolling/expanding window fixtures
-5. **Low:** Add additional IO format support (JSON, Parquet)
+3. **Medium:** Add simple `DataFrame::pivot` conformance and broader stack/unstack edge cases
+4. **Medium:** Expand rolling/expanding/EWM window parameter fixtures
+5. **Low:** Add SQL round-trip conformance and broader IO option matrices
