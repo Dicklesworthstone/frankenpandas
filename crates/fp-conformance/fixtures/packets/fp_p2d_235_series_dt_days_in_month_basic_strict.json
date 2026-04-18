@@ -1,0 +1,35 @@
+{
+  "packet_id": "FP-P2D-235",
+  "case_id": "series_dt_days_in_month_basic_strict",
+  "mode": "strict",
+  "operation": "series_dt_days_in_month",
+  "left": {
+    "name": "dates",
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 3 }
+    ],
+    "values": [
+      { "kind": "datetime64", "value": "2024-01-15T00:00:00" },
+      { "kind": "datetime64", "value": "2024-02-15T00:00:00" },
+      { "kind": "datetime64", "value": "2023-02-15T00:00:00" },
+      { "kind": "datetime64", "value": "2024-04-15T00:00:00" }
+    ]
+  },
+  "expected_series": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 3 }
+    ],
+    "values": [
+      { "kind": "int64", "value": 31 },
+      { "kind": "int64", "value": 29 },
+      { "kind": "int64", "value": 28 },
+      { "kind": "int64", "value": 30 }
+    ]
+  }
+}

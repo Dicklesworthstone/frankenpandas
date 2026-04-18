@@ -1,0 +1,35 @@
+{
+  "packet_id": "FP-P2D-236",
+  "case_id": "series_dt_is_leap_year_basic_strict",
+  "mode": "strict",
+  "operation": "series_dt_is_leap_year",
+  "left": {
+    "name": "dates",
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 3 }
+    ],
+    "values": [
+      { "kind": "datetime64", "value": "2024-01-01T00:00:00" },
+      { "kind": "datetime64", "value": "2023-01-01T00:00:00" },
+      { "kind": "datetime64", "value": "2000-01-01T00:00:00" },
+      { "kind": "datetime64", "value": "1900-01-01T00:00:00" }
+    ]
+  },
+  "expected_series": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 3 }
+    ],
+    "values": [
+      { "kind": "bool", "value": true },
+      { "kind": "bool", "value": false },
+      { "kind": "bool", "value": true },
+      { "kind": "bool", "value": false }
+    ]
+  }
+}

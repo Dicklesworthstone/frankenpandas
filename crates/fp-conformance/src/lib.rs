@@ -550,6 +550,12 @@ pub enum FixtureOperation {
     SeriesDtIsYearStart,
     #[serde(rename = "series_dt_is_year_end", alias = "series_dt_is_year_end_default")]
     SeriesDtIsYearEnd,
+    #[serde(rename = "series_dt_date", alias = "series_dt_date_default")]
+    SeriesDtDate,
+    #[serde(rename = "series_dt_days_in_month", alias = "series_dt_days_in_month_default")]
+    SeriesDtDaysInMonth,
+    #[serde(rename = "series_dt_is_leap_year", alias = "series_dt_is_leap_year_default")]
+    SeriesDtIsLeapYear,
     #[serde(rename = "dataframe_loc", alias = "data_frame_loc")]
     DataFrameLoc,
     #[serde(rename = "dataframe_iloc", alias = "data_frame_iloc")]
@@ -992,6 +998,9 @@ impl FixtureOperation {
             Self::SeriesDtIsMonthEnd => "series_dt_is_month_end",
             Self::SeriesDtIsYearStart => "series_dt_is_year_start",
             Self::SeriesDtIsYearEnd => "series_dt_is_year_end",
+            Self::SeriesDtDate => "series_dt_date",
+            Self::SeriesDtDaysInMonth => "series_dt_days_in_month",
+            Self::SeriesDtIsLeapYear => "series_dt_is_leap_year",
             Self::DataFrameLoc => "dataframe_loc",
             Self::DataFrameIloc => "dataframe_iloc",
             Self::DataFrameTake => "dataframe_take",
@@ -9194,6 +9203,9 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::SeriesDtIsMonthEnd
         | FixtureOperation::SeriesDtIsYearStart
         | FixtureOperation::SeriesDtIsYearEnd
+        | FixtureOperation::SeriesDtDate
+        | FixtureOperation::SeriesDtDaysInMonth
+        | FixtureOperation::SeriesDtIsLeapYear
         | FixtureOperation::SeriesAtTime
         | FixtureOperation::SeriesBetweenTime
         | FixtureOperation::DataFrameGroupByCumcount
@@ -9743,6 +9755,9 @@ fn capture_live_oracle_expected(
         | FixtureOperation::SeriesDtIsMonthEnd
         | FixtureOperation::SeriesDtIsYearStart
         | FixtureOperation::SeriesDtIsYearEnd
+        | FixtureOperation::SeriesDtDate
+        | FixtureOperation::SeriesDtDaysInMonth
+        | FixtureOperation::SeriesDtIsLeapYear
         | FixtureOperation::SeriesAtTime
         | FixtureOperation::SeriesBetweenTime
         | FixtureOperation::DataFrameGroupByCumcount
@@ -12477,6 +12492,15 @@ fn execute_series_module_utility_fixture_operation(
         }
         FixtureOperation::SeriesDtIsYearEnd => {
             series.dt().is_year_end().map_err(|err| err.to_string())
+        }
+        FixtureOperation::SeriesDtDate => {
+            series.dt().date().map_err(|err| err.to_string())
+        }
+        FixtureOperation::SeriesDtDaysInMonth => {
+            series.dt().days_in_month().map_err(|err| err.to_string())
+        }
+        FixtureOperation::SeriesDtIsLeapYear => {
+            series.dt().is_leap_year().map_err(|err| err.to_string())
         }
         other => Err(format!(
             "unsupported series module utility operation for fixture execution: {other:?}"
