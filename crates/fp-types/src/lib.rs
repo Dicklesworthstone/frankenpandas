@@ -89,7 +89,21 @@ impl Scalar {
     #[must_use]
     pub fn semantic_eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (Self::Float64(a), Self::Float64(b)) => (a.is_nan() && b.is_nan()) || (a == b),
+            (Self::Float64(a), Self::Float64(b)) => {
+                if a.is_nan() && b.is_nan() {
+                    return true;
+                }
+                if *a == *b {
+                    return true;
+                }
+                let diff = (*a - *b).abs();
+                let max_abs = a.abs().max(b.abs());
+                if max_abs == 0.0 {
+                    diff < f64::EPSILON
+                } else {
+                    diff / max_abs < 1e-14
+                }
+            }
             (Self::Null(NullKind::NaN), Self::Float64(v))
             | (Self::Float64(v), Self::Null(NullKind::NaN)) => v.is_nan(),
             _ => self == other,
