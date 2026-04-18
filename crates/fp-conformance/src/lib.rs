@@ -18147,6 +18147,19 @@ mod tests {
     }
 
     #[test]
+    fn packet_filter_runs_index_monotonic_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2D-058", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-058"));
+        assert!(
+            report.fixture_count >= 4,
+            "expected FP-P2D-058 index monotonic fixtures"
+        );
+        assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
     fn packet_filter_runs_join_packet() {
         let cfg = HarnessConfig::default_paths();
         let report =
@@ -18737,6 +18750,45 @@ mod tests {
         assert!(
             report.fixture_count >= 2,
             "expected FP-P2D-056 dataframe merge_asof fixtures"
+        );
+        assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
+    fn packet_filter_runs_series_diff_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2D-060", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-060"));
+        assert!(
+            report.fixture_count >= 2,
+            "expected FP-P2D-060 series_diff fixtures"
+        );
+        assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
+    fn packet_filter_runs_series_shift_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2D-061", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-061"));
+        assert!(
+            report.fixture_count >= 2,
+            "expected FP-P2D-061 series_shift fixtures"
+        );
+        assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
+    fn packet_filter_runs_series_pct_change_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2D-062", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-062"));
+        assert!(
+            report.fixture_count >= 1,
+            "expected FP-P2D-062 series_pct_change fixtures"
         );
         assert!(report.is_green(), "expected report green: {report:?}");
     }

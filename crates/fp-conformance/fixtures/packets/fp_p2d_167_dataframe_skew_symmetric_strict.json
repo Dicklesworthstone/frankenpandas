@@ -1,6 +1,6 @@
 {
-  "packet_id": "FP-P2D-149",
-  "case_id": "dataframe_skew_basic_strict",
+  "packet_id": "FP-P2D-167",
+  "case_id": "dataframe_skew_symmetric_strict",
   "mode": "strict",
   "operation": "dataframe_skew",
   "frame": {
@@ -11,31 +11,31 @@
       { "kind": "int64", "value": 3 },
       { "kind": "int64", "value": 4 }
     ],
-    "column_order": ["a", "b"],
+    "column_order": ["x", "y"],
     "columns": {
-      "a": [
+      "x": [
         { "kind": "float64", "value": 1.0 },
         { "kind": "float64", "value": 2.0 },
         { "kind": "float64", "value": 3.0 },
         { "kind": "float64", "value": 4.0 },
-        { "kind": "float64", "value": 10.0 }
+        { "kind": "float64", "value": 5.0 }
       ],
-      "b": [
-        { "kind": "float64", "value": 1.0 },
-        { "kind": "float64", "value": 1.0 },
-        { "kind": "float64", "value": 1.0 },
-        { "kind": "float64", "value": 1.0 },
-        { "kind": "float64", "value": 1.0 }
+      "y": [
+        { "kind": "float64", "value": 2.0 },
+        { "kind": "float64", "value": 4.0 },
+        { "kind": "float64", "value": 6.0 },
+        { "kind": "float64", "value": 8.0 },
+        { "kind": "float64", "value": 10.0 }
       ]
     }
   },
   "expected_series": {
     "index": [
-      { "kind": "utf8", "value": "a" },
-      { "kind": "utf8", "value": "b" }
+      { "kind": "utf8", "value": "x" },
+      { "kind": "utf8", "value": "y" }
     ],
     "values": [
-      { "kind": "float64", "value": 1.2516115088638053 },
+      { "kind": "float64", "value": 0.0 },
       { "kind": "float64", "value": 0.0 }
     ]
   }
