@@ -1,0 +1,51 @@
+{
+  "packet_id": "FP-P2D-276",
+  "case_id": "dataframe_dropna_columns_basic_strict",
+  "mode": "strict",
+  "operation": "dataframe_dropna_columns",
+  "frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 }
+    ],
+    "columns": {
+      "a": [
+        { "kind": "int64", "value": 1 },
+        { "kind": "int64", "value": 2 },
+        { "kind": "int64", "value": 3 }
+      ],
+      "b": [
+        { "kind": "int64", "value": 10 },
+        { "kind": "null", "value": "null" },
+        { "kind": "int64", "value": 30 }
+      ],
+      "c": [
+        { "kind": "int64", "value": 100 },
+        { "kind": "int64", "value": 200 },
+        { "kind": "int64", "value": 300 }
+      ]
+    },
+    "column_order": ["a", "b", "c"]
+  },
+  "expected_frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 }
+    ],
+    "columns": {
+      "a": [
+        { "kind": "int64", "value": 1 },
+        { "kind": "int64", "value": 2 },
+        { "kind": "int64", "value": 3 }
+      ],
+      "c": [
+        { "kind": "int64", "value": 100 },
+        { "kind": "int64", "value": 200 },
+        { "kind": "int64", "value": 300 }
+      ]
+    },
+    "column_order": ["a", "c"]
+  }
+}
