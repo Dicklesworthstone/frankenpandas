@@ -35,8 +35,8 @@
       { "kind": "utf8", "value": "b" }
     ],
     "values": [
-      { "kind": "float64", "value": -1.3 },
-      { "kind": "float64", "value": 2.0833333333333335 }
+      { "kind": "float64", "value": -1.1999999999999993 },
+      { "kind": "float64", "value": 5.0000000000000036 }
     ]
   }
 }
