@@ -2840,6 +2840,33 @@ def op_dataframe_insert(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return {"expected_frame": dataframe_to_json(out)}
 
 
+def op_dataframe_assign(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    assignments = payload.get("assignments")
+    if frame_payload is None:
+        raise OracleError("dataframe_assign requires frame payload")
+    if not isinstance(assignments, list) or not assignments:
+        raise OracleError("dataframe_assign requires non-empty assignments list")
+
+    frame = dataframe_from_json(pd, frame_payload)
+    out = frame.copy()
+    for assignment in assignments:
+        if not isinstance(assignment, dict):
+            raise OracleError("dataframe_assign assignments must be objects")
+        name = assignment.get("name")
+        values = assignment.get("values")
+        if not isinstance(name, str):
+            raise OracleError("dataframe_assign assignment name must be a string")
+        if not isinstance(values, list):
+            raise OracleError("dataframe_assign assignment values must be a list")
+        parsed_values = [scalar_from_json(value) for value in values]
+        try:
+            out = out.assign(**{name: parsed_values})
+        except Exception as exc:
+            raise OracleError(f"dataframe_assign failed: {exc}") from exc
+    return {"expected_frame": dataframe_to_json(out)}
+
+
 def _resolve_sort_ascending(payload: dict[str, Any], op_name: str) -> bool:
     raw = payload.get("sort_ascending")
     if raw is None:
@@ -3555,6 +3582,8 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_dataframe_reset_index(pd, payload)
     if op in {"dataframe_insert", "data_frame_insert"}:
         return op_dataframe_insert(pd, payload)
+    if op in {"dataframe_assign", "data_frame_assign"}:
+        return op_dataframe_assign(pd, payload)
     if op in {"dataframe_sort_index", "data_frame_sort_index"}:
         return op_dataframe_sort_index(pd, payload)
     if op in {"dataframe_sort_values", "data_frame_sort_values"}:

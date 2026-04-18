@@ -482,6 +482,8 @@ pub enum FixtureOperation {
     DataFrameResetIndex,
     #[serde(rename = "dataframe_insert", alias = "data_frame_insert")]
     DataFrameInsert,
+    #[serde(rename = "dataframe_assign", alias = "data_frame_assign")]
+    DataFrameAssign,
     #[serde(rename = "dataframe_duplicated", alias = "data_frame_duplicated")]
     DataFrameDuplicated,
     #[serde(
@@ -739,6 +741,7 @@ impl FixtureOperation {
             Self::DataFrameSetIndex => "dataframe_set_index",
             Self::DataFrameResetIndex => "dataframe_reset_index",
             Self::DataFrameInsert => "dataframe_insert",
+            Self::DataFrameAssign => "dataframe_assign",
             Self::DataFrameDuplicated => "dataframe_duplicated",
             Self::DataFrameDropDuplicates => "dataframe_drop_duplicates",
             Self::DataFrameSortIndex => "dataframe_sort_index",
@@ -846,6 +849,12 @@ pub struct FixtureExpectedDataFrame {
     pub columns: BTreeMap<String, Vec<Scalar>>,
     #[serde(default)]
     pub column_order: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FixtureColumnAssignment {
+    pub name: String,
+    pub values: Vec<Scalar>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1017,6 +1026,8 @@ pub struct PacketFixture {
     pub insert_column: Option<String>,
     #[serde(default)]
     pub insert_values: Option<Vec<Scalar>>,
+    #[serde(default)]
+    pub assignments: Option<Vec<FixtureColumnAssignment>>,
     #[serde(default)]
     pub subset: Option<Vec<String>>,
     #[serde(default)]
@@ -1452,6 +1463,7 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::DataFrameSetIndex
         | FixtureOperation::DataFrameResetIndex
         | FixtureOperation::DataFrameInsert
+        | FixtureOperation::DataFrameAssign
         | FixtureOperation::DataFrameDuplicated
         | FixtureOperation::DataFrameDropDuplicates
         | FixtureOperation::DataFrameSortIndex
@@ -2075,6 +2087,8 @@ struct OracleRequest {
     insert_column: Option<String>,
     #[serde(default)]
     insert_values: Option<Vec<Scalar>>,
+    #[serde(default)]
+    assignments: Option<Vec<FixtureColumnAssignment>>,
     #[serde(default)]
     subset: Option<Vec<String>>,
     #[serde(default)]
@@ -8027,6 +8041,7 @@ fn run_fixture_operation(
         | FixtureOperation::DataFrameSetIndex
         | FixtureOperation::DataFrameResetIndex
         | FixtureOperation::DataFrameInsert
+        | FixtureOperation::DataFrameAssign
         | FixtureOperation::DataFrameDropDuplicates
         | FixtureOperation::DataFrameSortIndex
         | FixtureOperation::DataFrameSortValues
@@ -8559,6 +8574,7 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::DataFrameSetIndex
         | FixtureOperation::DataFrameResetIndex
         | FixtureOperation::DataFrameInsert
+        | FixtureOperation::DataFrameAssign
         | FixtureOperation::DataFrameDropDuplicates
         | FixtureOperation::DataFrameMerge
         | FixtureOperation::DataFrameMergeIndex
@@ -8716,6 +8732,7 @@ fn capture_live_oracle_expected(
         insert_loc: fixture.insert_loc,
         insert_column: fixture.insert_column.clone(),
         insert_values: fixture.insert_values.clone(),
+        assignments: fixture.assignments.clone(),
         subset: fixture.subset.clone(),
         keep: fixture.keep.clone(),
         ignore_index: fixture.ignore_index,
@@ -8998,6 +9015,7 @@ fn capture_live_oracle_expected(
         | FixtureOperation::DataFrameSetIndex
         | FixtureOperation::DataFrameResetIndex
         | FixtureOperation::DataFrameInsert
+        | FixtureOperation::DataFrameAssign
         | FixtureOperation::DataFrameDropDuplicates
         | FixtureOperation::DataFrameMerge
         | FixtureOperation::DataFrameMergeIndex
@@ -10811,6 +10829,28 @@ fn execute_dataframe_fixture_operation(fixture: &PacketFixture) -> Result<DataFr
             frame
                 .insert(loc, column_name, column)
                 .map_err(|err| err.to_string())
+        }
+        FixtureOperation::DataFrameAssign => {
+            let frame = build_dataframe(require_frame(fixture)?)
+                .map_err(|err| format!("frame build failed: {err}"))?;
+            let assignment_payloads = fixture
+                .assignments
+                .as_ref()
+                .ok_or_else(|| "assignments are required for dataframe_assign".to_owned())?;
+            let assignment_columns: Result<Vec<(String, Column)>, String> = assignment_payloads
+                .iter()
+                .map(|assignment| {
+                    Column::from_values(assignment.values.clone())
+                        .map(|column| (assignment.name.clone(), column))
+                        .map_err(|err| format!("assign column build failed: {err}"))
+                })
+                .collect();
+            let assignment_columns = assignment_columns?;
+            let assignments = assignment_columns
+                .iter()
+                .map(|(name, column)| (name.as_str(), column.clone()))
+                .collect();
+            frame.assign(assignments).map_err(|err| err.to_string())
         }
         FixtureOperation::DataFrameDropDuplicates => {
             let frame = build_dataframe(require_frame(fixture)?)
@@ -14968,6 +15008,7 @@ fn execute_and_compare_differential(
         | FixtureOperation::DataFrameSetIndex
         | FixtureOperation::DataFrameResetIndex
         | FixtureOperation::DataFrameInsert
+        | FixtureOperation::DataFrameAssign
         | FixtureOperation::DataFrameDropDuplicates
         | FixtureOperation::DataFrameSortIndex
         | FixtureOperation::DataFrameSortValues
@@ -19020,6 +19061,19 @@ mod tests {
         assert!(
             report.fixture_count >= 5,
             "expected FP-P2D-133 dataframe insert fixtures"
+        );
+        assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
+    fn packet_filter_runs_dataframe_assign_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2D-134", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-134"));
+        assert!(
+            report.fixture_count >= 4,
+            "expected FP-P2D-134 dataframe assign fixtures"
         );
         assert!(report.is_green(), "expected report green: {report:?}");
     }
