@@ -439,7 +439,10 @@ pub enum FixtureOperation {
     SeriesStrLower,
     #[serde(rename = "series_str_upper", alias = "series_str_upper_default")]
     SeriesStrUpper,
-    #[serde(rename = "series_str_capitalize", alias = "series_str_capitalize_default")]
+    #[serde(
+        rename = "series_str_capitalize",
+        alias = "series_str_capitalize_default"
+    )]
     SeriesStrCapitalize,
     #[serde(rename = "series_str_strip", alias = "series_str_strip_default")]
     SeriesStrStrip,
@@ -447,6 +450,16 @@ pub enum FixtureOperation {
     SeriesStrLen,
     #[serde(rename = "series_str_contains", alias = "series_str_contains_default")]
     SeriesStrContains,
+    #[serde(rename = "series_str_startswith", alias = "series_str_startswith_default")]
+    SeriesStrStartswith,
+    #[serde(rename = "series_str_endswith", alias = "series_str_endswith_default")]
+    SeriesStrEndswith,
+    #[serde(rename = "series_str_replace", alias = "series_str_replace_default")]
+    SeriesStrReplace,
+    #[serde(rename = "series_str_lstrip", alias = "series_str_lstrip_default")]
+    SeriesStrLstrip,
+    #[serde(rename = "series_str_rstrip", alias = "series_str_rstrip_default")]
+    SeriesStrRstrip,
     #[serde(rename = "dataframe_loc", alias = "data_frame_loc")]
     DataFrameLoc,
     #[serde(rename = "dataframe_iloc", alias = "data_frame_iloc")]
@@ -819,6 +832,11 @@ impl FixtureOperation {
             Self::SeriesStrStrip => "series_str_strip",
             Self::SeriesStrLen => "series_str_len",
             Self::SeriesStrContains => "series_str_contains",
+            Self::SeriesStrStartswith => "series_str_startswith",
+            Self::SeriesStrEndswith => "series_str_endswith",
+            Self::SeriesStrReplace => "series_str_replace",
+            Self::SeriesStrLstrip => "series_str_lstrip",
+            Self::SeriesStrRstrip => "series_str_rstrip",
             Self::DataFrameLoc => "dataframe_loc",
             Self::DataFrameIloc => "dataframe_iloc",
             Self::DataFrameTake => "dataframe_take",
@@ -1231,6 +1249,8 @@ pub struct PacketFixture {
     #[serde(default)]
     pub regex_pattern: Option<String>,
     #[serde(default)]
+    pub replace_value: Option<String>,
+    #[serde(default)]
     pub melt_id_vars: Option<Vec<String>>,
     #[serde(default)]
     pub melt_value_vars: Option<Vec<String>>,
@@ -1555,6 +1575,11 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::SeriesStrStrip
         | FixtureOperation::SeriesStrLen
         | FixtureOperation::SeriesStrContains
+        | FixtureOperation::SeriesStrStartswith
+        | FixtureOperation::SeriesStrEndswith
+        | FixtureOperation::SeriesStrReplace
+        | FixtureOperation::SeriesStrLstrip
+        | FixtureOperation::SeriesStrRstrip
         | FixtureOperation::SeriesIsNa
         | FixtureOperation::SeriesNotNa
         | FixtureOperation::SeriesIsNull
@@ -7291,7 +7316,12 @@ fn run_fixture_operation(
         | FixtureOperation::SeriesStrCapitalize
         | FixtureOperation::SeriesStrStrip
         | FixtureOperation::SeriesStrLen
-        | FixtureOperation::SeriesStrContains => {
+        | FixtureOperation::SeriesStrContains
+        | FixtureOperation::SeriesStrStartswith
+        | FixtureOperation::SeriesStrEndswith
+        | FixtureOperation::SeriesStrReplace
+        | FixtureOperation::SeriesStrLstrip
+        | FixtureOperation::SeriesStrRstrip => {
             let actual = execute_series_module_utility_fixture_operation(fixture);
             let op_name = fixture.operation.operation_name();
             match expected {
@@ -8807,6 +8837,11 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::SeriesStrStrip
         | FixtureOperation::SeriesStrLen
         | FixtureOperation::SeriesStrContains
+        | FixtureOperation::SeriesStrStartswith
+        | FixtureOperation::SeriesStrEndswith
+        | FixtureOperation::SeriesStrReplace
+        | FixtureOperation::SeriesStrLstrip
+        | FixtureOperation::SeriesStrRstrip
         | FixtureOperation::SeriesAtTime
         | FixtureOperation::SeriesBetweenTime
         | FixtureOperation::DataFrameGroupByCumcount
@@ -9296,6 +9331,11 @@ fn capture_live_oracle_expected(
         | FixtureOperation::SeriesStrStrip
         | FixtureOperation::SeriesStrLen
         | FixtureOperation::SeriesStrContains
+        | FixtureOperation::SeriesStrStartswith
+        | FixtureOperation::SeriesStrEndswith
+        | FixtureOperation::SeriesStrReplace
+        | FixtureOperation::SeriesStrLstrip
+        | FixtureOperation::SeriesStrRstrip
         | FixtureOperation::SeriesAtTime
         | FixtureOperation::SeriesBetweenTime
         | FixtureOperation::DataFrameGroupByCumcount
@@ -11664,28 +11704,59 @@ fn execute_series_module_utility_fixture_operation(
         FixtureOperation::SeriesQcut => {
             qcut(&series, require_qcut_quantiles(fixture)?).map_err(|err| err.to_string())
         }
-        FixtureOperation::SeriesStrLower => {
-            series.str().lower().map_err(|err| err.to_string())
-        }
-        FixtureOperation::SeriesStrUpper => {
-            series.str().upper().map_err(|err| err.to_string())
-        }
+        FixtureOperation::SeriesStrLower => series.str().lower().map_err(|err| err.to_string()),
+        FixtureOperation::SeriesStrUpper => series.str().upper().map_err(|err| err.to_string()),
         FixtureOperation::SeriesStrCapitalize => {
             series.str().capitalize().map_err(|err| err.to_string())
         }
-        FixtureOperation::SeriesStrStrip => {
-            series.str().strip().map_err(|err| err.to_string())
-        }
-        FixtureOperation::SeriesStrLen => {
-            series.str().len().map_err(|err| err.to_string())
-        }
+        FixtureOperation::SeriesStrStrip => series.str().strip().map_err(|err| err.to_string()),
+        FixtureOperation::SeriesStrLen => series.str().len().map_err(|err| err.to_string()),
         FixtureOperation::SeriesStrContains => {
             let pattern = fixture
                 .regex_pattern
                 .as_deref()
                 .ok_or_else(|| "regex_pattern required for series_str_contains".to_owned())?;
-            series.str().contains(pattern).map_err(|err| err.to_string())
+            series
+                .str()
+                .contains(pattern)
+                .map_err(|err| err.to_string())
         }
+        FixtureOperation::SeriesStrStartswith => {
+            let pattern = fixture
+                .regex_pattern
+                .as_deref()
+                .ok_or_else(|| "regex_pattern required for series_str_startswith".to_owned())?;
+            series
+                .str()
+                .startswith(pattern)
+                .map_err(|err| err.to_string())
+        }
+        FixtureOperation::SeriesStrEndswith => {
+            let pattern = fixture
+                .regex_pattern
+                .as_deref()
+                .ok_or_else(|| "regex_pattern required for series_str_endswith".to_owned())?;
+            series
+                .str()
+                .endswith(pattern)
+                .map_err(|err| err.to_string())
+        }
+        FixtureOperation::SeriesStrReplace => {
+            let pattern = fixture
+                .regex_pattern
+                .as_deref()
+                .ok_or_else(|| "regex_pattern required for series_str_replace".to_owned())?;
+            let repl = fixture
+                .replace_value
+                .as_deref()
+                .ok_or_else(|| "replace_value required for series_str_replace".to_owned())?;
+            series
+                .str()
+                .replace(pattern, repl)
+                .map_err(|err| err.to_string())
+        }
+        FixtureOperation::SeriesStrLstrip => series.str().lstrip().map_err(|err| err.to_string()),
+        FixtureOperation::SeriesStrRstrip => series.str().rstrip().map_err(|err| err.to_string()),
         other => Err(format!(
             "unsupported series module utility operation for fixture execution: {other:?}"
         )),
@@ -14338,7 +14409,12 @@ fn execute_and_compare_differential(
         | FixtureOperation::SeriesStrCapitalize
         | FixtureOperation::SeriesStrStrip
         | FixtureOperation::SeriesStrLen
-        | FixtureOperation::SeriesStrContains => {
+        | FixtureOperation::SeriesStrContains
+        | FixtureOperation::SeriesStrStartswith
+        | FixtureOperation::SeriesStrEndswith
+        | FixtureOperation::SeriesStrReplace
+        | FixtureOperation::SeriesStrLstrip
+        | FixtureOperation::SeriesStrRstrip => {
             let actual = execute_series_module_utility_fixture_operation(fixture);
             let op_name = fixture.operation.operation_name();
             match expected {
