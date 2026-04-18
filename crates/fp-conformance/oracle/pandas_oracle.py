@@ -1913,6 +1913,39 @@ def op_dataframe_idxmax(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return {"expected_series": series_to_json(out)}
 
 
+def op_dataframe_sem(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    if frame_payload is None:
+        raise OracleError("dataframe_sem requires frame payload")
+
+    frame = dataframe_from_json(pd, frame_payload)
+    axis = payload.get("sem_axis", 0)
+    skipna = payload.get("sem_skipna", True)
+    ddof = payload.get("sem_ddof", 1)
+
+    try:
+        out = frame.sem(axis=axis, skipna=skipna, ddof=ddof)
+    except Exception as exc:
+        raise OracleError(f"dataframe_sem failed: {exc}") from exc
+    return {"expected_series": series_to_json(out)}
+
+
+def op_dataframe_skew(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    if frame_payload is None:
+        raise OracleError("dataframe_skew requires frame payload")
+
+    frame = dataframe_from_json(pd, frame_payload)
+    axis = payload.get("skew_axis", 0)
+    skipna = payload.get("skew_skipna", True)
+
+    try:
+        out = frame.skew(axis=axis, skipna=skipna)
+    except Exception as exc:
+        raise OracleError(f"dataframe_skew failed: {exc}") from exc
+    return {"expected_series": series_to_json(out)}
+
+
 def op_dataframe_round(pd, payload: dict[str, Any]) -> dict[str, Any]:
     frame_payload = payload.get("frame")
     if frame_payload is None:
@@ -3878,6 +3911,10 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_dataframe_idxmin(pd, payload)
     if op in {"dataframe_idxmax", "data_frame_idxmax"}:
         return op_dataframe_idxmax(pd, payload)
+    if op in {"dataframe_sem", "data_frame_sem"}:
+        return op_dataframe_sem(pd, payload)
+    if op in {"dataframe_skew", "data_frame_skew"}:
+        return op_dataframe_skew(pd, payload)
     if op in {"dataframe_round", "data_frame_round"}:
         return op_dataframe_round(pd, payload)
     if op in {"dataframe_shift", "data_frame_shift"}:

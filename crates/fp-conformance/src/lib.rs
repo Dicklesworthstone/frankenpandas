@@ -313,6 +313,10 @@ pub enum FixtureOperation {
     DataFrameIdxmin,
     #[serde(rename = "dataframe_idxmax", alias = "dataframe_idxmax_default")]
     DataFrameIdxmax,
+    #[serde(rename = "dataframe_sem", alias = "dataframe_sem_default")]
+    DataFrameSem,
+    #[serde(rename = "dataframe_skew", alias = "dataframe_skew_default")]
+    DataFrameSkew,
     #[serde(rename = "dataframe_round", alias = "dataframe_round_default")]
     DataFrameRound,
     #[serde(rename = "series_cut", alias = "series_cut_default")]
@@ -706,6 +710,8 @@ impl FixtureOperation {
             Self::DataFrameCov => "dataframe_cov",
             Self::DataFrameIdxmin => "dataframe_idxmin",
             Self::DataFrameIdxmax => "dataframe_idxmax",
+            Self::DataFrameSem => "dataframe_sem",
+            Self::DataFrameSkew => "dataframe_skew",
             Self::DataFrameRound => "dataframe_round",
             Self::SeriesCut => "series_cut",
             Self::SeriesQcut => "series_qcut",
@@ -1434,6 +1440,8 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::DataFrameCov
         | FixtureOperation::DataFrameIdxmin
         | FixtureOperation::DataFrameIdxmax
+        | FixtureOperation::DataFrameSem
+        | FixtureOperation::DataFrameSkew
         | FixtureOperation::DataFrameRound => &["CC-005"],
         FixtureOperation::FillNa
         | FixtureOperation::DropNa
@@ -6815,13 +6823,18 @@ fn run_fixture_operation(
                 ),
             }
         }
-        FixtureOperation::DataFrameIdxmin | FixtureOperation::DataFrameIdxmax => {
+        FixtureOperation::DataFrameIdxmin
+        | FixtureOperation::DataFrameIdxmax
+        | FixtureOperation::DataFrameSem
+        | FixtureOperation::DataFrameSkew => {
             let frame = build_dataframe(require_frame(fixture)?)
                 .map_err(|err| format!("frame build failed: {err}"))?;
             let op_name = fixture.operation.operation_name();
             let actual = match fixture.operation {
                 FixtureOperation::DataFrameIdxmin => frame.idxmin().map_err(|err| err.to_string()),
                 FixtureOperation::DataFrameIdxmax => frame.idxmax().map_err(|err| err.to_string()),
+                FixtureOperation::DataFrameSem => frame.sem_agg().map_err(|err| err.to_string()),
+                FixtureOperation::DataFrameSkew => frame.skew_agg().map_err(|err| err.to_string()),
                 _ => unreachable!(),
             };
             match expected {
@@ -6839,7 +6852,9 @@ fn run_fixture_operation(
                     if actual.is_err() {
                         Ok(())
                     } else {
-                        Err(format!("expected {op_name} to fail but operation succeeded"))
+                        Err(format!(
+                            "expected {op_name} to fail but operation succeeded"
+                        ))
                     }
                 }
                 _ => Err(format!(
@@ -8646,6 +8661,8 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::DataFrameCount
         | FixtureOperation::DataFrameIdxmin
         | FixtureOperation::DataFrameIdxmax
+        | FixtureOperation::DataFrameSem
+        | FixtureOperation::DataFrameSkew
         | FixtureOperation::DataFrameDuplicated
         | FixtureOperation::GroupByMean
         | FixtureOperation::GroupByCount
@@ -9110,6 +9127,8 @@ fn capture_live_oracle_expected(
         | FixtureOperation::DataFrameCount
         | FixtureOperation::DataFrameIdxmin
         | FixtureOperation::DataFrameIdxmax
+        | FixtureOperation::DataFrameSem
+        | FixtureOperation::DataFrameSkew
         | FixtureOperation::DataFrameDuplicated
         | FixtureOperation::GroupByMean
         | FixtureOperation::GroupByCount
@@ -13707,13 +13726,18 @@ fn execute_and_compare_differential(
                 }
             }
         }
-        FixtureOperation::DataFrameIdxmin | FixtureOperation::DataFrameIdxmax => {
+        FixtureOperation::DataFrameIdxmin
+        | FixtureOperation::DataFrameIdxmax
+        | FixtureOperation::DataFrameSem
+        | FixtureOperation::DataFrameSkew => {
             let frame = build_dataframe(require_frame(fixture)?)
                 .map_err(|err| format!("frame build failed: {err}"))?;
             let op_name = fixture.operation.operation_name();
             let actual = match fixture.operation {
                 FixtureOperation::DataFrameIdxmin => frame.idxmin().map_err(|err| err.to_string()),
                 FixtureOperation::DataFrameIdxmax => frame.idxmax().map_err(|err| err.to_string()),
+                FixtureOperation::DataFrameSem => frame.sem_agg().map_err(|err| err.to_string()),
+                FixtureOperation::DataFrameSkew => frame.skew_agg().map_err(|err| err.to_string()),
                 _ => unreachable!(),
             };
             match expected {
@@ -13723,13 +13747,13 @@ fn execute_and_compare_differential(
                     Err(message) => vec![make_drift_record(
                         ComparisonCategory::Value,
                         DriftLevel::Critical,
-                        &format!("{op_name}.error"),
+                        format!("{op_name}.error"),
                         format!("expected {op_name} error containing '{substr}', got '{message}'"),
                     )],
                     Ok(_) => vec![make_drift_record(
                         ComparisonCategory::Value,
                         DriftLevel::Critical,
-                        &format!("{op_name}.error"),
+                        format!("{op_name}.error"),
                         format!("expected {op_name} to fail but operation succeeded"),
                     )],
                 }),
@@ -13738,7 +13762,7 @@ fn execute_and_compare_differential(
                     Ok(_) => vec![make_drift_record(
                         ComparisonCategory::Value,
                         DriftLevel::Critical,
-                        &format!("{op_name}.error"),
+                        format!("{op_name}.error"),
                         format!("expected {op_name} to fail but operation succeeded"),
                     )],
                 }),
@@ -19599,6 +19623,32 @@ mod tests {
         assert!(
             report.fixture_count >= 3,
             "expected FP-P2D-146 dataframe corr fixtures"
+        );
+        assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
+    fn packet_filter_runs_dataframe_sem_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2D-149", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-149"));
+        assert!(
+            report.fixture_count >= 1,
+            "expected FP-P2D-149 dataframe sem fixtures"
+        );
+        assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
+    fn packet_filter_runs_dataframe_skew_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2D-150", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-150"));
+        assert!(
+            report.fixture_count >= 1,
+            "expected FP-P2D-150 dataframe skew fixtures"
         );
         assert!(report.is_green(), "expected report green: {report:?}");
     }
