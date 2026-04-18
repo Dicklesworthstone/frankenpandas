@@ -1,0 +1,40 @@
+{
+  "packet_id": "FP-P2D-128",
+  "case_id": "series_str_get_dummies_hardened",
+  "mode": "hardened",
+  "operation": "series_str_get_dummies",
+  "string_sep": "|",
+  "left": {
+    "name": "tokens",
+    "index": [
+      { "kind": "utf8", "value": "r0" },
+      { "kind": "utf8", "value": "r1" },
+      { "kind": "utf8", "value": "r2" }
+    ],
+    "values": [
+      { "kind": "utf8", "value": "b|a" },
+      { "kind": "utf8", "value": "a" },
+      { "kind": "utf8", "value": "" }
+    ]
+  },
+  "expected_frame": {
+    "index": [
+      { "kind": "utf8", "value": "r0" },
+      { "kind": "utf8", "value": "r1" },
+      { "kind": "utf8", "value": "r2" }
+    ],
+    "columns": {
+      "b": [
+        { "kind": "int64", "value": 1 },
+        { "kind": "int64", "value": 0 },
+        { "kind": "int64", "value": 0 }
+      ],
+      "a": [
+        { "kind": "int64", "value": 1 },
+        { "kind": "int64", "value": 1 },
+        { "kind": "int64", "value": 0 }
+      ]
+    },
+    "column_order": ["b", "a"]
+  }
+}

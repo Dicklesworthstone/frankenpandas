@@ -1,0 +1,36 @@
+{
+  "packet_id": "FP-P2D-128",
+  "case_id": "series_unstack_strict",
+  "mode": "strict",
+  "operation": "series_unstack",
+  "left": {
+    "name": "value",
+    "index": [
+      { "kind": "utf8", "value": "east, A" },
+      { "kind": "utf8", "value": "east, B" },
+      { "kind": "utf8", "value": "west, A" }
+    ],
+    "values": [
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 3 }
+    ]
+  },
+  "expected_frame": {
+    "index": [
+      { "kind": "utf8", "value": "east" },
+      { "kind": "utf8", "value": "west" }
+    ],
+    "columns": {
+      "A": [
+        { "kind": "int64", "value": 1 },
+        { "kind": "int64", "value": 3 }
+      ],
+      "B": [
+        { "kind": "int64", "value": 2 },
+        { "kind": "null", "value": "na_n" }
+      ]
+    },
+    "column_order": ["A", "B"]
+  }
+}
