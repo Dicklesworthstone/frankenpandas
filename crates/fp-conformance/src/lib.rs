@@ -474,6 +474,20 @@ pub enum FixtureOperation {
     SeriesStrRjust,
     #[serde(rename = "series_str_pad", alias = "series_str_pad_default")]
     SeriesStrPad,
+    #[serde(rename = "series_str_isdigit", alias = "series_str_isdigit_default")]
+    SeriesStrIsdigit,
+    #[serde(rename = "series_str_isalpha", alias = "series_str_isalpha_default")]
+    SeriesStrIsalpha,
+    #[serde(rename = "series_str_isalnum", alias = "series_str_isalnum_default")]
+    SeriesStrIsalnum,
+    #[serde(rename = "series_str_isspace", alias = "series_str_isspace_default")]
+    SeriesStrIsspace,
+    #[serde(rename = "series_str_islower", alias = "series_str_islower_default")]
+    SeriesStrIslower,
+    #[serde(rename = "series_str_isupper", alias = "series_str_isupper_default")]
+    SeriesStrIsupper,
+    #[serde(rename = "series_str_isnumeric", alias = "series_str_isnumeric_default")]
+    SeriesStrIsnumeric,
     #[serde(rename = "series_dt_year", alias = "series_dt_year_default")]
     SeriesDtYear,
     #[serde(rename = "series_dt_month", alias = "series_dt_month_default")]
@@ -892,6 +906,13 @@ impl FixtureOperation {
             Self::SeriesStrLjust => "series_str_ljust",
             Self::SeriesStrRjust => "series_str_rjust",
             Self::SeriesStrPad => "series_str_pad",
+            Self::SeriesStrIsdigit => "series_str_isdigit",
+            Self::SeriesStrIsalpha => "series_str_isalpha",
+            Self::SeriesStrIsalnum => "series_str_isalnum",
+            Self::SeriesStrIsspace => "series_str_isspace",
+            Self::SeriesStrIslower => "series_str_islower",
+            Self::SeriesStrIsupper => "series_str_isupper",
+            Self::SeriesStrIsnumeric => "series_str_isnumeric",
             Self::SeriesDtYear => "series_dt_year",
             Self::SeriesDtMonth => "series_dt_month",
             Self::SeriesDtDay => "series_dt_day",
@@ -1665,6 +1686,13 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::SeriesStrLjust
         | FixtureOperation::SeriesStrRjust
         | FixtureOperation::SeriesStrPad
+        | FixtureOperation::SeriesStrIsdigit
+        | FixtureOperation::SeriesStrIsalpha
+        | FixtureOperation::SeriesStrIsalnum
+        | FixtureOperation::SeriesStrIsspace
+        | FixtureOperation::SeriesStrIslower
+        | FixtureOperation::SeriesStrIsupper
+        | FixtureOperation::SeriesStrIsnumeric
         | FixtureOperation::SeriesDtYear
         | FixtureOperation::SeriesDtMonth
         | FixtureOperation::SeriesDtDay
@@ -7431,6 +7459,13 @@ fn run_fixture_operation(
         | FixtureOperation::SeriesStrLjust
         | FixtureOperation::SeriesStrRjust
         | FixtureOperation::SeriesStrPad
+        | FixtureOperation::SeriesStrIsdigit
+        | FixtureOperation::SeriesStrIsalpha
+        | FixtureOperation::SeriesStrIsalnum
+        | FixtureOperation::SeriesStrIsspace
+        | FixtureOperation::SeriesStrIslower
+        | FixtureOperation::SeriesStrIsupper
+        | FixtureOperation::SeriesStrIsnumeric
         | FixtureOperation::SeriesDtYear
         | FixtureOperation::SeriesDtMonth
         | FixtureOperation::SeriesDtDay
@@ -8975,6 +9010,13 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::SeriesStrLjust
         | FixtureOperation::SeriesStrRjust
         | FixtureOperation::SeriesStrPad
+        | FixtureOperation::SeriesStrIsdigit
+        | FixtureOperation::SeriesStrIsalpha
+        | FixtureOperation::SeriesStrIsalnum
+        | FixtureOperation::SeriesStrIsspace
+        | FixtureOperation::SeriesStrIslower
+        | FixtureOperation::SeriesStrIsupper
+        | FixtureOperation::SeriesStrIsnumeric
         | FixtureOperation::SeriesDtYear
         | FixtureOperation::SeriesDtMonth
         | FixtureOperation::SeriesDtDay
@@ -9493,6 +9535,13 @@ fn capture_live_oracle_expected(
         | FixtureOperation::SeriesStrLjust
         | FixtureOperation::SeriesStrRjust
         | FixtureOperation::SeriesStrPad
+        | FixtureOperation::SeriesStrIsdigit
+        | FixtureOperation::SeriesStrIsalpha
+        | FixtureOperation::SeriesStrIsalnum
+        | FixtureOperation::SeriesStrIsspace
+        | FixtureOperation::SeriesStrIslower
+        | FixtureOperation::SeriesStrIsupper
+        | FixtureOperation::SeriesStrIsnumeric
         | FixtureOperation::SeriesDtYear
         | FixtureOperation::SeriesDtMonth
         | FixtureOperation::SeriesDtDay
@@ -12060,6 +12109,27 @@ fn execute_series_module_utility_fixture_operation(
                 .str()
                 .pad(width, side, fillchar)
                 .map_err(|err| err.to_string())
+        }
+        FixtureOperation::SeriesStrIsdigit => {
+            series.str().isdigit().map_err(|err| err.to_string())
+        }
+        FixtureOperation::SeriesStrIsalpha => {
+            series.str().isalpha().map_err(|err| err.to_string())
+        }
+        FixtureOperation::SeriesStrIsalnum => {
+            series.str().isalnum().map_err(|err| err.to_string())
+        }
+        FixtureOperation::SeriesStrIsspace => {
+            series.str().isspace().map_err(|err| err.to_string())
+        }
+        FixtureOperation::SeriesStrIslower => {
+            series.str().islower().map_err(|err| err.to_string())
+        }
+        FixtureOperation::SeriesStrIsupper => {
+            series.str().isupper().map_err(|err| err.to_string())
+        }
+        FixtureOperation::SeriesStrIsnumeric => {
+            series.str().isnumeric().map_err(|err| err.to_string())
         }
         FixtureOperation::SeriesDtYear => series.dt().year().map_err(|err| err.to_string()),
         FixtureOperation::SeriesDtMonth => series.dt().month().map_err(|err| err.to_string()),
@@ -14735,6 +14805,13 @@ fn execute_and_compare_differential(
         | FixtureOperation::SeriesStrLjust
         | FixtureOperation::SeriesStrRjust
         | FixtureOperation::SeriesStrPad
+        | FixtureOperation::SeriesStrIsdigit
+        | FixtureOperation::SeriesStrIsalpha
+        | FixtureOperation::SeriesStrIsalnum
+        | FixtureOperation::SeriesStrIsspace
+        | FixtureOperation::SeriesStrIslower
+        | FixtureOperation::SeriesStrIsupper
+        | FixtureOperation::SeriesStrIsnumeric
         | FixtureOperation::SeriesDtYear
         | FixtureOperation::SeriesDtMonth
         | FixtureOperation::SeriesDtDay
