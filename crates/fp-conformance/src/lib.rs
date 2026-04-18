@@ -10092,13 +10092,13 @@ fn diff_bool_round_trip_result(
             Err(message) => vec![make_drift_record(
                 ComparisonCategory::Value,
                 DriftLevel::Critical,
-                &format!("{op_name}.error"),
+                format!("{op_name}.error"),
                 format!("expected {op_name} error containing '{substr}', got '{message}'"),
             )],
             Ok(_) => vec![make_drift_record(
                 ComparisonCategory::Value,
                 DriftLevel::Critical,
-                &format!("{op_name}.error"),
+                format!("{op_name}.error"),
                 format!("expected {op_name} to fail but operation succeeded"),
             )],
         }),
@@ -10107,7 +10107,7 @@ fn diff_bool_round_trip_result(
             Ok(_) => vec![make_drift_record(
                 ComparisonCategory::Value,
                 DriftLevel::Critical,
-                &format!("{op_name}.error"),
+                format!("{op_name}.error"),
                 format!("expected {op_name} to fail but operation succeeded"),
             )],
         }),
@@ -23882,8 +23882,10 @@ mod tests {
         assert_eq!(result.len(), 3);
 
         let values = result.values();
-        assert_eq!(values[0], Scalar::Utf8("01:01:01".to_owned()));
-        assert_eq!(values[1], Scalar::Utf8("1 days 01:01:01".to_owned()));
+        // 3661 seconds = 3661 * 1_000_000_000 nanoseconds
+        assert_eq!(values[0], Scalar::Timedelta64(3_661_000_000_000));
+        // 90061 seconds = 90061 * 1_000_000_000 nanoseconds
+        assert_eq!(values[1], Scalar::Timedelta64(90_061_000_000_000));
         assert!(values[2].is_missing(), "null input should produce NaT");
     }
 
