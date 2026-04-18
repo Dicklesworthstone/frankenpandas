@@ -1861,6 +1861,26 @@ def op_dataframe_corr(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return {"expected_frame": dataframe_to_json(out)}
 
 
+def op_dataframe_cov(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    if frame_payload is None:
+        raise OracleError("dataframe_cov requires frame payload")
+
+    frame = dataframe_from_json(pd, frame_payload)
+    min_periods = payload.get("cov_min_periods")
+    ddof = payload.get("cov_ddof", 1)
+
+    kwargs: dict[str, Any] = {"ddof": ddof}
+    if min_periods is not None:
+        kwargs["min_periods"] = min_periods
+
+    try:
+        out = frame.cov(**kwargs)
+    except Exception as exc:
+        raise OracleError(f"dataframe_cov failed: {exc}") from exc
+    return {"expected_frame": dataframe_to_json(out)}
+
+
 def op_dataframe_round(pd, payload: dict[str, Any]) -> dict[str, Any]:
     frame_payload = payload.get("frame")
     if frame_payload is None:
@@ -3820,6 +3840,8 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_dataframe_describe(pd, payload)
     if op in {"dataframe_corr", "data_frame_corr"}:
         return op_dataframe_corr(pd, payload)
+    if op in {"dataframe_cov", "data_frame_cov"}:
+        return op_dataframe_cov(pd, payload)
     if op in {"dataframe_round", "data_frame_round"}:
         return op_dataframe_round(pd, payload)
     if op in {"dataframe_shift", "data_frame_shift"}:

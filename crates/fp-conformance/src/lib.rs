@@ -307,6 +307,8 @@ pub enum FixtureOperation {
     DataFrameDescribe,
     #[serde(rename = "dataframe_corr", alias = "dataframe_corr_default")]
     DataFrameCorr,
+    #[serde(rename = "dataframe_cov", alias = "dataframe_cov_default")]
+    DataFrameCov,
     #[serde(rename = "dataframe_round", alias = "dataframe_round_default")]
     DataFrameRound,
     #[serde(rename = "series_cut", alias = "series_cut_default")]
@@ -697,6 +699,7 @@ impl FixtureOperation {
             Self::DataFrameAbs => "dataframe_abs",
             Self::DataFrameDescribe => "dataframe_describe",
             Self::DataFrameCorr => "dataframe_corr",
+            Self::DataFrameCov => "dataframe_cov",
             Self::DataFrameRound => "dataframe_round",
             Self::SeriesCut => "series_cut",
             Self::SeriesQcut => "series_qcut",
@@ -1422,6 +1425,7 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::DataFrameAbs
         | FixtureOperation::DataFrameDescribe
         | FixtureOperation::DataFrameCorr
+        | FixtureOperation::DataFrameCov
         | FixtureOperation::DataFrameRound => &["CC-005"],
         FixtureOperation::FillNa
         | FixtureOperation::DropNa
@@ -6813,6 +6817,7 @@ fn run_fixture_operation(
         | FixtureOperation::DataFrameAbs
         | FixtureOperation::DataFrameDescribe
         | FixtureOperation::DataFrameCorr
+        | FixtureOperation::DataFrameCov
         | FixtureOperation::DataFrameRound => {
             let frame = build_dataframe(require_frame(fixture)?)
                 .map_err(|err| format!("frame build failed: {err}"))?;
@@ -6841,6 +6846,7 @@ fn run_fixture_operation(
                     frame.describe().map_err(|err| err.to_string())
                 }
                 FixtureOperation::DataFrameCorr => execute_dataframe_corr_fixture(&frame, fixture),
+                FixtureOperation::DataFrameCov => frame.cov().map_err(|err| err.to_string()),
                 FixtureOperation::DataFrameRound => {
                     let decimals = fixture.round_decimals.unwrap_or(0);
                     frame.round(decimals).map_err(|err| err.to_string())
@@ -8661,6 +8667,7 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::DataFrameAbs
         | FixtureOperation::DataFrameDescribe
         | FixtureOperation::DataFrameCorr
+        | FixtureOperation::DataFrameCov
         | FixtureOperation::DataFrameRound
         | FixtureOperation::DataFrameRank
         | FixtureOperation::DataFrameFromSeries
@@ -9122,6 +9129,7 @@ fn capture_live_oracle_expected(
         | FixtureOperation::DataFrameAbs
         | FixtureOperation::DataFrameDescribe
         | FixtureOperation::DataFrameCorr
+        | FixtureOperation::DataFrameCov
         | FixtureOperation::DataFrameRound
         | FixtureOperation::DataFrameRank
         | FixtureOperation::DataFrameFromSeries
@@ -10919,6 +10927,11 @@ fn execute_dataframe_fixture_operation(fixture: &PacketFixture) -> Result<DataFr
             let frame = build_dataframe(require_frame(fixture)?)
                 .map_err(|err| format!("frame build failed: {err}"))?;
             execute_dataframe_corr_fixture(&frame, fixture)
+        }
+        FixtureOperation::DataFrameCov => {
+            let frame = build_dataframe(require_frame(fixture)?)
+                .map_err(|err| format!("frame build failed: {err}"))?;
+            frame.cov().map_err(|err| err.to_string())
         }
         FixtureOperation::DataFrameRound => {
             let frame = build_dataframe(require_frame(fixture)?)
@@ -15308,6 +15321,7 @@ fn execute_and_compare_differential(
         | FixtureOperation::DataFrameAbs
         | FixtureOperation::DataFrameDescribe
         | FixtureOperation::DataFrameCorr
+        | FixtureOperation::DataFrameCov
         | FixtureOperation::DataFrameRound
         | FixtureOperation::DataFrameMelt
         | FixtureOperation::DataFramePivotTable

@@ -1,0 +1,46 @@
+{
+  "packet_id": "FP-P2D-147",
+  "case_id": "dataframe_cov_with_nulls_hardened",
+  "mode": "hardened",
+  "operation": "dataframe_cov",
+  "frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 3 }
+    ],
+    "column_order": ["a", "b"],
+    "columns": {
+      "a": [
+        { "kind": "float64", "value": 1.0 },
+        { "kind": "null", "value": "na_n" },
+        { "kind": "float64", "value": 3.0 },
+        { "kind": "float64", "value": 4.0 }
+      ],
+      "b": [
+        { "kind": "float64", "value": 2.0 },
+        { "kind": "float64", "value": 4.0 },
+        { "kind": "null", "value": "na_n" },
+        { "kind": "float64", "value": 8.0 }
+      ]
+    }
+  },
+  "expected_frame": {
+    "index": [
+      { "kind": "utf8", "value": "a" },
+      { "kind": "utf8", "value": "b" }
+    ],
+    "column_order": ["a", "b"],
+    "columns": {
+      "a": [
+        { "kind": "float64", "value": 2.333333333333333 },
+        { "kind": "float64", "value": 4.5 }
+      ],
+      "b": [
+        { "kind": "float64", "value": 4.5 },
+        { "kind": "float64", "value": 9.333333333333334 }
+      ]
+    }
+  }
+}
