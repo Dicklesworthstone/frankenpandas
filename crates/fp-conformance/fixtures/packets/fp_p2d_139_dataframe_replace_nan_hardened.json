@@ -1,0 +1,48 @@
+{
+  "packet_id": "FP-P2D-139",
+  "case_id": "dataframe_replace_nan_hardened",
+  "mode": "hardened",
+  "operation": "dataframe_replace",
+  "replace_to_find": [{ "kind": "null", "value": "na_n" }],
+  "replace_to_value": [{ "kind": "float64", "value": 0.0 }],
+  "frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 }
+    ],
+    "column_order": ["a", "b"],
+    "columns": {
+      "a": [
+        { "kind": "float64", "value": 1.5 },
+        { "kind": "null", "value": "na_n" },
+        { "kind": "float64", "value": 3.5 }
+      ],
+      "b": [
+        { "kind": "null", "value": "na_n" },
+        { "kind": "float64", "value": 2.5 },
+        { "kind": "null", "value": "na_n" }
+      ]
+    }
+  },
+  "expected_frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 }
+    ],
+    "column_order": ["a", "b"],
+    "columns": {
+      "a": [
+        { "kind": "float64", "value": 1.5 },
+        { "kind": "float64", "value": 0.0 },
+        { "kind": "float64", "value": 3.5 }
+      ],
+      "b": [
+        { "kind": "float64", "value": 0.0 },
+        { "kind": "float64", "value": 2.5 },
+        { "kind": "float64", "value": 0.0 }
+      ]
+    }
+  }
+}

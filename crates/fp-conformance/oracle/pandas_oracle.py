@@ -2955,6 +2955,29 @@ def op_dataframe_drop_columns(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return {"expected_frame": dataframe_to_json(out)}
 
 
+def op_dataframe_replace(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    to_find = payload.get("replace_to_find")
+    to_value = payload.get("replace_to_value")
+    if frame_payload is None:
+        raise OracleError("dataframe_replace requires frame payload")
+    if not isinstance(to_find, list):
+        raise OracleError("dataframe_replace requires replace_to_find list")
+    if not isinstance(to_value, list):
+        raise OracleError("dataframe_replace requires replace_to_value list")
+    if len(to_find) != len(to_value):
+        raise OracleError("dataframe_replace replacement lists must have the same length")
+
+    frame = dataframe_from_json(pd, frame_payload)
+    find_values = [scalar_from_json(value) for value in to_find]
+    replace_values = [scalar_from_json(value) for value in to_value]
+    try:
+        out = frame.replace(find_values, replace_values)
+    except Exception as exc:
+        raise OracleError(f"dataframe_replace failed: {exc}") from exc
+    return {"expected_frame": dataframe_to_json(out)}
+
+
 def _resolve_sort_ascending(payload: dict[str, Any], op_name: str) -> bool:
     raw = payload.get("sort_ascending")
     if raw is None:
@@ -3680,6 +3703,8 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_dataframe_reindex_columns(pd, payload)
     if op in {"dataframe_drop_columns", "data_frame_drop_columns"}:
         return op_dataframe_drop_columns(pd, payload)
+    if op in {"dataframe_replace", "data_frame_replace"}:
+        return op_dataframe_replace(pd, payload)
     if op in {"dataframe_sort_index", "data_frame_sort_index"}:
         return op_dataframe_sort_index(pd, payload)
     if op in {"dataframe_sort_values", "data_frame_sort_values"}:

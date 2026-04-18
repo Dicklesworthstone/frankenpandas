@@ -1,0 +1,42 @@
+{
+  "packet_id": "FP-P2D-139",
+  "case_id": "dataframe_replace_string_strict",
+  "mode": "strict",
+  "operation": "dataframe_replace",
+  "replace_to_find": [{ "kind": "utf8", "value": "old" }],
+  "replace_to_value": [{ "kind": "utf8", "value": "new" }],
+  "frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 }
+    ],
+    "column_order": ["left", "right"],
+    "columns": {
+      "left": [
+        { "kind": "utf8", "value": "old" },
+        { "kind": "utf8", "value": "keep" }
+      ],
+      "right": [
+        { "kind": "utf8", "value": "old" },
+        { "kind": "utf8", "value": "old" }
+      ]
+    }
+  },
+  "expected_frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 }
+    ],
+    "column_order": ["left", "right"],
+    "columns": {
+      "left": [
+        { "kind": "utf8", "value": "new" },
+        { "kind": "utf8", "value": "keep" }
+      ],
+      "right": [
+        { "kind": "utf8", "value": "new" },
+        { "kind": "utf8", "value": "new" }
+      ]
+    }
+  }
+}
