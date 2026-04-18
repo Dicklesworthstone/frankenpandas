@@ -2010,6 +2010,40 @@ def op_dataframe_mean(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return {"expected_series": series_to_expected(out)}
 
 
+def op_dataframe_std(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    if frame_payload is None:
+        raise OracleError("dataframe_std requires frame payload")
+
+    frame = dataframe_from_json(pd, frame_payload)
+    axis = payload.get("std_axis", 0)
+    skipna = payload.get("std_skipna", True)
+    ddof = payload.get("std_ddof", 1)
+
+    try:
+        out = frame.std(axis=axis, skipna=skipna, ddof=ddof)
+    except Exception as exc:
+        raise OracleError(f"dataframe_std failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
+def op_dataframe_var(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    if frame_payload is None:
+        raise OracleError("dataframe_var requires frame payload")
+
+    frame = dataframe_from_json(pd, frame_payload)
+    axis = payload.get("var_axis", 0)
+    skipna = payload.get("var_skipna", True)
+    ddof = payload.get("var_ddof", 1)
+
+    try:
+        out = frame.var(axis=axis, skipna=skipna, ddof=ddof)
+    except Exception as exc:
+        raise OracleError(f"dataframe_var failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
 def op_dataframe_round(pd, payload: dict[str, Any]) -> dict[str, Any]:
     frame_payload = payload.get("frame")
     if frame_payload is None:
@@ -3987,6 +4021,10 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_dataframe_sum(pd, payload)
     if op in {"dataframe_mean", "data_frame_mean"}:
         return op_dataframe_mean(pd, payload)
+    if op in {"dataframe_std", "data_frame_std"}:
+        return op_dataframe_std(pd, payload)
+    if op in {"dataframe_var", "data_frame_var"}:
+        return op_dataframe_var(pd, payload)
     if op in {"dataframe_round", "data_frame_round"}:
         return op_dataframe_round(pd, payload)
     if op in {"dataframe_shift", "data_frame_shift"}:
