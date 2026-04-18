@@ -1,0 +1,40 @@
+{
+  "packet_id": "FP-P2D-128",
+  "case_id": "dataframe_stack_preserves_column_order_strict",
+  "mode": "strict",
+  "operation": "dataframe_stack",
+  "frame": {
+    "index": [
+      { "kind": "utf8", "value": "r1" },
+      { "kind": "utf8", "value": "r2" }
+    ],
+    "columns": {
+      "B": [
+        { "kind": "int64", "value": 10 },
+        { "kind": "int64", "value": 20 }
+      ],
+      "A": [
+        { "kind": "int64", "value": 1 },
+        { "kind": "int64", "value": 2 }
+      ]
+    },
+    "column_order": ["B", "A"]
+  },
+  "expected_frame": {
+    "index": [
+      { "kind": "utf8", "value": "r1|B" },
+      { "kind": "utf8", "value": "r1|A" },
+      { "kind": "utf8", "value": "r2|B" },
+      { "kind": "utf8", "value": "r2|A" }
+    ],
+    "columns": {
+      "value": [
+        { "kind": "int64", "value": 10 },
+        { "kind": "int64", "value": 1 },
+        { "kind": "int64", "value": 20 },
+        { "kind": "int64", "value": 2 }
+      ]
+    },
+    "column_order": ["value"]
+  }
+}

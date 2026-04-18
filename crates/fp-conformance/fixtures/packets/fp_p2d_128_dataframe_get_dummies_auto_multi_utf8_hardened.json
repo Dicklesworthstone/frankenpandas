@@ -1,0 +1,61 @@
+{
+  "packet_id": "FP-P2D-128",
+  "case_id": "dataframe_get_dummies_auto_multi_utf8_hardened",
+  "mode": "hardened",
+  "operation": "dataframe_get_dummies",
+  "frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 }
+    ],
+    "columns": {
+      "count": [
+        { "kind": "int64", "value": 5 },
+        { "kind": "int64", "value": 3 },
+        { "kind": "int64", "value": 4 }
+      ],
+      "animal": [
+        { "kind": "utf8", "value": "cat" },
+        { "kind": "utf8", "value": "dog" },
+        { "kind": "utf8", "value": "cat" }
+      ],
+      "mood": [
+        { "kind": "utf8", "value": "happy" },
+        { "kind": "null", "value": "null" },
+        { "kind": "utf8", "value": "happy" }
+      ]
+    },
+    "column_order": ["count", "animal", "mood"]
+  },
+  "expected_frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 }
+    ],
+    "columns": {
+      "count": [
+        { "kind": "int64", "value": 5 },
+        { "kind": "int64", "value": 3 },
+        { "kind": "int64", "value": 4 }
+      ],
+      "animal_cat": [
+        { "kind": "int64", "value": 1 },
+        { "kind": "int64", "value": 0 },
+        { "kind": "int64", "value": 1 }
+      ],
+      "animal_dog": [
+        { "kind": "int64", "value": 0 },
+        { "kind": "int64", "value": 1 },
+        { "kind": "int64", "value": 0 }
+      ],
+      "mood_happy": [
+        { "kind": "int64", "value": 1 },
+        { "kind": "int64", "value": 0 },
+        { "kind": "int64", "value": 1 }
+      ]
+    },
+    "column_order": ["count", "animal_cat", "animal_dog", "mood_happy"]
+  }
+}

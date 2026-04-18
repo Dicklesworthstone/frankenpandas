@@ -270,6 +270,24 @@ def op_series_div(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return op_series_binary_numeric(pd, payload, "series_div")
 
 
+def op_series_mode(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    series = fixture_series_from_payload(pd, payload.get("series"), "series_mode")
+    dropna = payload.get("mode_dropna")
+    if dropna is None:
+        dropna = True
+    out = series.mode(dropna=bool(dropna))
+    return {"expected_series": series_to_expected(out)}
+
+
+def op_series_nunique(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    series = fixture_series_from_payload(pd, payload.get("series"), "series_nunique")
+    dropna = payload.get("nunique_dropna")
+    if dropna is None:
+        dropna = True
+    out = series.nunique(dropna=bool(dropna))
+    return {"expected_scalar": scalar_to_json(out)}
+
+
 def op_series_join(pd, payload: dict[str, Any]) -> dict[str, Any]:
     left = payload.get("left")
     right = payload.get("right")
@@ -1298,6 +1316,31 @@ def op_series_count(pd, payload: dict[str, Any]) -> dict[str, Any]:
     out = int(series.count())
 
     return {"expected_scalar": scalar_to_json(out)}
+
+
+def op_series_rank(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    if left is None:
+        raise OracleError("series_rank requires left payload")
+
+    method = payload.get("rank_method") or "average"
+    na_option = payload.get("rank_na_option") or "keep"
+    ascending = payload.get("sort_ascending")
+    if ascending is None:
+        ascending = True
+    pct = bool(payload.get("rank_pct", False))
+
+    index = [label_from_json(item) for item in left["index"]]
+    values = [scalar_from_json(item) for item in left["values"]]
+    series = pd.Series(values, index=index, name=left.get("name", "series"))
+    out = series.rank(method=method, ascending=ascending, na_option=na_option, pct=pct)
+
+    return {
+        "expected_series": {
+            "index": [label_to_json(v) for v in out.index.tolist()],
+            "values": [scalar_to_json(v) for v in out.tolist()],
+        }
+    }
 
 
 def op_series_any(pd, payload: dict[str, Any]) -> dict[str, Any]:
@@ -3020,8 +3063,22 @@ def op_dataframe_mode(pd, payload: dict[str, Any]) -> dict[str, Any]:
     if frame_payload is None:
         raise OracleError("dataframe_mode requires frame payload")
 
+    axis = payload.get("mode_axis")
+    if axis is None:
+        axis = 0
+    if axis not in (0, 1):
+        raise OracleError(f"dataframe_mode mode_axis must be 0 or 1 (got {axis!r})")
+
+    numeric_only = payload.get("mode_numeric_only")
+    if numeric_only is None:
+        numeric_only = False
+
+    dropna = payload.get("mode_dropna")
+    if dropna is None:
+        dropna = True
+
     frame = dataframe_from_json(pd, frame_payload)
-    out = frame.mode()
+    out = frame.mode(axis=axis, numeric_only=bool(numeric_only), dropna=bool(dropna))
     return {"expected_frame": dataframe_to_json(out)}
 
 
@@ -3035,6 +3092,7 @@ def op_dataframe_rank(pd, payload: dict[str, Any]) -> dict[str, Any]:
     ascending = payload.get("sort_ascending")
     if ascending is None:
         ascending = True
+    pct = bool(payload.get("rank_pct", False))
     axis = payload.get("rank_axis")
     if axis is None:
         axis = 0
@@ -3042,7 +3100,13 @@ def op_dataframe_rank(pd, payload: dict[str, Any]) -> dict[str, Any]:
         raise OracleError(f"dataframe_rank rank_axis must be 0 or 1 (got {axis!r})")
 
     frame = dataframe_from_json(pd, frame_payload)
-    out = frame.rank(method=method, ascending=ascending, na_option=na_option, axis=axis)
+    out = frame.rank(
+        method=method,
+        ascending=ascending,
+        na_option=na_option,
+        axis=axis,
+        pct=pct,
+    )
     return {"expected_frame": dataframe_to_json(out)}
 
 
@@ -3940,6 +4004,10 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_series_mul(pd, payload)
     if op == "series_div":
         return op_series_div(pd, payload)
+    if op == "series_mode":
+        return op_series_mode(pd, payload)
+    if op == "series_nunique":
+        return op_series_nunique(pd, payload)
     if op == "series_join":
         return op_series_join(pd, payload)
     if op == "series_constructor":
@@ -4068,6 +4136,8 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_series_dropna(pd, payload)
     if op == "series_count":
         return op_series_count(pd, payload)
+    if op in {"series_rank", "series_rank_default"}:
+        return op_series_rank(pd, payload)
     if op == "series_any":
         return op_series_any(pd, payload)
     if op == "series_all":

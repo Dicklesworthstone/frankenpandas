@@ -17,12 +17,12 @@
 | DataFrame Transform | 8 | 32 | ✅ Core |
 | DataFrame Reshape | 7 | 17 | ⚠️ Expanded |
 | DataFrame Aggregation | 4 | 10 | ⚠️ Light |
-| GroupBy | 10 | 24 | ⚠️ Light |
+| GroupBy | 10 | 27 | ⚠️ Light |
 | Index Operations | 5 | 14 | ✅ Core |
 | NaN Aggregations | 7 | 17 | ✅ Core |
 | Window Functions | 5 | 5 | ⚠️ Started |
 | IO Round-Trip | 5 | 24 | ⚠️ Started |
-| **Total** | **214** | **811** | **Partial** |
+| **Total** | **214** | **814** | **Partial** |
 
 ## Operation Coverage Detail
 
@@ -98,16 +98,16 @@
 | dataframe_isna/isnull | 4 | ✅ | Null detection |
 | dataframe_notna/notnull | 4 | ✅ | Null detection |
 
-### GroupBy Operations (Fixtures: 24)
+### GroupBy Operations (Fixtures: 27)
 
 | Operation | Fixtures | Status | Notes |
 |-----------|:--------:|:------:|-------|
-| groupby_sum | 3 | ⚠️ | Needs multi-key |
-| groupby_mean | 2 | ⚠️ | Needs edge cases |
+| groupby_sum | 4 | ⚠️ | Null-key dropna covered; needs multi-key |
+| groupby_mean | 3 | ⚠️ | Null-skipping edge covered |
 | groupby_median | 3 | ⚠️ | Needs edge cases |
 | groupby_min | 2 | ⚠️ | Needs edge cases |
 | groupby_max | 2 | ⚠️ | Needs edge cases |
-| groupby_count | 2 | ⚠️ | Needs edge cases |
+| groupby_count | 3 | ⚠️ | Non-null count edge covered |
 | groupby_std | 3 | ⚠️ | Needs ddof |
 | groupby_var | 3 | ⚠️ | Needs ddof |
 | groupby_first | 2 | ⚠️ | Needs edge cases |

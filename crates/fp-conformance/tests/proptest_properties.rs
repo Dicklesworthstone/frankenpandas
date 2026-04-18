@@ -10,7 +10,10 @@
 use proptest::prelude::*;
 
 use fp_frame::{DataFrame, DropNaHow, FrameError, Series};
-use fp_groupby::{GroupByExecutionOptions, GroupByOptions, groupby_sum, groupby_sum_with_options};
+use fp_groupby::{
+    GroupByExecutionOptions, GroupByOptions, groupby_count, groupby_mean, groupby_sum,
+    groupby_sum_with_options,
+};
 use fp_index::{DuplicateKeep, Index, IndexLabel, align_union, validate_alignment_plan};
 use fp_join::{
     JoinExecutionOptions, JoinType, JoinedSeries, join_series, join_series_with_options,
@@ -430,6 +433,75 @@ fn rename_index_from_labels(df: &DataFrame, target_labels: &[IndexLabel]) -> Dat
         .zip(target_labels.iter().cloned())
         .collect::<Vec<_>>();
     df.rename_index(&pairs)
+}
+
+fn fresh_shared_rename_index_labels(
+    left: &[IndexLabel],
+    right: &[IndexLabel],
+) -> (Vec<IndexLabel>, Vec<IndexLabel>) {
+    let mut existing = left.iter().chain(right.iter()).cloned().collect::<Vec<_>>();
+    let distinct_labels = left
+        .iter()
+        .chain(right.iter())
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut mapping = std::collections::BTreeMap::new();
+
+    for (salt, label) in distinct_labels.into_iter().enumerate() {
+        let candidate = fresh_missing_index_label(&existing, salt);
+        existing.push(candidate.clone());
+        mapping.insert(label, candidate);
+    }
+
+    let remap = |labels: &[IndexLabel]| {
+        labels
+            .iter()
+            .map(|label| {
+                mapping
+                    .get(label)
+                    .expect("every original label must have a fresh rename")
+                    .clone()
+            })
+            .collect::<Vec<_>>()
+    };
+
+    (remap(left), remap(right))
+}
+
+fn relabel_groupby_pair_indices(keys: &Series, values: &Series) -> (Series, Series) {
+    let (renamed_key_labels, renamed_value_labels) =
+        fresh_shared_rename_index_labels(keys.index().labels(), values.index().labels());
+    let renamed_keys = keys
+        .set_axis(renamed_key_labels)
+        .expect("keys relabel must preserve shape");
+    let renamed_values = values
+        .set_axis(renamed_value_labels)
+        .expect("values relabel must preserve shape");
+    (renamed_keys, renamed_values)
+}
+
+fn reconstruct_groupby_mean_from_sum_and_count(sum: &Series, count: &Series) -> Series {
+    let reconstructed = sum
+        .values()
+        .iter()
+        .zip(count.values())
+        .map(|(sum_value, count_value)| match count_value.to_f64() {
+            Ok(count) if count > 0.0 => Scalar::Float64(
+                sum_value
+                    .to_f64()
+                    .expect("non-empty group sum must be numeric")
+                    / count,
+            ),
+            _ => Scalar::Null(NullKind::Null),
+        })
+        .collect::<Vec<_>>();
+
+    Series::from_values(
+        "mean".to_owned(),
+        sum.index().labels().to_vec(),
+        reconstructed,
+    )
+    .expect("reconstructed groupby mean must construct")
 }
 
 fn arb_sorted_int_index_labels(len: usize) -> impl Strategy<Value = Vec<IndexLabel>> {
@@ -2579,7 +2651,10 @@ proptest! {
     fn prop_groupby_sum_dropna_removes_null_keys((keys, values) in arb_groupby_pair(15)) {
         let policy = RuntimePolicy::hardened(Some(100_000));
         let mut ledger = EvidenceLedger::new();
-        let opts = GroupByOptions { dropna: true };
+        let opts = GroupByOptions {
+            dropna: true,
+            ..GroupByOptions::default()
+        };
         if let Ok(result) = groupby_sum(&keys, &values, opts, &policy, &mut ledger) {
             for (i, label) in result.index().labels().iter().enumerate() {
                 match label {
@@ -2594,6 +2669,240 @@ proptest! {
                 prop_assert!(
                     result.values().len() > i,
                     "result should have value at index {}", i
+                );
+            }
+        }
+    }
+
+    /// Renaming both indexes with the same fresh bijection must preserve GroupBy mean results.
+    #[test]
+    fn prop_groupby_mean_alignment_rename_invariant(
+        (keys, values) in arb_groupby_pair(15),
+        dropna in proptest::bool::ANY,
+    ) {
+        let policy = RuntimePolicy::hardened(Some(100_000));
+        let baseline = {
+            let mut ledger = EvidenceLedger::new();
+            groupby_mean(
+                &keys,
+                &values,
+                GroupByOptions {
+                    dropna,
+                    ..GroupByOptions::default()
+                },
+                &policy,
+                &mut ledger,
+            )
+        };
+        let (renamed_keys, renamed_values) = relabel_groupby_pair_indices(&keys, &values);
+        let renamed = {
+            let mut ledger = EvidenceLedger::new();
+            groupby_mean(
+                &renamed_keys,
+                &renamed_values,
+                GroupByOptions {
+                    dropna,
+                    ..GroupByOptions::default()
+                },
+                &policy,
+                &mut ledger,
+            )
+        };
+
+        match (baseline, renamed) {
+            (Ok(original), Ok(relabeled)) => {
+                prop_assert!(
+                    same_series_payload(&original, &relabeled),
+                    "groupby_mean should be invariant under alignment-preserving index relabeling"
+                );
+            }
+            (Err(_), Err(_)) => {}
+            (Ok(_), Err(err)) => {
+                prop_assert!(false, "relabeled groupby_mean errored after baseline succeeded: {err}");
+            }
+            (Err(err), Ok(_)) => {
+                prop_assert!(false, "baseline groupby_mean errored but relabeled succeeded: {err}");
+            }
+        }
+    }
+
+    /// Renaming both indexes with the same fresh bijection must preserve GroupBy count results.
+    #[test]
+    fn prop_groupby_count_alignment_rename_invariant(
+        (keys, values) in arb_groupby_pair(15),
+        dropna in proptest::bool::ANY,
+    ) {
+        let policy = RuntimePolicy::hardened(Some(100_000));
+        let baseline = {
+            let mut ledger = EvidenceLedger::new();
+            groupby_count(
+                &keys,
+                &values,
+                GroupByOptions {
+                    dropna,
+                    ..GroupByOptions::default()
+                },
+                &policy,
+                &mut ledger,
+            )
+        };
+        let (renamed_keys, renamed_values) = relabel_groupby_pair_indices(&keys, &values);
+        let renamed = {
+            let mut ledger = EvidenceLedger::new();
+            groupby_count(
+                &renamed_keys,
+                &renamed_values,
+                GroupByOptions {
+                    dropna,
+                    ..GroupByOptions::default()
+                },
+                &policy,
+                &mut ledger,
+            )
+        };
+
+        match (baseline, renamed) {
+            (Ok(original), Ok(relabeled)) => {
+                prop_assert!(
+                    same_series_payload(&original, &relabeled),
+                    "groupby_count should be invariant under alignment-preserving index relabeling"
+                );
+            }
+            (Err(_), Err(_)) => {}
+            (Ok(_), Err(err)) => {
+                prop_assert!(false, "relabeled groupby_count errored after baseline succeeded: {err}");
+            }
+            (Err(err), Ok(_)) => {
+                prop_assert!(false, "baseline groupby_count errored but relabeled succeeded: {err}");
+            }
+        }
+    }
+
+    /// Translating non-missing values must not change GroupBy count.
+    #[test]
+    fn prop_groupby_count_is_translation_invariant(
+        (keys, values) in arb_groupby_pair(15),
+        dropna in proptest::bool::ANY,
+        delta in -1_000.0f64..1_000.0,
+    ) {
+        let policy = RuntimePolicy::hardened(Some(100_000));
+        let baseline = {
+            let mut ledger = EvidenceLedger::new();
+            groupby_count(
+                &keys,
+                &values,
+                GroupByOptions {
+                    dropna,
+                    ..GroupByOptions::default()
+                },
+                &policy,
+                &mut ledger,
+            )
+        };
+        let shifted = {
+            let mut ledger = EvidenceLedger::new();
+            groupby_count(
+                &keys,
+                &shift_series(&values, delta),
+                GroupByOptions {
+                    dropna,
+                    ..GroupByOptions::default()
+                },
+                &policy,
+                &mut ledger,
+            )
+        };
+
+        match (baseline, shifted) {
+            (Ok(original), Ok(translated)) => {
+                prop_assert!(
+                    same_series_payload(&original, &translated),
+                    "groupby_count(x + c) must equal groupby_count(x)"
+                );
+            }
+            (Err(_), Err(_)) => {}
+            (Ok(_), Err(err)) => {
+                prop_assert!(false, "translated groupby_count errored after baseline succeeded: {err}");
+            }
+            (Err(err), Ok(_)) => {
+                prop_assert!(false, "baseline groupby_count errored but translated succeeded: {err}");
+            }
+        }
+    }
+
+    /// GroupBy mean must equal GroupBy sum divided by GroupBy count for non-empty groups.
+    #[test]
+    fn prop_groupby_mean_matches_sum_over_count(
+        (keys, values) in arb_groupby_pair(15),
+        dropna in proptest::bool::ANY,
+    ) {
+        let policy = RuntimePolicy::hardened(Some(100_000));
+        let mean = {
+            let mut ledger = EvidenceLedger::new();
+            groupby_mean(
+                &keys,
+                &values,
+                GroupByOptions {
+                    dropna,
+                    ..GroupByOptions::default()
+                },
+                &policy,
+                &mut ledger,
+            )
+        };
+        let sum = {
+            let mut ledger = EvidenceLedger::new();
+            groupby_sum(
+                &keys,
+                &values,
+                GroupByOptions {
+                    dropna,
+                    ..GroupByOptions::default()
+                },
+                &policy,
+                &mut ledger,
+            )
+        };
+        let count = {
+            let mut ledger = EvidenceLedger::new();
+            groupby_count(
+                &keys,
+                &values,
+                GroupByOptions {
+                    dropna,
+                    ..GroupByOptions::default()
+                },
+                &policy,
+                &mut ledger,
+            )
+        };
+
+        match (mean, sum, count) {
+            (Ok(observed_mean), Ok(observed_sum), Ok(observed_count)) => {
+                prop_assert_eq!(
+                    observed_mean.index().labels(),
+                    observed_sum.index().labels(),
+                    "groupby mean/sum indexes must align"
+                );
+                prop_assert_eq!(
+                    observed_mean.index().labels(),
+                    observed_count.index().labels(),
+                    "groupby mean/count indexes must align"
+                );
+                let reconstructed = reconstruct_groupby_mean_from_sum_and_count(
+                    &observed_sum,
+                    &observed_count,
+                );
+                prop_assert!(
+                    same_series_payload(&observed_mean, &reconstructed),
+                    "groupby_mean must match groupby_sum/groupby_count reconstruction"
+                );
+            }
+            (Err(_), Err(_), Err(_)) => {}
+            (mean_result, sum_result, count_result) => {
+                prop_assert!(
+                    false,
+                    "groupby mean/sum/count disagree on success status: mean={mean_result:?} sum={sum_result:?} count={count_result:?}"
                 );
             }
         }
@@ -2800,7 +3109,10 @@ proptest! {
     ) {
         let policy = RuntimePolicy::hardened(Some(100_000));
         let mut ledger = EvidenceLedger::new();
-        let opts = GroupByOptions { dropna };
+        let opts = GroupByOptions {
+            dropna,
+            ..GroupByOptions::default()
+        };
 
         let global = groupby_sum_with_options(
             &keys, &values, opts, &policy, &mut ledger,

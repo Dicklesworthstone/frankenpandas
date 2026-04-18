@@ -1,0 +1,46 @@
+{
+  "packet_id": "FP-P2D-281",
+  "case_id": "dataframe_isnull_nan_empty_utf8_strict",
+  "mode": "strict",
+  "operation": "dataframe_isnull",
+  "frame": {
+    "index": [
+      { "kind": "utf8", "value": "dup" },
+      { "kind": "utf8", "value": "dup" },
+      { "kind": "utf8", "value": "z" }
+    ],
+    "columns": {
+      "a": [
+        { "kind": "float64", "value": 1.5 },
+        { "kind": "null", "value": "na_n" },
+        { "kind": "float64", "value": 0.0 }
+      ],
+      "b": [
+        { "kind": "utf8", "value": "" },
+        { "kind": "utf8", "value": "text" },
+        { "kind": "null", "value": "null" }
+      ]
+    },
+    "column_order": ["a", "b"]
+  },
+  "expected_frame": {
+    "index": [
+      { "kind": "utf8", "value": "dup" },
+      { "kind": "utf8", "value": "dup" },
+      { "kind": "utf8", "value": "z" }
+    ],
+    "columns": {
+      "a": [
+        { "kind": "bool", "value": false },
+        { "kind": "bool", "value": true },
+        { "kind": "bool", "value": false }
+      ],
+      "b": [
+        { "kind": "bool", "value": false },
+        { "kind": "bool", "value": false },
+        { "kind": "bool", "value": true }
+      ]
+    },
+    "column_order": ["a", "b"]
+  }
+}

@@ -4,41 +4,52 @@
   "mode": "strict",
   "operation": "dataframe_melt",
   "melt_id_vars": ["id"],
-  "melt_value_vars": [],
   "frame": {
-    "index": [
-      { "kind": "int64", "value": 0 }
-    ],
-    "columns": {
-      "id": [
-        { "kind": "utf8", "value": "a" }
-      ],
-      "val1": [
-        { "kind": "float64", "value": 10.0 }
-      ],
-      "val2": [
-        { "kind": "float64", "value": 20.0 }
-      ]
-    },
-    "column_order": ["id", "val1", "val2"]
-  },
-  "expected_frame": {
     "index": [
       { "kind": "int64", "value": 0 },
       { "kind": "int64", "value": 1 }
     ],
     "columns": {
       "id": [
+        { "kind": "utf8", "value": "r1" },
+        { "kind": "utf8", "value": "r2" }
+      ],
+      "b": [
+        { "kind": "int64", "value": 10 },
+        { "kind": "int64", "value": 20 }
+      ],
+      "a": [
+        { "kind": "int64", "value": 1 },
+        { "kind": "int64", "value": 2 }
+      ]
+    },
+    "column_order": ["id", "b", "a"]
+  },
+  "expected_frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 3 }
+    ],
+    "columns": {
+      "id": [
+        { "kind": "utf8", "value": "r1" },
+        { "kind": "utf8", "value": "r2" },
+        { "kind": "utf8", "value": "r1" },
+        { "kind": "utf8", "value": "r2" }
+      ],
+      "variable": [
+        { "kind": "utf8", "value": "b" },
+        { "kind": "utf8", "value": "b" },
         { "kind": "utf8", "value": "a" },
         { "kind": "utf8", "value": "a" }
       ],
-      "variable": [
-        { "kind": "utf8", "value": "val1" },
-        { "kind": "utf8", "value": "val2" }
-      ],
       "value": [
-        { "kind": "float64", "value": 10.0 },
-        { "kind": "float64", "value": 20.0 }
+        { "kind": "int64", "value": 10 },
+        { "kind": "int64", "value": 20 },
+        { "kind": "int64", "value": 1 },
+        { "kind": "int64", "value": 2 }
       ]
     },
     "column_order": ["id", "variable", "value"]

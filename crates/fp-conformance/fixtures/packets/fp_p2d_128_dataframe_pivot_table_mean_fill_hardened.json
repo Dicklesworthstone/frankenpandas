@@ -1,0 +1,57 @@
+{
+  "packet_id": "FP-P2D-128",
+  "case_id": "dataframe_pivot_table_mean_fill_hardened",
+  "mode": "hardened",
+  "operation": "dataframe_pivot_table",
+  "pivot_values": ["sales"],
+  "pivot_index": "region",
+  "pivot_columns": "product",
+  "pivot_aggfunc": "mean",
+  "fill_value": { "kind": "float64", "value": 0.0 },
+  "frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 3 }
+    ],
+    "columns": {
+      "region": [
+        { "kind": "utf8", "value": "east" },
+        { "kind": "utf8", "value": "east" },
+        { "kind": "utf8", "value": "west" },
+        { "kind": "utf8", "value": "east" }
+      ],
+      "product": [
+        { "kind": "utf8", "value": "A" },
+        { "kind": "utf8", "value": "B" },
+        { "kind": "utf8", "value": "A" },
+        { "kind": "utf8", "value": "A" }
+      ],
+      "sales": [
+        { "kind": "int64", "value": 10 },
+        { "kind": "int64", "value": 5 },
+        { "kind": "int64", "value": 7 },
+        { "kind": "int64", "value": 3 }
+      ]
+    },
+    "column_order": ["region", "product", "sales"]
+  },
+  "expected_frame": {
+    "index": [
+      { "kind": "utf8", "value": "east" },
+      { "kind": "utf8", "value": "west" }
+    ],
+    "columns": {
+      "A": [
+        { "kind": "float64", "value": 6.5 },
+        { "kind": "float64", "value": 7.0 }
+      ],
+      "B": [
+        { "kind": "float64", "value": 5.0 },
+        { "kind": "float64", "value": 0.0 }
+      ]
+    },
+    "column_order": ["A", "B"]
+  }
+}

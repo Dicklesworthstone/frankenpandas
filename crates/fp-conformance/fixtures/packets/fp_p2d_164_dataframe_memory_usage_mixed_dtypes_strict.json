@@ -1,0 +1,57 @@
+{
+  "packet_id": "FP-P2D-164",
+  "case_id": "dataframe_memory_usage_mixed_dtypes_strict",
+  "mode": "strict",
+  "operation": "dataframe_memory_usage",
+  "frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 3 }
+    ],
+    "column_order": ["flag", "nums", "text", "empty"],
+    "columns": {
+      "flag": [
+        { "kind": "bool", "value": true },
+        { "kind": "bool", "value": false },
+        { "kind": "bool", "value": true },
+        { "kind": "bool", "value": false }
+      ],
+      "nums": [
+        { "kind": "int64", "value": 10 },
+        { "kind": "int64", "value": 20 },
+        { "kind": "int64", "value": 30 },
+        { "kind": "int64", "value": 40 }
+      ],
+      "text": [
+        { "kind": "utf8", "value": "aa" },
+        { "kind": "utf8", "value": "bbb" },
+        { "kind": "utf8", "value": "c" },
+        { "kind": "utf8", "value": "dddd" }
+      ],
+      "empty": [
+        { "kind": "null", "value": "null" },
+        { "kind": "null", "value": "null" },
+        { "kind": "null", "value": "null" },
+        { "kind": "null", "value": "null" }
+      ]
+    }
+  },
+  "expected_series": {
+    "index": [
+      { "kind": "utf8", "value": "Index" },
+      { "kind": "utf8", "value": "flag" },
+      { "kind": "utf8", "value": "nums" },
+      { "kind": "utf8", "value": "text" },
+      { "kind": "utf8", "value": "empty" }
+    ],
+    "values": [
+      { "kind": "int64", "value": 32 },
+      { "kind": "int64", "value": 4 },
+      { "kind": "int64", "value": 32 },
+      { "kind": "int64", "value": 32 },
+      { "kind": "int64", "value": 0 }
+    ]
+  }
+}

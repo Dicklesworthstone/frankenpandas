@@ -1,0 +1,32 @@
+{
+  "packet_id": "FP-P2D-054",
+  "case_id": "dataframe_duplicated_semantic_nan_equality_strict",
+  "mode": "strict",
+  "operation": "dataframe_duplicated",
+  "frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 }
+    ],
+    "columns": {
+      "a": [
+        { "kind": "null", "value": "na_n" },
+        { "kind": "null", "value": "na_n" }
+      ],
+      "b": [
+        { "kind": "int64", "value": 1 },
+        { "kind": "int64", "value": 1 }
+      ]
+    }
+  },
+  "expected_series": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 }
+    ],
+    "values": [
+      { "kind": "bool", "value": false },
+      { "kind": "bool", "value": true }
+    ]
+  }
+}
