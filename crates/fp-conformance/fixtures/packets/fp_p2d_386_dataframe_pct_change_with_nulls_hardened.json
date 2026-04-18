@@ -1,0 +1,60 @@
+{
+  "packet_id": "FP-P2D-386",
+  "case_id": "dataframe_pct_change_with_nulls_hardened",
+  "mode": "hardened",
+  "operation": "dataframe_pct_change",
+  "pct_change_periods": 1,
+  "pct_change_axis": 0,
+  "frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 3 },
+      { "kind": "int64", "value": 4 }
+    ],
+    "column_order": ["a", "b"],
+    "columns": {
+      "a": [
+        { "kind": "float64", "value": 10.0 },
+        { "kind": "null", "value": "null" },
+        { "kind": "float64", "value": 30.0 },
+        { "kind": "float64", "value": 45.0 },
+        { "kind": "float64", "value": 90.0 }
+      ],
+      "b": [
+        { "kind": "null", "value": "null" },
+        { "kind": "float64", "value": 100.0 },
+        { "kind": "float64", "value": 150.0 },
+        { "kind": "null", "value": "null" },
+        { "kind": "float64", "value": 200.0 }
+      ]
+    }
+  },
+  "expected_frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 3 },
+      { "kind": "int64", "value": 4 }
+    ],
+    "column_order": ["a", "b"],
+    "columns": {
+      "a": [
+        { "kind": "null", "value": "null" },
+        { "kind": "null", "value": "null" },
+        { "kind": "null", "value": "null" },
+        { "kind": "float64", "value": 0.5 },
+        { "kind": "float64", "value": 1.0 }
+      ],
+      "b": [
+        { "kind": "null", "value": "null" },
+        { "kind": "null", "value": "null" },
+        { "kind": "float64", "value": 0.5 },
+        { "kind": "null", "value": "null" },
+        { "kind": "null", "value": "null" }
+      ]
+    }
+  }
+}
