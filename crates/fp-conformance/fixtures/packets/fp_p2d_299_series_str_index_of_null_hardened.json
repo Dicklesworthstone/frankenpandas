@@ -1,0 +1,36 @@
+{
+  "packet_id": "FP-P2D-299",
+  "case_id": "series_str_index_of_null_hardened",
+  "mode": "hardened",
+  "operation": "series_str_index_of",
+  "str_sub": "x",
+  "left": {
+    "name": "text",
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 3 }
+    ],
+    "values": [
+      { "kind": "utf8", "value": "xyzxyz" },
+      { "kind": "null", "value": "null" },
+      { "kind": "utf8", "value": "" },
+      { "kind": "utf8", "value": "no match" }
+    ]
+  },
+  "expected_series": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 3 }
+    ],
+    "values": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "null", "value": "null" },
+      { "kind": "null", "value": "null" },
+      { "kind": "null", "value": "null" }
+    ]
+  }
+}
