@@ -2937,6 +2937,24 @@ def op_dataframe_reindex_columns(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return {"expected_frame": dataframe_to_json(out)}
 
 
+def op_dataframe_drop_columns(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    columns = payload.get("drop_columns")
+    if frame_payload is None:
+        raise OracleError("dataframe_drop_columns requires frame payload")
+    if not isinstance(columns, list):
+        raise OracleError("dataframe_drop_columns requires drop_columns list")
+    if not all(isinstance(column, str) for column in columns):
+        raise OracleError("dataframe_drop_columns entries must be strings")
+
+    frame = dataframe_from_json(pd, frame_payload)
+    try:
+        out = frame.drop(columns=columns)
+    except Exception as exc:
+        raise OracleError(f"dataframe_drop_columns failed: {exc}") from exc
+    return {"expected_frame": dataframe_to_json(out)}
+
+
 def _resolve_sort_ascending(payload: dict[str, Any], op_name: str) -> bool:
     raw = payload.get("sort_ascending")
     if raw is None:
@@ -3660,6 +3678,8 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_dataframe_reindex(pd, payload)
     if op in {"dataframe_reindex_columns", "data_frame_reindex_columns"}:
         return op_dataframe_reindex_columns(pd, payload)
+    if op in {"dataframe_drop_columns", "data_frame_drop_columns"}:
+        return op_dataframe_drop_columns(pd, payload)
     if op in {"dataframe_sort_index", "data_frame_sort_index"}:
         return op_dataframe_sort_index(pd, payload)
     if op in {"dataframe_sort_values", "data_frame_sort_values"}:
