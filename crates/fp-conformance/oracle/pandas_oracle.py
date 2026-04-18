@@ -1894,7 +1894,7 @@ def op_dataframe_idxmin(pd, payload: dict[str, Any]) -> dict[str, Any]:
         out = frame.idxmin(axis=axis, skipna=skipna)
     except Exception as exc:
         raise OracleError(f"dataframe_idxmin failed: {exc}") from exc
-    return {"expected_series": series_to_json(out)}
+    return {"expected_series": series_to_expected(out)}
 
 
 def op_dataframe_idxmax(pd, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1910,7 +1910,7 @@ def op_dataframe_idxmax(pd, payload: dict[str, Any]) -> dict[str, Any]:
         out = frame.idxmax(axis=axis, skipna=skipna)
     except Exception as exc:
         raise OracleError(f"dataframe_idxmax failed: {exc}") from exc
-    return {"expected_series": series_to_json(out)}
+    return {"expected_series": series_to_expected(out)}
 
 
 def op_dataframe_sem(pd, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1927,7 +1927,7 @@ def op_dataframe_sem(pd, payload: dict[str, Any]) -> dict[str, Any]:
         out = frame.sem(axis=axis, skipna=skipna, ddof=ddof)
     except Exception as exc:
         raise OracleError(f"dataframe_sem failed: {exc}") from exc
-    return {"expected_series": series_to_json(out)}
+    return {"expected_series": series_to_expected(out)}
 
 
 def op_dataframe_skew(pd, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1943,7 +1943,7 @@ def op_dataframe_skew(pd, payload: dict[str, Any]) -> dict[str, Any]:
         out = frame.skew(axis=axis, skipna=skipna)
     except Exception as exc:
         raise OracleError(f"dataframe_skew failed: {exc}") from exc
-    return {"expected_series": series_to_json(out)}
+    return {"expected_series": series_to_expected(out)}
 
 
 def op_dataframe_kurtosis(pd, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1959,7 +1959,7 @@ def op_dataframe_kurtosis(pd, payload: dict[str, Any]) -> dict[str, Any]:
         out = frame.kurtosis(axis=axis, skipna=skipna)
     except Exception as exc:
         raise OracleError(f"dataframe_kurtosis failed: {exc}") from exc
-    return {"expected_series": series_to_json(out)}
+    return {"expected_series": series_to_expected(out)}
 
 
 def op_dataframe_prod(pd, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1975,7 +1975,23 @@ def op_dataframe_prod(pd, payload: dict[str, Any]) -> dict[str, Any]:
         out = frame.prod(axis=axis, skipna=skipna)
     except Exception as exc:
         raise OracleError(f"dataframe_prod failed: {exc}") from exc
-    return {"expected_series": series_to_json(out)}
+    return {"expected_series": series_to_expected(out)}
+
+
+def op_dataframe_sum(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    if frame_payload is None:
+        raise OracleError("dataframe_sum requires frame payload")
+
+    frame = dataframe_from_json(pd, frame_payload)
+    axis = payload.get("sum_axis", 0)
+    skipna = payload.get("sum_skipna", True)
+
+    try:
+        out = frame.sum(axis=axis, skipna=skipna)
+    except Exception as exc:
+        raise OracleError(f"dataframe_sum failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
 
 
 def op_dataframe_round(pd, payload: dict[str, Any]) -> dict[str, Any]:
@@ -3951,6 +3967,8 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_dataframe_kurtosis(pd, payload)
     if op in {"dataframe_prod", "data_frame_prod"}:
         return op_dataframe_prod(pd, payload)
+    if op in {"dataframe_sum", "data_frame_sum"}:
+        return op_dataframe_sum(pd, payload)
     if op in {"dataframe_round", "data_frame_round"}:
         return op_dataframe_round(pd, payload)
     if op in {"dataframe_shift", "data_frame_shift"}:
