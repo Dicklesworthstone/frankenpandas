@@ -1,0 +1,36 @@
+{
+  "packet_id": "FP-P2D-260",
+  "case_id": "series_str_startswith_any_empty_pattern_strict",
+  "mode": "strict",
+  "operation": "series_str_startswith_any",
+  "str_patterns": ["pre", ""],
+  "left": {
+    "name": "text",
+    "index": [
+      { "kind": "int64", "value": 3 },
+      { "kind": "int64", "value": 3 },
+      { "kind": "int64", "value": 4 },
+      { "kind": "int64", "value": 8 }
+    ],
+    "values": [
+      { "kind": "utf8", "value": "other" },
+      { "kind": "utf8", "value": "" },
+      { "kind": "utf8", "value": "prefix" },
+      { "kind": "utf8", "value": "zebra" }
+    ]
+  },
+  "expected_series": {
+    "index": [
+      { "kind": "int64", "value": 3 },
+      { "kind": "int64", "value": 3 },
+      { "kind": "int64", "value": 4 },
+      { "kind": "int64", "value": 8 }
+    ],
+    "values": [
+      { "kind": "bool", "value": true },
+      { "kind": "bool", "value": true },
+      { "kind": "bool", "value": true },
+      { "kind": "bool", "value": true }
+    ]
+  }
+}

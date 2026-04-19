@@ -1,0 +1,37 @@
+{
+  "packet_id": "FP-P2D-255",
+  "case_id": "series_str_split_regex_get_empty_segment_strict",
+  "mode": "strict",
+  "operation": "series_str_split_regex_get",
+  "regex_pattern": "[,;]",
+  "str_split_n": 1,
+  "left": {
+    "name": "text",
+    "index": [
+      { "kind": "int64", "value": 4 },
+      { "kind": "int64", "value": 4 },
+      { "kind": "int64", "value": 9 },
+      { "kind": "int64", "value": 10 }
+    ],
+    "values": [
+      { "kind": "utf8", "value": "a,,b" },
+      { "kind": "utf8", "value": "x;;y" },
+      { "kind": "utf8", "value": "m;n;o" },
+      { "kind": "utf8", "value": "single" }
+    ]
+  },
+  "expected_series": {
+    "index": [
+      { "kind": "int64", "value": 4 },
+      { "kind": "int64", "value": 4 },
+      { "kind": "int64", "value": 9 },
+      { "kind": "int64", "value": 10 }
+    ],
+    "values": [
+      { "kind": "utf8", "value": "" },
+      { "kind": "utf8", "value": "" },
+      { "kind": "utf8", "value": "n" },
+      { "kind": "null", "value": "na_n" }
+    ]
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "packet_id": "FP-P2D-263",
+  "case_id": "series_iloc_negative_out_of_bounds_strict",
+  "mode": "strict",
+  "operation": "series_iloc",
+  "iloc_positions": [-5],
+  "left": {
+    "name": "vals",
+    "index": [
+      { "kind": "int64", "value": 10 },
+      { "kind": "int64", "value": 11 },
+      { "kind": "int64", "value": 12 },
+      { "kind": "int64", "value": 13 }
+    ],
+    "values": [
+      { "kind": "int64", "value": 1000 },
+      { "kind": "int64", "value": 1100 },
+      { "kind": "int64", "value": 1200 },
+      { "kind": "int64", "value": 1300 }
+    ]
+  },
+  "expected_error_contains": "out of bounds"
+}

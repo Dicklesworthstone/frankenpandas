@@ -1,0 +1,37 @@
+{
+  "packet_id": "FP-P2D-223",
+  "case_id": "series_str_join_empty_segments_strict",
+  "mode": "strict",
+  "operation": "series_str_join",
+  "str_join_from": ",",
+  "str_join_sep": "-",
+  "left": {
+    "name": "text",
+    "index": [
+      { "kind": "int64", "value": 4 },
+      { "kind": "int64", "value": 4 },
+      { "kind": "int64", "value": 6 },
+      { "kind": "int64", "value": 7 }
+    ],
+    "values": [
+      { "kind": "str", "value": "a,,b" },
+      { "kind": "str", "value": ",lead" },
+      { "kind": "str", "value": "trail," },
+      { "kind": "str", "value": "solo" }
+    ]
+  },
+  "expected_series": {
+    "index": [
+      { "kind": "int64", "value": 4 },
+      { "kind": "int64", "value": 4 },
+      { "kind": "int64", "value": 6 },
+      { "kind": "int64", "value": 7 }
+    ],
+    "values": [
+      { "kind": "str", "value": "a--b" },
+      { "kind": "str", "value": "-lead" },
+      { "kind": "str", "value": "trail-" },
+      { "kind": "str", "value": "solo" }
+    ]
+  }
+}
