@@ -1,0 +1,36 @@
+{
+  "packet_id": "FP-P2D-220",
+  "case_id": "series_str_removeprefix_unicode_exact_only_strict",
+  "mode": "strict",
+  "operation": "series_str_removeprefix",
+  "str_prefix": "ß",
+  "left": {
+    "name": "text",
+    "index": [
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 5 },
+      { "kind": "int64", "value": 8 }
+    ],
+    "values": [
+      { "kind": "str", "value": "ßeta" },
+      { "kind": "str", "value": "ßßcore" },
+      { "kind": "str", "value": "sseta" },
+      { "kind": "str", "value": "beta" }
+    ]
+  },
+  "expected_series": {
+    "index": [
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 5 },
+      { "kind": "int64", "value": 8 }
+    ],
+    "values": [
+      { "kind": "str", "value": "eta" },
+      { "kind": "str", "value": "ßcore" },
+      { "kind": "str", "value": "sseta" },
+      { "kind": "str", "value": "beta" }
+    ]
+  }
+}

@@ -1,0 +1,36 @@
+{
+  "packet_id": "FP-P2D-221",
+  "case_id": "series_str_removesuffix_single_exact_only_strict",
+  "mode": "strict",
+  "operation": "series_str_removesuffix",
+  "str_suffix": ".tar.gz",
+  "left": {
+    "name": "text",
+    "index": [
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 3 },
+      { "kind": "int64", "value": 3 },
+      { "kind": "int64", "value": 7 }
+    ],
+    "values": [
+      { "kind": "str", "value": "archive.tar.gz" },
+      { "kind": "str", "value": "archive.tar.gz.tar.gz" },
+      { "kind": "str", "value": "archive.tar" },
+      { "kind": "str", "value": "backup.tar.GZ" }
+    ]
+  },
+  "expected_series": {
+    "index": [
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 3 },
+      { "kind": "int64", "value": 3 },
+      { "kind": "int64", "value": 7 }
+    ],
+    "values": [
+      { "kind": "str", "value": "archive" },
+      { "kind": "str", "value": "archive.tar.gz" },
+      { "kind": "str", "value": "archive.tar" },
+      { "kind": "str", "value": "backup.tar.GZ" }
+    ]
+  }
+}

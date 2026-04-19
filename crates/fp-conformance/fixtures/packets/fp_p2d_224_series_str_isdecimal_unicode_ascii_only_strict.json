@@ -1,0 +1,35 @@
+{
+  "packet_id": "FP-P2D-224",
+  "case_id": "series_str_isdecimal_unicode_ascii_only_strict",
+  "mode": "strict",
+  "operation": "series_str_isdecimal",
+  "left": {
+    "name": "text",
+    "index": [
+      { "kind": "int64", "value": 3 },
+      { "kind": "int64", "value": 4 },
+      { "kind": "int64", "value": 4 },
+      { "kind": "int64", "value": 8 }
+    ],
+    "values": [
+      { "kind": "str", "value": "123" },
+      { "kind": "str", "value": "１２３" },
+      { "kind": "str", "value": "٣٤٥" },
+      { "kind": "str", "value": "²" }
+    ]
+  },
+  "expected_series": {
+    "index": [
+      { "kind": "int64", "value": 3 },
+      { "kind": "int64", "value": 4 },
+      { "kind": "int64", "value": 4 },
+      { "kind": "int64", "value": 8 }
+    ],
+    "values": [
+      { "kind": "bool", "value": true },
+      { "kind": "bool", "value": false },
+      { "kind": "bool", "value": false },
+      { "kind": "bool", "value": false }
+    ]
+  }
+}

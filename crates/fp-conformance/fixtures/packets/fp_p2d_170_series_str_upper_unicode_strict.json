@@ -1,0 +1,35 @@
+{
+  "packet_id": "FP-P2D-170",
+  "case_id": "series_str_upper_unicode_strict",
+  "mode": "strict",
+  "operation": "series_str_upper",
+  "left": {
+    "name": "text",
+    "index": [
+      { "kind": "int64", "value": 3 },
+      { "kind": "int64", "value": 4 },
+      { "kind": "int64", "value": 4 },
+      { "kind": "int64", "value": 8 }
+    ],
+    "values": [
+      { "kind": "utf8", "value": "straße" },
+      { "kind": "utf8", "value": "élan" },
+      { "kind": "utf8", "value": "ß" },
+      { "kind": "utf8", "value": "mañana" }
+    ]
+  },
+  "expected_series": {
+    "index": [
+      { "kind": "int64", "value": 3 },
+      { "kind": "int64", "value": 4 },
+      { "kind": "int64", "value": 4 },
+      { "kind": "int64", "value": 8 }
+    ],
+    "values": [
+      { "kind": "utf8", "value": "STRASSE" },
+      { "kind": "utf8", "value": "ÉLAN" },
+      { "kind": "utf8", "value": "SS" },
+      { "kind": "utf8", "value": "MAÑANA" }
+    ]
+  }
+}

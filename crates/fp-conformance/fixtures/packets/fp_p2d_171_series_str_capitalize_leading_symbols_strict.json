@@ -1,0 +1,35 @@
+{
+  "packet_id": "FP-P2D-171",
+  "case_id": "series_str_capitalize_leading_symbols_strict",
+  "mode": "strict",
+  "operation": "series_str_capitalize",
+  "left": {
+    "name": "text",
+    "index": [
+      { "kind": "int64", "value": 7 },
+      { "kind": "int64", "value": 7 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 9 }
+    ],
+    "values": [
+      { "kind": "utf8", "value": "" },
+      { "kind": "utf8", "value": "a1!" },
+      { "kind": "utf8", "value": " MIX-ed " },
+      { "kind": "utf8", "value": "123abc" }
+    ]
+  },
+  "expected_series": {
+    "index": [
+      { "kind": "int64", "value": 7 },
+      { "kind": "int64", "value": 7 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 9 }
+    ],
+    "values": [
+      { "kind": "utf8", "value": "" },
+      { "kind": "utf8", "value": "A1!" },
+      { "kind": "utf8", "value": " mix-ed " },
+      { "kind": "utf8", "value": "123abc" }
+    ]
+  }
+}
