@@ -1,0 +1,35 @@
+{
+  "packet_id": "FP-P2D-166",
+  "case_id": "dataframe_tail_negative_n_saturates_empty_strict",
+  "mode": "strict",
+  "operation": "dataframe_tail",
+  "frame": {
+    "index": [
+      { "kind": "utf8", "value": "row0" },
+      { "kind": "utf8", "value": "row1" },
+      { "kind": "utf8", "value": "row2" }
+    ],
+    "column_order": ["b", "a"],
+    "columns": {
+      "b": [
+        { "kind": "int64", "value": 10 },
+        { "kind": "int64", "value": 20 },
+        { "kind": "int64", "value": 30 }
+      ],
+      "a": [
+        { "kind": "float64", "value": 1.5 },
+        { "kind": "float64", "value": -2.5 },
+        { "kind": "float64", "value": 3.5 }
+      ]
+    }
+  },
+  "tail_n": -10,
+  "expected_frame": {
+    "index": [],
+    "column_order": ["b", "a"],
+    "columns": {
+      "b": [],
+      "a": []
+    }
+  }
+}

@@ -1,0 +1,45 @@
+{
+  "packet_id": "FP-P2D-149",
+  "case_id": "dataframe_sem_skips_nonnumeric_order_strict",
+  "mode": "strict",
+  "operation": "dataframe_sem",
+  "frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 3 }
+    ],
+    "column_order": ["left", "label", "right"],
+    "columns": {
+      "left": [
+        { "kind": "float64", "value": 1.0 },
+        { "kind": "float64", "value": 2.0 },
+        { "kind": "float64", "value": 3.0 },
+        { "kind": "float64", "value": 4.0 }
+      ],
+      "label": [
+        { "kind": "utf8", "value": "alpha" },
+        { "kind": "utf8", "value": "beta" },
+        { "kind": "utf8", "value": "gamma" },
+        { "kind": "utf8", "value": "delta" }
+      ],
+      "right": [
+        { "kind": "float64", "value": 10.0 },
+        { "kind": "float64", "value": 20.0 },
+        { "kind": "float64", "value": 30.0 },
+        { "kind": "float64", "value": 40.0 }
+      ]
+    }
+  },
+  "expected_series": {
+    "index": [
+      { "kind": "utf8", "value": "left" },
+      { "kind": "utf8", "value": "right" }
+    ],
+    "values": [
+      { "kind": "float64", "value": 0.6454972243679028 },
+      { "kind": "float64", "value": 6.454972243679028 }
+    ]
+  }
+}

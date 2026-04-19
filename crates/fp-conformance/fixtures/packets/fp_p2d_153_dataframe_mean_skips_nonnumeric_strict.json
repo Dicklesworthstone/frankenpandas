@@ -1,0 +1,41 @@
+{
+  "packet_id": "FP-P2D-153",
+  "case_id": "dataframe_mean_skips_nonnumeric_strict",
+  "mode": "strict",
+  "operation": "dataframe_mean",
+  "frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 }
+    ],
+    "column_order": ["label", "a", "b"],
+    "columns": {
+      "label": [
+        { "kind": "utf8", "value": "z" },
+        { "kind": "utf8", "value": "a" },
+        { "kind": "utf8", "value": "m" }
+      ],
+      "a": [
+        { "kind": "int64", "value": 5 },
+        { "kind": "int64", "value": -1 },
+        { "kind": "int64", "value": 3 }
+      ],
+      "b": [
+        { "kind": "float64", "value": 2.5 },
+        { "kind": "float64", "value": 4.0 },
+        { "kind": "float64", "value": -7.5 }
+      ]
+    }
+  },
+  "expected_series": {
+    "index": [
+      { "kind": "utf8", "value": "a" },
+      { "kind": "utf8", "value": "b" }
+    ],
+    "values": [
+      { "kind": "float64", "value": 2.3333333333333335 },
+      { "kind": "float64", "value": -0.3333333333333333 }
+    ]
+  }
+}

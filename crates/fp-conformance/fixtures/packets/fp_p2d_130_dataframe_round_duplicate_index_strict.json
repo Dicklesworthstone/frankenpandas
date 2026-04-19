@@ -1,0 +1,47 @@
+{
+  "packet_id": "FP-P2D-130",
+  "case_id": "dataframe_round_duplicate_index_strict",
+  "mode": "strict",
+  "operation": "dataframe_round",
+  "round_decimals": 1,
+  "frame": {
+    "index": [
+      { "kind": "utf8", "value": "dup" },
+      { "kind": "utf8", "value": "dup" },
+      { "kind": "utf8", "value": "z" }
+    ],
+    "column_order": ["a", "b"],
+    "columns": {
+      "a": [
+        { "kind": "float64", "value": 1.24 },
+        { "kind": "float64", "value": 5.66 },
+        { "kind": "float64", "value": -2.24 }
+      ],
+      "b": [
+        { "kind": "float64", "value": -2.66 },
+        { "kind": "float64", "value": 3.04 },
+        { "kind": "float64", "value": 0.05 }
+      ]
+    }
+  },
+  "expected_frame": {
+    "index": [
+      { "kind": "utf8", "value": "dup" },
+      { "kind": "utf8", "value": "dup" },
+      { "kind": "utf8", "value": "z" }
+    ],
+    "column_order": ["a", "b"],
+    "columns": {
+      "a": [
+        { "kind": "float64", "value": 1.2 },
+        { "kind": "float64", "value": 5.7 },
+        { "kind": "float64", "value": -2.2 }
+      ],
+      "b": [
+        { "kind": "float64", "value": -2.7 },
+        { "kind": "float64", "value": 3.0 },
+        { "kind": "float64", "value": 0.1 }
+      ]
+    }
+  }
+}
