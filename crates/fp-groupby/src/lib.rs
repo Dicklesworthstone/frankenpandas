@@ -158,14 +158,12 @@ fn groupby_sum_with_global_allocator(
     aligned_values_values: &[Scalar],
     options: GroupByOptions,
 ) -> Result<Series, GroupByError> {
-    if let Some((out_index, out_values)) =
-        try_groupby_sum_dense_int64(
-            aligned_keys_values,
-            aligned_values_values,
-            options.dropna,
-            options.sort,
-        )
-    {
+    if let Some((out_index, out_values)) = try_groupby_sum_dense_int64(
+        aligned_keys_values,
+        aligned_values_values,
+        options.dropna,
+        options.sort,
+    ) {
         let out_column = Column::from_values(out_values)?;
         return Ok(Series::new("sum", Index::new(out_index), out_column)?);
     }

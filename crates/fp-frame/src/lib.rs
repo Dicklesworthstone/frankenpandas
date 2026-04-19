@@ -10217,7 +10217,11 @@ impl DatetimeAccessor<'_> {
                 _ => Scalar::Null(NullKind::NaN),
             },
             [year, month, day] => {
-                match (year.parse::<i32>(), month.parse::<u32>(), day.parse::<u32>()) {
+                match (
+                    year.parse::<i32>(),
+                    month.parse::<u32>(),
+                    day.parse::<u32>(),
+                ) {
                     (Ok(y), Ok(m), Ok(d)) if NaiveDate::from_ymd_opt(y, m, d).is_some() => {
                         Scalar::Utf8(format!("{trimmed} 00:00:00"))
                     }
@@ -43905,7 +43909,10 @@ mod tests {
         .unwrap();
         let result = s.str().expandtabs(4).unwrap();
         assert_eq!(result.column().values()[0], Scalar::Utf8("a   b".into()));
-        assert_eq!(result.column().values()[1], Scalar::Utf8("a   b   c".into()));
+        assert_eq!(
+            result.column().values()[1],
+            Scalar::Utf8("a   b   c".into())
+        );
         assert_eq!(
             result.column().values()[2],
             Scalar::Utf8("ab  cd\nxy  z".into())
@@ -48460,7 +48467,13 @@ mod tests {
     fn test_dt_to_timestamp_rejects_malformed_periods() {
         let s = Series::from_values(
             "periods",
-            vec![0_i64.into(), 1_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+            ],
             vec![
                 Scalar::Utf8("2024-13".to_string()),
                 Scalar::Utf8("2024-02-30".to_string()),

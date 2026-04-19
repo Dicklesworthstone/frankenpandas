@@ -450,7 +450,10 @@ pub enum FixtureOperation {
     SeriesStrLen,
     #[serde(rename = "series_str_contains", alias = "series_str_contains_default")]
     SeriesStrContains,
-    #[serde(rename = "series_str_startswith", alias = "series_str_startswith_default")]
+    #[serde(
+        rename = "series_str_startswith",
+        alias = "series_str_startswith_default"
+    )]
     SeriesStrStartswith,
     #[serde(rename = "series_str_endswith", alias = "series_str_endswith_default")]
     SeriesStrEndswith,
@@ -486,7 +489,10 @@ pub enum FixtureOperation {
     SeriesStrIslower,
     #[serde(rename = "series_str_isupper", alias = "series_str_isupper_default")]
     SeriesStrIsupper,
-    #[serde(rename = "series_str_isnumeric", alias = "series_str_isnumeric_default")]
+    #[serde(
+        rename = "series_str_isnumeric",
+        alias = "series_str_isnumeric_default"
+    )]
     SeriesStrIsnumeric,
     #[serde(rename = "series_str_find", alias = "series_str_find_default")]
     SeriesStrFind,
@@ -502,21 +508,39 @@ pub enum FixtureOperation {
     SeriesStrCount,
     #[serde(rename = "series_str_wrap", alias = "series_str_wrap_default")]
     SeriesStrWrap,
-    #[serde(rename = "series_str_normalize", alias = "series_str_normalize_default")]
+    #[serde(
+        rename = "series_str_normalize",
+        alias = "series_str_normalize_default"
+    )]
     SeriesStrNormalize,
-    #[serde(rename = "series_str_fullmatch", alias = "series_str_fullmatch_default")]
+    #[serde(
+        rename = "series_str_fullmatch",
+        alias = "series_str_fullmatch_default"
+    )]
     SeriesStrFullmatch,
     #[serde(rename = "series_str_match", alias = "series_str_match_default")]
     SeriesStrMatch,
-    #[serde(rename = "series_str_removeprefix", alias = "series_str_removeprefix_default")]
+    #[serde(
+        rename = "series_str_removeprefix",
+        alias = "series_str_removeprefix_default"
+    )]
     SeriesStrRemoveprefix,
-    #[serde(rename = "series_str_removesuffix", alias = "series_str_removesuffix_default")]
+    #[serde(
+        rename = "series_str_removesuffix",
+        alias = "series_str_removesuffix_default"
+    )]
     SeriesStrRemovesuffix,
-    #[serde(rename = "series_str_split_get", alias = "series_str_split_get_default")]
+    #[serde(
+        rename = "series_str_split_get",
+        alias = "series_str_split_get_default"
+    )]
     SeriesStrSplitGet,
     #[serde(rename = "series_str_join", alias = "series_str_join_default")]
     SeriesStrJoin,
-    #[serde(rename = "series_str_isdecimal", alias = "series_str_isdecimal_default")]
+    #[serde(
+        rename = "series_str_isdecimal",
+        alias = "series_str_isdecimal_default"
+    )]
     SeriesStrIsdecimal,
     #[serde(rename = "series_str_istitle", alias = "series_str_istitle_default")]
     SeriesStrIstitle,
@@ -526,31 +550,64 @@ pub enum FixtureOperation {
     SeriesStrEncode,
     #[serde(rename = "series_str_decode", alias = "series_str_decode_default")]
     SeriesStrDecode,
-    #[serde(rename = "series_str_translate", alias = "series_str_translate_default")]
+    #[serde(
+        rename = "series_str_translate",
+        alias = "series_str_translate_default"
+    )]
     SeriesStrTranslate,
-    #[serde(rename = "series_str_expandtabs", alias = "series_str_expandtabs_default")]
+    #[serde(
+        rename = "series_str_expandtabs",
+        alias = "series_str_expandtabs_default"
+    )]
     SeriesStrExpandtabs,
     #[serde(rename = "series_str_index_of", alias = "series_str_index_of_default")]
     SeriesStrIndexOf,
-    #[serde(rename = "series_str_rindex_of", alias = "series_str_rindex_of_default")]
+    #[serde(
+        rename = "series_str_rindex_of",
+        alias = "series_str_rindex_of_default"
+    )]
     SeriesStrRindexOf,
-    #[serde(rename = "series_str_split_count", alias = "series_str_split_count_default")]
+    #[serde(
+        rename = "series_str_split_count",
+        alias = "series_str_split_count_default"
+    )]
     SeriesStrSplitCount,
-    #[serde(rename = "series_str_rsplit_get", alias = "series_str_rsplit_get_default")]
+    #[serde(
+        rename = "series_str_rsplit_get",
+        alias = "series_str_rsplit_get_default"
+    )]
     SeriesStrRsplitGet,
-    #[serde(rename = "series_str_split_regex_get", alias = "series_str_split_regex_get_default")]
+    #[serde(
+        rename = "series_str_split_regex_get",
+        alias = "series_str_split_regex_get_default"
+    )]
     SeriesStrSplitRegexGet,
-    #[serde(rename = "series_str_count_matches", alias = "series_str_count_matches_default")]
+    #[serde(
+        rename = "series_str_count_matches",
+        alias = "series_str_count_matches_default"
+    )]
     SeriesStrCountMatches,
-    #[serde(rename = "series_str_count_literal", alias = "series_str_count_literal_default")]
+    #[serde(
+        rename = "series_str_count_literal",
+        alias = "series_str_count_literal_default"
+    )]
     SeriesStrCountLiteral,
     #[serde(rename = "series_str_findall", alias = "series_str_findall_default")]
     SeriesStrFindall,
-    #[serde(rename = "series_str_contains_any", alias = "series_str_contains_any_default")]
+    #[serde(
+        rename = "series_str_contains_any",
+        alias = "series_str_contains_any_default"
+    )]
     SeriesStrContainsAny,
-    #[serde(rename = "series_str_startswith_any", alias = "series_str_startswith_any_default")]
+    #[serde(
+        rename = "series_str_startswith_any",
+        alias = "series_str_startswith_any_default"
+    )]
     SeriesStrStartswithAny,
-    #[serde(rename = "series_str_endswith_any", alias = "series_str_endswith_any_default")]
+    #[serde(
+        rename = "series_str_endswith_any",
+        alias = "series_str_endswith_any_default"
+    )]
     SeriesStrEndswithAny,
     #[serde(rename = "series_dt_year", alias = "series_dt_year_default")]
     SeriesDtYear,
@@ -570,25 +627,52 @@ pub enum FixtureOperation {
     SeriesDtQuarter,
     #[serde(rename = "series_dt_dayofyear", alias = "series_dt_dayofyear_default")]
     SeriesDtDayofyear,
-    #[serde(rename = "series_dt_weekofyear", alias = "series_dt_weekofyear_default")]
+    #[serde(
+        rename = "series_dt_weekofyear",
+        alias = "series_dt_weekofyear_default"
+    )]
     SeriesDtWeekofyear,
-    #[serde(rename = "series_dt_is_month_start", alias = "series_dt_is_month_start_default")]
+    #[serde(
+        rename = "series_dt_is_month_start",
+        alias = "series_dt_is_month_start_default"
+    )]
     SeriesDtIsMonthStart,
-    #[serde(rename = "series_dt_is_month_end", alias = "series_dt_is_month_end_default")]
+    #[serde(
+        rename = "series_dt_is_month_end",
+        alias = "series_dt_is_month_end_default"
+    )]
     SeriesDtIsMonthEnd,
-    #[serde(rename = "series_dt_is_year_start", alias = "series_dt_is_year_start_default")]
+    #[serde(
+        rename = "series_dt_is_year_start",
+        alias = "series_dt_is_year_start_default"
+    )]
     SeriesDtIsYearStart,
-    #[serde(rename = "series_dt_is_year_end", alias = "series_dt_is_year_end_default")]
+    #[serde(
+        rename = "series_dt_is_year_end",
+        alias = "series_dt_is_year_end_default"
+    )]
     SeriesDtIsYearEnd,
     #[serde(rename = "series_dt_date", alias = "series_dt_date_default")]
     SeriesDtDate,
-    #[serde(rename = "series_dt_days_in_month", alias = "series_dt_days_in_month_default")]
+    #[serde(
+        rename = "series_dt_days_in_month",
+        alias = "series_dt_days_in_month_default"
+    )]
     SeriesDtDaysInMonth,
-    #[serde(rename = "series_dt_is_leap_year", alias = "series_dt_is_leap_year_default")]
+    #[serde(
+        rename = "series_dt_is_leap_year",
+        alias = "series_dt_is_leap_year_default"
+    )]
     SeriesDtIsLeapYear,
-    #[serde(rename = "series_dt_is_quarter_start", alias = "series_dt_is_quarter_start_default")]
+    #[serde(
+        rename = "series_dt_is_quarter_start",
+        alias = "series_dt_is_quarter_start_default"
+    )]
     SeriesDtIsQuarterStart,
-    #[serde(rename = "series_dt_is_quarter_end", alias = "series_dt_is_quarter_end_default")]
+    #[serde(
+        rename = "series_dt_is_quarter_end",
+        alias = "series_dt_is_quarter_end_default"
+    )]
     SeriesDtIsQuarterEnd,
     #[serde(rename = "series_dt_strftime", alias = "series_dt_strftime_default")]
     SeriesDtStrftime,
@@ -598,13 +682,22 @@ pub enum FixtureOperation {
     SeriesDtCeil,
     #[serde(rename = "series_dt_round", alias = "series_dt_round_default")]
     SeriesDtRound,
-    #[serde(rename = "series_dt_month_name", alias = "series_dt_month_name_default")]
+    #[serde(
+        rename = "series_dt_month_name",
+        alias = "series_dt_month_name_default"
+    )]
     SeriesDtMonthName,
     #[serde(rename = "series_dt_day_name", alias = "series_dt_day_name_default")]
     SeriesDtDayName,
-    #[serde(rename = "series_dt_total_seconds", alias = "series_dt_total_seconds_default")]
+    #[serde(
+        rename = "series_dt_total_seconds",
+        alias = "series_dt_total_seconds_default"
+    )]
     SeriesDtTotalSeconds,
-    #[serde(rename = "series_dt_to_timestamp", alias = "series_dt_to_timestamp_default")]
+    #[serde(
+        rename = "series_dt_to_timestamp",
+        alias = "series_dt_to_timestamp_default"
+    )]
     SeriesDtToTimestamp,
     #[serde(rename = "dataframe_loc", alias = "data_frame_loc")]
     DataFrameLoc,
@@ -815,7 +908,10 @@ pub enum FixtureOperation {
     SeriesRollingMax,
     #[serde(rename = "series_rolling_var", alias = "series_rolling_var_default")]
     SeriesRollingVar,
-    #[serde(rename = "series_rolling_count", alias = "series_rolling_count_default")]
+    #[serde(
+        rename = "series_rolling_count",
+        alias = "series_rolling_count_default"
+    )]
     SeriesRollingCount,
     #[serde(
         rename = "series_expanding_count",
@@ -827,17 +923,35 @@ pub enum FixtureOperation {
         alias = "series_expanding_quantile_default"
     )]
     SeriesExpandingQuantile,
-    #[serde(rename = "series_expanding_sum", alias = "series_expanding_sum_default")]
+    #[serde(
+        rename = "series_expanding_sum",
+        alias = "series_expanding_sum_default"
+    )]
     SeriesExpandingSum,
-    #[serde(rename = "series_expanding_mean", alias = "series_expanding_mean_default")]
+    #[serde(
+        rename = "series_expanding_mean",
+        alias = "series_expanding_mean_default"
+    )]
     SeriesExpandingMean,
-    #[serde(rename = "series_expanding_min", alias = "series_expanding_min_default")]
+    #[serde(
+        rename = "series_expanding_min",
+        alias = "series_expanding_min_default"
+    )]
     SeriesExpandingMin,
-    #[serde(rename = "series_expanding_max", alias = "series_expanding_max_default")]
+    #[serde(
+        rename = "series_expanding_max",
+        alias = "series_expanding_max_default"
+    )]
     SeriesExpandingMax,
-    #[serde(rename = "series_expanding_std", alias = "series_expanding_std_default")]
+    #[serde(
+        rename = "series_expanding_std",
+        alias = "series_expanding_std_default"
+    )]
     SeriesExpandingStd,
-    #[serde(rename = "series_expanding_var", alias = "series_expanding_var_default")]
+    #[serde(
+        rename = "series_expanding_var",
+        alias = "series_expanding_var_default"
+    )]
     SeriesExpandingVar,
     #[serde(rename = "series_ewm_mean", alias = "series_ewm_mean_default")]
     SeriesEwmMean,
@@ -12515,24 +12629,12 @@ fn execute_series_module_utility_fixture_operation(
                 .pad(width, side, fillchar)
                 .map_err(|err| err.to_string())
         }
-        FixtureOperation::SeriesStrIsdigit => {
-            series.str().isdigit().map_err(|err| err.to_string())
-        }
-        FixtureOperation::SeriesStrIsalpha => {
-            series.str().isalpha().map_err(|err| err.to_string())
-        }
-        FixtureOperation::SeriesStrIsalnum => {
-            series.str().isalnum().map_err(|err| err.to_string())
-        }
-        FixtureOperation::SeriesStrIsspace => {
-            series.str().isspace().map_err(|err| err.to_string())
-        }
-        FixtureOperation::SeriesStrIslower => {
-            series.str().islower().map_err(|err| err.to_string())
-        }
-        FixtureOperation::SeriesStrIsupper => {
-            series.str().isupper().map_err(|err| err.to_string())
-        }
+        FixtureOperation::SeriesStrIsdigit => series.str().isdigit().map_err(|err| err.to_string()),
+        FixtureOperation::SeriesStrIsalpha => series.str().isalpha().map_err(|err| err.to_string()),
+        FixtureOperation::SeriesStrIsalnum => series.str().isalnum().map_err(|err| err.to_string()),
+        FixtureOperation::SeriesStrIsspace => series.str().isspace().map_err(|err| err.to_string()),
+        FixtureOperation::SeriesStrIslower => series.str().islower().map_err(|err| err.to_string()),
+        FixtureOperation::SeriesStrIsupper => series.str().isupper().map_err(|err| err.to_string()),
         FixtureOperation::SeriesStrIsnumeric => {
             series.str().isnumeric().map_err(|err| err.to_string())
         }
@@ -12604,10 +12706,7 @@ fn execute_series_module_utility_fixture_operation(
                 .regex_pattern
                 .as_deref()
                 .ok_or_else(|| "regex_pattern required for series_str_match".to_owned())?;
-            series
-                .str()
-                .match_regex(pat)
-                .map_err(|err| err.to_string())
+            series.str().match_regex(pat).map_err(|err| err.to_string())
         }
         FixtureOperation::SeriesStrRemoveprefix => {
             let prefix = fixture
@@ -12637,7 +12736,10 @@ fn execute_series_module_utility_fixture_operation(
             let n = fixture
                 .str_split_n
                 .ok_or_else(|| "str_split_n required for series_str_split_get".to_owned())?;
-            series.str().split_get(pat, n).map_err(|err| err.to_string())
+            series
+                .str()
+                .split_get(pat, n)
+                .map_err(|err| err.to_string())
         }
         FixtureOperation::SeriesStrJoin => {
             let from = fixture
@@ -12653,9 +12755,7 @@ fn execute_series_module_utility_fixture_operation(
         FixtureOperation::SeriesStrIsdecimal => {
             series.str().isdecimal().map_err(|err| err.to_string())
         }
-        FixtureOperation::SeriesStrIstitle => {
-            series.str().istitle().map_err(|err| err.to_string())
-        }
+        FixtureOperation::SeriesStrIstitle => series.str().istitle().map_err(|err| err.to_string()),
         FixtureOperation::SeriesStrCasefold => {
             series.str().casefold().map_err(|err| err.to_string())
         }
@@ -12666,19 +12766,19 @@ fn execute_series_module_utility_fixture_operation(
             series.str().decode("utf-8").map_err(|err| err.to_string())
         }
         FixtureOperation::SeriesStrTranslate => {
-            let from = fixture
-                .str_translate_from
-                .as_deref()
-                .unwrap_or("");
-            let to = fixture
-                .str_translate_to
-                .as_deref()
-                .unwrap_or("");
-            series.str().translate(from, to).map_err(|err| err.to_string())
+            let from = fixture.str_translate_from.as_deref().unwrap_or("");
+            let to = fixture.str_translate_to.as_deref().unwrap_or("");
+            series
+                .str()
+                .translate(from, to)
+                .map_err(|err| err.to_string())
         }
         FixtureOperation::SeriesStrExpandtabs => {
             let tabsize = fixture.str_expandtabs_size.unwrap_or(8);
-            series.str().expandtabs(tabsize).map_err(|err| err.to_string())
+            series
+                .str()
+                .expandtabs(tabsize)
+                .map_err(|err| err.to_string())
         }
         FixtureOperation::SeriesStrIndexOf => {
             let sub = fixture.str_sub.as_deref().unwrap_or("");
@@ -12695,25 +12795,40 @@ fn execute_series_module_utility_fixture_operation(
         FixtureOperation::SeriesStrRsplitGet => {
             let pat = fixture.str_split_pat.as_deref().unwrap_or("");
             let n = fixture.str_split_n.unwrap_or(0);
-            series.str().rsplit_get(pat, n).map_err(|err| err.to_string())
+            series
+                .str()
+                .rsplit_get(pat, n)
+                .map_err(|err| err.to_string())
         }
         FixtureOperation::SeriesStrSplitRegexGet => {
             let pat = fixture.regex_pattern.as_deref().unwrap_or("");
             let n = fixture.str_split_n.unwrap_or(0);
-            series.str().split_regex_get(pat, n).map_err(|err| err.to_string())
+            series
+                .str()
+                .split_regex_get(pat, n)
+                .map_err(|err| err.to_string())
         }
         FixtureOperation::SeriesStrCountMatches => {
             let pat = fixture.regex_pattern.as_deref().unwrap_or("");
-            series.str().count_matches(pat).map_err(|err| err.to_string())
+            series
+                .str()
+                .count_matches(pat)
+                .map_err(|err| err.to_string())
         }
         FixtureOperation::SeriesStrCountLiteral => {
             let pat = fixture.str_sub.as_deref().unwrap_or("");
-            series.str().count_literal(pat).map_err(|err| err.to_string())
+            series
+                .str()
+                .count_literal(pat)
+                .map_err(|err| err.to_string())
         }
         FixtureOperation::SeriesStrFindall => {
             let pat = fixture.regex_pattern.as_deref().unwrap_or("");
             let sep = fixture.str_findall_sep.as_deref().unwrap_or(",");
-            series.str().findall(pat, sep).map_err(|err| err.to_string())
+            series
+                .str()
+                .findall(pat, sep)
+                .map_err(|err| err.to_string())
         }
         FixtureOperation::SeriesStrContainsAny => {
             let pats: Vec<&str> = fixture
@@ -12721,7 +12836,10 @@ fn execute_series_module_utility_fixture_operation(
                 .as_ref()
                 .map(|v| v.iter().map(String::as_str).collect())
                 .unwrap_or_default();
-            series.str().contains_any(&pats).map_err(|err| err.to_string())
+            series
+                .str()
+                .contains_any(&pats)
+                .map_err(|err| err.to_string())
         }
         FixtureOperation::SeriesStrStartswithAny => {
             let pats: Vec<&str> = fixture
@@ -12729,7 +12847,10 @@ fn execute_series_module_utility_fixture_operation(
                 .as_ref()
                 .map(|v| v.iter().map(String::as_str).collect())
                 .unwrap_or_default();
-            series.str().startswith_any(&pats).map_err(|err| err.to_string())
+            series
+                .str()
+                .startswith_any(&pats)
+                .map_err(|err| err.to_string())
         }
         FixtureOperation::SeriesStrEndswithAny => {
             let pats: Vec<&str> = fixture
@@ -12737,7 +12858,10 @@ fn execute_series_module_utility_fixture_operation(
                 .as_ref()
                 .map(|v| v.iter().map(String::as_str).collect())
                 .unwrap_or_default();
-            series.str().endswith_any(&pats).map_err(|err| err.to_string())
+            series
+                .str()
+                .endswith_any(&pats)
+                .map_err(|err| err.to_string())
         }
         FixtureOperation::SeriesDtYear => series.dt().year().map_err(|err| err.to_string()),
         FixtureOperation::SeriesDtMonth => series.dt().month().map_err(|err| err.to_string()),
@@ -12748,9 +12872,7 @@ fn execute_series_module_utility_fixture_operation(
         FixtureOperation::SeriesDtDayofweek => {
             series.dt().dayofweek().map_err(|err| err.to_string())
         }
-        FixtureOperation::SeriesDtQuarter => {
-            series.dt().quarter().map_err(|err| err.to_string())
-        }
+        FixtureOperation::SeriesDtQuarter => series.dt().quarter().map_err(|err| err.to_string()),
         FixtureOperation::SeriesDtDayofyear => {
             series.dt().dayofyear().map_err(|err| err.to_string())
         }
@@ -12769,18 +12891,17 @@ fn execute_series_module_utility_fixture_operation(
         FixtureOperation::SeriesDtIsYearEnd => {
             series.dt().is_year_end().map_err(|err| err.to_string())
         }
-        FixtureOperation::SeriesDtDate => {
-            series.dt().date().map_err(|err| err.to_string())
-        }
+        FixtureOperation::SeriesDtDate => series.dt().date().map_err(|err| err.to_string()),
         FixtureOperation::SeriesDtDaysInMonth => {
             series.dt().days_in_month().map_err(|err| err.to_string())
         }
         FixtureOperation::SeriesDtIsLeapYear => {
             series.dt().is_leap_year().map_err(|err| err.to_string())
         }
-        FixtureOperation::SeriesDtIsQuarterStart => {
-            series.dt().is_quarter_start().map_err(|err| err.to_string())
-        }
+        FixtureOperation::SeriesDtIsQuarterStart => series
+            .dt()
+            .is_quarter_start()
+            .map_err(|err| err.to_string()),
         FixtureOperation::SeriesDtIsQuarterEnd => {
             series.dt().is_quarter_end().map_err(|err| err.to_string())
         }
@@ -12815,9 +12936,7 @@ fn execute_series_module_utility_fixture_operation(
         FixtureOperation::SeriesDtMonthName => {
             series.dt().month_name().map_err(|err| err.to_string())
         }
-        FixtureOperation::SeriesDtDayName => {
-            series.dt().day_name().map_err(|err| err.to_string())
-        }
+        FixtureOperation::SeriesDtDayName => series.dt().day_name().map_err(|err| err.to_string()),
         FixtureOperation::SeriesDtTotalSeconds => {
             series.dt().total_seconds().map_err(|err| err.to_string())
         }
