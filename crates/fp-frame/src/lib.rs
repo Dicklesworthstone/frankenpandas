@@ -10179,35 +10179,62 @@ impl DatetimeAccessor<'_> {
         )
     }
 
+    fn normalize_period_like_timestamp(s: &str) -> Scalar {
+        let trimmed = s.trim();
+        if trimmed.is_empty() {
+            return Scalar::Null(NullKind::NaN);
+        }
+
+        if has_tz_suffix(trimmed) {
+            return if parse_tz_aware_datetime(trimmed).is_ok() {
+                Scalar::Utf8(trimmed.to_string())
+            } else {
+                Scalar::Null(NullKind::NaN)
+            };
+        }
+
+        if trimmed.contains('T') || trimmed.contains(' ') {
+            return if parse_naive_datetime_value(trimmed).is_ok() {
+                Scalar::Utf8(trimmed.to_string())
+            } else {
+                Scalar::Null(NullKind::NaN)
+            };
+        }
+
+        let parts: Vec<&str> = trimmed.split('-').collect();
+        match parts.as_slice() {
+            [year] => {
+                if year.parse::<i32>().is_ok() {
+                    Scalar::Utf8(format!("{year}-01-01 00:00:00"))
+                } else {
+                    Scalar::Null(NullKind::NaN)
+                }
+            }
+            [year, month] => match (year.parse::<i32>(), month.parse::<u32>()) {
+                (Ok(y), Ok(m)) if NaiveDate::from_ymd_opt(y, m, 1).is_some() => {
+                    Scalar::Utf8(format!("{trimmed}-01 00:00:00"))
+                }
+                _ => Scalar::Null(NullKind::NaN),
+            },
+            [year, month, day] => {
+                match (year.parse::<i32>(), month.parse::<u32>(), day.parse::<u32>()) {
+                    (Ok(y), Ok(m), Ok(d)) if NaiveDate::from_ymd_opt(y, m, d).is_some() => {
+                        Scalar::Utf8(format!("{trimmed} 00:00:00"))
+                    }
+                    _ => Scalar::Null(NullKind::NaN),
+                }
+            }
+            _ => Scalar::Null(NullKind::NaN),
+        }
+    }
+
     /// Convert period-like strings to full timestamp strings.
     ///
     /// Matches `pd.Series.dt.to_timestamp()`. For date-only strings ("YYYY-MM-DD"),
     /// appends "00:00:00" to produce a full datetime. Month periods ("YYYY-MM")
     /// become "YYYY-MM-01 00:00:00". Year periods ("YYYY") become "YYYY-01-01 00:00:00".
     pub fn to_timestamp(&self) -> Result<Series, FrameError> {
-        self.extract_component(
-            |s| {
-                let trimmed = s.trim();
-                // Already a full datetime?
-                if trimmed.contains('T') || trimmed.contains(' ') {
-                    return Scalar::Utf8(trimmed.to_string());
-                }
-                let parts: Vec<&str> = trimmed.split('-').collect();
-                match parts.len() {
-                    3 => Scalar::Utf8(format!("{trimmed} 00:00:00")),
-                    2 => Scalar::Utf8(format!("{trimmed}-01 00:00:00")),
-                    1 => {
-                        if parts[0].parse::<i64>().is_ok() {
-                            Scalar::Utf8(format!("{}-01-01 00:00:00", parts[0]))
-                        } else {
-                            Scalar::Null(NullKind::NaN)
-                        }
-                    }
-                    _ => Scalar::Null(NullKind::NaN),
-                }
-            },
-            self.series.name(),
-        )
+        self.extract_component(Self::normalize_period_like_timestamp, self.series.name())
     }
 
     /// Round each datetime down (floor) to the given frequency.
@@ -48426,6 +48453,34 @@ mod tests {
         assert_eq!(
             result.column().values()[2],
             Scalar::Utf8("2023-01-01 00:00:00".to_string())
+        );
+    }
+
+    #[test]
+    fn test_dt_to_timestamp_rejects_malformed_periods() {
+        let s = Series::from_values(
+            "periods",
+            vec![0_i64.into(), 1_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Utf8("2024-13".to_string()),
+                Scalar::Utf8("2024-02-30".to_string()),
+                Scalar::Utf8("2024-02-29T25:00:00".to_string()),
+                Scalar::Utf8("2024-02-29".to_string()),
+                Scalar::Utf8("2024-02-29T12:30:00".to_string()),
+            ],
+        )
+        .unwrap();
+        let result = s.dt().to_timestamp().unwrap();
+        assert_eq!(result.column().values()[0], Scalar::Null(NullKind::NaN));
+        assert_eq!(result.column().values()[1], Scalar::Null(NullKind::NaN));
+        assert_eq!(result.column().values()[2], Scalar::Null(NullKind::NaN));
+        assert_eq!(
+            result.column().values()[3],
+            Scalar::Utf8("2024-02-29 00:00:00".to_string())
+        );
+        assert_eq!(
+            result.column().values()[4],
+            Scalar::Utf8("2024-02-29T12:30:00".to_string())
         );
     }
 

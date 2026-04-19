@@ -1,0 +1,39 @@
+{
+  "packet_id": "FP-P2D-246",
+  "case_id": "series_dt_to_timestamp_invalid_periods_strict",
+  "mode": "strict",
+  "operation": "series_dt_to_timestamp",
+  "left": {
+    "name": "periods",
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 3 }
+    ],
+    "values": [
+      { "kind": "utf8", "value": "2024-13" },
+      { "kind": "utf8", "value": "2024-02-30" },
+      { "kind": "utf8", "value": "2024-02-29T25:00:00" },
+      { "kind": "utf8", "value": "2024-02-29" },
+      { "kind": "utf8", "value": "2024-02-29T12:30:00" }
+    ]
+  },
+  "expected_series": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 3 }
+    ],
+    "values": [
+      { "kind": "null", "value": "na_n" },
+      { "kind": "null", "value": "na_n" },
+      { "kind": "null", "value": "na_n" },
+      { "kind": "utf8", "value": "2024-02-29 00:00:00" },
+      { "kind": "utf8", "value": "2024-02-29T12:30:00" }
+    ]
+  }
+}
