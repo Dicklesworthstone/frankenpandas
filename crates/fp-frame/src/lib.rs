@@ -20,6 +20,7 @@ use fp_types::{DType, NullKind, Scalar, Timedelta, common_dtype};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use thiserror::Error;
+use unicode_casefold::UnicodeCaseFold;
 
 #[derive(Debug, Error)]
 pub enum FrameError {
@@ -9236,8 +9237,10 @@ impl StringAccessor<'_> {
     /// Matches `pd.Series.str.casefold()`. Like lower() but more aggressive
     /// for Unicode (e.g., German sharp s).
     pub fn casefold(&self) -> Result<Series, FrameError> {
-        // Rust's to_lowercase is already Unicode-aware and handles casefold semantics
-        self.apply_str(|s| Scalar::Utf8(s.to_lowercase()), self.series.name())
+        self.apply_str(
+            |s| Scalar::Utf8(s.case_fold().collect::<String>()),
+            self.series.name(),
+        )
     }
 
     /// Swap the case of each character.
@@ -9246,16 +9249,38 @@ impl StringAccessor<'_> {
     pub fn swapcase(&self) -> Result<Series, FrameError> {
         self.apply_str(
             |s| {
-                let swapped: String = s
-                    .chars()
-                    .flat_map(|c| {
-                        if c.is_uppercase() {
-                            c.to_lowercase().collect::<Vec<_>>()
+                let mut swapped = String::with_capacity(s.len());
+                let mut run = String::new();
+                let mut upper_run = None;
+
+                for ch in s.chars() {
+                    let is_upper = ch.is_uppercase();
+                    if upper_run == Some(is_upper) {
+                        run.push(ch);
+                        continue;
+                    }
+
+                    if let Some(previous_upper) = upper_run {
+                        if previous_upper {
+                            swapped.push_str(&run.to_lowercase());
                         } else {
-                            c.to_uppercase().collect::<Vec<_>>()
+                            swapped.push_str(&run.to_uppercase());
                         }
-                    })
-                    .collect();
+                        run.clear();
+                    }
+
+                    upper_run = Some(is_upper);
+                    run.push(ch);
+                }
+
+                if let Some(previous_upper) = upper_run {
+                    if previous_upper {
+                        swapped.push_str(&run.to_lowercase());
+                    } else {
+                        swapped.push_str(&run.to_uppercase());
+                    }
+                }
+
                 Scalar::Utf8(swapped)
             },
             self.series.name(),
@@ -39139,6 +39164,23 @@ mod tests {
     }
 
     #[test]
+    fn str_casefold_expands_sharp_s_and_sigma() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![
+                Scalar::Utf8("Straße".to_owned()),
+                Scalar::Utf8("ΟΣ".to_owned()),
+            ],
+        )
+        .unwrap();
+
+        let result = s.str().casefold().unwrap();
+        assert_eq!(result.values()[0], Scalar::Utf8("strasse".to_owned()));
+        assert_eq!(result.values()[1], Scalar::Utf8("οσ".to_owned()));
+    }
+
+    #[test]
     fn str_swapcase() {
         let s = Series::from_values(
             "x",
@@ -39149,6 +39191,15 @@ mod tests {
 
         let result = s.str().swapcase().unwrap();
         assert_eq!(result.values()[0], Scalar::Utf8("hELLO wORLD".to_owned()));
+    }
+
+    #[test]
+    fn str_swapcase_preserves_final_sigma_context() {
+        let s = Series::from_values("x", vec![0_i64.into()], vec![Scalar::Utf8("ΟΣ".to_owned())])
+            .unwrap();
+
+        let result = s.str().swapcase().unwrap();
+        assert_eq!(result.values()[0], Scalar::Utf8("ος".to_owned()));
     }
 
     #[test]
