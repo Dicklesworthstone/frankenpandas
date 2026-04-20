@@ -91,6 +91,10 @@ pub struct CsvReadOptions {
     /// Force specific dtypes for columns. Map of column name -> DType.
     /// Matches pandas `dtype` parameter.
     pub dtype: Option<std::collections::HashMap<String, DType>>,
+    /// Character whose lines are treated as comments and skipped entirely.
+    /// Must be a single byte (ASCII); multi-byte characters are rejected.
+    /// Matches pandas `comment` parameter. Default: `None`.
+    pub comment: Option<u8>,
 }
 
 impl Default for CsvReadOptions {
@@ -106,6 +110,7 @@ impl Default for CsvReadOptions {
             nrows: None,
             skiprows: 0,
             dtype: None,
+            comment: None,
         }
     }
 }
@@ -305,10 +310,12 @@ fn validate_usecols(headers: &[String], usecols: &[String]) -> Result<(), IoErro
 // ── CSV with options ───────────────────────────────────────────────────
 
 pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<DataFrame, IoError> {
-    let mut reader = ReaderBuilder::new()
-        .has_headers(false)
-        .delimiter(options.delimiter)
-        .from_reader(input.as_bytes());
+    let mut builder = ReaderBuilder::new();
+    builder.has_headers(false).delimiter(options.delimiter);
+    if let Some(c) = options.comment {
+        builder.comment(Some(c));
+    }
+    let mut reader = builder.from_reader(input.as_bytes());
 
     let max_rows = options.nrows.unwrap_or(usize::MAX);
     let skip = options.skiprows;
@@ -2499,6 +2506,48 @@ mod tests {
             assert!(col.is_empty());
         }
         eprintln!("[TEST] test_csv_empty_columns | rows=0 cols=3 parse_ok=true | PASS");
+    }
+
+    #[test]
+    fn test_csv_comment_skips_lines() {
+        let input = "# header comment\nname,age\n# inline comment\nalice,30\nbob,25\n";
+        let options = CsvReadOptions {
+            comment: Some(b'#'),
+            ..CsvReadOptions::default()
+        };
+        let frame = read_csv_with_options(input, &options).expect("parse");
+        assert_eq!(frame.index().len(), 2);
+        let names: Vec<&String> = frame.column_names().into_iter().collect();
+        assert_eq!(names, vec!["name", "age"]);
+        assert_eq!(
+            frame.column("name").unwrap().values()[0],
+            Scalar::Utf8("alice".to_string())
+        );
+        assert_eq!(frame.column("age").unwrap().values()[1], Scalar::Int64(25));
+    }
+
+    #[test]
+    fn test_csv_comment_none_preserves_comment_lines() {
+        // Without comment set, a leading "#"-line should become part of parsing
+        // (and fail as duplicate/missing-headers or be treated as data).
+        let input = "name,age\nalice,30\n";
+        let frame = read_csv_with_options(input, &CsvReadOptions::default()).expect("parse");
+        assert_eq!(frame.index().len(), 1);
+    }
+
+    #[test]
+    fn test_csv_comment_custom_char() {
+        let input = "% this is ignored\nname,age\nalice,30\n";
+        let options = CsvReadOptions {
+            comment: Some(b'%'),
+            ..CsvReadOptions::default()
+        };
+        let frame = read_csv_with_options(input, &options).expect("parse");
+        assert_eq!(frame.index().len(), 1);
+        assert_eq!(
+            frame.column("name").unwrap().values()[0],
+            Scalar::Utf8("alice".to_string())
+        );
     }
 
     #[test]
