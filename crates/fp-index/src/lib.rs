@@ -1632,6 +1632,85 @@ impl MultiIndex {
         (indexer, missing)
     }
 
+    /// Per-row flag for duplicated composite tuples.
+    ///
+    /// Matches `pd.MultiIndex.duplicated(keep='first'|'last'|False)`.
+    /// - `DuplicateKeep::First` marks all but the first occurrence of each
+    ///   tuple as duplicated (pandas default).
+    /// - `DuplicateKeep::Last` marks all but the last occurrence.
+    /// - `DuplicateKeep::None` marks every occurrence of any tuple that
+    ///   appears more than once.
+    #[must_use]
+    pub fn duplicated(&self, keep: DuplicateKeep) -> Vec<bool> {
+        let len = self.len();
+        let mut out = vec![false; len];
+        if len == 0 {
+            return out;
+        }
+        let mut first_seen: HashMap<Vec<IndexLabel>, usize> = HashMap::with_capacity(len);
+        let mut counts: HashMap<Vec<IndexLabel>, usize> = HashMap::with_capacity(len);
+
+        for row in 0..len {
+            let key: Vec<IndexLabel> =
+                self.levels.iter().map(|level| level[row].clone()).collect();
+            *counts.entry(key.clone()).or_insert(0) += 1;
+            first_seen.entry(key).or_insert(row);
+        }
+
+        match keep {
+            DuplicateKeep::First => {
+                for row in 0..len {
+                    let key: Vec<IndexLabel> =
+                        self.levels.iter().map(|level| level[row].clone()).collect();
+                    if first_seen[&key] != row {
+                        out[row] = true;
+                    }
+                }
+            }
+            DuplicateKeep::Last => {
+                let mut last_seen: HashMap<Vec<IndexLabel>, usize> = HashMap::with_capacity(len);
+                for row in 0..len {
+                    let key: Vec<IndexLabel> =
+                        self.levels.iter().map(|level| level[row].clone()).collect();
+                    last_seen.insert(key, row);
+                }
+                for row in 0..len {
+                    let key: Vec<IndexLabel> =
+                        self.levels.iter().map(|level| level[row].clone()).collect();
+                    if last_seen[&key] != row {
+                        out[row] = true;
+                    }
+                }
+            }
+            DuplicateKeep::None => {
+                for row in 0..len {
+                    let key: Vec<IndexLabel> =
+                        self.levels.iter().map(|level| level[row].clone()).collect();
+                    if counts[&key] > 1 {
+                        out[row] = true;
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Whether all composite tuples are unique.
+    ///
+    /// Matches `pd.MultiIndex.is_unique`.
+    #[must_use]
+    pub fn is_unique(&self) -> bool {
+        !self.duplicated(DuplicateKeep::First).iter().any(|&b| b)
+    }
+
+    /// Whether any composite tuple appears more than once.
+    ///
+    /// Matches `pd.MultiIndex.has_duplicates`.
+    #[must_use]
+    pub fn has_duplicates(&self) -> bool {
+        !self.is_unique()
+    }
+
     /// Per-row membership test against a set of tuples.
     ///
     /// Matches `pd.MultiIndex.isin(values)`. Each entry in the returned
@@ -3551,6 +3630,70 @@ mod tests {
         let mi = MultiIndex::from_tuples(Vec::new()).unwrap();
         let needles: Vec<Vec<IndexLabel>> = vec![vec!["a".into(), 1_i64.into()]];
         assert_eq!(mi.isin(&needles), Vec::<bool>::new());
+    }
+
+    #[test]
+    fn multi_index_duplicated_keep_first_default() {
+        let mi = MultiIndex::from_tuples(vec![
+            vec!["a".into(), 1_i64.into()],
+            vec!["b".into(), 2_i64.into()],
+            vec!["a".into(), 1_i64.into()],
+            vec!["c".into(), 3_i64.into()],
+        ])
+        .unwrap();
+        let dup = mi.duplicated(DuplicateKeep::First);
+        assert_eq!(dup, vec![false, false, true, false]);
+    }
+
+    #[test]
+    fn multi_index_duplicated_keep_last_marks_earlier_occurrences() {
+        let mi = MultiIndex::from_tuples(vec![
+            vec!["a".into(), 1_i64.into()],
+            vec!["a".into(), 1_i64.into()],
+            vec!["b".into(), 2_i64.into()],
+        ])
+        .unwrap();
+        let dup = mi.duplicated(DuplicateKeep::Last);
+        assert_eq!(dup, vec![true, false, false]);
+    }
+
+    #[test]
+    fn multi_index_duplicated_keep_none_marks_all_repeats() {
+        let mi = MultiIndex::from_tuples(vec![
+            vec!["a".into(), 1_i64.into()],
+            vec!["b".into(), 2_i64.into()],
+            vec!["a".into(), 1_i64.into()],
+            vec!["c".into(), 3_i64.into()],
+        ])
+        .unwrap();
+        let dup = mi.duplicated(DuplicateKeep::None);
+        assert_eq!(dup, vec![true, false, true, false]);
+    }
+
+    #[test]
+    fn multi_index_is_unique_true_and_false() {
+        let unique = MultiIndex::from_tuples(vec![
+            vec!["a".into(), 1_i64.into()],
+            vec!["b".into(), 2_i64.into()],
+        ])
+        .unwrap();
+        assert!(unique.is_unique());
+        assert!(!unique.has_duplicates());
+
+        let duped = MultiIndex::from_tuples(vec![
+            vec!["a".into(), 1_i64.into()],
+            vec!["a".into(), 1_i64.into()],
+        ])
+        .unwrap();
+        assert!(!duped.is_unique());
+        assert!(duped.has_duplicates());
+    }
+
+    #[test]
+    fn multi_index_duplicated_empty_yields_empty() {
+        let mi = MultiIndex::from_tuples(Vec::new()).unwrap();
+        assert_eq!(mi.duplicated(DuplicateKeep::First), Vec::<bool>::new());
+        assert!(mi.is_unique());
     }
 
     #[test]
