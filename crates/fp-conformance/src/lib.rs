@@ -20651,7 +20651,7 @@ mod tests {
             run_packet_by_id(&cfg, "FP-P2D-054", OracleMode::FixtureExpected).expect("report");
         assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-054"));
         assert!(
-            report.fixture_count >= 6,
+            report.fixture_count >= 9,
             "expected FP-P2D-054 dataframe duplicated/drop_duplicates fixtures"
         );
         assert!(report.is_green(), "expected report green: {report:?}");

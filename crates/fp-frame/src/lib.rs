@@ -30390,6 +30390,82 @@ mod tests {
     }
 
     #[test]
+    fn dataframe_drop_duplicates_subset_list_preserves_input_row_order() {
+        let df = DataFrame::from_dict_with_index(
+            vec![
+                (
+                    "a",
+                    vec![
+                        Scalar::Int64(1),
+                        Scalar::Int64(1),
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                        Scalar::Int64(1),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Utf8("x".to_owned()),
+                        Scalar::Utf8("x".to_owned()),
+                        Scalar::Utf8("y".to_owned()),
+                        Scalar::Utf8("x".to_owned()),
+                        Scalar::Utf8("x".to_owned()),
+                    ],
+                ),
+                (
+                    "c",
+                    vec![
+                        Scalar::Int64(10),
+                        Scalar::Int64(20),
+                        Scalar::Int64(30),
+                        Scalar::Int64(40),
+                        Scalar::Int64(50),
+                    ],
+                ),
+            ],
+            vec![
+                IndexLabel::from(10_i64),
+                IndexLabel::from(5_i64),
+                IndexLabel::from(10_i64),
+                IndexLabel::from(7_i64),
+                IndexLabel::from(5_i64),
+            ],
+        )
+        .unwrap();
+
+        let subset = vec!["b".to_owned(), "a".to_owned()];
+        let out = df
+            .drop_duplicates(Some(&subset), DuplicateKeep::First, false)
+            .unwrap();
+
+        assert_eq!(
+            out.index().labels(),
+            &[
+                IndexLabel::from(10_i64),
+                IndexLabel::from(10_i64),
+                IndexLabel::from(7_i64)
+            ]
+        );
+        assert_eq!(
+            out.column("a").unwrap().values(),
+            &[Scalar::Int64(1), Scalar::Int64(1), Scalar::Int64(2)]
+        );
+        assert_eq!(
+            out.column("b").unwrap().values(),
+            &[
+                Scalar::Utf8("x".to_owned()),
+                Scalar::Utf8("y".to_owned()),
+                Scalar::Utf8("x".to_owned())
+            ]
+        );
+        assert_eq!(
+            out.column("c").unwrap().values(),
+            &[Scalar::Int64(10), Scalar::Int64(30), Scalar::Int64(40)]
+        );
+    }
+
+    #[test]
     fn dataframe_drop_duplicates_keep_last_with_ignore_index_resets_labels() {
         let df = DataFrame::from_dict(
             &["a", "b"],
