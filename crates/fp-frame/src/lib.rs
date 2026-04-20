@@ -8327,6 +8327,55 @@ impl StringAccessor<'_> {
         self.apply_str(|s| Scalar::Utf8(s.replace(pat, repl)), self.series.name())
     }
 
+    /// Replace with pandas-parity case/regex/n options.
+    ///
+    /// Matches `pd.Series.str.replace(pat, repl, n=-1, case=True, regex=True)`:
+    /// - `regex=true` compiles `pat` as a regex; `regex=false` treats it
+    ///   as a literal substring.
+    /// - `case=false` performs case-insensitive matching. For literal
+    ///   mode this is implemented via case-folded `find` scanning.
+    /// - `n=None` (pandas `-1`) replaces every occurrence. `n=Some(k)`
+    ///   caps at the first `k` replacements per cell.
+    pub fn replace_with_options(
+        &self,
+        pat: &str,
+        repl: &str,
+        n: Option<usize>,
+        case: bool,
+        regex: bool,
+    ) -> Result<Series, FrameError> {
+        if regex {
+            let adjusted = if case {
+                pat.to_owned()
+            } else {
+                format!("(?i){pat}")
+            };
+            let re = Regex::new(&adjusted).map_err(|e| {
+                FrameError::CompatibilityRejected(format!("invalid regex pattern: {e}"))
+            })?;
+            let repl_owned = repl.to_string();
+            let limit = n;
+            self.apply_str(
+                |s| match limit {
+                    Some(k) => {
+                        Scalar::Utf8(re.replacen(s, k, repl_owned.as_str()).into_owned())
+                    }
+                    None => Scalar::Utf8(re.replace_all(s, repl_owned.as_str()).into_owned()),
+                },
+                self.series.name(),
+            )
+        } else {
+            let pat_owned = pat.to_string();
+            let repl_owned = repl.to_string();
+            self.apply_str(
+                |s| {
+                    Scalar::Utf8(literal_replace_n_case(s, &pat_owned, &repl_owned, n, case))
+                },
+                self.series.name(),
+            )
+        }
+    }
+
     /// Check whether each string starts with a prefix.
     pub fn startswith(&self, pat: &str) -> Result<Series, FrameError> {
         self.apply_str(|s| Scalar::Bool(s.starts_with(pat)), self.series.name())
@@ -9806,6 +9855,39 @@ impl StringAccessor<'_> {
             },
             self.series.name(),
         )
+    }
+}
+
+fn literal_replace_n_case(
+    haystack: &str,
+    needle: &str,
+    repl: &str,
+    max: Option<usize>,
+    case_sensitive: bool,
+) -> String {
+    if needle.is_empty() || max == Some(0) {
+        return haystack.to_string();
+    }
+
+    if case_sensitive {
+        return match max {
+            Some(k) => haystack.replacen(needle, repl, k),
+            None => haystack.replace(needle, repl),
+        };
+    }
+
+    // Case-insensitive literal replace: route through regex with an
+    // escaped pattern and the (?i) flag to avoid ambiguity from
+    // case-folding byte-length changes (e.g. ß → ss).
+    let escaped = regex::escape(needle);
+    let pattern = format!("(?i){escaped}");
+    let re = match Regex::new(&pattern) {
+        Ok(r) => r,
+        Err(_) => return haystack.to_string(),
+    };
+    match max {
+        Some(k) => re.replacen(haystack, k, repl).into_owned(),
+        None => re.replace_all(haystack, repl).into_owned(),
     }
 }
 
@@ -34848,6 +34930,95 @@ mod tests {
         .unwrap();
         let result = s.str().replace("world", "rust").unwrap();
         assert_eq!(result.values()[0], Scalar::Utf8("hello rust".into()));
+    }
+
+    #[test]
+    fn str_replace_with_options_n_caps_literal_replacements() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into()],
+            vec![Scalar::Utf8("a-a-a-a".into())],
+        )
+        .unwrap();
+        let r = s
+            .str()
+            .replace_with_options("a", "b", Some(2), true, false)
+            .unwrap();
+        assert_eq!(r.values()[0], Scalar::Utf8("b-b-a-a".into()));
+    }
+
+    #[test]
+    fn str_replace_with_options_n_none_replaces_all() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into()],
+            vec![Scalar::Utf8("a-a-a".into())],
+        )
+        .unwrap();
+        let r = s
+            .str()
+            .replace_with_options("a", "b", None, true, false)
+            .unwrap();
+        assert_eq!(r.values()[0], Scalar::Utf8("b-b-b".into()));
+    }
+
+    #[test]
+    fn str_replace_with_options_case_insensitive_literal() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into()],
+            vec![Scalar::Utf8("Hello WORLD hello World".into())],
+        )
+        .unwrap();
+        let r = s
+            .str()
+            .replace_with_options("world", "rust", None, false, false)
+            .unwrap();
+        assert_eq!(
+            r.values()[0],
+            Scalar::Utf8("Hello rust hello rust".into())
+        );
+    }
+
+    #[test]
+    fn str_replace_with_options_case_insensitive_regex() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into()],
+            vec![Scalar::Utf8("HELLO world".into())],
+        )
+        .unwrap();
+        let r = s
+            .str()
+            .replace_with_options(r"h\w+o", "-", None, false, true)
+            .unwrap();
+        assert_eq!(r.values()[0], Scalar::Utf8("- world".into()));
+    }
+
+    #[test]
+    fn str_replace_with_options_regex_n_caps_replacements() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into()],
+            vec![Scalar::Utf8("a1 a2 a3 a4".into())],
+        )
+        .unwrap();
+        let r = s
+            .str()
+            .replace_with_options(r"a\d", "X", Some(2), true, true)
+            .unwrap();
+        assert_eq!(r.values()[0], Scalar::Utf8("X X a3 a4".into()));
+    }
+
+    #[test]
+    fn str_replace_with_options_invalid_regex_errors() {
+        let s = Series::from_values("x", vec![0_i64.into()], vec![Scalar::Utf8("a".into())])
+            .unwrap();
+        let err = s
+            .str()
+            .replace_with_options("(unclosed", "X", None, true, true)
+            .unwrap_err();
+        assert!(matches!(err, FrameError::CompatibilityRejected(_)));
     }
 
     #[test]
