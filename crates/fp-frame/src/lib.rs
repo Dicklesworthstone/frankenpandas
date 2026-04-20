@@ -1318,6 +1318,24 @@ impl Series {
         self.binary_op_with_policy(other, ArithmeticOp::Pow, policy, ledger)
     }
 
+    /// Element-wise divmod: returns `(self // other, self % other)`.
+    ///
+    /// Matches `pd.Series.divmod(other)`. The two returned Series share the
+    /// aligned union index produced by `floordiv`/`modulo`; alignment and
+    /// null-propagation semantics follow the same rules as those operators.
+    pub fn divmod(&self, other: &Self) -> Result<(Self, Self), FrameError> {
+        let quotient = self.floordiv(other)?;
+        let remainder = self.modulo(other)?;
+        Ok((quotient, remainder))
+    }
+
+    /// Reversed element-wise divmod: returns `(other // self, other % self)`.
+    ///
+    /// Matches `pd.Series.rdivmod(other)`.
+    pub fn rdivmod(&self, other: &Self) -> Result<(Self, Self), FrameError> {
+        other.divmod(self)
+    }
+
     // ── Timedelta Arithmetic ──
 
     /// Add two Timedelta64 Series element-wise.
@@ -13048,19 +13066,30 @@ impl DataFrame {
             return Self::new(Index::new(Vec::new()), BTreeMap::new());
         }
 
+        let materialized_series = series_list
+            .into_iter()
+            .map(|series| {
+                if let Some(cat) = series.cat() {
+                    cat.to_values()
+                } else {
+                    Ok(series)
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
         // Phase 1: Compute global union index across all series.
         // Use N-way leapfrog triejoin fast-path if no duplicates are present.
-        let has_duplicates = series_list.iter().any(|s| s.index.has_duplicates());
+        let has_duplicates = materialized_series.iter().any(|s| s.index.has_duplicates());
         let union_index = if has_duplicates {
-            let mut union_index = series_list[0].index.clone();
-            for series in &series_list[1..] {
+            let mut union_index = materialized_series[0].index.clone();
+            for series in &materialized_series[1..] {
                 let plan = align_union(&union_index, &series.index);
                 validate_alignment_plan(&plan)?;
                 union_index = plan.union_index;
             }
             union_index
         } else {
-            let indexes: Vec<&Index> = series_list.iter().map(|s| &s.index).collect();
+            let indexes: Vec<&Index> = materialized_series.iter().map(|s| &s.index).collect();
             let plan = fp_index::multi_way_align(&indexes);
             plan.union_index
         };
@@ -13068,7 +13097,7 @@ impl DataFrame {
         // Phase 2: Reindex each series column exactly once against the final union index.
         let mut columns = BTreeMap::new();
         let mut column_order = Vec::new();
-        for series in series_list {
+        for series in materialized_series {
             let plan = align_union(&union_index, &series.index);
             // The right_positions map from the union to this series's positions.
             // Since union_index already contains all labels, the union_index in
@@ -18552,6 +18581,29 @@ impl DataFrame {
         sort: bool,
         dropna: bool,
     ) -> Result<DataFrameGroupBy<'_>, FrameError> {
+        self.groupby_full_options_with_observed(by, as_index, sort, dropna, true)
+    }
+
+    /// Group with explicit `observed` control for categorical inputs.
+    ///
+    /// The current DataFrame storage model materializes categorical columns to
+    /// their labels, so `observed=true` matches the pandas-observable result
+    /// surface for categorical groupers. `observed=false` still requires
+    /// DataFrame-level category metadata and is rejected for now.
+    pub fn groupby_full_options_with_observed(
+        &self,
+        by: &[&str],
+        as_index: bool,
+        sort: bool,
+        dropna: bool,
+        observed: bool,
+    ) -> Result<DataFrameGroupBy<'_>, FrameError> {
+        if !observed {
+            return Err(FrameError::CompatibilityRejected(
+                "groupby(..., observed=false) requires dataframe categorical metadata".to_owned(),
+            ));
+        }
+
         // Validate columns exist
         for col in by {
             if !self.columns.contains_key(*col) {
@@ -25955,6 +26007,37 @@ mod tests {
                 Scalar::Int64(1),
                 Scalar::Int64(2),
                 Scalar::Null(NullKind::Null)
+            ]
+        );
+    }
+
+    #[test]
+    fn dataframe_from_series_materializes_categorical_values() {
+        let key = Series::from_categorical_codes(
+            "key",
+            vec![0, 0, 1],
+            vec![
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("unused".into()),
+            ],
+            false,
+        )
+        .unwrap();
+        let value = Series::from_values(
+            "value",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+        )
+        .unwrap();
+
+        let df = DataFrame::from_series(vec![key, value]).unwrap();
+        assert_eq!(
+            df.column("key").unwrap().values(),
+            &[
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into())
             ]
         );
     }
@@ -38687,6 +38770,83 @@ mod tests {
         assert_eq!(result.values()[1], Scalar::Float64(9.0)); // 3^2
     }
 
+    #[test]
+    fn series_divmod_returns_floordiv_and_mod() {
+        let s1 = Series::from_values(
+            "a",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Float64(10.0), Scalar::Float64(7.0)],
+        )
+        .unwrap();
+
+        let s2 = Series::from_values(
+            "b",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Float64(3.0), Scalar::Float64(4.0)],
+        )
+        .unwrap();
+
+        let (q, r) = s1.divmod(&s2).unwrap();
+        assert_eq!(q.values()[0], Scalar::Float64(3.0)); // 10 // 3
+        assert_eq!(q.values()[1], Scalar::Float64(1.0)); // 7 // 4
+        assert_eq!(r.values()[0], Scalar::Float64(1.0)); // 10 % 3
+        assert_eq!(r.values()[1], Scalar::Float64(3.0)); // 7 % 4
+    }
+
+    #[test]
+    fn series_divmod_matches_scalar_operators() {
+        let s1 = Series::from_values(
+            "a",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Float64(15.0),
+                Scalar::Float64(22.0),
+                Scalar::Float64(9.0),
+            ],
+        )
+        .unwrap();
+
+        let s2 = Series::from_values(
+            "b",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Float64(4.0),
+                Scalar::Float64(5.0),
+                Scalar::Float64(2.0),
+            ],
+        )
+        .unwrap();
+
+        let (q, r) = s1.divmod(&s2).unwrap();
+        let q_expected = s1.floordiv(&s2).unwrap();
+        let r_expected = s1.modulo(&s2).unwrap();
+        assert_eq!(q.values(), q_expected.values());
+        assert_eq!(r.values(), r_expected.values());
+    }
+
+    #[test]
+    fn series_rdivmod_swaps_operands() {
+        let s1 = Series::from_values(
+            "a",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Float64(3.0), Scalar::Float64(4.0)],
+        )
+        .unwrap();
+
+        let s2 = Series::from_values(
+            "b",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Float64(10.0), Scalar::Float64(7.0)],
+        )
+        .unwrap();
+
+        let (q, r) = s1.rdivmod(&s2).unwrap();
+        assert_eq!(q.values()[0], Scalar::Float64(3.0)); // 10 // 3
+        assert_eq!(q.values()[1], Scalar::Float64(1.0)); // 7 // 4
+        assert_eq!(r.values()[0], Scalar::Float64(1.0)); // 10 % 3
+        assert_eq!(r.values()[1], Scalar::Float64(3.0)); // 7 % 4
+    }
+
     // --- DataFrame.select_dtypes & filter_labels tests ---
 
     #[test]
@@ -49258,6 +49418,41 @@ mod tests {
             .unwrap();
         let result_keep = gb_keep.sum().unwrap();
         assert_eq!(result_keep.len(), 3); // "a", "b", and NaN group
+    }
+
+    #[test]
+    fn test_groupby_observed_true_with_materialized_categorical_values() {
+        let key = Series::from_categorical_codes(
+            "key",
+            vec![0, 0, 1],
+            vec![
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("unused".into()),
+            ],
+            false,
+        )
+        .unwrap();
+        let value = Series::from_values(
+            "val",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+        )
+        .unwrap();
+        let df = DataFrame::from_series(vec![key, value]).unwrap();
+
+        let gb = df
+            .groupby_full_options_with_observed(&["key"], true, true, true, true)
+            .unwrap();
+        let result = gb.sum().unwrap();
+        assert_eq!(
+            result.index().labels(),
+            &[IndexLabel::Utf8("a".into()), IndexLabel::Utf8("b".into())]
+        );
+        assert_eq!(
+            result.column("val").unwrap().values(),
+            &[Scalar::Float64(30.0), Scalar::Float64(30.0)]
+        );
     }
 
     #[test]
