@@ -1695,6 +1695,8 @@ pub struct PacketFixture {
     pub replace_to_find: Option<Vec<Scalar>>,
     #[serde(default)]
     pub replace_to_value: Option<Vec<Scalar>>,
+    #[serde(default)]
+    pub na_action_ignore: Option<bool>,
     // Window operation parameters
     #[serde(default)]
     pub window_size: Option<usize>,
@@ -2827,6 +2829,8 @@ struct OracleRequest {
     replace_to_find: Option<Vec<Scalar>>,
     #[serde(default)]
     replace_to_value: Option<Vec<Scalar>>,
+    #[serde(default)]
+    na_action_ignore: Option<bool>,
     #[serde(default)]
     subset: Option<Vec<String>>,
     #[serde(default)]
@@ -7228,7 +7232,13 @@ fn run_fixture_operation(
                 .zip(to_value.iter())
                 .map(|(f, v)| (f.clone(), v.clone()))
                 .collect();
-            let actual = series.map(&mapping).map_err(|err| err.to_string());
+            let actual = if fixture.na_action_ignore.unwrap_or(false) {
+                series
+                    .map_with_na_action(&mapping, true)
+                    .map_err(|err| err.to_string())
+            } else {
+                series.map(&mapping).map_err(|err| err.to_string())
+            };
             match expected {
                 ResolvedExpected::Series(series) => compare_series_expected(&actual?, &series),
                 ResolvedExpected::ErrorContains(substr) => match actual {
@@ -9807,6 +9817,7 @@ fn capture_live_oracle_expected(
         drop_columns: fixture.drop_columns.clone(),
         replace_to_find: fixture.replace_to_find.clone(),
         replace_to_value: fixture.replace_to_value.clone(),
+        na_action_ignore: fixture.na_action_ignore,
         subset: fixture.subset.clone(),
         keep: fixture.keep.clone(),
         ignore_index: fixture.ignore_index,
@@ -14959,7 +14970,13 @@ fn execute_and_compare_differential(
                 .zip(to_value.iter())
                 .map(|(f, v)| (f.clone(), v.clone()))
                 .collect();
-            let actual = series.map(&mapping).map_err(|err| err.to_string());
+            let actual = if fixture.na_action_ignore.unwrap_or(false) {
+                series
+                    .map_with_na_action(&mapping, true)
+                    .map_err(|err| err.to_string())
+            } else {
+                series.map(&mapping).map_err(|err| err.to_string())
+            };
             match expected {
                 ResolvedExpected::Series(s) => Ok(diff_series(&actual?, &s)),
                 ResolvedExpected::ErrorContains(substr) => Ok(match actual {
