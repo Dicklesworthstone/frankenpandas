@@ -12,7 +12,7 @@ use arrow::array::{
 use arrow::datatypes::{DataType as ArrowDataType, Field, Schema, TimeUnit};
 use csv::{ReaderBuilder, WriterBuilder};
 use fp_columnar::{Column, ColumnError};
-use fp_frame::{DataFrame, FrameError};
+use fp_frame::{DataFrame, FrameError, Series};
 use fp_index::{Index, IndexLabel};
 use fp_types::{DType, NullKind, Scalar, Timedelta};
 use parquet::arrow::ArrowWriter;
@@ -1137,6 +1137,101 @@ fn dtype_to_arrow(dtype: DType) -> ArrowDataType {
     }
 }
 
+fn column_to_arrow_array(column: &Column) -> Result<Arc<dyn Array>, IoError> {
+    let arr: Arc<dyn Array> = match column.dtype() {
+        DType::Int64 => {
+            let mut builder = Int64Builder::with_capacity(column.len());
+            for value in column.values() {
+                match value {
+                    Scalar::Int64(n) => builder.append_value(*n),
+                    _ if value.is_missing() => builder.append_null(),
+                    _ => builder.append_null(),
+                }
+            }
+            Arc::new(builder.finish())
+        }
+        DType::Float64 => {
+            let mut builder = Float64Builder::with_capacity(column.len());
+            for value in column.values() {
+                match value {
+                    Scalar::Float64(n) => {
+                        if n.is_nan() {
+                            builder.append_null();
+                        } else {
+                            builder.append_value(*n);
+                        }
+                    }
+                    _ if value.is_missing() => builder.append_null(),
+                    _ => builder.append_null(),
+                }
+            }
+            Arc::new(builder.finish())
+        }
+        DType::Bool => {
+            let mut builder = BooleanBuilder::with_capacity(column.len());
+            for value in column.values() {
+                match value {
+                    Scalar::Bool(flag) => builder.append_value(*flag),
+                    _ if value.is_missing() => builder.append_null(),
+                    _ => builder.append_null(),
+                }
+            }
+            Arc::new(builder.finish())
+        }
+        DType::Utf8 | DType::Null => {
+            let mut builder = StringBuilder::with_capacity(column.len(), column.len() * 8);
+            for value in column.values() {
+                match value {
+                    Scalar::Utf8(text) => builder.append_value(text),
+                    _ if value.is_missing() => builder.append_null(),
+                    _ => builder.append_value(format!("{value:?}")),
+                }
+            }
+            Arc::new(builder.finish())
+        }
+        DType::Timedelta64 => {
+            let mut builder = Int64Builder::with_capacity(column.len());
+            for value in column.values() {
+                match value {
+                    Scalar::Timedelta64(nanos) => {
+                        if *nanos == Timedelta::NAT {
+                            builder.append_null();
+                        } else {
+                            builder.append_value(*nanos);
+                        }
+                    }
+                    _ if value.is_missing() => builder.append_null(),
+                    _ => builder.append_null(),
+                }
+            }
+            Arc::new(builder.finish())
+        }
+    };
+
+    Ok(arr)
+}
+
+/// Convert a Series to its Arrow data type plus backing array.
+///
+/// This is the Arrow-level building block under Feather / IPC round-trips and
+/// preserves nullable Int64 columns as Arrow null-bitmaps rather than coercing
+/// through Float64.
+pub fn series_to_arrow_array(series: &Series) -> Result<(ArrowDataType, Arc<dyn Array>), IoError> {
+    let dt = dtype_to_arrow(series.column().dtype());
+    Ok((dt, column_to_arrow_array(series.column())?))
+}
+
+/// Rebuild a Series from an Arrow array and explicit dtype metadata.
+pub fn series_from_arrow_array(
+    name: impl Into<String>,
+    index_labels: Vec<IndexLabel>,
+    arr: &dyn Array,
+    dt: &ArrowDataType,
+) -> Result<Series, IoError> {
+    let values = arrow_array_to_scalars(arr, dt)?;
+    Series::from_values(name, index_labels, values).map_err(IoError::from)
+}
+
 /// Build an Arrow RecordBatch from a DataFrame.
 fn dataframe_to_record_batch(frame: &DataFrame) -> Result<RecordBatch, IoError> {
     let col_names = frame.column_names();
@@ -1149,76 +1244,7 @@ fn dataframe_to_record_batch(frame: &DataFrame) -> Result<RecordBatch, IoError> 
             .ok_or_else(|| IoError::Parquet(format!("missing column: {name}")))?;
         let dt = col.dtype();
         fields.push(Field::new(name.as_str(), dtype_to_arrow(dt), true));
-
-        let arr: Arc<dyn Array> = match dt {
-            DType::Int64 => {
-                let mut builder = Int64Builder::with_capacity(col.len());
-                for v in col.values() {
-                    match v {
-                        Scalar::Int64(n) => builder.append_value(*n),
-                        _ if v.is_missing() => builder.append_null(),
-                        _ => builder.append_null(),
-                    }
-                }
-                Arc::new(builder.finish())
-            }
-            DType::Float64 => {
-                let mut builder = Float64Builder::with_capacity(col.len());
-                for v in col.values() {
-                    match v {
-                        Scalar::Float64(n) => {
-                            if n.is_nan() {
-                                builder.append_null();
-                            } else {
-                                builder.append_value(*n);
-                            }
-                        }
-                        _ if v.is_missing() => builder.append_null(),
-                        _ => builder.append_null(),
-                    }
-                }
-                Arc::new(builder.finish())
-            }
-            DType::Bool => {
-                let mut builder = BooleanBuilder::with_capacity(col.len());
-                for v in col.values() {
-                    match v {
-                        Scalar::Bool(b) => builder.append_value(*b),
-                        _ if v.is_missing() => builder.append_null(),
-                        _ => builder.append_null(),
-                    }
-                }
-                Arc::new(builder.finish())
-            }
-            DType::Utf8 | DType::Null => {
-                let mut builder = StringBuilder::with_capacity(col.len(), col.len() * 8);
-                for v in col.values() {
-                    match v {
-                        Scalar::Utf8(s) => builder.append_value(s),
-                        _ if v.is_missing() => builder.append_null(),
-                        _ => builder.append_value(format!("{v:?}")),
-                    }
-                }
-                Arc::new(builder.finish())
-            }
-            DType::Timedelta64 => {
-                let mut builder = Int64Builder::with_capacity(col.len());
-                for v in col.values() {
-                    match v {
-                        Scalar::Timedelta64(n) => {
-                            if *n == Timedelta::NAT {
-                                builder.append_null();
-                            } else {
-                                builder.append_value(*n);
-                            }
-                        }
-                        _ if v.is_missing() => builder.append_null(),
-                        _ => builder.append_null(),
-                    }
-                }
-                Arc::new(builder.finish())
-            }
-        };
+        let arr = column_to_arrow_array(col)?;
         arrays.push(arr);
     }
 
@@ -2377,10 +2403,12 @@ impl DataFrameIoExt for DataFrame {
 mod tests {
     use std::collections::BTreeMap;
 
+    use arrow::array::{Array, Int64Array};
+    use arrow::datatypes::DataType as ArrowDataType;
     use fp_columnar::Column;
-    use fp_frame::DataFrame;
+    use fp_frame::{DataFrame, Series};
     use fp_index::{Index, IndexLabel};
-    use fp_types::{NullKind, Scalar};
+    use fp_types::{DType, NullKind, Scalar};
 
     use super::{IoError, read_csv_str, write_csv_string};
 
@@ -3979,6 +4007,85 @@ mod tests {
             frame2.column("vals").unwrap().values()[2],
             Scalar::Float64(3.0)
         );
+    }
+
+    #[test]
+    fn feather_nullable_int_roundtrip_preserves_int_dtype() {
+        use fp_types::DType;
+
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            "vals".to_string(),
+            Column::new(
+                DType::Int64,
+                vec![
+                    Scalar::Int64(10),
+                    Scalar::Null(NullKind::Null),
+                    Scalar::Int64(30),
+                ],
+            )
+            .unwrap(),
+        );
+
+        let labels = vec![
+            IndexLabel::Int64(0),
+            IndexLabel::Int64(1),
+            IndexLabel::Int64(2),
+        ];
+        let frame =
+            DataFrame::new_with_column_order(Index::new(labels), columns, vec!["vals".to_string()])
+                .unwrap();
+
+        let bytes = super::write_feather_bytes(&frame).expect("write");
+        let frame2 = super::read_feather_bytes(&bytes).expect("read");
+        let vals = frame2.column("vals").unwrap();
+
+        assert_eq!(vals.dtype(), DType::Int64);
+        assert_eq!(vals.values()[0], Scalar::Int64(10));
+        assert_eq!(vals.values()[1], Scalar::Null(NullKind::Null));
+        assert_eq!(vals.values()[2], Scalar::Int64(30));
+    }
+
+    #[test]
+    fn series_arrow_array_nullable_int_roundtrip() {
+        let series = Series::from_values(
+            "vals",
+            vec![
+                IndexLabel::Utf8("r0".into()),
+                IndexLabel::Utf8("r1".into()),
+                IndexLabel::Utf8("r2".into()),
+            ],
+            vec![
+                Scalar::Int64(10),
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(30),
+            ],
+        )
+        .unwrap();
+
+        let (dt, arr) = super::series_to_arrow_array(&series).expect("arrow encode");
+        assert_eq!(dt, ArrowDataType::Int64);
+
+        let typed = arr
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .expect("int64 arrow array");
+        assert_eq!(typed.value(0), 10);
+        assert!(typed.is_null(1));
+        assert_eq!(typed.value(2), 30);
+
+        let roundtrip = super::series_from_arrow_array(
+            series.name(),
+            series.index().labels().to_vec(),
+            arr.as_ref(),
+            &dt,
+        )
+        .expect("arrow decode");
+
+        assert_eq!(roundtrip.name(), "vals");
+        assert_eq!(roundtrip.index().labels(), series.index().labels());
+        assert_eq!(roundtrip.column().dtype(), DType::Int64);
+        assert_eq!(roundtrip.values(), series.values());
     }
 
     #[test]
