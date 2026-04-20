@@ -1748,6 +1748,8 @@ pub struct PacketFixture {
     pub dt_freq: Option<String>,
     #[serde(default)]
     pub dt_strftime_format: Option<String>,
+    #[serde(default)]
+    pub dt_how: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -13215,7 +13217,11 @@ fn execute_series_module_utility_fixture_operation(
             series.dt().total_seconds().map_err(|err| err.to_string())
         }
         FixtureOperation::SeriesDtToTimestamp => {
-            series.dt().to_timestamp().map_err(|err| err.to_string())
+            let how = fixture.dt_how.as_deref().unwrap_or("start");
+            series
+                .dt()
+                .to_timestamp_with_how(how)
+                .map_err(|err| err.to_string())
         }
         other => Err(format!(
             "unsupported series module utility operation for fixture execution: {other:?}"

@@ -1,0 +1,36 @@
+{
+  "packet_id": "FP-P2D-246",
+  "case_id": "series_dt_to_timestamp_how_end_strict",
+  "mode": "strict",
+  "operation": "series_dt_to_timestamp",
+  "dt_how": "end",
+  "left": {
+    "name": "periods",
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 5 }
+    ],
+    "values": [
+      { "kind": "utf8", "value": "2024" },
+      { "kind": "utf8", "value": "2024-02" },
+      { "kind": "utf8", "value": "2024-02-29" },
+      { "kind": "utf8", "value": "2024-02-29T12:30:00" }
+    ]
+  },
+  "expected_series": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 5 }
+    ],
+    "values": [
+      { "kind": "utf8", "value": "2024-12-31 23:59:59.999999999" },
+      { "kind": "utf8", "value": "2024-02-29 23:59:59.999999999" },
+      { "kind": "utf8", "value": "2024-02-29 23:59:59.999999999" },
+      { "kind": "utf8", "value": "2024-02-29T12:30:00" }
+    ]
+  }
+}
