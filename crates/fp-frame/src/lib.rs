@@ -21687,8 +21687,28 @@ impl DataFrame {
     /// `{column_name}_{value}`. Original columns are removed.
     /// If `columns` is empty, all Utf8 columns are encoded.
     pub fn get_dummies(&self, columns: &[&str]) -> Result<Self, FrameError> {
+        self.get_dummies_with_options(columns, "_", false, false)
+    }
+
+    /// One-hot encode columns with full pandas 2.2 option parity.
+    ///
+    /// Matches `pd.get_dummies(df, columns=..., prefix_sep='_',
+    /// dummy_na=False, drop_first=False)`.
+    /// - `prefix_sep` joins the source column name to the value
+    ///   (pandas default `'_'`).
+    /// - `dummy_na` adds an `{col}{sep}nan` indicator column marking
+    ///   null values in the source column.
+    /// - `drop_first` drops the first indicator column for each encoded
+    ///   source column (discovery order), avoiding the dummy-variable
+    ///   trap.
+    pub fn get_dummies_with_options(
+        &self,
+        columns: &[&str],
+        prefix_sep: &str,
+        dummy_na: bool,
+        drop_first: bool,
+    ) -> Result<Self, FrameError> {
         let target_cols: Vec<String> = if columns.is_empty() {
-            // Auto-select Utf8 columns
             self.column_order
                 .iter()
                 .filter(|c| self.columns[*c].dtype() == DType::Utf8)
@@ -21702,7 +21722,6 @@ impl DataFrame {
             return Ok(self.clone());
         }
 
-        // Collect unique values per target column (preserving discovery order)
         let mut col_unique_vals: Vec<(String, Vec<String>)> = Vec::new();
         for col_name in &target_cols {
             let col = self.columns.get(col_name).ok_or_else(|| {
@@ -21726,17 +21745,20 @@ impl DataFrame {
             col_unique_vals.push((col_name.clone(), seen));
         }
 
-        // Build result columns: keep non-target columns, add indicators
         let mut result_cols = BTreeMap::new();
         let mut col_order = Vec::new();
 
         for col_name in &self.column_order {
             if target_cols.contains(col_name) {
-                // Replace with indicator columns
                 let (_, unique_vals) = col_unique_vals.iter().find(|(n, _)| n == col_name).unwrap();
                 let src = &self.columns[col_name];
-                for uval in unique_vals {
-                    let indicator_name = format!("{col_name}_{uval}");
+                let effective_vals: &[String] = if drop_first && !unique_vals.is_empty() {
+                    &unique_vals[1..]
+                } else {
+                    unique_vals.as_slice()
+                };
+                for uval in effective_vals {
+                    let indicator_name = format!("{col_name}{prefix_sep}{uval}");
                     let vals: Vec<Scalar> = src
                         .values()
                         .iter()
@@ -21753,6 +21775,16 @@ impl DataFrame {
                         .collect();
                     result_cols.insert(indicator_name.clone(), Column::from_values(vals)?);
                     col_order.push(indicator_name);
+                }
+                if dummy_na {
+                    let nan_name = format!("{col_name}{prefix_sep}nan");
+                    let vals: Vec<Scalar> = src
+                        .values()
+                        .iter()
+                        .map(|v| Scalar::Int64(i64::from(v.is_missing())))
+                        .collect();
+                    result_cols.insert(nan_name.clone(), Column::from_values(vals)?);
+                    col_order.push(nan_name);
                 }
             } else {
                 result_cols.insert(col_name.clone(), self.columns[col_name].clone());
@@ -32924,7 +32956,9 @@ mod tests {
     #[test]
     fn series_pct_change_with_fill_invalid_method_errors() {
         let s = Series::from_values("x", vec!["a".into()], vec![Scalar::Float64(1.0)]).unwrap();
-        let err = s.pct_change_with_fill(1, Some("nearest"), None).unwrap_err();
+        let err = s
+            .pct_change_with_fill(1, Some("nearest"), None)
+            .unwrap_err();
         assert!(matches!(err, FrameError::CompatibilityRejected(_)));
     }
 
@@ -46376,6 +46410,93 @@ mod tests {
         assert!(result.columns.contains_key("b_p"));
         assert!(result.columns.contains_key("b_q"));
         assert_eq!(result.column_names().len(), 4);
+    }
+
+    #[test]
+    fn df_get_dummies_drop_first_removes_first_indicator() {
+        let df = DataFrame::from_dict(
+            &["a"],
+            vec![(
+                "a",
+                vec![
+                    Scalar::Utf8("x".to_string()),
+                    Scalar::Utf8("y".to_string()),
+                    Scalar::Utf8("z".to_string()),
+                ],
+            )],
+        )
+        .unwrap();
+        // Default: all three indicators present.
+        let default = df.get_dummies(&["a"]).unwrap();
+        assert_eq!(default.column_names().len(), 3);
+        // drop_first=true: first discovered category ("x") dropped.
+        let dropped = df.get_dummies_with_options(&["a"], "_", false, true).unwrap();
+        assert!(!dropped.columns.contains_key("a_x"));
+        assert!(dropped.columns.contains_key("a_y"));
+        assert!(dropped.columns.contains_key("a_z"));
+        assert_eq!(dropped.column_names().len(), 2);
+    }
+
+    #[test]
+    fn df_get_dummies_dummy_na_adds_indicator_for_nulls() {
+        let df = DataFrame::from_dict(
+            &["a"],
+            vec![(
+                "a",
+                vec![
+                    Scalar::Utf8("x".to_string()),
+                    Scalar::Null(NullKind::NaN),
+                    Scalar::Utf8("y".to_string()),
+                ],
+            )],
+        )
+        .unwrap();
+        let result = df.get_dummies_with_options(&["a"], "_", true, false).unwrap();
+        assert!(result.columns.contains_key("a_x"));
+        assert!(result.columns.contains_key("a_y"));
+        assert!(result.columns.contains_key("a_nan"));
+        let nan_col = result.column("a_nan").unwrap();
+        assert_eq!(nan_col.values()[0], Scalar::Int64(0));
+        assert_eq!(nan_col.values()[1], Scalar::Int64(1));
+        assert_eq!(nan_col.values()[2], Scalar::Int64(0));
+    }
+
+    #[test]
+    fn df_get_dummies_custom_prefix_sep() {
+        let df = DataFrame::from_dict(
+            &["a"],
+            vec![(
+                "a",
+                vec![Scalar::Utf8("x".to_string()), Scalar::Utf8("y".to_string())],
+            )],
+        )
+        .unwrap();
+        let result = df.get_dummies_with_options(&["a"], ".", false, false).unwrap();
+        assert!(result.columns.contains_key("a.x"));
+        assert!(result.columns.contains_key("a.y"));
+        assert!(!result.columns.contains_key("a_x"));
+    }
+
+    #[test]
+    fn df_get_dummies_drop_first_with_dummy_na() {
+        let df = DataFrame::from_dict(
+            &["a"],
+            vec![(
+                "a",
+                vec![
+                    Scalar::Utf8("x".to_string()),
+                    Scalar::Utf8("y".to_string()),
+                    Scalar::Null(NullKind::NaN),
+                ],
+            )],
+        )
+        .unwrap();
+        // drop_first drops "x"; dummy_na adds a_nan; result = [a_y, a_nan]
+        let result = df.get_dummies_with_options(&["a"], "_", true, true).unwrap();
+        assert!(!result.columns.contains_key("a_x"));
+        assert!(result.columns.contains_key("a_y"));
+        assert!(result.columns.contains_key("a_nan"));
+        assert_eq!(result.column_names().len(), 2);
     }
 
     // ── to_numeric ──
