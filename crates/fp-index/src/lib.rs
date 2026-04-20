@@ -1595,6 +1595,43 @@ impl MultiIndex {
         Some(self.levels.iter().map(|level| &level[position]).collect())
     }
 
+    /// Compute a non-unique indexer against another MultiIndex.
+    ///
+    /// Matches `pd.MultiIndex.get_indexer_non_unique(target)` by expanding
+    /// every matching source position for each target tuple in target order.
+    /// Missing target tuples contribute a single `-1` entry and their target
+    /// position is recorded in the returned `missing` vector.
+    #[must_use]
+    pub fn get_indexer_non_unique(&self, target: &Self) -> (Vec<isize>, Vec<usize>) {
+        if self.nlevels() != target.nlevels() {
+            return (vec![-1; target.len()], (0..target.len()).collect());
+        }
+
+        let mut positions = HashMap::<Vec<IndexLabel>, Vec<usize>>::with_capacity(self.len());
+        for row in 0..self.len() {
+            let key: Vec<IndexLabel> = self.levels.iter().map(|level| level[row].clone()).collect();
+            positions.entry(key).or_default().push(row);
+        }
+
+        let mut indexer = Vec::new();
+        let mut missing = Vec::new();
+        for target_row in 0..target.len() {
+            let key: Vec<IndexLabel> = target
+                .levels
+                .iter()
+                .map(|level| level[target_row].clone())
+                .collect();
+            if let Some(matches) = positions.get(&key) {
+                indexer.extend(matches.iter().map(|&pos| pos as isize));
+            } else {
+                indexer.push(-1);
+                missing.push(target_row);
+            }
+        }
+
+        (indexer, missing)
+    }
+
     /// Construct a MultiIndex from tuples of labels.
     ///
     /// Matches `pd.MultiIndex.from_tuples(tuples)`.
@@ -3360,6 +3397,42 @@ mod tests {
     fn multi_index_get_tuple_out_of_bounds() {
         let mi = MultiIndex::from_tuples(vec![vec!["a".into()]]).unwrap();
         assert!(mi.get_tuple(1).is_none());
+    }
+
+    #[test]
+    fn multi_index_get_indexer_non_unique_expands_duplicate_matches() {
+        let source = MultiIndex::from_tuples(vec![
+            vec!["a".into(), 1_i64.into()],
+            vec!["a".into(), 2_i64.into()],
+            vec!["b".into(), 1_i64.into()],
+            vec!["a".into(), 1_i64.into()],
+        ])
+        .unwrap();
+        let target = MultiIndex::from_tuples(vec![
+            vec!["a".into(), 1_i64.into()],
+            vec!["z".into(), 9_i64.into()],
+            vec!["a".into(), 2_i64.into()],
+            vec!["a".into(), 1_i64.into()],
+        ])
+        .unwrap();
+
+        let (indexer, missing) = source.get_indexer_non_unique(&target);
+        assert_eq!(indexer, vec![0, 3, -1, 1, 0, 3]);
+        assert_eq!(missing, vec![1]);
+    }
+
+    #[test]
+    fn multi_index_get_indexer_non_unique_level_mismatch_marks_all_missing() {
+        let source = MultiIndex::from_tuples(vec![
+            vec!["a".into(), 1_i64.into()],
+            vec!["b".into(), 2_i64.into()],
+        ])
+        .unwrap();
+        let target = MultiIndex::from_tuples(vec![vec!["a".into()], vec!["b".into()]]).unwrap();
+
+        let (indexer, missing) = source.get_indexer_non_unique(&target);
+        assert_eq!(indexer, vec![-1, -1]);
+        assert_eq!(missing, vec![0, 1]);
     }
 
     #[test]
