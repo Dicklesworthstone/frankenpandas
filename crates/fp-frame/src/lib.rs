@@ -8308,6 +8308,27 @@ impl StringAccessor<'_> {
         )
     }
 
+    /// Check whether each string starts with `pat`, replacing nulls with `na`.
+    ///
+    /// Matches `pd.Series.str.startswith(pat, na=...)`. When `na` is
+    /// `None` (Rust `None`), nulls propagate as NaN — same as the
+    /// default pandas behavior on 2.2+. When `na` is `Some(true)` /
+    /// `Some(false)`, null entries are replaced with that boolean.
+    pub fn startswith_with_na(&self, pat: &str, na: Option<bool>) -> Result<Series, FrameError> {
+        self.str_boolean_with_na(na, |s| s.starts_with(pat))
+    }
+
+    /// Check whether each string starts with any of `pats`, replacing nulls with `na`.
+    ///
+    /// Matches `pd.Series.str.startswith((p1, p2, ...), na=...)`.
+    pub fn startswith_any_with_na(
+        &self,
+        pats: &[&str],
+        na: Option<bool>,
+    ) -> Result<Series, FrameError> {
+        self.str_boolean_with_na(na, |s| pats.iter().any(|p| s.starts_with(p)))
+    }
+
     /// Check whether each string ends with a suffix.
     pub fn endswith(&self, pat: &str) -> Result<Series, FrameError> {
         self.apply_str(|s| Scalar::Bool(s.ends_with(pat)), self.series.name())
@@ -8320,6 +8341,47 @@ impl StringAccessor<'_> {
         self.apply_str(
             |s| Scalar::Bool(pats.iter().any(|p| s.ends_with(p))),
             self.series.name(),
+        )
+    }
+
+    /// Check whether each string ends with `pat`, replacing nulls with `na`.
+    ///
+    /// Matches `pd.Series.str.endswith(pat, na=...)`.
+    pub fn endswith_with_na(&self, pat: &str, na: Option<bool>) -> Result<Series, FrameError> {
+        self.str_boolean_with_na(na, |s| s.ends_with(pat))
+    }
+
+    /// Check whether each string ends with any of `pats`, replacing nulls with `na`.
+    ///
+    /// Matches `pd.Series.str.endswith((s1, s2, ...), na=...)`.
+    pub fn endswith_any_with_na(
+        &self,
+        pats: &[&str],
+        na: Option<bool>,
+    ) -> Result<Series, FrameError> {
+        self.str_boolean_with_na(na, |s| pats.iter().any(|p| s.ends_with(p)))
+    }
+
+    fn str_boolean_with_na<F>(&self, na: Option<bool>, pred: F) -> Result<Series, FrameError>
+    where
+        F: Fn(&str) -> bool,
+    {
+        let vals = self.series.column().values();
+        let out: Vec<Scalar> = vals
+            .iter()
+            .map(|v| match v {
+                Scalar::Utf8(s) => Scalar::Bool(pred(s)),
+                _ if v.is_missing() => match na {
+                    Some(b) => Scalar::Bool(b),
+                    None => Scalar::Null(NullKind::NaN),
+                },
+                _ => v.clone(),
+            })
+            .collect();
+        Series::from_values(
+            self.series.name(),
+            self.series.index().labels().to_vec(),
+            out,
         )
     }
 
@@ -34629,6 +34691,94 @@ mod tests {
         let ends = s.str().endswith("suffix").unwrap();
         assert_eq!(ends.values()[0], Scalar::Bool(false));
         assert_eq!(ends.values()[1], Scalar::Bool(true));
+    }
+
+    #[test]
+    fn str_startswith_with_na_none_propagates_nulls() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("alpha".into()),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Utf8("beta".into()),
+            ],
+        )
+        .unwrap();
+        let r = s.str().startswith_with_na("al", None).unwrap();
+        assert_eq!(r.values()[0], Scalar::Bool(true));
+        assert!(r.values()[1].is_missing());
+        assert_eq!(r.values()[2], Scalar::Bool(false));
+    }
+
+    #[test]
+    fn str_startswith_with_na_false_fills_nulls_with_false() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Null(NullKind::NaN), Scalar::Utf8("alpha".into())],
+        )
+        .unwrap();
+        let r = s.str().startswith_with_na("a", Some(false)).unwrap();
+        assert_eq!(r.values()[0], Scalar::Bool(false));
+        assert_eq!(r.values()[1], Scalar::Bool(true));
+    }
+
+    #[test]
+    fn str_endswith_with_na_true_fills_nulls_with_true() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Null(NullKind::NaN), Scalar::Utf8("foo.txt".into())],
+        )
+        .unwrap();
+        let r = s.str().endswith_with_na(".txt", Some(true)).unwrap();
+        assert_eq!(r.values()[0], Scalar::Bool(true));
+        assert_eq!(r.values()[1], Scalar::Bool(true));
+    }
+
+    #[test]
+    fn str_startswith_any_with_na_tuple_matches_either_prefix() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Utf8("alpha".into()),
+                Scalar::Utf8("beta".into()),
+                Scalar::Utf8("gamma".into()),
+                Scalar::Null(NullKind::NaN),
+            ],
+        )
+        .unwrap();
+        let r = s
+            .str()
+            .startswith_any_with_na(&["al", "ga"], Some(false))
+            .unwrap();
+        assert_eq!(r.values()[0], Scalar::Bool(true));
+        assert_eq!(r.values()[1], Scalar::Bool(false));
+        assert_eq!(r.values()[2], Scalar::Bool(true));
+        assert_eq!(r.values()[3], Scalar::Bool(false));
+    }
+
+    #[test]
+    fn str_endswith_any_with_na_propagates_when_none() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("report.csv".into()),
+                Scalar::Utf8("notes.md".into()),
+                Scalar::Null(NullKind::NaN),
+            ],
+        )
+        .unwrap();
+        let r = s
+            .str()
+            .endswith_any_with_na(&[".csv", ".tsv"], None)
+            .unwrap();
+        assert_eq!(r.values()[0], Scalar::Bool(true));
+        assert_eq!(r.values()[1], Scalar::Bool(false));
+        assert!(r.values()[2].is_missing());
     }
 
     #[test]
