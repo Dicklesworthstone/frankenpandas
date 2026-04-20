@@ -1,0 +1,19 @@
+{
+  "packet_id": "FP-P2D-423",
+  "case_id": "series_str_split_expand_empty_separator_strict",
+  "mode": "strict",
+  "operation": "series_split_df",
+  "str_split_pat": "",
+  "left": {
+    "name": "parts",
+    "index": [
+      { "kind": "utf8", "value": "row0" },
+      { "kind": "utf8", "value": "row0" }
+    ],
+    "values": [
+      { "kind": "utf8", "value": "abc" },
+      { "kind": "utf8", "value": "def" }
+    ]
+  },
+  "expected_error_contains": "empty separator"
+}

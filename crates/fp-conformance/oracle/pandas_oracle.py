@@ -1763,6 +1763,23 @@ def op_series_rpartition_df(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return {"expected_frame": dataframe_to_json(out)}
 
 
+def op_series_split_df(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    if left is None:
+        raise OracleError("series_split_df requires left payload")
+    str_split_pat = payload.get("str_split_pat")
+    if not isinstance(str_split_pat, str):
+        raise OracleError("series_split_df requires str_split_pat")
+
+    series = fixture_series_from_payload(pd, left, "series_split_df")
+    try:
+        out = series.str.split(str_split_pat, expand=True)
+    except Exception as exc:
+        raise OracleError(f"series_split_df failed: {exc}") from exc
+
+    return {"expected_frame": dataframe_to_json(out)}
+
+
 def dataframe_from_json(pd, payload: dict[str, Any]):
     index_raw = payload.get("index")
     columns_raw = payload.get("columns")
@@ -4368,6 +4385,8 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_series_partition_df(pd, payload)
     if op == "series_rpartition_df":
         return op_series_rpartition_df(pd, payload)
+    if op == "series_split_df":
+        return op_series_split_df(pd, payload)
     if op == "series_extract_df":
         return op_series_extract_df(pd, payload)
     if op == "series_extractall":

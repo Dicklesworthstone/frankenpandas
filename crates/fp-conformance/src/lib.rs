@@ -434,6 +434,8 @@ pub enum FixtureOperation {
     SeriesPartitionDf,
     #[serde(rename = "series_rpartition_df", alias = "series_str_rpartition_df")]
     SeriesRpartitionDf,
+    #[serde(rename = "series_split_df", alias = "series_str_split_df")]
+    SeriesSplitDf,
     #[serde(rename = "series_extract_df", alias = "series_str_extract_df")]
     SeriesExtractDf,
     #[serde(rename = "series_extractall", alias = "series_str_extractall")]
@@ -1134,6 +1136,7 @@ impl FixtureOperation {
             Self::SeriesBetweenTime => "series_between_time",
             Self::SeriesPartitionDf => "series_partition_df",
             Self::SeriesRpartitionDf => "series_rpartition_df",
+            Self::SeriesSplitDf => "series_split_df",
             Self::SeriesExtractDf => "series_extract_df",
             Self::SeriesExtractAll => "series_extractall",
             Self::SeriesStrGetDummies => "series_str_get_dummies",
@@ -2195,6 +2198,7 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::SeriesBetweenTime
         | FixtureOperation::SeriesPartitionDf
         | FixtureOperation::SeriesRpartitionDf
+        | FixtureOperation::SeriesSplitDf
         | FixtureOperation::SeriesExtractDf
         | FixtureOperation::SeriesExtractAll
         | FixtureOperation::SeriesToFrame
@@ -8309,6 +8313,31 @@ fn run_fixture_operation(
                 ),
             }
         }
+        FixtureOperation::SeriesSplitDf => {
+            let actual = execute_dataframe_fixture_operation(fixture);
+            match expected {
+                ResolvedExpected::Frame(frame) => compare_dataframe_expected(&actual?, &frame),
+                ResolvedExpected::ErrorContains(substr) => match actual {
+                    Err(message) if message.contains(&substr) => Ok(()),
+                    Err(message) => Err(format!(
+                        "expected series_split_df error containing '{substr}', got '{message}'"
+                    )),
+                    Ok(_) => Err(format!(
+                        "expected series_split_df to fail with error containing '{substr}'"
+                    )),
+                },
+                ResolvedExpected::ErrorAny => {
+                    if actual.is_err() {
+                        Ok(())
+                    } else {
+                        Err("expected series_split_df to fail but operation succeeded".to_owned())
+                    }
+                }
+                _ => Err(
+                    "expected_frame or expected_error is required for series_split_df".to_owned(),
+                ),
+            }
+        }
         FixtureOperation::SeriesExtractAll => {
             let actual = execute_dataframe_fixture_operation(fixture);
             match expected {
@@ -9874,6 +9903,7 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::DataFrameCombineFirst
         | FixtureOperation::SeriesPartitionDf
         | FixtureOperation::SeriesRpartitionDf
+        | FixtureOperation::SeriesSplitDf
         | FixtureOperation::SeriesExtractDf
         | FixtureOperation::DataFrameRollingMean
         | FixtureOperation::DataFrameResampleSum
@@ -10473,6 +10503,7 @@ fn capture_live_oracle_expected(
         | FixtureOperation::DataFrameCombineFirst
         | FixtureOperation::SeriesPartitionDf
         | FixtureOperation::SeriesRpartitionDf
+        | FixtureOperation::SeriesSplitDf
         | FixtureOperation::SeriesExtractDf
         | FixtureOperation::DataFrameRollingMean
         | FixtureOperation::DataFrameResampleSum
@@ -12018,6 +12049,18 @@ fn execute_dataframe_fixture_operation(fixture: &PacketFixture) -> Result<DataFr
             series
                 .str()
                 .rpartition_df(sep)
+                .map_err(|err| err.to_string())
+        }
+        FixtureOperation::SeriesSplitDf => {
+            let left = require_left_series(fixture)?;
+            let pat = fixture
+                .str_split_pat
+                .as_deref()
+                .ok_or_else(|| "str_split_pat is required for series_split_df".to_owned())?;
+            let series = build_series(left).map_err(|err| format!("series build failed: {err}"))?;
+            series
+                .str()
+                .split_expand(pat)
                 .map_err(|err| err.to_string())
         }
         FixtureOperation::SeriesExtractDf => {
@@ -16597,6 +16640,41 @@ fn execute_and_compare_differential(
                 _ => Err(
                     "expected_frame or expected_error required for series_rpartition_df".to_owned(),
                 ),
+            }
+        }
+        FixtureOperation::SeriesSplitDf => {
+            let actual = execute_dataframe_fixture_operation(fixture);
+            match expected {
+                ResolvedExpected::Frame(frame) => Ok(diff_dataframe(&actual?, &frame)),
+                ResolvedExpected::ErrorContains(substr) => Ok(match actual {
+                    Err(message) if message.contains(&substr) => Vec::new(),
+                    Err(message) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_split_df.error",
+                        format!(
+                            "expected series_split_df error containing '{substr}', got '{message}'"
+                        ),
+                    )],
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_split_df.error",
+                        "expected series_split_df to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                ResolvedExpected::ErrorAny => Ok(match actual {
+                    Err(_) => Vec::new(),
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_split_df.error",
+                        "expected series_split_df to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                _ => {
+                    Err("expected_frame or expected_error required for series_split_df".to_owned())
+                }
             }
         }
         FixtureOperation::SeriesExtractAll => {
