@@ -1549,6 +1549,8 @@ pub struct PacketFixture {
     #[serde(default)]
     pub corr_min_periods: Option<usize>,
     #[serde(default)]
+    pub corr_numeric_only: Option<bool>,
+    #[serde(default)]
     pub sort_column: Option<String>,
     #[serde(default)]
     pub sort_ascending: Option<bool>,
@@ -2837,6 +2839,8 @@ struct OracleRequest {
     pub corr_method: Option<String>,
     #[serde(default)]
     pub corr_min_periods: Option<usize>,
+    #[serde(default)]
+    pub corr_numeric_only: Option<bool>,
     #[serde(default)]
     pub sort_column: Option<String>,
     #[serde(default)]
@@ -9913,6 +9917,7 @@ fn capture_live_oracle_expected(
         rank_pct: fixture.rank_pct,
         corr_method: fixture.corr_method.clone(),
         corr_min_periods: fixture.corr_min_periods,
+        corr_numeric_only: fixture.corr_numeric_only,
         sort_column: fixture.sort_column.clone(),
         sort_ascending: fixture.sort_ascending,
         concat_axis: fixture.concat_axis,
@@ -11863,12 +11868,13 @@ fn execute_dataframe_corr_fixture(
     frame: &DataFrame,
     fixture: &PacketFixture,
 ) -> Result<DataFrame, String> {
+    let numeric_only = fixture.corr_numeric_only.unwrap_or(false);
     match (fixture.corr_method.as_deref(), fixture.corr_min_periods) {
-        (None, None) => frame.corr(),
+        (None, None) => frame.corr_with_numeric_only(numeric_only),
         (None, Some(min_periods)) | (Some("pearson"), Some(min_periods)) => {
-            frame.corr_min_periods(min_periods)
+            frame.corr_min_periods_with_numeric_only(min_periods, numeric_only)
         }
-        (Some(method), None) => frame.corr_method(method),
+        (Some(method), None) => frame.corr_method_with_numeric_only(method, numeric_only),
         (Some(method), Some(_)) => Err(FrameError::CompatibilityRejected(format!(
             "dataframe_corr min_periods with method '{method}' is not supported"
         ))),

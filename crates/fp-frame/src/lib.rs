@@ -16848,7 +16848,15 @@ impl DataFrame {
 
     /// Compute the Pearson correlation matrix between numeric columns.
     pub fn corr(&self) -> Result<Self, FrameError> {
-        self.pairwise_stat_min("corr", 1)
+        self.corr_with_numeric_only(false)
+    }
+
+    /// Compute the Pearson correlation matrix, optionally restricting to numeric dtypes.
+    ///
+    /// Matches `df.corr(numeric_only=...)`. Boolean columns are treated as numeric,
+    /// and non-numeric columns are excluded from the result.
+    pub fn corr_with_numeric_only(&self, numeric_only: bool) -> Result<Self, FrameError> {
+        self.pairwise_corr_stat_min("corr", 1, numeric_only)
     }
 
     /// Compute pairwise Pearson correlation with a minimum-observations threshold.
@@ -16856,17 +16864,39 @@ impl DataFrame {
     /// Matches `df.corr(min_periods=n)`. Pairs with fewer than `min_periods`
     /// valid (non-NaN) observations yield NaN.
     pub fn corr_min_periods(&self, min_periods: usize) -> Result<Self, FrameError> {
-        self.pairwise_stat_min("corr", min_periods)
+        self.corr_min_periods_with_numeric_only(min_periods, false)
+    }
+
+    /// Compute pairwise Pearson correlation with a minimum-observations threshold.
+    ///
+    /// Matches `df.corr(min_periods=n, numeric_only=...)`.
+    pub fn corr_min_periods_with_numeric_only(
+        &self,
+        min_periods: usize,
+        numeric_only: bool,
+    ) -> Result<Self, FrameError> {
+        self.pairwise_corr_stat_min("corr", min_periods, numeric_only)
     }
 
     /// Compute correlation matrix using the specified method.
     ///
     /// Supported methods: "pearson", "spearman", "kendall".
     pub fn corr_method(&self, method: &str) -> Result<Self, FrameError> {
+        self.corr_method_with_numeric_only(method, false)
+    }
+
+    /// Compute correlation matrix using the specified method and numeric_only policy.
+    ///
+    /// Supported methods: "pearson", "spearman", "kendall".
+    pub fn corr_method_with_numeric_only(
+        &self,
+        method: &str,
+        numeric_only: bool,
+    ) -> Result<Self, FrameError> {
         match method {
-            "pearson" => self.pairwise_stat_min("corr", 1),
-            "spearman" => self.pairwise_rank_corr("spearman"),
-            "kendall" => self.pairwise_rank_corr("kendall"),
+            "pearson" => self.pairwise_corr_stat_min("corr", 1, numeric_only),
+            "spearman" => self.pairwise_rank_corr("spearman", numeric_only),
+            "kendall" => self.pairwise_rank_corr("kendall", numeric_only),
             other => Err(FrameError::CompatibilityRejected(format!(
                 "unsupported correlation method: '{other}'"
             ))),
@@ -16886,11 +16916,106 @@ impl DataFrame {
         self.pairwise_stat_min("cov", min_periods)
     }
 
+    fn corr_candidate_columns(&self, _numeric_only: bool) -> Vec<String> {
+        self.column_order
+            .iter()
+            .filter(|name| {
+                matches!(
+                    self.columns[name.as_str()].dtype(),
+                    DType::Bool | DType::Int64 | DType::Float64
+                )
+            })
+            .cloned()
+            .collect()
+    }
+
+    fn pairwise_corr_stat_min(
+        &self,
+        stat: &str,
+        min_periods: usize,
+        numeric_only: bool,
+    ) -> Result<Self, FrameError> {
+        let len = self.index.len();
+        let numeric_cols = self.corr_candidate_columns(numeric_only);
+        let n = numeric_cols.len();
+
+        let col_data: Vec<Vec<f64>> = numeric_cols
+            .iter()
+            .map(|name| {
+                let col = &self.columns[name];
+                (0..len)
+                    .map(|i| col.values()[i].to_f64().unwrap_or(f64::NAN))
+                    .collect()
+            })
+            .collect();
+
+        let mut result_cols = BTreeMap::new();
+        for (j, col_j_name) in numeric_cols.iter().enumerate() {
+            let mut vals = Vec::with_capacity(n);
+            for (i, _) in numeric_cols.iter().enumerate() {
+                let mut sum_x = 0.0_f64;
+                let mut sum_y = 0.0_f64;
+                let mut sum_xy = 0.0_f64;
+                let mut sum_x2 = 0.0_f64;
+                let mut sum_y2 = 0.0_f64;
+                let mut count = 0_usize;
+
+                for (&x, &y) in col_data[i].iter().zip(col_data[j].iter()) {
+                    if x.is_nan() || y.is_nan() {
+                        continue;
+                    }
+                    sum_x += x;
+                    sum_y += y;
+                    sum_xy += x * y;
+                    sum_x2 += x * x;
+                    sum_y2 += y * y;
+                    count += 1;
+                }
+
+                let threshold = min_periods.max(2);
+                let val = if count < threshold {
+                    f64::NAN
+                } else {
+                    let n_f = count as f64;
+                    let mean_x = sum_x / n_f;
+                    let mean_y = sum_y / n_f;
+                    let cov_xy = (sum_xy - n_f * mean_x * mean_y) / (n_f - 1.0);
+
+                    match stat {
+                        "cov" => cov_xy,
+                        "corr" => {
+                            let var_x = (sum_x2 - n_f * mean_x * mean_x) / (n_f - 1.0);
+                            let var_y = (sum_y2 - n_f * mean_y * mean_y) / (n_f - 1.0);
+                            let denom = (var_x * var_y).sqrt();
+                            if denom < f64::EPSILON {
+                                f64::NAN
+                            } else {
+                                cov_xy / denom
+                            }
+                        }
+                        _ => f64::NAN,
+                    }
+                };
+                vals.push(Scalar::Float64(val));
+            }
+            result_cols.insert(col_j_name.clone(), Column::new(DType::Float64, vals)?);
+        }
+
+        let labels: Vec<IndexLabel> = numeric_cols
+            .iter()
+            .map(|s| IndexLabel::Utf8(s.clone()))
+            .collect();
+
+        Ok(Self {
+            columns: result_cols,
+            column_order: numeric_cols,
+            index: Index::new(labels),
+        })
+    }
+
     /// Internal helper for corr/cov pairwise matrix computation.
     fn pairwise_stat_min(&self, stat: &str, min_periods: usize) -> Result<Self, FrameError> {
         let len = self.index.len();
-
-        // Only include numeric columns (Int64/Float64), matching pandas behavior
         let numeric_cols: Vec<String> = self
             .column_order
             .iter()
@@ -16980,18 +17105,9 @@ impl DataFrame {
     }
 
     /// Compute pairwise Spearman or Kendall correlation matrix between numeric columns.
-    fn pairwise_rank_corr(&self, method: &str) -> Result<Self, FrameError> {
+    fn pairwise_rank_corr(&self, method: &str, numeric_only: bool) -> Result<Self, FrameError> {
         let len = self.index.len();
-
-        let numeric_cols: Vec<String> = self
-            .column_order
-            .iter()
-            .filter(|name| {
-                let dt = self.columns[name.as_str()].dtype();
-                dt == DType::Int64 || dt == DType::Float64
-            })
-            .cloned()
-            .collect();
+        let numeric_cols = self.corr_candidate_columns(numeric_only);
 
         let n = numeric_cols.len();
 
@@ -33650,6 +33766,53 @@ mod tests {
         assert!((corr_matrix.columns["a"].values()[0].to_f64().unwrap() - 1.0).abs() < 1e-10);
         assert!((corr_matrix.columns["b"].values()[1].to_f64().unwrap() - 1.0).abs() < 1e-10);
         // Off-diagonal: perfect positive corr
+        assert!((corr_matrix.columns["b"].values()[0].to_f64().unwrap() - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn dataframe_corr_numeric_only_includes_bool_and_skips_utf8() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "x",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(2.0),
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(2.0),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "b",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Bool(false),
+                    Scalar::Bool(true),
+                    Scalar::Bool(false),
+                    Scalar::Bool(true),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "s",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Utf8("left".into()),
+                    Scalar::Utf8("right".into()),
+                    Scalar::Utf8("left".into()),
+                    Scalar::Utf8("right".into()),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let corr_matrix = df.corr_with_numeric_only(true).unwrap();
+        let names: Vec<String> = corr_matrix.column_names().into_iter().cloned().collect();
+        assert_eq!(names, vec!["x".to_owned(), "b".to_owned()]);
+        assert!((corr_matrix.columns["x"].values()[0].to_f64().unwrap() - 1.0).abs() < 1e-10);
+        assert!((corr_matrix.columns["b"].values()[1].to_f64().unwrap() - 1.0).abs() < 1e-10);
         assert!((corr_matrix.columns["b"].values()[0].to_f64().unwrap() - 1.0).abs() < 1e-10);
     }
 
