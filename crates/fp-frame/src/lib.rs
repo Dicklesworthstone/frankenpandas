@@ -3193,24 +3193,38 @@ impl Series {
         Self::from_values(self.name.clone(), self.index.labels().to_vec(), out)
     }
 
-    /// Return a new Series with name prefixed.
+    /// Return a new Series with prefixed index labels.
     ///
-    /// Analogous to `pandas.Series.add_prefix(prefix)`.
+    /// Matches `pd.Series.add_prefix(prefix)`: the index labels are
+    /// stringified and prefixed; the Series name and values are unchanged.
     pub fn add_prefix(&self, prefix: &str) -> Result<Self, FrameError> {
+        let new_labels: Vec<IndexLabel> = self
+            .index
+            .labels()
+            .iter()
+            .map(|label| IndexLabel::Utf8(format!("{prefix}{label}")))
+            .collect();
         Self::new(
-            format!("{prefix}{}", self.name),
-            self.index.clone(),
+            self.name.clone(),
+            Index::new(new_labels),
             self.column.clone(),
         )
     }
 
-    /// Return a new Series with name suffixed.
+    /// Return a new Series with suffixed index labels.
     ///
-    /// Analogous to `pandas.Series.add_suffix(suffix)`.
+    /// Matches `pd.Series.add_suffix(suffix)`: the index labels are
+    /// stringified and suffixed; the Series name and values are unchanged.
     pub fn add_suffix(&self, suffix: &str) -> Result<Self, FrameError> {
+        let new_labels: Vec<IndexLabel> = self
+            .index
+            .labels()
+            .iter()
+            .map(|label| IndexLabel::Utf8(format!("{label}{suffix}")))
+            .collect();
         Self::new(
-            format!("{}{suffix}", self.name),
-            self.index.clone(),
+            self.name.clone(),
+            Index::new(new_labels),
             self.column.clone(),
         )
     }
@@ -15351,6 +15365,40 @@ impl DataFrame {
         self.rename_with(|name| format!("{name}{s}"))
     }
 
+    /// Add a prefix to labels along the chosen axis.
+    ///
+    /// Matches `df.add_prefix(prefix, axis=...)`. `axis=0` prefixes the
+    /// index (labels are stringified), `axis=1` prefixes column names.
+    pub fn add_prefix_axis(&self, prefix: &str, axis: usize) -> Result<Self, FrameError> {
+        match axis {
+            0 => {
+                let p = prefix.to_owned();
+                Ok(self.rename_index_with(|label| IndexLabel::Utf8(format!("{p}{label}"))))
+            }
+            1 => self.add_prefix(prefix),
+            other => Err(FrameError::CompatibilityRejected(format!(
+                "axis must be 0 or 1, got {other}"
+            ))),
+        }
+    }
+
+    /// Add a suffix to labels along the chosen axis.
+    ///
+    /// Matches `df.add_suffix(suffix, axis=...)`. `axis=0` suffixes the
+    /// index (labels are stringified), `axis=1` suffixes column names.
+    pub fn add_suffix_axis(&self, suffix: &str, axis: usize) -> Result<Self, FrameError> {
+        match axis {
+            0 => {
+                let s = suffix.to_owned();
+                Ok(self.rename_index_with(|label| IndexLabel::Utf8(format!("{label}{s}"))))
+            }
+            1 => self.add_suffix(suffix),
+            other => Err(FrameError::CompatibilityRejected(format!(
+                "axis must be 0 or 1, got {other}"
+            ))),
+        }
+    }
+
     /// Summary statistics for numeric columns.
     ///
     /// Matches `df.describe()` — returns a DataFrame with index
@@ -23318,6 +23366,53 @@ pub struct DataFrameGroupBy<'a> {
 }
 
 impl DataFrameGroupBy<'_> {
+    fn sum_group_vals(dtype: DType, group_vals: &[Scalar]) -> Scalar {
+        match dtype {
+            DType::Int64 => {
+                let mut total = 0_i128;
+                for value in group_vals {
+                    match value {
+                        Scalar::Int64(v) => total += i128::from(*v),
+                        Scalar::Null(_) => {}
+                        Scalar::Float64(v) if v.is_nan() => {}
+                        _ => return fp_types::nansum(group_vals),
+                    }
+                }
+                match i64::try_from(total) {
+                    Ok(v) => Scalar::Int64(v),
+                    Err(_) => Scalar::Float64(total as f64),
+                }
+            }
+            DType::Bool => {
+                let mut total = 0_i64;
+                for value in group_vals {
+                    match value {
+                        Scalar::Bool(flag) => total += i64::from(*flag),
+                        Scalar::Null(_) => {}
+                        Scalar::Float64(v) if v.is_nan() => {}
+                        _ => return fp_types::nansum(group_vals),
+                    }
+                }
+                Scalar::Int64(total)
+            }
+            DType::Timedelta64 => {
+                let mut total = 0_i128;
+                for value in group_vals {
+                    match value {
+                        Scalar::Timedelta64(v) if *v != Timedelta::NAT => total += i128::from(*v),
+                        Scalar::Timedelta64(_) | Scalar::Null(_) => {}
+                        _ => return fp_types::nansum(group_vals),
+                    }
+                }
+                match i64::try_from(total) {
+                    Ok(v) => Scalar::Timedelta64(v),
+                    Err(_) => Scalar::Float64(total as f64),
+                }
+            }
+            _ => fp_types::nansum(group_vals),
+        }
+    }
+
     /// Internal: build groups as (composite_key -> Vec<row_index>).
     fn build_groups(&self) -> (Vec<GroupKey<'_>>, GroupMap<'_>) {
         let n = self.df.len();
@@ -23476,7 +23571,7 @@ impl DataFrameGroupBy<'_> {
                     .collect();
 
                 let agg_val = match func_name {
-                    "sum" => fp_types::nansum(&group_vals),
+                    "sum" => Self::sum_group_vals(col.dtype(), &group_vals),
                     "mean" => fp_types::nanmean(&group_vals),
                     "count" => fp_types::nancount(&group_vals),
                     "min" => fp_types::nanmin(&group_vals),
@@ -23821,7 +23916,7 @@ impl DataFrameGroupBy<'_> {
                     .map(|&i| col.values()[i].clone())
                     .collect();
 
-                let agg_val = Self::apply_agg_func(func_name, &group_vals)?;
+                let agg_val = Self::apply_agg_func(func_name, &group_vals, col.dtype())?;
                 agg_vals.push(agg_val);
             }
 
@@ -23873,7 +23968,7 @@ impl DataFrameGroupBy<'_> {
                         .map(|&i| col.values()[i].clone())
                         .collect();
 
-                    let agg_val = Self::apply_agg_func(func_name, &group_vals)?;
+                    let agg_val = Self::apply_agg_func(func_name, &group_vals, col.dtype())?;
                     agg_vals.push(agg_val);
                 }
 
@@ -23938,7 +24033,7 @@ impl DataFrameGroupBy<'_> {
                     .iter()
                     .map(|&i| col.values()[i].clone())
                     .collect();
-                agg_vals.push(Self::apply_agg_func(func_name, &group_vals)?);
+                agg_vals.push(Self::apply_agg_func(func_name, &group_vals, col.dtype())?);
             }
 
             result_cols.insert(output_name.to_owned(), Column::from_values(agg_vals)?);
@@ -23953,9 +24048,13 @@ impl DataFrameGroupBy<'_> {
     }
 
     /// Apply a named aggregation function to a group's values.
-    fn apply_agg_func(func_name: &str, group_vals: &[Scalar]) -> Result<Scalar, FrameError> {
+    fn apply_agg_func(
+        func_name: &str,
+        group_vals: &[Scalar],
+        dtype: DType,
+    ) -> Result<Scalar, FrameError> {
         match func_name {
-            "sum" => Ok(fp_types::nansum(group_vals)),
+            "sum" => Ok(Self::sum_group_vals(dtype, group_vals)),
             "mean" => Ok(fp_types::nanmean(group_vals)),
             "count" => Ok(fp_types::nancount(group_vals)),
             "min" => Ok(fp_types::nanmin(group_vals)),
@@ -24026,7 +24125,7 @@ impl DataFrameGroupBy<'_> {
                         .map(|&i| col.values()[i].clone())
                         .collect();
 
-                    let agg_val = Self::apply_agg_func(func_name, &group_vals)?;
+                    let agg_val = Self::apply_agg_func(func_name, &group_vals, col.dtype())?;
                     agg_vals.push(agg_val);
                 }
 
@@ -24160,7 +24259,7 @@ impl DataFrameGroupBy<'_> {
                     .map(|&i| col.values()[i].clone())
                     .collect();
 
-                let agg_val = Self::apply_agg_func(func_name, &group_vals)?;
+                let agg_val = Self::apply_agg_func(func_name, &group_vals, col.dtype())?;
 
                 // Broadcast the aggregated value back to all rows in this group
                 for &row_idx in row_indices {
@@ -34596,6 +34695,39 @@ mod tests {
     }
 
     #[test]
+    fn dataframe_groupby_sum_preserves_int_dtype() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "grp",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("b".into()),
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("b".into()),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "val",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Int64(1),
+                    Scalar::Int64(2),
+                    Scalar::Int64(3),
+                    Scalar::Int64(4),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let result = df.groupby(&["grp"]).unwrap().sum().unwrap();
+        assert_eq!(result.columns["val"].values()[0], Scalar::Int64(4));
+        assert_eq!(result.columns["val"].values()[1], Scalar::Int64(6));
+    }
+
+    #[test]
     fn dataframe_groupby_mean() {
         let df = DataFrame::from_series(vec![
             Series::from_values(
@@ -36584,12 +36716,108 @@ mod tests {
     }
 
     #[test]
-    fn series_add_prefix_suffix() {
-        let s = Series::from_values("col", vec![0_i64.into()], vec![Scalar::Int64(1)]).unwrap();
-        let prefixed = s.add_prefix("pre_").unwrap();
-        assert_eq!(prefixed.name(), "pre_col");
-        let suffixed = s.add_suffix("_suf").unwrap();
-        assert_eq!(suffixed.name(), "col_suf");
+    fn series_add_prefix_prefixes_index_not_name() {
+        let s = Series::from_values(
+            "col",
+            vec![
+                IndexLabel::Utf8("a".to_owned()),
+                IndexLabel::Utf8("b".to_owned()),
+            ],
+            vec![Scalar::Int64(1), Scalar::Int64(2)],
+        )
+        .unwrap();
+
+        let prefixed = s.add_prefix("p_").unwrap();
+        assert_eq!(prefixed.name(), "col");
+        assert_eq!(
+            prefixed.index().labels(),
+            &[
+                IndexLabel::Utf8("p_a".to_owned()),
+                IndexLabel::Utf8("p_b".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn series_add_suffix_suffixes_index_not_name() {
+        let s = Series::from_values(
+            "col",
+            vec![
+                IndexLabel::Utf8("a".to_owned()),
+                IndexLabel::Utf8("b".to_owned()),
+            ],
+            vec![Scalar::Int64(1), Scalar::Int64(2)],
+        )
+        .unwrap();
+
+        let suffixed = s.add_suffix("_x").unwrap();
+        assert_eq!(suffixed.name(), "col");
+        assert_eq!(
+            suffixed.index().labels(),
+            &[
+                IndexLabel::Utf8("a_x".to_owned()),
+                IndexLabel::Utf8("b_x".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn series_add_prefix_stringifies_int_index() {
+        let s = Series::from_values(
+            "col",
+            vec![IndexLabel::Int64(10), IndexLabel::Int64(20)],
+            vec![Scalar::Int64(1), Scalar::Int64(2)],
+        )
+        .unwrap();
+
+        let prefixed = s.add_prefix("r_").unwrap();
+        assert_eq!(
+            prefixed.index().labels(),
+            &[
+                IndexLabel::Utf8("r_10".to_owned()),
+                IndexLabel::Utf8("r_20".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn dataframe_add_prefix_axis_zero_prefixes_index() {
+        let df = DataFrame::from_dict(
+            &["a"],
+            vec![("a", vec![Scalar::Int64(1), Scalar::Int64(2)])],
+        )
+        .unwrap();
+
+        let prefixed = df.add_prefix_axis("r_", 0).unwrap();
+        assert_eq!(
+            prefixed.index().labels(),
+            &[
+                IndexLabel::Utf8("r_0".to_owned()),
+                IndexLabel::Utf8("r_1".to_owned()),
+            ]
+        );
+        // Column names unchanged.
+        assert_eq!(prefixed.column_names(), vec!["a"]);
+    }
+
+    #[test]
+    fn dataframe_add_suffix_axis_one_matches_plain_suffix() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![("a", vec![Scalar::Int64(1)]), ("b", vec![Scalar::Int64(2)])],
+        )
+        .unwrap();
+
+        let default = df.add_suffix("_v").unwrap();
+        let axis1 = df.add_suffix_axis("_v", 1).unwrap();
+        assert_eq!(default.column_names(), axis1.column_names());
+    }
+
+    #[test]
+    fn dataframe_add_prefix_axis_invalid_errors() {
+        let df = DataFrame::from_dict(&["a"], vec![("a", vec![Scalar::Int64(1)])]).unwrap();
+        let err = df.add_prefix_axis("p", 2).unwrap_err();
+        assert!(matches!(err, FrameError::CompatibilityRejected(_)));
     }
 
     // ── Series.dtype tests ──
@@ -38936,11 +39164,7 @@ mod tests {
 
     #[test]
     fn dataframe_select_dtypes_by_name_unknown_alias_errors() {
-        let df = DataFrame::from_dict(
-            &["a"],
-            vec![("a", vec![Scalar::Int64(1)])],
-        )
-        .unwrap();
+        let df = DataFrame::from_dict(&["a"], vec![("a", vec![Scalar::Int64(1)])]).unwrap();
 
         let err = df.select_dtypes_by_name(&["complex"], &[]).unwrap_err();
         assert!(matches!(err, FrameError::CompatibilityRejected(_)));
@@ -38948,11 +39172,7 @@ mod tests {
 
     #[test]
     fn dataframe_select_dtypes_by_name_overlap_errors() {
-        let df = DataFrame::from_dict(
-            &["a"],
-            vec![("a", vec![Scalar::Int64(1)])],
-        )
-        .unwrap();
+        let df = DataFrame::from_dict(&["a"], vec![("a", vec![Scalar::Int64(1)])]).unwrap();
 
         let err = df
             .select_dtypes_by_name(&["int"], &["integer"])
@@ -38972,9 +39192,7 @@ mod tests {
         .unwrap();
 
         // "int" and "integer" are aliases for DType::Int64; should dedupe.
-        let ints = df
-            .select_dtypes_by_name(&["int", "integer"], &[])
-            .unwrap();
+        let ints = df.select_dtypes_by_name(&["int", "integer"], &[]).unwrap();
         assert_eq!(ints.num_columns(), 1);
         assert!(ints.column("a").is_some());
     }
@@ -49451,7 +49669,7 @@ mod tests {
         );
         assert_eq!(
             result.column("val").unwrap().values(),
-            &[Scalar::Float64(30.0), Scalar::Float64(30.0)]
+            &[Scalar::Int64(30), Scalar::Int64(30)]
         );
     }
 

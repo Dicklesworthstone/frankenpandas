@@ -728,6 +728,8 @@ pub enum FixtureOperation {
     DataFrameIloc,
     #[serde(rename = "dataframe_take", alias = "data_frame_take")]
     DataFrameTake,
+    #[serde(rename = "dataframe_groupby_sum", alias = "data_frame_groupby_sum")]
+    DataFrameGroupBySum,
     #[serde(
         rename = "dataframe_groupby_idxmin",
         alias = "data_frame_groupby_idxmin"
@@ -1225,6 +1227,7 @@ impl FixtureOperation {
             Self::DataFrameLoc => "dataframe_loc",
             Self::DataFrameIloc => "dataframe_iloc",
             Self::DataFrameTake => "dataframe_take",
+            Self::DataFrameGroupBySum => "dataframe_groupby_sum",
             Self::DataFrameGroupByIdxMin => "dataframe_groupby_idxmin",
             Self::DataFrameGroupByIdxMax => "dataframe_groupby_idxmax",
             Self::DataFrameGroupByAny => "dataframe_groupby_any",
@@ -1382,6 +1385,15 @@ pub struct FixtureDataFrame {
     pub columns: BTreeMap<String, Vec<Scalar>>,
     #[serde(default)]
     pub column_order: Option<Vec<String>>,
+    #[serde(default)]
+    pub categorical_columns: Option<BTreeMap<String, FixtureCategoricalColumn>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FixtureCategoricalColumn {
+    pub categories: Vec<Scalar>,
+    #[serde(default)]
+    pub ordered: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1434,6 +1446,8 @@ pub struct PacketFixture {
     pub groupby_keys: Option<Vec<FixtureSeries>>,
     #[serde(default)]
     pub groupby_columns: Option<Vec<String>>,
+    #[serde(default)]
+    pub groupby_observed: Option<bool>,
     #[serde(default)]
     pub frame: Option<FixtureDataFrame>,
     #[serde(default)]
@@ -2189,6 +2203,7 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::DataFrameLoc
         | FixtureOperation::DataFrameIloc
         | FixtureOperation::DataFrameTake
+        | FixtureOperation::DataFrameGroupBySum
         | FixtureOperation::DataFrameGroupByIdxMin
         | FixtureOperation::DataFrameGroupByIdxMax
         | FixtureOperation::DataFrameGroupByAny
@@ -2768,6 +2783,8 @@ struct OracleRequest {
     groupby_keys: Option<Vec<FixtureSeries>>,
     #[serde(default)]
     groupby_columns: Option<Vec<String>>,
+    #[serde(default)]
+    groupby_observed: Option<bool>,
     frame: Option<FixtureDataFrame>,
     #[serde(default)]
     expr: Option<String>,
@@ -8506,6 +8523,35 @@ fn run_fixture_operation(
                 ),
             }
         }
+        FixtureOperation::DataFrameGroupBySum => {
+            let actual = execute_dataframe_fixture_operation(fixture);
+            match expected {
+                ResolvedExpected::Frame(frame) => compare_dataframe_expected(&actual?, &frame),
+                ResolvedExpected::ErrorContains(substr) => match actual {
+                    Err(message) if message.contains(&substr) => Ok(()),
+                    Err(message) => Err(format!(
+                        "expected dataframe_groupby_sum error containing '{substr}', got '{message}'"
+                    )),
+                    Ok(_) => Err(format!(
+                        "expected dataframe_groupby_sum to fail with error containing '{substr}'"
+                    )),
+                },
+                ResolvedExpected::ErrorAny => {
+                    if actual.is_err() {
+                        Ok(())
+                    } else {
+                        Err(
+                            "expected dataframe_groupby_sum to fail but operation succeeded"
+                                .to_owned(),
+                        )
+                    }
+                }
+                _ => Err(
+                    "expected_frame or expected_error is required for dataframe_groupby_sum"
+                        .to_owned(),
+                ),
+            }
+        }
         FixtureOperation::DataFrameGroupByIdxMax => {
             let actual = execute_dataframe_fixture_operation(fixture);
             match expected {
@@ -9745,6 +9791,7 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::DataFrameIloc
         | FixtureOperation::DataFrameTake
         | FixtureOperation::DataFrameXs
+        | FixtureOperation::DataFrameGroupBySum
         | FixtureOperation::DataFrameGroupByIdxMin
         | FixtureOperation::DataFrameGroupByIdxMax
         | FixtureOperation::DataFrameGroupByAny
@@ -9913,6 +9960,7 @@ fn capture_live_oracle_expected(
         right: fixture.right.clone(),
         groupby_keys: fixture.groupby_keys.clone(),
         groupby_columns: fixture.groupby_columns.clone(),
+        groupby_observed: fixture.groupby_observed,
         frame: fixture.frame.clone(),
         expr: fixture.expr.clone(),
         locals: fixture.locals.clone(),
@@ -10342,6 +10390,7 @@ fn capture_live_oracle_expected(
         | FixtureOperation::DataFrameIloc
         | FixtureOperation::DataFrameTake
         | FixtureOperation::DataFrameXs
+        | FixtureOperation::DataFrameGroupBySum
         | FixtureOperation::DataFrameGroupByIdxMin
         | FixtureOperation::DataFrameGroupByIdxMax
         | FixtureOperation::DataFrameGroupByAny
@@ -10877,6 +10926,10 @@ fn require_groupby_columns(
     } else {
         Ok(columns)
     }
+}
+
+fn resolve_groupby_observed(fixture: &PacketFixture) -> bool {
+    fixture.groupby_observed.unwrap_or(true)
 }
 
 fn require_group_name<'a>(
@@ -12563,6 +12616,9 @@ fn execute_dataframe_fixture_operation(fixture: &PacketFixture) -> Result<DataFr
             let axis = resolve_take_axis(fixture)?;
             frame.take(indices, axis).map_err(|err| err.to_string())
         }
+        FixtureOperation::DataFrameGroupBySum => {
+            execute_dataframe_groupby_frame_fixture_operation(fixture, "dataframe_groupby_sum")
+        }
         FixtureOperation::DataFrameXs => {
             let frame = build_dataframe(require_frame(fixture)?)
                 .map_err(|err| format!("frame build failed: {err}"))?;
@@ -12639,9 +12695,16 @@ fn execute_dataframe_groupby_frame_fixture_operation(
         .map(String::as_str)
         .collect::<Vec<_>>();
     let groupby = frame
-        .groupby(&groupby_refs)
+        .groupby_full_options_with_observed(
+            &groupby_refs,
+            true,
+            true,
+            true,
+            resolve_groupby_observed(fixture),
+        )
         .map_err(|err| err.to_string())?;
     match operation_name {
+        "dataframe_groupby_sum" => groupby.sum().map_err(|err| err.to_string()),
         "dataframe_groupby_idxmin" => groupby.idxmin().map_err(|err| err.to_string()),
         "dataframe_groupby_idxmax" => groupby.idxmax().map_err(|err| err.to_string()),
         "dataframe_groupby_any" => groupby.any().map_err(|err| err.to_string()),
@@ -13657,30 +13720,118 @@ fn resolve_datetime_origin_option(
     }
 }
 
-fn build_dataframe(frame: &FixtureDataFrame) -> Result<DataFrame, String> {
-    let mut columns = Vec::new();
+fn resolve_frame_column_order(frame: &FixtureDataFrame) -> Result<Vec<String>, String> {
+    let mut column_order = Vec::new();
     let mut seen = BTreeSet::new();
 
-    if let Some(column_order) = frame.column_order.as_ref() {
-        for name in column_order {
-            let values = frame
-                .columns
-                .get(name)
-                .ok_or_else(|| format!("frame column_order references missing column '{name}'"))?;
+    if let Some(requested_order) = frame.column_order.as_ref() {
+        for name in requested_order {
+            if !frame.columns.contains_key(name) {
+                return Err(format!(
+                    "frame column_order references missing column '{name}'"
+                ));
+            }
             if !seen.insert(name.clone()) {
                 return Err(format!(
                     "frame column_order contains duplicate column '{name}'"
                 ));
             }
-            columns.push((name.as_str(), values.clone()));
+            column_order.push(name.clone());
         }
     }
 
-    for (name, values) in &frame.columns {
+    for name in frame.columns.keys() {
         if seen.insert(name.clone()) {
-            columns.push((name.as_str(), values.clone()));
+            column_order.push(name.clone());
         }
     }
+
+    Ok(column_order)
+}
+
+fn build_fixture_categorical_series(
+    name: &str,
+    values: &[Scalar],
+    spec: &FixtureCategoricalColumn,
+) -> Result<Series, String> {
+    let codes = values
+        .iter()
+        .enumerate()
+        .map(|(idx, value)| {
+            if value.is_missing() {
+                return Ok(-1);
+            }
+            spec.categories
+                .iter()
+                .position(|category| category.semantic_eq(value))
+                .map(|position| position as i64)
+                .ok_or_else(|| {
+                    format!(
+                        "frame categorical column '{name}' value at idx={idx} is not present in categories"
+                    )
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Series::from_categorical_codes(
+        name.to_owned(),
+        codes,
+        spec.categories.clone(),
+        spec.ordered.unwrap_or(false),
+    )
+    .map_err(|err| err.to_string())
+}
+
+fn build_dataframe(frame: &FixtureDataFrame) -> Result<DataFrame, String> {
+    let column_order = resolve_frame_column_order(frame)?;
+    if let Some(categorical_columns) = frame.categorical_columns.as_ref() {
+        let row_index = frame.index.clone();
+        let default_index = (0..row_index.len() as i64)
+            .map(IndexLabel::from)
+            .collect::<Vec<_>>();
+        let mut series_list = Vec::with_capacity(column_order.len());
+
+        for name in &column_order {
+            let values = frame
+                .columns
+                .get(name)
+                .ok_or_else(|| format!("frame is missing column '{name}'"))?;
+            let series = if let Some(spec) = categorical_columns.get(name) {
+                build_fixture_categorical_series(name, values, spec)?
+            } else {
+                Series::from_values(name.clone(), default_index.clone(), values.clone())
+                    .map_err(|err| err.to_string())?
+            };
+            series_list.push(series);
+        }
+
+        let materialized = DataFrame::from_series(series_list).map_err(|err| err.to_string())?;
+        let rebuilt_columns = column_order
+            .iter()
+            .map(|name| {
+                let values = materialized
+                    .column(name)
+                    .ok_or_else(|| format!("materialized frame is missing column '{name}'"))?
+                    .values()
+                    .to_vec();
+                Ok((name.as_str(), values))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        return DataFrame::from_dict_with_index(rebuilt_columns, row_index)
+            .map_err(|err| err.to_string());
+    }
+
+    let columns = column_order
+        .iter()
+        .map(|name| {
+            frame
+                .columns
+                .get(name)
+                .cloned()
+                .map(|values| (name.as_str(), values))
+                .ok_or_else(|| format!("frame is missing column '{name}'"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
 
     DataFrame::from_dict_with_index(columns, frame.index.clone()).map_err(|err| err.to_string())
 }
@@ -16729,6 +16880,42 @@ fn execute_and_compare_differential(
                 }),
                 _ => Err(
                     "expected_frame or expected_error required for dataframe_groupby_idxmin"
+                        .to_owned(),
+                ),
+            }
+        }
+        FixtureOperation::DataFrameGroupBySum => {
+            let actual = execute_dataframe_fixture_operation(fixture);
+            match expected {
+                ResolvedExpected::Frame(frame) => Ok(diff_dataframe(&actual?, &frame)),
+                ResolvedExpected::ErrorContains(substr) => Ok(match actual {
+                    Err(message) if message.contains(&substr) => Vec::new(),
+                    Err(message) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "dataframe_groupby_sum.error",
+                        format!(
+                            "expected dataframe_groupby_sum error containing '{substr}', got '{message}'"
+                        ),
+                    )],
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "dataframe_groupby_sum.error",
+                        "expected dataframe_groupby_sum to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                ResolvedExpected::ErrorAny => Ok(match actual {
+                    Err(_) => Vec::new(),
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "dataframe_groupby_sum.error",
+                        "expected dataframe_groupby_sum to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                _ => Err(
+                    "expected_frame or expected_error required for dataframe_groupby_sum"
                         .to_owned(),
                 ),
             }
@@ -21408,6 +21595,16 @@ mod tests {
             report.fixture_count >= 3,
             "expected FP-P2D-112 dataframe_groupby_ngroup fixtures"
         );
+        assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
+    fn packet_filter_runs_dataframe_groupby_sum_observed_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2D-422", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-422"));
+        assert_eq!(report.fixture_count, 1);
         assert!(report.is_green(), "expected report green: {report:?}");
     }
 

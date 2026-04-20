@@ -1,0 +1,50 @@
+{
+  "packet_id": "FP-P2D-422",
+  "case_id": "dataframe_groupby_sum_observed_true_categorical_strict",
+  "mode": "strict",
+  "operation": "dataframe_groupby_sum",
+  "groupby_columns": ["grp"],
+  "groupby_observed": true,
+  "frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 }
+    ],
+    "column_order": ["grp", "val"],
+    "categorical_columns": {
+      "grp": {
+        "categories": [
+          { "kind": "utf8", "value": "a" },
+          { "kind": "utf8", "value": "b" },
+          { "kind": "utf8", "value": "unused" }
+        ],
+        "ordered": false
+      }
+    },
+    "columns": {
+      "grp": [
+        { "kind": "utf8", "value": "a" },
+        { "kind": "utf8", "value": "a" },
+        { "kind": "utf8", "value": "b" }
+      ],
+      "val": [
+        { "kind": "int64", "value": 10 },
+        { "kind": "int64", "value": 20 },
+        { "kind": "int64", "value": 30 }
+      ]
+    }
+  },
+  "expected_frame": {
+    "index": [
+      { "kind": "utf8", "value": "a" },
+      { "kind": "utf8", "value": "b" }
+    ],
+    "columns": {
+      "val": [
+        { "kind": "int64", "value": 30 },
+        { "kind": "int64", "value": 30 }
+      ]
+    }
+  }
+}

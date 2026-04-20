@@ -1767,6 +1767,7 @@ def dataframe_from_json(pd, payload: dict[str, Any]):
     index_raw = payload.get("index")
     columns_raw = payload.get("columns")
     column_order_raw = payload.get("column_order")
+    categorical_columns_raw = payload.get("categorical_columns")
     if not isinstance(index_raw, list):
         raise OracleError("frame payload requires index list")
     if not isinstance(columns_raw, dict):
@@ -1809,7 +1810,37 @@ def dataframe_from_json(pd, payload: dict[str, Any]):
                 column_order.append(name)
 
     frame = pd.DataFrame(columns, index=index)
-    return frame.reindex(columns=column_order)
+    frame = frame.reindex(columns=column_order)
+
+    if categorical_columns_raw is not None:
+        if not isinstance(categorical_columns_raw, dict):
+            raise OracleError("frame payload categorical_columns must be an object")
+        for raw_name, raw_spec in categorical_columns_raw.items():
+            name = str(raw_name)
+            if name not in frame.columns:
+                raise OracleError(
+                    f"frame payload categorical_columns references unknown column {name!r}"
+                )
+            if not isinstance(raw_spec, dict):
+                raise OracleError(
+                    f"frame payload categorical_columns[{name!r}] must be an object"
+                )
+            categories_raw = raw_spec.get("categories")
+            if not isinstance(categories_raw, list):
+                raise OracleError(
+                    f"frame payload categorical_columns[{name!r}].categories must be a list"
+                )
+            ordered_raw = raw_spec.get("ordered", False)
+            if not isinstance(ordered_raw, bool):
+                raise OracleError(
+                    f"frame payload categorical_columns[{name!r}].ordered must be a boolean"
+                )
+            categories = [scalar_from_json(item) for item in categories_raw]
+            frame[name] = pd.Categorical(
+                frame[name], categories=categories, ordered=ordered_raw
+            )
+
+    return frame
 
 
 def dataframe_to_json(frame) -> dict[str, Any]:
@@ -2679,6 +2710,34 @@ def op_dataframe_groupby_idxmin(pd, payload: dict[str, Any]) -> dict[str, Any]:
         out = frame.groupby(columns).idxmin()
     except Exception as exc:
         raise OracleError(f"dataframe_groupby_idxmin failed: {exc}") from exc
+
+    return {"expected_frame": dataframe_to_json(out)}
+
+
+def op_dataframe_groupby_sum(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    groupby_columns = payload.get("groupby_columns")
+    observed = payload.get("groupby_observed", True)
+    if frame_payload is None:
+        raise OracleError("dataframe_groupby_sum requires frame payload")
+    if not isinstance(groupby_columns, list) or not groupby_columns:
+        raise OracleError("dataframe_groupby_sum requires non-empty groupby_columns list")
+    if not isinstance(observed, bool):
+        raise OracleError("dataframe_groupby_sum groupby_observed must be a boolean")
+
+    columns: list[str] = []
+    for entry in groupby_columns:
+        if not isinstance(entry, str) or not entry.strip():
+            raise OracleError(
+                "dataframe_groupby_sum groupby_columns entries must be non-empty strings"
+            )
+        columns.append(entry.strip())
+
+    frame = dataframe_from_json(pd, frame_payload)
+    try:
+        out = frame.groupby(columns, observed=observed).sum()
+    except Exception as exc:
+        raise OracleError(f"dataframe_groupby_sum failed: {exc}") from exc
 
     return {"expected_frame": dataframe_to_json(out)}
 
@@ -4329,6 +4388,8 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_dataframe_groupby_any(pd, payload)
     if op in {"dataframe_groupby_all", "data_frame_groupby_all"}:
         return op_dataframe_groupby_all(pd, payload)
+    if op in {"dataframe_groupby_sum", "data_frame_groupby_sum"}:
+        return op_dataframe_groupby_sum(pd, payload)
     if op in {"dataframe_groupby_get_group", "data_frame_groupby_get_group"}:
         return op_dataframe_groupby_get_group(pd, payload)
     if op in {"dataframe_groupby_ffill", "data_frame_groupby_ffill"}:
