@@ -96,6 +96,32 @@ fn dtype_memory_width(dtype: DType) -> usize {
     }
 }
 
+fn expand_dtype_alias(name: &str) -> Result<&'static [DType], FrameError> {
+    match name {
+        "number" | "numeric" => Ok(&[DType::Int64, DType::Float64]),
+        "integer" | "int" | "int64" | "i8" => Ok(&[DType::Int64]),
+        "floating" | "float" | "float64" | "f8" => Ok(&[DType::Float64]),
+        "bool" | "boolean" | "?" => Ok(&[DType::Bool]),
+        "object" | "string" | "str" | "O" => Ok(&[DType::Utf8]),
+        "timedelta" | "timedelta64" | "m8" => Ok(&[DType::Timedelta64]),
+        other => Err(FrameError::CompatibilityRejected(format!(
+            "data type '{other}' not understood"
+        ))),
+    }
+}
+
+fn expand_dtype_aliases(names: &[&str]) -> Result<Vec<DType>, FrameError> {
+    let mut out = Vec::new();
+    for alias in names {
+        for dt in expand_dtype_alias(alias)? {
+            if !out.contains(dt) {
+                out.push(*dt);
+            }
+        }
+    }
+    Ok(out)
+}
+
 fn column_memory_usage_bytes(column: &Column) -> usize {
     column_memory_usage_bytes_with_deep(column, false)
 }
@@ -22560,6 +22586,39 @@ impl DataFrame {
         self.select_columns(&selected)
     }
 
+    /// Select columns by pandas-style dtype alias names.
+    ///
+    /// Matches `df.select_dtypes(include='number', exclude='object')` and
+    /// its list-of-strings form. Each alias expands to the corresponding
+    /// set of `DType` variants; unknown aliases return an error consistent
+    /// with pandas' `TypeError: data type '...' not understood`.
+    ///
+    /// Recognized aliases:
+    /// - `"number"`, `"numeric"` → Int64 + Float64
+    /// - `"integer"`, `"int"`, `"int64"` → Int64
+    /// - `"floating"`, `"float"`, `"float64"` → Float64
+    /// - `"bool"`, `"boolean"` → Bool
+    /// - `"object"`, `"string"`, `"str"` → Utf8
+    /// - `"timedelta"`, `"timedelta64"` → Timedelta64
+    pub fn select_dtypes_by_name(
+        &self,
+        include: &[&str],
+        exclude: &[&str],
+    ) -> Result<Self, FrameError> {
+        let include_set = expand_dtype_aliases(include)?;
+        let exclude_set = expand_dtype_aliases(exclude)?;
+        if !include_set.is_empty() && !exclude_set.is_empty() {
+            for dt in &include_set {
+                if exclude_set.contains(dt) {
+                    return Err(FrameError::CompatibilityRejected(
+                        "include and exclude overlap".to_owned(),
+                    ));
+                }
+            }
+        }
+        self.select_dtypes(&include_set, &exclude_set)
+    }
+
     /// Filter rows or columns by label.
     ///
     /// Matches `df.filter(items, like, regex, axis)`.
@@ -38615,6 +38674,93 @@ mod tests {
         let non_string = df.select_dtypes(&[], &[DType::Utf8]).unwrap();
         assert_eq!(non_string.num_columns(), 1);
         assert!(non_string.column("a").is_some());
+    }
+
+    #[test]
+    fn dataframe_select_dtypes_by_name_number_alias() {
+        let df = DataFrame::from_dict(
+            &["a", "b", "c", "d"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                ("b", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
+                (
+                    "c",
+                    vec![Scalar::Utf8("x".to_owned()), Scalar::Utf8("y".to_owned())],
+                ),
+                ("d", vec![Scalar::Bool(true), Scalar::Bool(false)]),
+            ],
+        )
+        .unwrap();
+
+        let numeric = df.select_dtypes_by_name(&["number"], &[]).unwrap();
+        let names: Vec<&str> = numeric
+            .column_names()
+            .into_iter()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(names, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn dataframe_select_dtypes_by_name_object_exclude() {
+        let df = DataFrame::from_dict(
+            &["a", "b", "c"],
+            vec![
+                ("a", vec![Scalar::Int64(1)]),
+                ("b", vec![Scalar::Float64(1.0)]),
+                ("c", vec![Scalar::Utf8("x".to_owned())]),
+            ],
+        )
+        .unwrap();
+
+        let non_object = df.select_dtypes_by_name(&[], &["object"]).unwrap();
+        assert_eq!(non_object.num_columns(), 2);
+        assert!(non_object.column("c").is_none());
+    }
+
+    #[test]
+    fn dataframe_select_dtypes_by_name_unknown_alias_errors() {
+        let df = DataFrame::from_dict(
+            &["a"],
+            vec![("a", vec![Scalar::Int64(1)])],
+        )
+        .unwrap();
+
+        let err = df.select_dtypes_by_name(&["complex"], &[]).unwrap_err();
+        assert!(matches!(err, FrameError::CompatibilityRejected(_)));
+    }
+
+    #[test]
+    fn dataframe_select_dtypes_by_name_overlap_errors() {
+        let df = DataFrame::from_dict(
+            &["a"],
+            vec![("a", vec![Scalar::Int64(1)])],
+        )
+        .unwrap();
+
+        let err = df
+            .select_dtypes_by_name(&["int"], &["integer"])
+            .unwrap_err();
+        assert!(matches!(err, FrameError::CompatibilityRejected(_)));
+    }
+
+    #[test]
+    fn dataframe_select_dtypes_by_name_multiple_aliases_dedup() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1)]),
+                ("b", vec![Scalar::Float64(1.0)]),
+            ],
+        )
+        .unwrap();
+
+        // "int" and "integer" are aliases for DType::Int64; should dedupe.
+        let ints = df
+            .select_dtypes_by_name(&["int", "integer"], &[])
+            .unwrap();
+        assert_eq!(ints.num_columns(), 1);
+        assert!(ints.column("a").is_some());
     }
 
     #[test]
