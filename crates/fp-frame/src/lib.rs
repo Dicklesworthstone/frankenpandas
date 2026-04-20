@@ -3064,6 +3064,26 @@ impl Series {
         lower: Option<&Self>,
         upper: Option<&Self>,
     ) -> Result<Self, FrameError> {
+        let lower = lower
+            .map(|bounds| {
+                if self.index == bounds.index {
+                    Ok::<Self, FrameError>(bounds.clone())
+                } else {
+                    let (_, aligned_bounds) = self.align(bounds, AlignMode::Left)?;
+                    Ok::<Self, FrameError>(aligned_bounds)
+                }
+            })
+            .transpose()?;
+        let upper = upper
+            .map(|bounds| {
+                if self.index == bounds.index {
+                    Ok::<Self, FrameError>(bounds.clone())
+                } else {
+                    let (_, aligned_bounds) = self.align(bounds, AlignMode::Left)?;
+                    Ok::<Self, FrameError>(aligned_bounds)
+                }
+            })
+            .transpose()?;
         let mut out = Vec::with_capacity(self.len());
         for i in 0..self.len() {
             let val = &self.column.values()[i];
@@ -3076,14 +3096,14 @@ impl Series {
                 continue;
             };
             let mut result = v;
-            if let Some(lo) = lower
+            if let Some(lo) = lower.as_ref()
                 && i < lo.len()
                 && !lo.column.values()[i].is_missing()
                 && let Ok(lo_val) = lo.column.values()[i].to_f64()
             {
                 result = result.max(lo_val);
             }
-            if let Some(hi) = upper
+            if let Some(hi) = upper.as_ref()
                 && i < hi.len()
                 && !hi.column.values()[i].is_missing()
                 && let Ok(hi_val) = hi.column.values()[i].to_f64()
@@ -48856,6 +48876,52 @@ mod tests {
         assert_eq!(result.column().values()[0], Scalar::Float64(2.0)); // 1 clipped up to 2
         assert_eq!(result.column().values()[1], Scalar::Float64(5.0)); // in range
         assert_eq!(result.column().values()[2], Scalar::Float64(8.0)); // 9 clipped down to 8
+    }
+
+    #[test]
+    fn test_clip_with_series_aligns_bounds_by_index() {
+        let s = Series::from_values(
+            "data",
+            vec![10_i64.into(), 20_i64.into(), 30_i64.into(), 40_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(5.0),
+                Scalar::Float64(10.0),
+                Scalar::Float64(-2.0),
+            ],
+        )
+        .unwrap();
+        let lo = Series::from_values(
+            "lo",
+            vec![40_i64.into(), 10_i64.into(), 30_i64.into(), 20_i64.into()],
+            vec![
+                Scalar::Float64(-1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(8.0),
+                Scalar::Float64(4.0),
+            ],
+        )
+        .unwrap();
+        let hi = Series::from_values(
+            "hi",
+            vec![40_i64.into(), 10_i64.into(), 30_i64.into(), 20_i64.into()],
+            vec![
+                Scalar::Float64(0.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(9.0),
+                Scalar::Float64(6.0),
+            ],
+        )
+        .unwrap();
+        let result = s.clip_with_series(Some(&lo), Some(&hi)).unwrap();
+        assert_eq!(result.column().values()[0], Scalar::Float64(2.0));
+        assert_eq!(result.column().values()[1], Scalar::Float64(5.0));
+        assert_eq!(result.column().values()[2], Scalar::Float64(9.0));
+        assert_eq!(result.column().values()[3], Scalar::Float64(-1.0));
+        assert_eq!(
+            result.index().labels(),
+            &[10_i64.into(), 20_i64.into(), 30_i64.into(), 40_i64.into()]
+        );
     }
 
     #[test]

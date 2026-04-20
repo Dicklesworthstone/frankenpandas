@@ -1509,6 +1509,10 @@ pub struct PacketFixture {
     #[serde(default)]
     pub clip_upper: Option<f64>,
     #[serde(default)]
+    pub clip_lower_series: Option<FixtureSeries>,
+    #[serde(default)]
+    pub clip_upper_series: Option<FixtureSeries>,
+    #[serde(default)]
     pub round_decimals: Option<i32>,
     #[serde(default)]
     pub nlargest_n: Option<usize>,
@@ -2813,6 +2817,10 @@ struct OracleRequest {
     pub clip_lower: Option<f64>,
     #[serde(default)]
     pub clip_upper: Option<f64>,
+    #[serde(default)]
+    pub clip_lower_series: Option<FixtureSeries>,
+    #[serde(default)]
+    pub clip_upper_series: Option<FixtureSeries>,
     #[serde(default)]
     pub round_decimals: Option<i32>,
     #[serde(default)]
@@ -9894,6 +9902,8 @@ fn capture_live_oracle_expected(
         diff_axis: fixture.diff_axis,
         clip_lower: fixture.clip_lower,
         clip_upper: fixture.clip_upper,
+        clip_lower_series: fixture.clip_lower_series.clone(),
+        clip_upper_series: fixture.clip_upper_series.clone(),
         round_decimals: fixture.round_decimals,
         rank_method: fixture.rank_method.clone(),
         rank_na_option: fixture.rank_na_option.clone(),
@@ -12690,6 +12700,34 @@ fn utf8_value_looks_datetime_like(value: &str) -> bool {
         || NaiveDate::parse_from_str(value, "%Y-%m-%d").is_ok()
 }
 
+fn execute_series_clip_fixture_operation(
+    series: &Series,
+    fixture: &PacketFixture,
+) -> Result<Series, String> {
+    let lower = fixture
+        .clip_lower_series
+        .as_ref()
+        .map(build_series)
+        .transpose()
+        .map_err(|err| format!("clip lower series build failed: {err}"))?;
+    let upper = fixture
+        .clip_upper_series
+        .as_ref()
+        .map(build_series)
+        .transpose()
+        .map_err(|err| format!("clip upper series build failed: {err}"))?;
+
+    if lower.is_some() || upper.is_some() {
+        series
+            .clip_with_series(lower.as_ref(), upper.as_ref())
+            .map_err(|err| err.to_string())
+    } else {
+        series
+            .clip(fixture.clip_lower, fixture.clip_upper)
+            .map_err(|err| err.to_string())
+    }
+}
+
 fn execute_series_module_utility_fixture_operation(
     fixture: &PacketFixture,
 ) -> Result<Series, String> {
@@ -12707,9 +12745,7 @@ fn execute_series_module_utility_fixture_operation(
             let target_dtype = parse_constructor_dtype_spec(dtype_spec)?;
             series.astype(target_dtype).map_err(|err| err.to_string())
         }
-        FixtureOperation::SeriesClip => series
-            .clip(fixture.clip_lower, fixture.clip_upper)
-            .map_err(|err| err.to_string()),
+        FixtureOperation::SeriesClip => execute_series_clip_fixture_operation(&series, fixture),
         FixtureOperation::SeriesAbs => series.abs().map_err(|err| err.to_string()),
         FixtureOperation::SeriesRound => {
             let decimals = fixture.round_decimals.unwrap_or(0);

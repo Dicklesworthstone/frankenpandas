@@ -598,6 +598,17 @@ def fixture_series_from_payload(pd, payload: dict[str, Any], op_name: str):
     return pd.Series(values, index=index, name=payload.get("name", "series"))
 
 
+def optional_series_payload(
+    pd, payload: dict[str, Any], key: str, op_name: str
+):
+    value = payload.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise OracleError(f"{op_name} {key} must be a series payload")
+    return fixture_series_from_payload(pd, value, op_name)
+
+
 def series_to_expected(series) -> dict[str, Any]:
     return {
         "index": [label_to_json(v) for v in series.index.tolist()],
@@ -636,6 +647,35 @@ def op_series_asof(pd, payload: dict[str, Any]) -> dict[str, Any]:
     except Exception as exc:
         raise OracleError(f"series_asof failed: {exc}") from exc
     return {"expected_scalar": scalar_to_json(out)}
+
+
+def op_series_clip(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    if left is None:
+        raise OracleError("series_clip requires left payload")
+
+    series = fixture_series_from_payload(pd, left, "series_clip")
+    lower_series = optional_series_payload(
+        pd, payload, "clip_lower_series", "series_clip"
+    )
+    upper_series = optional_series_payload(
+        pd, payload, "clip_upper_series", "series_clip"
+    )
+    lower = None if lower_series is not None else optional_float_payload(
+        payload, "clip_lower", "series_clip"
+    )
+    upper = None if upper_series is not None else optional_float_payload(
+        payload, "clip_upper", "series_clip"
+    )
+
+    try:
+        out = series.clip(
+            lower=lower_series if lower_series is not None else lower,
+            upper=upper_series if upper_series is not None else upper,
+        )
+    except Exception as exc:
+        raise OracleError(f"series_clip failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
 
 
 def op_series_to_datetime(pd, payload: dict[str, Any]) -> dict[str, Any]:
@@ -4082,6 +4122,8 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_series_combine_first(pd, payload)
     if op == "series_asof":
         return op_series_asof(pd, payload)
+    if op == "series_clip":
+        return op_series_clip(pd, payload)
     if op in {"series_to_datetime", "to_datetime"}:
         return op_series_to_datetime(pd, payload)
     if op in {"dataframe_from_series", "data_frame_from_series"}:
