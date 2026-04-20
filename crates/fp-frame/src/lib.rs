@@ -31772,6 +31772,23 @@ mod tests {
     }
 
     #[test]
+    fn series_between_right_inclusive() {
+        let s = Series::from_values(
+            "x",
+            vec!["a".into(), "b".into(), "c".into()],
+            vec![Scalar::Int64(2), Scalar::Int64(3), Scalar::Int64(4)],
+        )
+        .unwrap();
+
+        let result = s
+            .between(&Scalar::Int64(2), &Scalar::Int64(4), "right")
+            .unwrap();
+        assert_eq!(result.values()[0], Scalar::Bool(false)); // 2 == left -> excluded
+        assert_eq!(result.values()[1], Scalar::Bool(true)); // 3 in range
+        assert_eq!(result.values()[2], Scalar::Bool(true)); // 4 == right -> included
+    }
+
+    #[test]
     fn series_between_null_produces_false() {
         let s = Series::from_values(
             "x",
