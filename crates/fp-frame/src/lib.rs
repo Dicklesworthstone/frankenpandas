@@ -8735,15 +8735,25 @@ impl StringAccessor<'_> {
 
     /// Extract the first match of a regex capture group.
     ///
-    /// Analogous to `pandas.Series.str.extract(pat)`.
-    /// Returns the first capture group (group 1) if the pattern contains
-    /// a group, otherwise returns the full match (group 0).
-    /// Non-matching strings produce Null.
+    /// Analogous to `pandas.Series.str.extract(pat, expand=False)` for a
+    /// single-group pattern. Returns the first capture group (group 1) if
+    /// the pattern contains a group, otherwise returns the full match
+    /// (group 0). Non-matching strings produce Null. If the pattern's
+    /// single capture group is named, the group name is used as the
+    /// Series name (matching pandas 2.2 behavior).
     pub fn extract(&self, pat: &str) -> Result<Series, FrameError> {
         let re = Regex::new(pat).map_err(|e| {
             FrameError::CompatibilityRejected(format!("invalid regex pattern: {e}"))
         })?;
         let has_groups = re.captures_len() > 1;
+        let named_single: Option<String> = if has_groups && re.captures_len() == 2 {
+            re.capture_names().nth(1).flatten().map(str::to_owned)
+        } else {
+            None
+        };
+        let out_name = named_single
+            .as_deref()
+            .unwrap_or_else(|| self.series.name());
         self.apply_str(
             |s| match re.captures(s) {
                 Some(caps) => {
@@ -8755,7 +8765,7 @@ impl StringAccessor<'_> {
                 }
                 None => Scalar::Null(NullKind::NaN),
             },
-            self.series.name(),
+            out_name,
         )
     }
 
@@ -36738,6 +36748,53 @@ mod tests {
         // No capture group → returns full match
         let result = s.str().extract(r"\d+").unwrap();
         assert_eq!(result.values()[0], Scalar::Utf8("123".into()));
+    }
+
+    #[test]
+    fn str_extract_named_single_group_uses_group_name_as_series_name() {
+        let s = Series::from_values(
+            "original",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![
+                Scalar::Utf8("alpha42".into()),
+                Scalar::Utf8("beta100".into()),
+            ],
+        )
+        .unwrap();
+        let result = s.str().extract(r"(?P<number>\d+)").unwrap();
+        assert_eq!(result.name(), "number");
+        assert_eq!(result.values()[0], Scalar::Utf8("42".into()));
+        assert_eq!(result.values()[1], Scalar::Utf8("100".into()));
+    }
+
+    #[test]
+    fn str_extract_unnamed_single_group_keeps_series_name() {
+        let s = Series::from_values(
+            "original",
+            vec![0_i64.into()],
+            vec![Scalar::Utf8("alpha42".into())],
+        )
+        .unwrap();
+        let result = s.str().extract(r"(\d+)").unwrap();
+        assert_eq!(result.name(), "original");
+    }
+
+    #[test]
+    fn str_extract_multi_group_single_series_still_uses_original_name() {
+        // Multi-group pattern via extract() still uses original name (series form
+        // only picks group 1); DataFrame-form extract_df handles named columns.
+        let s = Series::from_values(
+            "original",
+            vec![0_i64.into()],
+            vec![Scalar::Utf8("alpha42".into())],
+        )
+        .unwrap();
+        let result = s
+            .str()
+            .extract(r"(?P<word>[a-z]+)(?P<number>\d+)")
+            .unwrap();
+        // Two groups -> not a single-group rename; keeps original name.
+        assert_eq!(result.name(), "original");
     }
 
     #[test]
