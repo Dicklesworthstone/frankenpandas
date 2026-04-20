@@ -18838,7 +18838,11 @@ impl DataFrame {
     /// Render the DataFrame as a Markdown table.
     ///
     /// Matches `df.to_markdown()`.
-    pub fn to_markdown(&self, include_index: bool) -> String {
+    pub fn to_markdown(
+        &self,
+        include_index: bool,
+        tablefmt: Option<&str>,
+    ) -> Result<String, FrameError> {
         fn format_scalar(val: &Scalar) -> String {
             match val {
                 Scalar::Null(_) => "NaN".to_string(),
@@ -18895,38 +18899,94 @@ impl DataFrame {
             })
             .collect();
 
-        let mut out = String::new();
-
-        // Header
-        out.push('|');
-        for (h, w) in headers.iter().zip(&widths) {
-            out.push_str(&format!(" {:width$} |", h, width = *w));
-        }
-        out.push('\n');
-
-        // Separator
-        out.push('|');
-        for w in &widths {
-            out.push(' ');
-            for _ in 0..*w {
-                out.push('-');
-            }
-            out.push_str(" |");
-        }
-        out.push('\n');
-
-        // Rows
-        for row_idx in 0..nrows {
+        fn render_markdown_row(cells: &[String], widths: &[usize]) -> String {
+            let mut out = String::new();
             out.push('|');
-            for (cells, w) in col_cells.iter().zip(&widths) {
-                out.push_str(&format!(" {:width$} |", cells[row_idx], width = *w));
+            for (cell, width) in cells.iter().zip(widths) {
+                out.push_str(&format!(" {:width$} |", cell, width = *width));
             }
-            if row_idx + 1 < nrows {
-                out.push('\n');
-            }
+            out
         }
 
-        out
+        fn render_markdown_separator(widths: &[usize]) -> String {
+            let mut out = String::new();
+            out.push('|');
+            for width in widths {
+                out.push(' ');
+                out.push_str(&"-".repeat(*width));
+                out.push_str(" |");
+            }
+            out
+        }
+
+        fn render_grid_border(widths: &[usize], ch: char) -> String {
+            let mut out = String::new();
+            out.push('+');
+            for width in widths {
+                out.push_str(&ch.to_string().repeat(*width + 2));
+                out.push('+');
+            }
+            out
+        }
+
+        let rows = (0..nrows)
+            .map(|row_idx| {
+                col_cells
+                    .iter()
+                    .map(|cells| cells[row_idx].clone())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+
+        let format = tablefmt.unwrap_or("github");
+        match format {
+            "github" | "pipe" => {
+                let mut lines = Vec::with_capacity(nrows + 2);
+                lines.push(render_markdown_row(&headers, &widths));
+                lines.push(render_markdown_separator(&widths));
+                for row in rows {
+                    lines.push(render_markdown_row(&row, &widths));
+                }
+                Ok(lines.join("\n"))
+            }
+            "grid" => {
+                let mut lines = Vec::with_capacity(nrows * 2 + 3);
+                let border = render_grid_border(&widths, '-');
+                let header_border = render_grid_border(&widths, '=');
+                lines.push(border.clone());
+                lines.push(render_markdown_row(&headers, &widths));
+                lines.push(header_border);
+                for row in rows {
+                    lines.push(render_markdown_row(&row, &widths));
+                    lines.push(border.clone());
+                }
+                Ok(lines.join("\n"))
+            }
+            "plain" => {
+                let mut lines = Vec::with_capacity(nrows + 1);
+                lines.push(
+                    headers
+                        .iter()
+                        .zip(&widths)
+                        .map(|(cell, width)| format!("{cell:width$}", width = *width))
+                        .collect::<Vec<_>>()
+                        .join("  "),
+                );
+                for row in rows {
+                    lines.push(
+                        row.iter()
+                            .zip(&widths)
+                            .map(|(cell, width)| format!("{cell:width$}", width = *width))
+                            .collect::<Vec<_>>()
+                            .join("  "),
+                    );
+                }
+                Ok(lines.join("\n"))
+            }
+            other => Err(FrameError::CompatibilityRejected(format!(
+                "unsupported to_markdown tablefmt '{other}'"
+            ))),
+        }
     }
 
     /// Randomly sample rows from the DataFrame.
@@ -40324,7 +40384,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = df.to_markdown(false);
+        let result = df.to_markdown(false, None).unwrap();
         // Should have header row with | x | y |
         assert!(result.contains("| x"));
         assert!(result.contains("| y"));
@@ -40342,10 +40402,58 @@ mod tests {
         )
         .unwrap();
 
-        let result = df.to_markdown(true);
-        assert!(result.contains("|"));
-        assert!(result.contains("val"));
-        assert!(result.contains("10"));
+        let result = df.to_markdown(true, Some("grid")).unwrap();
+        assert!(result.contains("+-----+-----+"));
+        assert!(result.contains("|     | val |"));
+        assert!(result.contains("+=====+=====+"));
+        assert!(result.contains("| 0   | 10  |"));
+    }
+
+    #[test]
+    fn df_to_markdown_plain() {
+        let df = DataFrame::from_dict(
+            &["animal"],
+            vec![(
+                "animal",
+                vec![Scalar::Utf8("elk".into()), Scalar::Utf8("pig".into())],
+            )],
+        )
+        .unwrap();
+
+        let result = df.to_markdown(false, Some("plain")).unwrap();
+        assert!(!result.contains('|'));
+        assert!(result.lines().next().unwrap().contains("animal"));
+        assert!(result.contains("elk"));
+        assert!(result.contains("pig"));
+    }
+
+    #[test]
+    fn df_to_markdown_rejects_unknown_tablefmt() {
+        let df = DataFrame::from_dict(
+            &["val"],
+            vec![("val", vec![Scalar::Int64(10), Scalar::Int64(20)])],
+        )
+        .unwrap();
+
+        let err = df.to_markdown(true, Some("rounded_grid")).unwrap_err();
+        assert!(matches!(
+            err,
+            FrameError::CompatibilityRejected(msg) if msg.contains("unsupported to_markdown tablefmt")
+        ));
+    }
+
+    #[test]
+    fn df_to_markdown_pipe_alias() {
+        let df = DataFrame::from_dict(
+            &["val"],
+            vec![("val", vec![Scalar::Int64(10), Scalar::Int64(20)])],
+        )
+        .unwrap();
+
+        let github = df.to_markdown(true, Some("github")).unwrap();
+        let pipe = df.to_markdown(true, Some("pipe")).unwrap();
+        assert_eq!(github, pipe);
+        assert!(github.contains('|'));
     }
 
     // ── GroupBy cumulative tests ──

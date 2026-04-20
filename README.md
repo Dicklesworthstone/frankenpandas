@@ -492,7 +492,7 @@ let row = df.xs("2024-01-15")?;
 | `to_string_truncated(idx, rows, cols)` | `df.to_string(max_rows=)` | Truncated with head/tail + "..." |
 | `to_html(include_index)` | `df.to_html()` | HTML `<table>` |
 | `to_latex(include_index)` | `df.to_latex()` | LaTeX `tabular` |
-| `to_markdown(include_index)` | `df.to_markdown()` | GitHub-flavored markdown table |
+| `to_markdown(include_index, tablefmt)` | `df.to_markdown()` | GitHub/pipe, grid, and plain markdown/table text output |
 | `to_dict(orient)` | `df.to_dict()` | dict/list/records/index/split/tight |
 | `to_series_dict()` | `df.to_dict('series')` | `BTreeMap<String, Series>` |
 | `to_records()` | `df.to_records()` | Vec of row vectors |
