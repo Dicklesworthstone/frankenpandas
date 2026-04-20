@@ -9494,7 +9494,8 @@ impl StringAccessor<'_> {
     /// Translate characters using a mapping table.
     ///
     /// Matches `pd.Series.str.translate(table)`. Replaces each character
-    /// found in `from` with the corresponding character in `to`.
+    /// found in `from` with the corresponding character in `to`. If `to`
+    /// is shorter than `from`, excess mapped characters are deleted.
     pub fn translate(&self, from: &str, to: &str) -> Result<Series, FrameError> {
         let from_chars: Vec<char> = from.chars().collect();
         let to_chars: Vec<char> = to.chars().collect();
@@ -9502,11 +9503,11 @@ impl StringAccessor<'_> {
             |s| {
                 let translated: String = s
                     .chars()
-                    .map(|c| {
+                    .filter_map(|c| {
                         if let Some(pos) = from_chars.iter().position(|&fc| fc == c) {
-                            to_chars.get(pos).copied().unwrap_or(c)
+                            to_chars.get(pos).copied()
                         } else {
-                            c
+                            Some(c)
                         }
                     })
                     .collect();
@@ -45640,6 +45641,22 @@ mod tests {
         assert_eq!(result.values()[0], Scalar::Utf8("xyz".to_string()));
         assert_eq!(result.values()[1], Scalar::Utf8("xxyyzz".to_string()));
         assert!(result.values()[2].is_missing());
+    }
+
+    #[test]
+    fn str_translate_deletes_when_target_shorter() {
+        let s = Series::from_values(
+            "s",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![
+                Scalar::Utf8("abcabc".to_string()),
+                Scalar::Utf8("cab!".to_string()),
+            ],
+        )
+        .unwrap();
+        let result = s.str().translate("abc", "xy").unwrap();
+        assert_eq!(result.values()[0], Scalar::Utf8("xyxy".to_string()));
+        assert_eq!(result.values()[1], Scalar::Utf8("xy!".to_string()));
     }
 
     // ── str.extractall() ──
