@@ -8531,9 +8531,7 @@ impl StringAccessor<'_> {
             let limit = n;
             self.apply_str(
                 |s| match limit {
-                    Some(k) => {
-                        Scalar::Utf8(re.replacen(s, k, repl_owned.as_str()).into_owned())
-                    }
+                    Some(k) => Scalar::Utf8(re.replacen(s, k, repl_owned.as_str()).into_owned()),
                     None => Scalar::Utf8(re.replace_all(s, repl_owned.as_str()).into_owned()),
                 },
                 self.series.name(),
@@ -8542,9 +8540,7 @@ impl StringAccessor<'_> {
             let pat_owned = pat.to_string();
             let repl_owned = repl.to_string();
             self.apply_str(
-                |s| {
-                    Scalar::Utf8(literal_replace_n_case(s, &pat_owned, &repl_owned, n, case))
-                },
+                |s| Scalar::Utf8(literal_replace_n_case(s, &pat_owned, &repl_owned, n, case)),
                 self.series.name(),
             )
         }
@@ -9336,6 +9332,29 @@ impl StringAccessor<'_> {
         self.apply_str(|s| Scalar::Bool(re.is_match(s)), self.series.name())
     }
 
+    /// Fullmatch with case/na option parity.
+    ///
+    /// Matches `pd.Series.str.fullmatch(pat, case=True, na=None)`.
+    /// `case=false` enables inline `(?i)` matching. `na=None` propagates
+    /// nulls as NaN; `na=Some(bool)` replaces null entries with the
+    /// chosen boolean.
+    pub fn fullmatch_with_options(
+        &self,
+        pat: &str,
+        case: bool,
+        na: Option<bool>,
+    ) -> Result<Series, FrameError> {
+        let anchored = if case {
+            format!("^(?:{pat})$")
+        } else {
+            format!("(?i)^(?:{pat})$")
+        };
+        let re = Regex::new(&anchored).map_err(|e| {
+            FrameError::CompatibilityRejected(format!("invalid regex pattern: {e}"))
+        })?;
+        self.str_boolean_with_na(na, move |s| re.is_match(s))
+    }
+
     /// Check whether each string matches a regex pattern at the start.
     ///
     /// Analogous to `pandas.Series.str.match(pat)` which uses Python's
@@ -9346,6 +9365,29 @@ impl StringAccessor<'_> {
             FrameError::CompatibilityRejected(format!("invalid regex pattern: {e}"))
         })?;
         self.apply_str(|s| Scalar::Bool(re.is_match(s)), self.series.name())
+    }
+
+    /// Match (start-anchored) with case/na option parity.
+    ///
+    /// Matches `pd.Series.str.match(pat, case=True, na=None)` — Python's
+    /// `re.match` semantics (anchored at start, not end). `case=false`
+    /// enables inline `(?i)` matching; `na` handling mirrors
+    /// `fullmatch_with_options`.
+    pub fn match_regex_with_options(
+        &self,
+        pat: &str,
+        case: bool,
+        na: Option<bool>,
+    ) -> Result<Series, FrameError> {
+        let anchored = if case {
+            format!("^(?:{pat})")
+        } else {
+            format!("(?i)^(?:{pat})")
+        };
+        let re = Regex::new(&anchored).map_err(|e| {
+            FrameError::CompatibilityRejected(format!("invalid regex pattern: {e}"))
+        })?;
+        self.str_boolean_with_na(na, move |s| re.is_match(s))
     }
 
     /// Split each string by a regex pattern and return the n-th element.
@@ -35073,7 +35115,8 @@ mod tests {
 
     #[test]
     fn str_contains_with_options_invalid_regex_errors() {
-        let s = Series::from_values("x", vec![0_i64.into()], vec![Scalar::Utf8("a".into())]).unwrap();
+        let s =
+            Series::from_values("x", vec![0_i64.into()], vec![Scalar::Utf8("a".into())]).unwrap();
         let err = s
             .str()
             .contains_with_options("(unclosed", true, None, true)
@@ -35129,12 +35172,8 @@ mod tests {
 
     #[test]
     fn str_replace_with_options_n_none_replaces_all() {
-        let s = Series::from_values(
-            "x",
-            vec![0_i64.into()],
-            vec![Scalar::Utf8("a-a-a".into())],
-        )
-        .unwrap();
+        let s = Series::from_values("x", vec![0_i64.into()], vec![Scalar::Utf8("a-a-a".into())])
+            .unwrap();
         let r = s
             .str()
             .replace_with_options("a", "b", None, true, false)
@@ -35154,10 +35193,7 @@ mod tests {
             .str()
             .replace_with_options("world", "rust", None, false, false)
             .unwrap();
-        assert_eq!(
-            r.values()[0],
-            Scalar::Utf8("Hello rust hello rust".into())
-        );
+        assert_eq!(r.values()[0], Scalar::Utf8("Hello rust hello rust".into()));
     }
 
     #[test]
@@ -35192,8 +35228,8 @@ mod tests {
 
     #[test]
     fn str_replace_with_options_invalid_regex_errors() {
-        let s = Series::from_values("x", vec![0_i64.into()], vec![Scalar::Utf8("a".into())])
-            .unwrap();
+        let s =
+            Series::from_values("x", vec![0_i64.into()], vec![Scalar::Utf8("a".into())]).unwrap();
         let err = s
             .str()
             .replace_with_options("(unclosed", "X", None, true, true)
@@ -35372,10 +35408,7 @@ mod tests {
         let s = Series::from_values(
             "x",
             vec![0_i64.into(), 1_i64.into()],
-            vec![
-                Scalar::Utf8("a-b-c-d".into()),
-                Scalar::Utf8("x-y".into()),
-            ],
+            vec![Scalar::Utf8("a-b-c-d".into()), Scalar::Utf8("x-y".into())],
         )
         .unwrap();
         // n=1 means at most 1 split → 2 parts max.
@@ -35394,12 +35427,8 @@ mod tests {
 
     #[test]
     fn str_split_df_n_none_matches_unlimited_split() {
-        let s = Series::from_values(
-            "x",
-            vec![0_i64.into()],
-            vec![Scalar::Utf8("a-b-c".into())],
-        )
-        .unwrap();
+        let s = Series::from_values("x", vec![0_i64.into()], vec![Scalar::Utf8("a-b-c".into())])
+            .unwrap();
         let unlimited = s.str().split_df("-").unwrap();
         let none_arg = s.str().split_df_n("-", None).unwrap();
         assert_eq!(unlimited.column_names(), none_arg.column_names());
@@ -35411,12 +35440,8 @@ mod tests {
 
     #[test]
     fn str_split_df_n_zero_yields_single_column() {
-        let s = Series::from_values(
-            "x",
-            vec![0_i64.into()],
-            vec![Scalar::Utf8("a-b-c".into())],
-        )
-        .unwrap();
+        let s = Series::from_values("x", vec![0_i64.into()], vec![Scalar::Utf8("a-b-c".into())])
+            .unwrap();
         // n=0 means zero splits → entire string in column 0.
         let result = s.str().split_df_n("-", Some(0)).unwrap();
         assert_eq!(result.column_names(), vec!["0"]);
@@ -37213,10 +37238,7 @@ mod tests {
             vec![Scalar::Utf8("alpha42".into())],
         )
         .unwrap();
-        let result = s
-            .str()
-            .extract(r"(?P<word>[a-z]+)(?P<number>\d+)")
-            .unwrap();
+        let result = s.str().extract(r"(?P<word>[a-z]+)(?P<number>\d+)").unwrap();
         // Two groups -> not a single-group rename; keeps original name.
         assert_eq!(result.name(), "original");
     }
@@ -37289,6 +37311,88 @@ mod tests {
         assert_eq!(result.values()[0], Scalar::Bool(true)); // starts with digits
         assert_eq!(result.values()[1], Scalar::Bool(false)); // starts with letters
         assert_eq!(result.values()[2], Scalar::Bool(true)); // all digits
+    }
+
+    #[test]
+    fn str_fullmatch_with_options_case_insensitive() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Utf8("ABC".into()), Scalar::Utf8("Abc1".into())],
+        )
+        .unwrap();
+        let r = s
+            .str()
+            .fullmatch_with_options(r"[a-z]+", false, None)
+            .unwrap();
+        assert_eq!(r.values()[0], Scalar::Bool(true));
+        assert_eq!(r.values()[1], Scalar::Bool(false)); // "Abc1" has a digit → not full match
+    }
+
+    #[test]
+    fn str_fullmatch_with_options_na_fills_nulls() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Null(NullKind::NaN), Scalar::Utf8("123".into())],
+        )
+        .unwrap();
+        let r_false = s
+            .str()
+            .fullmatch_with_options(r"\d+", true, Some(false))
+            .unwrap();
+        assert_eq!(r_false.values()[0], Scalar::Bool(false));
+        assert_eq!(r_false.values()[1], Scalar::Bool(true));
+        let r_none = s.str().fullmatch_with_options(r"\d+", true, None).unwrap();
+        assert!(r_none.values()[0].is_missing());
+    }
+
+    #[test]
+    fn str_match_regex_with_options_case_insensitive_anchors_at_start() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("HELLO world".into()),
+                Scalar::Utf8("say hello".into()),
+                Scalar::Utf8("Hello!".into()),
+            ],
+        )
+        .unwrap();
+        let r = s
+            .str()
+            .match_regex_with_options(r"hello", false, None)
+            .unwrap();
+        assert_eq!(r.values()[0], Scalar::Bool(true));
+        assert_eq!(r.values()[1], Scalar::Bool(false)); // not at start
+        assert_eq!(r.values()[2], Scalar::Bool(true));
+    }
+
+    #[test]
+    fn str_match_regex_with_options_na_propagates_when_none() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Null(NullKind::NaN), Scalar::Utf8("123".into())],
+        )
+        .unwrap();
+        let r = s
+            .str()
+            .match_regex_with_options(r"\d+", true, None)
+            .unwrap();
+        assert!(r.values()[0].is_missing());
+        assert_eq!(r.values()[1], Scalar::Bool(true));
+    }
+
+    #[test]
+    fn str_fullmatch_with_options_invalid_regex_errors() {
+        let s =
+            Series::from_values("x", vec![0_i64.into()], vec![Scalar::Utf8("a".into())]).unwrap();
+        let err = s
+            .str()
+            .fullmatch_with_options("(unclosed", true, None)
+            .unwrap_err();
+        assert!(matches!(err, FrameError::CompatibilityRejected(_)));
     }
 
     #[test]
@@ -47214,7 +47318,9 @@ mod tests {
         let default = df.get_dummies(&["a"]).unwrap();
         assert_eq!(default.column_names().len(), 3);
         // drop_first=true: first discovered category ("x") dropped.
-        let dropped = df.get_dummies_with_options(&["a"], "_", false, true).unwrap();
+        let dropped = df
+            .get_dummies_with_options(&["a"], "_", false, true)
+            .unwrap();
         assert!(!dropped.columns.contains_key("a_x"));
         assert!(dropped.columns.contains_key("a_y"));
         assert!(dropped.columns.contains_key("a_z"));
@@ -47235,7 +47341,9 @@ mod tests {
             )],
         )
         .unwrap();
-        let result = df.get_dummies_with_options(&["a"], "_", true, false).unwrap();
+        let result = df
+            .get_dummies_with_options(&["a"], "_", true, false)
+            .unwrap();
         assert!(result.columns.contains_key("a_x"));
         assert!(result.columns.contains_key("a_y"));
         assert!(result.columns.contains_key("a_nan"));
@@ -47255,7 +47363,9 @@ mod tests {
             )],
         )
         .unwrap();
-        let result = df.get_dummies_with_options(&["a"], ".", false, false).unwrap();
+        let result = df
+            .get_dummies_with_options(&["a"], ".", false, false)
+            .unwrap();
         assert!(result.columns.contains_key("a.x"));
         assert!(result.columns.contains_key("a.y"));
         assert!(!result.columns.contains_key("a_x"));
@@ -47276,7 +47386,9 @@ mod tests {
         )
         .unwrap();
         // drop_first drops "x"; dummy_na adds a_nan; result = [a_y, a_nan]
-        let result = df.get_dummies_with_options(&["a"], "_", true, true).unwrap();
+        let result = df
+            .get_dummies_with_options(&["a"], "_", true, true)
+            .unwrap();
         assert!(!result.columns.contains_key("a_x"));
         assert!(result.columns.contains_key("a_y"));
         assert!(result.columns.contains_key("a_nan"));
@@ -48145,7 +48257,11 @@ mod tests {
         )
         .unwrap();
         let result = s.str().extractall(r"(?P<digit>\d)").unwrap();
-        let names: Vec<&str> = result.column_names().into_iter().map(String::as_str).collect();
+        let names: Vec<&str> = result
+            .column_names()
+            .into_iter()
+            .map(String::as_str)
+            .collect();
         assert_eq!(names, vec!["digit"]);
         assert_eq!(
             result.column("digit").unwrap().values()[0],
@@ -48166,7 +48282,11 @@ mod tests {
         )
         .unwrap();
         let result = s.str().extractall(r"(?P<letter>[a-z])(\d)").unwrap();
-        let names: Vec<&str> = result.column_names().into_iter().map(String::as_str).collect();
+        let names: Vec<&str> = result
+            .column_names()
+            .into_iter()
+            .map(String::as_str)
+            .collect();
         assert_eq!(names, vec!["letter", "1"]);
     }
 
@@ -48179,7 +48299,11 @@ mod tests {
         )
         .unwrap();
         let result = s.str().extractall(r"([a-z])(\d)").unwrap();
-        let names: Vec<&str> = result.column_names().into_iter().map(String::as_str).collect();
+        let names: Vec<&str> = result
+            .column_names()
+            .into_iter()
+            .map(String::as_str)
+            .collect();
         assert_eq!(names, vec!["0", "1"]);
     }
 
