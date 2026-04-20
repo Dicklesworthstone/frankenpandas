@@ -4653,6 +4653,34 @@ impl Series {
         Self::from_values(self.name.clone(), self.index.labels().to_vec(), out)
     }
 
+    /// Percentage change with optional null fill before computation.
+    ///
+    /// Matches `series.pct_change(periods, fill_method=..., limit=...)`.
+    /// `fill_method` is `None` (pandas 2.2 default — no fill), `"ffill"` /
+    /// `"pad"` (forward-fill missing values), or `"bfill"` / `"backfill"`
+    /// (backward-fill). `limit` caps consecutive fills; it is ignored when
+    /// `fill_method` is `None`.
+    pub fn pct_change_with_fill(
+        &self,
+        periods: usize,
+        fill_method: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<Self, FrameError> {
+        let filled = match fill_method {
+            None => self.clone(),
+            Some(method) => match method {
+                "ffill" | "pad" => self.ffill(limit)?,
+                "bfill" | "backfill" => self.bfill(limit)?,
+                other => {
+                    return Err(FrameError::CompatibilityRejected(format!(
+                        "fill_method must be one of ['ffill', 'pad', 'bfill', 'backfill'], got '{other}'"
+                    )));
+                }
+            },
+        };
+        filled.pct_change(periods)
+    }
+
     /// Convert Series to a single-column DataFrame.
     ///
     /// Matches `series.to_frame(name=None)`. Uses the series name as the
@@ -32812,6 +32840,92 @@ mod tests {
         let result = s.pct_change(1).unwrap();
         assert!(result.values()[1].is_missing()); // null previous -> NaN
         assert!(result.values()[2].is_missing()); // null at i-1 -> NaN
+    }
+
+    #[test]
+    fn series_pct_change_with_fill_ffill_smooths_over_null() {
+        let s = Series::from_values(
+            "x",
+            vec!["a".into(), "b".into(), "c".into()],
+            vec![
+                Scalar::Float64(100.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(200.0),
+            ],
+        )
+        .unwrap();
+
+        // fill_method='ffill' -> [100, 100, 200], pct_change -> [NaN, 0.0, 1.0]
+        let result = s.pct_change_with_fill(1, Some("ffill"), None).unwrap();
+        assert!(result.values()[0].is_missing());
+        assert_eq!(result.values()[1], Scalar::Float64(0.0));
+        assert_eq!(result.values()[2], Scalar::Float64(1.0));
+    }
+
+    #[test]
+    fn series_pct_change_with_fill_bfill_matches_backfill_alias() {
+        let s = Series::from_values(
+            "x",
+            vec!["a".into(), "b".into(), "c".into(), "d".into()],
+            vec![
+                Scalar::Float64(100.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(150.0),
+                Scalar::Float64(300.0),
+            ],
+        )
+        .unwrap();
+
+        let result_bfill = s.pct_change_with_fill(1, Some("bfill"), None).unwrap();
+        let result_backfill = s.pct_change_with_fill(1, Some("backfill"), None).unwrap();
+        assert_eq!(result_bfill.values(), result_backfill.values());
+    }
+
+    #[test]
+    fn series_pct_change_with_fill_none_matches_pct_change() {
+        let s = Series::from_values(
+            "x",
+            vec!["a".into(), "b".into(), "c".into()],
+            vec![
+                Scalar::Float64(10.0),
+                Scalar::Float64(20.0),
+                Scalar::Float64(40.0),
+            ],
+        )
+        .unwrap();
+
+        let a = s.pct_change(1).unwrap();
+        let b = s.pct_change_with_fill(1, None, None).unwrap();
+        assert_eq!(a.values(), b.values());
+    }
+
+    #[test]
+    fn series_pct_change_with_fill_limit_caps_consecutive_fills() {
+        let s = Series::from_values(
+            "x",
+            vec!["a".into(), "b".into(), "c".into(), "d".into()],
+            vec![
+                Scalar::Float64(10.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(40.0),
+            ],
+        )
+        .unwrap();
+
+        // ffill(limit=1) -> [10, 10, NaN, 40]; pct_change(1) -> [NaN, 0.0, NaN, NaN]
+        let result = s.pct_change_with_fill(1, Some("ffill"), Some(1)).unwrap();
+        assert!(result.values()[0].is_missing());
+        assert_eq!(result.values()[1], Scalar::Float64(0.0));
+        assert!(result.values()[2].is_missing());
+        assert!(result.values()[3].is_missing());
+    }
+
+    #[test]
+    fn series_pct_change_with_fill_invalid_method_errors() {
+        let s = Series::from_values("x", vec!["a".into()], vec![Scalar::Float64(1.0)]).unwrap();
+        let err = s.pct_change_with_fill(1, Some("nearest"), None).unwrap_err();
+        assert!(matches!(err, FrameError::CompatibilityRejected(_)));
     }
 
     // --- Series::to_frame / to_list / to_dict tests ---
