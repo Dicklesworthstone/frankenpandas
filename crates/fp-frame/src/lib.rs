@@ -7229,6 +7229,60 @@ impl DataFrameRolling<'_> {
     pub fn cov(&self) -> Result<DataFrame, FrameError> {
         self.pairwise_rolling(|rolling, other| rolling.cov(other))
     }
+
+    /// Rolling correlation of each numeric column with `other`.
+    ///
+    /// Matches `pd.DataFrame.rolling(window).corr(other)` when `other`
+    /// is a Series: produces a DataFrame with one column per numeric
+    /// input, each containing the rolling Pearson correlation between
+    /// that column and `other`. Column names are preserved.
+    pub fn corr_with(&self, other: &Series) -> Result<DataFrame, FrameError> {
+        self.with_series(other, |rolling, s| rolling.corr(s))
+    }
+
+    /// Rolling covariance of each numeric column with `other`.
+    ///
+    /// Matches `pd.DataFrame.rolling(window).cov(other)` when `other`
+    /// is a Series: produces a DataFrame with one column per numeric
+    /// input containing the rolling sample covariance (ddof=1) with
+    /// `other`. Column names are preserved.
+    pub fn cov_with(&self, other: &Series) -> Result<DataFrame, FrameError> {
+        self.with_series(other, |rolling, s| rolling.cov(s))
+    }
+
+    fn with_series<F>(&self, other: &Series, agg: F) -> Result<DataFrame, FrameError>
+    where
+        F: Fn(&Rolling<'_>, &Series) -> Result<Series, FrameError>,
+    {
+        let numeric_cols: Vec<String> = self
+            .df
+            .column_order
+            .iter()
+            .filter(|name| {
+                let dt = self.df.columns[name.as_str()].dtype();
+                dt == DType::Int64 || dt == DType::Float64
+            })
+            .cloned()
+            .collect();
+
+        let mut result_cols = BTreeMap::new();
+        let mut col_order = Vec::new();
+
+        for col_name in &numeric_cols {
+            let col = self.df.columns[col_name].clone();
+            let left_series = Series::new(col_name, self.df.index.clone(), col)?;
+            let rolling = left_series.rolling(self.window, Some(self.min_periods));
+            let paired = agg(&rolling, other)?;
+            result_cols.insert(col_name.clone(), paired.column().clone());
+            col_order.push(col_name.clone());
+        }
+
+        Ok(DataFrame {
+            columns: result_cols,
+            column_order: col_order,
+            index: self.df.index.clone(),
+        })
+    }
 }
 
 /// Expanding window aggregation over a DataFrame's numeric columns.
@@ -48112,6 +48166,125 @@ mod tests {
         // cov([1,2,3],[10,20,30]) = 10.0
         let v = result.values()[2].to_f64().unwrap();
         assert!((v - 10.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn df_rolling_corr_with_series_matches_per_column_corr() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(4.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(4.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(1.0),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let other = Series::from_values(
+            "other",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Float64(2.0),
+                Scalar::Float64(4.0),
+                Scalar::Float64(6.0),
+                Scalar::Float64(8.0),
+            ],
+        )
+        .unwrap();
+
+        let result = df.rolling(3, None).corr_with(&other).unwrap();
+        assert_eq!(result.column_names(), vec!["a", "b"]);
+        // Column "a" should have +1 correlation with other on the last window.
+        let a_last = result.column("a").unwrap().values()[2].to_f64().unwrap();
+        assert!((a_last - 1.0).abs() < 1e-10);
+        // Column "b" should have -1 correlation with other on the last window.
+        let b_last = result.column("b").unwrap().values()[2].to_f64().unwrap();
+        assert!((b_last + 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn df_rolling_cov_with_series_matches_manual_cov() {
+        let df = DataFrame::from_dict(
+            &["a"],
+            vec![(
+                "a",
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(2.0),
+                    Scalar::Float64(3.0),
+                ],
+            )],
+        )
+        .unwrap();
+        let other = Series::from_values(
+            "other",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Float64(10.0),
+                Scalar::Float64(20.0),
+                Scalar::Float64(30.0),
+            ],
+        )
+        .unwrap();
+
+        let result = df.rolling(3, None).cov_with(&other).unwrap();
+        let v = result.column("a").unwrap().values()[2].to_f64().unwrap();
+        // cov([1,2,3],[10,20,30]) = 10.0 (sample, ddof=1)
+        assert!((v - 10.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn df_rolling_corr_with_skips_non_numeric_columns() {
+        let df = DataFrame::from_dict(
+            &["a", "label"],
+            vec![
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
+                (
+                    "label",
+                    vec![
+                        Scalar::Utf8("x".into()),
+                        Scalar::Utf8("y".into()),
+                        Scalar::Utf8("z".into()),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let other = Series::from_values(
+            "other",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Float64(3.0),
+                Scalar::Float64(6.0),
+                Scalar::Float64(9.0),
+            ],
+        )
+        .unwrap();
+
+        let result = df.rolling(3, None).corr_with(&other).unwrap();
+        // Only the numeric column "a" is present.
+        assert_eq!(result.column_names(), vec!["a"]);
     }
 
     // ── Expanding.count / Expanding.quantile ──
