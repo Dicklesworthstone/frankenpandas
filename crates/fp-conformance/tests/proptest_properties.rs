@@ -1100,6 +1100,15 @@ fn scale_series(series: &Series, factor: f64) -> Series {
     .expect("scaled series must construct")
 }
 
+fn constant_numeric_series_like(series: &Series, name: &str, value: f64) -> Series {
+    Series::from_values(
+        name.to_owned(),
+        series.index().labels().to_vec(),
+        vec![Scalar::Float64(value); series.len()],
+    )
+    .expect("constant numeric series must construct")
+}
+
 fn scale_dataframe(df: &DataFrame, factor: f64) -> DataFrame {
     let mut scaled_columns = std::collections::BTreeMap::new();
     let column_order = df
@@ -1990,6 +1999,95 @@ proptest! {
                 }
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Property: Series arithmetic kernel invariants
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(200))]
+
+    /// Series subtraction with itself yields zeros for non-missing values and
+    /// preserves missing values when the index is unique.
+    #[test]
+    fn prop_series_sub_self_zeroes_non_missing(series in arb_unique_numeric_series("self_sub", 10)) {
+        let policy = RuntimePolicy::hardened(Some(100_000));
+        let mut ledger = EvidenceLedger::new();
+        let result = series.sub_with_policy(&series, &policy, &mut ledger);
+        prop_assert!(result.is_ok(), "self subtraction should succeed: {result:?}");
+        let result = result.unwrap();
+
+        let expected = Series::from_values(
+            "expected_sub".to_owned(),
+            series.index().labels().to_vec(),
+            series
+                .values()
+                .iter()
+                .map(|value| {
+                    if value.is_missing() {
+                        value.clone()
+                    } else {
+                        Scalar::Float64(0.0)
+                    }
+                })
+                .collect(),
+        )
+        .expect("expected subtraction result must construct");
+
+        prop_assert!(
+            same_series_payload(&result, &expected),
+            "series - itself should yield zeros/missing:\nleft={series:?}\nresult={result:?}\nexpected={expected:?}"
+        );
+    }
+
+    /// Flipping the sign of both operands leaves element-wise multiplication unchanged.
+    #[test]
+    fn prop_series_mul_sign_flip_both_operands_preserves_product(
+        (left, right) in arb_unique_series_pair(10)
+    ) {
+        let policy = RuntimePolicy::hardened(Some(100_000));
+
+        let mut baseline_ledger = EvidenceLedger::new();
+        let baseline = left.mul_with_policy(&right, &policy, &mut baseline_ledger);
+
+        let flipped_left = sign_flip_series(&left);
+        let flipped_right = sign_flip_series(&right);
+        let mut flipped_ledger = EvidenceLedger::new();
+        let flipped = flipped_left.mul_with_policy(&flipped_right, &policy, &mut flipped_ledger);
+
+        prop_assert!(
+            baseline.is_ok() == flipped.is_ok(),
+            "sign-flipped multiplication should preserve success/error shape:\nleft={:?}\nright={:?}\nbaseline={:?}\nflipped={:?}",
+            left,
+            right,
+            baseline,
+            flipped
+        );
+
+        if let (Ok(baseline), Ok(flipped)) = (baseline, flipped) {
+            prop_assert!(
+                approx_equal_series(&baseline, &flipped),
+                "(-x) * (-y) should equal x * y:\nleft={left:?}\nright={right:?}\nbaseline={baseline:?}\nflipped={flipped:?}"
+            );
+        }
+    }
+
+    /// Dividing by an aligned all-ones series is an identity transform.
+    #[test]
+    fn prop_series_div_by_one_is_identity(series in arb_unique_numeric_series("div_one", 10)) {
+        let ones = constant_numeric_series_like(&series, "ones", 1.0);
+        let policy = RuntimePolicy::hardened(Some(100_000));
+        let mut ledger = EvidenceLedger::new();
+        let result = series.div_with_policy(&ones, &policy, &mut ledger);
+        prop_assert!(result.is_ok(), "division by ones should succeed: {result:?}");
+        let result = result.unwrap();
+
+        prop_assert!(
+            same_series_payload(&result, &series),
+            "series / 1 should be identity:\nseries={series:?}\nresult={result:?}"
+        );
     }
 }
 
