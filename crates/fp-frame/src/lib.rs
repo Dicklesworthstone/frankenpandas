@@ -22659,6 +22659,19 @@ impl DataFrame {
     /// Matches `df.explode(column)` for string columns. Splits the specified
     /// column by `sep` and replicates other columns accordingly.
     pub fn explode(&self, column: &str, sep: &str) -> Result<Self, FrameError> {
+        self.explode_with_ignore_index(column, sep, false)
+    }
+
+    /// Explode a column containing delimited strings into multiple rows.
+    ///
+    /// Matches `df.explode(column, ignore_index=...)` for the current
+    /// string-delimited explode surface.
+    pub fn explode_with_ignore_index(
+        &self,
+        column: &str,
+        sep: &str,
+        ignore_index: bool,
+    ) -> Result<Self, FrameError> {
         let col = self.columns.get(column).ok_or_else(|| {
             FrameError::CompatibilityRejected(format!("explode: column '{column}' not found"))
         })?;
@@ -22710,11 +22723,16 @@ impl DataFrame {
             col_order.push(name.clone());
         }
 
-        Ok(DataFrame {
+        let out = DataFrame {
             columns: result_cols,
             column_order: col_order,
             index: Index::new(new_indices),
-        })
+        };
+        if ignore_index {
+            out.reset_index(true)
+        } else {
+            Ok(out)
+        }
     }
 
     // ── Cross-section ───────────────────────────────────────────────
@@ -41263,6 +41281,33 @@ mod tests {
         assert_eq!(id_col.values()[0], Scalar::Int64(1));
         assert_eq!(id_col.values()[1], Scalar::Int64(1));
         assert_eq!(id_col.values()[2], Scalar::Int64(2));
+    }
+
+    #[test]
+    fn df_explode_ignore_index_resets_labels() {
+        let df = DataFrame::from_dict_with_index(
+            vec![
+                ("id", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                (
+                    "items",
+                    vec![Scalar::Utf8("a|b".to_owned()), Scalar::Utf8("c".to_owned())],
+                ),
+            ],
+            vec!["left".into(), "right".into()],
+        )
+        .unwrap();
+
+        let result = df.explode_with_ignore_index("items", "|", true).unwrap();
+        assert_eq!(result.len(), 3);
+        assert_eq!(
+            result.index().labels(),
+            &[0_i64.into(), 1_i64.into(), 2_i64.into()]
+        );
+
+        let items = result.column_as_series("items").unwrap();
+        assert_eq!(items.values()[0], Scalar::Utf8("a".to_owned()));
+        assert_eq!(items.values()[1], Scalar::Utf8("b".to_owned()));
+        assert_eq!(items.values()[2], Scalar::Utf8("c".to_owned()));
     }
 
     // ── DataFrame xs / droplevel tests ──

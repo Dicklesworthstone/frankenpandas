@@ -783,6 +783,8 @@ pub enum FixtureOperation {
     DataFrameEval,
     #[serde(rename = "dataframe_compare", alias = "data_frame_compare")]
     DataFrameCompare,
+    #[serde(rename = "dataframe_explode", alias = "data_frame_explode")]
+    DataFrameExplode,
     #[serde(rename = "dataframe_query", alias = "data_frame_query")]
     DataFrameQuery,
     #[serde(rename = "dataframe_xs", alias = "data_frame_xs")]
@@ -1238,6 +1240,7 @@ impl FixtureOperation {
             Self::DataFrameTail => "dataframe_tail",
             Self::DataFrameEval => "dataframe_eval",
             Self::DataFrameCompare => "dataframe_compare",
+            Self::DataFrameExplode => "dataframe_explode",
             Self::DataFrameQuery => "dataframe_query",
             Self::DataFrameXs => "dataframe_xs",
             Self::DataFrameIsNa => "dataframe_isna",
@@ -1590,6 +1593,8 @@ pub struct PacketFixture {
     pub keep: Option<String>,
     #[serde(default)]
     pub ignore_index: Option<bool>,
+    #[serde(default)]
+    pub explode_column: Option<String>,
     #[serde(default)]
     pub csv_input: Option<String>,
     #[serde(default)]
@@ -2178,6 +2183,7 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::DataFrameTail
         | FixtureOperation::DataFrameEval
         | FixtureOperation::DataFrameCompare
+        | FixtureOperation::DataFrameExplode
         | FixtureOperation::DataFrameQuery
         | FixtureOperation::DataFrameXs
         | FixtureOperation::DataFrameSetIndex
@@ -2859,6 +2865,8 @@ struct OracleRequest {
     keep: Option<String>,
     #[serde(default)]
     ignore_index: Option<bool>,
+    #[serde(default)]
+    explode_column: Option<String>,
     #[serde(default)]
     csv_input: Option<String>,
     #[serde(default)]
@@ -9060,6 +9068,7 @@ fn run_fixture_operation(
         | FixtureOperation::DataFrameMask
         | FixtureOperation::DataFrameMaskDf
         | FixtureOperation::DataFrameDropDuplicates
+        | FixtureOperation::DataFrameExplode
         | FixtureOperation::DataFrameSortIndex
         | FixtureOperation::DataFrameSortValues
         | FixtureOperation::DataFrameNlargest
@@ -9733,6 +9742,7 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::DataFrameMask
         | FixtureOperation::DataFrameMaskDf
         | FixtureOperation::DataFrameDropDuplicates
+        | FixtureOperation::DataFrameExplode
         | FixtureOperation::DataFrameMerge
         | FixtureOperation::DataFrameMergeIndex
         | FixtureOperation::DataFrameMergeAsof
@@ -9906,6 +9916,7 @@ fn capture_live_oracle_expected(
         subset: fixture.subset.clone(),
         keep: fixture.keep.clone(),
         ignore_index: fixture.ignore_index,
+        explode_column: fixture.explode_column.clone(),
         csv_input: fixture.csv_input.clone(),
         loc_labels: fixture.loc_labels.clone(),
         iloc_positions: fixture.iloc_positions.clone(),
@@ -10316,6 +10327,7 @@ fn capture_live_oracle_expected(
         | FixtureOperation::DataFrameMask
         | FixtureOperation::DataFrameMaskDf
         | FixtureOperation::DataFrameDropDuplicates
+        | FixtureOperation::DataFrameExplode
         | FixtureOperation::DataFrameMerge
         | FixtureOperation::DataFrameMergeIndex
         | FixtureOperation::DataFrameMergeAsof
@@ -10838,6 +10850,16 @@ fn require_string_sep<'a>(
         .string_sep
         .as_deref()
         .ok_or_else(|| format!("string_sep is required for {operation_name}"))
+}
+
+fn require_explode_column<'a>(
+    fixture: &'a PacketFixture,
+    operation_name: &str,
+) -> Result<&'a str, String> {
+    fixture
+        .explode_column
+        .as_deref()
+        .ok_or_else(|| format!("explode_column is required for {operation_name}"))
 }
 
 fn require_start_time(fixture: &PacketFixture) -> Result<&str, String> {
@@ -12425,6 +12447,17 @@ fn execute_dataframe_fixture_operation(fixture: &PacketFixture) -> Result<DataFr
                     subset.as_deref(),
                     keep,
                     resolve_drop_duplicates_ignore_index(fixture),
+                )
+                .map_err(|err| err.to_string())
+        }
+        FixtureOperation::DataFrameExplode => {
+            let frame = build_dataframe(require_frame(fixture)?)
+                .map_err(|err| format!("frame build failed: {err}"))?;
+            frame
+                .explode_with_ignore_index(
+                    require_explode_column(fixture, "dataframe_explode")?,
+                    require_string_sep(fixture, "dataframe_explode")?,
+                    fixture.ignore_index.unwrap_or(false),
                 )
                 .map_err(|err| err.to_string())
         }
@@ -17315,6 +17348,7 @@ fn execute_and_compare_differential(
         | FixtureOperation::DataFrameMask
         | FixtureOperation::DataFrameMaskDf
         | FixtureOperation::DataFrameDropDuplicates
+        | FixtureOperation::DataFrameExplode
         | FixtureOperation::DataFrameSortIndex
         | FixtureOperation::DataFrameSortValues
         | FixtureOperation::DataFrameNlargest
@@ -20588,6 +20622,19 @@ mod tests {
         assert!(
             report.fixture_count >= 4,
             "expected FP-P2D-419 series asof fixtures"
+        );
+        assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
+    fn packet_filter_runs_dataframe_explode_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2D-420", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-420"));
+        assert!(
+            report.fixture_count >= 2,
+            "expected FP-P2D-420 dataframe explode fixtures"
         );
         assert!(report.is_green(), "expected report green: {report:?}");
     }

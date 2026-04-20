@@ -3220,6 +3220,13 @@ def _resolve_drop_duplicates_ignore_index(payload: dict[str, Any], op_name: str)
     raise OracleError(f"{op_name} ignore_index must be a boolean")
 
 
+def _require_explode_column(payload: dict[str, Any], op_name: str) -> str:
+    raw = payload.get("explode_column")
+    if not isinstance(raw, str) or raw.strip() == "":
+        raise OracleError(f"{op_name} explode_column must be a non-empty string")
+    return raw
+
+
 def op_dataframe_duplicated(pd, payload: dict[str, Any]) -> dict[str, Any]:
     frame_payload = payload.get("frame")
     if frame_payload is None:
@@ -3252,6 +3259,37 @@ def op_dataframe_drop_duplicates(pd, payload: dict[str, Any]) -> dict[str, Any]:
         )
     except Exception as exc:
         raise OracleError(f"dataframe_drop_duplicates failed: {exc}") from exc
+    return {"expected_frame": dataframe_to_json(out)}
+
+
+def op_dataframe_explode(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    if frame_payload is None:
+        raise OracleError("dataframe_explode requires frame payload")
+
+    frame = dataframe_from_json(pd, frame_payload).copy()
+    explode_column = _require_explode_column(payload, "dataframe_explode")
+    if explode_column not in frame.columns:
+        raise OracleError(
+            f"dataframe_explode explode_column {explode_column!r} not found"
+        )
+
+    string_sep = payload.get("string_sep")
+    if not isinstance(string_sep, str) or string_sep == "":
+        raise OracleError("dataframe_explode string_sep must be a non-empty string")
+
+    ignore_index = _resolve_drop_duplicates_ignore_index(payload, "dataframe_explode")
+
+    def _prepare_explode_value(value: Any) -> Any:
+        if isinstance(value, str):
+            return [part.strip() for part in value.split(string_sep)]
+        return value
+
+    frame[explode_column] = frame[explode_column].map(_prepare_explode_value)
+    try:
+        out = frame.explode(explode_column, ignore_index=ignore_index)
+    except Exception as exc:
+        raise OracleError(f"dataframe_explode failed: {exc}") from exc
     return {"expected_frame": dataframe_to_json(out)}
 
 
@@ -4316,6 +4354,8 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_dataframe_duplicated(pd, payload)
     if op in {"dataframe_drop_duplicates", "data_frame_drop_duplicates"}:
         return op_dataframe_drop_duplicates(pd, payload)
+    if op in {"dataframe_explode", "data_frame_explode"}:
+        return op_dataframe_explode(pd, payload)
     if op in {"dataframe_set_index", "data_frame_set_index"}:
         return op_dataframe_set_index(pd, payload)
     if op in {"dataframe_reset_index", "data_frame_reset_index"}:
