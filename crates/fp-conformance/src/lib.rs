@@ -20799,7 +20799,7 @@ mod tests {
             run_packet_by_id(&cfg, "FP-P2D-086", OracleMode::FixtureExpected).expect("report");
         assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-086"));
         assert!(
-            report.fixture_count >= 3,
+            report.fixture_count >= 4,
             "expected FP-P2D-086 series_extract_df fixtures"
         );
         assert!(report.is_green(), "expected report green: {report:?}");

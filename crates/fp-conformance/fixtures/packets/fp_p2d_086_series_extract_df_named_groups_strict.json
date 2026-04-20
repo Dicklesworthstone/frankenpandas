@@ -1,0 +1,40 @@
+{
+  "packet_id": "FP-P2D-086",
+  "case_id": "series_extract_df_named_groups_strict",
+  "mode": "strict",
+  "operation": "series_extract_df",
+  "regex_pattern": "(?P<prefix>[A-Za-z]+)-(?P<number>\\d+)",
+  "left": {
+    "name": "strings",
+    "index": [
+      { "kind": "utf8", "value": "row_a" },
+      { "kind": "utf8", "value": "row_b" },
+      { "kind": "utf8", "value": "row_b" }
+    ],
+    "values": [
+      { "kind": "utf8", "value": "abc-123" },
+      { "kind": "utf8", "value": "xyz" },
+      { "kind": "utf8", "value": "def-456" }
+    ]
+  },
+  "expected_frame": {
+    "index": [
+      { "kind": "utf8", "value": "row_a" },
+      { "kind": "utf8", "value": "row_b" },
+      { "kind": "utf8", "value": "row_b" }
+    ],
+    "column_order": ["prefix", "number"],
+    "columns": {
+      "prefix": [
+        { "kind": "utf8", "value": "abc" },
+        { "kind": "null", "value": "na_n" },
+        { "kind": "utf8", "value": "def" }
+      ],
+      "number": [
+        { "kind": "utf8", "value": "123" },
+        { "kind": "null", "value": "na_n" },
+        { "kind": "utf8", "value": "456" }
+      ]
+    }
+  }
+}
