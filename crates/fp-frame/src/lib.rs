@@ -22078,6 +22078,15 @@ impl DataFrame {
     /// columns showing `self` and `other` values where they differ.
     /// Only rows and columns with at least one difference are included.
     pub fn compare(&self, other: &Self) -> Result<Self, FrameError> {
+        self.compare_with_result_names(other, ("self", "other"))
+    }
+
+    /// Matches `df.compare(other, result_names=(left, right))`.
+    pub fn compare_with_result_names(
+        &self,
+        other: &Self,
+        result_names: (&str, &str),
+    ) -> Result<Self, FrameError> {
         if self.index != other.index || self.column_order != other.column_order {
             return Err(FrameError::CompatibilityRejected(
                 "compare requires DataFrames with identical index and columns".to_owned(),
@@ -22114,8 +22123,8 @@ impl DataFrame {
             }
 
             if col_has_diff {
-                diff_cols.push((format!("{col_name}_self"), self_vals));
-                diff_cols.push((format!("{col_name}_other"), other_vals));
+                diff_cols.push((format!("{col_name}_{}", result_names.0), self_vals));
+                diff_cols.push((format!("{col_name}_{}", result_names.1), other_vals));
             }
         }
 
@@ -37672,6 +37681,34 @@ mod tests {
         let diff = df1.compare(&df2).unwrap();
         // Row 1 has diff in a, row 2 has diff in b
         assert_eq!(diff.len(), 2);
+    }
+
+    #[test]
+    fn dataframe_compare_custom_result_names() {
+        let df1 = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                ("b", vec![Scalar::Int64(3), Scalar::Int64(4)]),
+            ],
+        )
+        .unwrap();
+        let df2 = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(9)]),
+                ("b", vec![Scalar::Int64(3), Scalar::Int64(4)]),
+            ],
+        )
+        .unwrap();
+
+        let diff = df1.compare_with_result_names(&df2, ("lhs", "rhs")).unwrap();
+        assert!(diff.column("a_lhs").is_some());
+        assert!(diff.column("a_rhs").is_some());
+        assert!(diff.column("a_self").is_none());
+        assert!(diff.column("a_other").is_none());
+        assert_eq!(diff.column("a_lhs").unwrap().values()[0], Scalar::Int64(2));
+        assert_eq!(diff.column("a_rhs").unwrap().values()[0], Scalar::Int64(9));
     }
 
     // --- Series.str formatting & predicates tests ---

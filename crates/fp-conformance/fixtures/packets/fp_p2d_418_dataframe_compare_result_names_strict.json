@@ -1,0 +1,55 @@
+{
+  "packet_id": "FP-P2D-418",
+  "case_id": "dataframe_compare_result_names_strict",
+  "mode": "strict",
+  "operation": "dataframe_compare",
+  "frame": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 }
+    ],
+    "columns": {
+      "a": [
+        { "kind": "int64", "value": 1 },
+        { "kind": "int64", "value": 2 }
+      ],
+      "b": [
+        { "kind": "int64", "value": 3 },
+        { "kind": "int64", "value": 4 }
+      ]
+    },
+    "column_order": ["a", "b"]
+  },
+  "frame_right": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 }
+    ],
+    "columns": {
+      "a": [
+        { "kind": "int64", "value": 1 },
+        { "kind": "int64", "value": 9 }
+      ],
+      "b": [
+        { "kind": "int64", "value": 3 },
+        { "kind": "int64", "value": 4 }
+      ]
+    },
+    "column_order": ["a", "b"]
+  },
+  "compare_result_names": ["left", "right"],
+  "expected_frame": {
+    "index": [
+      { "kind": "int64", "value": 1 }
+    ],
+    "columns": {
+      "a_left": [
+        { "kind": "int64", "value": 2 }
+      ],
+      "a_right": [
+        { "kind": "int64", "value": 9 }
+      ]
+    },
+    "column_order": ["a_left", "a_right"]
+  }
+}

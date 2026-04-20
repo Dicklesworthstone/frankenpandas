@@ -778,6 +778,8 @@ pub enum FixtureOperation {
     DataFrameTail,
     #[serde(rename = "dataframe_eval", alias = "data_frame_eval")]
     DataFrameEval,
+    #[serde(rename = "dataframe_compare", alias = "data_frame_compare")]
+    DataFrameCompare,
     #[serde(rename = "dataframe_query", alias = "data_frame_query")]
     DataFrameQuery,
     #[serde(rename = "dataframe_xs", alias = "data_frame_xs")]
@@ -1231,6 +1233,7 @@ impl FixtureOperation {
             Self::DataFrameHead => "dataframe_head",
             Self::DataFrameTail => "dataframe_tail",
             Self::DataFrameEval => "dataframe_eval",
+            Self::DataFrameCompare => "dataframe_compare",
             Self::DataFrameQuery => "dataframe_query",
             Self::DataFrameXs => "dataframe_xs",
             Self::DataFrameIsNa => "dataframe_isna",
@@ -1466,6 +1469,8 @@ pub struct PacketFixture {
     pub merge_suffixes: Option<[Option<String>; 2]>,
     #[serde(default)]
     pub merge_sort: Option<bool>,
+    #[serde(default)]
+    pub compare_result_names: Option<[String; 2]>,
     #[serde(default)]
     pub expected_series: Option<FixtureExpectedSeries>,
     #[serde(default)]
@@ -2168,6 +2173,7 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::DataFrameHead
         | FixtureOperation::DataFrameTail
         | FixtureOperation::DataFrameEval
+        | FixtureOperation::DataFrameCompare
         | FixtureOperation::DataFrameQuery
         | FixtureOperation::DataFrameXs
         | FixtureOperation::DataFrameSetIndex
@@ -8965,6 +8971,31 @@ fn run_fixture_operation(
                 ),
             }
         }
+        FixtureOperation::DataFrameCompare => {
+            let actual = execute_dataframe_fixture_operation(fixture);
+            match expected {
+                ResolvedExpected::Frame(frame) => compare_dataframe_expected(&actual?, &frame),
+                ResolvedExpected::ErrorContains(substr) => match actual {
+                    Err(message) if message.contains(&substr) => Ok(()),
+                    Err(message) => Err(format!(
+                        "expected dataframe_compare error containing '{substr}', got '{message}'"
+                    )),
+                    Ok(_) => Err(format!(
+                        "expected dataframe_compare to fail with error containing '{substr}'"
+                    )),
+                },
+                ResolvedExpected::ErrorAny => {
+                    if actual.is_err() {
+                        Ok(())
+                    } else {
+                        Err("expected dataframe_compare to fail but operation succeeded".to_owned())
+                    }
+                }
+                _ => Err(
+                    "expected_frame or expected_error is required for dataframe_compare".to_owned(),
+                ),
+            }
+        }
         FixtureOperation::DataFrameQuery => {
             let actual = execute_dataframe_query_fixture_operation(fixture, policy, ledger);
             match expected {
@@ -9646,6 +9677,7 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::DataFrameBetweenTime
         | FixtureOperation::DataFrameHead
         | FixtureOperation::DataFrameTail
+        | FixtureOperation::DataFrameCompare
         | FixtureOperation::DataFrameQuery
         | FixtureOperation::DataFrameMode
         | FixtureOperation::DataFrameCumsum
@@ -10227,6 +10259,7 @@ fn capture_live_oracle_expected(
         | FixtureOperation::DataFrameBetweenTime
         | FixtureOperation::DataFrameHead
         | FixtureOperation::DataFrameTail
+        | FixtureOperation::DataFrameCompare
         | FixtureOperation::DataFrameQuery
         | FixtureOperation::DataFrameMode
         | FixtureOperation::DataFrameCumsum
@@ -12029,6 +12062,20 @@ fn execute_dataframe_fixture_operation(fixture: &PacketFixture) -> Result<DataFr
                     .pivot_table(value_refs[0], index, columns, aggfunc)
                     .map_err(|err| err.to_string())
             }
+        }
+        FixtureOperation::DataFrameCompare => {
+            let frame = build_dataframe(require_frame(fixture)?)
+                .map_err(|err| format!("left frame build failed: {err}"))?;
+            let other = build_dataframe(require_frame_right(fixture)?)
+                .map_err(|err| format!("right frame build failed: {err}"))?;
+            let result_names = fixture
+                .compare_result_names
+                .as_ref()
+                .map(|names| (names[0].as_str(), names[1].as_str()))
+                .unwrap_or(("self", "other"));
+            frame
+                .compare_with_result_names(&other, result_names)
+                .map_err(|err| err.to_string())
         }
         FixtureOperation::DataFrameStack => {
             let frame = build_dataframe(require_frame(fixture)?)
@@ -17213,6 +17260,7 @@ fn execute_and_compare_differential(
         | FixtureOperation::DataFrameCorr
         | FixtureOperation::DataFrameCov
         | FixtureOperation::DataFrameRound
+        | FixtureOperation::DataFrameCompare
         | FixtureOperation::DataFrameMelt
         | FixtureOperation::DataFramePivot
         | FixtureOperation::DataFramePivotTable
