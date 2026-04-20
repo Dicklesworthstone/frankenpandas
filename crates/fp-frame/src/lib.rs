@@ -6763,6 +6763,126 @@ impl Expanding<'_> {
             self.series.name(),
         )
     }
+
+    /// Expanding Pearson correlation with another Series.
+    ///
+    /// Matches `pd.Series.expanding().corr(other)`. At each position,
+    /// correlates all prior (and current) aligned pairs that have non-null
+    /// numeric values in both series. Returns NaN until `min_periods` and
+    /// at least two valid pairs are observed, and when either sample
+    /// standard deviation is zero.
+    pub fn corr(&self, other: &Series) -> Result<Series, FrameError> {
+        if self.series.len() != other.len() {
+            return Err(FrameError::LengthMismatch {
+                index_len: self.series.len(),
+                column_len: other.len(),
+            });
+        }
+        let a_vals = self.series.column().values();
+        let b_vals = other.column().values();
+        let len = a_vals.len();
+        let mut out = Vec::with_capacity(len);
+
+        for i in 0..len {
+            let pairs: Vec<(f64, f64)> = (0..=i)
+                .filter_map(|j| {
+                    let a = if a_vals[j].is_missing() {
+                        None
+                    } else {
+                        a_vals[j].to_f64().ok()
+                    };
+                    let b = if b_vals[j].is_missing() {
+                        None
+                    } else {
+                        b_vals[j].to_f64().ok()
+                    };
+                    a.zip(b)
+                })
+                .collect();
+            if pairs.len() < self.min_periods.max(2) {
+                out.push(Scalar::Null(NullKind::NaN));
+                continue;
+            }
+            let n = pairs.len() as f64;
+            let mean_a = pairs.iter().map(|(a, _)| a).sum::<f64>() / n;
+            let mean_b = pairs.iter().map(|(_, b)| b).sum::<f64>() / n;
+            let cov = pairs
+                .iter()
+                .map(|(a, b)| (a - mean_a) * (b - mean_b))
+                .sum::<f64>()
+                / (n - 1.0);
+            let std_a =
+                (pairs.iter().map(|(a, _)| (a - mean_a).powi(2)).sum::<f64>() / (n - 1.0)).sqrt();
+            let std_b =
+                (pairs.iter().map(|(_, b)| (b - mean_b).powi(2)).sum::<f64>() / (n - 1.0)).sqrt();
+            if std_a == 0.0 || std_b == 0.0 {
+                out.push(Scalar::Null(NullKind::NaN));
+            } else {
+                out.push(Scalar::Float64(cov / (std_a * std_b)));
+            }
+        }
+
+        Series::from_values(
+            self.series.name(),
+            self.series.index().labels().to_vec(),
+            out,
+        )
+    }
+
+    /// Expanding sample covariance (ddof=1) with another Series.
+    ///
+    /// Matches `pd.Series.expanding().cov(other)`. At each position, the
+    /// covariance is computed over all aligned pairs where both values
+    /// are non-null and numeric.
+    pub fn cov(&self, other: &Series) -> Result<Series, FrameError> {
+        if self.series.len() != other.len() {
+            return Err(FrameError::LengthMismatch {
+                index_len: self.series.len(),
+                column_len: other.len(),
+            });
+        }
+        let a_vals = self.series.column().values();
+        let b_vals = other.column().values();
+        let len = a_vals.len();
+        let mut out = Vec::with_capacity(len);
+
+        for i in 0..len {
+            let pairs: Vec<(f64, f64)> = (0..=i)
+                .filter_map(|j| {
+                    let a = if a_vals[j].is_missing() {
+                        None
+                    } else {
+                        a_vals[j].to_f64().ok()
+                    };
+                    let b = if b_vals[j].is_missing() {
+                        None
+                    } else {
+                        b_vals[j].to_f64().ok()
+                    };
+                    a.zip(b)
+                })
+                .collect();
+            if pairs.len() < self.min_periods.max(2) {
+                out.push(Scalar::Null(NullKind::NaN));
+                continue;
+            }
+            let n = pairs.len() as f64;
+            let mean_a = pairs.iter().map(|(a, _)| a).sum::<f64>() / n;
+            let mean_b = pairs.iter().map(|(_, b)| b).sum::<f64>() / n;
+            let cov = pairs
+                .iter()
+                .map(|(a, b)| (a - mean_a) * (b - mean_b))
+                .sum::<f64>()
+                / (n - 1.0);
+            out.push(Scalar::Float64(cov));
+        }
+
+        Series::from_values(
+            self.series.name(),
+            self.series.index().labels().to_vec(),
+            out,
+        )
+    }
 }
 
 /// Exponentially weighted moving window aggregation over a Series.
@@ -48325,6 +48445,108 @@ mod tests {
         assert_eq!(result.values()[0], Scalar::Float64(1.0)); // [1] median=1
         assert_eq!(result.values()[1], Scalar::Float64(2.0)); // [1,3] median=2
         assert_eq!(result.values()[2], Scalar::Float64(3.0)); // [1,3,5] median=3
+    }
+
+    #[test]
+    fn expanding_corr_perfect_positive() {
+        let a = Series::from_values(
+            "a",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+            ],
+        )
+        .unwrap();
+        let b = Series::from_values(
+            "b",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Float64(2.0),
+                Scalar::Float64(4.0),
+                Scalar::Float64(6.0),
+            ],
+        )
+        .unwrap();
+        let result = a.expanding(Some(2)).corr(&b).unwrap();
+        assert!(result.values()[0].is_missing()); // 1 pair < 2
+        let v1 = result.values()[1].to_f64().unwrap();
+        assert!((v1 - 1.0).abs() < 1e-10);
+        let v2 = result.values()[2].to_f64().unwrap();
+        assert!((v2 - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn expanding_cov_matches_sample_cov() {
+        let a = Series::from_values(
+            "a",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+            ],
+        )
+        .unwrap();
+        let b = Series::from_values(
+            "b",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Float64(10.0),
+                Scalar::Float64(20.0),
+                Scalar::Float64(30.0),
+            ],
+        )
+        .unwrap();
+        let result = a.expanding(Some(2)).cov(&b).unwrap();
+        assert!(result.values()[0].is_missing());
+        // cov([1,2],[10,20]) = 5.0 (sample, ddof=1)
+        let v1 = result.values()[1].to_f64().unwrap();
+        assert!((v1 - 5.0).abs() < 1e-10);
+        // cov([1,2,3],[10,20,30]) = 10.0
+        let v2 = result.values()[2].to_f64().unwrap();
+        assert!((v2 - 10.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn expanding_corr_constant_series_is_nan() {
+        let a = Series::from_values(
+            "a",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Float64(5.0),
+                Scalar::Float64(5.0),
+                Scalar::Float64(5.0),
+            ],
+        )
+        .unwrap();
+        let b = Series::from_values(
+            "b",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+            ],
+        )
+        .unwrap();
+        let result = a.expanding(Some(2)).corr(&b).unwrap();
+        // std_a == 0 -> corr undefined (NaN)
+        assert!(result.values()[2].is_missing());
+    }
+
+    #[test]
+    fn expanding_cov_length_mismatch_errors() {
+        let a = Series::from_values(
+            "a",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Float64(1.0), Scalar::Float64(2.0)],
+        )
+        .unwrap();
+        let b = Series::from_values("b", vec![0_i64.into()], vec![Scalar::Float64(10.0)]).unwrap();
+        let err = a.expanding(Some(2)).cov(&b).unwrap_err();
+        assert!(matches!(err, FrameError::LengthMismatch { .. }));
     }
 
     // ── DataFrame.idxmin_axis1 / idxmax_axis1 ──
