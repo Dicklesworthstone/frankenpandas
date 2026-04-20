@@ -1632,6 +1632,58 @@ impl MultiIndex {
         (indexer, missing)
     }
 
+    /// Per-row membership test against a set of tuples.
+    ///
+    /// Matches `pd.MultiIndex.isin(values)`. Each entry in the returned
+    /// bool vector is `true` iff that row's composite tuple appears in
+    /// `values`. Tuples whose length does not match the MultiIndex's
+    /// number of levels never match (silently contribute `false`),
+    /// matching pandas' lenient behavior.
+    #[must_use]
+    pub fn isin(&self, values: &[Vec<IndexLabel>]) -> Vec<bool> {
+        let nlevels = self.nlevels();
+        let lookup: std::collections::HashSet<&Vec<IndexLabel>> = values
+            .iter()
+            .filter(|v| v.len() == nlevels)
+            .collect();
+        if lookup.is_empty() {
+            return vec![false; self.len()];
+        }
+        (0..self.len())
+            .map(|row| {
+                let key: Vec<IndexLabel> = self
+                    .levels
+                    .iter()
+                    .map(|level| level[row].clone())
+                    .collect();
+                lookup.contains(&key)
+            })
+            .collect()
+    }
+
+    /// Per-row membership test against values for a single level.
+    ///
+    /// Matches `pd.MultiIndex.isin(values, level=...)`. Returns `true`
+    /// for positions whose label at `level` is in `values`. Returns an
+    /// `OutOfBounds` error when `level` exceeds `nlevels()`.
+    pub fn isin_level(
+        &self,
+        values: &[IndexLabel],
+        level: usize,
+    ) -> Result<Vec<bool>, IndexError> {
+        if level >= self.nlevels() {
+            return Err(IndexError::OutOfBounds {
+                position: level,
+                length: self.nlevels(),
+            });
+        }
+        let lookup: std::collections::HashSet<&IndexLabel> = values.iter().collect();
+        Ok(self.levels[level]
+            .iter()
+            .map(|label| lookup.contains(label))
+            .collect())
+    }
+
     /// Construct a MultiIndex from tuples of labels.
     ///
     /// Matches `pd.MultiIndex.from_tuples(tuples)`.
@@ -3433,6 +3485,72 @@ mod tests {
         let (indexer, missing) = source.get_indexer_non_unique(&target);
         assert_eq!(indexer, vec![-1, -1]);
         assert_eq!(missing, vec![0, 1]);
+    }
+
+    #[test]
+    fn multi_index_isin_tuple_membership() {
+        let mi = MultiIndex::from_tuples(vec![
+            vec!["a".into(), 1_i64.into()],
+            vec!["b".into(), 2_i64.into()],
+            vec!["a".into(), 3_i64.into()],
+        ])
+        .unwrap();
+        let needles: Vec<Vec<IndexLabel>> = vec![
+            vec!["a".into(), 1_i64.into()],
+            vec!["b".into(), 2_i64.into()],
+        ];
+        assert_eq!(mi.isin(&needles), vec![true, true, false]);
+    }
+
+    #[test]
+    fn multi_index_isin_ignores_mismatched_tuple_length() {
+        let mi = MultiIndex::from_tuples(vec![
+            vec!["a".into(), 1_i64.into()],
+            vec!["b".into(), 2_i64.into()],
+        ])
+        .unwrap();
+        // Wrong-arity tuple contributes no matches.
+        let needles: Vec<Vec<IndexLabel>> = vec![vec!["a".into()]];
+        assert_eq!(mi.isin(&needles), vec![false, false]);
+    }
+
+    #[test]
+    fn multi_index_isin_empty_values_yields_all_false() {
+        let mi = MultiIndex::from_tuples(vec![
+            vec!["a".into(), 1_i64.into()],
+            vec!["b".into(), 2_i64.into()],
+        ])
+        .unwrap();
+        let needles: Vec<Vec<IndexLabel>> = Vec::new();
+        assert_eq!(mi.isin(&needles), vec![false, false]);
+    }
+
+    #[test]
+    fn multi_index_isin_level_filters_by_level() {
+        let mi = MultiIndex::from_tuples(vec![
+            vec!["a".into(), 1_i64.into()],
+            vec!["b".into(), 2_i64.into()],
+            vec!["a".into(), 3_i64.into()],
+        ])
+        .unwrap();
+        let level0 = mi.isin_level(&["a".into()], 0).unwrap();
+        assert_eq!(level0, vec![true, false, true]);
+        let level1 = mi.isin_level(&[2_i64.into(), 3_i64.into()], 1).unwrap();
+        assert_eq!(level1, vec![false, true, true]);
+    }
+
+    #[test]
+    fn multi_index_isin_level_out_of_bounds_errors() {
+        let mi = MultiIndex::from_tuples(vec![vec!["a".into(), 1_i64.into()]]).unwrap();
+        let err = mi.isin_level(&["a".into()], 5).unwrap_err();
+        assert!(matches!(err, crate::IndexError::OutOfBounds { .. }));
+    }
+
+    #[test]
+    fn multi_index_isin_empty_index_yields_empty() {
+        let mi = MultiIndex::from_tuples(Vec::new()).unwrap();
+        let needles: Vec<Vec<IndexLabel>> = vec![vec!["a".into(), 1_i64.into()]];
+        assert_eq!(mi.isin(&needles), Vec::<bool>::new());
     }
 
     #[test]
