@@ -12616,7 +12616,9 @@ fn execute_dataframe_groupby_series_fixture_operation(
         .groupby(&groupby_refs)
         .map_err(|err| err.to_string())?;
     if use_ngroup {
-        groupby.ngroup().map_err(|err| err.to_string())
+        groupby
+            .ngroup_with_ascending(resolve_sort_ascending(fixture))
+            .map_err(|err| err.to_string())
     } else {
         groupby
             .cumcount_with_ascending(resolve_sort_ascending(fixture))

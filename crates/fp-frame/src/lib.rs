@@ -24648,13 +24648,28 @@ impl DataFrameGroupBy<'_> {
     /// Matches `groupby.ngroup()`. Returns a Series of Int64 where
     /// each row gets the ordinal number of its group.
     pub fn ngroup(&self) -> Result<Series, FrameError> {
+        self.ngroup_with_ascending(true)
+    }
+
+    /// Assign group number to each row with explicit numbering direction.
+    ///
+    /// Matches `groupby.ngroup(ascending=...)`. Rows skipped by `dropna=True`
+    /// keep `NaN`, while included groups are numbered in iteration order or in
+    /// reverse when `ascending` is `false`.
+    pub fn ngroup_with_ascending(&self, ascending: bool) -> Result<Series, FrameError> {
         let (group_order, groups) = self.build_groups();
         let n = self.df.len();
-        let mut out = vec![Scalar::Int64(0); n];
+        let mut out = vec![Scalar::Null(NullKind::NaN); n];
+        let group_count = group_order.len() as i64;
 
         for (group_num, gkey) in group_order.iter().enumerate() {
+            let assigned = if ascending {
+                group_num as i64
+            } else {
+                group_count - 1 - group_num as i64
+            };
             for &idx in &groups[gkey] {
-                out[idx] = Scalar::Int64(group_num as i64);
+                out[idx] = Scalar::Int64(assigned);
             }
         }
 
@@ -42410,6 +42425,74 @@ mod tests {
         assert_eq!(ng.values()[0], Scalar::Int64(0));
         assert_eq!(ng.values()[1], Scalar::Int64(1));
         assert_eq!(ng.values()[2], Scalar::Int64(0));
+    }
+
+    #[test]
+    fn groupby_ngroup_descending() {
+        let df = DataFrame::from_dict(
+            &["g", "v"],
+            vec![
+                (
+                    "g",
+                    vec![
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("b".into()),
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("c".into()),
+                    ],
+                ),
+                (
+                    "v",
+                    vec![
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                        Scalar::Int64(3),
+                        Scalar::Int64(4),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let gb = df.groupby(&["g"]).unwrap();
+        let ng = gb.ngroup_with_ascending(false).unwrap();
+        assert_eq!(ng.values()[0], Scalar::Int64(2));
+        assert_eq!(ng.values()[1], Scalar::Int64(1));
+        assert_eq!(ng.values()[2], Scalar::Int64(2));
+        assert_eq!(ng.values()[3], Scalar::Int64(0));
+    }
+
+    #[test]
+    fn groupby_ngroup_dropna_true_marks_missing_keys_nan() {
+        let df = DataFrame::from_dict(
+            &["g", "v"],
+            vec![
+                (
+                    "g",
+                    vec![
+                        Scalar::Utf8("a".into()),
+                        Scalar::Null(NullKind::NaN),
+                        Scalar::Utf8("b".into()),
+                        Scalar::Utf8("a".into()),
+                    ],
+                ),
+                (
+                    "v",
+                    vec![
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                        Scalar::Int64(3),
+                        Scalar::Int64(4),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let gb = df.groupby_full_options(&["g"], true, true, true).unwrap();
+        let ng = gb.ngroup().unwrap();
+        assert_eq!(ng.values()[0], Scalar::Int64(0));
+        assert_eq!(ng.values()[1], Scalar::Null(NullKind::NaN));
+        assert_eq!(ng.values()[2], Scalar::Int64(1));
+        assert_eq!(ng.values()[3], Scalar::Int64(0));
     }
 
     #[test]
