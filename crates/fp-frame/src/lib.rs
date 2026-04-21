@@ -19446,6 +19446,17 @@ impl DataFrame {
         (self.index.labels().to_vec(), self.column_order.clone())
     }
 
+    /// Total number of cells in the DataFrame (rows × columns).
+    ///
+    /// Matches `pd.DataFrame.size`. Equivalent to
+    /// `len() * num_columns()`, but follows pandas' property naming so
+    /// callers can write size-generic code that works on both Series
+    /// and DataFrame.
+    #[must_use]
+    pub fn size(&self) -> usize {
+        self.index.len() * self.column_order.len()
+    }
+
     /// Render the DataFrame as an HTML table.
     ///
     /// Matches `pd.DataFrame.to_html()`.
@@ -38928,6 +38939,39 @@ mod tests {
             panic!("expected CompatibilityRejected");
         };
         assert!(msg.contains("duplicate index labels"));
+    }
+
+    #[test]
+    fn dataframe_size_multiplies_rows_and_columns() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]),
+                ("b", vec![Scalar::Int64(4), Scalar::Int64(5), Scalar::Int64(6)]),
+            ],
+        )
+        .unwrap();
+        assert_eq!(df.size(), 6);
+    }
+
+    #[test]
+    fn dataframe_size_zero_when_empty() {
+        let df = DataFrame::from_dict(
+            &["a"],
+            vec![("a", Vec::<Scalar>::new())],
+        )
+        .unwrap();
+        assert_eq!(df.size(), 0);
+
+        // Zero columns also → zero size regardless of row count.
+        let index = Index::from_i64(vec![1, 2, 3]);
+        let empty_cols = DataFrame::new_with_column_order(
+            index,
+            BTreeMap::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(empty_cols.size(), 0);
     }
 
     #[test]
