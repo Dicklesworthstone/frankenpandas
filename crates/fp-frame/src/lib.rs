@@ -17339,8 +17339,10 @@ impl DataFrame {
                     "var" => s.var()?,
                     "median" => s.median()?,
                     "count" => Scalar::Int64(s.count() as i64),
+                    "sem" => Scalar::Float64(s.sem().unwrap_or(f64::NAN)),
                     "skew" => Scalar::Float64(s.skew()?),
                     "kurt" | "kurtosis" => Scalar::Float64(s.kurt()?),
+                    "prod" | "product" => s.prod()?,
                     other => {
                         return Err(FrameError::CompatibilityRejected(format!(
                             "unsupported apply function: '{other}'"
@@ -51523,6 +51525,61 @@ mod tests {
     }
 
     #[test]
+    fn df_apply_axis0_sem_matches_series_sem_and_singleton_nan() {
+        let df = DataFrame::from_dict(
+            &["x", "y"],
+            vec![
+                (
+                    "x",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(4.0),
+                    ],
+                ),
+                (
+                    "y",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Null(NullKind::NaN),
+                        Scalar::Null(NullKind::NaN),
+                        Scalar::Null(NullKind::NaN),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let result = df.apply("sem", 0).unwrap();
+        assert_eq!(
+            result.index().labels(),
+            &[
+                IndexLabel::Utf8("x".to_string()),
+                IndexLabel::Utf8("y".to_string()),
+            ]
+        );
+
+        let x_series = Series::from_values(
+            "x",
+            (0..4).map(IndexLabel::Int64).collect(),
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(4.0),
+            ],
+        )
+        .unwrap();
+        let expected_x = x_series.sem().unwrap();
+        let got_x = expect_float64(&result.column().values()[0]);
+        assert!((got_x - expected_x).abs() < 1e-10);
+
+        let got_y = expect_float64(&result.column().values()[1]);
+        assert!(got_y.is_nan(), "expected singleton sem to be NaN, got {got_y}");
+    }
+
+    #[test]
     fn df_apply_axis0_kurt_and_kurtosis_aliases() {
         let df = DataFrame::from_dict(
             &["v"],
@@ -51560,6 +51617,75 @@ mod tests {
         .unwrap();
         let expected = v_series.kurt().unwrap();
         assert!((got_kurt - expected).abs() < 1e-10);
+    }
+
+    #[test]
+    fn df_apply_axis0_prod_matches_series_prod() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(4.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(-2.0),
+                        Scalar::Float64(5.0),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let prod = df.apply("prod", 0).unwrap();
+        assert_eq!(
+            prod.index().labels(),
+            &[
+                IndexLabel::Utf8("a".to_string()),
+                IndexLabel::Utf8("b".to_string()),
+            ]
+        );
+        let a = expect_float64(&prod.column().values()[0]);
+        let b = expect_float64(&prod.column().values()[1]);
+        assert!((a - 24.0).abs() < 1e-12);
+        assert!((b + 10.0).abs() < 1e-12);
+
+        // "product" alias matches "prod".
+        let product = df.apply("product", 0).unwrap();
+        assert_eq!(product.column().values(), prod.column().values());
+    }
+
+    #[test]
+    fn df_apply_axis0_prod_empty_frame_emits_identity() {
+        // Series::prod returns 1.0 for empty (matches pandas).
+        let df = DataFrame::from_dict(&["v"], vec![("v", Vec::<Scalar>::new())]).unwrap();
+        let prod = df.apply("prod", 0).unwrap();
+        assert_eq!(prod.column().values(), &[Scalar::Float64(1.0)]);
+    }
+
+    #[test]
+    fn df_apply_axis0_prod_skips_nulls_like_series_prod() {
+        let df = DataFrame::from_dict(
+            &["v"],
+            vec![(
+                "v",
+                vec![
+                    Scalar::Float64(2.0),
+                    Scalar::Null(NullKind::NaN),
+                    Scalar::Float64(5.0),
+                ],
+            )],
+        )
+        .unwrap();
+        let prod = df.apply("prod", 0).unwrap();
+        assert_eq!(prod.column().values(), &[Scalar::Float64(10.0)]);
     }
 
     #[test]
