@@ -1352,6 +1352,51 @@ impl Column {
         nanall(&self.values)
     }
 
+    /// Sliding-window sum over `window` consecutive positions.
+    ///
+    /// Matches `pd.Series.rolling(window).sum()`. Positions with fewer
+    /// than `min_periods` non-missing values in the window emit
+    /// `Null(NaN)`. `min_periods=0` preserves pandas' convention that
+    /// an empty window sums to 0.0. Result dtype is always Float64.
+    /// `window=0` returns an all-null Float64 column the same length
+    /// as self.
+    pub fn rolling_window_sum(
+        &self,
+        window: usize,
+        min_periods: usize,
+    ) -> Result<Self, ColumnError> {
+        let len = self.values.len();
+        if window == 0 {
+            return Self::new(DType::Float64, vec![Scalar::Null(NullKind::NaN); len]);
+        }
+        let mut out = Vec::with_capacity(len);
+        for i in 0..len {
+            let start = (i + 1).saturating_sub(window);
+            let end = i + 1;
+            let mut sum = 0.0_f64;
+            let mut observed = 0usize;
+            for v in &self.values[start..end] {
+                if v.is_missing() {
+                    continue;
+                }
+                match v.to_f64() {
+                    Ok(x) if !x.is_nan() => {
+                        sum += x;
+                        observed += 1;
+                    }
+                    Ok(_) => {}
+                    Err(err) => return Err(ColumnError::Type(err)),
+                }
+            }
+            if observed >= min_periods.max(1) || (min_periods == 0 && end - start > 0) {
+                out.push(Scalar::Float64(sum));
+            } else {
+                out.push(Scalar::Null(NullKind::NaN));
+            }
+        }
+        Self::new(DType::Float64, out)
+    }
+
     /// Per-row missing-value flag (Bool column).
     ///
     /// Matches `pd.Series.isna()` / `isnull()`.
@@ -5404,6 +5449,79 @@ mod tests {
             ])
             .expect("col");
             assert!(col.skew().is_missing());
+        }
+
+        #[test]
+        fn rolling_window_sum_full_window() {
+            let col = Column::from_values(vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(4.0),
+                Scalar::Float64(5.0),
+            ])
+            .expect("col");
+            // window=3, min_periods=3 -> [NaN, NaN, 6, 9, 12]
+            let r = col.rolling_window_sum(3, 3).expect("rolling");
+            assert!(r.values()[0].is_missing());
+            assert!(r.values()[1].is_missing());
+            assert_eq!(r.values()[2], Scalar::Float64(6.0));
+            assert_eq!(r.values()[3], Scalar::Float64(9.0));
+            assert_eq!(r.values()[4], Scalar::Float64(12.0));
+        }
+
+        #[test]
+        fn rolling_window_sum_min_periods_relaxed() {
+            let col = Column::from_values(vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+            ])
+            .expect("col");
+            // window=3, min_periods=1 -> [1, 3, 6]
+            let r = col.rolling_window_sum(3, 1).expect("rolling");
+            assert_eq!(r.values()[0], Scalar::Float64(1.0));
+            assert_eq!(r.values()[1], Scalar::Float64(3.0));
+            assert_eq!(r.values()[2], Scalar::Float64(6.0));
+        }
+
+        #[test]
+        fn rolling_window_sum_skips_missing() {
+            let col = Column::from_values(vec![
+                Scalar::Float64(1.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(3.0),
+                Scalar::Float64(4.0),
+            ])
+            .expect("col");
+            // window=3, min_periods=2:
+            // i=0: {1.0} observed=1 → NaN (below min_periods)
+            // i=1: {1.0, NaN} observed=1 → NaN
+            // i=2: {1.0, NaN, 3.0} observed=2 → 4.0
+            // i=3: {NaN, 3.0, 4.0} observed=2 → 7.0
+            let r = col.rolling_window_sum(3, 2).expect("rolling");
+            assert!(r.values()[0].is_missing());
+            assert!(r.values()[1].is_missing());
+            assert_eq!(r.values()[2], Scalar::Float64(4.0));
+            assert_eq!(r.values()[3], Scalar::Float64(7.0));
+        }
+
+        #[test]
+        fn rolling_window_sum_window_zero_is_all_null() {
+            let col = Column::from_values(vec![Scalar::Float64(1.0), Scalar::Float64(2.0)])
+                .expect("col");
+            let r = col.rolling_window_sum(0, 0).expect("rolling");
+            assert!(r.values()[0].is_missing());
+            assert!(r.values()[1].is_missing());
+            assert_eq!(r.dtype(), DType::Float64);
+        }
+
+        #[test]
+        fn rolling_window_sum_empty_column() {
+            let col = Column::from_values(Vec::<Scalar>::new()).expect("col");
+            let r = col.rolling_window_sum(3, 1).expect("rolling");
+            assert!(r.is_empty());
+            assert_eq!(r.dtype(), DType::Float64);
         }
 
         #[test]
