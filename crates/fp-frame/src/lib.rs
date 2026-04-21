@@ -4691,6 +4691,42 @@ impl Series {
         column_memory_usage_bytes(&self.column)
     }
 
+    /// Number of axes — always 1 for Series.
+    ///
+    /// Matches `pd.Series.ndim`.
+    #[must_use]
+    pub fn ndim(&self) -> usize {
+        1
+    }
+
+    /// Number of elements in the Series.
+    ///
+    /// Matches `pd.Series.size`. Equivalent to `len()` but follows the
+    /// pandas property naming so callers can write size-generic code
+    /// that works on both Series and DataFrame.
+    #[must_use]
+    pub fn size(&self) -> usize {
+        self.column.len()
+    }
+
+    /// Axes of the Series — a single-entry Vec containing the index
+    /// labels (pandas returns `[self.index]`).
+    ///
+    /// Matches `pd.Series.axes`.
+    #[must_use]
+    pub fn axes(&self) -> Vec<Vec<IndexLabel>> {
+        vec![self.index.labels().to_vec()]
+    }
+
+    /// Whether the Series has zero elements.
+    ///
+    /// Matches `pd.Series.empty`.
+    #[must_use]
+    pub fn empty(&self) -> bool {
+        self.column.is_empty()
+    }
+
+
     /// Pass the Series through a function.
     ///
     /// Matches `pd.Series.pipe(func)`. Useful for method chaining.
@@ -45141,6 +45177,68 @@ mod tests {
         )
         .unwrap();
         assert!(!s.hasnans());
+    }
+
+    #[test]
+    fn series_ndim_is_one() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into()],
+            vec![Scalar::Int64(1)],
+        )
+        .unwrap();
+        assert_eq!(s.ndim(), 1);
+    }
+
+    #[test]
+    fn series_size_matches_len() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+        )
+        .unwrap();
+        assert_eq!(s.size(), 3);
+        assert_eq!(s.size(), s.len());
+    }
+
+    #[test]
+    fn series_axes_returns_single_index_axis() {
+        let s = Series::from_values(
+            "x",
+            vec![
+                IndexLabel::Utf8("a".into()),
+                IndexLabel::Utf8("b".into()),
+            ],
+            vec![Scalar::Int64(1), Scalar::Int64(2)],
+        )
+        .unwrap();
+        let axes = s.axes();
+        assert_eq!(axes.len(), 1);
+        assert_eq!(
+            axes[0],
+            vec![
+                IndexLabel::Utf8("a".into()),
+                IndexLabel::Utf8("b".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn series_empty_true_when_zero_values() {
+        let s = Series::from_values("x", Vec::<IndexLabel>::new(), Vec::<Scalar>::new()).unwrap();
+        assert!(s.empty());
+    }
+
+    #[test]
+    fn series_empty_false_when_populated() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into()],
+            vec![Scalar::Int64(1)],
+        )
+        .unwrap();
+        assert!(!s.empty());
     }
 
     #[test]
