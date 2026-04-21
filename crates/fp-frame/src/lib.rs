@@ -3074,6 +3074,27 @@ impl Series {
         Self::from_values(self.name.clone(), self.index.labels().to_vec(), out)
     }
 
+    /// Map values by applying a user function element-wise.
+    ///
+    /// Matches `pd.Series.map(callable)` — the function form rather
+    /// than the dict form of `map`. Missing values pass through as
+    /// `Null(NaN)` without invoking `func` (matches pandas
+    /// `na_action='ignore'` default).
+    pub fn map_callable<F>(&self, mut func: F) -> Result<Self, FrameError>
+    where
+        F: FnMut(&Scalar) -> Scalar,
+    {
+        let mut out = Vec::with_capacity(self.len());
+        for val in self.column.values() {
+            if val.is_missing() {
+                out.push(Scalar::Null(NullKind::NaN));
+            } else {
+                out.push(func(val));
+            }
+        }
+        Self::from_values(self.name.clone(), self.index.labels().to_vec(), out)
+    }
+
     /// Map values using a lookup table with a default for unmapped keys.
     ///
     /// Matches `pd.Series.map(dict, na_action=None)` where unmapped values
@@ -18777,6 +18798,26 @@ impl DataFrame {
             index: Index::new(labels),
             column_multiindex: None,
         })
+    }
+
+    /// Single-cell access by (row label, column name).
+    ///
+    /// Matches `pd.DataFrame.at[label, col]`. Returns `None` when the
+    /// row label is not present in the index or the column name is
+    /// unknown. Use `.iloc` / `iat`-style positional access on the
+    /// underlying Index+Column for integer positions.
+    pub fn at(&self, label: &IndexLabel, column: &str) -> Result<Scalar, FrameError> {
+        let row = self.index.position(label).ok_or_else(|| {
+            FrameError::CompatibilityRejected(format!(
+                "DataFrame.at: label {label:?} not found in index"
+            ))
+        })?;
+        let col = self.columns.get(column).ok_or_else(|| {
+            FrameError::CompatibilityRejected(format!(
+                "DataFrame.at: column {column:?} not found"
+            ))
+        })?;
+        Ok(col.values()[row].clone())
     }
 
     /// Per-column value counts as a map of Series.
@@ -39427,6 +39468,98 @@ mod tests {
         ])
         .unwrap();
         assert!(df.to_dict("invalid").is_err());
+    }
+
+    #[test]
+    fn dataframe_at_returns_cell() {
+        let index = Index::from_i64(vec![10, 20, 30]);
+        let mut cols = BTreeMap::new();
+        cols.insert(
+            "a".to_string(),
+            Column::from_values(vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+            ])
+            .unwrap(),
+        );
+        cols.insert(
+            "b".to_string(),
+            Column::from_values(vec![
+                Scalar::Utf8("x".into()),
+                Scalar::Utf8("y".into()),
+                Scalar::Utf8("z".into()),
+            ])
+            .unwrap(),
+        );
+        let df = DataFrame::new_with_column_order(
+            index,
+            cols,
+            vec!["a".to_string(), "b".to_string()],
+        )
+        .unwrap();
+        assert_eq!(
+            df.at(&IndexLabel::Int64(20), "a").unwrap(),
+            Scalar::Int64(2)
+        );
+        assert_eq!(
+            df.at(&IndexLabel::Int64(30), "b").unwrap(),
+            Scalar::Utf8("z".into())
+        );
+    }
+
+    #[test]
+    fn dataframe_at_missing_label_errors() {
+        let df = DataFrame::from_dict(
+            &["a"],
+            vec![("a", vec![Scalar::Int64(1)])],
+        )
+        .unwrap();
+        assert!(df.at(&IndexLabel::Int64(999), "a").is_err());
+        assert!(df.at(&IndexLabel::Int64(0), "missing").is_err());
+    }
+
+    #[test]
+    fn series_map_callable_applies_function() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+        )
+        .unwrap();
+        let doubled = s
+            .map_callable(|v| match v {
+                Scalar::Int64(i) => Scalar::Int64(i * 2),
+                other => other.clone(),
+            })
+            .unwrap();
+        assert_eq!(doubled.values()[0], Scalar::Int64(2));
+        assert_eq!(doubled.values()[1], Scalar::Int64(4));
+        assert_eq!(doubled.values()[2], Scalar::Int64(6));
+    }
+
+    #[test]
+    fn series_map_callable_propagates_nulls() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Null(NullKind::NaN)],
+        )
+        .unwrap();
+        let mut calls = 0;
+        let out = s
+            .map_callable(|v| {
+                calls += 1;
+                match v {
+                    Scalar::Int64(i) => Scalar::Int64(i + 10),
+                    other => other.clone(),
+                }
+            })
+            .unwrap();
+        // func invoked once (only on the non-missing value).
+        assert_eq!(calls, 1);
+        assert_eq!(out.values()[0], Scalar::Int64(11));
+        assert!(out.values()[1].is_missing());
     }
 
     #[test]
