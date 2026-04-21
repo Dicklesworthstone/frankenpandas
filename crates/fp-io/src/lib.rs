@@ -123,6 +123,10 @@ pub struct CsvReadOptions {
     /// Matches pandas `on_bad_lines` parameter for the supported
     /// `error`/`warn`/`skip` modes.
     pub on_bad_lines: CsvOnBadLines,
+    /// Thousands separator stripped from numeric fields before parsing.
+    /// Matches pandas `thousands` parameter. Must differ from `decimal`
+    /// (otherwise the option is silently ignored, matching pandas).
+    pub thousands: Option<u8>,
 }
 
 impl Default for CsvReadOptions {
@@ -145,6 +149,7 @@ impl Default for CsvReadOptions {
             false_values: Vec::new(),
             decimal: b'.',
             on_bad_lines: CsvOnBadLines::Error,
+            thousands: None,
         }
     }
 }
@@ -284,6 +289,7 @@ fn scalar_to_csv(scalar: &Scalar) -> String {
 /// - `na_filter`: If false, skip NA detection entirely for performance
 /// - `keep_default_na`: If true, use pandas default NA values
 /// - `na_values`: Additional NA values to recognize
+#[allow(clippy::too_many_arguments)]
 fn parse_scalar_with_options(
     field: &str,
     na_filter: bool,
@@ -292,6 +298,7 @@ fn parse_scalar_with_options(
     true_values: &[String],
     false_values: &[String],
     decimal: u8,
+    thousands: Option<u8>,
 ) -> Scalar {
     let trimmed = field.trim();
 
@@ -311,14 +318,28 @@ fn parse_scalar_with_options(
         return Scalar::Bool(false);
     }
 
-    if let Ok(value) = trimmed.parse::<i64>() {
+    // `thousands` is silently ignored if it equals the decimal separator,
+    // matching pandas semantics.
+    let thousands_effective = thousands.filter(|t| *t != decimal);
+    let numeric_candidate = if let Some(t) = thousands_effective {
+        let ch = char::from(t);
+        if trimmed.contains(ch) {
+            trimmed.replace(ch, "")
+        } else {
+            trimmed.to_owned()
+        }
+    } else {
+        trimmed.to_owned()
+    };
+
+    if let Ok(value) = numeric_candidate.parse::<i64>() {
         return Scalar::Int64(value);
     }
 
     let float_candidate = if decimal == b'.' {
-        trimmed.to_owned()
+        numeric_candidate.clone()
     } else {
-        trimmed.replace(char::from(decimal), ".")
+        numeric_candidate.replace(char::from(decimal), ".")
     };
     if let Ok(value) = float_candidate.parse::<f64>() {
         return Scalar::Float64(value);
@@ -515,6 +536,7 @@ fn append_csv_record(columns: &mut [Vec<Scalar>], record: &StringRecord, options
             &options.true_values,
             &options.false_values,
             options.decimal,
+            options.thousands,
         ));
     }
 }
@@ -2781,6 +2803,84 @@ mod tests {
         assert_eq!(
             frame.column("name").unwrap().values()[0],
             Scalar::Utf8("alice".to_string())
+        );
+    }
+
+    #[test]
+    fn test_csv_thousands_strips_int_separator() {
+        let input = "amount\n\"1,234,567\"\n\"42\"\n";
+        let options = CsvReadOptions {
+            thousands: Some(b','),
+            ..CsvReadOptions::default()
+        };
+        let frame = read_csv_with_options(input, &options).expect("parse");
+        assert_eq!(
+            frame.column("amount").unwrap().values()[0],
+            Scalar::Int64(1234567)
+        );
+        assert_eq!(
+            frame.column("amount").unwrap().values()[1],
+            Scalar::Int64(42)
+        );
+    }
+
+    #[test]
+    fn test_csv_thousands_strips_float_with_custom_decimal() {
+        // European convention: '.' as thousands, ',' as decimal.
+        let input = "price\n\"1.234,56\"\n";
+        let options = CsvReadOptions {
+            thousands: Some(b'.'),
+            decimal: b',',
+            ..CsvReadOptions::default()
+        };
+        let frame = read_csv_with_options(input, &options).expect("parse");
+        let v = frame.column("price").unwrap().values()[0].clone();
+        match v {
+            Scalar::Float64(f) => assert!((f - 1234.56).abs() < 1e-9),
+            other => panic!("expected Float64, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_csv_thousands_none_keeps_separator_as_string() {
+        // Without thousands set, "1,234" in a single field stays Utf8.
+        let input = "amount\n\"1,234\"\n";
+        let frame = read_csv_with_options(input, &CsvReadOptions::default()).expect("parse");
+        assert_eq!(
+            frame.column("amount").unwrap().values()[0],
+            Scalar::Utf8("1,234".to_string())
+        );
+    }
+
+    #[test]
+    fn test_csv_thousands_equal_to_decimal_is_ignored() {
+        // pandas silently ignores thousands if it equals decimal.
+        let input = "v\n\"1.234\"\n";
+        let options = CsvReadOptions {
+            thousands: Some(b'.'),
+            decimal: b'.',
+            ..CsvReadOptions::default()
+        };
+        let frame = read_csv_with_options(input, &options).expect("parse");
+        let v = frame.column("v").unwrap().values()[0].clone();
+        // thousands ignored → "1.234" parses as float 1.234
+        match v {
+            Scalar::Float64(f) => assert!((f - 1.234).abs() < 1e-9),
+            other => panic!("expected Float64, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_csv_thousands_does_not_affect_non_numeric() {
+        let input = "name\n\"a,b\"\n";
+        let options = CsvReadOptions {
+            thousands: Some(b','),
+            ..CsvReadOptions::default()
+        };
+        let frame = read_csv_with_options(input, &options).expect("parse");
+        assert_eq!(
+            frame.column("name").unwrap().values()[0],
+            Scalar::Utf8("a,b".to_string())
         );
     }
 
