@@ -871,6 +871,70 @@ impl Column {
         &self.validity
     }
 
+    /// Borrow-returning iterator over the column's scalars.
+    ///
+    /// Convenience over `self.values().iter()` so call sites don't
+    /// have to reach through the slice accessor. Preserves
+    /// position order.
+    pub fn iter_values(&self) -> std::slice::Iter<'_, Scalar> {
+        self.values.iter()
+    }
+
+    /// Materialize the column's values into an owned `Vec<Scalar>`.
+    ///
+    /// Matches `pd.Series.to_list()`. Equivalent to
+    /// `self.values().to_vec()`; the shorthand survives refactors
+    /// that change the internal storage shape.
+    #[must_use]
+    pub fn to_vec(&self) -> Vec<Scalar> {
+        self.values.clone()
+    }
+
+    /// Whether any value in the column is missing.
+    ///
+    /// Matches `pd.Series.isna().any()` in one pass. Faster than
+    /// calling `isnull()` and scanning — returns on the first
+    /// missing value seen.
+    #[must_use]
+    pub fn has_any_missing(&self) -> bool {
+        self.values.iter().any(Scalar::is_missing)
+    }
+
+    /// Whether every value in the column is missing.
+    ///
+    /// Matches `pd.Series.isna().all()`. Empty columns return true
+    /// (vacuously), mirroring `ValidityMask::all`'s empty-case
+    /// convention.
+    #[must_use]
+    pub fn all_missing(&self) -> bool {
+        self.values.iter().all(Scalar::is_missing)
+    }
+
+    /// Apply a predicate per value and collect the results into a
+    /// Bool column.
+    ///
+    /// Like `Column::map` but specialized for predicate functions
+    /// returning `bool`. Missing inputs produce `Scalar::Bool(false)`
+    /// by default — callers that need null propagation should use
+    /// `map` instead so they can emit `Null(NaN)` explicitly.
+    pub fn apply_bool<F>(&self, mut predicate: F) -> Result<Self, ColumnError>
+    where
+        F: FnMut(&Scalar) -> bool,
+    {
+        let out: Vec<Scalar> = self
+            .values
+            .iter()
+            .map(|v| {
+                if v.is_missing() {
+                    Scalar::Bool(false)
+                } else {
+                    Scalar::Bool(predicate(v))
+                }
+            })
+            .collect();
+        Self::new(DType::Bool, out)
+    }
+
     pub fn reindex_by_positions(&self, positions: &[Option<usize>]) -> Result<Self, ColumnError> {
         let values = positions
             .iter()
@@ -4653,6 +4717,102 @@ mod tests {
                 .expect("gt");
             assert_eq!(gt.values()[0], Scalar::Bool(true));
             assert_eq!(gt.values()[1], Scalar::Bool(false));
+        }
+    }
+
+    mod iter_and_predicates {
+        use super::*;
+        use fp_types::NullKind;
+
+        #[test]
+        fn iter_values_preserves_order() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+            ])
+            .expect("col");
+            let collected: Vec<_> = col.iter_values().cloned().collect();
+            assert_eq!(collected, col.values());
+        }
+
+        #[test]
+        fn to_vec_returns_owned_clone() {
+            let col = Column::from_values(vec![Scalar::Int64(5), Scalar::Int64(6)]).expect("col");
+            let v = col.to_vec();
+            assert_eq!(v, vec![Scalar::Int64(5), Scalar::Int64(6)]);
+            // Column still owns its values; to_vec was a clone.
+            assert_eq!(col.len(), 2);
+        }
+
+        #[test]
+        fn has_any_missing_detects_null() {
+            let populated =
+                Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2)]).expect("col");
+            assert!(!populated.has_any_missing());
+
+            let with_null = Column::from_values(vec![
+                Scalar::Int64(1),
+                Scalar::Null(NullKind::NaN),
+            ])
+            .expect("col");
+            assert!(with_null.has_any_missing());
+        }
+
+        #[test]
+        fn all_missing_empty_is_true() {
+            let empty = Column::from_values(Vec::<Scalar>::new()).expect("col");
+            assert!(empty.all_missing());
+
+            let all_null = Column::from_values(vec![
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::Null),
+            ])
+            .expect("col");
+            assert!(all_null.all_missing());
+
+            let mixed = Column::from_values(vec![
+                Scalar::Int64(1),
+                Scalar::Null(NullKind::NaN),
+            ])
+            .expect("col");
+            assert!(!mixed.all_missing());
+        }
+
+        #[test]
+        fn apply_bool_positive_predicate() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+                Scalar::Int64(4),
+            ])
+            .expect("col");
+            let even = col
+                .apply_bool(|v| {
+                    v.to_f64()
+                        .map(|f| f as i64 % 2 == 0)
+                        .unwrap_or(false)
+                })
+                .expect("apply_bool");
+            assert_eq!(even.dtype(), DType::Bool);
+            assert_eq!(even.values()[0], Scalar::Bool(false));
+            assert_eq!(even.values()[1], Scalar::Bool(true));
+            assert_eq!(even.values()[2], Scalar::Bool(false));
+            assert_eq!(even.values()[3], Scalar::Bool(true));
+        }
+
+        #[test]
+        fn apply_bool_missing_maps_to_false() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(1),
+                Scalar::Null(NullKind::NaN),
+            ])
+            .expect("col");
+            let result = col.apply_bool(|_| true).expect("apply_bool");
+            assert_eq!(result.values()[0], Scalar::Bool(true));
+            // Missing input → false (per doc contract).
+            assert_eq!(result.values()[1], Scalar::Bool(false));
         }
     }
 
