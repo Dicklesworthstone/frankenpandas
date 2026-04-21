@@ -17319,6 +17319,9 @@ impl DataFrame {
     ///
     /// Matches `df.apply(func, axis=...)` for built-in aggregations.
     fn apply_named(&self, func: &str, axis: usize) -> Result<Series, FrameError> {
+        if func == "nunique" {
+            return self.nunique_axis(axis);
+        }
         if axis == 0 {
             // Column-wise: aggregate each column
             let mut labels = Vec::new();
@@ -51580,6 +51583,61 @@ mod tests {
             got_y.is_nan(),
             "expected singleton sem to be NaN, got {got_y}"
         );
+    }
+
+    #[test]
+    fn df_apply_axis0_nunique_matches_dataframe_nunique() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(1.0),
+                        Scalar::Null(NullKind::NaN),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Null(NullKind::NaN),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let result = df.apply("nunique", 0).unwrap();
+        assert_eq!(
+            result.index().labels(),
+            &[
+                IndexLabel::Utf8("a".to_string()),
+                IndexLabel::Utf8("b".to_string()),
+            ]
+        );
+        assert_eq!(result.column().values()[0], Scalar::Int64(1));
+        assert_eq!(result.column().values()[1], Scalar::Int64(2));
+    }
+
+    #[test]
+    fn df_apply_axis1_nunique_matches_dataframe_nunique_axis1() {
+        let df = DataFrame::from_dict(
+            &["a", "b", "c"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Null(NullKind::NaN)]),
+                ("b", vec![Scalar::Float64(1.0), Scalar::Null(NullKind::NaN)]),
+                ("c", vec![Scalar::Float64(2.0), Scalar::Float64(3.0)]),
+            ],
+        )
+        .unwrap();
+
+        let result = df.apply("nunique", 1).unwrap();
+        assert_eq!(result.index().labels(), df.index().labels());
+        assert_eq!(result.column().values()[0], Scalar::Int64(2));
+        assert_eq!(result.column().values()[1], Scalar::Int64(1));
     }
 
     #[test]
