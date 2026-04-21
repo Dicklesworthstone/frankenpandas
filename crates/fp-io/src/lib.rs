@@ -12,7 +12,7 @@ use arrow::array::{
 use arrow::datatypes::{DataType as ArrowDataType, Field, Schema, TimeUnit};
 use csv::{ReaderBuilder, StringRecord, WriterBuilder};
 use fp_columnar::{Column, ColumnError};
-use fp_frame::{DataFrame, FrameError, Series};
+use fp_frame::{DataFrame, FrameError, Series, to_datetime};
 use fp_index::{Index, IndexLabel};
 use fp_types::{DType, NullKind, Scalar, Timedelta};
 use parquet::arrow::ArrowWriter;
@@ -29,6 +29,8 @@ pub enum IoError {
     DuplicateColumnName(String),
     #[error("usecols contains missing columns: {0:?}")]
     MissingUsecols(Vec<String>),
+    #[error("parse_dates contains missing columns: {0:?}")]
+    MissingParseDateColumns(Vec<String>),
     #[error("json format error: {0}")]
     JsonFormat(String),
     #[error("parquet error: {0}")]
@@ -98,6 +100,9 @@ pub struct CsvReadOptions {
     /// Force specific dtypes for columns. Map of column name -> DType.
     /// Matches pandas `dtype` parameter.
     pub dtype: Option<std::collections::HashMap<String, DType>>,
+    /// Column names to coerce via pandas-style parse_dates handling.
+    /// Currently supports explicit column-name selection.
+    pub parse_dates: Option<Vec<String>>,
     /// Character whose lines are treated as comments and skipped entirely.
     /// Must be a single byte (ASCII); multi-byte characters are rejected.
     /// Matches pandas `comment` parameter. Default: `None`.
@@ -130,6 +135,7 @@ impl Default for CsvReadOptions {
             nrows: None,
             skiprows: 0,
             dtype: None,
+            parse_dates: None,
             comment: None,
             true_values: Vec::new(),
             false_values: Vec::new(),
@@ -347,6 +353,52 @@ fn validate_usecols(headers: &[String], usecols: &[String]) -> Result<(), IoErro
     }
 }
 
+fn validate_parse_dates(headers: &[String], parse_dates: &[String]) -> Result<(), IoError> {
+    let header_set: std::collections::BTreeSet<&String> = headers.iter().collect();
+    let mut missing = Vec::new();
+    for name in parse_dates {
+        if !header_set.contains(name) {
+            missing.push(name.clone());
+        }
+    }
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(IoError::MissingParseDateColumns(missing))
+    }
+}
+
+fn apply_parse_dates(
+    headers: &[String],
+    columns: &mut [Vec<Scalar>],
+    parse_dates: &[String],
+) -> Result<(), IoError> {
+    if parse_dates.is_empty() {
+        return Ok(());
+    }
+
+    validate_parse_dates(headers, parse_dates)?;
+
+    for column_name in parse_dates {
+        let Some(column_idx) = headers.iter().position(|header| header == column_name) else {
+            continue;
+        };
+
+        let index_labels = (0..columns[column_idx].len() as i64)
+            .map(IndexLabel::Int64)
+            .collect::<Vec<_>>();
+        let series = Series::from_values(
+            column_name.clone(),
+            index_labels,
+            columns[column_idx].clone(),
+        )?;
+        let parsed = to_datetime(&series)?;
+        columns[column_idx] = parsed.values().to_vec();
+    }
+
+    Ok(())
+}
+
 fn append_csv_record(columns: &mut [Vec<Scalar>], record: &StringRecord, options: &CsvReadOptions) {
     for (idx, col) in columns.iter_mut().enumerate() {
         let field = record.get(idx).unwrap_or_default();
@@ -482,6 +534,10 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
     } else {
         (headers, columns)
     };
+
+    if let Some(ref parse_dates) = options.parse_dates {
+        apply_parse_dates(&headers, &mut columns, parse_dates)?;
+    }
 
     // Apply dtype coercion if specified.
     if let Some(ref dtype_map) = options.dtype {
@@ -4499,6 +4555,27 @@ mod tests {
         assert_eq!(
             frame.column("flag").unwrap().values(),
             &[Scalar::Int64(1), Scalar::Int64(0)]
+        );
+    }
+
+    #[test]
+    fn csv_parse_dates_mixed_naive_and_aware_strings_preserves_object_like_values() {
+        let input = "ts,value\n2024-01-15 10:30:00,1\n2024-01-15T10:30:00Z,2\n";
+        let opts = CsvReadOptions {
+            parse_dates: Some(vec!["ts".to_owned()]),
+            ..Default::default()
+        };
+        let frame = read_csv_with_options(input, &opts).expect("parse");
+        assert_eq!(
+            frame.column("ts").unwrap().values(),
+            &[
+                Scalar::Utf8("2024-01-15 10:30:00".to_owned()),
+                Scalar::Utf8("2024-01-15 10:30:00+00:00".to_owned()),
+            ]
+        );
+        assert_eq!(
+            frame.column("value").unwrap().values(),
+            &[Scalar::Int64(1), Scalar::Int64(2)]
         );
     }
 

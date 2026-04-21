@@ -1651,6 +1651,8 @@ pub struct PacketFixture {
     #[serde(default)]
     pub csv_on_bad_lines: Option<String>,
     #[serde(default)]
+    pub csv_parse_dates: Option<Vec<String>>,
+    #[serde(default)]
     pub csv_true_values: Option<Vec<String>>,
     #[serde(default)]
     pub csv_false_values: Option<Vec<String>>,
@@ -2953,6 +2955,8 @@ struct OracleRequest {
     explode_column: Option<String>,
     #[serde(default)]
     csv_input: Option<String>,
+    #[serde(default)]
+    csv_parse_dates: Option<Vec<String>>,
     #[serde(default)]
     loc_labels: Option<Vec<IndexLabel>>,
     #[serde(default)]
@@ -10142,6 +10146,7 @@ fn capture_live_oracle_expected(
         ignore_index: fixture.ignore_index,
         explode_column: fixture.explode_column.clone(),
         csv_input: fixture.csv_input.clone(),
+        csv_parse_dates: fixture.csv_parse_dates.clone(),
         loc_labels: fixture.loc_labels.clone(),
         iloc_positions: fixture.iloc_positions.clone(),
         take_indices: fixture.take_indices.clone(),
@@ -11722,6 +11727,7 @@ fn execute_csv_read_frame_fixture_operation(fixture: &PacketFixture) -> Result<D
     let options = CsvReadOptions {
         decimal,
         on_bad_lines,
+        parse_dates: fixture.csv_parse_dates.clone(),
         true_values: fixture.csv_true_values.clone().unwrap_or_default(),
         false_values: fixture.csv_false_values.clone().unwrap_or_default(),
         ..CsvReadOptions::default()
@@ -21638,6 +21644,16 @@ mod tests {
         let report =
             run_packet_by_id(&cfg, "FP-P2D-428", OracleMode::FixtureExpected).expect("report");
         assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-428"));
+        assert_eq!(report.fixture_count, 1);
+        assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
+    fn packet_filter_runs_csv_read_frame_parse_dates_mixed_timezone_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2D-429", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-429"));
         assert_eq!(report.fixture_count, 1);
         assert!(report.is_green(), "expected report green: {report:?}");
     }

@@ -1,0 +1,25 @@
+{
+  "packet_id": "FP-P2D-429",
+  "case_id": "csv_read_frame_parse_dates_mixed_timezone_strict",
+  "mode": "strict",
+  "operation": "csv_read_frame",
+  "csv_parse_dates": ["ts"],
+  "csv_input": "ts,value\n2024-01-15 10:30:00,1\n2024-01-15T10:30:00Z,2\n",
+  "expected_frame": {
+    "columns": {
+      "ts": [
+        { "kind": "utf8", "value": "2024-01-15 10:30:00" },
+        { "kind": "utf8", "value": "2024-01-15 10:30:00+00:00" }
+      ],
+      "value": [
+        { "kind": "int64", "value": 1 },
+        { "kind": "int64", "value": 2 }
+      ]
+    },
+    "column_order": ["ts", "value"],
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 }
+    ]
+  }
+}
