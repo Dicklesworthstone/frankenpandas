@@ -826,6 +826,87 @@ impl Index {
         ))
     }
 
+    /// Drop missing labels, preserving order.
+    ///
+    /// Matches `pd.Index.dropna()`. Labels whose `is_missing()` returns
+    /// true are removed. The name (if any) is preserved.
+    #[must_use]
+    pub fn dropna(&self) -> Self {
+        self.propagate_name(Self::new(
+            self.labels
+                .iter()
+                .filter(|label| !label.is_missing())
+                .cloned()
+                .collect(),
+        ))
+    }
+
+    /// Insert a new label at the given position.
+    ///
+    /// Matches `pd.Index.insert(loc, item)`. `loc` is an ordinal position
+    /// where the new label is inserted; positions equal to `len()` append
+    /// to the end. Out-of-bounds positions return an `OutOfBounds` error.
+    pub fn insert(&self, loc: usize, item: IndexLabel) -> Result<Self, IndexError> {
+        if loc > self.labels.len() {
+            return Err(IndexError::OutOfBounds {
+                position: loc,
+                length: self.labels.len(),
+            });
+        }
+        let mut labels = self.labels.clone();
+        labels.insert(loc, item);
+        Ok(self.propagate_name(Self::new(labels)))
+    }
+
+    /// Delete the label at the given position.
+    ///
+    /// Matches `pd.Index.delete(loc)`. Returns an `OutOfBounds` error
+    /// for positions outside `0..len()`.
+    pub fn delete(&self, loc: usize) -> Result<Self, IndexError> {
+        if loc >= self.labels.len() {
+            return Err(IndexError::OutOfBounds {
+                position: loc,
+                length: self.labels.len(),
+            });
+        }
+        let mut labels = self.labels.clone();
+        labels.remove(loc);
+        Ok(self.propagate_name(Self::new(labels)))
+    }
+
+    /// Append another index to the end of this one.
+    ///
+    /// Matches `pd.Index.append(other)`. The returned index contains
+    /// `self.labels` followed by `other.labels`. Name is preserved from
+    /// `self`.
+    #[must_use]
+    pub fn append(&self, other: &Self) -> Self {
+        let mut labels = self.labels.clone();
+        labels.extend(other.labels.iter().cloned());
+        self.propagate_name(Self::new(labels))
+    }
+
+    /// Repeat each label `repeats` times.
+    ///
+    /// Matches `pd.Index.repeat(repeats)`. `repeats=0` yields an empty
+    /// index; `repeats=1` is a no-op clone. Name is preserved.
+    #[must_use]
+    pub fn repeat(&self, repeats: usize) -> Self {
+        if repeats == 0 {
+            return self.propagate_name(Self::new(Vec::new()));
+        }
+        if repeats == 1 {
+            return self.clone();
+        }
+        let mut out = Vec::with_capacity(self.labels.len() * repeats);
+        for label in &self.labels {
+            for _ in 0..repeats {
+                out.push(label.clone());
+            }
+        }
+        self.propagate_name(Self::new(out))
+    }
+
     /// Fill missing labels with the provided scalar.
     ///
     /// Matches `pd.Index.fillna(value)`.
@@ -1651,8 +1732,7 @@ impl MultiIndex {
         let mut counts: HashMap<Vec<IndexLabel>, usize> = HashMap::with_capacity(len);
 
         for row in 0..len {
-            let key: Vec<IndexLabel> =
-                self.levels.iter().map(|level| level[row].clone()).collect();
+            let key: Vec<IndexLabel> = self.levels.iter().map(|level| level[row].clone()).collect();
             *counts.entry(key.clone()).or_insert(0) += 1;
             first_seen.entry(key).or_insert(row);
         }
@@ -1721,20 +1801,15 @@ impl MultiIndex {
     #[must_use]
     pub fn isin(&self, values: &[Vec<IndexLabel>]) -> Vec<bool> {
         let nlevels = self.nlevels();
-        let lookup: std::collections::HashSet<&Vec<IndexLabel>> = values
-            .iter()
-            .filter(|v| v.len() == nlevels)
-            .collect();
+        let lookup: std::collections::HashSet<&Vec<IndexLabel>> =
+            values.iter().filter(|v| v.len() == nlevels).collect();
         if lookup.is_empty() {
             return vec![false; self.len()];
         }
         (0..self.len())
             .map(|row| {
-                let key: Vec<IndexLabel> = self
-                    .levels
-                    .iter()
-                    .map(|level| level[row].clone())
-                    .collect();
+                let key: Vec<IndexLabel> =
+                    self.levels.iter().map(|level| level[row].clone()).collect();
                 lookup.contains(&key)
             })
             .collect()
@@ -1745,11 +1820,7 @@ impl MultiIndex {
     /// Matches `pd.MultiIndex.isin(values, level=...)`. Returns `true`
     /// for positions whose label at `level` is in `values`. Returns an
     /// `OutOfBounds` error when `level` exceeds `nlevels()`.
-    pub fn isin_level(
-        &self,
-        values: &[IndexLabel],
-        level: usize,
-    ) -> Result<Vec<bool>, IndexError> {
+    pub fn isin_level(&self, values: &[IndexLabel], level: usize) -> Result<Vec<bool>, IndexError> {
         if level >= self.nlevels() {
             return Err(IndexError::OutOfBounds {
                 position: level,
@@ -3172,6 +3243,147 @@ mod tests {
                 IndexLabel::Timedelta64(42),
             ]
         );
+    }
+
+    #[test]
+    fn index_dropna_removes_missing_and_preserves_name() {
+        let idx =
+            Index::from_timedelta64(vec![1, Timedelta::NAT, 3, Timedelta::NAT, 5]).set_name("t");
+        let dropped = idx.dropna();
+        assert_eq!(
+            dropped.labels(),
+            &[
+                IndexLabel::Timedelta64(1),
+                IndexLabel::Timedelta64(3),
+                IndexLabel::Timedelta64(5),
+            ]
+        );
+        assert_eq!(dropped.name(), Some("t"));
+    }
+
+    #[test]
+    fn index_dropna_all_present_is_noop() {
+        let idx = Index::from_i64(vec![1, 2, 3]);
+        let dropped = idx.dropna();
+        assert_eq!(
+            dropped.labels(),
+            &[
+                IndexLabel::Int64(1),
+                IndexLabel::Int64(2),
+                IndexLabel::Int64(3),
+            ]
+        );
+    }
+
+    #[test]
+    fn index_insert_at_middle_position() {
+        let idx = Index::from_i64(vec![1, 3, 4]);
+        let result = idx.insert(1, IndexLabel::Int64(2)).unwrap();
+        assert_eq!(
+            result.labels(),
+            &[
+                IndexLabel::Int64(1),
+                IndexLabel::Int64(2),
+                IndexLabel::Int64(3),
+                IndexLabel::Int64(4),
+            ]
+        );
+    }
+
+    #[test]
+    fn index_insert_at_end_appends() {
+        let idx = Index::from_i64(vec![1, 2]);
+        let result = idx.insert(2, IndexLabel::Int64(3)).unwrap();
+        assert_eq!(
+            result.labels(),
+            &[
+                IndexLabel::Int64(1),
+                IndexLabel::Int64(2),
+                IndexLabel::Int64(3),
+            ]
+        );
+    }
+
+    #[test]
+    fn index_insert_past_end_errors() {
+        let idx = Index::from_i64(vec![1, 2]);
+        let err = idx.insert(5, IndexLabel::Int64(9)).unwrap_err();
+        assert!(matches!(err, crate::IndexError::OutOfBounds { .. }));
+    }
+
+    #[test]
+    fn index_delete_removes_position() {
+        let idx = Index::from_i64(vec![10, 20, 30]).set_name("k");
+        let result = idx.delete(1).unwrap();
+        assert_eq!(
+            result.labels(),
+            &[IndexLabel::Int64(10), IndexLabel::Int64(30)]
+        );
+        assert_eq!(result.name(), Some("k"));
+    }
+
+    #[test]
+    fn index_delete_out_of_bounds_errors() {
+        let idx = Index::from_i64(vec![1]);
+        let err = idx.delete(1).unwrap_err();
+        assert!(matches!(err, crate::IndexError::OutOfBounds { .. }));
+    }
+
+    #[test]
+    fn index_append_concatenates() {
+        let a = Index::from_i64(vec![1, 2]).set_name("left");
+        let b = Index::from_i64(vec![3, 4]);
+        let result = a.append(&b);
+        assert_eq!(
+            result.labels(),
+            &[
+                IndexLabel::Int64(1),
+                IndexLabel::Int64(2),
+                IndexLabel::Int64(3),
+                IndexLabel::Int64(4),
+            ]
+        );
+        assert_eq!(result.name(), Some("left"));
+    }
+
+    #[test]
+    fn index_append_empty_is_noop() {
+        let a = Index::from_i64(vec![1, 2]);
+        let empty = Index::new(Vec::new());
+        let result = a.append(&empty);
+        assert_eq!(result.labels(), a.labels());
+    }
+
+    #[test]
+    fn index_repeat_duplicates_each_label() {
+        let idx = Index::from_i64(vec![1, 2, 3]).set_name("k");
+        let result = idx.repeat(2);
+        assert_eq!(
+            result.labels(),
+            &[
+                IndexLabel::Int64(1),
+                IndexLabel::Int64(1),
+                IndexLabel::Int64(2),
+                IndexLabel::Int64(2),
+                IndexLabel::Int64(3),
+                IndexLabel::Int64(3),
+            ]
+        );
+        assert_eq!(result.name(), Some("k"));
+    }
+
+    #[test]
+    fn index_repeat_zero_yields_empty() {
+        let idx = Index::from_i64(vec![1, 2, 3]);
+        let result = idx.repeat(0);
+        assert!(result.labels().is_empty());
+    }
+
+    #[test]
+    fn index_repeat_one_is_clone() {
+        let idx = Index::from_i64(vec![1, 2]);
+        let result = idx.repeat(1);
+        assert_eq!(result.labels(), idx.labels());
     }
 
     #[test]
