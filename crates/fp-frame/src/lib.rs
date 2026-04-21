@@ -26157,6 +26157,67 @@ impl DataFrameGroupBy<'_> {
         })
     }
 
+    /// Transform each group with multiple named aggregation functions.
+    ///
+    /// Matches `df.groupby(col).transform(['sum', 'mean'])` for the
+    /// supported function set. One output column is produced per
+    /// `{input_column}_{func}` pair, and each aggregated value is
+    /// broadcast back to the original row positions of its group.
+    pub fn transform_list(&self, funcs: &[&str]) -> Result<DataFrame, FrameError> {
+        if funcs.is_empty() {
+            return Err(FrameError::CompatibilityRejected(
+                "transform_list: funcs must be non-empty".to_owned(),
+            ));
+        }
+
+        let (group_order, groups) = self.build_groups();
+        let n = self.df.len();
+
+        let value_cols: Vec<String> = self
+            .df
+            .column_order
+            .iter()
+            .filter(|c| !self.by.contains(c))
+            .cloned()
+            .collect();
+
+        let mut result_cols = BTreeMap::new();
+        let mut col_order = Vec::new();
+
+        for col_name in &value_cols {
+            let col = &self.df.columns[col_name];
+
+            for &func_name in funcs {
+                let out_name = format!("{col_name}_{func_name}");
+                let mut out_vals = vec![Scalar::Null(NullKind::NaN); n];
+
+                for gkey in &group_order {
+                    let row_indices = &groups[gkey];
+                    let group_vals: Vec<Scalar> = row_indices
+                        .iter()
+                        .map(|&i| col.values()[i].clone())
+                        .collect();
+
+                    let agg_val = Self::apply_agg_func(func_name, &group_vals, col.dtype())?;
+
+                    for &row_idx in row_indices {
+                        out_vals[row_idx] = agg_val.clone();
+                    }
+                }
+
+                result_cols.insert(out_name.clone(), Column::from_values(out_vals)?);
+                col_order.push(out_name);
+            }
+        }
+
+        Ok(DataFrame {
+            columns: result_cols,
+            column_order: col_order,
+            index: self.df.index.clone(),
+            column_multiindex: None,
+        })
+    }
+
     /// Transform each group using a user-supplied closure.
     ///
     /// Matches `df.groupby(col).transform(lambda s: ...)` — the closure
@@ -39364,6 +39425,98 @@ mod tests {
         assert_eq!(
             result.index().labels(),
             &[0_i64.into(), 1_i64.into(), 2_i64.into()]
+        );
+    }
+
+    #[test]
+    fn dataframe_groupby_transform_list_broadcasts_multiple_funcs_per_column() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "grp",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("b".into()),
+                    Scalar::Utf8("b".into()),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "v1",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(3.0),
+                    Scalar::Float64(10.0),
+                    Scalar::Float64(20.0),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "v2",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Float64(2.0),
+                    Scalar::Float64(4.0),
+                    Scalar::Float64(5.0),
+                    Scalar::Float64(7.0),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let result = df
+            .groupby(&["grp"])
+            .unwrap()
+            .transform_list(&["sum", "mean"])
+            .unwrap();
+
+        assert_eq!(
+            result.column_order,
+            vec![
+                "v1_sum".to_string(),
+                "v1_mean".to_string(),
+                "v2_sum".to_string(),
+                "v2_mean".to_string(),
+            ]
+        );
+        assert_eq!(result.len(), 4);
+        assert_eq!(
+            result.index().labels(),
+            &[0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()]
+        );
+        assert_eq!(result.columns["v1_sum"].values()[0], Scalar::Float64(4.0));
+        assert_eq!(result.columns["v1_sum"].values()[1], Scalar::Float64(4.0));
+        assert_eq!(result.columns["v1_sum"].values()[2], Scalar::Float64(30.0));
+        assert_eq!(result.columns["v1_sum"].values()[3], Scalar::Float64(30.0));
+        assert_eq!(result.columns["v1_mean"].values()[0], Scalar::Float64(2.0));
+        assert_eq!(result.columns["v1_mean"].values()[1], Scalar::Float64(2.0));
+        assert_eq!(result.columns["v1_mean"].values()[2], Scalar::Float64(15.0));
+        assert_eq!(result.columns["v1_mean"].values()[3], Scalar::Float64(15.0));
+        assert_eq!(result.columns["v2_sum"].values()[0], Scalar::Float64(6.0));
+        assert_eq!(result.columns["v2_sum"].values()[1], Scalar::Float64(6.0));
+        assert_eq!(result.columns["v2_sum"].values()[2], Scalar::Float64(12.0));
+        assert_eq!(result.columns["v2_sum"].values()[3], Scalar::Float64(12.0));
+        assert_eq!(result.columns["v2_mean"].values()[0], Scalar::Float64(3.0));
+        assert_eq!(result.columns["v2_mean"].values()[1], Scalar::Float64(3.0));
+        assert_eq!(result.columns["v2_mean"].values()[2], Scalar::Float64(6.0));
+        assert_eq!(result.columns["v2_mean"].values()[3], Scalar::Float64(6.0));
+        assert!(!result.column_order.contains(&"grp".to_string()));
+    }
+
+    #[test]
+    fn dataframe_groupby_transform_list_rejects_empty_funcs() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values("g", vec![0_i64.into()], vec![Scalar::Utf8("a".into())]).unwrap(),
+            Series::from_values("v", vec![0_i64.into()], vec![Scalar::Float64(1.0)]).unwrap(),
+        ])
+        .unwrap();
+
+        let err = df.groupby(&["g"]).unwrap().transform_list(&[]).unwrap_err();
+        assert!(
+            matches!(err, FrameError::CompatibilityRejected(msg) if msg == "transform_list: funcs must be non-empty")
         );
     }
 
