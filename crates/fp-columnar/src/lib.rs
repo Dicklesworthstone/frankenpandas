@@ -1268,6 +1268,63 @@ impl Column {
         self.values.iter().filter(|v| !v.is_missing()).count()
     }
 
+    /// Forward-fill missing values with the most recent non-missing
+    /// value, optionally capped by `limit` consecutive fills.
+    ///
+    /// Matches `pd.Series.ffill(limit=None)`. Leading nulls stay null
+    /// until the first non-missing value is seen. `limit=None` means
+    /// unbounded; `limit=Some(k)` caps each missing run to `k` fills.
+    pub fn ffill(&self, limit: Option<usize>) -> Result<Self, ColumnError> {
+        let mut out = Vec::with_capacity(self.values.len());
+        let mut last: Option<Scalar> = None;
+        let mut run = 0usize;
+        for v in &self.values {
+            if !v.is_missing() {
+                out.push(v.clone());
+                last = Some(v.clone());
+                run = 0;
+                continue;
+            }
+            match (&last, limit) {
+                (Some(prev), None) => out.push(prev.clone()),
+                (Some(prev), Some(cap)) if run < cap => {
+                    out.push(prev.clone());
+                    run += 1;
+                }
+                _ => out.push(v.clone()),
+            }
+        }
+        Self::new(self.dtype, out)
+    }
+
+    /// Backward-fill missing values with the next non-missing value,
+    /// optionally capped by `limit` consecutive fills.
+    ///
+    /// Matches `pd.Series.bfill(limit=None)`. Trailing nulls stay null
+    /// if no subsequent non-missing value is observed.
+    pub fn bfill(&self, limit: Option<usize>) -> Result<Self, ColumnError> {
+        let mut out = vec![Scalar::Null(NullKind::NaN); self.values.len()];
+        let mut next: Option<Scalar> = None;
+        let mut run = 0usize;
+        for (i, v) in self.values.iter().enumerate().rev() {
+            if !v.is_missing() {
+                out[i] = v.clone();
+                next = Some(v.clone());
+                run = 0;
+                continue;
+            }
+            match (&next, limit) {
+                (Some(nxt), None) => out[i] = nxt.clone(),
+                (Some(nxt), Some(cap)) if run < cap => {
+                    out[i] = nxt.clone();
+                    run += 1;
+                }
+                _ => out[i] = v.clone(),
+            }
+        }
+        Self::new(self.dtype, out)
+    }
+
     /// Count of distinct non-missing values.
     ///
     /// Matches `pd.Series.nunique(dropna=True)`.
@@ -5084,6 +5141,83 @@ mod tests {
                 Column::from_values(vec![Scalar::Float64(0.0), Scalar::Float64(5.0)]).expect("col");
             let r = col.pct_change(1).expect("pct_change");
             assert!(r.values()[1].is_missing());
+        }
+
+        #[test]
+        fn ffill_fills_trailing_missing_runs() {
+            let col = Column::from_values(vec![
+                Scalar::Null(NullKind::NaN),
+                Scalar::Int64(1),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Int64(5),
+            ])
+            .expect("col");
+            let r = col.ffill(None).expect("ffill");
+            assert!(r.values()[0].is_missing());
+            assert_eq!(r.values()[1], Scalar::Int64(1));
+            assert_eq!(r.values()[2], Scalar::Int64(1));
+            assert_eq!(r.values()[3], Scalar::Int64(1));
+            assert_eq!(r.values()[4], Scalar::Int64(5));
+        }
+
+        #[test]
+        fn ffill_respects_limit_per_run() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(1),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Int64(9),
+            ])
+            .expect("col");
+            let r = col.ffill(Some(2)).expect("ffill");
+            assert_eq!(r.values()[0], Scalar::Int64(1));
+            assert_eq!(r.values()[1], Scalar::Int64(1));
+            assert_eq!(r.values()[2], Scalar::Int64(1));
+            assert!(r.values()[3].is_missing());
+            assert_eq!(r.values()[4], Scalar::Int64(9));
+        }
+
+        #[test]
+        fn bfill_fills_leading_missing_runs() {
+            let col = Column::from_values(vec![
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Int64(3),
+                Scalar::Null(NullKind::NaN),
+            ])
+            .expect("col");
+            let r = col.bfill(None).expect("bfill");
+            assert_eq!(r.values()[0], Scalar::Int64(3));
+            assert_eq!(r.values()[1], Scalar::Int64(3));
+            assert_eq!(r.values()[2], Scalar::Int64(3));
+            // Trailing null stays null (no next value).
+            assert!(r.values()[3].is_missing());
+        }
+
+        #[test]
+        fn bfill_respects_limit_per_run() {
+            let col = Column::from_values(vec![
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Int64(7),
+            ])
+            .expect("col");
+            let r = col.bfill(Some(1)).expect("bfill");
+            assert!(r.values()[0].is_missing());
+            assert!(r.values()[1].is_missing());
+            assert_eq!(r.values()[2], Scalar::Int64(7));
+            assert_eq!(r.values()[3], Scalar::Int64(7));
+        }
+
+        #[test]
+        fn ffill_empty_is_empty_same_dtype() {
+            let col = Column::from_values(Vec::<Scalar>::new()).expect("col");
+            let r = col.ffill(None).expect("ffill");
+            assert!(r.is_empty());
+            assert_eq!(r.dtype(), DType::Null);
         }
 
         #[test]
