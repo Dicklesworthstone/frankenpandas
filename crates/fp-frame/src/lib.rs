@@ -12675,6 +12675,8 @@ pub fn to_datetime_with_options(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DatetimeUnit {
     Days,
+    Hours,
+    Minutes,
     Seconds,
     Milliseconds,
     Microseconds,
@@ -12683,14 +12685,18 @@ enum DatetimeUnit {
 
 impl DatetimeUnit {
     fn parse(unit: &str) -> Result<Self, FrameError> {
-        match unit.trim().to_ascii_lowercase().as_str() {
+        let trimmed = unit.trim();
+        let normalized = trimmed.to_ascii_lowercase();
+        match normalized.as_str() {
             "d" => Ok(Self::Days),
+            "h" => Ok(Self::Hours),
+            "m" if trimmed != "M" => Ok(Self::Minutes),
             "s" => Ok(Self::Seconds),
             "ms" => Ok(Self::Milliseconds),
             "us" => Ok(Self::Microseconds),
             "ns" => Ok(Self::Nanoseconds),
-            other => Err(FrameError::CompatibilityRejected(format!(
-                "unsupported to_datetime unit '{other}'"
+            _ => Err(FrameError::CompatibilityRejected(format!(
+                "unsupported to_datetime unit '{trimmed}'"
             ))),
         }
     }
@@ -12698,6 +12704,8 @@ impl DatetimeUnit {
     fn nanos_per_unit_i128(self) -> i128 {
         match self {
             Self::Days => 86_400_i128 * 1_000_000_000_i128,
+            Self::Hours => 3_600_i128 * 1_000_000_000_i128,
+            Self::Minutes => 60_i128 * 1_000_000_000_i128,
             Self::Seconds => 1_000_000_000_i128,
             Self::Milliseconds => 1_000_000_i128,
             Self::Microseconds => 1_000_i128,
@@ -12708,6 +12716,8 @@ impl DatetimeUnit {
     fn nanos_per_unit_f64(self) -> f64 {
         match self {
             Self::Days => 86_400_f64 * 1_000_000_000_f64,
+            Self::Hours => 3_600_f64 * 1_000_000_000_f64,
+            Self::Minutes => 60_f64 * 1_000_000_000_f64,
             Self::Seconds => 1_000_000_000_f64,
             Self::Milliseconds => 1_000_000_f64,
             Self::Microseconds => 1_000_f64,
@@ -58098,6 +58108,42 @@ mod tests {
     }
 
     #[test]
+    fn to_datetime_with_unit_minutes_uses_unix_origin() {
+        let s = Series::from_values("epoch_m", vec![0_i64.into()], vec![Scalar::Int64(2)]).unwrap();
+        let result = super::to_datetime_with_unit(&s, "m").unwrap();
+        assert_eq!(
+            result.values()[0],
+            Scalar::Utf8("1970-01-01 00:02:00".into())
+        );
+    }
+
+    #[test]
+    fn to_datetime_with_unit_hours_respects_custom_origin() {
+        let s = Series::from_values(
+            "epoch_h",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Float64(2.5)],
+        )
+        .unwrap();
+        let result = super::to_datetime_with_options(
+            &s,
+            super::ToDatetimeOptions {
+                unit: Some("h"),
+                origin: Some(super::ToDatetimeOrigin::Str("2024-01-15 06:00:00")),
+                ..super::ToDatetimeOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            result.values(),
+            &[
+                Scalar::Utf8("2024-01-15 07:00:00".into()),
+                Scalar::Utf8("2024-01-15 08:30:00".into()),
+            ]
+        );
+    }
+
+    #[test]
     fn to_datetime_with_unit_parses_numeric_strings_and_coerces_invalid_values() {
         let s = Series::from_values(
             "epoch_str",
@@ -58124,10 +58170,20 @@ mod tests {
     #[test]
     fn to_datetime_with_unit_rejects_unknown_units() {
         let s = Series::from_values("epoch", vec![0_i64.into()], vec![Scalar::Int64(1)]).unwrap();
-        let err = super::to_datetime_with_unit(&s, "minutes").unwrap_err();
+        let err = super::to_datetime_with_unit(&s, "weeks").unwrap_err();
         assert_eq!(
             err.to_string(),
-            "compatibility gate rejected operation: unsupported to_datetime unit 'minutes'"
+            "compatibility gate rejected operation: unsupported to_datetime unit 'weeks'"
+        );
+    }
+
+    #[test]
+    fn to_datetime_with_unit_rejects_ambiguous_uppercase_minutes() {
+        let s = Series::from_values("epoch", vec![0_i64.into()], vec![Scalar::Int64(1)]).unwrap();
+        let err = super::to_datetime_with_unit(&s, "M").unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "compatibility gate rejected operation: unsupported to_datetime unit 'M'"
         );
     }
 
