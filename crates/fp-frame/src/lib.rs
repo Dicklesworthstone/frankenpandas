@@ -21125,6 +21125,45 @@ impl DataFrame {
             out
         }
 
+        fn render_plain_row(cells: &[String], widths: &[usize]) -> String {
+            cells
+                .iter()
+                .zip(widths)
+                .map(|(cell, width)| format!("{cell:width$}", width = *width))
+                .collect::<Vec<_>>()
+                .join("  ")
+        }
+
+        fn render_plain_rule(widths: &[usize], ch: char) -> String {
+            widths
+                .iter()
+                .map(|width| ch.to_string().repeat(*width))
+                .collect::<Vec<_>>()
+                .join("  ")
+        }
+
+        fn render_psql_row(cells: &[String], widths: &[usize]) -> String {
+            let mut out = String::new();
+            out.push('|');
+            for (cell, width) in cells.iter().zip(widths) {
+                out.push_str(&format!(" {:width$} |", cell, width = *width));
+            }
+            out
+        }
+
+        fn render_psql_header_rule(widths: &[usize]) -> String {
+            let mut out = String::new();
+            out.push('|');
+            for (idx, width) in widths.iter().enumerate() {
+                out.push_str(&"-".repeat(*width + 2));
+                out.push('|');
+                if idx + 1 == widths.len() {
+                    break;
+                }
+            }
+            out
+        }
+
         let rows = (0..nrows)
             .map(|row_idx| {
                 col_cells
@@ -21160,23 +21199,43 @@ impl DataFrame {
             }
             "plain" => {
                 let mut lines = Vec::with_capacity(nrows + 1);
-                lines.push(
-                    headers
-                        .iter()
-                        .zip(&widths)
-                        .map(|(cell, width)| format!("{cell:width$}", width = *width))
-                        .collect::<Vec<_>>()
-                        .join("  "),
-                );
+                lines.push(render_plain_row(&headers, &widths));
                 for row in rows {
-                    lines.push(
-                        row.iter()
-                            .zip(&widths)
-                            .map(|(cell, width)| format!("{cell:width$}", width = *width))
-                            .collect::<Vec<_>>()
-                            .join("  "),
-                    );
+                    lines.push(render_plain_row(&row, &widths));
                 }
+                Ok(lines.join("\n"))
+            }
+            "simple" => {
+                let mut lines = Vec::with_capacity(nrows + 2);
+                lines.push(render_plain_row(&headers, &widths));
+                lines.push(render_plain_rule(&widths, '-'));
+                for row in rows {
+                    lines.push(render_plain_row(&row, &widths));
+                }
+                Ok(lines.join("\n"))
+            }
+            "psql" => {
+                let mut lines = Vec::with_capacity(nrows + 4);
+                let border = render_grid_border(&widths, '-');
+                lines.push(border.clone());
+                lines.push(render_psql_row(&headers, &widths));
+                lines.push(render_psql_header_rule(&widths));
+                for row in rows {
+                    lines.push(render_psql_row(&row, &widths));
+                }
+                lines.push(border);
+                Ok(lines.join("\n"))
+            }
+            "rst" => {
+                let mut lines = Vec::with_capacity(nrows + 4);
+                let rule = render_plain_rule(&widths, '=');
+                lines.push(rule.clone());
+                lines.push(render_plain_row(&headers, &widths));
+                lines.push(rule.clone());
+                for row in rows {
+                    lines.push(render_plain_row(&row, &widths));
+                }
+                lines.push(rule);
                 Ok(lines.join("\n"))
             }
             other => Err(FrameError::CompatibilityRejected(format!(
@@ -46680,6 +46739,63 @@ mod tests {
         assert!(result.lines().next().unwrap().contains("animal"));
         assert!(result.contains("elk"));
         assert!(result.contains("pig"));
+    }
+
+    #[test]
+    fn df_to_markdown_simple() {
+        let df = DataFrame::from_dict(
+            &["animal", "legs"],
+            vec![
+                (
+                    "animal",
+                    vec![Scalar::Utf8("elk".into()), Scalar::Utf8("pig".into())],
+                ),
+                ("legs", vec![Scalar::Int64(4), Scalar::Int64(4)]),
+            ],
+        )
+        .unwrap();
+
+        let result = df.to_markdown(false, Some("simple")).unwrap();
+        assert_eq!(
+            result,
+            "animal  legs\n------  ----\nelk     4   \npig     4   "
+        );
+    }
+
+    #[test]
+    fn df_to_markdown_psql() {
+        let df = DataFrame::from_dict(
+            &["val"],
+            vec![("val", vec![Scalar::Int64(10), Scalar::Int64(20)])],
+        )
+        .unwrap();
+
+        let result = df.to_markdown(true, Some("psql")).unwrap();
+        assert_eq!(
+            result,
+            "+-----+-----+\n|     | val |\n|-----|-----|\n| 0   | 10  |\n| 1   | 20  |\n+-----+-----+"
+        );
+    }
+
+    #[test]
+    fn df_to_markdown_rst() {
+        let df = DataFrame::from_dict(
+            &["animal", "legs"],
+            vec![
+                (
+                    "animal",
+                    vec![Scalar::Utf8("elk".into()), Scalar::Utf8("pig".into())],
+                ),
+                ("legs", vec![Scalar::Int64(4), Scalar::Int64(4)]),
+            ],
+        )
+        .unwrap();
+
+        let result = df.to_markdown(false, Some("rst")).unwrap();
+        assert_eq!(
+            result,
+            "======  ====\nanimal  legs\n======  ====\nelk     4   \npig     4   \n======  ===="
+        );
     }
 
     #[test]
