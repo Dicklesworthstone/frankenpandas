@@ -2780,6 +2780,14 @@ pub enum SqlIfExists {
     Append,
 }
 
+/// Options for reading SQL query results into a DataFrame.
+#[derive(Debug, Clone, Default)]
+pub struct SqlReadOptions {
+    /// Column names to coerce via pandas-style parse_dates handling.
+    /// Currently supports explicit column-name selection.
+    pub parse_dates: Option<Vec<String>>,
+}
+
 /// Map an fp-types DType to an SQLite column type declaration.
 fn dtype_to_sql(dtype: DType) -> &'static str {
     match dtype {
@@ -2815,6 +2823,17 @@ fn escape_sql_ident(name: &str) -> Result<String, IoError> {
 ///
 /// Matches `pd.read_sql(sql, con)`.
 pub fn read_sql(conn: &rusqlite::Connection, query: &str) -> Result<DataFrame, IoError> {
+    read_sql_with_options(conn, query, &SqlReadOptions::default())
+}
+
+/// Read the result of a SQL query into a DataFrame with read-time options.
+///
+/// Matches the supported subset of `pd.read_sql(sql, con, parse_dates=...)`.
+pub fn read_sql_with_options(
+    conn: &rusqlite::Connection,
+    query: &str,
+    options: &SqlReadOptions,
+) -> Result<DataFrame, IoError> {
     let mut stmt = conn
         .prepare(query)
         .map_err(|e| IoError::Sql(format!("prepare failed: {e}")))?;
@@ -2843,6 +2862,10 @@ pub fn read_sql(conn: &rusqlite::Connection, query: &str) -> Result<DataFrame, I
         }
     }
 
+    if let Some(ref parse_dates) = options.parse_dates {
+        apply_parse_dates(&headers, &mut columns, parse_dates)?;
+    }
+
     let row_count = columns.first().map_or(0, Vec::len);
     let mut out_columns = BTreeMap::new();
     let mut column_order = Vec::new();
@@ -2857,6 +2880,78 @@ pub fn read_sql(conn: &rusqlite::Connection, query: &str) -> Result<DataFrame, I
         index,
         out_columns,
         column_order,
+    )?)
+}
+
+/// Read a SQL query result with one column promoted to the index.
+///
+/// Matches `pd.read_sql(sql, con, index_col=...)`. When
+/// `index_col=Some(name)` the named column is removed from the data
+/// columns and its values become the DataFrame's row index. Returns
+/// `IoError::Sql` if the named column is absent from the result set.
+pub fn read_sql_with_index_col(
+    conn: &rusqlite::Connection,
+    query: &str,
+    index_col: Option<&str>,
+) -> Result<DataFrame, IoError> {
+    let frame = read_sql(conn, query)?;
+    let Some(col_name) = index_col else {
+        return Ok(frame);
+    };
+    promote_column_to_index(&frame, col_name)
+}
+
+/// Read an entire SQL table with one column promoted to the index.
+///
+/// Matches `pd.read_sql_table(table, con, index_col=...)`.
+pub fn read_sql_table_with_index_col(
+    conn: &rusqlite::Connection,
+    table_name: &str,
+    index_col: Option<&str>,
+) -> Result<DataFrame, IoError> {
+    let frame = read_sql_table(conn, table_name)?;
+    let Some(col_name) = index_col else {
+        return Ok(frame);
+    };
+    promote_column_to_index(&frame, col_name)
+}
+
+fn promote_column_to_index(frame: &DataFrame, col_name: &str) -> Result<DataFrame, IoError> {
+    let column = frame.column(col_name).ok_or_else(|| {
+        IoError::Sql(format!(
+            "index_col {col_name:?} not present in result columns"
+        ))
+    })?;
+    let labels: Vec<IndexLabel> = column
+        .values()
+        .iter()
+        .map(|v| match v {
+            Scalar::Int64(i) => IndexLabel::Int64(*i),
+            Scalar::Utf8(s) => IndexLabel::Utf8(s.clone()),
+            Scalar::Float64(f) if !f.is_nan() => IndexLabel::Utf8(f.to_string()),
+            Scalar::Bool(b) => IndexLabel::Utf8(b.to_string()),
+            Scalar::Timedelta64(ns) => IndexLabel::Timedelta64(*ns),
+            _ => IndexLabel::Utf8("NaN".to_owned()),
+        })
+        .collect();
+    let new_index = Index::new(labels).set_name(col_name);
+
+    let mut new_columns = std::collections::BTreeMap::new();
+    let mut new_order = Vec::new();
+    for name in frame.column_names() {
+        if name == col_name {
+            continue;
+        }
+        if let Some(col) = frame.column(name) {
+            new_columns.insert(name.clone(), col.clone());
+            new_order.push(name.clone());
+        }
+    }
+
+    Ok(DataFrame::new_with_column_order(
+        new_index,
+        new_columns,
+        new_order,
     )?)
 }
 
@@ -4597,12 +4692,9 @@ mod tests {
             },
         )
         .expect("write");
-        let sheets = super::read_excel_sheets_bytes(
-            &bytes,
-            None,
-            &super::ExcelReadOptions::default(),
-        )
-        .expect("read");
+        let sheets =
+            super::read_excel_sheets_bytes(&bytes, None, &super::ExcelReadOptions::default())
+                .expect("read");
         assert_eq!(sheets.len(), 1);
         assert!(sheets.contains_key("Results"));
     }
@@ -5300,10 +5392,80 @@ mod tests {
 
     // ── SQL I/O tests ──────────────────────────────────────────────
 
-    use super::{SqlIfExists, read_sql, read_sql_table, write_sql};
+    use super::{
+        SqlIfExists, SqlReadOptions, read_sql, read_sql_table, read_sql_table_with_index_col,
+        read_sql_with_index_col, read_sql_with_options, write_sql,
+    };
 
     fn make_sql_test_conn() -> rusqlite::Connection {
         rusqlite::Connection::open_in_memory().expect("in-memory sqlite")
+    }
+
+    #[test]
+    fn sql_read_with_index_col_promotes_named_column() {
+        let frame = make_test_dataframe();
+        let conn = make_sql_test_conn();
+        write_sql(&frame, &conn, "indexed_tbl", SqlIfExists::Fail).expect("write");
+
+        // Promote the "ints" column to the row index. The data
+        // columns should drop ints and the index labels should be the
+        // ints values.
+        let result = read_sql_table_with_index_col(&conn, "indexed_tbl", Some("ints"))
+            .expect("read with index");
+        assert_eq!(result.index().name(), Some("ints"));
+        assert_eq!(result.index().labels()[0], crate::IndexLabel::Int64(10));
+        assert_eq!(result.index().labels()[1], crate::IndexLabel::Int64(20));
+        assert_eq!(result.index().labels()[2], crate::IndexLabel::Int64(30));
+        // Data columns: only the non-index columns remain.
+        let names: Vec<&str> = result.column_names().iter().map(|s| s.as_str()).collect();
+        assert!(!names.contains(&"ints"));
+        assert!(names.contains(&"floats"));
+        assert!(names.contains(&"names"));
+    }
+
+    #[test]
+    fn sql_read_with_index_col_none_is_unchanged() {
+        let frame = make_test_dataframe();
+        let conn = make_sql_test_conn();
+        write_sql(&frame, &conn, "noindex_tbl", SqlIfExists::Fail).expect("write");
+        let baseline = read_sql_table(&conn, "noindex_tbl").expect("baseline");
+        let result =
+            read_sql_table_with_index_col(&conn, "noindex_tbl", None).expect("noop variant");
+        assert_eq!(result.index().labels(), baseline.index().labels());
+        assert_eq!(result.column_names(), baseline.column_names());
+    }
+
+    #[test]
+    fn sql_read_with_index_col_unknown_column_errors() {
+        let frame = make_test_dataframe();
+        let conn = make_sql_test_conn();
+        write_sql(&frame, &conn, "missing_tbl", SqlIfExists::Fail).expect("write");
+        let err = read_sql_table_with_index_col(&conn, "missing_tbl", Some("nope")).unwrap_err();
+        assert!(matches!(err, crate::IoError::Sql(_)));
+    }
+
+    #[test]
+    fn sql_read_query_with_index_col_works_on_arbitrary_select() {
+        let frame = make_test_dataframe();
+        let conn = make_sql_test_conn();
+        write_sql(&frame, &conn, "queried_tbl", SqlIfExists::Fail).expect("write");
+        let result = read_sql_with_index_col(
+            &conn,
+            "SELECT names AS label, ints, floats FROM queried_tbl ORDER BY ints DESC",
+            Some("label"),
+        )
+        .expect("read query with index");
+        assert_eq!(result.index().name(), Some("label"));
+        // Order respected by the SELECT (ints DESC) → index labels in
+        // reversed name order.
+        assert_eq!(
+            result.index().labels()[0],
+            crate::IndexLabel::Utf8("carol".into())
+        );
+        assert_eq!(
+            result.index().labels()[2],
+            crate::IndexLabel::Utf8("alice".into())
+        );
     }
 
     #[test]
@@ -5350,6 +5512,61 @@ mod tests {
         assert_eq!(
             filtered.column("names").unwrap().values()[1],
             Scalar::Utf8("carol".into())
+        );
+    }
+
+    #[test]
+    fn sql_read_with_parse_dates_coerces_named_columns() {
+        let conn = make_sql_test_conn();
+        conn.execute_batch(
+            "CREATE TABLE events (ts TEXT, value INTEGER);
+             INSERT INTO events (ts, value) VALUES
+                ('2024-01-15', 1),
+                ('2024-02-01 05:06:07', 2);",
+        )
+        .expect("create events table");
+
+        let frame = read_sql_with_options(
+            &conn,
+            "SELECT ts, value FROM events ORDER BY value",
+            &SqlReadOptions {
+                parse_dates: Some(vec!["ts".to_owned()]),
+            },
+        )
+        .expect("read sql with parse_dates");
+
+        assert_eq!(
+            frame.column("ts").unwrap().values()[0],
+            Scalar::Utf8("2024-01-15 00:00:00".into())
+        );
+        assert_eq!(
+            frame.column("ts").unwrap().values()[1],
+            Scalar::Utf8("2024-02-01 05:06:07".into())
+        );
+        assert_eq!(frame.column("value").unwrap().values()[0], Scalar::Int64(1));
+        assert_eq!(frame.column("value").unwrap().values()[1], Scalar::Int64(2));
+    }
+
+    #[test]
+    fn sql_read_with_parse_dates_missing_column_errors() {
+        let conn = make_sql_test_conn();
+        conn.execute_batch(
+            "CREATE TABLE metrics (value INTEGER);
+             INSERT INTO metrics (value) VALUES (1);",
+        )
+        .expect("create metrics table");
+
+        let err = read_sql_with_options(
+            &conn,
+            "SELECT value FROM metrics",
+            &SqlReadOptions {
+                parse_dates: Some(vec!["ts".to_owned()]),
+            },
+        )
+        .expect_err("missing parse_dates column should error");
+
+        assert!(
+            matches!(err, IoError::MissingParseDateColumns(missing) if missing == vec!["ts".to_owned()])
         );
     }
 
