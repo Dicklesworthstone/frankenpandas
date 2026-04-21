@@ -1242,6 +1242,125 @@ impl Column {
         self.values.iter().filter(|v| !v.is_missing()).count()
     }
 
+    /// Remove duplicated values, keeping the first occurrence.
+    ///
+    /// Matches `pd.Series.drop_duplicates(keep='first')`. Built atop
+    /// `duplicated()` for consistent null handling (a single null
+    /// position is kept; subsequent nulls are dropped).
+    pub fn drop_duplicates(&self) -> Result<Self, ColumnError> {
+        let dup = self.duplicated()?;
+        let mut out = Vec::with_capacity(self.values.len());
+        for (v, keep_flag) in self.values.iter().zip(dup.values.iter()) {
+            if matches!(keep_flag, Scalar::Bool(false)) {
+                out.push(v.clone());
+            }
+        }
+        Self::new(self.dtype, out)
+    }
+
+    /// Element-wise comparison against `other`, emitting a 2-column
+    /// report of differences.
+    ///
+    /// Matches `pd.Series.compare(other)` — returns two Columns
+    /// `(self_values, other_values)` containing only the positions
+    /// where the two differ. Missing entries compare equal to each
+    /// other. Length-mismatched inputs return `LengthMismatch`.
+    pub fn compare(&self, other: &Self) -> Result<(Self, Self), ColumnError> {
+        if self.values.len() != other.values.len() {
+            return Err(ColumnError::LengthMismatch {
+                left: self.values.len(),
+                right: other.values.len(),
+            });
+        }
+        let mut left = Vec::new();
+        let mut right = Vec::new();
+        for (a, b) in self.values.iter().zip(other.values.iter()) {
+            let equal = match (a.is_missing(), b.is_missing()) {
+                (true, true) => true,
+                (true, false) | (false, true) => false,
+                (false, false) => a.semantic_eq(b),
+            };
+            if !equal {
+                left.push(a.clone());
+                right.push(b.clone());
+            }
+        }
+        Ok((Self::new(self.dtype, left)?, Self::new(other.dtype, right)?))
+    }
+
+    /// Apply a unary function over each value.
+    ///
+    /// Matches `pd.Series.map(func)`. Missing values are passed to the
+    /// user function (callers can decide whether to propagate NaN);
+    /// result dtype is inferred via `infer_dtype` over the outputs,
+    /// falling back to `self.dtype` when inference fails (e.g. empty
+    /// or all-null output).
+    pub fn map<F>(&self, mut func: F) -> Result<Self, ColumnError>
+    where
+        F: FnMut(&Scalar) -> Scalar,
+    {
+        let out: Vec<Scalar> = self.values.iter().map(&mut func).collect();
+        let target = infer_dtype(&out).unwrap_or(self.dtype);
+        Self::new(target, out)
+    }
+
+    /// Linearly interpolate missing numeric values.
+    ///
+    /// Matches `pd.Series.interpolate(method='linear')` for the
+    /// default contiguous case. Only interior missing runs are
+    /// interpolated — leading/trailing nulls stay null (matches
+    /// pandas `limit_direction='forward'` default). Non-numeric
+    /// columns return a type error. Result dtype is always Float64.
+    pub fn interpolate_linear(&self) -> Result<Self, ColumnError> {
+        let len = self.values.len();
+        // Convert to f64 once; missing → None.
+        let mut floats: Vec<Option<f64>> = Vec::with_capacity(len);
+        for v in &self.values {
+            if v.is_missing() {
+                floats.push(None);
+                continue;
+            }
+            match v.to_f64() {
+                Ok(x) if !x.is_nan() => floats.push(Some(x)),
+                Ok(_) => floats.push(None),
+                Err(err) => return Err(ColumnError::Type(err)),
+            }
+        }
+
+        // Walk interior gaps between the first and last non-null.
+        let first = floats.iter().position(Option::is_some);
+        let last = floats.iter().rposition(Option::is_some);
+        if let (Some(start), Some(end)) = (first, last) {
+            let mut i = start;
+            while i < end {
+                if floats[i].is_some() {
+                    i += 1;
+                    continue;
+                }
+                let gap_start = i;
+                while i < end && floats[i].is_none() {
+                    i += 1;
+                }
+                let before = floats[gap_start - 1].expect("anchor");
+                let after = floats[i].expect("anchor");
+                let span = (i - gap_start + 1) as f64;
+                for (k, j) in (gap_start..i).enumerate() {
+                    let step = (k + 1) as f64;
+                    floats[j] = Some(before + (after - before) * (step / span));
+                }
+            }
+        }
+
+        let out: Vec<Scalar> = floats
+            .into_iter()
+            .map(|opt| match opt {
+                Some(x) => Scalar::Float64(x),
+                None => Scalar::Null(NullKind::NaN),
+            })
+            .collect();
+        Self::new(DType::Float64, out)
+    }
+
     /// Linear-interpolation quantile at `q ∈ [0.0, 1.0]`.
     ///
     /// Matches `pd.Series.quantile(q, interpolation='linear')`.
@@ -1299,7 +1418,13 @@ impl Column {
         let max_count = counts.values().map(|(c, _)| *c).max().unwrap_or(0);
         let mut winners: Vec<Scalar> = counts
             .values()
-            .filter_map(|(c, v)| if *c == max_count { Some((*v).clone()) } else { None })
+            .filter_map(|(c, v)| {
+                if *c == max_count {
+                    Some((*v).clone())
+                } else {
+                    None
+                }
+            })
             .collect();
         winners.sort_by(|a, b| compare_scalars_na_last(a, b, true));
         Self::new(self.dtype, winners)
@@ -4019,10 +4144,11 @@ mod tests {
                 Scalar::Float64(5.0),
             ])
             .expect("col");
-            match col.quantile(0.5) {
-                Scalar::Float64(v) => assert!((v - 3.0).abs() < 1e-9),
-                other => panic!("expected Float64, got {other:?}"),
-            }
+            let quantile = col.quantile(0.5);
+            assert!(
+                matches!(quantile, Scalar::Float64(v) if (v - 3.0).abs() < 1e-9),
+                "expected Float64 median, got {quantile:?}"
+            );
         }
 
         #[test]
@@ -4074,12 +4200,9 @@ mod tests {
 
         #[test]
         fn memory_usage_fixed_width_for_numeric() {
-            let col = Column::from_values(vec![
-                Scalar::Int64(1),
-                Scalar::Int64(2),
-                Scalar::Int64(3),
-            ])
-            .expect("col");
+            let col =
+                Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)])
+                    .expect("col");
             let usage = col.memory_usage(false);
             // 3 * 8 + ceil(3/8) = 24 + 1
             assert_eq!(usage, 25);
@@ -4097,6 +4220,152 @@ mod tests {
             assert!(deep > shallow);
             // deep_extra = "hi".len() + "world".len() = 2 + 5 = 7
             assert_eq!(deep - shallow, 7);
+        }
+
+        #[test]
+        fn interpolate_fills_interior_gaps() {
+            let col = Column::from_values(vec![
+                Scalar::Float64(1.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(4.0),
+            ])
+            .expect("col");
+            let r = col.interpolate_linear().expect("interpolate");
+            assert_eq!(r.values()[0], Scalar::Float64(1.0));
+            assert!(
+                matches!(&r.values()[1], Scalar::Float64(v) if (*v - 2.0).abs() < 1e-9),
+                "expected Float64, got {:?}",
+                r.values()[1]
+            );
+            assert!(
+                matches!(&r.values()[2], Scalar::Float64(v) if (*v - 3.0).abs() < 1e-9),
+                "expected Float64, got {:?}",
+                r.values()[2]
+            );
+            assert_eq!(r.values()[3], Scalar::Float64(4.0));
+        }
+
+        #[test]
+        fn interpolate_leaves_leading_and_trailing_nulls_null() {
+            let col = Column::from_values(vec![
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(2.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(4.0),
+                Scalar::Null(NullKind::NaN),
+            ])
+            .expect("col");
+            let r = col.interpolate_linear().expect("interpolate");
+            assert!(r.values()[0].is_missing());
+            assert_eq!(r.values()[1], Scalar::Float64(2.0));
+            assert!(
+                matches!(&r.values()[2], Scalar::Float64(v) if (*v - 3.0).abs() < 1e-9),
+                "expected Float64, got {:?}",
+                r.values()[2]
+            );
+            assert_eq!(r.values()[3], Scalar::Float64(4.0));
+            assert!(r.values()[4].is_missing());
+        }
+
+        #[test]
+        fn interpolate_empty_is_empty_float64() {
+            let col = Column::from_values(Vec::<Scalar>::new()).expect("col");
+            let r = col.interpolate_linear().expect("interpolate");
+            assert!(r.is_empty());
+            assert_eq!(r.dtype(), DType::Float64);
+        }
+
+        #[test]
+        fn drop_duplicates_keeps_first_occurrence() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(1),
+                Scalar::Int64(3),
+                Scalar::Int64(2),
+            ])
+            .expect("col");
+            let d = col.drop_duplicates().expect("drop_duplicates");
+            assert_eq!(
+                d.values(),
+                &[Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]
+            );
+        }
+
+        #[test]
+        fn drop_duplicates_treats_nulls_as_one_bucket() {
+            let col = Column::from_values(vec![
+                Scalar::Null(NullKind::NaN),
+                Scalar::Int64(1),
+                Scalar::Null(NullKind::NaN),
+            ])
+            .expect("col");
+            let d = col.drop_duplicates().expect("drop_duplicates");
+            // First null is kept; subsequent null is dropped.
+            assert_eq!(d.len(), 2);
+            assert!(d.values()[0].is_missing());
+            assert_eq!(d.values()[1], Scalar::Int64(1));
+        }
+
+        #[test]
+        fn compare_returns_only_differences() {
+            let a = Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)])
+                .expect("a");
+            let b =
+                Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(20), Scalar::Int64(3)])
+                    .expect("b");
+            let (left, right) = a.compare(&b).expect("compare");
+            assert_eq!(left.values(), &[Scalar::Int64(2)]);
+            assert_eq!(right.values(), &[Scalar::Int64(20)]);
+        }
+
+        #[test]
+        fn compare_treats_matching_nulls_as_equal() {
+            let a = Column::from_values(vec![Scalar::Int64(1), Scalar::Null(NullKind::NaN)])
+                .expect("a");
+            let b = Column::from_values(vec![Scalar::Int64(1), Scalar::Null(NullKind::NaN)])
+                .expect("b");
+            let (left, right) = a.compare(&b).expect("compare");
+            assert!(left.is_empty());
+            assert!(right.is_empty());
+        }
+
+        #[test]
+        fn compare_length_mismatch_errors() {
+            let a = Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2)]).expect("a");
+            let b = Column::from_values(vec![Scalar::Int64(1)]).expect("b");
+            let err = a.compare(&b).unwrap_err();
+            assert!(matches!(err, crate::ColumnError::LengthMismatch { .. }));
+        }
+
+        #[test]
+        fn map_applies_unary_function() {
+            let col =
+                Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)])
+                    .expect("col");
+            let doubled = col
+                .map(|v| match v {
+                    Scalar::Int64(i) => Scalar::Int64(i * 2),
+                    other => other.clone(),
+                })
+                .expect("map");
+            assert_eq!(doubled.values()[0], Scalar::Int64(2));
+            assert_eq!(doubled.values()[1], Scalar::Int64(4));
+            assert_eq!(doubled.values()[2], Scalar::Int64(6));
+        }
+
+        #[test]
+        fn map_can_change_dtype() {
+            let col = Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2)]).expect("col");
+            let as_str = col
+                .map(|v| match v {
+                    Scalar::Int64(i) => Scalar::Utf8(i.to_string()),
+                    other => other.clone(),
+                })
+                .expect("map");
+            assert_eq!(as_str.dtype(), DType::Utf8);
+            assert_eq!(as_str.values()[0], Scalar::Utf8("1".into()));
         }
 
         #[test]
