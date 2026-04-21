@@ -262,6 +262,7 @@ pub enum FixtureOperation {
     IpcStreamRoundTrip,
     // FP-P2C-009: Storage invariants
     ColumnDtypeCheck,
+    SeriesDtypeCheck,
     // FP-P2C-010: loc/iloc
     SeriesFilter,
     SeriesHead,
@@ -1070,6 +1071,7 @@ impl FixtureOperation {
             Self::ExcelRoundTrip => "excel_round_trip",
             Self::IpcStreamRoundTrip => "ipc_stream_round_trip",
             Self::ColumnDtypeCheck => "column_dtype_check",
+            Self::SeriesDtypeCheck => "series_dtype_check",
             Self::SeriesFilter => "series_filter",
             Self::SeriesHead => "series_head",
             Self::SeriesTail => "series_tail",
@@ -2198,7 +2200,7 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::FeatherRoundTrip
         | FixtureOperation::ExcelRoundTrip
         | FixtureOperation::IpcStreamRoundTrip => &["CC-006"],
-        FixtureOperation::ColumnDtypeCheck => &["CC-001"],
+        FixtureOperation::ColumnDtypeCheck | FixtureOperation::SeriesDtypeCheck => &["CC-001"],
         FixtureOperation::SeriesFilter
         | FixtureOperation::SeriesHead
         | FixtureOperation::SeriesTail
@@ -5118,6 +5120,7 @@ fn fuzz_feather_scalar_for_dtype(dtype: DType, bytes: &[u8]) -> Scalar {
             char::from(b'a' + (payload % 26)),
             payload % 4
         )),
+        DType::Categorical => Scalar::Int64(i64::from(payload % 5) - 1),
         DType::Null => Scalar::Null(NullKind::Null),
         DType::Timedelta64 => {
             Scalar::Timedelta64(i64::from(payload % 100) * Timedelta::NANOS_PER_HOUR)
@@ -6860,6 +6863,20 @@ fn run_fixture_operation(
             let expected = match expected {
                 ResolvedExpected::Dtype(dtype) => dtype,
                 _ => return Err("expected_dtype is required for column_dtype_check".to_owned()),
+            };
+            if actual_dtype != expected {
+                return Err(format!(
+                    "dtype mismatch: actual={actual_dtype}, expected={expected}"
+                ));
+            }
+            Ok(())
+        }
+        FixtureOperation::SeriesDtypeCheck => {
+            let series = build_series_for_dtype_check(fixture)?;
+            let actual_dtype = format!("{:?}", series.dtype());
+            let expected = match expected {
+                ResolvedExpected::Dtype(dtype) => dtype,
+                _ => return Err("expected_dtype is required for series_dtype_check".to_owned()),
             };
             if actual_dtype != expected {
                 return Err(format!(
@@ -10074,7 +10091,7 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
                     fixture.case_id
                 ))
             }),
-        FixtureOperation::ColumnDtypeCheck => fixture
+        FixtureOperation::ColumnDtypeCheck | FixtureOperation::SeriesDtypeCheck => fixture
             .expected_dtype
             .clone()
             .map(ResolvedExpected::Dtype)
@@ -10668,7 +10685,7 @@ fn capture_live_oracle_expected(
             .expected_bool
             .map(ResolvedExpected::Bool)
             .ok_or_else(|| HarnessError::FixtureFormat("oracle omitted expected_bool".to_owned())),
-        FixtureOperation::ColumnDtypeCheck => response
+        FixtureOperation::ColumnDtypeCheck | FixtureOperation::SeriesDtypeCheck => response
             .expected_dtype
             .map(ResolvedExpected::Dtype)
             .ok_or_else(|| HarnessError::FixtureFormat("oracle omitted expected_dtype".to_owned())),
@@ -13915,6 +13932,29 @@ fn build_series(series: &FixtureSeries) -> Result<Series, String> {
     .map_err(|err| err.to_string())
 }
 
+fn build_series_for_dtype_check(fixture: &PacketFixture) -> Result<Series, String> {
+    let left = require_left_series(fixture)?;
+    if let Some(categories) = fixture.categorical_categories.as_ref() {
+        let ordered = fixture.categorical_ordered.unwrap_or(false);
+        let codes = left
+            .values
+            .iter()
+            .enumerate()
+            .map(|(idx, value)| match value {
+                Scalar::Int64(code) => Ok(*code),
+                other => Err(format!(
+                    "series_dtype_check requires int64 categorical codes at idx={idx}, got {other:?}"
+                )),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Series::from_categorical_codes(left.name.clone(), codes, categories.clone(), ordered)
+            .map_err(|err| err.to_string())
+    } else {
+        build_series(left)
+    }
+}
+
 fn run_series_categorical_from_codes(fixture: &PacketFixture) -> Result<Series, String> {
     let left = require_left_series(fixture)?;
     let categories = fixture.categorical_categories.as_ref().ok_or_else(|| {
@@ -15099,6 +15139,15 @@ fn execute_and_compare_differential(
                 _ => return Err("expected_dtype required for column_dtype_check".to_owned()),
             };
             Ok(diff_string(&actual_dtype, &expected, "column_dtype"))
+        }
+        FixtureOperation::SeriesDtypeCheck => {
+            let series = build_series_for_dtype_check(fixture)?;
+            let actual_dtype = format!("{:?}", series.dtype());
+            let expected = match expected {
+                ResolvedExpected::Dtype(dtype) => dtype,
+                _ => return Err("expected_dtype required for series_dtype_check".to_owned()),
+            };
+            Ok(diff_string(&actual_dtype, &expected, "series_dtype"))
         }
         FixtureOperation::SeriesFilter => {
             let left = require_left_series(fixture)?;
@@ -20753,7 +20802,7 @@ mod tests {
             run_packet_by_id(&cfg, "FP-P2D-017", OracleMode::FixtureExpected).expect("report");
         assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-017"));
         assert!(
-            report.fixture_count >= 14,
+            report.fixture_count >= 15,
             "expected FP-P2D-017 constructor+dtype fixtures"
         );
         assert!(report.is_green(), "expected report green: {report:?}");

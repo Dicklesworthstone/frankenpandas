@@ -12,6 +12,7 @@ pub enum DType {
     Float64,
     #[serde(alias = "string", alias = "str")]
     Utf8,
+    Categorical,
     Timedelta64,
 }
 
@@ -84,7 +85,9 @@ impl Scalar {
             DType::Float64 => Self::Null(NullKind::NaN),
             DType::Timedelta64 => Self::Timedelta64(Timedelta::NAT),
             DType::Null => Self::Null(NullKind::Null),
-            DType::Bool | DType::Int64 | DType::Utf8 => Self::Null(NullKind::Null),
+            DType::Bool | DType::Int64 | DType::Utf8 | DType::Categorical => {
+                Self::Null(NullKind::Null)
+            }
         }
     }
 
@@ -216,11 +219,12 @@ pub enum TypeError {
 }
 
 pub fn common_dtype(left: DType, right: DType) -> Result<DType, TypeError> {
-    use DType::{Bool, Float64, Int64, Null, Timedelta64};
+    use DType::{Bool, Categorical, Float64, Int64, Null, Timedelta64};
 
     let out = match (left, right) {
         (a, b) if a == b => a,
         (Null, other) | (other, Null) => other,
+        (Categorical, Categorical) => Categorical,
         (Bool, Int64) | (Int64, Bool) => Int64,
         (Bool, Float64) | (Float64, Bool) => Float64,
         (Int64, Float64) | (Float64, Int64) => Float64,
@@ -330,6 +334,7 @@ pub fn cast_scalar_owned(value: Scalar, target: DType) -> Result<Scalar, TypeErr
             _ => Err(TypeError::InvalidCast { from, to: target }),
         },
         DType::Utf8 => Err(TypeError::InvalidCast { from, to: target }),
+        DType::Categorical => Err(TypeError::InvalidCast { from, to: target }),
         DType::Timedelta64 => match &value {
             Scalar::Int64(v) => Ok(Scalar::Timedelta64(*v)),
             Scalar::Utf8(s) => Timedelta::parse(s)

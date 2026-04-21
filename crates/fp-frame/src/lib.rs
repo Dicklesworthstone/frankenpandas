@@ -40,8 +40,7 @@ pub enum FrameError {
 ///
 /// Stores the unique category values and an ordered flag. The underlying
 /// Series column contains integer codes (indices into `categories`).
-/// This design avoids adding a DType variant while providing full
-/// pandas Categorical semantics.
+/// Series-level dtype reporting still surfaces `DType::Categorical`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CategoricalMetadata {
     /// The unique category values, in order.
@@ -90,7 +89,7 @@ fn normalize_iloc_position(position: i64, len: usize) -> Result<usize, FrameErro
 fn dtype_memory_width(dtype: DType) -> usize {
     match dtype {
         DType::Bool => 1,
-        DType::Int64 | DType::Float64 | DType::Timedelta64 => 8,
+        DType::Int64 | DType::Float64 | DType::Categorical | DType::Timedelta64 => 8,
         DType::Utf8 => std::mem::size_of::<usize>(),
         DType::Null => 0,
     }
@@ -103,6 +102,7 @@ fn expand_dtype_alias(name: &str) -> Result<&'static [DType], FrameError> {
         "floating" | "float" | "float64" | "f8" => Ok(&[DType::Float64]),
         "bool" | "boolean" | "?" => Ok(&[DType::Bool]),
         "object" | "string" | "str" | "O" => Ok(&[DType::Utf8]),
+        "category" | "categorical" => Ok(&[DType::Categorical]),
         "timedelta" | "timedelta64" | "m8" => Ok(&[DType::Timedelta64]),
         other => Err(FrameError::CompatibilityRejected(format!(
             "data type '{other}' not understood"
@@ -696,6 +696,7 @@ fn coerce_scalar(val: &Scalar, dtype: DType) -> Scalar {
             _ => Scalar::Null(NullKind::NaN),
         },
         DType::Utf8 => Scalar::Utf8(format!("{val}")),
+        DType::Categorical => Scalar::Utf8(format!("{val}")),
         DType::Bool => match val {
             Scalar::Bool(_) => val.clone(),
             Scalar::Int64(n) => Scalar::Bool(*n != 0),
@@ -979,7 +980,11 @@ impl Series {
     /// Matches `pd.Series.dtype`.
     #[must_use]
     pub fn dtype(&self) -> DType {
-        self.column.dtype()
+        if self.categorical.is_some() {
+            DType::Categorical
+        } else {
+            self.column.dtype()
+        }
     }
 
     /// Return a deep copy of this Series.
@@ -14100,6 +14105,12 @@ impl DataFrame {
                                 })?
                             }
                             DType::Utf8 => Scalar::Utf8(raw.to_owned()),
+                            DType::Categorical => {
+                                return Err(FrameError::CompatibilityRejected(format!(
+                                    "cannot parse categorical value '{raw}' in column '{}'; construct categorical series explicitly",
+                                    col_names[idx]
+                                )));
+                            }
                             DType::Timedelta64 => Timedelta::parse(raw)
                                 .map(Scalar::Timedelta64)
                                 .map_err(|_| {
@@ -16053,6 +16064,7 @@ impl DataFrame {
                 "float64" | "float" => dt == DType::Float64,
                 "bool" | "boolean" => dt == DType::Bool,
                 "object" | "string" | "str" => dt == DType::Utf8,
+                "category" | "categorical" => dt == DType::Categorical,
                 "number" | "numeric" => matches!(dt, DType::Int64 | DType::Float64),
                 "all" => true,
                 _ => false,
@@ -22572,6 +22584,9 @@ impl DataFrame {
                     // Check if any value is NaN (shouldn't happen in Int64, but if mixed)
                     result_cols.insert(name.clone(), col.clone());
                 }
+                DType::Categorical => {
+                    result_cols.insert(name.clone(), col.clone());
+                }
                 DType::Utf8 => {
                     // Try to parse as numeric
                     let mut all_numeric = true;
@@ -23905,6 +23920,7 @@ impl DataFrameGroupBy<'_> {
                 }
                 Scalar::Int64(total)
             }
+            DType::Categorical => fp_types::nansum(group_vals),
             DType::Timedelta64 => {
                 let mut total = 0_i128;
                 for value in group_vals {
@@ -37960,6 +37976,23 @@ mod tests {
 
         let s2 = Series::from_values("y", vec![0_i64.into()], vec![Scalar::Int64(42)]).unwrap();
         assert_eq!(s2.dtype(), DType::Int64);
+    }
+
+    #[test]
+    fn series_dtype_reports_categorical_metadata() {
+        let s = Series::from_categorical(
+            "pet",
+            vec![
+                Scalar::Utf8("cat".into()),
+                Scalar::Utf8("dog".into()),
+                Scalar::Utf8("cat".into()),
+            ],
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(s.dtype(), DType::Categorical);
+        assert_eq!(s.column().dtype(), DType::Int64);
     }
 
     // ── Series.copy tests ──

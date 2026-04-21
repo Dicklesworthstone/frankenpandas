@@ -1261,6 +1261,7 @@ fn dtype_to_arrow(dtype: DType) -> ArrowDataType {
         DType::Int64 => ArrowDataType::Int64,
         DType::Float64 => ArrowDataType::Float64,
         DType::Utf8 => ArrowDataType::Utf8,
+        DType::Categorical => ArrowDataType::Utf8,
         DType::Bool => ArrowDataType::Boolean,
         DType::Null => ArrowDataType::Utf8, // fallback: null-only columns as string
         DType::Timedelta64 => ArrowDataType::Int64, // store as nanoseconds
@@ -1308,7 +1309,7 @@ fn column_to_arrow_array(column: &Column) -> Result<Arc<dyn Array>, IoError> {
             }
             Arc::new(builder.finish())
         }
-        DType::Utf8 | DType::Null => {
+        DType::Utf8 | DType::Categorical | DType::Null => {
             let mut builder = StringBuilder::with_capacity(column.len(), column.len() * 8);
             for value in column.values() {
                 match value {
@@ -2208,6 +2209,7 @@ fn dtype_to_sql(dtype: DType) -> &'static str {
         DType::Int64 => "INTEGER",
         DType::Float64 => "REAL",
         DType::Utf8 => "TEXT",
+        DType::Categorical => "TEXT",
         DType::Bool => "INTEGER",
         DType::Null => "TEXT",
         DType::Timedelta64 => "INTEGER", // store as nanoseconds

@@ -222,6 +222,16 @@ impl ColumnData {
                     .collect();
                 Self::Int64(data)
             }
+            DType::Categorical => {
+                let data: Vec<i64> = values
+                    .iter()
+                    .map(|v| match v {
+                        Scalar::Int64(i) => *i,
+                        _ => -1,
+                    })
+                    .collect();
+                Self::Int64(data)
+            }
             DType::Bool => {
                 let data: Vec<bool> = values
                     .iter()
