@@ -13451,31 +13451,71 @@ pub enum DataFrameColumnInput {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct DataFrameDictSplit {
+    pub columns: Vec<Scalar>,
+    pub index: Vec<Scalar>,
+    pub data: Vec<Vec<Scalar>>,
+}
+
+/// Pandas 2.2 `to_dict(orient='tight')` payload.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DataFrameDictTight {
+    /// Row index labels, in row order.
+    pub index: Vec<Scalar>,
+    /// Column names, in column order.
+    pub columns: Vec<Scalar>,
+    /// Row-major nested data: `data[row][col]`.
+    pub data: Vec<Vec<Scalar>>,
+    /// Names of each index level (pandas emits `[None]` for an
+    /// unnamed single-level index).
+    pub index_names: Vec<Option<String>>,
+    /// Names of each column level (always `[None]` until MultiIndex
+    /// columns land).
+    pub column_names: Vec<Option<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum DataFrameDictResult {
     Mapping(BTreeMap<String, Vec<(String, Scalar)>>),
     List(BTreeMap<String, Vec<Scalar>>),
     Series(BTreeMap<String, Series>),
+    Split(DataFrameDictSplit),
+    Tight(DataFrameDictTight),
 }
 
 impl DataFrameDictResult {
     pub fn as_mapping(&self) -> Option<&BTreeMap<String, Vec<(String, Scalar)>>> {
         match self {
             Self::Mapping(mapping) => Some(mapping),
-            Self::List(_) | Self::Series(_) => None,
+            _ => None,
         }
     }
 
     pub fn as_list(&self) -> Option<&BTreeMap<String, Vec<Scalar>>> {
         match self {
             Self::List(list) => Some(list),
-            Self::Mapping(_) | Self::Series(_) => None,
+            _ => None,
         }
     }
 
     pub fn as_series(&self) -> Option<&BTreeMap<String, Series>> {
         match self {
             Self::Series(series) => Some(series),
-            Self::Mapping(_) | Self::List(_) => None,
+            _ => None,
+        }
+    }
+
+    pub fn as_tight(&self) -> Option<&DataFrameDictTight> {
+        match self {
+            Self::Tight(tight) => Some(tight),
+            _ => None,
+        }
+    }
+
+    pub fn as_split(&self) -> Option<&DataFrameDictSplit> {
+        match self {
+            Self::Split(split) => Some(split),
+            _ => None,
         }
     }
 }
@@ -13527,6 +13567,29 @@ impl DataFrame {
             }
         }
         Ok(())
+    }
+
+    fn index_label_to_scalar(label: &IndexLabel) -> Scalar {
+        match label {
+            IndexLabel::Int64(v) => Scalar::Int64(*v),
+            IndexLabel::Utf8(s) => Scalar::Utf8(s.clone()),
+            IndexLabel::Timedelta64(ns) => Scalar::Timedelta64(*ns),
+            IndexLabel::Datetime64(ns) => Scalar::Utf8(format_datetime_ns(*ns)),
+        }
+    }
+
+    fn row_major_values(&self) -> Vec<Vec<Scalar>> {
+        self.index
+            .labels()
+            .iter()
+            .enumerate()
+            .map(|(row_idx, _)| {
+                self.column_order
+                    .iter()
+                    .map(|col_name| self.columns[col_name].values()[row_idx].clone())
+                    .collect()
+            })
+            .collect()
     }
 
     fn normalize_column_order(
@@ -19482,6 +19545,7 @@ impl DataFrame {
     /// - `"records"`: `[{column -> value}, ...]`
     /// - `"index"`: `{index -> {column -> value}}`
     /// - `"series"`: `{column -> Series}`
+    /// - `"split"`: `{index, columns, data}`
     pub fn to_dict(&self, orient: &str) -> Result<DataFrameDictResult, FrameError> {
         match orient {
             "dict" => {
@@ -19542,110 +19606,61 @@ impl DataFrame {
                 Ok(DataFrameDictResult::Series(result))
             }
             "split" => {
-                // Split orient: returns columns, index, data as separate entries
-                let mut result = BTreeMap::new();
-                let col_entry: Vec<(String, Scalar)> = self
+                let columns = self
                     .column_order
                     .iter()
-                    .enumerate()
-                    .map(|(i, name)| (i.to_string(), Scalar::Utf8(name.clone())))
+                    .map(|name| Scalar::Utf8(name.clone()))
                     .collect();
-                result.insert("columns".to_owned(), col_entry);
-
-                let idx_entry: Vec<(String, Scalar)> = self
+                let index = self
                     .index
                     .labels()
                     .iter()
-                    .enumerate()
-                    .map(|(i, label)| {
-                        (
-                            i.to_string(),
-                            match label {
-                                IndexLabel::Int64(v) => Scalar::Int64(*v),
-                                IndexLabel::Utf8(s) => Scalar::Utf8(s.clone()),
-                                IndexLabel::Timedelta64(ns) => Scalar::Timedelta64(*ns),
-                                IndexLabel::Datetime64(ns) => Scalar::Utf8(format_datetime_ns(*ns)),
-                            },
-                        )
-                    })
+                    .map(Self::index_label_to_scalar)
                     .collect();
-                result.insert("index".to_owned(), idx_entry);
-
-                // Data: row-major list of lists
-                for (row_idx, _label) in self.index.labels().iter().enumerate() {
-                    let entries: Vec<(String, Scalar)> = self
-                        .column_order
-                        .iter()
-                        .map(|col_name| {
-                            let val = self.columns[col_name].values()[row_idx].clone();
-                            (col_name.clone(), val)
-                        })
-                        .collect();
-                    result.insert(format!("data_{row_idx}"), entries);
-                }
-                Ok(DataFrameDictResult::Mapping(result))
+                let data = self.row_major_values();
+                Ok(DataFrameDictResult::Split(DataFrameDictSplit {
+                    columns,
+                    index,
+                    data,
+                }))
             }
             "tight" => {
-                // Tight orient: comprehensive representation with metadata.
-                // Returns: {columns, index, data, index_names, column_names}
-                let mut result = BTreeMap::new();
-
-                // columns: list of column names
-                let col_entry: Vec<(String, Scalar)> = self
+                // Tight orient: pandas 2.2 payload = {index, columns,
+                // data (row-major nested list), index_names, column_names}.
+                let columns: Vec<Scalar> = self
                     .column_order
                     .iter()
-                    .enumerate()
-                    .map(|(i, name)| (i.to_string(), Scalar::Utf8(name.clone())))
+                    .map(|name| Scalar::Utf8(name.clone()))
                     .collect();
-                result.insert("columns".to_owned(), col_entry);
-
-                // index: list of index labels
-                let idx_entry: Vec<(String, Scalar)> = self
+                let index: Vec<Scalar> = self
                     .index
                     .labels()
                     .iter()
-                    .enumerate()
-                    .map(|(i, label)| {
-                        (
-                            i.to_string(),
-                            match label {
-                                IndexLabel::Int64(v) => Scalar::Int64(*v),
-                                IndexLabel::Utf8(s) => Scalar::Utf8(s.clone()),
-                                IndexLabel::Timedelta64(ns) => Scalar::Timedelta64(*ns),
-                                IndexLabel::Datetime64(ns) => Scalar::Utf8(format_datetime_ns(*ns)),
-                            },
-                        )
+                    .map(|label| match label {
+                        IndexLabel::Int64(v) => Scalar::Int64(*v),
+                        IndexLabel::Utf8(s) => Scalar::Utf8(s.clone()),
+                        IndexLabel::Timedelta64(ns) => Scalar::Timedelta64(*ns),
+                        IndexLabel::Datetime64(ns) => Scalar::Utf8(format_datetime_ns(*ns)),
                     })
                     .collect();
-                result.insert("index".to_owned(), idx_entry);
-
-                // data: row-major nested list
-                for (row_idx, _label) in self.index.labels().iter().enumerate() {
-                    let entries: Vec<(String, Scalar)> = self
-                        .column_order
-                        .iter()
-                        .map(|col_name| {
-                            let val = self.columns[col_name].values()[row_idx].clone();
-                            (col_name.clone(), val)
-                        })
-                        .collect();
-                    result.insert(format!("data_{row_idx}"), entries);
-                }
-
-                // index_names: name of the index
-                let index_name = self
-                    .index
-                    .name()
-                    .map_or(Scalar::Null(NullKind::Null), |n| Scalar::Utf8(n.to_owned()));
-                result.insert("index_names".to_owned(), vec![("0".to_owned(), index_name)]);
-
-                // column_names: always [None] for single-level columns
-                result.insert(
-                    "column_names".to_owned(),
-                    vec![("0".to_owned(), Scalar::Null(NullKind::Null))],
-                );
-
-                Ok(DataFrameDictResult::Mapping(result))
+                let data: Vec<Vec<Scalar>> = (0..self.index.labels().len())
+                    .map(|row_idx| {
+                        self.column_order
+                            .iter()
+                            .map(|col_name| self.columns[col_name].values()[row_idx].clone())
+                            .collect()
+                    })
+                    .collect();
+                let index_names = vec![self.index.name().map(str::to_owned)];
+                // Column-level names are None until MultiIndex columns land.
+                let column_names = vec![None];
+                Ok(DataFrameDictResult::Tight(DataFrameDictTight {
+                    index,
+                    columns,
+                    data,
+                    index_names,
+                    column_names,
+                }))
             }
             other => Err(FrameError::CompatibilityRejected(format!(
                 "unsupported to_dict orient: {other:?}"
@@ -38737,6 +38752,38 @@ mod tests {
     }
 
     #[test]
+    fn dataframe_to_dict_split() {
+        let df = DataFrame::from_dict(
+            &["b", "a"],
+            vec![
+                (
+                    "b",
+                    vec![Scalar::Utf8("x".into()), Scalar::Utf8("y".into())],
+                ),
+                ("a", vec![Scalar::Int64(10), Scalar::Null(NullKind::NaN)]),
+            ],
+        )
+        .unwrap();
+
+        let result = df.to_dict("split").unwrap();
+        let result = result
+            .as_split()
+            .expect("split orient should return structured split payload");
+        assert_eq!(
+            result.columns,
+            vec![Scalar::Utf8("b".into()), Scalar::Utf8("a".into())]
+        );
+        assert_eq!(result.index, vec![Scalar::Int64(0), Scalar::Int64(1)]);
+        assert_eq!(
+            result.data,
+            vec![
+                vec![Scalar::Utf8("x".into()), Scalar::Int64(10)],
+                vec![Scalar::Utf8("y".into()), Scalar::Null(NullKind::NaN)],
+            ]
+        );
+    }
+
+    #[test]
     fn dataframe_to_dict_invalid_orient() {
         let df = DataFrame::from_series(vec![
             Series::from_values("a", vec![0_i64.into()], vec![Scalar::Int64(1)]).unwrap(),
@@ -38746,7 +38793,7 @@ mod tests {
     }
 
     #[test]
-    fn dataframe_to_dict_tight() {
+    fn dataframe_to_dict_tight_has_pandas_shape() {
         let df = DataFrame::from_dict(
             &["x", "y"],
             vec![
@@ -38760,21 +38807,53 @@ mod tests {
         .unwrap();
 
         let result = df.to_dict("tight").unwrap();
-        let result = result
-            .as_mapping()
-            .expect("tight orient should return mapping");
-        assert!(result.contains_key("columns"));
-        assert!(result.contains_key("index"));
-        assert!(result.contains_key("data_0"));
-        assert!(result.contains_key("data_1"));
-        assert!(result.contains_key("index_names"));
-        assert!(result.contains_key("column_names"));
+        let tight = result
+            .as_tight()
+            .expect("tight orient should return structured tight payload");
+        assert_eq!(
+            tight.columns,
+            vec![Scalar::Utf8("x".into()), Scalar::Utf8("y".into())]
+        );
+        assert_eq!(tight.index, vec![Scalar::Int64(0), Scalar::Int64(1)]);
+        // Row-major data: row 0 = [1, "a"], row 1 = [2, "b"]
+        assert_eq!(tight.data.len(), 2);
+        assert_eq!(
+            tight.data[0],
+            vec![Scalar::Int64(1), Scalar::Utf8("a".into())]
+        );
+        assert_eq!(
+            tight.data[1],
+            vec![Scalar::Int64(2), Scalar::Utf8("b".into())]
+        );
+        assert_eq!(tight.index_names, vec![None]);
+        assert_eq!(tight.column_names, vec![None]);
+    }
 
-        // columns should list "x" and "y"
-        let cols = &result["columns"];
-        assert_eq!(cols.len(), 2);
-        assert_eq!(cols[0].1, Scalar::Utf8("x".into()));
-        assert_eq!(cols[1].1, Scalar::Utf8("y".into()));
+    #[test]
+    fn dataframe_to_dict_tight_preserves_index_name() {
+        let index = Index::from_i64(vec![10]).set_name("row_id");
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            "a".to_string(),
+            Column::from_values(vec![Scalar::Int64(1)]).unwrap(),
+        );
+        let df = DataFrame::new_with_column_order(index, columns, vec!["a".to_string()]).unwrap();
+        let result = df.to_dict("tight").unwrap();
+        let tight = result.as_tight().expect("tight");
+        assert_eq!(tight.index_names, vec![Some("row_id".to_owned())]);
+    }
+
+    #[test]
+    fn dataframe_to_dict_tight_missing_values_preserved() {
+        let df = DataFrame::from_dict(
+            &["a"],
+            vec![("a", vec![Scalar::Int64(1), Scalar::Null(NullKind::NaN)])],
+        )
+        .unwrap();
+        let result = df.to_dict("tight").unwrap();
+        let tight = result.as_tight().expect("tight");
+        assert_eq!(tight.data.len(), 2);
+        assert!(tight.data[1][0].is_missing());
     }
 
     #[test]
