@@ -566,6 +566,36 @@ pub enum ComparisonOp {
 }
 
 #[derive(Debug, Error, Clone, PartialEq)]
+fn compare_scalars_na_last(
+    left: &Scalar,
+    right: &Scalar,
+    ascending: bool,
+) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    match (left.is_missing(), right.is_missing()) {
+        (true, true) => Ordering::Equal,
+        // Missing always sorts to the end, regardless of direction.
+        (true, false) => Ordering::Greater,
+        (false, true) => Ordering::Less,
+        (false, false) => {
+            let ord = match (left, right) {
+                (Scalar::Int64(a), Scalar::Int64(b)) => a.cmp(b),
+                (Scalar::Float64(a), Scalar::Float64(b)) => {
+                    a.partial_cmp(b).unwrap_or(Ordering::Equal)
+                }
+                (Scalar::Bool(a), Scalar::Bool(b)) => a.cmp(b),
+                (Scalar::Utf8(a), Scalar::Utf8(b)) => a.cmp(b),
+                (Scalar::Timedelta64(a), Scalar::Timedelta64(b)) => a.cmp(b),
+                (a, b) => match (a.to_f64(), b.to_f64()) {
+                    (Ok(af), Ok(bf)) => af.partial_cmp(&bf).unwrap_or(Ordering::Equal),
+                    _ => Ordering::Equal,
+                },
+            };
+            if ascending { ord } else { ord.reverse() }
+        }
+    }
+}
+
 pub enum ColumnError {
     #[error("column length mismatch: left={left}, right={right}")]
     LengthMismatch { left: usize, right: usize },
@@ -1155,6 +1185,140 @@ impl Column {
         Self::new(DType::Float64, out)
     }
 
+    /// Sort values in ascending or descending order.
+    ///
+    /// Matches `pd.Series.sort_values(ascending=...)`. Missing values
+    /// are placed at the end (pandas `na_position='last'` default).
+    /// Stable sort.
+    pub fn sort_values(&self, ascending: bool) -> Result<Self, ColumnError> {
+        let mut indexed: Vec<(usize, &Scalar)> = self.values.iter().enumerate().collect();
+        indexed.sort_by(|a, b| compare_scalars_na_last(a.1, b.1, ascending));
+        let sorted: Vec<Scalar> = indexed.into_iter().map(|(_, v)| v.clone()).collect();
+        Self::new(self.dtype, sorted)
+    }
+
+    /// Positions that would sort the column ascending.
+    ///
+    /// Matches `pd.Series.argsort()`. Returns a `Vec<usize>` such that
+    /// `take(&argsort)` equals `sort_values(true)`. Missing values
+    /// sort to the end; stable.
+    #[must_use]
+    pub fn argsort(&self) -> Vec<usize> {
+        let mut indexed: Vec<(usize, &Scalar)> = self.values.iter().enumerate().collect();
+        indexed.sort_by(|a, b| compare_scalars_na_last(a.1, b.1, true));
+        indexed.into_iter().map(|(i, _)| i).collect()
+    }
+
+    /// First-order difference: `values[i] - values[i - periods]`.
+    ///
+    /// Matches `pd.Series.diff(periods)`. The leading `|periods|`
+    /// positions are Null(NaN). Negative periods compute
+    /// `values[i] - values[i + |periods|]`. Non-numeric inputs return
+    /// a type error. Result dtype is always Float64.
+    pub fn diff(&self, periods: i64) -> Result<Self, ColumnError> {
+        let len = self.values.len();
+        if len == 0 || periods == 0 {
+            return Self::new(DType::Float64, vec![Scalar::Null(NullKind::NaN); len]);
+        }
+        let abs = periods.unsigned_abs() as usize;
+        let mut out: Vec<Scalar> = Vec::with_capacity(len);
+        for i in 0..len {
+            if (periods > 0 && i < abs) || (periods < 0 && i + abs >= len) {
+                out.push(Scalar::Null(NullKind::NaN));
+                continue;
+            }
+            let (cur, prev) = if periods > 0 {
+                (&self.values[i], &self.values[i - abs])
+            } else {
+                (&self.values[i], &self.values[i + abs])
+            };
+            if cur.is_missing() || prev.is_missing() {
+                out.push(Scalar::Null(NullKind::NaN));
+                continue;
+            }
+            match (cur.to_f64(), prev.to_f64()) {
+                (Ok(a), Ok(b)) => out.push(Scalar::Float64(a - b)),
+                _ => out.push(Scalar::Null(NullKind::NaN)),
+            }
+        }
+        Self::new(DType::Float64, out)
+    }
+
+    /// Per-row boolean flag for duplicated values (keep='first').
+    ///
+    /// Matches `pd.Series.duplicated()` — all but the first occurrence
+    /// of each value is flagged true. Missing values are treated as a
+    /// single bucket (pandas equates NaN for this purpose).
+    pub fn duplicated(&self) -> Result<Self, ColumnError> {
+        use std::collections::HashSet;
+        #[derive(Hash, PartialEq, Eq)]
+        enum Key<'a> {
+            Null,
+            Bool(bool),
+            Int64(i64),
+            FloatBits(u64),
+            Utf8(&'a str),
+            Timedelta64(i64),
+        }
+        fn key_of(v: &Scalar) -> Key<'_> {
+            if v.is_missing() {
+                return Key::Null;
+            }
+            match v {
+                Scalar::Bool(b) => Key::Bool(*b),
+                Scalar::Int64(i) => Key::Int64(*i),
+                Scalar::Float64(f) => {
+                    let norm = if *f == 0.0 { 0.0 } else { *f };
+                    Key::FloatBits(norm.to_bits())
+                }
+                Scalar::Utf8(s) => Key::Utf8(s.as_str()),
+                Scalar::Timedelta64(v) => Key::Timedelta64(*v),
+                Scalar::Null(_) => Key::Null,
+            }
+        }
+
+        let mut seen: HashSet<Key<'_>> = HashSet::new();
+        let out: Vec<Scalar> = self
+            .values
+            .iter()
+            .map(|v| Scalar::Bool(!seen.insert(key_of(v))))
+            .collect();
+        Self::new(DType::Bool, out)
+    }
+
+    /// Bool column indicating whether each value lies in `[lower, upper]`
+    /// (or the open interval when `inclusive=false`).
+    ///
+    /// Matches `pd.Series.between(left, right, inclusive='both'|'neither')`.
+    /// Missing values map to false. Non-numeric inputs return a type
+    /// error.
+    pub fn between(
+        &self,
+        lower: f64,
+        upper: f64,
+        inclusive: bool,
+    ) -> Result<Self, ColumnError> {
+        let mut out = Vec::with_capacity(self.values.len());
+        for v in &self.values {
+            if v.is_missing() {
+                out.push(Scalar::Bool(false));
+                continue;
+            }
+            match v.to_f64() {
+                Ok(x) => {
+                    let in_range = if inclusive {
+                        x >= lower && x <= upper
+                    } else {
+                        x > lower && x < upper
+                    };
+                    out.push(Scalar::Bool(in_range));
+                }
+                Err(err) => return Err(ColumnError::Type(err)),
+            }
+        }
+        Self::new(DType::Bool, out)
+    }
+
     /// Element-wise absolute value.
     ///
     /// Matches `pd.Series.abs()`. Int/Float/Timedelta paths preserve
@@ -1360,6 +1524,92 @@ impl Column {
             }
         }
         Self::new(self.dtype, out)
+    }
+
+    /// Count occurrences of each distinct value.
+    ///
+    /// Matches `pd.Series.value_counts()` default behavior at the
+    /// columnar level: missing values are dropped, counts are sorted
+    /// descending, and first-seen order breaks ties.
+    pub fn value_counts(&self) -> Result<(Self, Self), ColumnError> {
+        self.value_counts_with_options(false, true, false, true)
+    }
+
+    /// Count occurrences of each distinct value with pandas-style options.
+    ///
+    /// Returns a pair of columns `(values, counts)`. The `values`
+    /// column preserves the source dtype; the `counts` column is Int64
+    /// unless `normalize=true`, in which case it is Float64.
+    pub fn value_counts_with_options(
+        &self,
+        normalize: bool,
+        sort: bool,
+        ascending: bool,
+        dropna: bool,
+    ) -> Result<(Self, Self), ColumnError> {
+        let mut counts: Vec<(Scalar, usize)> = Vec::new();
+        let mut missing_count = 0_usize;
+
+        for value in &self.values {
+            if value.is_missing() {
+                missing_count += 1;
+                continue;
+            }
+
+            if let Some((_, count)) = counts
+                .iter_mut()
+                .find(|(existing, _)| existing.semantic_eq(value))
+            {
+                *count += 1;
+            } else {
+                counts.push((value.clone(), 1));
+            }
+        }
+
+        if !dropna && missing_count > 0 {
+            counts.push((Scalar::Null(NullKind::NaN), missing_count));
+        }
+
+        if sort {
+            if ascending {
+                counts.sort_by_key(|(_, count)| *count);
+            } else {
+                counts.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
+            }
+        }
+
+        let total = if normalize {
+            counts.iter().map(|(_, count)| *count).sum::<usize>() as f64
+        } else {
+            1.0
+        };
+
+        let mut values_out = Vec::with_capacity(counts.len());
+        let mut counts_out = Vec::with_capacity(counts.len());
+        for (value, count) in counts {
+            values_out.push(value);
+            if normalize {
+                let normalized = if total == 0.0 {
+                    0.0
+                } else {
+                    count as f64 / total
+                };
+                counts_out.push(Scalar::Float64(normalized));
+            } else {
+                counts_out.push(Scalar::Int64(i64::try_from(count).unwrap_or(i64::MAX)));
+            }
+        }
+
+        let values = Self::new(self.dtype, values_out)?;
+        let counts = Self::new(
+            if normalize {
+                DType::Float64
+            } else {
+                DType::Int64
+            },
+            counts_out,
+        )?;
+        Ok((values, counts))
     }
 
     #[must_use]
@@ -2913,21 +3163,16 @@ mod tests {
 
         #[test]
         fn abs_int_and_float() {
-            let int_col = Column::from_values(vec![
-                Scalar::Int64(-3),
-                Scalar::Int64(0),
-                Scalar::Int64(5),
-            ])
-            .expect("int");
+            let int_col =
+                Column::from_values(vec![Scalar::Int64(-3), Scalar::Int64(0), Scalar::Int64(5)])
+                    .expect("int");
             let a = int_col.abs().expect("abs");
             assert_eq!(a.values()[0], Scalar::Int64(3));
             assert_eq!(a.values()[1], Scalar::Int64(0));
 
-            let float_col = Column::from_values(vec![
-                Scalar::Float64(-1.5),
-                Scalar::Null(NullKind::NaN),
-            ])
-            .expect("float");
+            let float_col =
+                Column::from_values(vec![Scalar::Float64(-1.5), Scalar::Null(NullKind::NaN)])
+                    .expect("float");
             let b = float_col.abs().expect("abs");
             assert_eq!(b.values()[0], Scalar::Float64(1.5));
             assert!(b.values()[1].is_missing());
@@ -2941,12 +3186,9 @@ mod tests {
 
         #[test]
         fn shift_positive_pads_left_with_fill() {
-            let col = Column::from_values(vec![
-                Scalar::Int64(1),
-                Scalar::Int64(2),
-                Scalar::Int64(3),
-            ])
-            .expect("col");
+            let col =
+                Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)])
+                    .expect("col");
             let s = col.shift(1, Scalar::Null(NullKind::NaN)).expect("shift");
             assert!(s.values()[0].is_missing());
             assert_eq!(s.values()[1], Scalar::Int64(1));
@@ -2955,12 +3197,9 @@ mod tests {
 
         #[test]
         fn shift_negative_pads_right() {
-            let col = Column::from_values(vec![
-                Scalar::Int64(1),
-                Scalar::Int64(2),
-                Scalar::Int64(3),
-            ])
-            .expect("col");
+            let col =
+                Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)])
+                    .expect("col");
             let s = col.shift(-1, Scalar::Int64(0)).expect("shift");
             assert_eq!(s.values()[0], Scalar::Int64(2));
             assert_eq!(s.values()[1], Scalar::Int64(3));
@@ -2990,11 +3229,8 @@ mod tests {
 
         #[test]
         fn clip_none_bounds_are_noop() {
-            let col = Column::from_values(vec![
-                Scalar::Float64(-5.0),
-                Scalar::Float64(10.0),
-            ])
-            .expect("col");
+            let col = Column::from_values(vec![Scalar::Float64(-5.0), Scalar::Float64(10.0)])
+                .expect("col");
             let c = col.clip(None, None).expect("clip");
             assert_eq!(c.values()[0], Scalar::Float64(-5.0));
             assert_eq!(c.values()[1], Scalar::Float64(10.0));
@@ -3053,6 +3289,101 @@ mod tests {
             let r = col.isin(&[]).expect("isin");
             assert_eq!(r.values()[0], Scalar::Bool(false));
             assert_eq!(r.values()[1], Scalar::Bool(false));
+        }
+    }
+
+    mod value_counts {
+        use super::*;
+        use fp_types::NullKind;
+
+        #[test]
+        fn value_counts_default_drops_missing_and_sorts_descending() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(3),
+                Scalar::Int64(1),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Int64(3),
+                Scalar::Int64(2),
+                Scalar::Int64(1),
+                Scalar::Int64(3),
+            ])
+            .expect("col");
+
+            let (values, counts) = col.value_counts().expect("value_counts");
+            assert_eq!(
+                values.values(),
+                &[Scalar::Int64(3), Scalar::Int64(1), Scalar::Int64(2)]
+            );
+            assert_eq!(
+                counts.values(),
+                &[Scalar::Int64(3), Scalar::Int64(2), Scalar::Int64(1)]
+            );
+        }
+
+        #[test]
+        fn value_counts_sort_false_preserves_first_seen_order() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(2),
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+                Scalar::Int64(1),
+            ])
+            .expect("col");
+
+            let (values, counts) = col
+                .value_counts_with_options(false, false, false, true)
+                .expect("value_counts");
+            assert_eq!(
+                values.values(),
+                &[Scalar::Int64(2), Scalar::Int64(1), Scalar::Int64(3)]
+            );
+            assert_eq!(
+                counts.values(),
+                &[Scalar::Int64(2), Scalar::Int64(2), Scalar::Int64(1)]
+            );
+        }
+
+        #[test]
+        fn value_counts_dropna_false_includes_missing_bucket() {
+            let col = Column::from_values(vec![
+                Scalar::Utf8("a".into()),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Utf8("a".into()),
+                Scalar::Null(NullKind::Null),
+            ])
+            .expect("col");
+
+            let (values, counts) = col
+                .value_counts_with_options(false, true, false, false)
+                .expect("value_counts");
+            assert_eq!(values.values()[0], Scalar::Utf8("a".into()));
+            assert!(values.values()[1].is_missing());
+            assert_eq!(counts.values(), &[Scalar::Int64(2), Scalar::Int64(2)]);
+        }
+
+        #[test]
+        fn value_counts_normalize_uses_returned_total() {
+            let col = Column::from_values(vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(1.0),
+                Scalar::Null(NullKind::NaN),
+            ])
+            .expect("col");
+
+            let (values, counts) = col
+                .value_counts_with_options(true, true, false, true)
+                .expect("value_counts");
+            assert_eq!(
+                values.values(),
+                &[Scalar::Float64(1.0), Scalar::Float64(2.0)]
+            );
+            assert_eq!(counts.dtype(), DType::Float64);
+            assert_eq!(
+                counts.values(),
+                &[Scalar::Float64(2.0 / 3.0), Scalar::Float64(1.0 / 3.0)]
+            );
         }
     }
 }
