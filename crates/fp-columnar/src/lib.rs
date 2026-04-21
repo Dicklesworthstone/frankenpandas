@@ -2662,6 +2662,24 @@ impl Column {
     /// the end (consistent with `sort_values(true)`). Missing
     /// `needle` is rejected with a type error.
     pub fn searchsorted(&self, needle: &Scalar, side: &str) -> Result<usize, ColumnError> {
+        self.searchsorted_position(needle, side)
+    }
+
+    /// Positions where `needles` would be inserted to preserve sort order.
+    ///
+    /// Matches `pd.Series.searchsorted(values, side)` for array-like
+    /// inputs. Returns an `Int64` column of insertion positions.
+    /// Missing needles are rejected with the same error as the scalar path.
+    pub fn searchsorted_values(&self, needles: &[Scalar], side: &str) -> Result<Self, ColumnError> {
+        let positions: Vec<Scalar> = needles
+            .iter()
+            .map(|needle| self.searchsorted_position(needle, side))
+            .map(|result| result.map(|position| Scalar::Int64(position as i64)))
+            .collect::<Result<Vec<_>, _>>()?;
+        Self::new(DType::Int64, positions)
+    }
+
+    fn searchsorted_position(&self, needle: &Scalar, side: &str) -> Result<usize, ColumnError> {
         if side != "left" && side != "right" {
             return Err(ColumnError::Type(TypeError::NonNumericValue {
                 value: side.to_string(),
@@ -7281,6 +7299,67 @@ mod tests {
             .expect("col");
             // needle=3 should land at position 2 (before trailing null).
             assert_eq!(col.searchsorted(&Scalar::Int64(3), "left").unwrap(), 2);
+        }
+
+        #[test]
+        fn searchsorted_values_left_returns_positions_column() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(2),
+                Scalar::Int64(5),
+            ])
+            .expect("col");
+            let positions = col
+                .searchsorted_values(
+                    &[Scalar::Int64(0), Scalar::Int64(2), Scalar::Int64(6)],
+                    "left",
+                )
+                .expect("searchsorted");
+            assert_eq!(positions.dtype(), DType::Int64);
+            assert_eq!(
+                positions.values(),
+                &[Scalar::Int64(0), Scalar::Int64(1), Scalar::Int64(4)]
+            );
+        }
+
+        #[test]
+        fn searchsorted_values_right_returns_positions_column() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(2),
+                Scalar::Int64(5),
+            ])
+            .expect("col");
+            let positions = col
+                .searchsorted_values(
+                    &[Scalar::Int64(0), Scalar::Int64(2), Scalar::Int64(6)],
+                    "right",
+                )
+                .expect("searchsorted");
+            assert_eq!(
+                positions.values(),
+                &[Scalar::Int64(0), Scalar::Int64(3), Scalar::Int64(4)]
+            );
+        }
+
+        #[test]
+        fn searchsorted_values_rejects_invalid_side() {
+            let col = Column::from_values(vec![Scalar::Int64(1)]).expect("col");
+            let err = col
+                .searchsorted_values(&[Scalar::Int64(0)], "middle")
+                .unwrap_err();
+            assert!(matches!(err, crate::ColumnError::Type(_)));
+        }
+
+        #[test]
+        fn searchsorted_values_rejects_missing_needles() {
+            let col = Column::from_values(vec![Scalar::Int64(1)]).expect("col");
+            let err = col
+                .searchsorted_values(&[Scalar::Null(NullKind::NaN)], "left")
+                .unwrap_err();
+            assert!(matches!(err, crate::ColumnError::Type(_)));
         }
     }
 
