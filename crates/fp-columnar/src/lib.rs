@@ -1271,6 +1271,28 @@ impl Column {
         Self::new(self.dtype, out)
     }
 
+    /// Cast the column to a target dtype.
+    ///
+    /// Matches `pd.Series.astype(dtype)`. Each value is routed through
+    /// `fp_types::cast_scalar`, so coercion rules (Int64↔Float64,
+    /// Bool→Int64, Utf8 parsing, etc.) match the existing cast table.
+    /// Cast failures on any element return `ColumnError::Type` wrapping
+    /// the underlying TypeError so the caller can attribute the
+    /// failing conversion. Missing values pass through as the
+    /// target dtype's canonical missing representation.
+    pub fn astype(&self, target: DType) -> Result<Self, ColumnError> {
+        if self.dtype == target {
+            return Ok(self.clone());
+        }
+        let out: Vec<Scalar> = self
+            .values
+            .iter()
+            .map(|v| cast_scalar(v, target))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(ColumnError::Type)?;
+        Self::new(target, out)
+    }
+
     /// Return the `n` largest values.
     ///
     /// Matches `pd.Series.nlargest(n)` with `keep='first'` — ties are
@@ -3933,6 +3955,56 @@ mod tests {
             let top = col.nlargest(0).expect("nlargest");
             assert!(top.is_empty());
             assert_eq!(top.dtype(), DType::Int64);
+        }
+    }
+
+    mod astype {
+        use super::*;
+        use fp_types::NullKind;
+
+        #[test]
+        fn astype_int_to_float_preserves_values() {
+            let col = Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2)]).expect("col");
+            let out = col.astype(DType::Float64).expect("astype");
+            assert_eq!(out.dtype(), DType::Float64);
+            assert_eq!(out.values()[0], Scalar::Float64(1.0));
+            assert_eq!(out.values()[1], Scalar::Float64(2.0));
+        }
+
+        #[test]
+        fn astype_same_dtype_is_noop_clone() {
+            let col = Column::from_values(vec![Scalar::Int64(1)]).expect("col");
+            let out = col.astype(DType::Int64).expect("astype");
+            assert_eq!(out.values(), col.values());
+        }
+
+        #[test]
+        fn astype_bool_to_int() {
+            let col = Column::from_values(vec![Scalar::Bool(true), Scalar::Bool(false)])
+                .expect("col");
+            let out = col.astype(DType::Int64).expect("astype");
+            assert_eq!(out.dtype(), DType::Int64);
+            assert_eq!(out.values()[0], Scalar::Int64(1));
+            assert_eq!(out.values()[1], Scalar::Int64(0));
+        }
+
+        #[test]
+        fn astype_propagates_missing() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(1),
+                Scalar::Null(NullKind::NaN),
+            ])
+            .expect("col");
+            let out = col.astype(DType::Float64).expect("astype");
+            assert_eq!(out.values()[0], Scalar::Float64(1.0));
+            assert!(out.values()[1].is_missing());
+        }
+
+        #[test]
+        fn astype_lossy_float_to_int_errors() {
+            let col = Column::from_values(vec![Scalar::Float64(1.5)]).expect("col");
+            let err = col.astype(DType::Int64).unwrap_err();
+            assert!(matches!(err, crate::ColumnError::Type(_)));
         }
     }
 
