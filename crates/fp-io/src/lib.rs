@@ -106,6 +106,12 @@ pub struct CsvReadOptions {
     /// Column groups to combine and coerce via pandas-style parse_dates handling.
     /// Each group replaces its source columns with a new `<a>_<b>_...` datetime column.
     pub parse_date_combinations: Option<Vec<Vec<String>>>,
+    /// Named column groups to combine and parse as datetime, matching
+    /// `pd.read_csv(parse_dates={'new_name': ['year', 'month', 'day']})`.
+    /// Each `(new_name, [source_cols])` entry replaces its source columns
+    /// with a single combined datetime column using the caller-supplied
+    /// name instead of the default `<a>_<b>_...` joined form.
+    pub parse_date_combinations_named: Option<Vec<(String, Vec<String>)>>,
     /// Character whose lines are treated as comments and skipped entirely.
     /// Must be a single byte (ASCII); multi-byte characters are rejected.
     /// Matches pandas `comment` parameter. Default: `None`.
@@ -165,6 +171,7 @@ impl Default for CsvReadOptions {
             dtype: None,
             parse_dates: None,
             parse_date_combinations: None,
+            parse_date_combinations_named: None,
             comment: None,
             true_values: Vec::new(),
             false_values: Vec::new(),
@@ -573,6 +580,45 @@ fn combine_parse_date_values(column_group: &[Vec<Scalar>]) -> Vec<Scalar> {
     combined
 }
 
+fn apply_one_parse_date_combination(
+    headers: &mut Vec<String>,
+    columns: &mut Vec<Vec<Scalar>>,
+    combined_name: String,
+    sources: &[String],
+) -> Result<(), IoError> {
+    let mut positions = sources
+        .iter()
+        .map(|name| {
+            headers
+                .iter()
+                .position(|header| header == name)
+                .ok_or_else(|| IoError::MissingParseDateColumns(vec![name.clone()]))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    positions.sort_unstable();
+
+    let index_labels = (0..columns[positions[0]].len() as i64)
+        .map(IndexLabel::Int64)
+        .collect::<Vec<_>>();
+    let combined_values = combine_parse_date_values(
+        &positions
+            .iter()
+            .map(|&idx| columns[idx].clone())
+            .collect::<Vec<_>>(),
+    );
+    let combined_series =
+        Series::from_values(combined_name.clone(), index_labels, combined_values)?;
+    let parsed = to_datetime(&combined_series)?;
+
+    for idx in positions.iter().rev() {
+        headers.remove(*idx);
+        columns.remove(*idx);
+    }
+    headers.insert(positions[0], combined_name);
+    columns.insert(positions[0], parsed.values().to_vec());
+    Ok(())
+}
+
 fn apply_parse_date_combinations(
     headers: &mut Vec<String>,
     columns: &mut Vec<Vec<Scalar>>,
@@ -588,38 +634,41 @@ fn apply_parse_date_combinations(
         if combination.is_empty() {
             continue;
         }
-
-        let mut positions = combination
-            .iter()
-            .map(|name| {
-                headers
-                    .iter()
-                    .position(|header| header == name)
-                    .ok_or_else(|| IoError::MissingParseDateColumns(vec![name.clone()]))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        positions.sort_unstable();
-
         let combined_name = combination.join("_");
-        let index_labels = (0..columns[positions[0]].len() as i64)
-            .map(IndexLabel::Int64)
-            .collect::<Vec<_>>();
-        let combined_values = combine_parse_date_values(
-            &positions
-                .iter()
-                .map(|&idx| columns[idx].clone())
-                .collect::<Vec<_>>(),
-        );
-        let combined_series =
-            Series::from_values(combined_name.clone(), index_labels, combined_values)?;
-        let parsed = to_datetime(&combined_series)?;
+        apply_one_parse_date_combination(headers, columns, combined_name, combination)?;
+    }
 
-        for idx in positions.iter().rev() {
-            headers.remove(*idx);
-            columns.remove(*idx);
+    Ok(())
+}
+
+fn apply_parse_date_combinations_named(
+    headers: &mut Vec<String>,
+    columns: &mut Vec<Vec<Scalar>>,
+    parse_date_combinations_named: &[(String, Vec<String>)],
+) -> Result<(), IoError> {
+    if parse_date_combinations_named.is_empty() {
+        return Ok(());
+    }
+
+    let mut assigned_names: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+    for (new_name, _) in parse_date_combinations_named {
+        if !assigned_names.insert(new_name.clone()) {
+            return Err(IoError::DuplicateColumnName(new_name.clone()));
         }
-        headers.insert(positions[0], combined_name);
-        columns.insert(positions[0], parsed.values().to_vec());
+    }
+
+    let combos_only: Vec<Vec<String>> = parse_date_combinations_named
+        .iter()
+        .map(|(_, sources)| sources.clone())
+        .collect();
+    validate_parse_date_combinations(headers, &combos_only)?;
+
+    for (new_name, sources) in parse_date_combinations_named {
+        if sources.is_empty() {
+            continue;
+        }
+        apply_one_parse_date_combination(headers, columns, new_name.clone(), sources)?;
     }
 
     Ok(())
@@ -783,6 +832,10 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
 
     if let Some(ref parse_date_combinations) = options.parse_date_combinations {
         apply_parse_date_combinations(&mut headers, &mut columns, parse_date_combinations)?;
+    }
+
+    if let Some(ref named) = options.parse_date_combinations_named {
+        apply_parse_date_combinations_named(&mut headers, &mut columns, named)?;
     }
 
     if let Some(ref parse_dates) = options.parse_dates {
@@ -6584,6 +6637,101 @@ mod tests {
             frame.column("value").unwrap().values(),
             &[Scalar::Int64(1), Scalar::Int64(2)]
         );
+    }
+
+    #[test]
+    fn csv_parse_date_combinations_named_uses_caller_supplied_name() {
+        let input = "date,time,value\n2024-01-15,10:30:00,1\n2024-01-16,11:45:30,2\n";
+        let opts = CsvReadOptions {
+            parse_date_combinations_named: Some(vec![(
+                "timestamp".to_owned(),
+                vec!["date".to_owned(), "time".to_owned()],
+            )]),
+            ..Default::default()
+        };
+        let frame = read_csv_with_options(input, &opts).expect("parse");
+        // Dict-style rename: combined column named "timestamp" rather than
+        // the default underscore-joined "date_time".
+        assert_eq!(frame.column_names(), vec!["timestamp", "value"]);
+        assert!(frame.column("date").is_none());
+        assert!(frame.column("time").is_none());
+        assert_eq!(
+            frame.column("timestamp").unwrap().values(),
+            &[
+                Scalar::Utf8("2024-01-15 10:30:00".to_owned()),
+                Scalar::Utf8("2024-01-16 11:45:30".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn csv_parse_date_combinations_named_multiple_groups() {
+        let input =
+            "d1,t1,d2,t2,value\n2024-01-01,09:00:00,2024-01-01,17:00:00,10\n2024-02-01,09:00:00,2024-02-01,17:00:00,20\n";
+        let opts = CsvReadOptions {
+            parse_date_combinations_named: Some(vec![
+                ("start".to_owned(), vec!["d1".to_owned(), "t1".to_owned()]),
+                ("end".to_owned(), vec!["d2".to_owned(), "t2".to_owned()]),
+            ]),
+            ..Default::default()
+        };
+        let frame = read_csv_with_options(input, &opts).expect("parse");
+        let names = frame.column_names();
+        assert!(names.iter().any(|n| n.as_str() == "start"));
+        assert!(names.iter().any(|n| n.as_str() == "end"));
+        assert!(!names.iter().any(|n| n.as_str() == "d1"));
+        assert!(!names.iter().any(|n| n.as_str() == "t2"));
+        assert_eq!(
+            frame.column("value").unwrap().values(),
+            &[Scalar::Int64(10), Scalar::Int64(20)]
+        );
+        assert_eq!(
+            frame.column("start").unwrap().values(),
+            &[
+                Scalar::Utf8("2024-01-01 09:00:00".to_owned()),
+                Scalar::Utf8("2024-02-01 09:00:00".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn csv_parse_date_combinations_named_rejects_duplicate_output_names() {
+        let input = "a,b,c,d\n2024,01,2024,02\n";
+        let opts = CsvReadOptions {
+            parse_date_combinations_named: Some(vec![
+                ("ts".to_owned(), vec!["a".to_owned(), "b".to_owned()]),
+                ("ts".to_owned(), vec!["c".to_owned(), "d".to_owned()]),
+            ]),
+            ..Default::default()
+        };
+        let err = read_csv_with_options(input, &opts).unwrap_err();
+        assert!(matches!(err, IoError::DuplicateColumnName(name) if name == "ts"));
+    }
+
+    #[test]
+    fn csv_parse_date_combinations_named_rejects_missing_source_column() {
+        let input = "date,time,value\n2024-01-01,09:00:00,1\n";
+        let opts = CsvReadOptions {
+            parse_date_combinations_named: Some(vec![(
+                "ts".to_owned(),
+                vec!["date".to_owned(), "missing".to_owned()],
+            )]),
+            ..Default::default()
+        };
+        let err = read_csv_with_options(input, &opts).unwrap_err();
+        assert!(matches!(err, IoError::MissingParseDateColumns(_)));
+    }
+
+    #[test]
+    fn csv_parse_date_combinations_named_empty_sources_skipped() {
+        let input = "a,b\n1,2\n";
+        let opts = CsvReadOptions {
+            parse_date_combinations_named: Some(vec![("unused".to_owned(), Vec::new())]),
+            ..Default::default()
+        };
+        let frame = read_csv_with_options(input, &opts).expect("parse");
+        // Empty source list is a no-op; original columns remain.
+        assert_eq!(frame.column_names(), vec!["a", "b"]);
     }
 
     // ── JSONL tests (frankenpandas-sue) ──────────────────────────────
