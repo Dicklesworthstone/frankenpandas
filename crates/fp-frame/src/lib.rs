@@ -529,6 +529,11 @@ fn index_label_to_json_key(label: &IndexLabel) -> String {
     }
 }
 
+fn multiindex_tuple_to_string(labels: &[&IndexLabel]) -> String {
+    let parts = labels.iter().map(|label| label.to_string()).collect::<Vec<_>>();
+    format!("({})", parts.join(", "))
+}
+
 fn dtype_to_table_schema_type(dtype: DType) -> &'static str {
     match dtype {
         DType::Bool => "boolean",
@@ -4426,6 +4431,46 @@ impl Series {
             .collect()
     }
 
+    /// Find an insertion point using an explicit sorter permutation.
+    ///
+    /// Matches `pd.Series.searchsorted(value, side='left'|'right', sorter=...)`.
+    /// `sorter` must have the same length as the Series and describe the
+    /// integer positions that would sort the Series.
+    pub fn searchsorted_with_sorter(
+        &self,
+        value: &Scalar,
+        side: &str,
+        sorter: &[i64],
+    ) -> Result<usize, FrameError> {
+        if sorter.len() != self.len() {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "searchsorted: sorter length {} must match series length {}",
+                sorter.len(),
+                self.len()
+            )));
+        }
+        self.take(sorter)?.searchsorted(value, side)
+    }
+
+    /// Find insertion points for array-like values using an explicit sorter.
+    ///
+    /// Matches `pd.Series.searchsorted(values, side='left'|'right', sorter=...)`.
+    pub fn searchsorted_values_with_sorter(
+        &self,
+        values: &[Scalar],
+        side: &str,
+        sorter: &[i64],
+    ) -> Result<Vec<usize>, FrameError> {
+        if sorter.len() != self.len() {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "searchsorted: sorter length {} must match series length {}",
+                sorter.len(),
+                self.len()
+            )));
+        }
+        self.take(sorter)?.searchsorted_values(values, side)
+    }
+
     /// Encode the Series as an enumerated type.
     ///
     /// Matches `pd.Series.factorize()`. Returns `(codes, uniques)` where
@@ -7186,6 +7231,102 @@ impl Ewm<'_> {
                 ewm_old = alpha * x + one_minus_alpha * ewm_old;
             }
             out.push(Scalar::Float64(ewm_old));
+        }
+
+        Series::from_values(
+            self.series.name(),
+            self.series.index().labels().to_vec(),
+            out,
+        )
+    }
+
+    /// EWM weighted sum.
+    ///
+    /// Matches `series.ewm(span=...).sum()`. Uses the recursive
+    /// formula `s_t = x_t + (1 - alpha) * s_{t-1}` where `alpha` is
+    /// the smoothing factor derived from span. Leading missing values
+    /// stay null until the first observation is seen.
+    pub fn sum(&self) -> Result<Series, FrameError> {
+        let vals = self.series.column().values();
+        let mut out = Vec::with_capacity(vals.len());
+        let one_minus_alpha = 1.0 - self.alpha;
+
+        let mut ewm_sum = 0.0_f64;
+        let mut nobs = 0_usize;
+
+        for val in vals {
+            if val.is_missing() || val.to_f64().is_ok_and(f64::is_nan) {
+                out.push(Scalar::Null(NullKind::NaN));
+                continue;
+            }
+            let x = val.to_f64().unwrap();
+            nobs += 1;
+            if nobs == 1 {
+                ewm_sum = x;
+            } else {
+                ewm_sum = x + one_minus_alpha * ewm_sum;
+            }
+            out.push(Scalar::Float64(ewm_sum));
+        }
+
+        Series::from_values(
+            self.series.name(),
+            self.series.index().labels().to_vec(),
+            out,
+        )
+    }
+
+    /// EWM covariance with another Series (sample, ddof=1).
+    ///
+    /// Matches `series.ewm(span=...).cov(other)`. Uses Welford-style
+    /// online updates with exponential weighting over aligned
+    /// positions; missing positions on either side emit `Null(NaN)`
+    /// without advancing the running estimate. Returns
+    /// `LengthMismatch` when inputs differ in length.
+    pub fn cov(&self, other: &Series) -> Result<Series, FrameError> {
+        if self.series.len() != other.len() {
+            return Err(FrameError::LengthMismatch {
+                index_len: self.series.len(),
+                column_len: other.len(),
+            });
+        }
+        let a_vals = self.series.column().values();
+        let b_vals = other.column().values();
+        let mut out = Vec::with_capacity(a_vals.len());
+
+        let alpha = self.alpha;
+        let mut mean_x = 0.0_f64;
+        let mut mean_y = 0.0_f64;
+        let mut cov_xy = 0.0_f64;
+        let mut nobs = 0_usize;
+
+        for (a, b) in a_vals.iter().zip(b_vals.iter()) {
+            let x = if a.is_missing() { None } else { a.to_f64().ok() };
+            let y = if b.is_missing() { None } else { b.to_f64().ok() };
+            match (x, y) {
+                (Some(xv), Some(yv)) if !xv.is_nan() && !yv.is_nan() => {
+                    nobs += 1;
+                    if nobs == 1 {
+                        mean_x = xv;
+                        mean_y = yv;
+                        cov_xy = 0.0;
+                        out.push(Scalar::Null(NullKind::NaN));
+                    } else {
+                        let delta_x = xv - mean_x;
+                        mean_x += alpha * delta_x;
+                        let delta_y = yv - mean_y;
+                        mean_y += alpha * delta_y;
+                        cov_xy = (1.0 - alpha) * (cov_xy + alpha * delta_x * delta_y);
+                        // Bias correction — divide by the cumulative weight
+                        // (`1 - (1 - alpha)^nobs`) so the emitted value is a
+                        // sample-biased estimate of the EWM covariance.
+                        let bias = 1.0 - (1.0 - alpha).powi(nobs as i32);
+                        let adjusted = if bias == 0.0 { cov_xy } else { cov_xy / bias };
+                        out.push(Scalar::Float64(adjusted));
+                    }
+                }
+                _ => out.push(Scalar::Null(NullKind::NaN)),
+            }
         }
 
         Series::from_values(
@@ -13720,6 +13861,28 @@ impl DataFrame {
         }
     }
 
+    fn table_column_name(&self, position: usize) -> Result<String, FrameError> {
+        match &self.column_multiindex {
+            Some(multiindex) => {
+                let tuple = multiindex.get_tuple(position).ok_or_else(|| {
+                    FrameError::CompatibilityRejected(format!(
+                        "column MultiIndex position {position} out of bounds"
+                    ))
+                })?;
+                Ok(multiindex_tuple_to_string(&tuple))
+            }
+            None => self
+                .column_order
+                .get(position)
+                .cloned()
+                .ok_or_else(|| {
+                    FrameError::CompatibilityRejected(format!(
+                        "column position {position} out of bounds"
+                    ))
+                }),
+        }
+    }
+
     fn row_major_values(&self) -> Vec<Vec<Scalar>> {
         self.index
             .labels()
@@ -20121,10 +20284,13 @@ impl DataFrame {
                         ),
                     ),
                 ])));
-                for name in &self.column_order {
+                for (col_idx, name) in self.column_order.iter().enumerate() {
                     let column = &self.columns[name];
                     fields.push(Value::Object(Map::from_iter([
-                        ("name".to_owned(), Value::String(name.clone())),
+                        (
+                            "name".to_owned(),
+                            Value::String(self.table_column_name(col_idx)?),
+                        ),
                         (
                             "type".to_owned(),
                             Value::String(dtype_to_table_schema_type(column.dtype()).to_owned()),
@@ -20139,15 +20305,15 @@ impl DataFrame {
                             index_name.clone(),
                             index_label_to_json_value(&self.index.labels()[row_idx]),
                         );
-                        for name in &self.column_order {
+                        for (col_idx, name) in self.column_order.iter().enumerate() {
                             row.insert(
-                                name.clone(),
+                                self.table_column_name(col_idx)?,
                                 scalar_to_json_value(&self.columns[name].values()[row_idx]),
                             );
                         }
-                        Value::Object(row)
+                        Ok(Value::Object(row))
                     })
-                    .collect();
+                    .collect::<Result<Vec<_>, FrameError>>()?;
 
                 serialize_json_value(&Value::Object(Map::from_iter([
                     (
@@ -41976,6 +42142,60 @@ mod tests {
         );
     }
 
+    #[test]
+    fn dataframe_to_json_table_uses_stringified_multiindex_column_labels() {
+        let index = Index::from_i64(vec![10, 20]).set_names(Some("row_id"));
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            "price_open".to_string(),
+            Column::from_values(vec![Scalar::Int64(10), Scalar::Int64(12)]).unwrap(),
+        );
+        columns.insert(
+            "price_close".to_string(),
+            Column::from_values(vec![Scalar::Int64(11), Scalar::Int64(13)]).unwrap(),
+        );
+        let column_multiindex = fp_index::MultiIndex::from_arrays(vec![
+            vec![
+                IndexLabel::Utf8("price".into()),
+                IndexLabel::Utf8("price".into()),
+            ],
+            vec![
+                IndexLabel::Utf8("open".into()),
+                IndexLabel::Utf8("close".into()),
+            ],
+        ])
+        .unwrap()
+        .set_names(vec![Some("field".into()), Some("stat".into())]);
+        let df = DataFrame::new_with_column_order_and_multiindex(
+            index,
+            columns,
+            vec!["price_open".to_string(), "price_close".to_string()],
+            Some(column_multiindex),
+        )
+        .unwrap();
+
+        let json = df.to_json("table").unwrap();
+        let parsed: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            parsed,
+            serde_json::json!({
+                "schema": {
+                    "fields": [
+                        {"name": "row_id", "type": "integer"},
+                        {"name": "(price, open)", "type": "integer"},
+                        {"name": "(price, close)", "type": "integer"}
+                    ],
+                    "primaryKey": ["row_id"],
+                    "pandas_version": "1.4.0"
+                },
+                "data": [
+                    {"row_id": 10, "(price, open)": 10, "(price, close)": 11},
+                    {"row_id": 20, "(price, open)": 12, "(price, close)": 13}
+                ]
+            })
+        );
+    }
+
     // --- Series.explode tests ---
 
     #[test]
@@ -42778,20 +42998,13 @@ mod tests {
         )
         .unwrap();
         // first position where v >= true → index 2
-        assert_eq!(
-            s.searchsorted(&Scalar::Bool(true), "left").unwrap(),
-            2
-        );
+        assert_eq!(s.searchsorted(&Scalar::Bool(true), "left").unwrap(), 2);
     }
 
     #[test]
     fn series_searchsorted_rejects_invalid_side() {
-        let s = Series::from_values(
-            "x",
-            vec![0_i64.into()],
-            vec![Scalar::Utf8("a".into())],
-        )
-        .unwrap();
+        let s =
+            Series::from_values("x", vec![0_i64.into()], vec![Scalar::Utf8("a".into())]).unwrap();
         let err = s
             .searchsorted(&Scalar::Utf8("a".into()), "middle")
             .unwrap_err();
@@ -42800,14 +43013,76 @@ mod tests {
 
     #[test]
     fn series_searchsorted_rejects_missing_needle() {
+        let s =
+            Series::from_values("x", vec![0_i64.into()], vec![Scalar::Utf8("a".into())]).unwrap();
+        let err = s
+            .searchsorted(&Scalar::Null(NullKind::NaN), "left")
+            .unwrap_err();
+        assert!(matches!(err, FrameError::CompatibilityRejected(_)));
+    }
+
+    #[test]
+    fn series_searchsorted_with_sorter_left() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into()],
-            vec![Scalar::Utf8("a".into())],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(3), Scalar::Int64(1), Scalar::Int64(2)],
+        )
+        .unwrap();
+        let sorter = [1_i64, 2_i64, 0_i64];
+        assert_eq!(
+            s.searchsorted_with_sorter(&Scalar::Int64(2), "left", &sorter)
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn series_searchsorted_with_sorter_right() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(3), Scalar::Int64(1), Scalar::Int64(2)],
+        )
+        .unwrap();
+        let sorter = [1_i64, 2_i64, 0_i64];
+        assert_eq!(
+            s.searchsorted_with_sorter(&Scalar::Int64(2), "right", &sorter)
+                .unwrap(),
+            2
+        );
+    }
+
+    #[test]
+    fn series_searchsorted_values_with_sorter() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(3), Scalar::Int64(1), Scalar::Int64(2)],
+        )
+        .unwrap();
+        let sorter = [1_i64, 2_i64, 0_i64];
+        assert_eq!(
+            s.searchsorted_values_with_sorter(
+                &[Scalar::Int64(0), Scalar::Int64(2), Scalar::Int64(4)],
+                "left",
+                &sorter,
+            )
+            .unwrap(),
+            vec![0, 1, 3]
+        );
+    }
+
+    #[test]
+    fn series_searchsorted_with_sorter_rejects_length_mismatch() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(3), Scalar::Int64(1), Scalar::Int64(2)],
         )
         .unwrap();
         let err = s
-            .searchsorted(&Scalar::Null(NullKind::NaN), "left")
+            .searchsorted_with_sorter(&Scalar::Int64(2), "left", &[1_i64, 2_i64])
             .unwrap_err();
         assert!(matches!(err, FrameError::CompatibilityRejected(_)));
     }
@@ -43927,6 +44202,88 @@ mod tests {
         // Rest: should be sqrt of var, so positive
         let v = expect_float64(&result.values()[1]);
         assert!(v > 0.0);
+    }
+
+    #[test]
+    fn ewm_sum_basic() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+            ],
+        )
+        .unwrap();
+        let result = s.ewm(None, Some(0.5)).sum().unwrap();
+        // recursive: s0 = 1; s1 = 2 + 0.5*1 = 2.5; s2 = 3 + 0.5*2.5 = 4.25
+        assert_eq!(result.values()[0], Scalar::Float64(1.0));
+        assert_eq!(result.values()[1], Scalar::Float64(2.5));
+        assert_eq!(result.values()[2], Scalar::Float64(4.25));
+    }
+
+    #[test]
+    fn ewm_sum_skips_nulls() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(3.0),
+            ],
+        )
+        .unwrap();
+        let result = s.ewm(None, Some(0.5)).sum().unwrap();
+        assert_eq!(result.values()[0], Scalar::Float64(1.0));
+        assert!(result.values()[1].is_missing());
+        // Second real value: 3 + 0.5*1 = 3.5 (count increments only on non-null).
+        assert_eq!(result.values()[2], Scalar::Float64(3.5));
+    }
+
+    #[test]
+    fn ewm_cov_positively_correlated_converges_positive() {
+        let a = Series::from_values(
+            "a",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(4.0),
+            ],
+        )
+        .unwrap();
+        let b = Series::from_values(
+            "b",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Float64(2.0),
+                Scalar::Float64(4.0),
+                Scalar::Float64(6.0),
+                Scalar::Float64(8.0),
+            ],
+        )
+        .unwrap();
+        let result = a.ewm(None, Some(0.5)).cov(&b).unwrap();
+        assert!(result.values()[0].is_missing());
+        // Perfectly positively linear: later cov values should be positive.
+        let v = expect_float64(&result.values()[3]);
+        assert!(v > 0.0);
+    }
+
+    #[test]
+    fn ewm_cov_length_mismatch_errors() {
+        let a = Series::from_values(
+            "a",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Float64(1.0), Scalar::Float64(2.0)],
+        )
+        .unwrap();
+        let b = Series::from_values("b", vec![0_i64.into()], vec![Scalar::Float64(3.0)]).unwrap();
+        let err = a.ewm(None, Some(0.5)).cov(&b).unwrap_err();
+        assert!(matches!(err, FrameError::LengthMismatch { .. }));
     }
 
     // ── autocorr tests ──
