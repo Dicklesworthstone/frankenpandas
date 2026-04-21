@@ -37275,6 +37275,100 @@ mod tests {
         assert!((all_all - sample_std(&[10.0, 20.0, 4.0, 8.0, 1.0, 3.0])).abs() < 1e-10);
     }
 
+    #[test]
+    fn dataframe_pivot_table_with_margins_median_uses_raw_source_values() {
+        fn sample_median(values: &[f64]) -> f64 {
+            let mut sorted = values.to_vec();
+            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let len = sorted.len();
+            if len % 2 == 1 {
+                sorted[len / 2]
+            } else {
+                (sorted[len / 2 - 1] + sorted[len / 2]) / 2.0
+            }
+        }
+
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "row",
+                vec![
+                    0_i64.into(),
+                    1_i64.into(),
+                    2_i64.into(),
+                    3_i64.into(),
+                    4_i64.into(),
+                    5_i64.into(),
+                ],
+                vec![
+                    Scalar::Utf8("r1".into()),
+                    Scalar::Utf8("r1".into()),
+                    Scalar::Utf8("r1".into()),
+                    Scalar::Utf8("r2".into()),
+                    Scalar::Utf8("r2".into()),
+                    Scalar::Utf8("r2".into()),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "col",
+                vec![
+                    0_i64.into(),
+                    1_i64.into(),
+                    2_i64.into(),
+                    3_i64.into(),
+                    4_i64.into(),
+                    5_i64.into(),
+                ],
+                vec![
+                    Scalar::Utf8("c1".into()),
+                    Scalar::Utf8("c1".into()),
+                    Scalar::Utf8("c2".into()),
+                    Scalar::Utf8("c1".into()),
+                    Scalar::Utf8("c2".into()),
+                    Scalar::Utf8("c2".into()),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "val",
+                vec![
+                    0_i64.into(),
+                    1_i64.into(),
+                    2_i64.into(),
+                    3_i64.into(),
+                    4_i64.into(),
+                    5_i64.into(),
+                ],
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(100.0),
+                    Scalar::Float64(2.0),
+                    Scalar::Float64(8.0),
+                    Scalar::Float64(9.0),
+                    Scalar::Float64(10.0),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let pt = df
+            .pivot_table_with_margins("val", "row", "col", "median", true)
+            .unwrap();
+
+        let r1_all = pt.columns["All"].values()[0].to_f64().unwrap();
+        let r2_all = pt.columns["All"].values()[1].to_f64().unwrap();
+        let all_c1 = pt.columns["c1"].values()[2].to_f64().unwrap();
+        let all_c2 = pt.columns["c2"].values()[2].to_f64().unwrap();
+        let all_all = pt.columns["All"].values()[2].to_f64().unwrap();
+
+        assert!((r1_all - sample_median(&[1.0, 100.0, 2.0])).abs() < 1e-10);
+        assert!((r2_all - sample_median(&[8.0, 9.0, 10.0])).abs() < 1e-10);
+        assert!((all_c1 - sample_median(&[1.0, 100.0, 8.0])).abs() < 1e-10);
+        assert!((all_c2 - sample_median(&[2.0, 9.0, 10.0])).abs() < 1e-10);
+        assert!((all_all - sample_median(&[1.0, 100.0, 2.0, 8.0, 9.0, 10.0])).abs() < 1e-10);
+    }
+
     // ── agg tests ──
 
     #[test]
