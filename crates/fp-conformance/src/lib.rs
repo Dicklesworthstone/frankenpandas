@@ -1663,6 +1663,8 @@ pub struct PacketFixture {
     #[serde(default)]
     pub csv_parse_dates: Option<Vec<String>>,
     #[serde(default)]
+    pub csv_parse_date_combinations: Option<Vec<Vec<String>>>,
+    #[serde(default)]
     pub csv_true_values: Option<Vec<String>>,
     #[serde(default)]
     pub csv_false_values: Option<Vec<String>>,
@@ -11804,6 +11806,7 @@ fn execute_csv_read_frame_fixture_operation(fixture: &PacketFixture) -> Result<D
         decimal,
         on_bad_lines,
         parse_dates: fixture.csv_parse_dates.clone(),
+        parse_date_combinations: fixture.csv_parse_date_combinations.clone(),
         true_values: fixture.csv_true_values.clone().unwrap_or_default(),
         false_values: fixture.csv_false_values.clone().unwrap_or_default(),
         ..CsvReadOptions::default()
@@ -21809,6 +21812,16 @@ mod tests {
         let report =
             run_packet_by_id(&cfg, "FP-P2D-429", OracleMode::FixtureExpected).expect("report");
         assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-429"));
+        assert_eq!(report.fixture_count, 1);
+        assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
+    fn packet_filter_runs_csv_read_frame_parse_dates_combined_columns_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2D-432", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-432"));
         assert_eq!(report.fixture_count, 1);
         assert!(report.is_green(), "expected report green: {report:?}");
     }

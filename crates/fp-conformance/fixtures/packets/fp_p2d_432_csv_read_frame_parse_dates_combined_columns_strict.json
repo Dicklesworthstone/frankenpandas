@@ -1,0 +1,25 @@
+{
+  "packet_id": "FP-P2D-432",
+  "case_id": "csv_read_frame_parse_dates_combined_columns_strict",
+  "mode": "strict",
+  "operation": "csv_read_frame",
+  "csv_parse_date_combinations": [["date", "time"]],
+  "csv_input": "date,time,value\n2024-01-15,10:30:00,1\n2024-01-16,11:45:30,2\n",
+  "expected_frame": {
+    "columns": {
+      "date_time": [
+        { "kind": "utf8", "value": "2024-01-15 10:30:00" },
+        { "kind": "utf8", "value": "2024-01-16 11:45:30" }
+      ],
+      "value": [
+        { "kind": "int64", "value": 1 },
+        { "kind": "int64", "value": 2 }
+      ]
+    },
+    "column_order": ["date_time", "value"],
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 }
+    ]
+  }
+}

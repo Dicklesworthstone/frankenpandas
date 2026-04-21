@@ -103,6 +103,9 @@ pub struct CsvReadOptions {
     /// Column names to coerce via pandas-style parse_dates handling.
     /// Currently supports explicit column-name selection.
     pub parse_dates: Option<Vec<String>>,
+    /// Column groups to combine and coerce via pandas-style parse_dates handling.
+    /// Each group replaces its source columns with a new `<a>_<b>_...` datetime column.
+    pub parse_date_combinations: Option<Vec<Vec<String>>>,
     /// Character whose lines are treated as comments and skipped entirely.
     /// Must be a single byte (ASCII); multi-byte characters are rejected.
     /// Matches pandas `comment` parameter. Default: `None`.
@@ -136,6 +139,7 @@ impl Default for CsvReadOptions {
             skiprows: 0,
             dtype: None,
             parse_dates: None,
+            parse_date_combinations: None,
             comment: None,
             true_values: Vec::new(),
             false_values: Vec::new(),
@@ -368,6 +372,28 @@ fn validate_parse_dates(headers: &[String], parse_dates: &[String]) -> Result<()
     }
 }
 
+fn validate_parse_date_combinations(
+    headers: &[String],
+    parse_date_combinations: &[Vec<String>],
+) -> Result<(), IoError> {
+    let header_set: std::collections::BTreeSet<&String> = headers.iter().collect();
+    let mut missing = BTreeSet::new();
+    for combo in parse_date_combinations {
+        for name in combo {
+            if !header_set.contains(name) {
+                missing.insert(name.clone());
+            }
+        }
+    }
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(IoError::MissingParseDateColumns(
+            missing.into_iter().collect(),
+        ))
+    }
+}
+
 fn apply_parse_dates(
     headers: &[String],
     columns: &mut [Vec<Scalar>],
@@ -394,6 +420,85 @@ fn apply_parse_dates(
         )?;
         let parsed = to_datetime(&series)?;
         columns[column_idx] = parsed.values().to_vec();
+    }
+
+    Ok(())
+}
+
+fn combine_parse_date_values(column_group: &[Vec<Scalar>]) -> Vec<Scalar> {
+    let len = column_group.first().map_or(0, Vec::len);
+    let mut combined = Vec::with_capacity(len);
+
+    for row in 0..len {
+        if column_group
+            .iter()
+            .any(|column| matches!(column[row], Scalar::Null(_)))
+        {
+            combined.push(Scalar::Null(NullKind::NaT));
+            continue;
+        }
+
+        let joined = column_group
+            .iter()
+            .map(|column| match &column[row] {
+                Scalar::Utf8(value) => value.clone(),
+                other => other.to_string(),
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        combined.push(Scalar::Utf8(joined));
+    }
+
+    combined
+}
+
+fn apply_parse_date_combinations(
+    headers: &mut Vec<String>,
+    columns: &mut Vec<Vec<Scalar>>,
+    parse_date_combinations: &[Vec<String>],
+) -> Result<(), IoError> {
+    if parse_date_combinations.is_empty() {
+        return Ok(());
+    }
+
+    validate_parse_date_combinations(headers, parse_date_combinations)?;
+
+    for combination in parse_date_combinations {
+        if combination.is_empty() {
+            continue;
+        }
+
+        let mut positions = combination
+            .iter()
+            .map(|name| {
+                headers
+                    .iter()
+                    .position(|header| header == name)
+                    .ok_or_else(|| IoError::MissingParseDateColumns(vec![name.clone()]))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        positions.sort_unstable();
+
+        let combined_name = combination.join("_");
+        let index_labels = (0..columns[positions[0]].len() as i64)
+            .map(IndexLabel::Int64)
+            .collect::<Vec<_>>();
+        let combined_values = combine_parse_date_values(
+            &positions
+                .iter()
+                .map(|&idx| columns[idx].clone())
+                .collect::<Vec<_>>(),
+        );
+        let combined_series =
+            Series::from_values(combined_name.clone(), index_labels, combined_values)?;
+        let parsed = to_datetime(&combined_series)?;
+
+        for idx in positions.iter().rev() {
+            headers.remove(*idx);
+            columns.remove(*idx);
+        }
+        headers.insert(positions[0], combined_name);
+        columns.insert(positions[0], parsed.values().to_vec());
     }
 
     Ok(())
@@ -521,7 +626,7 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
     }
 
     // Apply usecols filter: keep only selected columns.
-    let (headers, mut columns) = if let Some(ref usecols) = options.usecols {
+    let (mut headers, mut columns) = if let Some(ref usecols) = options.usecols {
         let mut fh = Vec::new();
         let mut fc = Vec::new();
         for (h, c) in headers.into_iter().zip(columns) {
@@ -534,6 +639,10 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
     } else {
         (headers, columns)
     };
+
+    if let Some(ref parse_date_combinations) = options.parse_date_combinations {
+        apply_parse_date_combinations(&mut headers, &mut columns, parse_date_combinations)?;
+    }
 
     if let Some(ref parse_dates) = options.parse_dates {
         apply_parse_dates(&headers, &mut columns, parse_dates)?;
@@ -4575,6 +4684,30 @@ mod tests {
                 Scalar::Utf8("2024-01-15 10:30:00+00:00".to_owned()),
             ]
         );
+        assert_eq!(
+            frame.column("value").unwrap().values(),
+            &[Scalar::Int64(1), Scalar::Int64(2)]
+        );
+    }
+
+    #[test]
+    fn csv_parse_dates_combined_columns_replaces_source_columns() {
+        let input = "date,time,value\n2024-01-15,10:30:00,1\n2024-01-16,11:45:30,2\n";
+        let opts = CsvReadOptions {
+            parse_date_combinations: Some(vec![vec!["date".to_owned(), "time".to_owned()]]),
+            ..Default::default()
+        };
+        let frame = read_csv_with_options(input, &opts).expect("parse");
+        assert_eq!(frame.column_names(), vec!["date_time", "value"]);
+        assert_eq!(
+            frame.column("date_time").unwrap().values(),
+            &[
+                Scalar::Utf8("2024-01-15 10:30:00".to_owned()),
+                Scalar::Utf8("2024-01-16 11:45:30".to_owned()),
+            ]
+        );
+        assert!(frame.column("date").is_none());
+        assert!(frame.column("time").is_none());
         assert_eq!(
             frame.column("value").unwrap().values(),
             &[Scalar::Int64(1), Scalar::Int64(2)]
