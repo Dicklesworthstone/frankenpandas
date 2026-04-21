@@ -1271,6 +1271,30 @@ impl Column {
         Self::new(self.dtype, out)
     }
 
+    /// Return the `n` largest values.
+    ///
+    /// Matches `pd.Series.nlargest(n)` with `keep='first'` — ties are
+    /// broken by first-seen order via a stable descending sort.
+    /// Missing values are placed at the end of the sorted view and
+    /// therefore excluded from the top-n when `n` fits within the
+    /// non-missing count. `n > len()` clamps to the full column.
+    pub fn nlargest(&self, n: usize) -> Result<Self, ColumnError> {
+        let sorted = self.sort_values(false)?;
+        let take = n.min(sorted.values.len());
+        let values: Vec<Scalar> = sorted.values[..take].to_vec();
+        Self::new(self.dtype, values)
+    }
+
+    /// Return the `n` smallest values.
+    ///
+    /// Matches `pd.Series.nsmallest(n)` with `keep='first'`.
+    pub fn nsmallest(&self, n: usize) -> Result<Self, ColumnError> {
+        let sorted = self.sort_values(true)?;
+        let take = n.min(sorted.values.len());
+        let values: Vec<Scalar> = sorted.values[..take].to_vec();
+        Self::new(self.dtype, values)
+    }
+
     /// Replace values where `cond` is true with `other`; otherwise keep.
     ///
     /// Matches `pd.Series.mask(cond, other)` — the logical inverse of
@@ -3841,6 +3865,74 @@ mod tests {
             let cond = Column::from_values(vec![Scalar::Bool(true)]).expect("cond");
             let err = col.where_cond(&cond, &Scalar::Int64(0)).unwrap_err();
             assert!(matches!(err, crate::ColumnError::LengthMismatch { .. }));
+        }
+    }
+
+    mod nlargest_nsmallest {
+        use super::*;
+        use fp_types::NullKind;
+
+        #[test]
+        fn nlargest_returns_top_n_descending() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(3),
+                Scalar::Int64(1),
+                Scalar::Int64(5),
+                Scalar::Int64(2),
+                Scalar::Int64(4),
+            ])
+            .expect("col");
+            let top = col.nlargest(3).expect("nlargest");
+            assert_eq!(top.len(), 3);
+            assert_eq!(top.values()[0], Scalar::Int64(5));
+            assert_eq!(top.values()[1], Scalar::Int64(4));
+            assert_eq!(top.values()[2], Scalar::Int64(3));
+        }
+
+        #[test]
+        fn nsmallest_returns_bottom_n_ascending() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(3),
+                Scalar::Int64(1),
+                Scalar::Int64(5),
+                Scalar::Int64(2),
+                Scalar::Int64(4),
+            ])
+            .expect("col");
+            let bot = col.nsmallest(2).expect("nsmallest");
+            assert_eq!(bot.len(), 2);
+            assert_eq!(bot.values()[0], Scalar::Int64(1));
+            assert_eq!(bot.values()[1], Scalar::Int64(2));
+        }
+
+        #[test]
+        fn nlargest_excludes_missing_when_n_fits() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(5),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Int64(3),
+                Scalar::Int64(7),
+            ])
+            .expect("col");
+            let top = col.nlargest(2).expect("nlargest");
+            assert_eq!(top.len(), 2);
+            assert_eq!(top.values()[0], Scalar::Int64(7));
+            assert_eq!(top.values()[1], Scalar::Int64(5));
+        }
+
+        #[test]
+        fn nlargest_n_larger_than_length_clamps() {
+            let col = Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2)]).expect("col");
+            let top = col.nlargest(100).expect("nlargest");
+            assert_eq!(top.len(), 2);
+        }
+
+        #[test]
+        fn nlargest_zero_is_empty_same_dtype() {
+            let col = Column::from_values(vec![Scalar::Int64(1)]).expect("col");
+            let top = col.nlargest(0).expect("nlargest");
+            assert!(top.is_empty());
+            assert_eq!(top.dtype(), DType::Int64);
         }
     }
 
