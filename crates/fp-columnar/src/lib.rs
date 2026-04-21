@@ -1127,40 +1127,6 @@ impl Column {
         Self::new(self.dtype, values)
     }
 
-    /// Return the first `n` rows (positive) or all-but-last `|n|` rows
-    /// (negative).
-    ///
-    /// Matches `pd.Series.head(n)`. Out-of-range `|n|` clamps to a full
-    /// clone / empty column without erroring.
-    pub fn head(&self, n: i64) -> Result<Self, ColumnError> {
-        let len = self.values.len();
-        let take = if n >= 0 {
-            (n as usize).min(len)
-        } else {
-            let drop = (-n) as usize;
-            len.saturating_sub(drop)
-        };
-        let values = self.values[..take].to_vec();
-        Self::new(self.dtype, values)
-    }
-
-    /// Return the last `n` rows (positive) or all-but-first `|n|` rows
-    /// (negative).
-    ///
-    /// Matches `pd.Series.tail(n)`.
-    pub fn tail(&self, n: i64) -> Result<Self, ColumnError> {
-        let len = self.values.len();
-        let (start, end) = if n >= 0 {
-            let take = (n as usize).min(len);
-            (len - take, len)
-        } else {
-            let drop = (-n) as usize;
-            (drop.min(len), len)
-        };
-        let values = self.values[start..end].to_vec();
-        Self::new(self.dtype, values)
-    }
-
     /// Cumulative sum, null-propagating per fp-types::nancumsum.
     ///
     /// Matches `pd.Series.cumsum()`. The resulting column is always
@@ -1187,6 +1153,173 @@ impl Column {
     pub fn cummin(&self) -> Result<Self, ColumnError> {
         let out = nancummin(&self.values);
         Self::new(DType::Float64, out)
+    }
+
+    /// Element-wise absolute value.
+    ///
+    /// Matches `pd.Series.abs()`. Int/Float/Timedelta paths preserve
+    /// dtype; Bool/Utf8 inputs return `ColumnError::Type` because
+    /// pandas raises TypeError on non-numeric .abs().
+    pub fn abs(&self) -> Result<Self, ColumnError> {
+        let mut out = Vec::with_capacity(self.values.len());
+        for v in &self.values {
+            if v.is_missing() {
+                out.push(v.clone());
+                continue;
+            }
+            match v {
+                Scalar::Int64(x) => out.push(Scalar::Int64(x.wrapping_abs())),
+                Scalar::Float64(x) => out.push(Scalar::Float64(x.abs())),
+                Scalar::Timedelta64(x) if *x != Timedelta::NAT => {
+                    out.push(Scalar::Timedelta64(x.wrapping_abs()))
+                }
+                _ => {
+                    return Err(ColumnError::Type(TypeError::NonNumericValue {
+                        value: format!("{v:?}"),
+                        dtype: self.dtype,
+                    }));
+                }
+            }
+        }
+        Self::new(self.dtype, out)
+    }
+
+    /// Shift column values by `periods` positions, filling vacated slots
+    /// with `fill`.
+    ///
+    /// Matches `pd.Series.shift(periods, fill_value)` for the positional
+    /// form. Positive periods shift right (vacates the head); negative
+    /// periods shift left (vacates the tail).
+    pub fn shift(&self, periods: i64, fill: Scalar) -> Result<Self, ColumnError> {
+        let len = self.values.len();
+        if len == 0 || periods == 0 {
+            return Ok(self.clone());
+        }
+        let abs = periods.unsigned_abs() as usize;
+        let mut out: Vec<Scalar> = Vec::with_capacity(len);
+        if abs >= len {
+            for _ in 0..len {
+                out.push(fill.clone());
+            }
+        } else if periods > 0 {
+            for _ in 0..abs {
+                out.push(fill.clone());
+            }
+            out.extend_from_slice(&self.values[..len - abs]);
+        } else {
+            out.extend_from_slice(&self.values[abs..]);
+            for _ in 0..abs {
+                out.push(fill.clone());
+            }
+        }
+        Self::new(self.dtype, out)
+    }
+
+    /// Clip numeric values to `[lower, upper]`.
+    ///
+    /// Matches `pd.Series.clip(lower, upper)`. `None` on either bound
+    /// disables that side. Non-numeric inputs return a type error.
+    /// Missing values pass through unchanged. Result dtype is Float64
+    /// (via `infer_dtype`) to accommodate fractional clipping.
+    pub fn clip(&self, lower: Option<f64>, upper: Option<f64>) -> Result<Self, ColumnError> {
+        let mut out = Vec::with_capacity(self.values.len());
+        for v in &self.values {
+            if v.is_missing() {
+                out.push(v.clone());
+                continue;
+            }
+            let numeric = match v.to_f64() {
+                Ok(x) => x,
+                Err(err) => return Err(ColumnError::Type(err)),
+            };
+            let mut clipped = numeric;
+            if let Some(lo) = lower
+                && clipped < lo
+            {
+                clipped = lo;
+            }
+            if let Some(hi) = upper
+                && clipped > hi
+            {
+                clipped = hi;
+            }
+            out.push(Scalar::Float64(clipped));
+        }
+        Self::new(DType::Float64, out)
+    }
+
+    /// Round numeric values to `decimals` decimal places.
+    ///
+    /// Matches `pd.Series.round(decimals)`. Negative `decimals` rounds
+    /// to the left of the decimal point. Int columns pass through
+    /// unchanged for decimals >= 0. Missing values are preserved.
+    pub fn round(&self, decimals: i32) -> Result<Self, ColumnError> {
+        if self.dtype == DType::Int64 && decimals >= 0 {
+            return Ok(self.clone());
+        }
+        let factor = 10f64.powi(decimals);
+        let mut out = Vec::with_capacity(self.values.len());
+        for v in &self.values {
+            if v.is_missing() {
+                out.push(v.clone());
+                continue;
+            }
+            match v.to_f64() {
+                Ok(x) => out.push(Scalar::Float64((x * factor).round() / factor)),
+                Err(err) => return Err(ColumnError::Type(err)),
+            }
+        }
+        Self::new(DType::Float64, out)
+    }
+
+    /// Per-row boolean membership test against `needles`.
+    ///
+    /// Matches `pd.Series.isin(values)`. The result is always a Bool
+    /// column the same length as `self`. Missing input positions map
+    /// to `false` (pandas convention — NaN is never "in" a set).
+    pub fn isin(&self, needles: &[Scalar]) -> Result<Self, ColumnError> {
+        use std::collections::HashSet;
+        #[derive(Hash, PartialEq, Eq)]
+        enum Key<'a> {
+            Bool(bool),
+            Int64(i64),
+            FloatBits(u64),
+            Utf8(&'a str),
+            Timedelta64(i64),
+        }
+        fn key_of(v: &Scalar) -> Option<Key<'_>> {
+            if v.is_missing() {
+                return None;
+            }
+            Some(match v {
+                Scalar::Bool(b) => Key::Bool(*b),
+                Scalar::Int64(i) => Key::Int64(*i),
+                Scalar::Float64(f) => {
+                    let norm = if *f == 0.0 { 0.0 } else { *f };
+                    Key::FloatBits(norm.to_bits())
+                }
+                Scalar::Utf8(s) => Key::Utf8(s.as_str()),
+                Scalar::Timedelta64(v) => Key::Timedelta64(*v),
+                Scalar::Null(_) => return None,
+            })
+        }
+
+        let mut lookup: HashSet<Key<'_>> = HashSet::new();
+        for n in needles {
+            if let Some(k) = key_of(n) {
+                lookup.insert(k);
+            }
+        }
+
+        let out: Vec<Scalar> = self
+            .values
+            .iter()
+            .map(|v| match key_of(v) {
+                Some(k) => Scalar::Bool(lookup.contains(&k)),
+                None => Scalar::Bool(false),
+            })
+            .collect();
+        Self::new(DType::Bool, out)
     }
 
     /// Unique values in first-seen order, missing values dropped.
@@ -2518,6 +2651,70 @@ mod tests {
         }
 
         #[test]
+        fn head_returns_first_n_values() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(10),
+                Scalar::Int64(20),
+                Scalar::Int64(30),
+                Scalar::Int64(40),
+            ])
+            .expect("col");
+            let out = col.head(2).expect("head");
+            assert_eq!(out.values(), &[Scalar::Int64(10), Scalar::Int64(20)]);
+        }
+
+        #[test]
+        fn tail_returns_last_n_values() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(10),
+                Scalar::Int64(20),
+                Scalar::Int64(30),
+                Scalar::Int64(40),
+            ])
+            .expect("col");
+            let out = col.tail(2).expect("tail");
+            assert_eq!(out.values(), &[Scalar::Int64(30), Scalar::Int64(40)]);
+        }
+
+        #[test]
+        fn head_tail_negative_n_match_pandas_style() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(10),
+                Scalar::Int64(20),
+                Scalar::Int64(30),
+                Scalar::Int64(40),
+                Scalar::Int64(50),
+            ])
+            .expect("col");
+            let head = col.head(-2).expect("head");
+            let tail = col.tail(-2).expect("tail");
+            assert_eq!(
+                head.values(),
+                &[Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)]
+            );
+            assert_eq!(
+                tail.values(),
+                &[Scalar::Int64(30), Scalar::Int64(40), Scalar::Int64(50)]
+            );
+        }
+
+        #[test]
+        fn head_tail_large_negative_n_saturate_to_empty() {
+            let col = Column::from_values(vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+            ])
+            .expect("col");
+            let head = col.head(-10).expect("head");
+            let tail = col.tail(-10).expect("tail");
+            assert!(head.is_empty());
+            assert!(tail.is_empty());
+            assert_eq!(head.dtype(), DType::Float64);
+            assert_eq!(tail.dtype(), DType::Float64);
+        }
+
+        #[test]
         fn concat_appends_same_dtype() {
             let a = Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2)]).expect("a");
             let b = Column::from_values(vec![Scalar::Int64(3)]).expect("b");
@@ -2567,12 +2764,9 @@ mod tests {
 
         #[test]
         fn reverse_swaps_order_and_preserves_dtype() {
-            let col = Column::from_values(vec![
-                Scalar::Int64(1),
-                Scalar::Int64(2),
-                Scalar::Int64(3),
-            ])
-            .expect("col");
+            let col =
+                Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)])
+                    .expect("col");
             let r = col.reverse().expect("reverse");
             assert_eq!(r.values()[0], Scalar::Int64(3));
             assert_eq!(r.values()[2], Scalar::Int64(1));
@@ -2596,12 +2790,9 @@ mod tests {
 
         #[test]
         fn head_negative_drops_last_n() {
-            let col = Column::from_values(vec![
-                Scalar::Int64(1),
-                Scalar::Int64(2),
-                Scalar::Int64(3),
-            ])
-            .expect("col");
+            let col =
+                Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)])
+                    .expect("col");
             let h = col.head(-1).expect("head");
             assert_eq!(h.len(), 2);
             assert_eq!(h.values()[1], Scalar::Int64(2));
@@ -2624,12 +2815,9 @@ mod tests {
 
         #[test]
         fn tail_negative_drops_first_n() {
-            let col = Column::from_values(vec![
-                Scalar::Int64(1),
-                Scalar::Int64(2),
-                Scalar::Int64(3),
-            ])
-            .expect("col");
+            let col =
+                Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)])
+                    .expect("col");
             let t = col.tail(-1).expect("tail");
             assert_eq!(t.len(), 2);
             assert_eq!(t.values()[0], Scalar::Int64(2));
@@ -2716,6 +2904,155 @@ mod tests {
             let u = col.unique().expect("unique");
             assert_eq!(u.len(), 1);
             assert_eq!(u.values()[0], Scalar::Int64(1));
+        }
+    }
+
+    mod abs_shift_clip_round_isin {
+        use super::*;
+        use fp_types::NullKind;
+
+        #[test]
+        fn abs_int_and_float() {
+            let int_col = Column::from_values(vec![
+                Scalar::Int64(-3),
+                Scalar::Int64(0),
+                Scalar::Int64(5),
+            ])
+            .expect("int");
+            let a = int_col.abs().expect("abs");
+            assert_eq!(a.values()[0], Scalar::Int64(3));
+            assert_eq!(a.values()[1], Scalar::Int64(0));
+
+            let float_col = Column::from_values(vec![
+                Scalar::Float64(-1.5),
+                Scalar::Null(NullKind::NaN),
+            ])
+            .expect("float");
+            let b = float_col.abs().expect("abs");
+            assert_eq!(b.values()[0], Scalar::Float64(1.5));
+            assert!(b.values()[1].is_missing());
+        }
+
+        #[test]
+        fn abs_utf8_errors() {
+            let col = Column::from_values(vec![Scalar::Utf8("x".into())]).expect("col");
+            assert!(col.abs().is_err());
+        }
+
+        #[test]
+        fn shift_positive_pads_left_with_fill() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+            ])
+            .expect("col");
+            let s = col.shift(1, Scalar::Null(NullKind::NaN)).expect("shift");
+            assert!(s.values()[0].is_missing());
+            assert_eq!(s.values()[1], Scalar::Int64(1));
+            assert_eq!(s.values()[2], Scalar::Int64(2));
+        }
+
+        #[test]
+        fn shift_negative_pads_right() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+            ])
+            .expect("col");
+            let s = col.shift(-1, Scalar::Int64(0)).expect("shift");
+            assert_eq!(s.values()[0], Scalar::Int64(2));
+            assert_eq!(s.values()[1], Scalar::Int64(3));
+            assert_eq!(s.values()[2], Scalar::Int64(0));
+        }
+
+        #[test]
+        fn shift_zero_is_clone() {
+            let col = Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2)]).expect("col");
+            let s = col.shift(0, Scalar::Int64(-1)).expect("shift");
+            assert_eq!(s.values(), col.values());
+        }
+
+        #[test]
+        fn clip_both_bounds() {
+            let col = Column::from_values(vec![
+                Scalar::Float64(-5.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(10.0),
+            ])
+            .expect("col");
+            let c = col.clip(Some(0.0), Some(5.0)).expect("clip");
+            assert_eq!(c.values()[0], Scalar::Float64(0.0));
+            assert_eq!(c.values()[1], Scalar::Float64(3.0));
+            assert_eq!(c.values()[2], Scalar::Float64(5.0));
+        }
+
+        #[test]
+        fn clip_none_bounds_are_noop() {
+            let col = Column::from_values(vec![
+                Scalar::Float64(-5.0),
+                Scalar::Float64(10.0),
+            ])
+            .expect("col");
+            let c = col.clip(None, None).expect("clip");
+            assert_eq!(c.values()[0], Scalar::Float64(-5.0));
+            assert_eq!(c.values()[1], Scalar::Float64(10.0));
+        }
+
+        #[test]
+        fn round_rounds_floats() {
+            let col = Column::from_values(vec![
+                Scalar::Float64(1.234),
+                Scalar::Float64(5.678),
+                Scalar::Null(NullKind::NaN),
+            ])
+            .expect("col");
+            let r = col.round(1).expect("round");
+            assert_eq!(r.values()[0], Scalar::Float64(1.2));
+            assert_eq!(r.values()[1], Scalar::Float64(5.7));
+            assert!(r.values()[2].is_missing());
+        }
+
+        #[test]
+        fn round_int_nonnegative_decimals_is_noop() {
+            let col = Column::from_values(vec![Scalar::Int64(12), Scalar::Int64(34)]).expect("col");
+            let r = col.round(2).expect("round");
+            assert_eq!(r.values(), col.values());
+            assert_eq!(r.dtype(), DType::Int64);
+        }
+
+        #[test]
+        fn round_negative_decimals_rounds_left() {
+            let col = Column::from_values(vec![Scalar::Float64(1234.0)]).expect("col");
+            let r = col.round(-2).expect("round");
+            assert_eq!(r.values()[0], Scalar::Float64(1200.0));
+        }
+
+        #[test]
+        fn isin_returns_bool_column() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+                Scalar::Null(NullKind::NaN),
+            ])
+            .expect("col");
+            let needles = vec![Scalar::Int64(1), Scalar::Int64(3)];
+            let r = col.isin(&needles).expect("isin");
+            assert_eq!(r.dtype(), DType::Bool);
+            assert_eq!(r.values()[0], Scalar::Bool(true));
+            assert_eq!(r.values()[1], Scalar::Bool(false));
+            assert_eq!(r.values()[2], Scalar::Bool(true));
+            assert_eq!(r.values()[3], Scalar::Bool(false));
+        }
+
+        #[test]
+        fn isin_empty_needles_yields_all_false() {
+            let col = Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2)]).expect("col");
+            let r = col.isin(&[]).expect("isin");
+            assert_eq!(r.values()[0], Scalar::Bool(false));
+            assert_eq!(r.values()[1], Scalar::Bool(false));
         }
     }
 }
