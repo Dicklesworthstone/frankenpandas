@@ -21378,6 +21378,19 @@ impl DataFrame {
                 lines.push(bottom_border);
                 Ok(lines.join("\n"))
             }
+            "outline" => {
+                let mut lines = Vec::with_capacity(nrows + 3);
+                let border = render_grid_border(&widths, '+', '+', '+', '-');
+                let header_border = render_grid_border(&widths, '+', '+', '+', '=');
+                lines.push(border.clone());
+                lines.push(render_markdown_row(&headers, &widths));
+                lines.push(header_border);
+                for row in rows {
+                    lines.push(render_markdown_row(&row, &widths));
+                }
+                lines.push(border);
+                Ok(lines.join("\n"))
+            }
             "rst" => {
                 let mut lines = Vec::with_capacity(nrows + 4);
                 let rule = render_plain_rule(&widths, '=');
@@ -47280,6 +47293,42 @@ mod tests {
         assert_eq!(
             result,
             "╔═════╦═════╗\n║     ║ val ║\n╠═════╬═════╣\n║ 0   ║ 10  ║\n╠═════╬═════╣\n║ 1   ║ 20  ║\n╚═════╩═════╝"
+        );
+    }
+
+    #[test]
+    fn df_to_markdown_outline_without_index() {
+        let df = DataFrame::from_dict(
+            &["animal", "legs"],
+            vec![
+                (
+                    "animal",
+                    vec![Scalar::Utf8("elk".into()), Scalar::Utf8("pig".into())],
+                ),
+                ("legs", vec![Scalar::Int64(4), Scalar::Int64(4)]),
+            ],
+        )
+        .unwrap();
+
+        let result = df.to_markdown(false, Some("outline")).unwrap();
+        assert_eq!(
+            result,
+            "+--------+------+\n| animal | legs |\n+========+======+\n| elk    | 4    |\n| pig    | 4    |\n+--------+------+"
+        );
+    }
+
+    #[test]
+    fn df_to_markdown_outline_with_index() {
+        let df = DataFrame::from_dict(
+            &["val"],
+            vec![("val", vec![Scalar::Int64(10), Scalar::Int64(20)])],
+        )
+        .unwrap();
+
+        let result = df.to_markdown(true, Some("outline")).unwrap();
+        assert_eq!(
+            result,
+            "+-----+-----+\n|     | val |\n+=====+=====+\n| 0   | 10  |\n| 1   | 20  |\n+-----+-----+"
         );
     }
 
