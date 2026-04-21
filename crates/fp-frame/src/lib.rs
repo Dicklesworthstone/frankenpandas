@@ -20689,6 +20689,12 @@ impl DataFrame {
                 serialize_json_value(&Value::Array(data))
             }
             "table" => {
+                if self.column_multiindex.is_some() {
+                    return Err(FrameError::CompatibilityRejected(
+                        "orient='table' is not supported for MultiIndex columns".to_owned(),
+                    ));
+                }
+
                 let index_name = match self.index.name() {
                     Some(name) => {
                         if self.columns.contains_key(name) {
@@ -44003,25 +44009,9 @@ mod tests {
         )
         .unwrap();
 
-        let json = df.to_json("table").unwrap();
-        let parsed: Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(
-            parsed,
-            serde_json::json!({
-                "schema": {
-                    "fields": [
-                        {"name": "row_id", "type": "integer"},
-                        {"name": "(price, open)", "type": "integer"},
-                        {"name": "(price, close)", "type": "integer"}
-                    ],
-                    "primaryKey": ["row_id"],
-                    "pandas_version": "1.4.0"
-                },
-                "data": [
-                    {"row_id": 10, "(price, open)": 10, "(price, close)": 11},
-                    {"row_id": 20, "(price, open)": 12, "(price, close)": 13}
-                ]
-            })
+        let err = df.to_json("table").unwrap_err();
+        assert!(
+            matches!(err, FrameError::CompatibilityRejected(msg) if msg == "orient='table' is not supported for MultiIndex columns")
         );
     }
 
