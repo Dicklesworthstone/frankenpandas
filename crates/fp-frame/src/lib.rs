@@ -13453,6 +13453,7 @@ pub enum DataFrameColumnInput {
 #[derive(Debug, Clone, PartialEq)]
 pub enum DataFrameDictResult {
     Mapping(BTreeMap<String, Vec<(String, Scalar)>>),
+    List(BTreeMap<String, Vec<Scalar>>),
     Series(BTreeMap<String, Series>),
 }
 
@@ -13460,14 +13461,21 @@ impl DataFrameDictResult {
     pub fn as_mapping(&self) -> Option<&BTreeMap<String, Vec<(String, Scalar)>>> {
         match self {
             Self::Mapping(mapping) => Some(mapping),
-            Self::Series(_) => None,
+            Self::List(_) | Self::Series(_) => None,
+        }
+    }
+
+    pub fn as_list(&self) -> Option<&BTreeMap<String, Vec<Scalar>>> {
+        match self {
+            Self::List(list) => Some(list),
+            Self::Mapping(_) | Self::Series(_) => None,
         }
     }
 
     pub fn as_series(&self) -> Option<&BTreeMap<String, Series>> {
         match self {
             Self::Series(series) => Some(series),
-            Self::Mapping(_) => None,
+            Self::Mapping(_) | Self::List(_) => None,
         }
     }
 }
@@ -19495,15 +19503,9 @@ impl DataFrame {
                 let mut result = BTreeMap::new();
                 for col_name in &self.column_order {
                     let col = &self.columns[col_name];
-                    let entries: Vec<(String, Scalar)> = col
-                        .values()
-                        .iter()
-                        .enumerate()
-                        .map(|(i, val)| (i.to_string(), val.clone()))
-                        .collect();
-                    result.insert(col_name.clone(), entries);
+                    result.insert(col_name.clone(), col.values().to_vec());
                 }
-                Ok(DataFrameDictResult::Mapping(result))
+                Ok(DataFrameDictResult::List(result))
             }
             "records" => {
                 let mut result = BTreeMap::new();
@@ -38709,6 +38711,29 @@ mod tests {
             .as_mapping()
             .expect("records orient should return mapping");
         assert_eq!(result.len(), 2); // 2 rows
+    }
+
+    #[test]
+    fn dataframe_to_dict_list() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(10), Scalar::Int64(20)]),
+                ("b", vec![Scalar::Float64(1.5), Scalar::Null(NullKind::NaN)]),
+            ],
+        )
+        .unwrap();
+
+        let result = df.to_dict("list").unwrap();
+        let result = result
+            .as_list()
+            .expect("list orient should return list map");
+        assert_eq!(result.len(), 2);
+        assert_eq!(result["a"], vec![Scalar::Int64(10), Scalar::Int64(20)]);
+        assert_eq!(
+            result["b"],
+            vec![Scalar::Float64(1.5), Scalar::Null(NullKind::NaN)]
+        );
     }
 
     #[test]
