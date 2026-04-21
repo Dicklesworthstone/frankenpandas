@@ -26787,9 +26787,10 @@ mod tests {
     use fp_index::AlignMode;
 
     use super::{
-        DataFrame, DataFrameColumnInput, DataFrameCsvReadOptions, DropNaHow, DuplicateKeep,
-        FrameError, IndexLabel, Series, TzAmbiguousPolicy, TzLocalizeOptions, TzNonexistentPolicy,
-        cut, index_to_frame, index_to_series, qcut, to_numeric,
+        DataFrame, DataFrameColumnInput, DataFrameCsvReadOptions, DataFrameDictAxisLabels,
+        DropNaHow, DuplicateKeep, FrameError, IndexLabel, Series, TzAmbiguousPolicy,
+        TzLocalizeOptions, TzNonexistentPolicy, cut, index_to_frame, index_to_series, qcut,
+        to_numeric,
     };
     use fp_index::Index;
 
