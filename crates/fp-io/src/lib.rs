@@ -1962,6 +1962,9 @@ pub struct ExcelReadOptions {
     pub sheet_name: Option<String>,
     /// Whether the first row contains column headers.
     pub has_headers: bool,
+    /// Explicit column names to use instead of worksheet headers or
+    /// auto-generated `column_N` names. Matches pandas `names=...`.
+    pub names: Option<Vec<String>>,
     /// Optional column to use as the DataFrame index.
     pub index_col: Option<String>,
     /// Number of initial rows to skip before reading headers/data.
@@ -1973,6 +1976,7 @@ impl Default for ExcelReadOptions {
         Self {
             sheet_name: None,
             has_headers: true,
+            names: None,
             index_col: None,
             skip_rows: 0,
         }
@@ -2035,23 +2039,48 @@ fn parse_excel_rows(
         return DataFrame::new(Index::new(Vec::new()), BTreeMap::new()).map_err(IoError::Frame);
     }
 
+    let resolve_names = |width: usize| -> Result<Option<Vec<String>>, IoError> {
+        options.names.as_ref().map_or(Ok(None), |names| {
+            if names.len() == width {
+                Ok(Some(names.clone()))
+            } else {
+                Err(IoError::Excel(format!(
+                    "expected {width} column names, got {}",
+                    names.len()
+                )))
+            }
+        })
+    };
+
     // Extract headers.
     let (headers, header_generated, data_rows) = if options.has_headers {
         let header_row = &rows[0];
-        let header_pairs: Vec<(String, bool)> = header_row
-            .iter()
-            .enumerate()
-            .map(|(i, cell)| match cell {
-                calamine::Data::String(s) if !s.is_empty() => (s.clone(), false),
-                _ => (format!("column_{i}"), true),
-            })
-            .collect();
-        let (headers, header_generated): (Vec<_>, Vec<_>) = header_pairs.into_iter().unzip();
+        let header_width = header_row.len();
+        let provided_names = resolve_names(header_width)?;
+        let (headers, header_generated): (Vec<_>, Vec<_>) = if let Some(names) = provided_names {
+            (names, vec![false; header_width])
+        } else {
+            let header_pairs: Vec<(String, bool)> = header_row
+                .iter()
+                .enumerate()
+                .map(|(i, cell)| match cell {
+                    calamine::Data::String(s) if !s.is_empty() => (s.clone(), false),
+                    _ => (format!("column_{i}"), true),
+                })
+                .collect();
+            header_pairs.into_iter().unzip()
+        };
         (headers, header_generated, &rows[1..])
     } else {
         let ncols = rows.iter().map(Vec::len).max().unwrap_or(0);
-        let headers: Vec<String> = (0..ncols).map(|i| format!("column_{i}")).collect();
-        let header_generated = vec![true; ncols];
+        let provided_names = resolve_names(ncols)?;
+        let (headers, header_generated) = if let Some(names) = provided_names {
+            (names, vec![false; ncols])
+        } else {
+            let headers: Vec<String> = (0..ncols).map(|i| format!("column_{i}")).collect();
+            let header_generated = vec![true; ncols];
+            (headers, header_generated)
+        };
         (headers, header_generated, rows.as_slice())
     };
     reject_duplicate_headers(&headers)?;
@@ -2082,7 +2111,7 @@ fn parse_excel_rows(
     };
 
     let index_name = index_col_idx.and_then(|idx_pos| {
-        if options.has_headers && !header_generated[idx_pos] {
+        if !header_generated[idx_pos] {
             Some(headers[idx_pos].clone())
         } else {
             None
@@ -2181,6 +2210,107 @@ pub fn read_excel_bytes(data: &[u8], options: &ExcelReadOptions) -> Result<DataF
         .collect();
 
     parse_excel_rows(rows, options)
+}
+
+/// Read multiple sheets from an Excel file.
+///
+/// Matches `pd.read_excel(path, sheet_name=[...])` when `sheet_name`
+/// is a list of sheet names — pandas returns a dict
+/// `{name: DataFrame}`. Pass `sheet_names=None` to read every sheet
+/// in the workbook (pandas `sheet_name=None`).
+///
+/// The outer Excel reader options (`has_headers`, `index_col`,
+/// `skip_rows`) are applied uniformly to each selected sheet. The
+/// per-sheet `sheet_name` option on `options` is ignored here
+/// because the explicit `sheet_names` argument drives selection.
+pub fn read_excel_sheets(
+    path: &Path,
+    sheet_names: Option<&[String]>,
+    options: &ExcelReadOptions,
+) -> Result<BTreeMap<String, DataFrame>, IoError> {
+    use calamine::{Reader, open_workbook_auto};
+
+    let mut workbook = open_workbook_auto(path)
+        .map_err(|e| IoError::Excel(format!("cannot open workbook: {e}")))?;
+    let available: Vec<String> = workbook.sheet_names();
+    let selected: Vec<String> = match sheet_names {
+        Some(names) => {
+            for name in names {
+                if !available.iter().any(|s| s == name) {
+                    return Err(IoError::Excel(format!(
+                        "workbook does not contain sheet {name:?}"
+                    )));
+                }
+            }
+            names.to_vec()
+        }
+        None => available.clone(),
+    };
+    if selected.is_empty() {
+        return Err(IoError::Excel("no sheets selected".to_owned()));
+    }
+
+    let mut out = BTreeMap::new();
+    for sheet in &selected {
+        let range = workbook
+            .worksheet_range(sheet)
+            .map_err(|e| IoError::Excel(format!("cannot read sheet {sheet:?}: {e}")))?;
+        let rows: Vec<Vec<calamine::Data>> = range
+            .rows()
+            .skip(options.skip_rows)
+            .map(|r| r.to_vec())
+            .collect();
+        let frame = parse_excel_rows(rows, options)?;
+        out.insert(sheet.clone(), frame);
+    }
+    Ok(out)
+}
+
+/// Read multiple sheets from Excel bytes.
+///
+/// Byte-based counterpart to `read_excel_sheets`.
+pub fn read_excel_sheets_bytes(
+    data: &[u8],
+    sheet_names: Option<&[String]>,
+    options: &ExcelReadOptions,
+) -> Result<BTreeMap<String, DataFrame>, IoError> {
+    use calamine::{Reader, open_workbook_auto_from_rs};
+
+    let cursor = std::io::Cursor::new(data);
+    let mut workbook = open_workbook_auto_from_rs(cursor)
+        .map_err(|e| IoError::Excel(format!("cannot open workbook from bytes: {e}")))?;
+    let available: Vec<String> = workbook.sheet_names();
+    let selected: Vec<String> = match sheet_names {
+        Some(names) => {
+            for name in names {
+                if !available.iter().any(|s| s == name) {
+                    return Err(IoError::Excel(format!(
+                        "workbook does not contain sheet {name:?}"
+                    )));
+                }
+            }
+            names.to_vec()
+        }
+        None => available.clone(),
+    };
+    if selected.is_empty() {
+        return Err(IoError::Excel("no sheets selected".to_owned()));
+    }
+
+    let mut out = BTreeMap::new();
+    for sheet in &selected {
+        let range = workbook
+            .worksheet_range(sheet)
+            .map_err(|e| IoError::Excel(format!("cannot read sheet {sheet:?}: {e}")))?;
+        let rows: Vec<Vec<calamine::Data>> = range
+            .rows()
+            .skip(options.skip_rows)
+            .map(|r| r.to_vec())
+            .collect();
+        let frame = parse_excel_rows(rows, options)?;
+        out.insert(sheet.clone(), frame);
+    }
+    Ok(out)
 }
 
 /// Write a DataFrame to an Excel (.xlsx) file.
@@ -4259,6 +4389,98 @@ mod tests {
 
     // ── Excel I/O tests ──────────────────────────────────────────────
 
+    fn build_two_sheet_workbook_bytes() -> Vec<u8> {
+        use rust_xlsxwriter::Workbook;
+        let mut workbook = Workbook::new();
+        let sheet1 = workbook.add_worksheet();
+        sheet1.set_name("Alpha").expect("sheet name");
+        sheet1.write_string(0, 0, "a").expect("header");
+        sheet1.write_string(0, 1, "b").expect("header");
+        sheet1.write_number(1, 0, 1.0).expect("data");
+        sheet1.write_number(1, 1, 10.0).expect("data");
+        sheet1.write_number(2, 0, 2.0).expect("data");
+        sheet1.write_number(2, 1, 20.0).expect("data");
+
+        let sheet2 = workbook.add_worksheet();
+        sheet2.set_name("Bravo").expect("sheet name");
+        sheet2.write_string(0, 0, "name").expect("header");
+        sheet2.write_string(1, 0, "alice").expect("data");
+        sheet2.write_string(2, 0, "bob").expect("data");
+
+        let sheet3 = workbook.add_worksheet();
+        sheet3.set_name("Charlie").expect("sheet name");
+        sheet3.write_string(0, 0, "x").expect("header");
+        sheet3.write_number(1, 0, 99.0).expect("data");
+
+        workbook.save_to_buffer().expect("save")
+    }
+
+    #[test]
+    fn read_excel_sheets_bytes_all_sheets_returns_map() {
+        let bytes = build_two_sheet_workbook_bytes();
+        let sheets =
+            super::read_excel_sheets_bytes(&bytes, None, &super::ExcelReadOptions::default())
+                .expect("read sheets");
+        assert_eq!(sheets.len(), 3);
+        assert!(sheets.contains_key("Alpha"));
+        assert!(sheets.contains_key("Bravo"));
+        assert!(sheets.contains_key("Charlie"));
+
+        let alpha = &sheets["Alpha"];
+        assert_eq!(alpha.index().len(), 2);
+        assert_eq!(alpha.column_names().len(), 2);
+
+        let bravo = &sheets["Bravo"];
+        assert_eq!(bravo.index().len(), 2);
+        assert_eq!(
+            bravo.column("name").unwrap().values()[0],
+            Scalar::Utf8("alice".into())
+        );
+    }
+
+    #[test]
+    fn read_excel_sheets_bytes_selects_subset() {
+        let bytes = build_two_sheet_workbook_bytes();
+        let selected = vec!["Alpha".to_string(), "Charlie".to_string()];
+        let sheets = super::read_excel_sheets_bytes(
+            &bytes,
+            Some(&selected),
+            &super::ExcelReadOptions::default(),
+        )
+        .expect("read subset");
+        assert_eq!(sheets.len(), 2);
+        assert!(sheets.contains_key("Alpha"));
+        assert!(sheets.contains_key("Charlie"));
+        assert!(!sheets.contains_key("Bravo"));
+    }
+
+    #[test]
+    fn read_excel_sheets_bytes_unknown_sheet_errors() {
+        let bytes = build_two_sheet_workbook_bytes();
+        let bogus = vec!["Zeta".to_string()];
+        let err = super::read_excel_sheets_bytes(
+            &bytes,
+            Some(&bogus),
+            &super::ExcelReadOptions::default(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, super::IoError::Excel(_)));
+    }
+
+    #[test]
+    fn read_excel_sheets_path_matches_bytes() {
+        let bytes = build_two_sheet_workbook_bytes();
+        let temp = std::env::temp_dir().join("fp_io_9my2_multisheet.xlsx");
+        std::fs::write(&temp, &bytes).expect("write temp");
+        let via_path =
+            super::read_excel_sheets(&temp, None, &super::ExcelReadOptions::default())
+                .expect("read path");
+        let via_bytes =
+            super::read_excel_sheets_bytes(&bytes, None, &super::ExcelReadOptions::default())
+                .expect("read bytes");
+        assert_eq!(via_path.keys().collect::<Vec<_>>(), via_bytes.keys().collect::<Vec<_>>());
+    }
+
     #[test]
     fn excel_bytes_roundtrip() {
         let frame = make_test_dataframe();
@@ -4454,6 +4676,92 @@ mod tests {
         // With has_headers=false, column names are auto-generated.
         assert_eq!(frame2.index().len(), 2);
         assert!(frame2.column("column_0").is_some());
+    }
+
+    #[test]
+    fn excel_header_none_with_explicit_names_uses_names_and_keeps_first_row() {
+        let rows = vec![
+            vec![
+                calamine::Data::Int(1),
+                calamine::Data::String("alpha".to_owned()),
+            ],
+            vec![
+                calamine::Data::Int(2),
+                calamine::Data::String("beta".to_owned()),
+            ],
+        ];
+
+        let frame = super::parse_excel_rows(
+            rows,
+            &super::ExcelReadOptions {
+                has_headers: false,
+                names: Some(vec!["id".to_owned(), "label".to_owned()]),
+                ..Default::default()
+            },
+        )
+        .expect("parse excel rows with explicit names");
+
+        assert_eq!(frame.column_names(), vec!["id", "label"]);
+        assert_eq!(frame.index().len(), 2);
+        assert_eq!(frame.column("id").unwrap().values()[0], Scalar::Int64(1));
+        assert_eq!(
+            frame.column("label").unwrap().values()[0],
+            Scalar::Utf8("alpha".into())
+        );
+        assert_eq!(frame.column("id").unwrap().values()[1], Scalar::Int64(2));
+    }
+
+    #[test]
+    fn excel_header_none_with_explicit_names_preserves_index_name() {
+        let rows = vec![
+            vec![
+                calamine::Data::Int(10),
+                calamine::Data::String("alpha".to_owned()),
+            ],
+            vec![
+                calamine::Data::Int(20),
+                calamine::Data::String("beta".to_owned()),
+            ],
+        ];
+
+        let frame = super::parse_excel_rows(
+            rows,
+            &super::ExcelReadOptions {
+                has_headers: false,
+                names: Some(vec!["row_id".to_owned(), "value".to_owned()]),
+                index_col: Some("row_id".to_owned()),
+                ..Default::default()
+            },
+        )
+        .expect("parse excel rows with named index column");
+
+        assert_eq!(frame.index().name(), Some("row_id"));
+        assert_eq!(frame.index().labels()[0], IndexLabel::Int64(10));
+        assert_eq!(frame.index().labels()[1], IndexLabel::Int64(20));
+        assert!(frame.column("row_id").is_none());
+        assert_eq!(
+            frame.column("value").unwrap().values(),
+            &[Scalar::Utf8("alpha".into()), Scalar::Utf8("beta".into())]
+        );
+    }
+
+    #[test]
+    fn excel_explicit_names_width_mismatch_errors() {
+        let rows = vec![vec![calamine::Data::Int(1), calamine::Data::Int(2)]];
+
+        let err = super::parse_excel_rows(
+            rows,
+            &super::ExcelReadOptions {
+                has_headers: false,
+                names: Some(vec!["only_one".to_owned()]),
+                ..Default::default()
+            },
+        )
+        .expect_err("names width mismatch should error");
+
+        assert!(
+            matches!(err, IoError::Excel(message) if message.contains("expected 2 column names, got 1"))
+        );
     }
 
     #[test]
