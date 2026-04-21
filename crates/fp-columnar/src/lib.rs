@@ -3,7 +3,8 @@
 use fp_types::{
     DType, NullKind, Scalar, Timedelta, TypeError, cast_scalar, cast_scalar_owned, common_dtype,
     infer_dtype, nanall, nanany, nanargmax, nanargmin, nancummax, nancummin, nancumprod, nancumsum,
-    nanmax, nanmean, nanmedian, nanmin, nannunique, nanprod, nanquantile, nansum,
+    nankurt, nanmax, nanmean, nanmedian, nanmin, nannunique, nanprod, nanptp, nanquantile, nansem,
+    nanskew, nanstd, nansum, nanvar,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -1349,6 +1350,81 @@ impl Column {
     #[must_use]
     pub fn all(&self) -> Scalar {
         nanall(&self.values)
+    }
+
+    /// Per-row missing-value flag (Bool column).
+    ///
+    /// Matches `pd.Series.isna()` / `isnull()`.
+    pub fn isnull(&self) -> Result<Self, ColumnError> {
+        let out: Vec<Scalar> = self
+            .values
+            .iter()
+            .map(|v| Scalar::Bool(v.is_missing()))
+            .collect();
+        Self::new(DType::Bool, out)
+    }
+
+    /// Per-row non-missing flag (Bool column).
+    ///
+    /// Matches `pd.Series.notna()` / `notnull()`.
+    pub fn notnull(&self) -> Result<Self, ColumnError> {
+        let out: Vec<Scalar> = self
+            .values
+            .iter()
+            .map(|v| Scalar::Bool(!v.is_missing()))
+            .collect();
+        Self::new(DType::Bool, out)
+    }
+
+    /// Sample variance (ddof-parameterized).
+    ///
+    /// Matches `pd.Series.var(ddof=1)`.
+    #[must_use]
+    pub fn var(&self, ddof: usize) -> Scalar {
+        nanvar(&self.values, ddof)
+    }
+
+    /// Sample standard deviation (ddof-parameterized).
+    ///
+    /// Matches `pd.Series.std(ddof=1)`.
+    #[must_use]
+    pub fn std(&self, ddof: usize) -> Scalar {
+        nanstd(&self.values, ddof)
+    }
+
+    /// Standard error of the mean (ddof-parameterized).
+    ///
+    /// Matches `pd.Series.sem(ddof=1)`.
+    #[must_use]
+    pub fn sem(&self, ddof: usize) -> Scalar {
+        nansem(&self.values, ddof)
+    }
+
+    /// Sample skewness (bias-corrected, Fisher-Pearson).
+    ///
+    /// Matches `pd.Series.skew()`. Requires at least 3 non-missing
+    /// values; returns `Null(NaN)` otherwise.
+    #[must_use]
+    pub fn skew(&self) -> Scalar {
+        nanskew(&self.values)
+    }
+
+    /// Excess sample kurtosis (Fisher's definition, bias-corrected).
+    ///
+    /// Matches `pd.Series.kurt()`. Requires at least 4 non-missing
+    /// values; returns `Null(NaN)` otherwise.
+    #[must_use]
+    pub fn kurt(&self) -> Scalar {
+        nankurt(&self.values)
+    }
+
+    /// Peak-to-peak range (max − min) over non-missing values.
+    ///
+    /// Matches `np.ptp`. Returns `Null(NaN)` for empty or all-missing
+    /// columns.
+    #[must_use]
+    pub fn ptp(&self) -> Scalar {
+        nanptp(&self.values)
     }
 
     /// Whether every non-missing value is distinct.
@@ -5218,6 +5294,116 @@ mod tests {
             let r = col.ffill(None).expect("ffill");
             assert!(r.is_empty());
             assert_eq!(r.dtype(), DType::Null);
+        }
+
+        #[test]
+        fn isnull_notnull_flag_missing_positions() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(1),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Int64(2),
+            ])
+            .expect("col");
+            let is_null = col.isnull().expect("isnull");
+            let not_null = col.notnull().expect("notnull");
+            assert_eq!(is_null.dtype(), DType::Bool);
+            assert_eq!(is_null.values(), &[
+                Scalar::Bool(false),
+                Scalar::Bool(true),
+                Scalar::Bool(false),
+            ]);
+            assert_eq!(not_null.values(), &[
+                Scalar::Bool(true),
+                Scalar::Bool(false),
+                Scalar::Bool(true),
+            ]);
+        }
+
+        #[test]
+        fn var_std_sem_ddof_one() {
+            let col = Column::from_values(vec![
+                Scalar::Float64(2.0),
+                Scalar::Float64(4.0),
+                Scalar::Float64(4.0),
+                Scalar::Float64(4.0),
+                Scalar::Float64(5.0),
+                Scalar::Float64(5.0),
+                Scalar::Float64(7.0),
+                Scalar::Float64(9.0),
+            ])
+            .expect("col");
+            match col.var(1) {
+                Scalar::Float64(v) => assert!((v - 4.571428571428571).abs() < 1e-9),
+                other => panic!("expected Float64, got {other:?}"),
+            }
+            match col.std(1) {
+                Scalar::Float64(v) => assert!((v - 2.138089935299395).abs() < 1e-9),
+                other => panic!("expected Float64, got {other:?}"),
+            }
+            match col.sem(1) {
+                Scalar::Float64(v) => assert!((v - 0.7559289460184544).abs() < 1e-9),
+                other => panic!("expected Float64, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn skew_symmetric_is_zero() {
+            let col = Column::from_values(vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(4.0),
+                Scalar::Float64(5.0),
+            ])
+            .expect("col");
+            match col.skew() {
+                Scalar::Float64(v) => assert!(v.abs() < 1e-9),
+                other => panic!("expected Float64, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn kurt_uniform_five_values_is_minus_one_point_two() {
+            let col = Column::from_values(vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(4.0),
+                Scalar::Float64(5.0),
+            ])
+            .expect("col");
+            match col.kurt() {
+                Scalar::Float64(v) => assert!((v + 1.2).abs() < 1e-9),
+                other => panic!("expected Float64, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn ptp_returns_max_minus_min() {
+            let col = Column::from_values(vec![
+                Scalar::Float64(3.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(7.0),
+                Scalar::Float64(1.0),
+            ])
+            .expect("col");
+            assert_eq!(col.ptp(), Scalar::Float64(6.0));
+        }
+
+        #[test]
+        fn ptp_empty_is_null() {
+            let col = Column::from_values(Vec::<Scalar>::new()).expect("col");
+            assert!(col.ptp().is_missing());
+        }
+
+        #[test]
+        fn skew_too_few_values_returns_null() {
+            let col = Column::from_values(vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+            ])
+            .expect("col");
+            assert!(col.skew().is_missing());
         }
 
         #[test]
