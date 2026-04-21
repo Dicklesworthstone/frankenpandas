@@ -8463,6 +8463,9 @@ impl DataFrameResample<'_> {
                     "count" => resample.count()?,
                     "min" => resample.min()?,
                     "max" => resample.max()?,
+                    "std" => resample.std()?,
+                    "var" => resample.var()?,
+                    "median" => resample.median()?,
                     "first" => resample.first()?,
                     "last" => resample.last()?,
                     _ => {
@@ -56828,11 +56831,31 @@ mod tests {
             ],
         )
         .unwrap();
-        let result = df.resample("ME").agg(&["sum", "mean"]).unwrap();
-        // Should have columns val_sum and val_mean
+        let result = df
+            .resample("M")
+            .agg(&["sum", "mean", "std", "var", "median"])
+            .unwrap();
         let col_names: Vec<String> = result.column_names().into_iter().cloned().collect();
         assert!(col_names.contains(&"val_sum".to_string()));
         assert!(col_names.contains(&"val_mean".to_string()));
+        assert!(col_names.contains(&"val_std".to_string()));
+        assert!(col_names.contains(&"val_var".to_string()));
+        assert!(col_names.contains(&"val_median".to_string()));
+        assert_eq!(
+            result.columns["val_std"].values(),
+            &[
+                Scalar::Float64(std::f64::consts::FRAC_1_SQRT_2),
+                Scalar::Float64(std::f64::consts::FRAC_1_SQRT_2)
+            ]
+        );
+        assert_eq!(
+            result.columns["val_var"].values(),
+            &[Scalar::Float64(0.5), Scalar::Float64(0.5)]
+        );
+        assert_eq!(
+            result.columns["val_median"].values(),
+            &[Scalar::Float64(1.5), Scalar::Float64(3.5)]
+        );
     }
 
     #[test]
