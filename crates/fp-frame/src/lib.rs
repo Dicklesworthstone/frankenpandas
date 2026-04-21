@@ -529,6 +529,42 @@ fn index_label_to_json_key(label: &IndexLabel) -> String {
     }
 }
 
+fn dtype_to_table_schema_type(dtype: DType) -> &'static str {
+    match dtype {
+        DType::Bool => "boolean",
+        DType::Int64 => "integer",
+        DType::Float64 => "number",
+        DType::Utf8 | DType::Categorical => "string",
+        DType::Timedelta64 => "duration",
+        DType::Null => "any",
+    }
+}
+
+fn index_label_to_table_schema_type(label: &IndexLabel) -> &'static str {
+    match label {
+        IndexLabel::Int64(_) => "integer",
+        IndexLabel::Utf8(_) => "string",
+        IndexLabel::Timedelta64(_) => "duration",
+        IndexLabel::Datetime64(_) => "datetime",
+    }
+}
+
+fn index_labels_to_table_schema_type(labels: &[IndexLabel]) -> &'static str {
+    let Some(first) = labels.first() else {
+        return "integer";
+    };
+
+    let first_type = index_label_to_table_schema_type(first);
+    if labels
+        .iter()
+        .all(|label| index_label_to_table_schema_type(label) == first_type)
+    {
+        first_type
+    } else {
+        "string"
+    }
+}
+
 fn serialize_json_value(value: &Value) -> Result<String, FrameError> {
     serde_json::to_string(value).map_err(|err| {
         FrameError::CompatibilityRejected(format!("failed to serialize JSON output: {err}"))
@@ -19649,6 +19685,75 @@ impl DataFrame {
                     })
                     .collect();
                 serialize_json_value(&Value::Array(data))
+            }
+            "table" => {
+                let index_name = match self.index.name() {
+                    Some(name) => {
+                        if self.columns.contains_key(name) {
+                            return Err(FrameError::CompatibilityRejected(format!(
+                                "to_json orient 'table' cannot serialize index name {name:?} because it collides with a column label"
+                            )));
+                        }
+                        name.to_owned()
+                    }
+                    None => self.reset_index_column_name()?,
+                };
+
+                let mut fields = Vec::with_capacity(self.column_order.len() + 1);
+                fields.push(Value::Object(Map::from_iter([
+                    ("name".to_owned(), Value::String(index_name.clone())),
+                    (
+                        "type".to_owned(),
+                        Value::String(
+                            index_labels_to_table_schema_type(self.index.labels()).to_owned(),
+                        ),
+                    ),
+                ])));
+                for name in &self.column_order {
+                    let column = &self.columns[name];
+                    fields.push(Value::Object(Map::from_iter([
+                        ("name".to_owned(), Value::String(name.clone())),
+                        (
+                            "type".to_owned(),
+                            Value::String(dtype_to_table_schema_type(column.dtype()).to_owned()),
+                        ),
+                    ])));
+                }
+
+                let data = (0..self.len())
+                    .map(|row_idx| {
+                        let mut row = Map::new();
+                        row.insert(
+                            index_name.clone(),
+                            index_label_to_json_value(&self.index.labels()[row_idx]),
+                        );
+                        for name in &self.column_order {
+                            row.insert(
+                                name.clone(),
+                                scalar_to_json_value(&self.columns[name].values()[row_idx]),
+                            );
+                        }
+                        Value::Object(row)
+                    })
+                    .collect();
+
+                serialize_json_value(&Value::Object(Map::from_iter([
+                    (
+                        "schema".to_owned(),
+                        Value::Object(Map::from_iter([
+                            ("fields".to_owned(), Value::Array(fields)),
+                            (
+                                "primaryKey".to_owned(),
+                                Value::Array(vec![Value::String(index_name)]),
+                            ),
+                            (
+                                "pandas_version".to_owned(),
+                                Value::String("1.4.0".to_owned()),
+                            ),
+                        ])),
+                    ),
+                    ("data".to_owned(), Value::Array(data)),
+                ])))
             }
             other => Err(FrameError::CompatibilityRejected(format!(
                 "unsupported to_json orient: {other:?}"
@@ -40961,6 +41066,80 @@ mod tests {
         let json = df.to_json("values").unwrap();
         let parsed: Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, serde_json::json!([[10.0, true], [null, false]]));
+    }
+
+    #[test]
+    fn dataframe_to_json_table() {
+        let index = Index::from_i64(vec![10, 20]).set_names(Some("row_id"));
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            "x".to_owned(),
+            Column::from_values(vec![Scalar::Int64(1), Scalar::Null(NullKind::Null)]).unwrap(),
+        );
+        columns.insert(
+            "y".to_owned(),
+            Column::from_values(vec![
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Utf8("b".to_owned()),
+            ])
+            .unwrap(),
+        );
+        let df =
+            DataFrame::new_with_column_order(index, columns, vec!["x".to_owned(), "y".to_owned()])
+                .unwrap();
+
+        let json = df.to_json("table").unwrap();
+        let parsed: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            parsed,
+            serde_json::json!({
+                "schema": {
+                    "fields": [
+                        {"name": "row_id", "type": "integer"},
+                        {"name": "x", "type": "integer"},
+                        {"name": "y", "type": "string"}
+                    ],
+                    "primaryKey": ["row_id"],
+                    "pandas_version": "1.4.0"
+                },
+                "data": [
+                    {"row_id": 10, "x": 1, "y": "a"},
+                    {"row_id": 20, "x": null, "y": "b"}
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn dataframe_to_json_table_unnamed_index_uses_level_0_when_index_column_exists() {
+        let df = DataFrame::from_dict(
+            &["index", "value"],
+            vec![
+                ("index", vec![Scalar::Utf8("left".to_owned())]),
+                ("value", vec![Scalar::Int64(7)]),
+            ],
+        )
+        .unwrap();
+
+        let json = df.to_json("table").unwrap();
+        let parsed: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            parsed,
+            serde_json::json!({
+                "schema": {
+                    "fields": [
+                        {"name": "level_0", "type": "integer"},
+                        {"name": "index", "type": "string"},
+                        {"name": "value", "type": "integer"}
+                    ],
+                    "primaryKey": ["level_0"],
+                    "pandas_version": "1.4.0"
+                },
+                "data": [
+                    {"level_0": 0, "index": "left", "value": 7}
+                ]
+            })
+        );
     }
 
     // --- Series.explode tests ---
