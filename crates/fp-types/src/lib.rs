@@ -797,6 +797,180 @@ pub fn nanprod(values: &[Scalar]) -> Scalar {
     Scalar::Float64(nums.iter().product())
 }
 
+/// Cumulative sum respecting null propagation.
+///
+/// Matches `np.nancumsum` / `pd.Series.cumsum()`. Missing input positions
+/// pass through as `Null(NaN)` in the output; the running sum ignores
+/// those positions when accumulating.
+pub fn nancumsum(values: &[Scalar]) -> Vec<Scalar> {
+    let mut out = Vec::with_capacity(values.len());
+    let mut running = 0.0_f64;
+    for v in values {
+        if v.is_missing() {
+            out.push(Scalar::Null(NullKind::NaN));
+            continue;
+        }
+        match v.to_f64() {
+            Ok(x) if !x.is_nan() => {
+                running += x;
+                out.push(Scalar::Float64(running));
+            }
+            _ => out.push(Scalar::Null(NullKind::NaN)),
+        }
+    }
+    out
+}
+
+/// Cumulative product respecting null propagation.
+///
+/// Matches `np.nancumprod` / `pd.Series.cumprod()`. Missing positions
+/// pass through as `Null(NaN)` without advancing the running product.
+pub fn nancumprod(values: &[Scalar]) -> Vec<Scalar> {
+    let mut out = Vec::with_capacity(values.len());
+    let mut running = 1.0_f64;
+    for v in values {
+        if v.is_missing() {
+            out.push(Scalar::Null(NullKind::NaN));
+            continue;
+        }
+        match v.to_f64() {
+            Ok(x) if !x.is_nan() => {
+                running *= x;
+                out.push(Scalar::Float64(running));
+            }
+            _ => out.push(Scalar::Null(NullKind::NaN)),
+        }
+    }
+    out
+}
+
+/// Cumulative maximum respecting null propagation.
+///
+/// Matches `pd.Series.cummax()`. Missing positions pass through as
+/// `Null(NaN)` without updating the running maximum. The first
+/// non-missing value initializes the running maximum.
+pub fn nancummax(values: &[Scalar]) -> Vec<Scalar> {
+    let mut out = Vec::with_capacity(values.len());
+    let mut running: Option<f64> = None;
+    for v in values {
+        if v.is_missing() {
+            out.push(Scalar::Null(NullKind::NaN));
+            continue;
+        }
+        match v.to_f64() {
+            Ok(x) if !x.is_nan() => {
+                running = Some(match running {
+                    Some(prev) => prev.max(x),
+                    None => x,
+                });
+                out.push(Scalar::Float64(running.unwrap()));
+            }
+            _ => out.push(Scalar::Null(NullKind::NaN)),
+        }
+    }
+    out
+}
+
+/// Cumulative minimum respecting null propagation.
+///
+/// Matches `pd.Series.cummin()`. Symmetric to `nancummax`.
+pub fn nancummin(values: &[Scalar]) -> Vec<Scalar> {
+    let mut out = Vec::with_capacity(values.len());
+    let mut running: Option<f64> = None;
+    for v in values {
+        if v.is_missing() {
+            out.push(Scalar::Null(NullKind::NaN));
+            continue;
+        }
+        match v.to_f64() {
+            Ok(x) if !x.is_nan() => {
+                running = Some(match running {
+                    Some(prev) => prev.min(x),
+                    None => x,
+                });
+                out.push(Scalar::Float64(running.unwrap()));
+            }
+            _ => out.push(Scalar::Null(NullKind::NaN)),
+        }
+    }
+    out
+}
+
+/// Linear-interpolation quantile over non-missing numeric values.
+///
+/// Matches `np.nanquantile(values, q)` with `interpolation='linear'`.
+/// Returns `Null(NaN)` for empty inputs or when `q` is outside
+/// `[0.0, 1.0]`.
+pub fn nanquantile(values: &[Scalar], q: f64) -> Scalar {
+    if !(0.0..=1.0).contains(&q) {
+        return Scalar::Null(NullKind::NaN);
+    }
+    let mut nums = collect_finite(values);
+    if nums.is_empty() {
+        return Scalar::Null(NullKind::NaN);
+    }
+    nums.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = nums.len();
+    if n == 1 {
+        return Scalar::Float64(nums[0]);
+    }
+    let pos = q * (n - 1) as f64;
+    let lo = pos.floor() as usize;
+    let hi = pos.ceil() as usize;
+    if lo == hi {
+        return Scalar::Float64(nums[lo]);
+    }
+    let weight = pos - lo as f64;
+    Scalar::Float64(nums[lo] + (nums[hi] - nums[lo]) * weight)
+}
+
+/// Position (in the original slice) of the non-missing maximum.
+///
+/// Matches `np.nanargmax`. Returns `None` if every value is missing.
+/// Ties resolve to the first position seen (matching numpy).
+pub fn nanargmax(values: &[Scalar]) -> Option<usize> {
+    let mut best: Option<(usize, f64)> = None;
+    for (i, v) in values.iter().enumerate() {
+        if v.is_missing() {
+            continue;
+        }
+        if let Ok(x) = v.to_f64() {
+            if x.is_nan() {
+                continue;
+            }
+            match best {
+                None => best = Some((i, x)),
+                Some((_, cur)) if x > cur => best = Some((i, x)),
+                _ => {}
+            }
+        }
+    }
+    best.map(|(i, _)| i)
+}
+
+/// Position (in the original slice) of the non-missing minimum.
+///
+/// Matches `np.nanargmin`. Returns `None` if every value is missing.
+pub fn nanargmin(values: &[Scalar]) -> Option<usize> {
+    let mut best: Option<(usize, f64)> = None;
+    for (i, v) in values.iter().enumerate() {
+        if v.is_missing() {
+            continue;
+        }
+        if let Ok(x) = v.to_f64() {
+            if x.is_nan() {
+                continue;
+            }
+            match best {
+                None => best = Some((i, x)),
+                Some((_, cur)) if x < cur => best = Some((i, x)),
+                _ => {}
+            }
+        }
+    }
+    best.map(|(i, _)| i)
+}
+
 /// Count of unique non-missing values.
 pub fn nannunique(values: &[Scalar]) -> Scalar {
     use std::collections::HashSet;
@@ -1309,5 +1483,141 @@ mod tests {
 
         let scalar: Scalar = serde_json::from_str(r#"{"kind":"string","value":"y"}"#).unwrap();
         assert_eq!(scalar, Scalar::Utf8("y".to_owned()));
+    }
+
+    #[test]
+    fn nancumsum_skips_nulls_and_accumulates() {
+        let values = vec![
+            Scalar::Float64(1.0),
+            Scalar::Null(NullKind::NaN),
+            Scalar::Float64(2.0),
+            Scalar::Float64(3.0),
+        ];
+        let out = super::nancumsum(&values);
+        assert!(matches!(out[0], Scalar::Float64(v) if (v - 1.0).abs() < 1e-9));
+        assert!(out[1].is_missing());
+        assert!(matches!(out[2], Scalar::Float64(v) if (v - 3.0).abs() < 1e-9));
+        assert!(matches!(out[3], Scalar::Float64(v) if (v - 6.0).abs() < 1e-9));
+    }
+
+    #[test]
+    fn nancumprod_skips_nulls_and_multiplies() {
+        let values = vec![
+            Scalar::Float64(2.0),
+            Scalar::Null(NullKind::NaN),
+            Scalar::Float64(3.0),
+            Scalar::Float64(4.0),
+        ];
+        let out = super::nancumprod(&values);
+        assert!(matches!(out[0], Scalar::Float64(v) if (v - 2.0).abs() < 1e-9));
+        assert!(out[1].is_missing());
+        assert!(matches!(out[2], Scalar::Float64(v) if (v - 6.0).abs() < 1e-9));
+        assert!(matches!(out[3], Scalar::Float64(v) if (v - 24.0).abs() < 1e-9));
+    }
+
+    #[test]
+    fn nancummax_tracks_running_max() {
+        let values = vec![
+            Scalar::Float64(1.0),
+            Scalar::Float64(3.0),
+            Scalar::Null(NullKind::NaN),
+            Scalar::Float64(2.0),
+            Scalar::Float64(5.0),
+        ];
+        let out = super::nancummax(&values);
+        assert_eq!(out[0], Scalar::Float64(1.0));
+        assert_eq!(out[1], Scalar::Float64(3.0));
+        assert!(out[2].is_missing());
+        assert_eq!(out[3], Scalar::Float64(3.0));
+        assert_eq!(out[4], Scalar::Float64(5.0));
+    }
+
+    #[test]
+    fn nancummin_tracks_running_min() {
+        let values = vec![
+            Scalar::Float64(5.0),
+            Scalar::Float64(3.0),
+            Scalar::Null(NullKind::NaN),
+            Scalar::Float64(4.0),
+            Scalar::Float64(1.0),
+        ];
+        let out = super::nancummin(&values);
+        assert_eq!(out[0], Scalar::Float64(5.0));
+        assert_eq!(out[1], Scalar::Float64(3.0));
+        assert!(out[2].is_missing());
+        assert_eq!(out[3], Scalar::Float64(3.0));
+        assert_eq!(out[4], Scalar::Float64(1.0));
+    }
+
+    #[test]
+    fn nanquantile_linear_interpolation_matches_numpy() {
+        let values = vec![
+            Scalar::Float64(1.0),
+            Scalar::Float64(2.0),
+            Scalar::Float64(3.0),
+            Scalar::Float64(4.0),
+            Scalar::Float64(5.0),
+        ];
+        // median
+        let q = super::nanquantile(&values, 0.5);
+        assert!(matches!(q, Scalar::Float64(v) if (v - 3.0).abs() < 1e-9));
+        // 25th percentile: interpolate between 2.0 and 3.0 at pos 1.0 → 2.0
+        let q25 = super::nanquantile(&values, 0.25);
+        assert!(matches!(q25, Scalar::Float64(v) if (v - 2.0).abs() < 1e-9));
+    }
+
+    #[test]
+    fn nanquantile_ignores_nulls() {
+        let values = vec![
+            Scalar::Float64(1.0),
+            Scalar::Null(NullKind::NaN),
+            Scalar::Float64(3.0),
+        ];
+        let q = super::nanquantile(&values, 0.5);
+        assert!(matches!(q, Scalar::Float64(v) if (v - 2.0).abs() < 1e-9));
+    }
+
+    #[test]
+    fn nanquantile_empty_and_out_of_range_yield_null() {
+        assert!(super::nanquantile(&[], 0.5).is_missing());
+        assert!(
+            super::nanquantile(&[Scalar::Float64(1.0)], 1.5).is_missing()
+        );
+        assert!(
+            super::nanquantile(&[Scalar::Float64(1.0)], -0.1).is_missing()
+        );
+    }
+
+    #[test]
+    fn nanargmax_returns_first_position() {
+        let values = vec![
+            Scalar::Float64(1.0),
+            Scalar::Null(NullKind::NaN),
+            Scalar::Float64(4.0),
+            Scalar::Float64(4.0),
+            Scalar::Float64(2.0),
+        ];
+        assert_eq!(super::nanargmax(&values), Some(2));
+    }
+
+    #[test]
+    fn nanargmin_returns_first_position() {
+        let values = vec![
+            Scalar::Float64(3.0),
+            Scalar::Null(NullKind::NaN),
+            Scalar::Float64(1.0),
+            Scalar::Float64(1.0),
+        ];
+        assert_eq!(super::nanargmin(&values), Some(2));
+    }
+
+    #[test]
+    fn nanargmax_all_missing_returns_none() {
+        let values = vec![
+            Scalar::Null(NullKind::NaN),
+            Scalar::Null(NullKind::Null),
+        ];
+        assert_eq!(super::nanargmax(&values), None);
+        assert_eq!(super::nanargmin(&values), None);
     }
 }
