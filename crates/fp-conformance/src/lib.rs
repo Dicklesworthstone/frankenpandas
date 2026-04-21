@@ -26,9 +26,10 @@ use fp_index::{
 use fp_io::{
     CsvOnBadLines, CsvReadOptions, ExcelReadOptions, IoError as FpIoError, JsonOrient,
     read_csv_str, read_csv_with_options, read_excel_bytes, read_feather_bytes,
-    read_ipc_stream_bytes, read_json_str, read_jsonl_str, read_parquet_bytes, write_csv_string,
-    write_excel_bytes, write_feather_bytes, write_ipc_stream_bytes, write_json_string,
-    write_jsonl_string, write_parquet_bytes,
+    read_ipc_stream_bytes, read_json_str, read_jsonl_str, read_parquet_bytes,
+    series_from_arrow_array, series_to_arrow_array, write_csv_string, write_excel_bytes,
+    write_feather_bytes, write_ipc_stream_bytes, write_json_string, write_jsonl_string,
+    write_parquet_bytes,
 };
 use fp_join::{
     JoinExecutionOptions, JoinType, JoinedSeries, MergeExecutionOptions, MergeValidateMode,
@@ -234,6 +235,12 @@ pub enum FixtureOperation {
     NanCount,
     FillNa,
     DropNa,
+    #[serde(
+        rename = "series_to_arrow_round_trip",
+        alias = "series_arrow_round_trip",
+        alias = "series_to_arrow"
+    )]
+    SeriesToArrowRoundTrip,
     // FP-P2C-008: IO round-trip
     CsvRoundTrip,
     #[serde(rename = "csv_read_frame", alias = "csv_read_frame_default")]
@@ -1048,6 +1055,7 @@ impl FixtureOperation {
             Self::NanCount => "nan_count",
             Self::FillNa => "fill_na",
             Self::DropNa => "drop_na",
+            Self::SeriesToArrowRoundTrip => "series_to_arrow_round_trip",
             Self::CsvRoundTrip => "csv_round_trip",
             Self::CsvReadFrame => "csv_read_frame",
             Self::JsonRoundTrip => "json_round_trip",
@@ -2171,7 +2179,8 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::DataFrameFillNa
         | FixtureOperation::DataFrameDropNa
         | FixtureOperation::DataFrameDropNaColumns => &["CC-002", "CC-005"],
-        FixtureOperation::CsvRoundTrip
+        FixtureOperation::SeriesToArrowRoundTrip
+        | FixtureOperation::CsvRoundTrip
         | FixtureOperation::CsvReadFrame
         | FixtureOperation::JsonRoundTrip
         | FixtureOperation::JsonlRoundTrip
@@ -6730,6 +6739,29 @@ fn run_fixture_operation(
             }
             Ok(())
         }
+        FixtureOperation::SeriesToArrowRoundTrip => {
+            let actual = execute_series_to_arrow_round_trip_fixture_operation(fixture);
+            match expected {
+                ResolvedExpected::Series(series) => compare_series_expected(&actual?, &series),
+                ResolvedExpected::ErrorContains(substr) => match actual {
+                    Err(message) if message.contains(&substr) => Ok(()),
+                    Err(message) => Err(format!(
+                        "expected series_to_arrow_round_trip error containing '{substr}', got '{message}'"
+                    )),
+                    Ok(_) => Err(format!(
+                        "expected series_to_arrow_round_trip to fail with error containing '{substr}'"
+                    )),
+                },
+                ResolvedExpected::ErrorAny => match actual {
+                    Err(_) => Ok(()),
+                    Ok(_) => Err("expected series_to_arrow_round_trip to fail".to_owned()),
+                },
+                _ => Err(
+                    "expected_series or expected_error is required for series_to_arrow_round_trip"
+                        .to_owned(),
+                ),
+            }
+        }
         FixtureOperation::CsvRoundTrip => {
             let actual = execute_csv_round_trip_fixture_operation(fixture);
             match expected {
@@ -9592,6 +9624,16 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
                     fixture.case_id
                 ))
             }),
+        FixtureOperation::SeriesToArrowRoundTrip => fixture
+            .expected_series
+            .clone()
+            .map(ResolvedExpected::Series)
+            .ok_or_else(|| {
+                HarnessError::FixtureFormat(format!(
+                    "missing expected_series for case {}",
+                    fixture.case_id
+                ))
+            }),
         FixtureOperation::IndexAlignUnion => fixture
             .expected_alignment
             .clone()
@@ -10214,6 +10256,12 @@ fn capture_live_oracle_expected(
             .map(ResolvedExpected::Join)
             .ok_or_else(|| HarnessError::FixtureFormat("oracle omitted expected_join".to_owned())),
         FixtureOperation::GroupBySum => response
+            .expected_series
+            .map(ResolvedExpected::Series)
+            .ok_or_else(|| {
+                HarnessError::FixtureFormat("oracle omitted expected_series".to_owned())
+            }),
+        FixtureOperation::SeriesToArrowRoundTrip => response
             .expected_series
             .map(ResolvedExpected::Series)
             .ok_or_else(|| {
@@ -11679,6 +11727,21 @@ fn execute_csv_read_frame_fixture_operation(fixture: &PacketFixture) -> Result<D
         ..CsvReadOptions::default()
     };
     read_csv_with_options(csv_input, &options).map_err(|err| format!("csv read failed: {err}"))
+}
+
+fn execute_series_to_arrow_round_trip_fixture_operation(
+    fixture: &PacketFixture,
+) -> Result<Series, String> {
+    let left = require_left_series(fixture)?;
+    let series = build_series(left)?;
+    let (dt, arr) = series_to_arrow_array(&series).map_err(|err| err.to_string())?;
+    series_from_arrow_array(
+        series.name(),
+        series.index().labels().to_vec(),
+        arr.as_ref(),
+        &dt,
+    )
+    .map_err(|err| err.to_string())
 }
 
 fn dataframes_semantically_equal(left: &DataFrame, right: &DataFrame) -> bool {
@@ -14853,6 +14916,44 @@ fn execute_and_compare_differential(
                 _ => return Err("expected_series required for drop_na".to_owned()),
             };
             Ok(diff_values(&actual_values, &expected.values, "drop_na"))
+        }
+        FixtureOperation::SeriesToArrowRoundTrip => {
+            let actual = execute_series_to_arrow_round_trip_fixture_operation(fixture);
+            match expected {
+                ResolvedExpected::Series(series) => Ok(diff_series(&actual?, &series)),
+                ResolvedExpected::ErrorContains(substr) => Ok(match actual {
+                    Err(message) if message.contains(&substr) => Vec::new(),
+                    Err(message) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_to_arrow_round_trip.error",
+                        format!(
+                            "expected series_to_arrow_round_trip error containing '{substr}', got '{message}'"
+                        ),
+                    )],
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_to_arrow_round_trip.error",
+                        "expected series_to_arrow_round_trip to fail but operation succeeded"
+                            .to_owned(),
+                    )],
+                }),
+                ResolvedExpected::ErrorAny => Ok(match actual {
+                    Err(_) => Vec::new(),
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_to_arrow_round_trip.error",
+                        "expected series_to_arrow_round_trip to fail but operation succeeded"
+                            .to_owned(),
+                    )],
+                }),
+                _ => Err(
+                    "expected_series or expected_error required for series_to_arrow_round_trip"
+                        .to_owned(),
+                ),
+            }
         }
         FixtureOperation::CsvRoundTrip => {
             let actual = execute_csv_round_trip_fixture_operation(fixture);
@@ -21518,6 +21619,16 @@ mod tests {
             report.fixture_count >= 3,
             "expected FP-P2D-092 series_to_timedelta fixtures"
         );
+        assert!(report.is_green(), "expected report green: {report:?}");
+    }
+
+    #[test]
+    fn packet_filter_runs_series_to_arrow_round_trip_packet() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_packet_by_id(&cfg, "FP-P2D-427", OracleMode::FixtureExpected).expect("report");
+        assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-427"));
+        assert_eq!(report.fixture_count, 1);
         assert!(report.is_green(), "expected report green: {report:?}");
     }
 
