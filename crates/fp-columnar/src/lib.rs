@@ -654,12 +654,7 @@ pub enum ComparisonOp {
     Le,
 }
 
-fn nkeep_impl(
-    col: &Column,
-    n: usize,
-    keep: &str,
-    ascending: bool,
-) -> Result<Column, ColumnError> {
+fn nkeep_impl(col: &Column, n: usize, keep: &str, ascending: bool) -> Result<Column, ColumnError> {
     if !matches!(keep, "first" | "last" | "all") {
         return Err(ColumnError::Type(TypeError::NonNumericValue {
             value: keep.to_string(),
@@ -684,8 +679,7 @@ fn nkeep_impl(
     if keep == "all" && take > 0 && take < indexed.len() {
         let boundary = indexed[take - 1].1;
         while end < indexed.len() {
-            let same =
-                compare_scalars_na_last(indexed[end].1, boundary, ascending).is_eq();
+            let same = compare_scalars_na_last(indexed[end].1, boundary, ascending).is_eq();
             if !same {
                 break;
             }
@@ -1460,7 +1454,25 @@ impl Column {
     /// Matches `pd.Series.nunique(dropna=True)`.
     #[must_use]
     pub fn nunique(&self) -> Scalar {
-        nannunique(&self.values)
+        self.nunique_with_dropna(true)
+    }
+
+    /// Count of distinct values with explicit missing-value handling.
+    ///
+    /// Matches `pd.Series.nunique(dropna=...)`. When `dropna=false`,
+    /// all missing values contribute a single extra distinct bucket.
+    #[must_use]
+    pub fn nunique_with_dropna(&self, dropna: bool) -> Scalar {
+        let mut distinct = match nannunique(&self.values) {
+            Scalar::Int64(count) => count,
+            _ => 0,
+        };
+
+        if !dropna && self.values.iter().any(Scalar::is_missing) {
+            distinct += 1;
+        }
+
+        Scalar::Int64(distinct)
     }
 
     /// Truthiness reduction: whether any non-missing value is truthy.
@@ -2385,9 +2397,7 @@ impl Column {
         if cond.dtype != DType::Bool {
             return Err(ColumnError::InvalidMaskType { dtype: cond.dtype });
         }
-        if self.values.len() != cond.values.len()
-            || self.values.len() != other.values.len()
-        {
+        if self.values.len() != cond.values.len() || self.values.len() != other.values.len() {
             return Err(ColumnError::LengthMismatch {
                 left: self.values.len(),
                 right: cond.values.len().max(other.values.len()),
@@ -2415,9 +2425,7 @@ impl Column {
         if cond.dtype != DType::Bool {
             return Err(ColumnError::InvalidMaskType { dtype: cond.dtype });
         }
-        if self.values.len() != cond.values.len()
-            || self.values.len() != other.values.len()
-        {
+        if self.values.len() != cond.values.len() || self.values.len() != other.values.len() {
             return Err(ColumnError::LengthMismatch {
                 left: self.values.len(),
                 right: cond.values.len().max(other.values.len()),
@@ -3593,10 +3601,7 @@ mod tests {
         assert!(!none_set.any());
         assert!(!none_set.all());
 
-        let mixed = ValidityMask::from_values(&[
-            Scalar::Int64(1),
-            Scalar::Null(NullKind::NaN),
-        ]);
+        let mixed = ValidityMask::from_values(&[Scalar::Int64(1), Scalar::Null(NullKind::NaN)]);
         assert!(mixed.any());
         assert!(!mixed.all());
 
@@ -3634,10 +3639,10 @@ mod tests {
     #[test]
     fn validity_mask_slice_extracts_range() {
         let mask = ValidityMask::from_values(&[
-            Scalar::Int64(1),          // valid
+            Scalar::Int64(1),            // valid
             Scalar::Null(NullKind::NaN), // invalid
-            Scalar::Int64(3),          // valid
-            Scalar::Int64(4),          // valid
+            Scalar::Int64(3),            // valid
+            Scalar::Int64(4),            // valid
             Scalar::Null(NullKind::NaN), // invalid
         ]);
         let sub = mask.slice(1, 3);
@@ -3660,14 +3665,8 @@ mod tests {
 
     #[test]
     fn validity_mask_concat_appends() {
-        let a = ValidityMask::from_values(&[
-            Scalar::Int64(1),
-            Scalar::Null(NullKind::NaN),
-        ]);
-        let b = ValidityMask::from_values(&[
-            Scalar::Int64(2),
-            Scalar::Int64(3),
-        ]);
+        let a = ValidityMask::from_values(&[Scalar::Int64(1), Scalar::Null(NullKind::NaN)]);
+        let b = ValidityMask::from_values(&[Scalar::Int64(2), Scalar::Int64(3)]);
         let merged = a.concat(&b);
         assert_eq!(merged.len(), 4);
         assert!(merged.get(0));
@@ -5829,6 +5828,31 @@ mod tests {
         }
 
         #[test]
+        fn nunique_with_dropna_false_counts_missing_once() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(1),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::Null),
+            ])
+            .expect("col");
+            assert_eq!(col.nunique_with_dropna(false), Scalar::Int64(3));
+        }
+
+        #[test]
+        fn nunique_with_dropna_false_all_missing_is_one() {
+            let col = Column::from_values(vec![
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::Null),
+                Scalar::Null(NullKind::NaN),
+            ])
+            .expect("col");
+            assert_eq!(col.nunique(), Scalar::Int64(0));
+            assert_eq!(col.nunique_with_dropna(false), Scalar::Int64(1));
+        }
+
+        #[test]
         fn any_all_reductions() {
             let col = Column::from_values(vec![Scalar::Int64(0), Scalar::Int64(0)]).expect("col");
             assert_eq!(col.any(), Scalar::Bool(false));
@@ -5988,16 +6012,14 @@ mod tests {
             let is_null = col.isnull().expect("isnull");
             let not_null = col.notnull().expect("notnull");
             assert_eq!(is_null.dtype(), DType::Bool);
-            assert_eq!(is_null.values(), &[
-                Scalar::Bool(false),
-                Scalar::Bool(true),
-                Scalar::Bool(false),
-            ]);
-            assert_eq!(not_null.values(), &[
-                Scalar::Bool(true),
-                Scalar::Bool(false),
-                Scalar::Bool(true),
-            ]);
+            assert_eq!(
+                is_null.values(),
+                &[Scalar::Bool(false), Scalar::Bool(true), Scalar::Bool(false),]
+            );
+            assert_eq!(
+                not_null.values(),
+                &[Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true),]
+            );
         }
 
         #[test]
@@ -6015,15 +6037,15 @@ mod tests {
             .expect("col");
             match col.var(1) {
                 Scalar::Float64(v) => assert!((v - 4.571428571428571).abs() < 1e-9),
-                other => panic!("expected Float64, got {other:?}"),
+                other => unreachable!("expected Float64, got {other:?}"),
             }
             match col.std(1) {
                 Scalar::Float64(v) => assert!((v - 2.138089935299395).abs() < 1e-9),
-                other => panic!("expected Float64, got {other:?}"),
+                other => unreachable!("expected Float64, got {other:?}"),
             }
             match col.sem(1) {
                 Scalar::Float64(v) => assert!((v - 0.7559289460184544).abs() < 1e-9),
-                other => panic!("expected Float64, got {other:?}"),
+                other => unreachable!("expected Float64, got {other:?}"),
             }
         }
 
@@ -6039,7 +6061,7 @@ mod tests {
             .expect("col");
             match col.skew() {
                 Scalar::Float64(v) => assert!(v.abs() < 1e-9),
-                other => panic!("expected Float64, got {other:?}"),
+                other => unreachable!("expected Float64, got {other:?}"),
             }
         }
 
@@ -6055,7 +6077,7 @@ mod tests {
             .expect("col");
             match col.kurt() {
                 Scalar::Float64(v) => assert!((v + 1.2).abs() < 1e-9),
-                other => panic!("expected Float64, got {other:?}"),
+                other => unreachable!("expected Float64, got {other:?}"),
             }
         }
 
@@ -6079,11 +6101,8 @@ mod tests {
 
         #[test]
         fn skew_too_few_values_returns_null() {
-            let col = Column::from_values(vec![
-                Scalar::Float64(1.0),
-                Scalar::Float64(2.0),
-            ])
-            .expect("col");
+            let col =
+                Column::from_values(vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]).expect("col");
             assert!(col.skew().is_missing());
         }
 
@@ -6144,8 +6163,8 @@ mod tests {
 
         #[test]
         fn rolling_window_sum_window_zero_is_all_null() {
-            let col = Column::from_values(vec![Scalar::Float64(1.0), Scalar::Float64(2.0)])
-                .expect("col");
+            let col =
+                Column::from_values(vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]).expect("col");
             let r = col.rolling_window_sum(0, 0).expect("rolling");
             assert!(r.values()[0].is_missing());
             assert!(r.values()[1].is_missing());
@@ -6180,10 +6199,8 @@ mod tests {
 
         #[test]
         fn sample_without_replacement_deterministic_by_seed() {
-            let col = Column::from_values(
-                (0..10).map(Scalar::Int64).collect::<Vec<_>>(),
-            )
-            .expect("col");
+            let col =
+                Column::from_values((0..10).map(Scalar::Int64).collect::<Vec<_>>()).expect("col");
             let a = col.sample(3, 42).expect("sample");
             let b = col.sample(3, 42).expect("sample");
             // Same seed → identical ordering.
@@ -6193,17 +6210,15 @@ mod tests {
             for v in a.values() {
                 match v {
                     Scalar::Int64(x) => assert!((0..10).contains(x)),
-                    other => panic!("unexpected value {other:?}"),
+                    other => unreachable!("unexpected value {other:?}"),
                 }
             }
         }
 
         #[test]
         fn sample_different_seeds_likely_differ() {
-            let col = Column::from_values(
-                (0..100).map(Scalar::Int64).collect::<Vec<_>>(),
-            )
-            .expect("col");
+            let col =
+                Column::from_values((0..100).map(Scalar::Int64).collect::<Vec<_>>()).expect("col");
             let a = col.sample(5, 1).expect("sample");
             let b = col.sample(5, 2).expect("sample");
             // Two independent seeds on a 100-element population: collision
@@ -6514,7 +6529,7 @@ mod tests {
                     assert!((qv - 3.0).abs() < 1e-9);
                     assert!((rv - 1.0).abs() < 1e-9);
                 }
-                other => panic!("unexpected {other:?}"),
+                other => unreachable!("unexpected {other:?}"),
             }
             // 7 / 2 → q=3, r=1
             match (&q.values()[1], &r.values()[1]) {
@@ -6522,7 +6537,7 @@ mod tests {
                     assert!((qv - 3.0).abs() < 1e-9);
                     assert!((rv - 1.0).abs() < 1e-9);
                 }
-                other => panic!("unexpected {other:?}"),
+                other => unreachable!("unexpected {other:?}"),
             }
             // -5 / 3 → q=-2 (floor), r = -5 - (-2*3) = 1
             match (&q.values()[2], &r.values()[2]) {
@@ -6530,7 +6545,7 @@ mod tests {
                     assert!((qv + 2.0).abs() < 1e-9);
                     assert!((rv - 1.0).abs() < 1e-9);
                 }
-                other => panic!("unexpected {other:?}"),
+                other => unreachable!("unexpected {other:?}"),
             }
         }
 
@@ -6545,12 +6560,9 @@ mod tests {
 
         #[test]
         fn where_cond_series_fills_from_other_column() {
-            let col = Column::from_values(vec![
-                Scalar::Int64(1),
-                Scalar::Int64(2),
-                Scalar::Int64(3),
-            ])
-            .expect("col");
+            let col =
+                Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)])
+                    .expect("col");
             let cond = Column::from_values(vec![
                 Scalar::Bool(true),
                 Scalar::Bool(false),
@@ -6571,24 +6583,18 @@ mod tests {
 
         #[test]
         fn mask_series_fills_from_other_column() {
-            let col = Column::from_values(vec![
-                Scalar::Int64(1),
-                Scalar::Int64(2),
-                Scalar::Int64(3),
-            ])
-            .expect("col");
+            let col =
+                Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)])
+                    .expect("col");
             let cond = Column::from_values(vec![
                 Scalar::Bool(true),
                 Scalar::Bool(false),
                 Scalar::Bool(true),
             ])
             .expect("cond");
-            let other = Column::from_values(vec![
-                Scalar::Int64(0),
-                Scalar::Int64(0),
-                Scalar::Int64(0),
-            ])
-            .expect("other");
+            let other =
+                Column::from_values(vec![Scalar::Int64(0), Scalar::Int64(0), Scalar::Int64(0)])
+                    .expect("other");
             let out = col.mask_series(&cond, &other).expect("mask_series");
             assert_eq!(out.values()[0], Scalar::Int64(0));
             assert_eq!(out.values()[1], Scalar::Int64(2));
@@ -6615,7 +6621,9 @@ mod tests {
             .expect("col");
             let to_replace = vec![Scalar::Int64(2), Scalar::Int64(3)];
             let replacement = vec![Scalar::Int64(20), Scalar::Int64(30)];
-            let out = col.replace_values(&to_replace, &replacement).expect("replace");
+            let out = col
+                .replace_values(&to_replace, &replacement)
+                .expect("replace");
             assert_eq!(out.values()[0], Scalar::Int64(1));
             assert_eq!(out.values()[1], Scalar::Int64(20));
             assert_eq!(out.values()[2], Scalar::Int64(30));
@@ -6632,7 +6640,9 @@ mod tests {
             .expect("col");
             let to_replace = vec![Scalar::Null(NullKind::NaN)];
             let replacement = vec![Scalar::Int64(-1)];
-            let out = col.replace_values(&to_replace, &replacement).expect("replace");
+            let out = col
+                .replace_values(&to_replace, &replacement)
+                .expect("replace");
             assert_eq!(out.values()[0], Scalar::Int64(1));
             assert_eq!(out.values()[1], Scalar::Int64(-1));
             assert_eq!(out.values()[2], Scalar::Int64(2));
