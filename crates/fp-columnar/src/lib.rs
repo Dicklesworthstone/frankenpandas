@@ -1876,7 +1876,12 @@ impl Column {
     /// length is the min of the two inputs (pandas aligns by position
     /// when inputs are the same length; longer inputs are truncated).
     /// Length mismatch returns `LengthMismatch`.
-    pub fn combine<F>(&self, other: &Self, mut func: F, fill: Scalar) -> Result<Self, ColumnError>
+    pub fn combine<F>(
+        &self,
+        other: &Self,
+        mut func: F,
+        fill: Option<Scalar>,
+    ) -> Result<Self, ColumnError>
     where
         F: FnMut(&Scalar, &Scalar) -> Scalar,
     {
@@ -1891,9 +1896,22 @@ impl Column {
             .iter()
             .zip(other.values.iter())
             .map(|(a, b)| {
-                let left = if a.is_missing() { &fill } else { a };
-                let right = if b.is_missing() { &fill } else { b };
-                func(left, right)
+                let a_miss = a.is_missing();
+                let b_miss = b.is_missing();
+                match (a_miss || b_miss, fill.as_ref()) {
+                    // pandas fill_value=None: propagate null, do not invoke func.
+                    (true, None) => Scalar::Null(NullKind::NaN),
+                    (_, fill_opt) => {
+                        let default = fill_opt.unwrap_or(a);
+                        let left = if a_miss { default } else { a };
+                        let right = if b_miss {
+                            fill_opt.unwrap_or(b)
+                        } else {
+                            b
+                        };
+                        func(left, right)
+                    }
+                }
             })
             .collect();
         let inferred = infer_dtype(&out).unwrap_or(self.dtype);
@@ -5767,7 +5785,7 @@ mod tests {
                             Scalar::Null(NullKind::NaN)
                         }
                     },
-                    Scalar::Int64(0),
+                    Some(Scalar::Int64(0)),
                 )
                 .expect("combine");
             assert_eq!(out.values()[0], Scalar::Float64(11.0));
@@ -5780,9 +5798,58 @@ mod tests {
             let a = Column::from_values(vec![Scalar::Int64(1)]).expect("a");
             let b = Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2)]).expect("b");
             let err = a
-                .combine(&b, |l, _| l.clone(), Scalar::Int64(0))
+                .combine(&b, |l, _| l.clone(), Some(Scalar::Int64(0)))
                 .unwrap_err();
             assert!(matches!(err, crate::ColumnError::LengthMismatch { .. }));
+        }
+
+        #[test]
+        fn combine_fill_none_propagates_nulls_without_invoking_func() {
+            let a = Column::from_values(vec![
+                Scalar::Float64(1.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(3.0),
+            ])
+            .expect("a");
+            let b = Column::from_values(vec![
+                Scalar::Float64(10.0),
+                Scalar::Float64(20.0),
+                Scalar::Null(NullKind::NaN),
+            ])
+            .expect("b");
+            let mut calls = 0usize;
+            let out = a
+                .combine(
+                    &b,
+                    |l, r| {
+                        calls += 1;
+                        Scalar::Float64(l.to_f64().unwrap() + r.to_f64().unwrap())
+                    },
+                    None,
+                )
+                .expect("combine");
+            // Only the position with both non-null invokes func.
+            assert_eq!(calls, 1);
+            assert_eq!(out.values()[0], Scalar::Float64(11.0));
+            assert!(out.values()[1].is_missing());
+            assert!(out.values()[2].is_missing());
+        }
+
+        #[test]
+        fn combine_fill_none_all_present_matches_elementwise_apply() {
+            let a = Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2)]).expect("a");
+            let b = Column::from_values(vec![Scalar::Int64(10), Scalar::Int64(20)]).expect("b");
+            let out = a
+                .combine(
+                    &b,
+                    |l, r| {
+                        Scalar::Int64(l.to_f64().unwrap() as i64 + r.to_f64().unwrap() as i64)
+                    },
+                    None,
+                )
+                .expect("combine");
+            assert_eq!(out.values()[0], Scalar::Int64(11));
+            assert_eq!(out.values()[1], Scalar::Int64(22));
         }
 
         #[test]
