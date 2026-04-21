@@ -2965,6 +2965,50 @@ pub fn read_sql_table(conn: &rusqlite::Connection, table_name: &str) -> Result<D
     read_sql(conn, &format!("SELECT * FROM \"{escaped_table}\""))
 }
 
+/// Read a subset of columns from a SQL table.
+///
+/// Matches `pd.read_sql_table(table, con, columns=[...])`. The named
+/// columns are emitted in the requested order. Each column name must
+/// satisfy the same alphanumeric+underscore rule as `table_name` to
+/// keep the projection injection-safe; mismatched names return
+/// `IoError::Sql`. Empty `columns` is rejected (pandas raises in
+/// the same case rather than producing an empty SELECT).
+pub fn read_sql_table_columns(
+    conn: &rusqlite::Connection,
+    table_name: &str,
+    columns: &[&str],
+) -> Result<DataFrame, IoError> {
+    if table_name.is_empty() || !table_name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+        return Err(IoError::Sql(format!(
+            "invalid table name: '{table_name}' (must be non-empty, only alphanumeric and underscore allowed)"
+        )));
+    }
+    if columns.is_empty() {
+        return Err(IoError::Sql(
+            "read_sql_table_columns: columns must be non-empty".to_owned(),
+        ));
+    }
+    for name in columns {
+        if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+            return Err(IoError::Sql(format!(
+                "invalid column name: '{name}' (must be non-empty, only alphanumeric and underscore allowed)"
+            )));
+        }
+    }
+
+    let escaped_table = escape_sql_ident(table_name)?;
+    let projection: Vec<String> = columns
+        .iter()
+        .map(|c| escape_sql_ident(c).map(|q| format!("\"{q}\"")))
+        .collect::<Result<_, _>>()?;
+    let query = format!(
+        "SELECT {} FROM \"{}\"",
+        projection.join(", "),
+        escaped_table
+    );
+    read_sql(conn, &query)
+}
+
 /// Write a DataFrame to a SQLite table.
 ///
 /// Matches `pd.DataFrame.to_sql(name, con)`.
@@ -5389,8 +5433,8 @@ mod tests {
     // ── SQL I/O tests ──────────────────────────────────────────────
 
     use super::{
-        SqlIfExists, SqlReadOptions, read_sql, read_sql_table, read_sql_table_with_index_col,
-        read_sql_with_index_col, read_sql_with_options, write_sql,
+        SqlIfExists, SqlReadOptions, read_sql, read_sql_table, read_sql_table_columns,
+        read_sql_table_with_index_col, read_sql_with_index_col, read_sql_with_options, write_sql,
     };
 
     fn make_sql_test_conn() -> rusqlite::Connection {
@@ -5437,6 +5481,67 @@ mod tests {
         let conn = make_sql_test_conn();
         write_sql(&frame, &conn, "missing_tbl", SqlIfExists::Fail).expect("write");
         let err = read_sql_table_with_index_col(&conn, "missing_tbl", Some("nope")).unwrap_err();
+        assert!(matches!(err, crate::IoError::Sql(_)));
+    }
+
+    #[test]
+    fn sql_read_table_columns_returns_requested_projection_in_order() {
+        let frame = make_test_dataframe();
+        let conn = make_sql_test_conn();
+        write_sql(&frame, &conn, "proj_tbl", SqlIfExists::Fail).expect("write");
+
+        let result = read_sql_table_columns(&conn, "proj_tbl", &["names", "ints"])
+            .expect("subset projection");
+        let names: Vec<&str> = result.column_names().iter().map(|s| s.as_str()).collect();
+        assert_eq!(names, vec!["names", "ints"]);
+        assert_eq!(result.index().len(), 3);
+        assert_eq!(
+            result.column("ints").unwrap().values()[0],
+            Scalar::Int64(10)
+        );
+        assert_eq!(
+            result.column("names").unwrap().values()[2],
+            Scalar::Utf8("carol".into())
+        );
+    }
+
+    #[test]
+    fn sql_read_table_columns_single_column_projection() {
+        let frame = make_test_dataframe();
+        let conn = make_sql_test_conn();
+        write_sql(&frame, &conn, "single_tbl", SqlIfExists::Fail).expect("write");
+
+        let result =
+            read_sql_table_columns(&conn, "single_tbl", &["floats"]).expect("single projection");
+        let names: Vec<&str> = result.column_names().iter().map(|s| s.as_str()).collect();
+        assert_eq!(names, vec!["floats"]);
+        assert_eq!(
+            result.column("floats").unwrap().values()[1],
+            Scalar::Float64(2.5)
+        );
+    }
+
+    #[test]
+    fn sql_read_table_columns_rejects_empty_columns() {
+        let conn = make_sql_test_conn();
+        let err = read_sql_table_columns(&conn, "any_tbl", &[]).unwrap_err();
+        assert!(matches!(err, crate::IoError::Sql(_)));
+    }
+
+    #[test]
+    fn sql_read_table_columns_rejects_invalid_column_name() {
+        let frame = make_test_dataframe();
+        let conn = make_sql_test_conn();
+        write_sql(&frame, &conn, "valid_tbl", SqlIfExists::Fail).expect("write");
+        let err = read_sql_table_columns(&conn, "valid_tbl", &["ints; DROP TABLE valid_tbl"])
+            .unwrap_err();
+        assert!(matches!(err, crate::IoError::Sql(_)));
+    }
+
+    #[test]
+    fn sql_read_table_columns_rejects_invalid_table_name() {
+        let conn = make_sql_test_conn();
+        let err = read_sql_table_columns(&conn, "bad table", &["ints"]).unwrap_err();
         assert!(matches!(err, crate::IoError::Sql(_)));
     }
 
