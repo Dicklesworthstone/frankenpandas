@@ -13311,6 +13311,28 @@ pub enum DataFrameColumnInput {
     Scalar(Scalar),
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum DataFrameDictResult {
+    Mapping(BTreeMap<String, Vec<(String, Scalar)>>),
+    Series(BTreeMap<String, Series>),
+}
+
+impl DataFrameDictResult {
+    pub fn as_mapping(&self) -> Option<&BTreeMap<String, Vec<(String, Scalar)>>> {
+        match self {
+            Self::Mapping(mapping) => Some(mapping),
+            Self::Series(_) => None,
+        }
+    }
+
+    pub fn as_series(&self) -> Option<&BTreeMap<String, Series>> {
+        match self {
+            Self::Series(series) => Some(series),
+            Self::Mapping(_) => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DataFrameCsvReadOptions {
     pub sep: char,
@@ -19199,10 +19221,8 @@ impl DataFrame {
     /// - `"list"`: `{column -> [values]}`
     /// - `"records"`: `[{column -> value}, ...]`
     /// - `"index"`: `{index -> {column -> value}}`
-    pub fn to_dict(
-        &self,
-        orient: &str,
-    ) -> Result<BTreeMap<String, Vec<(String, Scalar)>>, FrameError> {
+    /// - `"series"`: `{column -> Series}`
+    pub fn to_dict(&self, orient: &str) -> Result<DataFrameDictResult, FrameError> {
         match orient {
             "dict" => {
                 let mut result = BTreeMap::new();
@@ -19217,7 +19237,7 @@ impl DataFrame {
                         .collect();
                     result.insert(col_name.clone(), entries);
                 }
-                Ok(result)
+                Ok(DataFrameDictResult::Mapping(result))
             }
             "list" => {
                 let mut result = BTreeMap::new();
@@ -19231,7 +19251,7 @@ impl DataFrame {
                         .collect();
                     result.insert(col_name.clone(), entries);
                 }
-                Ok(result)
+                Ok(DataFrameDictResult::Mapping(result))
             }
             "records" => {
                 let mut result = BTreeMap::new();
@@ -19246,7 +19266,7 @@ impl DataFrame {
                         .collect();
                     result.insert(row_idx.to_string(), entries);
                 }
-                Ok(result)
+                Ok(DataFrameDictResult::Mapping(result))
             }
             "index" => {
                 let mut result = BTreeMap::new();
@@ -19261,7 +19281,11 @@ impl DataFrame {
                         .collect();
                     result.insert(label.to_string(), entries);
                 }
-                Ok(result)
+                Ok(DataFrameDictResult::Mapping(result))
+            }
+            "series" => {
+                let result = self.to_series_dict();
+                Ok(DataFrameDictResult::Series(result))
             }
             "split" => {
                 // Split orient: returns columns, index, data as separate entries
@@ -19305,7 +19329,7 @@ impl DataFrame {
                         .collect();
                     result.insert(format!("data_{row_idx}"), entries);
                 }
-                Ok(result)
+                Ok(DataFrameDictResult::Mapping(result))
             }
             "tight" => {
                 // Tight orient: comprehensive representation with metadata.
@@ -19367,7 +19391,7 @@ impl DataFrame {
                     vec![("0".to_owned(), Scalar::Null(NullKind::Null))],
                 );
 
-                Ok(result)
+                Ok(DataFrameDictResult::Mapping(result))
             }
             other => Err(FrameError::CompatibilityRejected(format!(
                 "unsupported to_dict orient: {other:?}"
@@ -38184,6 +38208,9 @@ mod tests {
         ])
         .unwrap();
         let result = df.to_dict("dict").unwrap();
+        let result = result
+            .as_mapping()
+            .expect("dict orient should return mapping");
         assert!(result.contains_key("a"));
         assert_eq!(result["a"].len(), 2);
     }
@@ -38200,6 +38227,9 @@ mod tests {
         ])
         .unwrap();
         let result = df.to_dict("records").unwrap();
+        let result = result
+            .as_mapping()
+            .expect("records orient should return mapping");
         assert_eq!(result.len(), 2); // 2 rows
     }
 
@@ -38227,6 +38257,9 @@ mod tests {
         .unwrap();
 
         let result = df.to_dict("tight").unwrap();
+        let result = result
+            .as_mapping()
+            .expect("tight orient should return mapping");
         assert!(result.contains_key("columns"));
         assert!(result.contains_key("index"));
         assert!(result.contains_key("data_0"));
@@ -38247,6 +38280,9 @@ mod tests {
 
         // Dict orient: keys should be display-formatted labels ("0"), not debug ("Int64(0)")
         let result = df.to_dict("dict").unwrap();
+        let result = result
+            .as_mapping()
+            .expect("dict orient should return mapping");
         let key = &result["val"][0].0;
         assert_eq!(
             key, "0",
@@ -38259,11 +38295,36 @@ mod tests {
         let df = DataFrame::from_dict(&["val"], vec![("val", vec![Scalar::Int64(42)])]).unwrap();
 
         let result = df.to_dict("index").unwrap();
+        let result = result
+            .as_mapping()
+            .expect("index orient should return mapping");
         assert!(
             result.contains_key("0"),
             "index orient key should be '0', got keys: {:?}",
             result.keys().collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn dataframe_to_dict_series() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                ("b", vec![Scalar::Float64(3.0), Scalar::Float64(4.0)]),
+            ],
+        )
+        .unwrap();
+
+        let result = df.to_dict("series").unwrap();
+        let result = result
+            .as_series()
+            .expect("series orient should return series mapping");
+        assert_eq!(result.len(), 2);
+        assert_eq!(result["a"].name(), "a");
+        assert_eq!(result["a"].values()[0], Scalar::Int64(1));
+        assert_eq!(result["b"].values()[1], Scalar::Float64(4.0));
+        assert_eq!(result["a"].index(), df.index());
     }
 
     #[test]
