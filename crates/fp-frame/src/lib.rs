@@ -7963,6 +7963,15 @@ impl DataFrameEwm<'_> {
     pub fn var(&self) -> Result<DataFrame, FrameError> {
         self.apply_ewm(|s, span, alpha| s.ewm(span, alpha).var())
     }
+
+    /// EWM weighted sum across all numeric columns.
+    ///
+    /// Matches `pd.DataFrame.ewm(span=...).sum()`. Non-numeric columns
+    /// are skipped (same policy as the existing mean/std/var
+    /// reducers).
+    pub fn sum(&self) -> Result<DataFrame, FrameError> {
+        self.apply_ewm(|s, span, alpha| s.ewm(span, alpha).sum())
+    }
 }
 
 /// Time-based resampling view over a DataFrame's numeric columns.
@@ -45370,6 +45379,69 @@ mod tests {
     }
 
     // ── DataFrame EWM tests ──
+
+    #[test]
+    fn df_ewm_sum_per_column() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(30.0),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let result = df.ewm(None, Some(0.5)).sum().unwrap();
+        assert_eq!(result.len(), 3);
+        assert_eq!(result.column_names().len(), 2);
+        let a = result.column_as_series("a").unwrap();
+        // Recursive sum with alpha=0.5: 1, 2.5, 4.25
+        assert_eq!(a.values()[0], Scalar::Float64(1.0));
+        assert_eq!(a.values()[1], Scalar::Float64(2.5));
+        assert_eq!(a.values()[2], Scalar::Float64(4.25));
+        let b = result.column_as_series("b").unwrap();
+        // 10, 25, 42.5
+        assert_eq!(b.values()[0], Scalar::Float64(10.0));
+        assert_eq!(b.values()[1], Scalar::Float64(25.0));
+        assert_eq!(b.values()[2], Scalar::Float64(42.5));
+    }
+
+    #[test]
+    fn df_ewm_sum_skips_non_numeric_columns() {
+        let df = DataFrame::from_dict(
+            &["a", "label"],
+            vec![
+                (
+                    "a",
+                    vec![Scalar::Float64(1.0), Scalar::Float64(2.0)],
+                ),
+                (
+                    "label",
+                    vec![
+                        Scalar::Utf8("x".into()),
+                        Scalar::Utf8("y".into()),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let result = df.ewm(None, Some(0.5)).sum().unwrap();
+        assert_eq!(result.column_names(), vec!["a"]);
+    }
 
     #[test]
     fn df_ewm_mean() {
