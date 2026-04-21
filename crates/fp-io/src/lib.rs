@@ -650,8 +650,7 @@ fn apply_parse_date_combinations_named(
         return Ok(());
     }
 
-    let mut assigned_names: std::collections::HashSet<String> =
-        std::collections::HashSet::new();
+    let mut assigned_names: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (new_name, _) in parse_date_combinations_named {
         if !assigned_names.insert(new_name.clone()) {
             return Err(IoError::DuplicateColumnName(new_name.clone()));
@@ -2832,6 +2831,8 @@ pub enum SqlIfExists {
 /// Options for reading SQL query results into a DataFrame.
 #[derive(Debug, Clone, Default)]
 pub struct SqlReadOptions {
+    /// Positional parameters to bind to `?` placeholders in the SQL query.
+    pub params: Option<Vec<Scalar>>,
     /// Column names to coerce via pandas-style parse_dates handling.
     /// Currently supports explicit column-name selection.
     pub parse_dates: Option<Vec<String>>,
@@ -2966,7 +2967,7 @@ pub fn read_sql(conn: &rusqlite::Connection, query: &str) -> Result<DataFrame, I
 
 /// Read the result of a SQL query into a DataFrame with read-time options.
 ///
-/// Matches the supported subset of `pd.read_sql(sql, con, parse_dates=...)`.
+/// Matches the supported subset of `pd.read_sql(sql, con, params=[...], parse_dates=...)`.
 pub fn read_sql_with_options(
     conn: &rusqlite::Connection,
     query: &str,
@@ -2984,8 +2985,14 @@ pub fn read_sql_with_options(
 
     let mut columns: Vec<Vec<Scalar>> = (0..col_count).map(|_| Vec::new()).collect();
 
+    let sql_params = options
+        .params
+        .as_ref()
+        .map(|params| params.iter().map(sql_value_from_scalar).collect::<Vec<_>>())
+        .unwrap_or_default();
+
     let mut rows = stmt
-        .query([])
+        .query(rusqlite::params_from_iter(sql_params.iter()))
         .map_err(|e| IoError::Sql(format!("query failed: {e}")))?;
 
     while let Some(row) = rows
@@ -5952,6 +5959,7 @@ mod tests {
             &conn,
             "SELECT ts, value FROM events ORDER BY value",
             &SqlReadOptions {
+                params: None,
                 parse_dates: Some(vec!["ts".to_owned()]),
             },
         )
@@ -5982,6 +5990,7 @@ mod tests {
             &conn,
             "SELECT value FROM metrics",
             &SqlReadOptions {
+                params: None,
                 parse_dates: Some(vec!["ts".to_owned()]),
             },
         )
@@ -5990,6 +5999,52 @@ mod tests {
         assert!(
             matches!(err, IoError::MissingParseDateColumns(missing) if missing == vec!["ts".to_owned()])
         );
+    }
+
+    #[test]
+    fn sql_read_with_params_binds_positional_placeholders() {
+        let frame = make_test_dataframe();
+        let conn = make_sql_test_conn();
+        write_sql(&frame, &conn, "data", SqlIfExists::Fail).unwrap();
+
+        let filtered = read_sql_with_options(
+            &conn,
+            "SELECT ints, names FROM data WHERE ints > ? AND names != ? ORDER BY ints",
+            &SqlReadOptions {
+                params: Some(vec![Scalar::Int64(15), Scalar::Utf8("bob".to_owned())]),
+                parse_dates: None,
+            },
+        )
+        .expect("read sql with params");
+
+        assert_eq!(filtered.index().len(), 1);
+        assert_eq!(
+            filtered.column("ints").unwrap().values(),
+            &[Scalar::Int64(30)]
+        );
+        assert_eq!(
+            filtered.column("names").unwrap().values(),
+            &[Scalar::Utf8("carol".into())]
+        );
+    }
+
+    #[test]
+    fn sql_read_with_params_wrong_arity_errors() {
+        let frame = make_test_dataframe();
+        let conn = make_sql_test_conn();
+        write_sql(&frame, &conn, "data", SqlIfExists::Fail).unwrap();
+
+        let err = read_sql_with_options(
+            &conn,
+            "SELECT ints FROM data WHERE ints > ? AND names != ?",
+            &SqlReadOptions {
+                params: Some(vec![Scalar::Int64(15)]),
+                parse_dates: None,
+            },
+        )
+        .expect_err("wrong arity should error");
+
+        assert!(matches!(err, IoError::Sql(msg) if msg.contains("parameter")));
     }
 
     #[test]
@@ -6666,8 +6721,7 @@ mod tests {
 
     #[test]
     fn csv_parse_date_combinations_named_multiple_groups() {
-        let input =
-            "d1,t1,d2,t2,value\n2024-01-01,09:00:00,2024-01-01,17:00:00,10\n2024-02-01,09:00:00,2024-02-01,17:00:00,20\n";
+        let input = "d1,t1,d2,t2,value\n2024-01-01,09:00:00,2024-01-01,17:00:00,10\n2024-02-01,09:00:00,2024-02-01,17:00:00,20\n";
         let opts = CsvReadOptions {
             parse_date_combinations_named: Some(vec![
                 ("start".to_owned(), vec!["d1".to_owned(), "t1".to_owned()]),
