@@ -46,6 +46,18 @@ impl IndexLabel {
     }
 }
 
+fn index_label_is_truthy(label: &IndexLabel) -> bool {
+    if label.is_missing() {
+        return false;
+    }
+    match label {
+        IndexLabel::Int64(v) => *v != 0,
+        IndexLabel::Utf8(s) => !s.is_empty(),
+        IndexLabel::Timedelta64(v) => *v != 0,
+        IndexLabel::Datetime64(v) => *v != 0,
+    }
+}
+
 impl fmt::Display for IndexLabel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -824,6 +836,102 @@ impl Index {
                 })
                 .collect(),
         ))
+    }
+
+    /// Equality check against another Index.
+    ///
+    /// Matches `pd.Index.equals(other)`. Returns true iff `other` has
+    /// the same labels in the same order. Names are ignored (use
+    /// `identical` for a name-sensitive check).
+    #[must_use]
+    pub fn equals(&self, other: &Self) -> bool {
+        self.labels == other.labels
+    }
+
+    /// Strict equality including name.
+    ///
+    /// Matches `pd.Index.identical(other)`. Requires the same labels in
+    /// the same order AND the same name.
+    #[must_use]
+    pub fn identical(&self, other: &Self) -> bool {
+        self.labels == other.labels && self.name == other.name
+    }
+
+    /// Count occurrences of each distinct label.
+    ///
+    /// Matches `pd.Index.value_counts()`. Returns a `Vec<(IndexLabel, usize)>`
+    /// sorted by descending count (first-seen wins on ties).
+    #[must_use]
+    pub fn value_counts(&self) -> Vec<(IndexLabel, usize)> {
+        let mut seen_order: Vec<IndexLabel> = Vec::new();
+        let mut counts: HashMap<IndexLabel, usize> = HashMap::new();
+        for label in &self.labels {
+            if !counts.contains_key(label) {
+                seen_order.push(label.clone());
+            }
+            *counts.entry(label.clone()).or_insert(0) += 1;
+        }
+        let mut pairs: Vec<(IndexLabel, usize)> = seen_order
+            .into_iter()
+            .map(|label| {
+                let count = counts[&label];
+                (label, count)
+            })
+            .collect();
+        pairs.sort_by_key(|b| std::cmp::Reverse(b.1));
+        pairs
+    }
+
+    /// Shift the labels by `periods` positions, filling vacated slots
+    /// with `fill`.
+    ///
+    /// Matches `pd.Index.shift(periods, fill_value=...)` for the
+    /// positional form (pandas also supports a `freq`-aware shift for
+    /// datetime indexes; that path is out of scope here). Positive
+    /// periods shift right; negative shift left.
+    #[must_use]
+    pub fn shift(&self, periods: i64, fill: IndexLabel) -> Self {
+        let len = self.labels.len();
+        if len == 0 || periods == 0 {
+            return self.clone();
+        }
+        let mut out: Vec<IndexLabel> = Vec::with_capacity(len);
+        let abs = periods.unsigned_abs() as usize;
+        if abs >= len {
+            for _ in 0..len {
+                out.push(fill.clone());
+            }
+        } else if periods > 0 {
+            for _ in 0..abs {
+                out.push(fill.clone());
+            }
+            out.extend_from_slice(&self.labels[..len - abs]);
+        } else {
+            out.extend_from_slice(&self.labels[abs..]);
+            for _ in 0..abs {
+                out.push(fill.clone());
+            }
+        }
+        self.propagate_name(Self::new(out))
+    }
+
+    /// Whether any label coerces to true.
+    ///
+    /// Matches `pd.Index.any()`. Non-zero integers, non-empty strings,
+    /// and non-NaT timedeltas count as truthy. Missing labels are
+    /// treated as falsy. Empty index returns false.
+    #[must_use]
+    pub fn any(&self) -> bool {
+        self.labels.iter().any(index_label_is_truthy)
+    }
+
+    /// Whether all labels coerce to true.
+    ///
+    /// Matches `pd.Index.all()`. Empty index returns true (pandas
+    /// convention: vacuously true). Missing labels count as falsy.
+    #[must_use]
+    pub fn all(&self) -> bool {
+        self.labels.iter().all(index_label_is_truthy)
     }
 
     /// Drop missing labels, preserving order.
@@ -3384,6 +3492,136 @@ mod tests {
         let idx = Index::from_i64(vec![1, 2]);
         let result = idx.repeat(1);
         assert_eq!(result.labels(), idx.labels());
+    }
+
+    #[test]
+    fn index_equals_same_labels_ignores_name() {
+        let a = Index::from_i64(vec![1, 2, 3]).set_name("x");
+        let b = Index::from_i64(vec![1, 2, 3]).set_name("y");
+        assert!(a.equals(&b));
+    }
+
+    #[test]
+    fn index_equals_differing_labels_false() {
+        let a = Index::from_i64(vec![1, 2, 3]);
+        let b = Index::from_i64(vec![1, 2]);
+        assert!(!a.equals(&b));
+    }
+
+    #[test]
+    fn index_identical_requires_matching_name() {
+        let a = Index::from_i64(vec![1, 2]).set_name("x");
+        let b = Index::from_i64(vec![1, 2]).set_name("y");
+        assert!(a.equals(&b));
+        assert!(!a.identical(&b));
+        let c = Index::from_i64(vec![1, 2]).set_name("x");
+        assert!(a.identical(&c));
+    }
+
+    #[test]
+    fn index_value_counts_sorts_by_descending_count() {
+        let idx = Index::new(vec![
+            "a".into(),
+            "b".into(),
+            "a".into(),
+            "c".into(),
+            "a".into(),
+            "b".into(),
+        ]);
+        let counts = idx.value_counts();
+        assert_eq!(counts[0].0, IndexLabel::Utf8("a".into()));
+        assert_eq!(counts[0].1, 3);
+        assert_eq!(counts[1].0, IndexLabel::Utf8("b".into()));
+        assert_eq!(counts[1].1, 2);
+        assert_eq!(counts[2].0, IndexLabel::Utf8("c".into()));
+        assert_eq!(counts[2].1, 1);
+    }
+
+    #[test]
+    fn index_value_counts_empty() {
+        let idx = Index::new(Vec::<IndexLabel>::new());
+        assert!(idx.value_counts().is_empty());
+    }
+
+    #[test]
+    fn index_shift_positive_pads_left() {
+        let idx = Index::from_i64(vec![1, 2, 3, 4]).set_name("k");
+        let shifted = idx.shift(2, IndexLabel::Int64(-1));
+        assert_eq!(
+            shifted.labels(),
+            &[
+                IndexLabel::Int64(-1),
+                IndexLabel::Int64(-1),
+                IndexLabel::Int64(1),
+                IndexLabel::Int64(2),
+            ]
+        );
+        assert_eq!(shifted.name(), Some("k"));
+    }
+
+    #[test]
+    fn index_shift_negative_pads_right() {
+        let idx = Index::from_i64(vec![1, 2, 3, 4]);
+        let shifted = idx.shift(-1, IndexLabel::Int64(0));
+        assert_eq!(
+            shifted.labels(),
+            &[
+                IndexLabel::Int64(2),
+                IndexLabel::Int64(3),
+                IndexLabel::Int64(4),
+                IndexLabel::Int64(0),
+            ]
+        );
+    }
+
+    #[test]
+    fn index_shift_zero_is_clone() {
+        let idx = Index::from_i64(vec![1, 2, 3]);
+        let shifted = idx.shift(0, IndexLabel::Int64(-1));
+        assert_eq!(shifted.labels(), idx.labels());
+    }
+
+    #[test]
+    fn index_shift_larger_than_len_fills_all() {
+        let idx = Index::from_i64(vec![1, 2, 3]);
+        let shifted = idx.shift(10, IndexLabel::Int64(-1));
+        assert_eq!(
+            shifted.labels(),
+            &[
+                IndexLabel::Int64(-1),
+                IndexLabel::Int64(-1),
+                IndexLabel::Int64(-1),
+            ]
+        );
+    }
+
+    #[test]
+    fn index_any_all_basic() {
+        let idx = Index::from_i64(vec![0, 0, 1]);
+        assert!(idx.any());
+        assert!(!idx.all());
+
+        let all_nonzero = Index::from_i64(vec![1, 2, 3]);
+        assert!(all_nonzero.all());
+        assert!(all_nonzero.any());
+
+        let all_zero = Index::from_i64(vec![0, 0]);
+        assert!(!all_zero.any());
+        assert!(!all_zero.all());
+    }
+
+    #[test]
+    fn index_all_empty_is_true() {
+        let idx = Index::new(Vec::<IndexLabel>::new());
+        assert!(idx.all());
+        assert!(!idx.any());
+    }
+
+    #[test]
+    fn index_any_string_nonempty_truthy() {
+        let idx = Index::new(vec!["".into(), "".into(), "x".into()]);
+        assert!(idx.any());
+        assert!(!idx.all());
     }
 
     #[test]
