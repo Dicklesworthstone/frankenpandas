@@ -6770,6 +6770,97 @@ impl Rolling<'_> {
         )
     }
 
+    /// Rolling first non-null value.
+    pub fn first(&self) -> Result<Series, FrameError> {
+        let vals = self.series.column().values();
+        let len = vals.len();
+        let mut out = Vec::with_capacity(len);
+
+        if self.center {
+            let half = self.window / 2;
+            for i in 0..len {
+                let start = i.saturating_sub(half);
+                let end = (i + half + self.window % 2).min(len);
+                let window_slice = &vals[start..end];
+                let nums = Self::window_values(window_slice);
+
+                if nums.len() < self.min_periods || window_slice.len() < self.window {
+                    out.push(Scalar::Null(NullKind::NaN));
+                } else {
+                    out.push(Scalar::Float64(nums[0]));
+                }
+            }
+        } else {
+            for i in 0..len {
+                let start = (i + 1).saturating_sub(self.window);
+                let window_slice = &vals[start..=i];
+                let nums = Self::window_values(window_slice);
+
+                if i + 1 < self.window || nums.len() < self.min_periods {
+                    out.push(Scalar::Null(NullKind::NaN));
+                } else {
+                    out.push(Scalar::Float64(nums[0]));
+                }
+            }
+        }
+
+        Series::from_values(
+            self.series.name(),
+            self.series.index().labels().to_vec(),
+            out,
+        )
+    }
+
+    /// Rolling last non-null value.
+    pub fn last(&self) -> Result<Series, FrameError> {
+        let vals = self.series.column().values();
+        let len = vals.len();
+        let mut out = Vec::with_capacity(len);
+
+        if self.center {
+            let half = self.window / 2;
+            for i in 0..len {
+                let start = i.saturating_sub(half);
+                let end = (i + half + self.window % 2).min(len);
+                let window_slice = &vals[start..end];
+                let nums = Self::window_values(window_slice);
+
+                if nums.len() < self.min_periods || window_slice.len() < self.window {
+                    out.push(Scalar::Null(NullKind::NaN));
+                } else {
+                    out.push(Scalar::Float64(
+                        *nums.last().expect("non-empty after min_periods"),
+                    ));
+                }
+            }
+        } else {
+            for i in 0..len {
+                let start = (i + 1).saturating_sub(self.window);
+                let window_slice = &vals[start..=i];
+                let nums = Self::window_values(window_slice);
+
+                if i + 1 < self.window || nums.len() < self.min_periods {
+                    out.push(Scalar::Null(NullKind::NaN));
+                } else {
+                    out.push(Scalar::Float64(
+                        *nums.last().expect("non-empty after min_periods"),
+                    ));
+                }
+            }
+        }
+
+        Series::from_values(
+            self.series.name(),
+            self.series.index().labels().to_vec(),
+            out,
+        )
+    }
+
+    /// Rolling product.
+    pub fn prod(&self) -> Result<Series, FrameError> {
+        self.apply_rolling(|nums| nums.iter().product(), self.series.name())
+    }
+
     /// Rolling quantile.
     ///
     /// Matches `series.rolling(window).quantile(q)`.
@@ -6997,6 +7088,9 @@ impl Rolling<'_> {
                 "var" => self.var()?,
                 "median" => self.median()?,
                 "count" => self.count()?,
+                "first" => self.first()?,
+                "last" => self.last()?,
+                "prod" => self.prod()?,
                 "skew" => self.skew()?,
                 "kurt" => self.kurt()?,
                 _ => {
@@ -57034,11 +57128,44 @@ mod tests {
             ],
         )
         .unwrap();
-        let result = s.rolling(2, None).agg(&["sum", "mean"]).unwrap();
+        let result = s
+            .rolling(2, None)
+            .agg(&["sum", "mean", "first", "last", "prod"])
+            .unwrap();
         let col_names: Vec<String> = result.column_names().into_iter().cloned().collect();
         assert!(col_names.contains(&"sum".to_string()));
         assert!(col_names.contains(&"mean".to_string()));
+        assert!(col_names.contains(&"first".to_string()));
+        assert!(col_names.contains(&"last".to_string()));
+        assert!(col_names.contains(&"prod".to_string()));
         assert_eq!(result.len(), 4); // same length as input
+        assert_eq!(
+            result.columns["first"].values(),
+            &[
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+            ]
+        );
+        assert_eq!(
+            result.columns["last"].values(),
+            &[
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(4.0),
+            ]
+        );
+        assert_eq!(
+            result.columns["prod"].values(),
+            &[
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(2.0),
+                Scalar::Float64(6.0),
+                Scalar::Float64(12.0),
+            ]
+        );
     }
 
     #[test]
