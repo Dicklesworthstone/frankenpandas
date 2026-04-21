@@ -243,6 +243,12 @@ pub struct CsvWriteOptions {
     pub na_rep: String,
     /// If false, the header row is omitted. Matches pandas `header=False`.
     pub header: bool,
+    /// If true, include the index as the first column. Matches pandas `index`.
+    pub include_index: bool,
+    /// Optional label for the index column header. Matches pandas `index_label`.
+    /// When omitted, a named index uses its name and an unnamed index writes an
+    /// empty header cell.
+    pub index_label: Option<String>,
 }
 
 impl Default for CsvWriteOptions {
@@ -251,16 +257,18 @@ impl Default for CsvWriteOptions {
             delimiter: b',',
             na_rep: String::new(),
             header: true,
+            include_index: false,
+            index_label: None,
         }
     }
 }
 
 /// Serialize a DataFrame to CSV with explicit options.
 ///
-/// Matches `pd.DataFrame.to_csv(sep, na_rep, header)` for the in-memory
-/// string form. Null and NaN-like values are substituted with
-/// `options.na_rep`; all other scalars use the same stringification as
-/// the default `write_csv_string`.
+/// Matches `pd.DataFrame.to_csv(sep, na_rep, header, index, index_label)`
+/// for the in-memory string form. Null and NaN-like values are
+/// substituted with `options.na_rep`; all other scalars use the same
+/// stringification as the default `write_csv_string`.
 pub fn write_csv_string_with_options(
     frame: &DataFrame,
     options: &CsvWriteOptions,
@@ -275,27 +283,40 @@ pub fn write_csv_string_with_options(
         .cloned()
         .collect::<Vec<_>>();
     if options.header {
-        writer.write_record(&headers)?;
+        let mut header_row =
+            Vec::with_capacity(headers.len() + if options.include_index { 1 } else { 0 });
+        if options.include_index {
+            header_row.push(resolve_csv_index_header(frame, options));
+        }
+        header_row.extend(headers.iter().cloned());
+        writer.write_record(&header_row)?;
     }
 
     for row_idx in 0..frame.index().len() {
-        let row = headers
-            .iter()
-            .map(|name| {
-                let value = frame
-                    .column(name)
-                    .and_then(|column| column.value(row_idx));
-                match value {
-                    Some(scalar) => scalar_to_csv_with_na(scalar, &options.na_rep),
-                    None => options.na_rep.clone(),
-                }
-            })
-            .collect::<Vec<_>>();
+        let mut row = Vec::with_capacity(headers.len() + if options.include_index { 1 } else { 0 });
+        if options.include_index {
+            row.push(frame.index().labels()[row_idx].to_string());
+        }
+        row.extend(headers.iter().map(|name| {
+            let value = frame.column(name).and_then(|column| column.value(row_idx));
+            match value {
+                Some(scalar) => scalar_to_csv_with_na(scalar, &options.na_rep),
+                None => options.na_rep.clone(),
+            }
+        }));
         writer.write_record(&row)?;
     }
 
     let bytes = writer.into_inner().map_err(|err| err.into_error())?;
     Ok(String::from_utf8(bytes)?)
+}
+
+fn resolve_csv_index_header(frame: &DataFrame, options: &CsvWriteOptions) -> String {
+    options
+        .index_label
+        .clone()
+        .or_else(|| frame.index().name().map(ToOwned::to_owned))
+        .unwrap_or_default()
 }
 
 fn scalar_to_csv_with_na(scalar: &Scalar, na_rep: &str) -> String {
@@ -2771,7 +2792,9 @@ mod tests {
     use fp_index::{Index, IndexLabel};
     use fp_types::{DType, NullKind, Scalar};
 
-    use super::{CsvWriteOptions, IoError, read_csv_str, write_csv_string, write_csv_string_with_options};
+    use super::{
+        CsvWriteOptions, IoError, read_csv_str, write_csv_string, write_csv_string_with_options,
+    };
 
     #[test]
     fn csv_round_trip_preserves_null_and_numeric_shape() {
@@ -2933,10 +2956,9 @@ mod tests {
         };
         let frame = read_csv_with_options(input, &options).expect("parse");
         let v = frame.column("price").unwrap().values()[0].clone();
-        match v {
-            Scalar::Float64(f) => assert!((f - 1234.56).abs() < 1e-9),
-            other => panic!("expected Float64, got {other:?}"),
-        }
+        assert!(matches!(v, Scalar::Float64(_)), "expected Float64");
+        let Scalar::Float64(f) = v else { return };
+        assert!((f - 1234.56).abs() < 1e-9);
     }
 
     #[test]
@@ -2962,10 +2984,9 @@ mod tests {
         let frame = read_csv_with_options(input, &options).expect("parse");
         let v = frame.column("v").unwrap().values()[0].clone();
         // thousands ignored → "1.234" parses as float 1.234
-        match v {
-            Scalar::Float64(f) => assert!((f - 1.234).abs() < 1e-9),
-            other => panic!("expected Float64, got {other:?}"),
-        }
+        assert!(matches!(v, Scalar::Float64(_)), "expected Float64");
+        let Scalar::Float64(f) = v else { return };
+        assert!((f - 1.234).abs() < 1e-9);
     }
 
     #[test]
@@ -3070,16 +3091,14 @@ mod tests {
         };
         let frame = read_csv_with_options(input, &options).expect("parse");
         assert_eq!(frame.index().len(), 3);
-        assert_eq!(
-            frame.column("a").unwrap().values()[2],
-            Scalar::Int64(3)
-        );
+        assert_eq!(frame.column("a").unwrap().values()[2], Scalar::Int64(3));
     }
 
     #[test]
     fn test_csv_skipfooter_zero_is_noop() {
         let input = "a,b\n1,x\n2,y\n";
-        let frame_default = read_csv_with_options(input, &CsvReadOptions::default()).expect("parse");
+        let frame_default =
+            read_csv_with_options(input, &CsvReadOptions::default()).expect("parse");
         let options = CsvReadOptions {
             skipfooter: 0,
             ..CsvReadOptions::default()
@@ -3324,6 +3343,76 @@ mod tests {
     }
 
     #[test]
+    fn test_write_csv_options_include_index_and_index_label() {
+        let input = "a,b\n1,2\n3,4\n";
+        let frame = read_csv_str(input).expect("read");
+        let output = write_csv_string_with_options(
+            &frame,
+            &CsvWriteOptions {
+                include_index: true,
+                index_label: Some("row_id".to_string()),
+                ..CsvWriteOptions::default()
+            },
+        )
+        .expect("write");
+
+        assert_eq!(output, "row_id,a,b\n0,1,2\n1,3,4\n");
+    }
+
+    #[test]
+    fn test_write_csv_options_include_index_uses_named_index_when_label_omitted() {
+        let mut cols = std::collections::BTreeMap::new();
+        cols.insert(
+            "a".to_string(),
+            Column::from_values(vec![Scalar::Int64(10), Scalar::Int64(20)]).unwrap(),
+        );
+        let frame = DataFrame::new_with_column_order(
+            Index::from_i64(vec![100, 200]).set_name("sample_id"),
+            cols,
+            vec!["a".to_string()],
+        )
+        .unwrap();
+
+        let output = write_csv_string_with_options(
+            &frame,
+            &CsvWriteOptions {
+                include_index: true,
+                ..CsvWriteOptions::default()
+            },
+        )
+        .expect("write");
+
+        assert_eq!(output, "sample_id,a\n100,10\n200,20\n");
+    }
+
+    #[test]
+    fn test_write_csv_options_include_index_label_overrides_index_name() {
+        let mut cols = std::collections::BTreeMap::new();
+        cols.insert(
+            "a".to_string(),
+            Column::from_values(vec![Scalar::Int64(10), Scalar::Int64(20)]).unwrap(),
+        );
+        let frame = DataFrame::new_with_column_order(
+            Index::from_i64(vec![100, 200]).set_name("sample_id"),
+            cols,
+            vec!["a".to_string()],
+        )
+        .unwrap();
+
+        let output = write_csv_string_with_options(
+            &frame,
+            &CsvWriteOptions {
+                include_index: true,
+                index_label: Some("row".to_string()),
+                ..CsvWriteOptions::default()
+            },
+        )
+        .expect("write");
+
+        assert_eq!(output, "row,a\n100,10\n200,20\n");
+    }
+
+    #[test]
     fn test_write_csv_options_default_matches_write_csv_string() {
         let input = "a,b\n1,2\n3,4\n";
         let frame = read_csv_str(input).expect("read");
@@ -3340,11 +3429,7 @@ mod tests {
         let mut cols = std::collections::BTreeMap::new();
         cols.insert(
             "score".to_string(),
-            Column::from_values(vec![
-                Scalar::Float64(1.5),
-                Scalar::Float64(f64::NAN),
-            ])
-            .unwrap(),
+            Column::from_values(vec![Scalar::Float64(1.5), Scalar::Float64(f64::NAN)]).unwrap(),
         );
         let frame = DataFrame::new_with_column_order(
             Index::from_i64(vec![0, 1]),
