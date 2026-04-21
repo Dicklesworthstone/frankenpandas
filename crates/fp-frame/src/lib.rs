@@ -21325,6 +21325,23 @@ impl DataFrame {
                 lines.push(bottom_border);
                 Ok(lines.join("\n"))
             }
+            "heavy_grid" => {
+                let mut lines = Vec::with_capacity(nrows * 2 + 3);
+                let top_border = render_grid_border(&widths, '┏', '┳', '┓', '━');
+                let row_border = render_grid_border(&widths, '┣', '╋', '┫', '━');
+                let bottom_border = render_grid_border(&widths, '┗', '┻', '┛', '━');
+                lines.push(top_border);
+                lines.push(render_box_row(&headers, &widths, '┃', '┃'));
+                lines.push(row_border.clone());
+                for (idx, row) in rows.into_iter().enumerate() {
+                    lines.push(render_box_row(&row, &widths, '┃', '┃'));
+                    if idx + 1 != nrows {
+                        lines.push(row_border.clone());
+                    }
+                }
+                lines.push(bottom_border);
+                Ok(lines.join("\n"))
+            }
             "fancy_grid" => {
                 let mut lines = Vec::with_capacity(nrows * 2 + 3);
                 let top_border = render_grid_border(&widths, '╒', '╤', '╕', '═');
@@ -47185,6 +47202,42 @@ mod tests {
         assert_eq!(
             result,
             "╭─────┬─────╮\n│     │ val │\n├─────┼─────┤\n│ 0   │ 10  │\n├─────┼─────┤\n│ 1   │ 20  │\n╰─────┴─────╯"
+        );
+    }
+
+    #[test]
+    fn df_to_markdown_heavy_grid_without_index() {
+        let df = DataFrame::from_dict(
+            &["animal", "legs"],
+            vec![
+                (
+                    "animal",
+                    vec![Scalar::Utf8("elk".into()), Scalar::Utf8("pig".into())],
+                ),
+                ("legs", vec![Scalar::Int64(4), Scalar::Int64(4)]),
+            ],
+        )
+        .unwrap();
+
+        let result = df.to_markdown(false, Some("heavy_grid")).unwrap();
+        assert_eq!(
+            result,
+            "┏━━━━━━━━┳━━━━━━┓\n┃ animal ┃ legs ┃\n┣━━━━━━━━╋━━━━━━┫\n┃ elk    ┃ 4    ┃\n┣━━━━━━━━╋━━━━━━┫\n┃ pig    ┃ 4    ┃\n┗━━━━━━━━┻━━━━━━┛"
+        );
+    }
+
+    #[test]
+    fn df_to_markdown_heavy_grid_with_index() {
+        let df = DataFrame::from_dict(
+            &["val"],
+            vec![("val", vec![Scalar::Int64(10), Scalar::Int64(20)])],
+        )
+        .unwrap();
+
+        let result = df.to_markdown(true, Some("heavy_grid")).unwrap();
+        assert_eq!(
+            result,
+            "┏━━━━━┳━━━━━┓\n┃     ┃ val ┃\n┣━━━━━╋━━━━━┫\n┃ 0   ┃ 10  ┃\n┣━━━━━╋━━━━━┫\n┃ 1   ┃ 20  ┃\n┗━━━━━┻━━━━━┛"
         );
     }
 
