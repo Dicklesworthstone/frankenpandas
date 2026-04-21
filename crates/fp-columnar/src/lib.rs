@@ -1242,6 +1242,62 @@ impl Column {
         self.values.iter().filter(|v| !v.is_missing()).count()
     }
 
+    /// Keep values where `cond` is true; replace false positions with
+    /// `other`.
+    ///
+    /// Matches `pd.Series.where(cond, other)`. `cond` must be a Bool
+    /// column of the same length (otherwise `LengthMismatch`). Missing
+    /// positions in `cond` propagate as Null(NaN) in the result.
+    pub fn where_cond(&self, cond: &Self, other: &Scalar) -> Result<Self, ColumnError> {
+        if cond.dtype != DType::Bool {
+            return Err(ColumnError::InvalidMaskType { dtype: cond.dtype });
+        }
+        if self.values.len() != cond.values.len() {
+            return Err(ColumnError::LengthMismatch {
+                left: self.values.len(),
+                right: cond.values.len(),
+            });
+        }
+        let out: Vec<Scalar> = self
+            .values
+            .iter()
+            .zip(cond.values.iter())
+            .map(|(v, c)| match c {
+                Scalar::Bool(true) => v.clone(),
+                Scalar::Bool(false) => other.clone(),
+                _ => Scalar::Null(NullKind::NaN),
+            })
+            .collect();
+        Self::new(self.dtype, out)
+    }
+
+    /// Replace values where `cond` is true with `other`; otherwise keep.
+    ///
+    /// Matches `pd.Series.mask(cond, other)` — the logical inverse of
+    /// `where_cond`. Same validation rules apply.
+    pub fn mask(&self, cond: &Self, other: &Scalar) -> Result<Self, ColumnError> {
+        if cond.dtype != DType::Bool {
+            return Err(ColumnError::InvalidMaskType { dtype: cond.dtype });
+        }
+        if self.values.len() != cond.values.len() {
+            return Err(ColumnError::LengthMismatch {
+                left: self.values.len(),
+                right: cond.values.len(),
+            });
+        }
+        let out: Vec<Scalar> = self
+            .values
+            .iter()
+            .zip(cond.values.iter())
+            .map(|(v, c)| match c {
+                Scalar::Bool(true) => other.clone(),
+                Scalar::Bool(false) => v.clone(),
+                _ => Scalar::Null(NullKind::NaN),
+            })
+            .collect();
+        Self::new(self.dtype, out)
+    }
+
     /// Sort values in ascending or descending order.
     ///
     /// Matches `pd.Series.sort_values(ascending=...)`. Missing values
@@ -3604,9 +3660,10 @@ mod tests {
                 Scalar::Float64(3.0),
             ])
             .expect("col");
-            match col.sum() {
-                Scalar::Float64(v) => assert!((v - 6.0).abs() < 1e-9),
-                other => panic!("expected Float64, got {other:?}"),
+            let sum = col.sum();
+            assert!(matches!(sum, Scalar::Float64(_)), "expected Float64 result");
+            if let Scalar::Float64(v) = sum {
+                assert!((v - 6.0).abs() < 1e-9);
             }
         }
 
@@ -3624,9 +3681,13 @@ mod tests {
                 Scalar::Float64(6.0),
             ])
             .expect("col");
-            match col.mean() {
-                Scalar::Float64(v) => assert!((v - 4.0).abs() < 1e-9),
-                other => panic!("expected Float64, got {other:?}"),
+            let mean = col.mean();
+            assert!(
+                matches!(mean, Scalar::Float64(_)),
+                "expected Float64 result"
+            );
+            if let Scalar::Float64(v) = mean {
+                assert!((v - 4.0).abs() < 1e-9);
             }
         }
 
@@ -3658,9 +3719,13 @@ mod tests {
                 Scalar::Float64(3.0),
             ])
             .expect("col");
-            match col.median() {
-                Scalar::Float64(v) => assert!((v - 3.0).abs() < 1e-9),
-                other => panic!("expected Float64, got {other:?}"),
+            let median = col.median();
+            assert!(
+                matches!(median, Scalar::Float64(_)),
+                "expected Float64 result"
+            );
+            if let Scalar::Float64(v) = median {
+                assert!((v - 3.0).abs() < 1e-9);
             }
         }
 
@@ -3673,9 +3738,13 @@ mod tests {
                 Scalar::Float64(4.0),
             ])
             .expect("col");
-            match col.prod() {
-                Scalar::Float64(v) => assert!((v - 24.0).abs() < 1e-9),
-                other => panic!("expected Float64, got {other:?}"),
+            let prod = col.prod();
+            assert!(
+                matches!(prod, Scalar::Float64(_)),
+                "expected Float64 result"
+            );
+            if let Scalar::Float64(v) = prod {
+                assert!((v - 24.0).abs() < 1e-9);
             }
         }
 
@@ -3695,6 +3764,83 @@ mod tests {
             ])
             .expect("col");
             assert_eq!(col.count(), 2);
+        }
+    }
+
+    mod where_mask {
+        use super::*;
+        use fp_types::NullKind;
+
+        #[test]
+        fn where_cond_keeps_true_positions() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+            ])
+            .expect("col");
+            let cond = Column::from_values(vec![
+                Scalar::Bool(true),
+                Scalar::Bool(false),
+                Scalar::Bool(true),
+            ])
+            .expect("cond");
+            let fill = Scalar::Int64(-1);
+            let out = col.where_cond(&cond, &fill).expect("where");
+            assert_eq!(out.values()[0], Scalar::Int64(1));
+            assert_eq!(out.values()[1], Scalar::Int64(-1));
+            assert_eq!(out.values()[2], Scalar::Int64(3));
+        }
+
+        #[test]
+        fn mask_inverts_where_cond() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+            ])
+            .expect("col");
+            let cond = Column::from_values(vec![
+                Scalar::Bool(true),
+                Scalar::Bool(false),
+                Scalar::Bool(true),
+            ])
+            .expect("cond");
+            let fill = Scalar::Int64(0);
+            let out = col.mask(&cond, &fill).expect("mask");
+            assert_eq!(out.values()[0], Scalar::Int64(0));
+            assert_eq!(out.values()[1], Scalar::Int64(2));
+            assert_eq!(out.values()[2], Scalar::Int64(0));
+        }
+
+        #[test]
+        fn where_missing_cond_propagates_null() {
+            let col = Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2)]).expect("col");
+            let cond = Column::from_values(vec![
+                Scalar::Bool(true),
+                Scalar::Null(NullKind::NaN),
+            ])
+            .expect("cond");
+            let fill = Scalar::Int64(-1);
+            let out = col.where_cond(&cond, &fill).expect("where");
+            assert_eq!(out.values()[0], Scalar::Int64(1));
+            assert!(out.values()[1].is_missing());
+        }
+
+        #[test]
+        fn where_rejects_non_bool_cond() {
+            let col = Column::from_values(vec![Scalar::Int64(1)]).expect("col");
+            let cond = Column::from_values(vec![Scalar::Int64(1)]).expect("cond");
+            let err = col.where_cond(&cond, &Scalar::Int64(0)).unwrap_err();
+            assert!(matches!(err, crate::ColumnError::InvalidMaskType { .. }));
+        }
+
+        #[test]
+        fn where_rejects_length_mismatch() {
+            let col = Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2)]).expect("col");
+            let cond = Column::from_values(vec![Scalar::Bool(true)]).expect("cond");
+            let err = col.where_cond(&cond, &Scalar::Int64(0)).unwrap_err();
+            assert!(matches!(err, crate::ColumnError::LengthMismatch { .. }));
         }
     }
 
