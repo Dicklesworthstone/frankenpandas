@@ -4387,6 +4387,22 @@ impl Series {
         }
     }
 
+    /// Find insertion points for array-like values to maintain sorted order.
+    ///
+    /// Matches `pd.Series.searchsorted(values, side='left'|'right')`
+    /// for array-like inputs. The Series must be sorted. Returns
+    /// integer positions in the same order as the input slice.
+    pub fn searchsorted_values(
+        &self,
+        values: &[Scalar],
+        side: &str,
+    ) -> Result<Vec<usize>, FrameError> {
+        values
+            .iter()
+            .map(|value| self.searchsorted(value, side))
+            .collect()
+    }
+
     /// Encode the Series as an enumerated type.
     ///
     /// Matches `pd.Series.factorize()`. Returns `(codes, uniques)` where
@@ -4726,6 +4742,30 @@ impl Series {
         self.column.is_empty()
     }
 
+    /// Reset the Series index to a default RangeIndex.
+    ///
+    /// Matches `pd.Series.reset_index(drop=...)`:
+    /// - `drop=true`: keep only the values; replace the index with
+    ///   `0..len`. Return type is a Series (preserves the shape for
+    ///   method chaining).
+    /// - `drop=false`: pandas returns a two-column DataFrame
+    ///   (`index` + the series name). We don't widen the return type
+    ///   here — callers who need the frame form should call
+    ///   `to_frame()` + `reset_index()` on the result. When
+    ///   `drop=false` this method returns `CompatibilityRejected`
+    ///   with a clear hint so the distinction is explicit rather than
+    ///   silently dropping the old index.
+    pub fn reset_index(&self, drop: bool) -> Result<Self, FrameError> {
+        if !drop {
+            return Err(FrameError::CompatibilityRejected(
+                "Series.reset_index(drop=false) not supported in the Series return shape; \
+                call `to_frame()?.reset_index(false)` instead"
+                    .to_owned(),
+            ));
+        }
+        let index = range_index(self.column.len())?;
+        Self::new(self.name.clone(), index, self.column.clone())
+    }
 
     /// Pass the Series through a function.
     ///
@@ -19656,8 +19696,7 @@ impl DataFrame {
                 // rows.
                 if self.index.has_duplicates() {
                     return Err(FrameError::CompatibilityRejected(
-                        "to_dict orient 'dict' does not support duplicate index labels"
-                            .to_owned(),
+                        "to_dict orient 'dict' does not support duplicate index labels".to_owned(),
                     ));
                 }
                 let mut result = BTreeMap::new();
@@ -38932,8 +38971,7 @@ mod tests {
             "a".to_string(),
             Column::from_values(vec![Scalar::Int64(10), Scalar::Int64(20)]).unwrap(),
         );
-        let df =
-            DataFrame::new_with_column_order(index, cols, vec!["a".to_string()]).unwrap();
+        let df = DataFrame::new_with_column_order(index, cols, vec!["a".to_string()]).unwrap();
         let err = df.to_dict("dict").unwrap_err();
         let FrameError::CompatibilityRejected(msg) = err else {
             panic!("expected CompatibilityRejected");
@@ -38946,8 +38984,14 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]),
-                ("b", vec![Scalar::Int64(4), Scalar::Int64(5), Scalar::Int64(6)]),
+                (
+                    "a",
+                    vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                ),
+                (
+                    "b",
+                    vec![Scalar::Int64(4), Scalar::Int64(5), Scalar::Int64(6)],
+                ),
             ],
         )
         .unwrap();
@@ -38956,31 +39000,19 @@ mod tests {
 
     #[test]
     fn dataframe_size_zero_when_empty() {
-        let df = DataFrame::from_dict(
-            &["a"],
-            vec![("a", Vec::<Scalar>::new())],
-        )
-        .unwrap();
+        let df = DataFrame::from_dict(&["a"], vec![("a", Vec::<Scalar>::new())]).unwrap();
         assert_eq!(df.size(), 0);
 
         // Zero columns also → zero size regardless of row count.
         let index = Index::from_i64(vec![1, 2, 3]);
-        let empty_cols = DataFrame::new_with_column_order(
-            index,
-            BTreeMap::new(),
-            Vec::new(),
-        )
-        .unwrap();
+        let empty_cols =
+            DataFrame::new_with_column_order(index, BTreeMap::new(), Vec::new()).unwrap();
         assert_eq!(empty_cols.size(), 0);
     }
 
     #[test]
     fn dataframe_empty_true_when_zero_rows() {
-        let df = DataFrame::from_dict(
-            &["a"],
-            vec![("a", Vec::<Scalar>::new())],
-        )
-        .unwrap();
+        let df = DataFrame::from_dict(&["a"], vec![("a", Vec::<Scalar>::new())]).unwrap();
         assert!(df.empty());
         assert!(df.is_empty()); // consistency with the row-only check
     }
@@ -38997,11 +39029,7 @@ mod tests {
 
     #[test]
     fn dataframe_empty_false_when_non_trivial() {
-        let df = DataFrame::from_dict(
-            &["a"],
-            vec![("a", vec![Scalar::Int64(1)])],
-        )
-        .unwrap();
+        let df = DataFrame::from_dict(&["a"], vec![("a", vec![Scalar::Int64(1)])]).unwrap();
         assert!(!df.empty());
     }
 
@@ -42615,6 +42643,75 @@ mod tests {
     }
 
     #[test]
+    fn series_searchsorted_values_left() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(4.0),
+            ],
+        )
+        .unwrap();
+
+        let positions = s
+            .searchsorted_values(
+                &[
+                    Scalar::Float64(0.0),
+                    Scalar::Float64(2.0),
+                    Scalar::Float64(5.0),
+                ],
+                "left",
+            )
+            .unwrap();
+        assert_eq!(positions, vec![0, 1, 4]);
+    }
+
+    #[test]
+    fn series_searchsorted_values_right() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(4.0),
+            ],
+        )
+        .unwrap();
+
+        let positions = s
+            .searchsorted_values(
+                &[
+                    Scalar::Float64(0.0),
+                    Scalar::Float64(2.0),
+                    Scalar::Float64(5.0),
+                ],
+                "right",
+            )
+            .unwrap();
+        assert_eq!(positions, vec![0, 2, 4]);
+    }
+
+    #[test]
+    fn series_searchsorted_values_reject_missing_value() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Float64(1.0), Scalar::Float64(2.0)],
+        )
+        .unwrap();
+
+        let err = s
+            .searchsorted_values(&[Scalar::Null(NullKind::NaN)], "left")
+            .unwrap_err();
+        assert!(matches!(err, FrameError::Column(_)));
+    }
+
+    #[test]
     fn series_factorize() {
         let s = Series::from_values(
             "x",
@@ -45225,12 +45322,7 @@ mod tests {
 
     #[test]
     fn series_ndim_is_one() {
-        let s = Series::from_values(
-            "x",
-            vec![0_i64.into()],
-            vec![Scalar::Int64(1)],
-        )
-        .unwrap();
+        let s = Series::from_values("x", vec![0_i64.into()], vec![Scalar::Int64(1)]).unwrap();
         assert_eq!(s.ndim(), 1);
     }
 
@@ -45250,10 +45342,7 @@ mod tests {
     fn series_axes_returns_single_index_axis() {
         let s = Series::from_values(
             "x",
-            vec![
-                IndexLabel::Utf8("a".into()),
-                IndexLabel::Utf8("b".into()),
-            ],
+            vec![IndexLabel::Utf8("a".into()), IndexLabel::Utf8("b".into())],
             vec![Scalar::Int64(1), Scalar::Int64(2)],
         )
         .unwrap();
@@ -45261,10 +45350,7 @@ mod tests {
         assert_eq!(axes.len(), 1);
         assert_eq!(
             axes[0],
-            vec![
-                IndexLabel::Utf8("a".into()),
-                IndexLabel::Utf8("b".into()),
-            ]
+            vec![IndexLabel::Utf8("a".into()), IndexLabel::Utf8("b".into()),]
         );
     }
 
@@ -45276,13 +45362,44 @@ mod tests {
 
     #[test]
     fn series_empty_false_when_populated() {
+        let s = Series::from_values("x", vec![0_i64.into()], vec![Scalar::Int64(1)]).unwrap();
+        assert!(!s.empty());
+    }
+
+    #[test]
+    fn series_reset_index_drop_replaces_with_range() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into()],
-            vec![Scalar::Int64(1)],
+            vec![
+                IndexLabel::Utf8("a".into()),
+                IndexLabel::Utf8("b".into()),
+                IndexLabel::Utf8("c".into()),
+            ],
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
         )
         .unwrap();
-        assert!(!s.empty());
+        let reset = s.reset_index(true).unwrap();
+        assert_eq!(
+            reset.index().labels(),
+            &[
+                IndexLabel::Int64(0),
+                IndexLabel::Int64(1),
+                IndexLabel::Int64(2),
+            ]
+        );
+        // Values and name are preserved.
+        assert_eq!(reset.name(), "x");
+        assert_eq!(reset.values(), s.values());
+    }
+
+    #[test]
+    fn series_reset_index_drop_false_is_rejected_with_hint() {
+        let s = Series::from_values("x", vec![0_i64.into()], vec![Scalar::Int64(1)]).unwrap();
+        let err = s.reset_index(false).unwrap_err();
+        let FrameError::CompatibilityRejected(msg) = err else {
+            panic!("expected CompatibilityRejected");
+        };
+        assert!(msg.contains("to_frame"));
     }
 
     #[test]
