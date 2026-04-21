@@ -143,6 +143,11 @@ pub struct CsvReadOptions {
     /// false, `escapechar` must be used to quote the quote character.
     /// Matches pandas `doublequote` parameter.
     pub doublequote: bool,
+    /// Custom single-byte line terminator. When set, the reader treats
+    /// only that byte as a record separator (instead of CRLF/LF).
+    /// Matches pandas `lineterminator` (C-engine only). `None` keeps
+    /// the default CRLF/LF handling.
+    pub lineterminator: Option<u8>,
 }
 
 impl Default for CsvReadOptions {
@@ -170,6 +175,7 @@ impl Default for CsvReadOptions {
             escapechar: None,
             doublequote: true,
             skipfooter: 0,
+            lineterminator: None,
         }
     }
 }
@@ -651,6 +657,9 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
     }
     if let Some(c) = options.comment {
         builder.comment(Some(c));
+    }
+    if let Some(term) = options.lineterminator {
+        builder.terminator(csv::Terminator::Any(term));
     }
     let mut reader = builder.from_reader(input.as_bytes());
 
@@ -3016,6 +3025,40 @@ mod tests {
             frame.column("text").unwrap().values()[0],
             Scalar::Utf8("hi\"there".to_string())
         );
+    }
+
+    #[test]
+    fn test_csv_lineterminator_semicolon() {
+        // Single-byte record separator '|'. No newlines in the data.
+        let input = "a,b|1,x|2,y|3,z";
+        let options = CsvReadOptions {
+            lineterminator: Some(b'|'),
+            ..CsvReadOptions::default()
+        };
+        let frame = read_csv_with_options(input, &options).expect("parse");
+        assert_eq!(frame.index().len(), 3);
+        assert_eq!(frame.column_names(), vec!["a", "b"]);
+        assert_eq!(frame.column("a").unwrap().values()[2], Scalar::Int64(3));
+    }
+
+    #[test]
+    fn test_csv_lineterminator_default_none_accepts_crlf() {
+        let input = "a,b\r\n1,x\r\n2,y\r\n";
+        let frame = read_csv_with_options(input, &CsvReadOptions::default()).expect("parse");
+        assert_eq!(frame.index().len(), 2);
+    }
+
+    #[test]
+    fn test_csv_lineterminator_interacts_with_skipfooter() {
+        let input = "a|1|2|3|4|FOOTER";
+        let options = CsvReadOptions {
+            lineterminator: Some(b'|'),
+            skipfooter: 1,
+            ..CsvReadOptions::default()
+        };
+        let frame = read_csv_with_options(input, &options).expect("parse");
+        // 5 data rows after header, footer drops 1 → 4 rows.
+        assert_eq!(frame.index().len(), 4);
     }
 
     #[test]
