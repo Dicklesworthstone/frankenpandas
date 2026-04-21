@@ -2147,6 +2147,142 @@ impl Column {
     }
 
     /// Keep values where `cond` is true; replace false positions with
+    /// values from an `other` Column (element-wise).
+    ///
+    /// Matches `pd.Series.where(cond, other)` when `other` is a Series
+    /// aligned by position. All three inputs must have the same
+    /// length. Cond must be Bool. Missing cond entries propagate as
+    /// Null(NaN). The result dtype is `self.dtype`; if `other`'s dtype
+    /// differs, values coming from `other` are cast via `cast_scalar`.
+    pub fn where_cond_series(&self, cond: &Self, other: &Self) -> Result<Self, ColumnError> {
+        if cond.dtype != DType::Bool {
+            return Err(ColumnError::InvalidMaskType { dtype: cond.dtype });
+        }
+        if self.values.len() != cond.values.len()
+            || self.values.len() != other.values.len()
+        {
+            return Err(ColumnError::LengthMismatch {
+                left: self.values.len(),
+                right: cond.values.len().max(other.values.len()),
+            });
+        }
+        let out: Vec<Scalar> = self
+            .values
+            .iter()
+            .zip(cond.values.iter().zip(other.values.iter()))
+            .map(|(v, (c, o))| match c {
+                Scalar::Bool(true) => Ok(v.clone()),
+                Scalar::Bool(false) => cast_scalar(o, self.dtype),
+                _ => Ok(Scalar::Null(NullKind::NaN)),
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(ColumnError::Type)?;
+        Self::new(self.dtype, out)
+    }
+
+    /// Replace values where `cond` is true with values from `other`
+    /// (element-wise); otherwise keep.
+    ///
+    /// Matches `pd.Series.mask(cond, other)` when `other` is a Series.
+    pub fn mask_series(&self, cond: &Self, other: &Self) -> Result<Self, ColumnError> {
+        if cond.dtype != DType::Bool {
+            return Err(ColumnError::InvalidMaskType { dtype: cond.dtype });
+        }
+        if self.values.len() != cond.values.len()
+            || self.values.len() != other.values.len()
+        {
+            return Err(ColumnError::LengthMismatch {
+                left: self.values.len(),
+                right: cond.values.len().max(other.values.len()),
+            });
+        }
+        let out: Vec<Scalar> = self
+            .values
+            .iter()
+            .zip(cond.values.iter().zip(other.values.iter()))
+            .map(|(v, (c, o))| match c {
+                Scalar::Bool(true) => cast_scalar(o, self.dtype),
+                Scalar::Bool(false) => Ok(v.clone()),
+                _ => Ok(Scalar::Null(NullKind::NaN)),
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(ColumnError::Type)?;
+        Self::new(self.dtype, out)
+    }
+
+    /// Pairwise value substitution.
+    ///
+    /// Matches `pd.Series.replace(to_replace, value)` when both
+    /// arguments are scalar lists of equal length. For each value in
+    /// the column, the first (to_replace, replacement) pair that
+    /// matches via `Scalar::semantic_eq` is applied. Missing inputs
+    /// can be replaced by listing `Scalar::Null(...)` in `to_replace`.
+    /// Length mismatch between `to_replace` and `values` returns
+    /// `ColumnError::LengthMismatch`.
+    pub fn replace_values(
+        &self,
+        to_replace: &[Scalar],
+        replacement: &[Scalar],
+    ) -> Result<Self, ColumnError> {
+        if to_replace.len() != replacement.len() {
+            return Err(ColumnError::LengthMismatch {
+                left: to_replace.len(),
+                right: replacement.len(),
+            });
+        }
+        let out: Vec<Scalar> = self
+            .values
+            .iter()
+            .map(|v| {
+                for (target, replacement_val) in to_replace.iter().zip(replacement.iter()) {
+                    // Treat all missing variants as matching to_replace = Null.
+                    let matches = if target.is_missing() && v.is_missing() {
+                        true
+                    } else if target.is_missing() || v.is_missing() {
+                        false
+                    } else {
+                        v.semantic_eq(target)
+                    };
+                    if matches {
+                        return replacement_val.clone();
+                    }
+                }
+                v.clone()
+            })
+            .collect();
+        let inferred = infer_dtype(&out).unwrap_or(self.dtype);
+        Self::new(inferred, out)
+    }
+
+    /// Positions where the value is truthy and non-missing.
+    ///
+    /// Matches `np.nonzero` / `pd.Series.to_numpy().nonzero()` style
+    /// behavior. Useful for turning a Bool mask column into explicit
+    /// index positions. Non-missing zero-like values (Int64 0,
+    /// Float64 0.0, Bool false, empty Utf8) are excluded.
+    #[must_use]
+    pub fn nonzero(&self) -> Vec<usize> {
+        let mut out = Vec::new();
+        for (i, v) in self.values.iter().enumerate() {
+            if v.is_missing() {
+                continue;
+            }
+            let truthy = match v {
+                Scalar::Bool(b) => *b,
+                Scalar::Int64(x) => *x != 0,
+                Scalar::Float64(x) => *x != 0.0 && !x.is_nan(),
+                Scalar::Utf8(s) => !s.is_empty(),
+                Scalar::Timedelta64(x) => *x != 0,
+                Scalar::Null(_) => false,
+            };
+            if truthy {
+                out.push(i);
+            }
+        }
+        out
+    }
+
+    /// Keep values where `cond` is true; replace false positions with
     /// `other`.
     ///
     /// Matches `pd.Series.where(cond, other)`. `cond` must be a Bool
@@ -5929,6 +6065,129 @@ mod tests {
             let cond = Column::from_values(vec![Scalar::Int64(1)]).expect("cond");
             let err = col.where_cond(&cond, &Scalar::Int64(0)).unwrap_err();
             assert!(matches!(err, crate::ColumnError::InvalidMaskType { .. }));
+        }
+
+        #[test]
+        fn where_cond_series_fills_from_other_column() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+            ])
+            .expect("col");
+            let cond = Column::from_values(vec![
+                Scalar::Bool(true),
+                Scalar::Bool(false),
+                Scalar::Bool(true),
+            ])
+            .expect("cond");
+            let other = Column::from_values(vec![
+                Scalar::Int64(10),
+                Scalar::Int64(20),
+                Scalar::Int64(30),
+            ])
+            .expect("other");
+            let out = col.where_cond_series(&cond, &other).expect("where_series");
+            assert_eq!(out.values()[0], Scalar::Int64(1));
+            assert_eq!(out.values()[1], Scalar::Int64(20));
+            assert_eq!(out.values()[2], Scalar::Int64(3));
+        }
+
+        #[test]
+        fn mask_series_fills_from_other_column() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+            ])
+            .expect("col");
+            let cond = Column::from_values(vec![
+                Scalar::Bool(true),
+                Scalar::Bool(false),
+                Scalar::Bool(true),
+            ])
+            .expect("cond");
+            let other = Column::from_values(vec![
+                Scalar::Int64(0),
+                Scalar::Int64(0),
+                Scalar::Int64(0),
+            ])
+            .expect("other");
+            let out = col.mask_series(&cond, &other).expect("mask_series");
+            assert_eq!(out.values()[0], Scalar::Int64(0));
+            assert_eq!(out.values()[1], Scalar::Int64(2));
+            assert_eq!(out.values()[2], Scalar::Int64(0));
+        }
+
+        #[test]
+        fn where_cond_series_rejects_non_bool_cond() {
+            let col = Column::from_values(vec![Scalar::Int64(1)]).expect("col");
+            let cond = Column::from_values(vec![Scalar::Int64(1)]).expect("cond");
+            let other = Column::from_values(vec![Scalar::Int64(0)]).expect("other");
+            let err = col.where_cond_series(&cond, &other).unwrap_err();
+            assert!(matches!(err, crate::ColumnError::InvalidMaskType { .. }));
+        }
+
+        #[test]
+        fn replace_values_applies_first_match() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+                Scalar::Int64(2),
+            ])
+            .expect("col");
+            let to_replace = vec![Scalar::Int64(2), Scalar::Int64(3)];
+            let replacement = vec![Scalar::Int64(20), Scalar::Int64(30)];
+            let out = col.replace_values(&to_replace, &replacement).expect("replace");
+            assert_eq!(out.values()[0], Scalar::Int64(1));
+            assert_eq!(out.values()[1], Scalar::Int64(20));
+            assert_eq!(out.values()[2], Scalar::Int64(30));
+            assert_eq!(out.values()[3], Scalar::Int64(20));
+        }
+
+        #[test]
+        fn replace_values_can_replace_nulls() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(1),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Int64(2),
+            ])
+            .expect("col");
+            let to_replace = vec![Scalar::Null(NullKind::NaN)];
+            let replacement = vec![Scalar::Int64(-1)];
+            let out = col.replace_values(&to_replace, &replacement).expect("replace");
+            assert_eq!(out.values()[0], Scalar::Int64(1));
+            assert_eq!(out.values()[1], Scalar::Int64(-1));
+            assert_eq!(out.values()[2], Scalar::Int64(2));
+        }
+
+        #[test]
+        fn replace_values_length_mismatch_errors() {
+            let col = Column::from_values(vec![Scalar::Int64(1)]).expect("col");
+            let err = col
+                .replace_values(&[Scalar::Int64(1)], &[Scalar::Int64(2), Scalar::Int64(3)])
+                .unwrap_err();
+            assert!(matches!(err, crate::ColumnError::LengthMismatch { .. }));
+        }
+
+        #[test]
+        fn nonzero_returns_truthy_positions() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(0),
+                Scalar::Int64(5),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Int64(-3),
+                Scalar::Int64(0),
+            ])
+            .expect("col");
+            assert_eq!(col.nonzero(), vec![1, 3]);
+        }
+
+        #[test]
+        fn nonzero_empty_column_is_empty() {
+            let col = Column::from_values(Vec::<Scalar>::new()).expect("col");
+            assert!(col.nonzero().is_empty());
         }
 
         #[test]
