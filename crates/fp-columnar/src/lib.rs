@@ -2,8 +2,8 @@
 
 use fp_types::{
     DType, NullKind, Scalar, Timedelta, TypeError, cast_scalar, cast_scalar_owned, common_dtype,
-    infer_dtype, nancummax, nancummin, nancumprod, nancumsum, nanmax, nanmean, nanmedian, nanmin,
-    nanprod, nanquantile, nansum,
+    infer_dtype, nanargmax, nanargmin, nancummax, nancummin, nancumprod, nancumsum, nanmax,
+    nanmean, nanmedian, nanmin, nanprod, nanquantile, nansum,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -564,6 +564,32 @@ pub enum ComparisonOp {
     Ne,
     Ge,
     Le,
+}
+
+fn is_monotonic_in_direction(values: &[Scalar], increasing: bool) -> bool {
+    let mut prev: Option<&Scalar> = None;
+    for v in values {
+        if v.is_missing() {
+            continue;
+        }
+        if let Some(p) = prev {
+            let ord = compare_scalars_na_last(p, v, true);
+            // `p` should come before `v` in the requested direction. With
+            // ascending compare: Less/Equal → non-decreasing OK; Greater
+            // breaks. For decreasing we flip the expectation.
+            let ok = matches!(
+                (ord, increasing),
+                (std::cmp::Ordering::Less, true)
+                    | (std::cmp::Ordering::Equal, _)
+                    | (std::cmp::Ordering::Greater, false)
+            );
+            if !ok {
+                return false;
+            }
+        }
+        prev = Some(v);
+    }
+    true
 }
 
 fn compare_scalars_na_last(left: &Scalar, right: &Scalar, ascending: bool) -> std::cmp::Ordering {
@@ -1240,6 +1266,82 @@ impl Column {
     #[must_use]
     pub fn count(&self) -> usize {
         self.values.iter().filter(|v| !v.is_missing()).count()
+    }
+
+    /// Position of the smallest non-missing value, or None when every
+    /// value is missing.
+    ///
+    /// Matches `pd.Series.argmin()` (skipna=True). Ties resolve to the
+    /// first position seen.
+    #[must_use]
+    pub fn argmin(&self) -> Option<usize> {
+        nanargmin(&self.values)
+    }
+
+    /// Position of the largest non-missing value, or None when every
+    /// value is missing.
+    ///
+    /// Matches `pd.Series.argmax()`.
+    #[must_use]
+    pub fn argmax(&self) -> Option<usize> {
+        nanargmax(&self.values)
+    }
+
+    /// Whether non-missing values are non-decreasing.
+    ///
+    /// Matches `pd.Series.is_monotonic_increasing`. An empty column or
+    /// a column with a single non-missing value returns true. Missing
+    /// values are skipped when comparing neighbors.
+    #[must_use]
+    pub fn is_monotonic_increasing(&self) -> bool {
+        is_monotonic_in_direction(&self.values, true)
+    }
+
+    /// Whether non-missing values are non-increasing.
+    ///
+    /// Matches `pd.Series.is_monotonic_decreasing`.
+    #[must_use]
+    pub fn is_monotonic_decreasing(&self) -> bool {
+        is_monotonic_in_direction(&self.values, false)
+    }
+
+    /// Combine two columns, taking `self` where present and `other`
+    /// otherwise.
+    ///
+    /// Matches `pd.Series.combine_first(other)`. For each aligned
+    /// position, the result is `self` when `self` is non-missing, else
+    /// `other`. Length mismatch returns `LengthMismatch`. Result
+    /// dtype follows `self`.
+    pub fn combine_first(&self, other: &Self) -> Result<Self, ColumnError> {
+        if self.values.len() != other.values.len() {
+            return Err(ColumnError::LengthMismatch {
+                left: self.values.len(),
+                right: other.values.len(),
+            });
+        }
+        let out: Vec<Scalar> = self
+            .values
+            .iter()
+            .zip(other.values.iter())
+            .map(|(a, b)| if a.is_missing() { b.clone() } else { a.clone() })
+            .collect();
+        Self::new(self.dtype, out)
+    }
+
+    /// Clip values below `lower`, leaving the upper bound free.
+    ///
+    /// Matches `pd.Series.clip(lower=...)`. Thin wrapper over
+    /// `clip(Some(lower), None)` that preserves the shortcut reading
+    /// convention of pandas.
+    pub fn clip_lower(&self, lower: f64) -> Result<Self, ColumnError> {
+        self.clip(Some(lower), None)
+    }
+
+    /// Clip values above `upper`, leaving the lower bound free.
+    ///
+    /// Matches `pd.Series.clip(upper=...)`.
+    pub fn clip_upper(&self, upper: f64) -> Result<Self, ColumnError> {
+        self.clip(None, Some(upper))
     }
 
     /// Remove duplicated values, keeping the first occurrence.
@@ -4366,6 +4468,131 @@ mod tests {
                 .expect("map");
             assert_eq!(as_str.dtype(), DType::Utf8);
             assert_eq!(as_str.values()[0], Scalar::Utf8("1".into()));
+        }
+
+        #[test]
+        fn argmin_argmax_skip_missing() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(3),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Int64(1),
+                Scalar::Int64(5),
+                Scalar::Int64(2),
+            ])
+            .expect("col");
+            assert_eq!(col.argmin(), Some(2));
+            assert_eq!(col.argmax(), Some(3));
+        }
+
+        #[test]
+        fn argmin_argmax_all_missing_returns_none() {
+            let col = Column::from_values(vec![
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::Null),
+            ])
+            .expect("col");
+            assert!(col.argmin().is_none());
+            assert!(col.argmax().is_none());
+        }
+
+        #[test]
+        fn is_monotonic_increasing_detects_ascending() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(2),
+                Scalar::Int64(5),
+            ])
+            .expect("col");
+            assert!(col.is_monotonic_increasing());
+            assert!(!col.is_monotonic_decreasing());
+        }
+
+        #[test]
+        fn is_monotonic_decreasing_detects_descending() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(5),
+                Scalar::Int64(3),
+                Scalar::Int64(1),
+            ])
+            .expect("col");
+            assert!(col.is_monotonic_decreasing());
+            assert!(!col.is_monotonic_increasing());
+        }
+
+        #[test]
+        fn is_monotonic_skips_missing_values() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(1),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Int64(3),
+                Scalar::Int64(5),
+            ])
+            .expect("col");
+            assert!(col.is_monotonic_increasing());
+        }
+
+        #[test]
+        fn is_monotonic_empty_is_true() {
+            let col = Column::from_values(Vec::<Scalar>::new()).expect("col");
+            assert!(col.is_monotonic_increasing());
+            assert!(col.is_monotonic_decreasing());
+        }
+
+        #[test]
+        fn combine_first_fills_missing_from_other() {
+            let a = Column::from_values(vec![
+                Scalar::Int64(1),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Int64(3),
+            ])
+            .expect("a");
+            let b = Column::from_values(vec![
+                Scalar::Int64(10),
+                Scalar::Int64(20),
+                Scalar::Int64(30),
+            ])
+            .expect("b");
+            let c = a.combine_first(&b).expect("combine_first");
+            assert_eq!(c.values()[0], Scalar::Int64(1));
+            assert_eq!(c.values()[1], Scalar::Int64(20));
+            assert_eq!(c.values()[2], Scalar::Int64(3));
+        }
+
+        #[test]
+        fn combine_first_length_mismatch_errors() {
+            let a = Column::from_values(vec![Scalar::Int64(1)]).expect("a");
+            let b = Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2)]).expect("b");
+            let err = a.combine_first(&b).unwrap_err();
+            assert!(matches!(err, crate::ColumnError::LengthMismatch { .. }));
+        }
+
+        #[test]
+        fn clip_lower_only() {
+            let col = Column::from_values(vec![
+                Scalar::Float64(-2.0),
+                Scalar::Float64(0.0),
+                Scalar::Float64(5.0),
+            ])
+            .expect("col");
+            let c = col.clip_lower(0.0).expect("clip_lower");
+            assert_eq!(c.values()[0], Scalar::Float64(0.0));
+            assert_eq!(c.values()[1], Scalar::Float64(0.0));
+            assert_eq!(c.values()[2], Scalar::Float64(5.0));
+        }
+
+        #[test]
+        fn clip_upper_only() {
+            let col = Column::from_values(vec![
+                Scalar::Float64(-2.0),
+                Scalar::Float64(0.0),
+                Scalar::Float64(5.0),
+            ])
+            .expect("col");
+            let c = col.clip_upper(1.0).expect("clip_upper");
+            assert_eq!(c.values()[0], Scalar::Float64(-2.0));
+            assert_eq!(c.values()[1], Scalar::Float64(0.0));
+            assert_eq!(c.values()[2], Scalar::Float64(1.0));
         }
 
         #[test]
