@@ -565,7 +565,6 @@ pub enum ComparisonOp {
     Le,
 }
 
-#[derive(Debug, Error, Clone, PartialEq)]
 fn compare_scalars_na_last(
     left: &Scalar,
     right: &Scalar,
@@ -596,6 +595,7 @@ fn compare_scalars_na_last(
     }
 }
 
+#[derive(Debug, Error, Clone, PartialEq)]
 pub enum ColumnError {
     #[error("column length mismatch: left={left}, right={right}")]
     LengthMismatch { left: usize, right: usize },
@@ -3289,6 +3289,161 @@ mod tests {
             let r = col.isin(&[]).expect("isin");
             assert_eq!(r.values()[0], Scalar::Bool(false));
             assert_eq!(r.values()[1], Scalar::Bool(false));
+        }
+    }
+
+    mod sort_diff_duplicated_between {
+        use super::*;
+        use fp_types::NullKind;
+
+        #[test]
+        fn sort_values_ascending_puts_nulls_last() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(3),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+            ])
+            .expect("col");
+            let s = col.sort_values(true).expect("sort");
+            assert_eq!(s.values()[0], Scalar::Int64(1));
+            assert_eq!(s.values()[1], Scalar::Int64(2));
+            assert_eq!(s.values()[2], Scalar::Int64(3));
+            assert!(s.values()[3].is_missing());
+        }
+
+        #[test]
+        fn sort_values_descending_keeps_nulls_last() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(1),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Int64(3),
+                Scalar::Int64(2),
+            ])
+            .expect("col");
+            let s = col.sort_values(false).expect("sort");
+            assert_eq!(s.values()[0], Scalar::Int64(3));
+            assert_eq!(s.values()[1], Scalar::Int64(2));
+            assert_eq!(s.values()[2], Scalar::Int64(1));
+            assert!(s.values()[3].is_missing());
+        }
+
+        #[test]
+        fn argsort_matches_take_sort_values() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(3),
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+            ])
+            .expect("col");
+            let positions = col.argsort();
+            assert_eq!(positions, vec![1, 2, 0]);
+            let via_take = col.take(&positions).expect("take");
+            let via_sort = col.sort_values(true).expect("sort");
+            assert_eq!(via_take.values(), via_sort.values());
+        }
+
+        #[test]
+        fn diff_periods_one_subtracts_prev() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(5),
+                Scalar::Int64(8),
+                Scalar::Int64(10),
+            ])
+            .expect("col");
+            let d = col.diff(1).expect("diff");
+            assert!(d.values()[0].is_missing());
+            assert_eq!(d.values()[1], Scalar::Float64(3.0));
+            assert_eq!(d.values()[2], Scalar::Float64(2.0));
+            assert_eq!(d.dtype(), DType::Float64);
+        }
+
+        #[test]
+        fn diff_negative_period_looks_ahead() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(5),
+                Scalar::Int64(8),
+                Scalar::Int64(10),
+            ])
+            .expect("col");
+            let d = col.diff(-1).expect("diff");
+            assert_eq!(d.values()[0], Scalar::Float64(-3.0));
+            assert_eq!(d.values()[1], Scalar::Float64(-2.0));
+            assert!(d.values()[2].is_missing());
+        }
+
+        #[test]
+        fn duplicated_keep_first() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(1),
+                Scalar::Int64(3),
+                Scalar::Int64(2),
+            ])
+            .expect("col");
+            let d = col.duplicated().expect("duplicated");
+            assert_eq!(d.values()[0], Scalar::Bool(false));
+            assert_eq!(d.values()[1], Scalar::Bool(false));
+            assert_eq!(d.values()[2], Scalar::Bool(true));
+            assert_eq!(d.values()[3], Scalar::Bool(false));
+            assert_eq!(d.values()[4], Scalar::Bool(true));
+        }
+
+        #[test]
+        fn duplicated_treats_nulls_as_one_bucket() {
+            let col = Column::from_values(vec![
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Int64(1),
+            ])
+            .expect("col");
+            let d = col.duplicated().expect("duplicated");
+            assert_eq!(d.values()[0], Scalar::Bool(false));
+            assert_eq!(d.values()[1], Scalar::Bool(true));
+            assert_eq!(d.values()[2], Scalar::Bool(false));
+        }
+
+        #[test]
+        fn between_inclusive_both() {
+            let col = Column::from_values(vec![
+                Scalar::Float64(0.5),
+                Scalar::Float64(1.0),
+                Scalar::Float64(5.0),
+                Scalar::Float64(6.0),
+            ])
+            .expect("col");
+            let b = col.between(1.0, 5.0, true).expect("between");
+            assert_eq!(b.values()[0], Scalar::Bool(false));
+            assert_eq!(b.values()[1], Scalar::Bool(true));
+            assert_eq!(b.values()[2], Scalar::Bool(true));
+            assert_eq!(b.values()[3], Scalar::Bool(false));
+        }
+
+        #[test]
+        fn between_exclusive() {
+            let col = Column::from_values(vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(5.0),
+            ])
+            .expect("col");
+            let b = col.between(1.0, 5.0, false).expect("between");
+            assert_eq!(b.values()[0], Scalar::Bool(false));
+            assert_eq!(b.values()[1], Scalar::Bool(true));
+            assert_eq!(b.values()[2], Scalar::Bool(false));
+        }
+
+        #[test]
+        fn between_missing_maps_to_false() {
+            let col = Column::from_values(vec![
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(3.0),
+            ])
+            .expect("col");
+            let b = col.between(1.0, 5.0, true).expect("between");
+            assert_eq!(b.values()[0], Scalar::Bool(false));
+            assert_eq!(b.values()[1], Scalar::Bool(true));
         }
     }
 
