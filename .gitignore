@@ -24,7 +24,6 @@ __pycache__/
 *.pyo
 
 # Local issue-tracker state
-.beads/
 .bv/
 
 # Ephemeral agent/runtime artifacts
