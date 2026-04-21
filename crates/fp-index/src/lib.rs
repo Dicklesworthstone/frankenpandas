@@ -963,6 +963,103 @@ impl Index {
         self.propagate_name(Self::new(out))
     }
 
+    /// Nearest-preceding-or-equal label lookup.
+    ///
+    /// Matches `pd.Index.asof(label)` for monotonic-increasing
+    /// indexes: returns the largest label `<= key`. Returns `None`
+    /// when no such label exists (key precedes every entry). The
+    /// index is assumed sorted; callers should `sort_values()` first
+    /// if needed (pandas emits a warning in the non-monotonic case
+    /// but still does a linear scan — we match that behavior).
+    #[must_use]
+    pub fn asof(&self, key: &IndexLabel) -> Option<IndexLabel> {
+        let mut best: Option<&IndexLabel> = None;
+        for label in &self.labels {
+            if label.is_missing() {
+                continue;
+            }
+            if label.cmp(key).is_le() {
+                best = Some(label);
+            } else {
+                break;
+            }
+        }
+        best.cloned()
+    }
+
+    /// Position where `value` would be inserted to keep the index
+    /// sorted ascending.
+    ///
+    /// Matches `pd.Index.searchsorted(value, side)`. `side` is
+    /// `"left"` (first valid insertion) or `"right"` (last). Returns
+    /// an error for unknown sides or missing needles.
+    pub fn searchsorted(&self, value: &IndexLabel, side: &str) -> Result<usize, IndexError> {
+        if side != "left" && side != "right" {
+            return Err(IndexError::InvalidArgument(format!(
+                "searchsorted: side must be 'left' or 'right', got {side:?}"
+            )));
+        }
+        if value.is_missing() {
+            return Err(IndexError::InvalidArgument(
+                "searchsorted: needle cannot be missing".to_owned(),
+            ));
+        }
+        let mut lo = 0usize;
+        let mut hi = self.labels.len();
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            let cmp = if self.labels[mid].is_missing() {
+                std::cmp::Ordering::Greater
+            } else {
+                self.labels[mid].cmp(value)
+            };
+            use std::cmp::Ordering;
+            let go_right = matches!(
+                (cmp, side),
+                (Ordering::Less, _) | (Ordering::Equal, "right")
+            );
+            if go_right {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        Ok(lo)
+    }
+
+    /// Approximate memory footprint (bytes) occupied by the labels.
+    ///
+    /// Matches `pd.Index.memory_usage(deep=...)`. `deep=false` uses
+    /// a fixed per-label width (8 bytes for Int64/Timedelta64/
+    /// Datetime64, pointer-size for Utf8); `deep=true` additionally
+    /// accounts for each Utf8 string's byte length.
+    #[must_use]
+    pub fn memory_usage(&self, deep: bool) -> usize {
+        self.labels
+            .iter()
+            .map(|label| match label {
+                IndexLabel::Int64(_) | IndexLabel::Timedelta64(_) | IndexLabel::Datetime64(_) => 8,
+                IndexLabel::Utf8(s) => {
+                    if deep {
+                        std::mem::size_of::<String>() + s.len()
+                    } else {
+                        std::mem::size_of::<String>()
+                    }
+                }
+            })
+            .sum()
+    }
+
+    /// Number of levels in this index.
+    ///
+    /// Matches `pd.Index.nlevels`. Always 1 for the flat Index type;
+    /// MultiIndex already overrides this. Provided so callers can
+    /// write level-agnostic code that works on either kind.
+    #[must_use]
+    pub fn nlevels(&self) -> usize {
+        1
+    }
+
     /// Materialize labels into an owned `Vec<IndexLabel>`.
     ///
     /// Matches `pd.Index.to_list()`. Convenience helper for callers
@@ -1178,6 +1275,8 @@ pub enum IndexError {
         actual: usize,
         context: String,
     },
+    #[error("invalid argument: {0}")]
+    InvalidArgument(String),
 }
 
 /// Alignment mode for index-level join semantics.
@@ -3837,6 +3936,77 @@ mod tests {
         let idx = Index::from_i64(vec![1, 2]);
         let replaced = idx.putmask(&[], &IndexLabel::Int64(0));
         assert_eq!(replaced.labels(), idx.labels());
+    }
+
+    #[test]
+    fn index_asof_finds_largest_not_exceeding() {
+        let idx = Index::from_i64(vec![1, 3, 5, 7]);
+        assert_eq!(idx.asof(&IndexLabel::Int64(4)), Some(IndexLabel::Int64(3)));
+        assert_eq!(idx.asof(&IndexLabel::Int64(5)), Some(IndexLabel::Int64(5)));
+        assert_eq!(idx.asof(&IndexLabel::Int64(7)), Some(IndexLabel::Int64(7)));
+        assert_eq!(idx.asof(&IndexLabel::Int64(100)), Some(IndexLabel::Int64(7)));
+    }
+
+    #[test]
+    fn index_asof_before_first_returns_none() {
+        let idx = Index::from_i64(vec![5, 10]);
+        assert_eq!(idx.asof(&IndexLabel::Int64(0)), None);
+    }
+
+    #[test]
+    fn index_searchsorted_left_right() {
+        let idx = Index::from_i64(vec![1, 2, 2, 5]);
+        assert_eq!(
+            idx.searchsorted(&IndexLabel::Int64(2), "left").unwrap(),
+            1
+        );
+        assert_eq!(
+            idx.searchsorted(&IndexLabel::Int64(2), "right").unwrap(),
+            3
+        );
+        assert_eq!(
+            idx.searchsorted(&IndexLabel::Int64(0), "left").unwrap(),
+            0
+        );
+        assert_eq!(
+            idx.searchsorted(&IndexLabel::Int64(6), "left").unwrap(),
+            4
+        );
+    }
+
+    #[test]
+    fn index_searchsorted_rejects_invalid_side() {
+        let idx = Index::from_i64(vec![1]);
+        assert!(
+            idx.searchsorted(&IndexLabel::Int64(0), "middle").is_err()
+        );
+    }
+
+    #[test]
+    fn index_memory_usage_counts_fixed_width() {
+        let idx = Index::from_i64(vec![1, 2, 3]);
+        let shallow = idx.memory_usage(false);
+        assert_eq!(shallow, 24); // 3 * 8
+        // deep is identical for fixed-width types.
+        assert_eq!(idx.memory_usage(true), 24);
+    }
+
+    #[test]
+    fn index_memory_usage_deep_counts_utf8_bytes() {
+        let idx = Index::new(vec![
+            IndexLabel::Utf8("hi".into()),
+            IndexLabel::Utf8("world".into()),
+        ]);
+        let shallow = idx.memory_usage(false);
+        let deep = idx.memory_usage(true);
+        // deep - shallow == sum of string byte lengths
+        assert_eq!(deep - shallow, 7);
+    }
+
+    #[test]
+    fn index_nlevels_flat_index_is_one() {
+        let idx = Index::from_i64(vec![1, 2]);
+        assert_eq!(idx.nlevels(), 1);
     }
 
     #[test]
