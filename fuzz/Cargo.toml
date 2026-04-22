@@ -131,6 +131,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_groupby_agg_dispatch"
+path = "fuzz_targets/fuzz_groupby_agg_dispatch.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_pivot_table"
 path = "fuzz_targets/fuzz_pivot_table.rs"
 test = false

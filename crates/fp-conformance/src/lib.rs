@@ -6764,6 +6764,204 @@ pub fn fuzz_groupby_sum_bytes(input: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
+const FUZZ_GROUPBY_AGG_FUNCS: &[&str] = &[
+    "sum", "mean", "count", "min", "max", "std", "var", "median", "first", "last", "nunique",
+    "prod", "product", "bogus",
+];
+
+fn fuzz_groupby_agg_key_scalar_from_bytes(bytes: &[u8]) -> Scalar {
+    let tag = bytes.first().copied().unwrap_or_default();
+    let payload = bytes.get(1).copied().unwrap_or_default();
+
+    match tag % 4 {
+        0 => Scalar::Null(NullKind::Null),
+        1 => Scalar::Utf8(format!("g{}", payload % 4)),
+        2 => Scalar::Utf8(format!("h{}", payload % 3)),
+        _ => Scalar::Utf8("same".to_owned()),
+    }
+}
+
+fn fuzz_groupby_agg_value_scalar_from_bytes(bytes: &[u8]) -> Scalar {
+    let tag = bytes.first().copied().unwrap_or_default();
+    let payload = bytes.get(1).copied().unwrap_or_default();
+
+    match tag % 6 {
+        0 => Scalar::Null(NullKind::Null),
+        1 => Scalar::Int64(i64::from(payload % 11) - 5),
+        2 => Scalar::Float64(f64::from(i8::from_ne_bytes([payload])) / 5.0),
+        3 => Scalar::Float64(0.0),
+        4 => Scalar::Float64(1.0),
+        _ => Scalar::Int64(2),
+    }
+}
+
+fn fuzz_groupby_agg_funcs_from_bytes(bytes: &[u8]) -> Vec<&'static str> {
+    let mut funcs = Vec::new();
+
+    for chunk in bytes.chunks(2).take(3) {
+        let selector = chunk.first().copied().unwrap_or_default() as usize;
+        let func = FUZZ_GROUPBY_AGG_FUNCS[selector % FUZZ_GROUPBY_AGG_FUNCS.len()];
+        if !funcs.contains(&func) {
+            funcs.push(func);
+        }
+    }
+
+    if funcs.is_empty() {
+        funcs.push("sum");
+    }
+
+    funcs
+}
+
+fn fuzz_groupby_agg_frame_from_bytes(bytes: &[u8]) -> Result<(DataFrame, usize), FrameError> {
+    let row_chunks: Vec<&[u8]> = if bytes.is_empty() {
+        vec![&[]]
+    } else {
+        bytes.chunks(4).take(12).collect()
+    };
+
+    let mut keys = Vec::with_capacity(row_chunks.len());
+    let mut values = Vec::with_capacity(row_chunks.len());
+    let mut expected_groups = BTreeSet::new();
+
+    for chunk in row_chunks {
+        let key = fuzz_groupby_agg_key_scalar_from_bytes(chunk.get(..2).unwrap_or(&[]));
+        if let Scalar::Utf8(label) = &key {
+            expected_groups.insert(label.clone());
+        }
+        keys.push(key);
+        values.push(fuzz_groupby_agg_value_scalar_from_bytes(
+            chunk.get(2..4).unwrap_or(&[]),
+        ));
+    }
+
+    let frame = DataFrame::from_dict(&["grp", "val"], vec![("grp", keys), ("val", values)])?;
+    Ok((frame, expected_groups.len()))
+}
+
+fn fuzz_validate_groupby_agg_result(
+    mode_name: &str,
+    result: Result<DataFrame, FrameError>,
+    expected_groups: usize,
+    expected_columns: usize,
+) -> Result<(), String> {
+    match result {
+        Ok(result) => {
+            if result.index().len() != expected_groups {
+                return Err(format!(
+                    "{mode_name} emitted {} groups, expected {expected_groups}: result={result:?}",
+                    result.index().len()
+                ));
+            }
+            if result.column_names().len() != expected_columns {
+                return Err(format!(
+                    "{mode_name} emitted {} columns, expected {expected_columns}: result={result:?}",
+                    result.column_names().len()
+                ));
+            }
+            for column_name in result.column_names() {
+                let column = result.column(column_name).ok_or_else(|| {
+                    format!("{mode_name} result missing declared column {column_name:?}")
+                })?;
+                if column.values().len() != expected_groups {
+                    return Err(format!(
+                        "{mode_name} column {column_name:?} length drifted: \
+                         values_len={} expected_groups={expected_groups}",
+                        column.values().len()
+                    ));
+                }
+            }
+            Ok(())
+        }
+        Err(FrameError::CompatibilityRejected(_)) => Ok(()),
+        Err(err) => Err(format!(
+            "{mode_name} returned unexpected error variant: {err:?}"
+        )),
+    }
+}
+
+/// Structure-aware fuzz entrypoint for `DataFrameGroupBy` aggregation dispatch.
+///
+/// The first byte selects the dispatch surface:
+/// - `0`: `agg_list(&[funcs...])`
+/// - `1`: `agg({\"val\": func})`
+/// - `2`: `agg_dict_list({\"val\": [funcs...]})`
+/// - `3`: `agg_named([(out, \"val\", func), ...])`
+///
+/// Remaining bytes are split at `|` (or midpoint) into function selectors and
+/// row payload. Successful runs must produce exactly one row per non-null group
+/// and one output column per requested aggregation. Unsupported functions are
+/// allowed only if they return `FrameError::CompatibilityRejected`.
+pub fn fuzz_groupby_agg_bytes(input: &[u8]) -> Result<(), String> {
+    let Some((&mode_tag, payload)) = input.split_first() else {
+        return Ok(());
+    };
+
+    let (func_bytes, row_bytes) =
+        if let Some(split_at) = payload.iter().position(|byte| *byte == b'|') {
+            (&payload[..split_at], &payload[split_at + 1..])
+        } else {
+            payload.split_at(payload.len() / 3)
+        };
+
+    let funcs = fuzz_groupby_agg_funcs_from_bytes(func_bytes);
+    let (frame, expected_groups) = fuzz_groupby_agg_frame_from_bytes(row_bytes)
+        .map_err(|err| format!("groupby agg frame projection failed: {err:?}"))?;
+    let groupby = frame
+        .groupby(&["grp"])
+        .map_err(|err| format!("groupby setup failed: {err:?}"))?;
+
+    match mode_tag % 4 {
+        0 => fuzz_validate_groupby_agg_result(
+            "agg_list",
+            groupby.agg_list(&funcs),
+            expected_groups,
+            funcs.len(),
+        ),
+        1 => {
+            let mut func_map = HashMap::new();
+            func_map.insert("val".to_owned(), funcs[0].to_owned());
+            fuzz_validate_groupby_agg_result("agg", groupby.agg(&func_map), expected_groups, 1)
+        }
+        2 => {
+            let mut func_map = HashMap::new();
+            func_map.insert(
+                "val".to_owned(),
+                funcs.iter().map(|func| (*func).to_owned()).collect(),
+            );
+            fuzz_validate_groupby_agg_result(
+                "agg_dict_list",
+                groupby.agg_dict_list(&func_map),
+                expected_groups,
+                funcs.len(),
+            )
+        }
+        _ => {
+            let specs_owned: Vec<(String, String, String)> = funcs
+                .iter()
+                .enumerate()
+                .map(|(idx, func)| {
+                    (
+                        format!("out_{idx}_{func}"),
+                        "val".to_owned(),
+                        (*func).to_owned(),
+                    )
+                })
+                .collect();
+            let specs: Vec<(&str, &str, &str)> = specs_owned
+                .iter()
+                .map(|(output, column, func)| (output.as_str(), column.as_str(), func.as_str()))
+                .collect();
+            fuzz_validate_groupby_agg_result(
+                "agg_named",
+                groupby.agg_named(&specs),
+                expected_groups,
+                funcs.len(),
+            )
+        }
+    }
+}
+
 /// Structure-aware fuzz entrypoint for the `fp-io` JSON and JSONL readers.
 ///
 /// The same textual payload is exercised across all supported JSON orients plus
@@ -21435,9 +21633,9 @@ mod tests {
         enforce_packet_gates, evaluate_ci_gate, evaluate_parity_gate, fuzz_column_arith_bytes,
         fuzz_common_dtype_bytes, fuzz_csv_parse_bytes, fuzz_dataframe_eval_bytes,
         fuzz_excel_io_bytes, fuzz_feather_io_bytes, fuzz_fixture_parse_bytes,
-        fuzz_format_cross_round_trip_bytes, fuzz_groupby_sum_bytes, fuzz_index_align_bytes,
-        fuzz_ipc_stream_io_bytes, fuzz_join_series_bytes, fuzz_json_io_bytes,
-        fuzz_parquet_io_bytes, fuzz_pivot_table_bytes, fuzz_scalar_cast_bytes,
+        fuzz_format_cross_round_trip_bytes, fuzz_groupby_agg_bytes, fuzz_groupby_sum_bytes,
+        fuzz_index_align_bytes, fuzz_ipc_stream_io_bytes, fuzz_join_series_bytes,
+        fuzz_json_io_bytes, fuzz_parquet_io_bytes, fuzz_pivot_table_bytes, fuzz_scalar_cast_bytes,
         fuzz_semantic_eq_bytes, fuzz_series_add_bytes, generate_raptorq_sidecar, run_ci_pipeline,
         run_differential_by_id, run_differential_suite, run_e2e_suite,
         run_fault_injection_validation_by_id, run_packet_by_id, run_packet_suite,
@@ -22168,6 +22366,30 @@ mod tests {
         let seed =
             include_bytes!("../fixtures/adversarial/fuzz_corpus/groupby_sum/alignment_seed.bin");
         fuzz_groupby_sum_bytes(seed).expect("alignment seed should satisfy invariants");
+    }
+
+    #[test]
+    fn fuzz_groupby_agg_bytes_accepts_empty_input() {
+        fuzz_groupby_agg_bytes(&[]).expect("empty input should be a no-op");
+    }
+
+    #[test]
+    fn fuzz_groupby_agg_bytes_accepts_supported_agg_list_seed() {
+        let seed = [0, 0, 1, 2, b'|', 1, 0, 1, 1, 1, 4, 1, 2, 7, 1, 3, 9];
+        fuzz_groupby_agg_bytes(&seed).expect("agg_list seed should satisfy invariants");
+    }
+
+    #[test]
+    fn fuzz_groupby_agg_bytes_accepts_compat_rejected_seed() {
+        let seed = [2, 13, b'|', 1, 0, 1, 1, 1, 4, 1, 2, 7];
+        fuzz_groupby_agg_bytes(&seed)
+            .expect("unsupported agg seed should stay in CompatibilityRejected");
+    }
+
+    #[test]
+    fn fuzz_groupby_agg_bytes_accepts_named_aggregation_seed() {
+        let seed = [3, 0, 1, b'|', 1, 0, 1, 1, 1, 3, 1, 2, 5, 1, 3, 7];
+        fuzz_groupby_agg_bytes(&seed).expect("agg_named seed should satisfy invariants");
     }
 
     #[test]
