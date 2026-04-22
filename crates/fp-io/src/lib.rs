@@ -3028,7 +3028,7 @@ pub fn read_ipc_stream_bytes(data: &[u8]) -> Result<DataFrame, IoError> {
     fp_frame::concat_dataframes(&refs).map_err(IoError::from)
 }
 
-// ── SQL (SQLite) I/O ────────────────────────────────────────────────────
+// ── SQL I/O ─────────────────────────────────────────────────────────────
 
 /// Options for writing a DataFrame to SQL.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3060,6 +3060,28 @@ pub struct SqlWriteOptions {
     pub index: bool,
     /// Optional override for the emitted index column name.
     pub index_label: Option<String>,
+}
+
+/// Backend-agnostic in-memory representation of a SQL query result.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SqlQueryResult {
+    pub columns: Vec<String>,
+    pub rows: Vec<Vec<Scalar>>,
+}
+
+/// Minimal SQL connection surface needed by FrankenPandas SQL IO.
+pub trait SqlConnection {
+    fn query(&self, query: &str, params: &[Scalar]) -> Result<SqlQueryResult, IoError>;
+
+    fn execute_batch(&self, sql: &str) -> Result<(), IoError>;
+
+    fn table_exists(&self, table_name: &str) -> Result<bool, IoError>;
+
+    fn insert_rows(&self, insert_sql: &str, rows: &[Vec<Scalar>]) -> Result<(), IoError>;
+
+    fn dtype_sql(&self, dtype: DType) -> &'static str;
+
+    fn index_dtype_sql(&self, index: &Index) -> &'static str;
 }
 
 /// Map an fp-types DType to an SQLite column type declaration.
@@ -3109,24 +3131,106 @@ fn sql_value_from_scalar(scalar: &Scalar) -> rusqlite::types::Value {
     }
 }
 
-fn sql_value_from_index_label(label: &IndexLabel) -> rusqlite::types::Value {
+fn scalar_from_index_label(label: &IndexLabel) -> Scalar {
     match label {
-        IndexLabel::Int64(v) => rusqlite::types::Value::Integer(*v),
-        IndexLabel::Utf8(s) => rusqlite::types::Value::Text(s.clone()),
+        IndexLabel::Int64(v) => Scalar::Int64(*v),
+        IndexLabel::Utf8(s) => Scalar::Utf8(s.clone()),
         IndexLabel::Timedelta64(v) => {
             if *v == Timedelta::NAT {
-                rusqlite::types::Value::Null
+                Scalar::Null(NullKind::Null)
             } else {
-                rusqlite::types::Value::Integer(*v)
+                Scalar::Timedelta64(*v)
             }
         }
         IndexLabel::Datetime64(v) => {
             if *v == i64::MIN {
-                rusqlite::types::Value::Null
+                Scalar::Null(NullKind::Null)
             } else {
-                rusqlite::types::Value::Text(format_datetime_ns(*v))
+                Scalar::Utf8(format_datetime_ns(*v))
             }
         }
+    }
+}
+
+impl SqlConnection for rusqlite::Connection {
+    fn query(&self, query: &str, params: &[Scalar]) -> Result<SqlQueryResult, IoError> {
+        let mut stmt = self
+            .prepare(query)
+            .map_err(|e| IoError::Sql(format!("prepare failed: {e}")))?;
+
+        let col_count = stmt.column_count();
+        let columns: Vec<String> = (0..col_count)
+            .map(|i| stmt.column_name(i).unwrap_or("?").to_owned())
+            .collect();
+
+        let sql_params = params.iter().map(sql_value_from_scalar).collect::<Vec<_>>();
+        let mut rows = stmt
+            .query(rusqlite::params_from_iter(sql_params.iter()))
+            .map_err(|e| IoError::Sql(format!("query failed: {e}")))?;
+
+        let mut out_rows = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .map_err(|e| IoError::Sql(format!("row fetch failed: {e}")))?
+        {
+            let mut values = Vec::with_capacity(col_count);
+            for col_idx in 0..col_count {
+                let value: rusqlite::types::Value = row
+                    .get(col_idx)
+                    .map_err(|e| IoError::Sql(format!("cell read failed: {e}")))?;
+                values.push(sql_value_to_scalar(&value));
+            }
+            out_rows.push(values);
+        }
+
+        Ok(SqlQueryResult {
+            columns,
+            rows: out_rows,
+        })
+    }
+
+    fn execute_batch(&self, sql: &str) -> Result<(), IoError> {
+        rusqlite::Connection::execute_batch(self, sql)
+            .map_err(|e| IoError::Sql(format!("execute_batch failed: {e}")))
+    }
+
+    fn table_exists(&self, table_name: &str) -> Result<bool, IoError> {
+        self.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1")
+            .and_then(|mut stmt| stmt.exists(rusqlite::params![table_name]))
+            .map_err(|e| IoError::Sql(format!("existence check failed: {e}")))
+    }
+
+    fn insert_rows(&self, insert_sql: &str, rows: &[Vec<Scalar>]) -> Result<(), IoError> {
+        let tx = self
+            .unchecked_transaction()
+            .map_err(|e| IoError::Sql(format!("begin transaction failed: {e}")))?;
+
+        {
+            let mut stmt = tx
+                .prepare_cached(insert_sql)
+                .map_err(|e| IoError::Sql(format!("prepare insert failed: {e}")))?;
+
+            for (row_idx, row_values) in rows.iter().enumerate() {
+                let params = row_values
+                    .iter()
+                    .map(sql_value_from_scalar)
+                    .collect::<Vec<_>>();
+                stmt.execute(rusqlite::params_from_iter(params.iter()))
+                    .map_err(|e| IoError::Sql(format!("insert row {row_idx} failed: {e}")))?;
+            }
+        }
+
+        tx.commit()
+            .map_err(|e| IoError::Sql(format!("commit failed: {e}")))?;
+        Ok(())
+    }
+
+    fn dtype_sql(&self, dtype: DType) -> &'static str {
+        dtype_to_sql(dtype)
+    }
+
+    fn index_dtype_sql(&self, index: &Index) -> &'static str {
+        sql_dtype_from_index(index)
     }
 }
 
@@ -3174,49 +3278,30 @@ fn escape_sql_ident(name: &str) -> Result<String, IoError> {
 /// Read the result of a SQL query into a DataFrame.
 ///
 /// Matches `pd.read_sql(sql, con)`.
-pub fn read_sql(conn: &rusqlite::Connection, query: &str) -> Result<DataFrame, IoError> {
+pub fn read_sql<C: SqlConnection>(conn: &C, query: &str) -> Result<DataFrame, IoError> {
     read_sql_with_options(conn, query, &SqlReadOptions::default())
 }
 
 /// Read the result of a SQL query into a DataFrame with read-time options.
 ///
 /// Matches the supported subset of `pd.read_sql(sql, con, params=[...], parse_dates=...)`.
-pub fn read_sql_with_options(
-    conn: &rusqlite::Connection,
+pub fn read_sql_with_options<C: SqlConnection>(
+    conn: &C,
     query: &str,
     options: &SqlReadOptions,
 ) -> Result<DataFrame, IoError> {
-    let mut stmt = conn
-        .prepare(query)
-        .map_err(|e| IoError::Sql(format!("prepare failed: {e}")))?;
-
-    let col_count = stmt.column_count();
-    let headers: Vec<String> = (0..col_count)
-        .map(|i| stmt.column_name(i).unwrap_or("?").to_owned())
-        .collect();
+    let SqlQueryResult {
+        columns: headers,
+        rows,
+    } = conn.query(query, options.params.as_deref().unwrap_or(&[]))?;
     reject_duplicate_headers(&headers)?;
+    let mut columns: Vec<Vec<Scalar>> = (0..headers.len()).map(|_| Vec::new()).collect();
 
-    let mut columns: Vec<Vec<Scalar>> = (0..col_count).map(|_| Vec::new()).collect();
-
-    let sql_params = options
-        .params
-        .as_ref()
-        .map(|params| params.iter().map(sql_value_from_scalar).collect::<Vec<_>>())
-        .unwrap_or_default();
-
-    let mut rows = stmt
-        .query(rusqlite::params_from_iter(sql_params.iter()))
-        .map_err(|e| IoError::Sql(format!("query failed: {e}")))?;
-
-    while let Some(row) = rows
-        .next()
-        .map_err(|e| IoError::Sql(format!("row fetch failed: {e}")))?
-    {
-        for (col_idx, col_vec) in columns.iter_mut().enumerate() {
-            let value: rusqlite::types::Value = row
-                .get(col_idx)
-                .map_err(|e| IoError::Sql(format!("cell read failed: {e}")))?;
-            col_vec.push(sql_value_to_scalar(&value));
+    for row in rows {
+        for (col_idx, value) in row.into_iter().enumerate() {
+            if let Some(col_vec) = columns.get_mut(col_idx) {
+                col_vec.push(value);
+            }
         }
     }
 
@@ -3247,8 +3332,8 @@ pub fn read_sql_with_options(
 /// `index_col=Some(name)` the named column is removed from the data
 /// columns and its values become the DataFrame's row index. Returns
 /// `IoError::Sql` if the named column is absent from the result set.
-pub fn read_sql_with_index_col(
-    conn: &rusqlite::Connection,
+pub fn read_sql_with_index_col<C: SqlConnection>(
+    conn: &C,
     query: &str,
     index_col: Option<&str>,
 ) -> Result<DataFrame, IoError> {
@@ -3262,8 +3347,8 @@ pub fn read_sql_with_index_col(
 /// Read an entire SQL table with one column promoted to the index.
 ///
 /// Matches `pd.read_sql_table(table, con, index_col=...)`.
-pub fn read_sql_table_with_index_col(
-    conn: &rusqlite::Connection,
+pub fn read_sql_table_with_index_col<C: SqlConnection>(
+    conn: &C,
     table_name: &str,
     index_col: Option<&str>,
 ) -> Result<DataFrame, IoError> {
@@ -3316,7 +3401,7 @@ fn promote_column_to_index(frame: &DataFrame, col_name: &str) -> Result<DataFram
 /// Read an entire SQL table into a DataFrame.
 ///
 /// Matches `pd.read_sql_table(table_name, con)`.
-pub fn read_sql_table(conn: &rusqlite::Connection, table_name: &str) -> Result<DataFrame, IoError> {
+pub fn read_sql_table<C: SqlConnection>(conn: &C, table_name: &str) -> Result<DataFrame, IoError> {
     // Validate table name to prevent SQL injection (only allow alphanumeric + underscore, non-empty).
     if table_name.is_empty() || !table_name.chars().all(|c| c.is_alphanumeric() || c == '_') {
         return Err(IoError::Sql(format!(
@@ -3335,8 +3420,8 @@ pub fn read_sql_table(conn: &rusqlite::Connection, table_name: &str) -> Result<D
 /// keep the projection injection-safe; mismatched names return
 /// `IoError::Sql`. Empty `columns` is rejected (pandas raises in
 /// the same case rather than producing an empty SELECT).
-pub fn read_sql_table_columns(
-    conn: &rusqlite::Connection,
+pub fn read_sql_table_columns<C: SqlConnection>(
+    conn: &C,
     table_name: &str,
     columns: &[&str],
 ) -> Result<DataFrame, IoError> {
@@ -3371,12 +3456,12 @@ pub fn read_sql_table_columns(
     read_sql(conn, &query)
 }
 
-/// Write a DataFrame to a SQLite table.
+/// Write a DataFrame to a SQL table.
 ///
 /// Matches `pd.DataFrame.to_sql(name, con)`.
-pub fn write_sql(
+pub fn write_sql<C: SqlConnection>(
     frame: &DataFrame,
-    conn: &rusqlite::Connection,
+    conn: &C,
     table_name: &str,
     if_exists: SqlIfExists,
 ) -> Result<(), IoError> {
@@ -3396,9 +3481,9 @@ pub fn write_sql(
 ///
 /// Matches the supported subset of
 /// `pd.DataFrame.to_sql(name, con, index=..., index_label=...)`.
-pub fn write_sql_with_options(
+pub fn write_sql_with_options<C: SqlConnection>(
     frame: &DataFrame,
-    conn: &rusqlite::Connection,
+    conn: &C,
     table_name: &str,
     options: &SqlWriteOptions,
 ) -> Result<(), IoError> {
@@ -3426,18 +3511,13 @@ pub fn write_sql_with_options(
     // Handle if_exists policy.
     match options.if_exists {
         SqlIfExists::Fail => {
-            // Check if table exists.
-            let exists: bool = conn
-                .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1")
-                .and_then(|mut s| s.exists(rusqlite::params![table_name]))
-                .map_err(|e| IoError::Sql(format!("existence check failed: {e}")))?;
+            let exists = conn.table_exists(table_name)?;
             if exists {
                 return Err(IoError::Sql(format!("table '{table_name}' already exists")));
             }
         }
         SqlIfExists::Replace => {
-            conn.execute_batch(&format!("DROP TABLE IF EXISTS \"{escaped_table}\""))
-                .map_err(|e| IoError::Sql(format!("drop table failed: {e}")))?;
+            conn.execute_batch(&format!("DROP TABLE IF EXISTS \"{escaped_table}\""))?;
         }
         SqlIfExists::Append => {
             // Table may or may not exist; CREATE TABLE IF NOT EXISTS handles both.
@@ -3450,7 +3530,7 @@ pub fn write_sql_with_options(
         col_defs.push(format!(
             "\"{}\" {}",
             escape_sql_ident(label)?,
-            sql_dtype_from_index(frame.index())
+            conn.index_dtype_sql(frame.index())
         ));
     }
     col_defs.extend(
@@ -3459,7 +3539,7 @@ pub fn write_sql_with_options(
             .map(|name| {
                 let escaped = escape_sql_ident(name)?;
                 let dt = frame.column(name).map_or(DType::Utf8, |c| c.dtype());
-                Ok(format!("\"{}\" {}", escaped, dtype_to_sql(dt)))
+                Ok(format!("\"{}\" {}", escaped, conn.dtype_sql(dt)))
             })
             .collect::<Result<Vec<_>, IoError>>()?,
     );
@@ -3469,10 +3549,8 @@ pub fn write_sql_with_options(
         escaped_table,
         col_defs.join(", ")
     );
-    conn.execute_batch(&create_sql)
-        .map_err(|e| IoError::Sql(format!("create table failed: {e}")))?;
+    conn.execute_batch(&create_sql)?;
 
-    // Insert rows in a transaction for performance.
     let placeholders: Vec<&str> = sql_col_names.iter().map(|_| "?").collect();
     let insert_sql = format!(
         "INSERT INTO \"{}\" ({}) VALUES ({})",
@@ -3485,35 +3563,24 @@ pub fn write_sql_with_options(
         placeholders.join(", ")
     );
 
-    let tx = conn
-        .unchecked_transaction()
-        .map_err(|e| IoError::Sql(format!("begin transaction failed: {e}")))?;
-
-    {
-        let mut stmt = tx
-            .prepare_cached(&insert_sql)
-            .map_err(|e| IoError::Sql(format!("prepare insert failed: {e}")))?;
-
-        let nrows = frame.index().len();
-        for row_idx in 0..nrows {
-            let mut params = Vec::with_capacity(sql_col_names.len());
-            if options.index {
-                params.push(sql_value_from_index_label(&frame.index().labels()[row_idx]));
-            }
-            params.extend(col_names.iter().map(|name| {
-                frame
-                    .column(name)
-                    .and_then(|col| col.value(row_idx))
-                    .map_or(rusqlite::types::Value::Null, sql_value_from_scalar)
-            }));
-
-            stmt.execute(rusqlite::params_from_iter(params.iter()))
-                .map_err(|e| IoError::Sql(format!("insert row {row_idx} failed: {e}")))?;
+    let nrows = frame.index().len();
+    let mut rows = Vec::with_capacity(nrows);
+    for row_idx in 0..nrows {
+        let mut row = Vec::with_capacity(sql_col_names.len());
+        if options.index {
+            row.push(scalar_from_index_label(&frame.index().labels()[row_idx]));
         }
+        row.extend(col_names.iter().map(|name| {
+            frame
+                .column(name)
+                .and_then(|col| col.value(row_idx))
+                .cloned()
+                .unwrap_or(Scalar::Null(NullKind::Null))
+        }));
+        rows.push(row);
     }
 
-    tx.commit()
-        .map_err(|e| IoError::Sql(format!("commit failed: {e}")))?;
+    conn.insert_rows(&insert_sql, &rows)?;
 
     Ok(())
 }
@@ -3566,20 +3633,20 @@ pub trait DataFrameIoExt {
     /// Serialize this DataFrame to Arrow IPC (Feather v2) bytes.
     fn to_feather_bytes(&self) -> Result<Vec<u8>, IoError>;
 
-    /// Write this DataFrame to a SQLite table.
+    /// Write this DataFrame to a SQL table.
     ///
     /// Matches `pd.DataFrame.to_sql(name, con)`.
-    fn to_sql(
+    fn to_sql<C: SqlConnection>(
         &self,
-        conn: &rusqlite::Connection,
+        conn: &C,
         table_name: &str,
         if_exists: SqlIfExists,
     ) -> Result<(), IoError>;
 
-    /// Write this DataFrame to a SQLite table with pandas-style SQL write options.
-    fn to_sql_with_options(
+    /// Write this DataFrame to a SQL table with pandas-style SQL write options.
+    fn to_sql_with_options<C: SqlConnection>(
         &self,
-        conn: &rusqlite::Connection,
+        conn: &C,
         table_name: &str,
         options: &SqlWriteOptions,
     ) -> Result<(), IoError>;
@@ -3622,18 +3689,18 @@ impl DataFrameIoExt for DataFrame {
         write_feather_bytes(self)
     }
 
-    fn to_sql(
+    fn to_sql<C: SqlConnection>(
         &self,
-        conn: &rusqlite::Connection,
+        conn: &C,
         table_name: &str,
         if_exists: SqlIfExists,
     ) -> Result<(), IoError> {
         write_sql(self, conn, table_name, if_exists)
     }
 
-    fn to_sql_with_options(
+    fn to_sql_with_options<C: SqlConnection>(
         &self,
-        conn: &rusqlite::Connection,
+        conn: &C,
         table_name: &str,
         options: &SqlWriteOptions,
     ) -> Result<(), IoError> {

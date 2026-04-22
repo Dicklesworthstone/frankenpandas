@@ -58,8 +58,10 @@ pub use fp_io::{
     IoError,
     // JSON
     JsonOrient,
+    SqlConnection,
     // SQL
     SqlIfExists,
+    SqlQueryResult,
     SqlReadOptions,
     SqlWriteOptions,
     read_csv,
