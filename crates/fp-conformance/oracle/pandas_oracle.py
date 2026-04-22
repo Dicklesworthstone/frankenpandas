@@ -2782,6 +2782,44 @@ def normalize_groupby_resample_frame(frame, groupby_columns: list[str], freq: st
     return out
 
 
+def normalize_groupby_rolling_frame(frame, groupby_columns: list[str]):
+    out = frame.copy()
+    if getattr(out.index, "nlevels", 1) > 1:
+        group_levels = list(range(out.index.nlevels - 1))
+        out = out.reset_index(level=group_levels)
+        rename_map: dict[Any, str] = {}
+        for position, column in enumerate(groupby_columns):
+            actual = out.columns[position]
+            if actual != column:
+                rename_map[actual] = column
+        if rename_map:
+            out = out.rename(columns=rename_map)
+    return out
+
+
+def op_dataframe_groupby_rolling_builtin(
+    pd, payload: dict[str, Any], func: str, op_name: str
+) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    if frame_payload is None:
+        raise OracleError(f"{op_name} requires frame payload")
+
+    columns = required_groupby_columns(payload, op_name)
+    window_size = payload.get("window_size", 3)
+    if not isinstance(window_size, int) or window_size <= 0:
+        raise OracleError(f"{op_name} requires positive integer window_size")
+
+    frame = dataframe_from_json(pd, frame_payload)
+
+    try:
+        out = getattr(frame.groupby(columns).rolling(window_size), func)()
+        out = normalize_groupby_rolling_frame(out, columns)
+    except Exception as exc:
+        raise OracleError(f"{op_name} failed: {exc}") from exc
+
+    return {"expected_frame": dataframe_to_json(out)}
+
+
 def op_dataframe_groupby_resample_builtin(
     pd, payload: dict[str, Any], func: str, op_name: str
 ) -> dict[str, Any]:
@@ -3124,6 +3162,18 @@ def op_dataframe_groupby_resample_max(pd, payload: dict[str, Any]) -> dict[str, 
 def op_dataframe_groupby_resample_count(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return op_dataframe_groupby_resample_builtin(
         pd, payload, "count", "dataframe_groupby_resample_count"
+    )
+
+
+def op_dataframe_groupby_rolling_mean(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return op_dataframe_groupby_rolling_builtin(
+        pd, payload, "mean", "dataframe_groupby_rolling_mean"
+    )
+
+
+def op_dataframe_groupby_rolling_sum(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return op_dataframe_groupby_rolling_builtin(
+        pd, payload, "sum", "dataframe_groupby_rolling_sum"
     )
 
 
@@ -4544,6 +4594,10 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_dataframe_groupby_resample_max(pd, payload)
     if op in {"dataframe_groupby_resample_count", "data_frame_groupby_resample_count"}:
         return op_dataframe_groupby_resample_count(pd, payload)
+    if op in {"dataframe_groupby_rolling_mean", "data_frame_groupby_rolling_mean"}:
+        return op_dataframe_groupby_rolling_mean(pd, payload)
+    if op in {"dataframe_groupby_rolling_sum", "data_frame_groupby_rolling_sum"}:
+        return op_dataframe_groupby_rolling_sum(pd, payload)
     if op in {"dataframe_groupby_cumcount", "data_frame_groupby_cumcount"}:
         return op_dataframe_groupby_cumcount(pd, payload)
     if op in {"dataframe_groupby_ngroup", "data_frame_groupby_ngroup"}:

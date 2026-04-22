@@ -813,6 +813,16 @@ pub enum FixtureOperation {
     )]
     DataFrameGroupByNgroup,
     #[serde(
+        rename = "dataframe_groupby_rolling_mean",
+        alias = "data_frame_groupby_rolling_mean"
+    )]
+    DataFrameGroupByRollingMean,
+    #[serde(
+        rename = "dataframe_groupby_rolling_sum",
+        alias = "data_frame_groupby_rolling_sum"
+    )]
+    DataFrameGroupByRollingSum,
+    #[serde(
         rename = "dataframe_groupby_resample_min",
         alias = "data_frame_groupby_resample_min"
     )]
@@ -1308,6 +1318,8 @@ impl FixtureOperation {
             Self::DataFrameGroupByOhlc => "dataframe_groupby_ohlc",
             Self::DataFrameGroupByCumcount => "dataframe_groupby_cumcount",
             Self::DataFrameGroupByNgroup => "dataframe_groupby_ngroup",
+            Self::DataFrameGroupByRollingMean => "dataframe_groupby_rolling_mean",
+            Self::DataFrameGroupByRollingSum => "dataframe_groupby_rolling_sum",
             Self::DataFrameGroupByResampleMin => "dataframe_groupby_resample_min",
             Self::DataFrameGroupByResampleMax => "dataframe_groupby_resample_max",
             Self::DataFrameGroupByResampleCount => "dataframe_groupby_resample_count",
@@ -2376,6 +2388,8 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::DataFrameRollingMean
         | FixtureOperation::DataFrameResampleSum
         | FixtureOperation::DataFrameResampleMean
+        | FixtureOperation::DataFrameGroupByRollingMean
+        | FixtureOperation::DataFrameGroupByRollingSum
         | FixtureOperation::DataFrameGroupByResampleMin
         | FixtureOperation::DataFrameGroupByResampleMax
         | FixtureOperation::DataFrameGroupByResampleCount => &["CC-004"],
@@ -10457,6 +10471,8 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::DataFrameRollingMean
         | FixtureOperation::DataFrameResampleSum
         | FixtureOperation::DataFrameResampleMean
+        | FixtureOperation::DataFrameGroupByRollingMean
+        | FixtureOperation::DataFrameGroupByRollingSum
         | FixtureOperation::DataFrameGroupByResampleMin
         | FixtureOperation::DataFrameGroupByResampleMax
         | FixtureOperation::DataFrameGroupByResampleCount => fixture
@@ -11075,6 +11091,8 @@ fn capture_live_oracle_expected(
         | FixtureOperation::DataFrameRollingMean
         | FixtureOperation::DataFrameResampleSum
         | FixtureOperation::DataFrameResampleMean
+        | FixtureOperation::DataFrameGroupByRollingMean
+        | FixtureOperation::DataFrameGroupByRollingSum
         | FixtureOperation::DataFrameGroupByResampleMin
         | FixtureOperation::DataFrameGroupByResampleMax
         | FixtureOperation::DataFrameGroupByResampleCount => response
@@ -13415,6 +13433,10 @@ fn execute_dataframe_fixture_operation(fixture: &PacketFixture) -> Result<DataFr
         | FixtureOperation::DataFrameGroupByResampleCount => {
             execute_dataframe_groupby_resample_fixture_operation(fixture)
         }
+        FixtureOperation::DataFrameGroupByRollingMean
+        | FixtureOperation::DataFrameGroupByRollingSum => {
+            execute_dataframe_groupby_rolling_fixture_operation(fixture)
+        }
         FixtureOperation::DataFrameAtTime => {
             let frame = build_dataframe(require_frame(fixture)?)
                 .map_err(|err| format!("frame build failed: {err}"))?;
@@ -13509,6 +13531,35 @@ fn execute_dataframe_groupby_resample_fixture_operation(
             .map_err(|err| err.to_string()),
         other => Err(format!(
             "unsupported dataframe groupby resample operation: {other:?}"
+        )),
+    }
+}
+
+fn execute_dataframe_groupby_rolling_fixture_operation(
+    fixture: &PacketFixture,
+) -> Result<DataFrame, String> {
+    let frame = build_dataframe(require_frame(fixture)?)
+        .map_err(|err| format!("frame build failed: {err}"))?;
+    let op_name = fixture.operation.operation_name();
+    let groupby_columns = require_groupby_columns(fixture, op_name)?;
+    let groupby_refs = groupby_columns
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let window_size = fixture.window_size.unwrap_or(3);
+    let groupby = frame.groupby(&groupby_refs).map_err(|err| err.to_string())?;
+
+    match fixture.operation {
+        FixtureOperation::DataFrameGroupByRollingMean => groupby
+            .rolling(window_size)
+            .mean()
+            .map_err(|err| err.to_string()),
+        FixtureOperation::DataFrameGroupByRollingSum => groupby
+            .rolling(window_size)
+            .sum()
+            .map_err(|err| err.to_string()),
+        other => Err(format!(
+            "unsupported dataframe groupby rolling operation: {other:?}"
         )),
     }
 }
@@ -18741,11 +18792,17 @@ fn execute_and_compare_differential(
         | FixtureOperation::DataFrameGetDummies
         | FixtureOperation::SeriesUnstack
         | FixtureOperation::SeriesStrGetDummies
+        | FixtureOperation::DataFrameGroupByRollingMean
+        | FixtureOperation::DataFrameGroupByRollingSum
         | FixtureOperation::DataFrameGroupByResampleMin
         | FixtureOperation::DataFrameGroupByResampleMax
         | FixtureOperation::DataFrameGroupByResampleCount
         | FixtureOperation::DataFrameCombineFirst => {
             let actual = match fixture.operation {
+                FixtureOperation::DataFrameGroupByRollingMean
+                | FixtureOperation::DataFrameGroupByRollingSum => {
+                    execute_dataframe_groupby_rolling_fixture_operation(fixture)
+                }
                 FixtureOperation::DataFrameGroupByResampleMin
                 | FixtureOperation::DataFrameGroupByResampleMax
                 | FixtureOperation::DataFrameGroupByResampleCount => {
@@ -27241,6 +27298,135 @@ mod tests {
         let actual = super::execute_dataframe_groupby_resample_fixture_operation(&fixture)
             .expect("actual frame");
         super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
+    }
+
+    fn assert_live_oracle_dataframe_groupby_rolling_frame_parity(fixture: super::PacketFixture) {
+        let mut cfg = HarnessConfig::default_paths();
+        cfg.allow_system_pandas_fallback = false;
+
+        let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+        if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+            eprintln!(
+                "live pandas unavailable; skipping dataframe groupby rolling oracle test {}: {message}",
+                fixture.case_id
+            );
+            return;
+        }
+
+        let expected = expected_result.expect("live oracle expected");
+        assert!(
+            matches!(&expected, super::ResolvedExpected::Frame(_)),
+            "expected live oracle frame payload, got {expected:?}"
+        );
+        let super::ResolvedExpected::Frame(expected) = expected else {
+            return;
+        };
+
+        let actual = super::execute_dataframe_groupby_rolling_fixture_operation(&fixture)
+            .expect("actual frame");
+        super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
+    }
+
+    #[test]
+    fn live_oracle_dataframe_groupby_rolling_mean_matches_pandas() {
+        let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+            "packet_id": "FP-P2D-444",
+            "case_id": "dataframe_groupby_rolling_mean_live",
+            "mode": "strict",
+            "operation": "dataframe_groupby_rolling_mean",
+            "oracle_source": "live_legacy_pandas",
+            "groupby_columns": ["grp"],
+            "window_size": 2,
+            "frame": {
+                "index": [
+                    { "kind": "int64", "value": 0 },
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "int64", "value": 2 },
+                    { "kind": "int64", "value": 3 },
+                    { "kind": "int64", "value": 4 },
+                    { "kind": "int64", "value": 5 },
+                    { "kind": "int64", "value": 6 },
+                    { "kind": "int64", "value": 7 }
+                ],
+                "column_order": ["grp", "val"],
+                "columns": {
+                    "grp": [
+                        { "kind": "utf8", "value": "a" },
+                        { "kind": "utf8", "value": "b" },
+                        { "kind": "utf8", "value": "a" },
+                        { "kind": "utf8", "value": "b" },
+                        { "kind": "utf8", "value": "a" },
+                        { "kind": "utf8", "value": "b" },
+                        { "kind": "utf8", "value": "a" },
+                        { "kind": "utf8", "value": "b" }
+                    ],
+                    "val": [
+                        { "kind": "float64", "value": 1.0 },
+                        { "kind": "float64", "value": 10.0 },
+                        { "kind": "float64", "value": 3.0 },
+                        { "kind": "float64", "value": 30.0 },
+                        { "kind": "float64", "value": 5.0 },
+                        { "kind": "null", "value": "na_n" },
+                        { "kind": "float64", "value": 7.0 },
+                        { "kind": "float64", "value": 50.0 }
+                    ]
+                }
+            }
+        }))
+        .expect("fixture");
+
+        assert_live_oracle_dataframe_groupby_rolling_frame_parity(fixture);
+    }
+
+    #[test]
+    fn live_oracle_dataframe_groupby_rolling_sum_matches_pandas() {
+        let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+            "packet_id": "FP-P2D-445",
+            "case_id": "dataframe_groupby_rolling_sum_live",
+            "mode": "strict",
+            "operation": "dataframe_groupby_rolling_sum",
+            "oracle_source": "live_legacy_pandas",
+            "groupby_columns": ["grp"],
+            "window_size": 2,
+            "frame": {
+                "index": [
+                    { "kind": "int64", "value": 0 },
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "int64", "value": 2 },
+                    { "kind": "int64", "value": 3 },
+                    { "kind": "int64", "value": 4 },
+                    { "kind": "int64", "value": 5 },
+                    { "kind": "int64", "value": 6 },
+                    { "kind": "int64", "value": 7 }
+                ],
+                "column_order": ["grp", "val"],
+                "columns": {
+                    "grp": [
+                        { "kind": "utf8", "value": "a" },
+                        { "kind": "utf8", "value": "b" },
+                        { "kind": "utf8", "value": "a" },
+                        { "kind": "utf8", "value": "b" },
+                        { "kind": "utf8", "value": "a" },
+                        { "kind": "utf8", "value": "b" },
+                        { "kind": "utf8", "value": "a" },
+                        { "kind": "utf8", "value": "b" }
+                    ],
+                    "val": [
+                        { "kind": "float64", "value": 2.0 },
+                        { "kind": "float64", "value": 4.0 },
+                        { "kind": "float64", "value": 5.0 },
+                        { "kind": "float64", "value": 8.0 },
+                        { "kind": "float64", "value": 11.0 },
+                        { "kind": "float64", "value": 16.0 },
+                        { "kind": "null", "value": "na_n" },
+                        { "kind": "float64", "value": 32.0 }
+                    ]
+                }
+            }
+        }))
+        .expect("fixture");
+
+        assert_live_oracle_dataframe_groupby_rolling_frame_parity(fixture);
     }
 
     #[test]
