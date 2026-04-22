@@ -3177,6 +3177,24 @@ def op_dataframe_groupby_rolling_sum(pd, payload: dict[str, Any]) -> dict[str, A
     )
 
 
+def op_dataframe_groupby_rolling_min(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return op_dataframe_groupby_rolling_builtin(
+        pd, payload, "min", "dataframe_groupby_rolling_min"
+    )
+
+
+def op_dataframe_groupby_rolling_max(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return op_dataframe_groupby_rolling_builtin(
+        pd, payload, "max", "dataframe_groupby_rolling_max"
+    )
+
+
+def op_dataframe_groupby_rolling_count(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return op_dataframe_groupby_rolling_builtin(
+        pd, payload, "count", "dataframe_groupby_rolling_count"
+    )
+
+
 def op_dataframe_groupby_cumcount(pd, payload: dict[str, Any]) -> dict[str, Any]:
     frame_payload = payload.get("frame")
     groupby_columns = payload.get("groupby_columns")
@@ -4598,6 +4616,12 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_dataframe_groupby_rolling_mean(pd, payload)
     if op in {"dataframe_groupby_rolling_sum", "data_frame_groupby_rolling_sum"}:
         return op_dataframe_groupby_rolling_sum(pd, payload)
+    if op in {"dataframe_groupby_rolling_min", "data_frame_groupby_rolling_min"}:
+        return op_dataframe_groupby_rolling_min(pd, payload)
+    if op in {"dataframe_groupby_rolling_max", "data_frame_groupby_rolling_max"}:
+        return op_dataframe_groupby_rolling_max(pd, payload)
+    if op in {"dataframe_groupby_rolling_count", "data_frame_groupby_rolling_count"}:
+        return op_dataframe_groupby_rolling_count(pd, payload)
     if op in {"dataframe_groupby_cumcount", "data_frame_groupby_cumcount"}:
         return op_dataframe_groupby_cumcount(pd, payload)
     if op in {"dataframe_groupby_ngroup", "data_frame_groupby_ngroup"}:
