@@ -22642,10 +22642,8 @@ impl DataFrame {
 
         let mut result_cols = BTreeMap::new();
         for (col_idx, name) in mode_columns.iter().enumerate() {
-            let mut values: Vec<Scalar> = padded_rows
-                .iter()
-                .map(|row| row[col_idx].clone())
-                .collect();
+            let mut values: Vec<Scalar> =
+                padded_rows.iter().map(|row| row[col_idx].clone()).collect();
             if any_source_is_float {
                 for value in &mut values {
                     if let Scalar::Int64(v) = *value {
@@ -50737,11 +50735,21 @@ mod tests {
             vec![
                 (
                     "a",
-                    vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true), Scalar::Bool(false)],
+                    vec![
+                        Scalar::Bool(true),
+                        Scalar::Bool(false),
+                        Scalar::Bool(true),
+                        Scalar::Bool(false),
+                    ],
                 ),
                 (
                     "b",
-                    vec![Scalar::Bool(true), Scalar::Bool(true), Scalar::Bool(true), Scalar::Bool(false)],
+                    vec![
+                        Scalar::Bool(true),
+                        Scalar::Bool(true),
+                        Scalar::Bool(true),
+                        Scalar::Bool(false),
+                    ],
                 ),
             ],
         )
@@ -58518,6 +58526,103 @@ mod tests {
                 Scalar::Int64(1),
                 Scalar::Int64(0),
                 Scalar::Int64(2),
+            ]
+        );
+    }
+
+    #[test]
+    fn groupby_resample_min_max_preserve_grouped_bucket_extrema() {
+        let df_with_idx = DataFrame::from_dict_with_index(
+            vec![
+                (
+                    "grp",
+                    vec![
+                        Scalar::Utf8("a".to_string()),
+                        Scalar::Utf8("a".to_string()),
+                        Scalar::Utf8("a".to_string()),
+                        Scalar::Utf8("a".to_string()),
+                        Scalar::Utf8("b".to_string()),
+                        Scalar::Utf8("b".to_string()),
+                        Scalar::Utf8("b".to_string()),
+                        Scalar::Utf8("b".to_string()),
+                    ],
+                ),
+                (
+                    "val",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(4.0),
+                        Scalar::Null(NullKind::NaN),
+                        Scalar::Float64(6.0),
+                        Scalar::Null(NullKind::NaN),
+                        Scalar::Float64(8.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(9.0),
+                    ],
+                ),
+            ],
+            vec![
+                "2024-01-01".into(),
+                "2024-01-15".into(),
+                "2024-02-01".into(),
+                "2024-02-20".into(),
+                "2024-01-05".into(),
+                "2024-01-25".into(),
+                "2024-02-05".into(),
+                "2024-02-15".into(),
+            ],
+        )
+        .unwrap();
+
+        let min_result = df_with_idx
+            .groupby(&["grp"])
+            .unwrap()
+            .resample("M")
+            .min()
+            .unwrap();
+        let max_result = df_with_idx
+            .groupby(&["grp"])
+            .unwrap()
+            .resample("M")
+            .max()
+            .unwrap();
+
+        let expected_index = &[
+            IndexLabel::Utf8("2024-01".to_string()),
+            IndexLabel::Utf8("2024-02".to_string()),
+            IndexLabel::Utf8("2024-01".to_string()),
+            IndexLabel::Utf8("2024-02".to_string()),
+        ];
+        let expected_groups = &[
+            Scalar::Utf8("a".to_string()),
+            Scalar::Utf8("a".to_string()),
+            Scalar::Utf8("b".to_string()),
+            Scalar::Utf8("b".to_string()),
+        ];
+
+        assert_eq!(min_result.column_names(), vec!["grp", "val"]);
+        assert_eq!(min_result.index().labels(), expected_index);
+        assert_eq!(min_result.column("grp").unwrap().values(), expected_groups);
+        assert_eq!(
+            min_result.column("val").unwrap().values(),
+            &[
+                Scalar::Float64(4.0),
+                Scalar::Float64(6.0),
+                Scalar::Float64(8.0),
+                Scalar::Float64(3.0),
+            ]
+        );
+
+        assert_eq!(max_result.column_names(), vec!["grp", "val"]);
+        assert_eq!(max_result.index().labels(), expected_index);
+        assert_eq!(max_result.column("grp").unwrap().values(), expected_groups);
+        assert_eq!(
+            max_result.column("val").unwrap().values(),
+            &[
+                Scalar::Float64(10.0),
+                Scalar::Float64(6.0),
+                Scalar::Float64(8.0),
+                Scalar::Float64(9.0),
             ]
         );
     }
