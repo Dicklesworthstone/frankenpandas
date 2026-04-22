@@ -9439,6 +9439,38 @@ fn run_fixture_operation(
                 )),
             }
         }
+        FixtureOperation::DataFrameGroupByRollingMean
+        | FixtureOperation::DataFrameGroupByRollingSum
+        | FixtureOperation::DataFrameGroupByRollingMin
+        | FixtureOperation::DataFrameGroupByRollingMax
+        | FixtureOperation::DataFrameGroupByRollingCount => {
+            let op_name = fixture.operation.operation_name();
+            let actual = execute_dataframe_groupby_rolling_fixture_operation(fixture);
+            match expected {
+                ResolvedExpected::Frame(frame) => compare_dataframe_expected(&actual?, &frame),
+                ResolvedExpected::ErrorContains(substr) => match actual {
+                    Err(message) if message.contains(&substr) => Ok(()),
+                    Err(message) => Err(format!(
+                        "expected {op_name} error containing '{substr}', got '{message}'"
+                    )),
+                    Ok(_) => Err(format!(
+                        "expected {op_name} to fail with error containing '{substr}'"
+                    )),
+                },
+                ResolvedExpected::ErrorAny => {
+                    if actual.is_err() {
+                        Ok(())
+                    } else {
+                        Err(format!(
+                            "expected {op_name} to fail but operation succeeded"
+                        ))
+                    }
+                }
+                _ => Err(format!(
+                    "expected_frame or expected_error is required for {op_name}"
+                )),
+            }
+        }
         FixtureOperation::DataFrameGroupByCumcount => {
             let actual = execute_dataframe_groupby_series_fixture_operation(fixture, false);
             match expected {
@@ -13577,7 +13609,9 @@ fn execute_dataframe_groupby_rolling_fixture_operation(
         .map(String::as_str)
         .collect::<Vec<_>>();
     let window_size = fixture.window_size.unwrap_or(3);
-    let groupby = frame.groupby(&groupby_refs).map_err(|err| err.to_string())?;
+    let groupby = frame
+        .groupby(&groupby_refs)
+        .map_err(|err| err.to_string())?;
 
     match fixture.operation {
         FixtureOperation::DataFrameGroupByRollingMean => groupby
