@@ -34,7 +34,7 @@
 | Row MultiIndex | Yes | No | Scaffolded (standalone type; DataFrame row-axis integration pending — see Limitations) |
 | Categorical dtype | Yes | Yes | Yes (metadata layer) |
 | 7 IO formats (CSV/JSON/JSONL/Parquet/Excel/SQL/Feather) | Yes (SQL: any SQLAlchemy engine) | Partial | Yes (SQL: SQLite-only via rusqlite; PostgreSQL/MySQL planned) |
-| Conformance testing against pandas oracle | - | - | Yes (20+ packet suites) |
+| Conformance testing against pandas oracle | - | - | Yes (430+ packet suites, 1249 fixtures, all green) |
 
 ## Quick Example
 
@@ -853,7 +853,7 @@ let merged = df1.merge_with_options(&df2, &["key"], JoinType::Inner,
 ./scripts/phase2c_gate_check.sh
 ```
 
-Regenerates conformance packet artifacts and fails closed if any parity report or gate is not green. 20+ packet suites covering alignment, join, groupby, concat, filter, CSV, dtype, null semantics, and more.
+Regenerates conformance packet artifacts and fails closed if any parity report or gate is not green. 430+ packet suites spanning 1249 fixtures cover alignment, join, groupby, concat, filter, CSV, dtype, null semantics, resample, rolling, groupby rolling/resample, datetime accessors, string accessors, and more — all currently green under `cargo test -p fp-conformance`.
 
 ## Missing Data Handling
 
