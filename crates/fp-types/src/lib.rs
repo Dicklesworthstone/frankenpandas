@@ -111,6 +111,13 @@ impl Scalar {
             }
             (Self::Null(NullKind::NaN), Self::Float64(v))
             | (Self::Float64(v), Self::Null(NullKind::NaN)) => v.is_nan(),
+            // All Null kinds (Null / NaN / NaT) mark missingness; they are
+            // semantically indistinguishable for oracle-parity checks even
+            // though derived PartialEq would reject a cross-kind pair.
+            // fp-frame normalizes Float64 column missing cells to
+            // Null(NaN) at Column::new time, while fixture oracles encode
+            // the canonical missing marker as Null(Null).
+            (Self::Null(_), Self::Null(_)) => true,
             _ => self == other,
         }
     }
