@@ -58246,6 +58246,86 @@ mod tests {
         assert_eq!(result.len(), 4);
     }
 
+    #[test]
+    fn groupby_resample_mean_preserves_group_and_bucket_order() {
+        let df_with_idx = DataFrame::from_dict_with_index(
+            vec![
+                (
+                    "grp",
+                    vec![
+                        Scalar::Utf8("a".to_string()),
+                        Scalar::Utf8("a".to_string()),
+                        Scalar::Utf8("a".to_string()),
+                        Scalar::Utf8("b".to_string()),
+                        Scalar::Utf8("b".to_string()),
+                        Scalar::Utf8("b".to_string()),
+                    ],
+                ),
+                (
+                    "val",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(40.0),
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(9.0),
+                    ],
+                ),
+            ],
+            vec![
+                "2024-01-01".into(),
+                "2024-01-15".into(),
+                "2024-02-01".into(),
+                "2024-01-05".into(),
+                "2024-02-05".into(),
+                "2024-02-20".into(),
+            ],
+        )
+        .unwrap();
+
+        let result = df_with_idx
+            .groupby(&["grp"])
+            .unwrap()
+            .resample("M")
+            .mean()
+            .unwrap();
+
+        assert_eq!(result.column_names(), vec!["grp", "val"]);
+        assert_eq!(result.len(), 4);
+        assert_eq!(
+            result.index().labels(),
+            &[
+                IndexLabel::Utf8("2024-01".to_string()),
+                IndexLabel::Utf8("2024-02".to_string()),
+                IndexLabel::Utf8("2024-01".to_string()),
+                IndexLabel::Utf8("2024-02".to_string()),
+            ]
+        );
+
+        let groups = result.column("grp").unwrap().values();
+        assert_eq!(
+            groups,
+            &[
+                Scalar::Utf8("a".to_string()),
+                Scalar::Utf8("a".to_string()),
+                Scalar::Utf8("b".to_string()),
+                Scalar::Utf8("b".to_string()),
+            ]
+        );
+
+        let values = result.column("val").unwrap().values();
+        assert_eq!(
+            values,
+            &[
+                Scalar::Float64(15.0),
+                Scalar::Float64(40.0),
+                Scalar::Float64(1.0),
+                Scalar::Float64(6.0),
+            ]
+        );
+    }
+
     // ── DataFrame.astype (all columns) ──────────────────────────────
 
     #[test]
