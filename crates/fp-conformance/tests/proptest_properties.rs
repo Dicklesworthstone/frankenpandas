@@ -9741,9 +9741,10 @@ proptest! {
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(30))]
 
-    /// Excel round-trip preserves DataFrame shape.
+    /// Excel default round-trip preserves row count and exposes the
+    /// written index as the leading column.
     #[test]
-    fn prop_excel_round_trip_preserves_shape(df in arb_int64_dataframe(8, 4)) {
+    fn prop_excel_default_round_trip_exposes_written_index(df in arb_int64_dataframe(8, 4)) {
         let bytes = fp_io::write_excel_bytes(&df);
         prop_assert!(bytes.is_ok(), "Excel write must succeed");
         let bytes = bytes.unwrap();
@@ -9754,8 +9755,34 @@ proptest! {
 
         prop_assert_eq!(parsed.index().len(), df.index().len(),
             "Excel round-trip must preserve row count");
+        prop_assert_eq!(parsed.column_names().len(), df.column_names().len() + 1,
+            "Excel default round-trip must expose the written index as an extra column");
+        prop_assert_eq!(parsed.column_names()[0], "column_0",
+            "Excel default round-trip must surface the unnamed index as column_0");
+    }
+
+    /// Excel round-trip preserves DataFrame shape when the writer omits
+    /// the row index to match the reader's default recovery path.
+    #[test]
+    fn prop_excel_round_trip_preserves_shape_when_index_false(df in arb_int64_dataframe(8, 4)) {
+        let bytes = fp_io::write_excel_bytes_with_options(
+            &df,
+            &fp_io::ExcelWriteOptions {
+                index: false,
+                ..fp_io::ExcelWriteOptions::default()
+            },
+        );
+        prop_assert!(bytes.is_ok(), "Excel write must succeed");
+        let bytes = bytes.unwrap();
+
+        let parsed = fp_io::read_excel_bytes(&bytes, &fp_io::ExcelReadOptions::default());
+        prop_assert!(parsed.is_ok(), "Excel parse must succeed: {:?}", parsed.err());
+        let parsed = parsed.unwrap();
+
+        prop_assert_eq!(parsed.index().len(), df.index().len(),
+            "Excel round-trip must preserve row count");
         prop_assert_eq!(parsed.column_names().len(), df.column_names().len(),
-            "Excel round-trip must preserve column count");
+            "Excel round-trip must preserve column count when index=false");
     }
 
     /// Excel round-trip preserves Int64 values exactly.
