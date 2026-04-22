@@ -424,12 +424,20 @@ fn mode_output_dtype(values: &[Scalar]) -> Option<DType> {
         }
     }
 
-    if saw_float || saw_missing || (saw_bool && saw_int) {
+    // Padding-induced missing values must not widen an Int64 or Bool
+    // column to Float64: pandas preserves the original dtype and keeps
+    // the null marker alongside it. Only widen for genuine Float64
+    // values or for Bool+Int mixes (dtype-lattice resolution).
+    if saw_float || (saw_bool && saw_int) {
         Some(DType::Float64)
-    } else if saw_bool {
-        Some(DType::Bool)
     } else if saw_int {
         Some(DType::Int64)
+    } else if saw_bool {
+        Some(DType::Bool)
+    } else if saw_missing {
+        // All-null (or padding-only) column: fall back to Float64 so
+        // Column::new can materialize a nullable numeric column.
+        Some(DType::Float64)
     } else {
         None
     }
@@ -50661,6 +50669,95 @@ mod tests {
     }
 
     #[test]
+    fn df_mode_preserves_int64_dtype_when_padding_with_nulls() {
+        // FP-P2D-057/dataframe_mode_ties_strict: column 'a' has two tied
+        // modes (forcing max_modes=2) while column 'b' has a single
+        // mode. The pad cell in 'b' must be a null Scalar, and the
+        // column dtype must stay Int64 — not widen to Float64.
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                (
+                    "a",
+                    vec![
+                        Scalar::Int64(1),
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                        Scalar::Int64(2),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Int64(3),
+                        Scalar::Int64(3),
+                        Scalar::Int64(3),
+                        Scalar::Int64(4),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let result = df.mode().unwrap();
+        assert_eq!(result.len(), 2);
+        let col_a = &result.columns()["a"];
+        let col_b = &result.columns()["b"];
+        assert_eq!(col_a.dtype(), DType::Int64);
+        assert_eq!(col_b.dtype(), DType::Int64, "b must stay Int64");
+        assert_eq!(col_a.values()[0], Scalar::Int64(1));
+        assert_eq!(col_a.values()[1], Scalar::Int64(2));
+        assert_eq!(col_b.values()[0], Scalar::Int64(3));
+        assert!(col_b.values()[1].is_missing(), "b padding must be null");
+    }
+
+    #[test]
+    fn df_mode_preserves_bool_dtype_when_padding_with_nulls() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                (
+                    "a",
+                    vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true), Scalar::Bool(false)],
+                ),
+                (
+                    "b",
+                    vec![Scalar::Bool(true), Scalar::Bool(true), Scalar::Bool(true), Scalar::Bool(false)],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let result = df.mode().unwrap();
+        assert_eq!(result.len(), 2);
+        let col_b = &result.columns()["b"];
+        assert_eq!(col_b.dtype(), DType::Bool, "bool column must stay Bool");
+        assert_eq!(col_b.values()[0], Scalar::Bool(true));
+        assert!(col_b.values()[1].is_missing());
+    }
+
+    #[test]
+    fn df_mode_widens_to_float64_when_actual_floats_present() {
+        // Genuine float values in the mode output must still produce
+        // a Float64 column (the padding fix must not regress this).
+        let df = DataFrame::from_dict(
+            &["a"],
+            vec![(
+                "a",
+                vec![
+                    Scalar::Float64(1.5),
+                    Scalar::Float64(1.5),
+                    Scalar::Float64(2.5),
+                    Scalar::Float64(2.5),
+                ],
+            )],
+        )
+        .unwrap();
+        let result = df.mode().unwrap();
+        assert_eq!(result.columns()["a"].dtype(), DType::Float64);
+    }
+
+    #[test]
     fn df_mode_dropna_false_counts_missing_values() {
         let df = DataFrame::from_tuples_with_index(
             vec![
@@ -58322,6 +58419,86 @@ mod tests {
                 Scalar::Float64(40.0),
                 Scalar::Float64(1.0),
                 Scalar::Float64(6.0),
+            ]
+        );
+    }
+
+    #[test]
+    fn groupby_resample_count_counts_non_missing_values_per_bucket() {
+        let df_with_idx = DataFrame::from_dict_with_index(
+            vec![
+                (
+                    "grp",
+                    vec![
+                        Scalar::Utf8("a".to_string()),
+                        Scalar::Utf8("a".to_string()),
+                        Scalar::Utf8("a".to_string()),
+                        Scalar::Utf8("b".to_string()),
+                        Scalar::Utf8("b".to_string()),
+                        Scalar::Utf8("b".to_string()),
+                    ],
+                ),
+                (
+                    "val",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Null(NullKind::NaN),
+                        Scalar::Float64(40.0),
+                        Scalar::Null(NullKind::NaN),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(9.0),
+                    ],
+                ),
+            ],
+            vec![
+                "2024-01-01".into(),
+                "2024-01-15".into(),
+                "2024-02-01".into(),
+                "2024-01-05".into(),
+                "2024-02-05".into(),
+                "2024-02-20".into(),
+            ],
+        )
+        .unwrap();
+
+        let result = df_with_idx
+            .groupby(&["grp"])
+            .unwrap()
+            .resample("M")
+            .count()
+            .unwrap();
+
+        assert_eq!(result.column_names(), vec!["grp", "val"]);
+        assert_eq!(result.len(), 4);
+        assert_eq!(
+            result.index().labels(),
+            &[
+                IndexLabel::Utf8("2024-01".to_string()),
+                IndexLabel::Utf8("2024-02".to_string()),
+                IndexLabel::Utf8("2024-01".to_string()),
+                IndexLabel::Utf8("2024-02".to_string()),
+            ]
+        );
+
+        let groups = result.column("grp").unwrap().values();
+        assert_eq!(
+            groups,
+            &[
+                Scalar::Utf8("a".to_string()),
+                Scalar::Utf8("a".to_string()),
+                Scalar::Utf8("b".to_string()),
+                Scalar::Utf8("b".to_string()),
+            ]
+        );
+
+        let values = result.column("val").unwrap().values();
+        assert_eq!(
+            values,
+            &[
+                Scalar::Int64(1),
+                Scalar::Int64(1),
+                Scalar::Int64(0),
+                Scalar::Int64(2),
             ]
         );
     }
