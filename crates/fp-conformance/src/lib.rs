@@ -18735,7 +18735,7 @@ fn percent(failed: usize, total: usize) -> f64 {
 }
 
 fn hash_bytes(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    hex_encode(Sha256::digest(bytes).as_slice())
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
@@ -19964,7 +19964,7 @@ impl ArtifactId {
             self.packet_id, self.artifact_kind, self.run_ts_unix_ms
         );
         let hash = Sha256::digest(input.as_bytes());
-        format!("{:x}", hash)[..8].to_owned()
+        hex_encode(hash.as_slice())[..8].to_owned()
     }
 }
 

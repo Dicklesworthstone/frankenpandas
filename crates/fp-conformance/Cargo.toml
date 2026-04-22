@@ -23,7 +23,7 @@ raptorq = { version = "2.0.1", features = ["serde_support"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = "0.9.34"
-sha2 = "0.10.9"
+sha2 = "0.11.0"
 thiserror = { workspace = true }
 
 [dev-dependencies]
