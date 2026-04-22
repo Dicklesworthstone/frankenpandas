@@ -32482,6 +32482,47 @@ test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; 
     }
 
     #[test]
+    fn ci_workflow_runs_workspace_rustdoc_gate() {
+        let root = repo_root();
+        let ci = fs::read_to_string(root.join(".github/workflows/ci.yml")).expect("read ci");
+        assert!(
+            ci.contains("Rustdoc"),
+            "expected named Rustdoc step in ci.yml"
+        );
+        assert!(
+            ci.contains("RUSTDOCFLAGS: -D warnings"),
+            "expected rustdoc warnings to be denied in ci.yml"
+        );
+        assert!(
+            ci.contains("cargo doc --workspace --no-deps --all-features"),
+            "expected CI to build workspace docs with all features"
+        );
+    }
+
+    #[test]
+    fn fp_frame_first_wave_public_panics_are_documented() {
+        let root = repo_root();
+        let source =
+            fs::read_to_string(root.join("crates/fp-frame/src/lib.rs")).expect("read fp-frame");
+        assert!(
+            source.contains("#![warn(rustdoc::broken_intra_doc_links)]"),
+            "expected fp-frame to opt into rustdoc broken link warnings"
+        );
+        for snippet in [
+            "/// # Panics\n    ///\n    /// Panics if the Series reports non-empty but its index has no last label,\n    /// which indicates internal index corruption.\n    pub fn last_offset(&self, offset: &str) -> Result<Self, FrameError> {",
+            "/// # Panics\n    ///\n    /// Panics if `self.column_order` references a column that is absent from\n    /// `self.columns`, which indicates internal DataFrame metadata corruption.\n    pub fn items(&self) -> Result<Vec<(String, Series)>, FrameError> {",
+            "/// # Panics\n    ///\n    /// Panics if any column length no longer matches the DataFrame index\n    /// length, which indicates internal DataFrame corruption.\n    pub fn to_series_dict(&self) -> BTreeMap<String, Series> {",
+            "/// # Panics\n    ///\n    /// Panics if the squeezed output cannot be represented as a valid Series\n    /// because the DataFrame's internal index or column metadata has already\n    /// diverged from its column storage.\n    #[allow(clippy::result_large_err)]\n    pub fn squeeze_to_series(&self, axis: usize) -> Result<Series, Self> {",
+            "/// # Panics\n    ///\n    /// Panics if the DataFrame reports non-empty but its index has no last\n    /// label, which indicates internal index corruption.\n    pub fn last_offset(&self, offset: &str) -> Result<Self, FrameError> {",
+        ] {
+            assert!(
+                source.contains(snippet),
+                "expected panic-contract snippet to exist in fp-frame source: {snippet}"
+            );
+        }
+    }
+
+    #[test]
     fn ci_gate_rule_ids_are_stable_and_nonempty() {
         let expected = vec![
             (CiGate::G1Compile, "G1"),

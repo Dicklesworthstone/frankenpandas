@@ -1907,7 +1907,7 @@ pub fn date_range(
 /// Full DataFrame integration is a future step.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MultiIndex {
-    /// One Vec<IndexLabel> per level, all the same length (= nrows).
+    /// One `Vec<IndexLabel>` per level, all the same length (= nrows).
     levels: Vec<Vec<IndexLabel>>,
     /// Optional name for each level.
     names: Vec<Option<String>>,

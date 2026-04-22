@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![warn(rustdoc::broken_intra_doc_links)]
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -5854,6 +5855,11 @@ impl Series {
     /// Select final rows from a DatetimeIndex backward by an offset.
     ///
     /// Matches `pd.Series.last(offset)`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the Series reports non-empty but its index has no last label,
+    /// which indicates internal index corruption.
     pub fn last_offset(&self, offset: &str) -> Result<Self, FrameError> {
         if self.is_empty() {
             return Ok(self.clone());
@@ -17788,7 +17794,7 @@ impl DataFrame {
     /// Label-based element lookup.
     ///
     /// Matches `df.lookup(row_labels, col_labels)`. Returns a Vec of Scalars
-    /// where element i is the value at (row_labels[i], col_labels[i]).
+    /// where element `i` is the value at (`row_labels[i]`, `col_labels[i]`).
     pub fn lookup(
         &self,
         row_labels: &[IndexLabel],
@@ -18080,7 +18086,7 @@ impl DataFrame {
         records
     }
 
-    /// Convert numeric columns to a 2D Vec<Vec<f64>>.
+    /// Convert numeric columns to a 2D `Vec<Vec<f64>>`.
     ///
     /// Matches `df.to_numpy()`. Rows are outer, columns are inner.
     /// Non-numeric values become `f64::NAN`.
@@ -18113,6 +18119,11 @@ impl DataFrame {
     /// Iterate over columns as `(column_name, Series)` pairs.
     ///
     /// Matches `df.items()` / `df.iteritems()`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `self.column_order` references a column that is absent from
+    /// `self.columns`, which indicates internal DataFrame metadata corruption.
     pub fn items(&self) -> Result<Vec<(String, Series)>, FrameError> {
         let mut result = Vec::with_capacity(self.column_order.len());
         for col_name in &self.column_order {
@@ -20966,6 +20977,11 @@ impl DataFrame {
     /// Matches `pd.DataFrame.to_dict(orient='series')`.
     /// Returns `{column_name -> Series}` where each Series has the
     /// DataFrame's index.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any column length no longer matches the DataFrame index
+    /// length, which indicates internal DataFrame corruption.
     pub fn to_series_dict(&self) -> BTreeMap<String, Series> {
         let mut result = BTreeMap::new();
         for col_name in &self.column_order {
@@ -22460,6 +22476,12 @@ impl DataFrame {
     /// Matches `pd.DataFrame.squeeze(axis)`.
     /// - axis=1 (default): if single column, return as Series
     /// - axis=0: if single row, return as Series
+    ///
+    /// # Panics
+    ///
+    /// Panics if the squeezed output cannot be represented as a valid Series
+    /// because the DataFrame's internal index or column metadata has already
+    /// diverged from its column storage.
     #[allow(clippy::result_large_err)]
     pub fn squeeze_to_series(&self, axis: usize) -> Result<Series, Self> {
         if axis == 1 && self.column_order.len() == 1 {
@@ -24909,6 +24931,11 @@ impl DataFrame {
     ///
     /// Matches `pd.DataFrame.last(offset)` where offset is a string like
     /// "3D" (days), "1M" (months), "2Y" (years).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the DataFrame reports non-empty but its index has no last
+    /// label, which indicates internal index corruption.
     pub fn last_offset(&self, offset: &str) -> Result<Self, FrameError> {
         if self.is_empty() {
             return Ok(self.clone());
