@@ -2,6 +2,30 @@
 
 Date of first entry: 2026-04-21
 Most recent sweep: 2026-04-22 (Clawdstein-libupdater-frankenpandas)
+Most recent verification: 2026-04-22 10:27Z (cc-pandas)
+
+## Verification (2026-04-22 10:27Z sweep, cc-pandas)
+
+Exhaustive recheck across all 22 tracked dependencies in
+`Cargo.toml` workspace.dependencies and every per-crate `fp-*/Cargo.toml`
+pin — queried `https://crates.io/api/v1/crates/<name>` for each and
+compared `max_stable_version` against the current pin. Result: **all
+22 match crates.io max stable** (asupersync 0.3.1 confirmed in
+`crates/fp-runtime/Cargo.toml`; Cargo.lock carries the matching
+franken-kernel / franken-evidence / franken-decision 0.3.1 triple).
+No further bumps available without hitting pre-release tracks.
+
+Baseline build: `cargo check --workspace --all-targets` under rch →
+exit 0. `cargo test -p fp-conformance --lib` → 373 passed / 0 failed
+(improvement from the 334/18 recorded in the previous sweep — the
+18 env-dependent sidecar failures resolved in the intervening fixture
+work).
+
+`serde_yaml` remains flagged as needs-attention: upstream archived,
+no newer stable under that name. Migration candidates (`serde_yml`,
+`serde_yaml_ng`) deferred.
+
+
 
 ## Summary (2026-04-22 sweep)
 
