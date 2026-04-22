@@ -58324,6 +58324,128 @@ mod tests {
         assert_eq!(vals[2], Scalar::Float64(4.0));
     }
 
+    #[test]
+    fn groupby_rolling_min_max_count_use_group_local_windows() {
+        let df = DataFrame::from_dict(
+            &["grp", "val"],
+            vec![
+                (
+                    "grp",
+                    vec![
+                        Scalar::Utf8("a".to_string()),
+                        Scalar::Utf8("b".to_string()),
+                        Scalar::Utf8("a".to_string()),
+                        Scalar::Utf8("b".to_string()),
+                        Scalar::Utf8("a".to_string()),
+                        Scalar::Utf8("b".to_string()),
+                        Scalar::Utf8("a".to_string()),
+                    ],
+                ),
+                (
+                    "val",
+                    vec![
+                        Scalar::Float64(5.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(7.0),
+                        Scalar::Null(NullKind::NaN),
+                        Scalar::Float64(6.0),
+                        Scalar::Float64(4.0),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let gb = df.groupby(&["grp"]).unwrap();
+
+        let mins = gb.rolling(2).min().unwrap();
+        let min_vals = mins.column("val").unwrap().values();
+        assert!(min_vals[0].is_missing());
+        assert!(min_vals[1].is_missing());
+        assert_eq!(min_vals[2], Scalar::Float64(1.0));
+        assert_eq!(min_vals[3], Scalar::Float64(2.0));
+        assert!(min_vals[4].is_missing());
+        assert_eq!(min_vals[5], Scalar::Float64(6.0));
+        assert!(min_vals[6].is_missing());
+
+        let maxs = gb.rolling(2).max().unwrap();
+        let max_vals = maxs.column("val").unwrap().values();
+        assert!(max_vals[0].is_missing());
+        assert!(max_vals[1].is_missing());
+        assert_eq!(max_vals[2], Scalar::Float64(5.0));
+        assert_eq!(max_vals[3], Scalar::Float64(7.0));
+        assert!(max_vals[4].is_missing());
+        assert_eq!(max_vals[5], Scalar::Float64(7.0));
+        assert!(max_vals[6].is_missing());
+
+        let counts = gb.rolling(2).count().unwrap();
+        let count_vals = counts.column("val").unwrap().values();
+        assert!(count_vals[0].is_missing());
+        assert!(count_vals[1].is_missing());
+        assert_eq!(count_vals[2], Scalar::Float64(2.0));
+        assert_eq!(count_vals[3], Scalar::Float64(2.0));
+        assert!(count_vals[4].is_missing());
+        assert_eq!(count_vals[5], Scalar::Float64(2.0));
+        assert!(count_vals[6].is_missing());
+    }
+
+    #[test]
+    fn groupby_rolling_std_var_respect_group_boundaries_and_missing_windows() {
+        let df = DataFrame::from_dict(
+            &["grp", "val"],
+            vec![
+                (
+                    "grp",
+                    vec![
+                        Scalar::Utf8("a".to_string()),
+                        Scalar::Utf8("b".to_string()),
+                        Scalar::Utf8("a".to_string()),
+                        Scalar::Utf8("b".to_string()),
+                        Scalar::Utf8("a".to_string()),
+                        Scalar::Utf8("b".to_string()),
+                        Scalar::Utf8("a".to_string()),
+                    ],
+                ),
+                (
+                    "val",
+                    vec![
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(4.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(6.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Null(NullKind::NaN),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let gb = df.groupby(&["grp"]).unwrap();
+
+        let stds = gb.rolling(3).std().unwrap();
+        let std_vals = stds.column("val").unwrap().values();
+        assert!(std_vals[0].is_missing());
+        assert!(std_vals[1].is_missing());
+        assert!(std_vals[2].is_missing());
+        assert!(std_vals[3].is_missing());
+        assert!((expect_float64(&std_vals[4]) - 2.0).abs() < 1e-10);
+        assert!((expect_float64(&std_vals[5]) - 1.0).abs() < 1e-10);
+        assert!(std_vals[6].is_missing());
+
+        let vars = gb.rolling(3).var().unwrap();
+        let var_vals = vars.column("val").unwrap().values();
+        assert!(var_vals[0].is_missing());
+        assert!(var_vals[1].is_missing());
+        assert!(var_vals[2].is_missing());
+        assert!(var_vals[3].is_missing());
+        assert!((expect_float64(&var_vals[4]) - 4.0).abs() < 1e-10);
+        assert!((expect_float64(&var_vals[5]) - 1.0).abs() < 1e-10);
+        assert!(var_vals[6].is_missing());
+    }
+
     // ── GroupBy resample tests ───────────────────────────────────────
 
     #[test]
