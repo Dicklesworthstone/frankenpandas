@@ -838,6 +838,16 @@ pub enum FixtureOperation {
     )]
     DataFrameGroupByRollingCount,
     #[serde(
+        rename = "dataframe_groupby_rolling_std",
+        alias = "data_frame_groupby_rolling_std"
+    )]
+    DataFrameGroupByRollingStd,
+    #[serde(
+        rename = "dataframe_groupby_rolling_var",
+        alias = "data_frame_groupby_rolling_var"
+    )]
+    DataFrameGroupByRollingVar,
+    #[serde(
         rename = "dataframe_groupby_resample_min",
         alias = "data_frame_groupby_resample_min"
     )]
@@ -1338,6 +1348,8 @@ impl FixtureOperation {
             Self::DataFrameGroupByRollingMin => "dataframe_groupby_rolling_min",
             Self::DataFrameGroupByRollingMax => "dataframe_groupby_rolling_max",
             Self::DataFrameGroupByRollingCount => "dataframe_groupby_rolling_count",
+            Self::DataFrameGroupByRollingStd => "dataframe_groupby_rolling_std",
+            Self::DataFrameGroupByRollingVar => "dataframe_groupby_rolling_var",
             Self::DataFrameGroupByResampleMin => "dataframe_groupby_resample_min",
             Self::DataFrameGroupByResampleMax => "dataframe_groupby_resample_max",
             Self::DataFrameGroupByResampleCount => "dataframe_groupby_resample_count",
@@ -2411,6 +2423,8 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::DataFrameGroupByRollingMin
         | FixtureOperation::DataFrameGroupByRollingMax
         | FixtureOperation::DataFrameGroupByRollingCount
+        | FixtureOperation::DataFrameGroupByRollingStd
+        | FixtureOperation::DataFrameGroupByRollingVar
         | FixtureOperation::DataFrameGroupByResampleMin
         | FixtureOperation::DataFrameGroupByResampleMax
         | FixtureOperation::DataFrameGroupByResampleCount => &["CC-004"],
@@ -5155,6 +5169,140 @@ pub fn fuzz_format_cross_round_trip_bytes(input: &[u8]) -> Result<(), FpIoError>
     Ok(())
 }
 
+const FUZZ_PIVOT_AGGFUNCS: [&str; 10] = [
+    "sum", "mean", "count", "min", "max", "prod", "median", "var", "std", "first",
+];
+
+fn fuzz_pivot_key_scalar_from_bytes(bytes: &[u8], synth_mode: bool, prefix: char) -> Scalar {
+    let tag = bytes.first().copied().unwrap_or_default();
+    let payload = bytes.get(1).copied().unwrap_or_default();
+
+    if synth_mode {
+        match tag % 5 {
+            0 => Scalar::Null(NullKind::Null),
+            1 => Scalar::Utf8(format!("{prefix}{}", payload % 3)),
+            2 => Scalar::Int64(i64::from(payload % 3)),
+            3 => Scalar::Utf8(format!("{prefix}{}", (payload / 3) % 3)),
+            _ => Scalar::Int64(i64::from(payload % 3) - 1),
+        }
+    } else {
+        match tag % 6 {
+            0 => Scalar::Null(NullKind::Null),
+            1 => Scalar::Utf8(char::from(b'a' + (payload % 4)).to_string()),
+            2 => Scalar::Int64(i64::from(payload % 5)),
+            3 => Scalar::Utf8(format!(
+                "{prefix}{}{}",
+                char::from(b'a' + (payload % 3)),
+                payload % 2
+            )),
+            4 => Scalar::Int64(i64::from(payload % 7) - 3),
+            _ => Scalar::Utf8(format!("{prefix}{}", payload % 5)),
+        }
+    }
+}
+
+fn fuzz_pivot_value_scalar_from_bytes(bytes: &[u8], synth_mode: bool) -> Scalar {
+    let tag = bytes.first().copied().unwrap_or_default();
+    let payload = bytes.get(1).copied().unwrap_or_default();
+
+    if synth_mode {
+        match tag % 6 {
+            0 => Scalar::Null(NullKind::NaN),
+            1 => Scalar::Int64(i64::from(payload % 9) - 4),
+            2 => Scalar::Float64(f64::from(i16::from(payload % 11) - 5)),
+            3 => Scalar::Float64(f64::from(payload % 8) / 2.0),
+            4 => Scalar::Float64(-f64::from(payload % 8) / 2.0),
+            _ => Scalar::Int64(i64::from(payload % 3)),
+        }
+    } else {
+        match tag % 8 {
+            0 => Scalar::Null(NullKind::NaN),
+            1 => Scalar::Int64(i64::from(payload % 17) - 8),
+            2 => Scalar::Float64(f64::from(i8::from_ne_bytes([payload])) / 8.0),
+            3 => Scalar::Float64(0.0),
+            4 => Scalar::Float64(1.5),
+            5 => Scalar::Float64(-2.5),
+            6 => Scalar::Int64(i64::from(payload % 5)),
+            _ => Scalar::Float64(f64::from(i16::from(payload % 13) - 6)),
+        }
+    }
+}
+
+fn fuzz_pivot_table_frame_from_bytes(
+    bytes: &[u8],
+    synth_mode: bool,
+) -> Result<DataFrame, FrameError> {
+    let row_count = if synth_mode {
+        usize::from(bytes.first().copied().unwrap_or(4) % 5) + 4
+    } else {
+        usize::from(bytes.first().copied().unwrap_or(2) % 8) + 1
+    };
+    let byte_at = |idx: usize| -> u8 { bytes.get(idx).copied().unwrap_or_default() };
+
+    let index = Index::new(
+        (0..row_count)
+            .map(|idx| IndexLabel::Int64(idx as i64))
+            .collect::<Vec<_>>(),
+    );
+
+    let row_values = (0..row_count)
+        .map(|row_idx| {
+            fuzz_pivot_key_scalar_from_bytes(
+                &[byte_at(1 + row_idx * 6), byte_at(2 + row_idx * 6)],
+                synth_mode,
+                'r',
+            )
+        })
+        .collect::<Vec<_>>();
+    let col_values = (0..row_count)
+        .map(|row_idx| {
+            fuzz_pivot_key_scalar_from_bytes(
+                &[byte_at(3 + row_idx * 6), byte_at(4 + row_idx * 6)],
+                synth_mode,
+                'c',
+            )
+        })
+        .collect::<Vec<_>>();
+    let val_values = (0..row_count)
+        .map(|row_idx| {
+            fuzz_pivot_value_scalar_from_bytes(
+                &[byte_at(5 + row_idx * 6), byte_at(6 + row_idx * 6)],
+                synth_mode,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let mut columns = BTreeMap::new();
+    columns.insert("row".to_owned(), Column::from_values(row_values)?);
+    columns.insert("col".to_owned(), Column::from_values(col_values)?);
+    columns.insert("val".to_owned(), Column::from_values(val_values)?);
+
+    DataFrame::new_with_column_order(
+        index,
+        columns,
+        vec!["row".to_owned(), "col".to_owned(), "val".to_owned()],
+    )
+}
+
+fn fuzz_pivot_key_name(value: &Scalar) -> Option<String> {
+    if value.is_missing() {
+        return None;
+    }
+
+    Some(match value {
+        Scalar::Int64(v) => v.to_string(),
+        Scalar::Utf8(v) => v.clone(),
+        Scalar::Bool(v) => v.to_string(),
+        Scalar::Float64(v) => v.to_string(),
+        Scalar::Timedelta64(v) => Timedelta::format(*v),
+        other => format!("{other:?}"),
+    })
+}
+
+fn fuzz_pivot_cell_is_missing(value: &Scalar) -> bool {
+    value.is_missing() || matches!(value, Scalar::Float64(v) if v.is_nan())
+}
+
 fn fuzz_dtype_from_byte(byte: u8) -> DType {
     match byte % 5 {
         0 => DType::Null,
@@ -5456,6 +5604,115 @@ pub fn fuzz_dataframe_eval_bytes(input: &[u8]) -> Result<(), String> {
         }
         Err(_) => Ok(()),
     }
+}
+
+/// Structure-aware fuzz entrypoint for `DataFrame::pivot_table(...)`.
+///
+/// The first byte selects raw-vs-synth projection mode, the second picks a
+/// supported aggregation function, and the remaining bytes are projected into
+/// a tiny frame with `row`, `col`, and `val` columns. Successful pivots must
+/// preserve first-seen row/column ordering and only surface missing cells when
+/// the source group lacked usable numeric values (or `std`/`var` had fewer
+/// than two numeric observations).
+pub fn fuzz_pivot_table_bytes(input: &[u8]) -> Result<(), String> {
+    let Some((&mode, rest)) = input.split_first() else {
+        return Ok(());
+    };
+    let Some((&agg_tag, payload)) = rest.split_first() else {
+        return Ok(());
+    };
+
+    let aggfunc = FUZZ_PIVOT_AGGFUNCS[usize::from(agg_tag) % FUZZ_PIVOT_AGGFUNCS.len()];
+    let frame = fuzz_pivot_table_frame_from_bytes(payload, mode % 2 == 1)
+        .map_err(|err| format!("pivot fuzz frame projection failed: {err:?}"))?;
+    let pivot = frame
+        .pivot_table("val", "row", "col", aggfunc)
+        .map_err(|err| format!("pivot_table failed for aggfunc={aggfunc}: {err}"))?;
+
+    let row_series = frame.get_column("row");
+    let col_series = frame.get_column("col");
+    let val_series = frame.get_column("val");
+
+    let mut expected_rows = Vec::new();
+    let mut expected_cols = Vec::new();
+    let mut seen_rows = BTreeSet::new();
+    let mut seen_cols = BTreeSet::new();
+    let mut numeric_counts = BTreeMap::<(String, String), usize>::new();
+
+    for idx in 0..frame.index().len() {
+        let Some(row_key) = fuzz_pivot_key_name(&row_series.values()[idx]) else {
+            continue;
+        };
+        let Some(col_key) = fuzz_pivot_key_name(&col_series.values()[idx]) else {
+            continue;
+        };
+        if seen_rows.insert(row_key.clone()) {
+            expected_rows.push(row_key.clone());
+        }
+        if seen_cols.insert(col_key.clone()) {
+            expected_cols.push(col_key.clone());
+        }
+        if val_series.values()[idx].to_f64().is_ok() && !val_series.values()[idx].is_missing() {
+            *numeric_counts.entry((row_key, col_key)).or_insert(0) += 1;
+        }
+    }
+
+    let actual_rows = pivot
+        .index()
+        .labels()
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    let actual_cols = pivot
+        .column_names()
+        .into_iter()
+        .cloned()
+        .collect::<Vec<_>>();
+
+    if pivot.shape() != (expected_rows.len(), expected_cols.len()) {
+        return Err(format!(
+            "pivot_table shape drifted for aggfunc={aggfunc}: actual={:?} expected=({}, {})",
+            pivot.shape(),
+            expected_rows.len(),
+            expected_cols.len()
+        ));
+    }
+    if actual_rows != expected_rows {
+        return Err(format!(
+            "pivot_table row order drifted for aggfunc={aggfunc}: actual={actual_rows:?} expected={expected_rows:?}"
+        ));
+    }
+    if actual_cols != expected_cols {
+        return Err(format!(
+            "pivot_table column order drifted for aggfunc={aggfunc}: actual={actual_cols:?} expected={expected_cols:?}"
+        ));
+    }
+
+    for col_name in &actual_cols {
+        let col = pivot.get_column(col_name);
+        for (row_idx, value) in col.values().iter().enumerate() {
+            let numeric_count = *numeric_counts
+                .get(&(actual_rows[row_idx].clone(), col_name.clone()))
+                .unwrap_or(&0);
+            let allow_missing =
+                numeric_count == 0 || (matches!(aggfunc, "std" | "var") && numeric_count < 2);
+            if fuzz_pivot_cell_is_missing(value) {
+                if !allow_missing {
+                    return Err(format!(
+                        "pivot_table emitted missing cell for aggfunc={aggfunc} at ({}, {}) despite {numeric_count} numeric source values",
+                        actual_rows[row_idx], col_name
+                    ));
+                }
+            } else if numeric_count == 0 {
+                return Err(format!(
+                    "pivot_table emitted value for aggfunc={aggfunc} at ({}, {}) without numeric source values",
+                    actual_rows[row_idx], col_name
+                ));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Structure-aware fuzz entrypoint for the `fp-io` Feather reader.
@@ -9443,7 +9700,9 @@ fn run_fixture_operation(
         | FixtureOperation::DataFrameGroupByRollingSum
         | FixtureOperation::DataFrameGroupByRollingMin
         | FixtureOperation::DataFrameGroupByRollingMax
-        | FixtureOperation::DataFrameGroupByRollingCount => {
+        | FixtureOperation::DataFrameGroupByRollingCount
+        | FixtureOperation::DataFrameGroupByRollingStd
+        | FixtureOperation::DataFrameGroupByRollingVar => {
             let op_name = fixture.operation.operation_name();
             let actual = execute_dataframe_groupby_rolling_fixture_operation(fixture);
             match expected {
@@ -10529,6 +10788,8 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::DataFrameGroupByRollingMin
         | FixtureOperation::DataFrameGroupByRollingMax
         | FixtureOperation::DataFrameGroupByRollingCount
+        | FixtureOperation::DataFrameGroupByRollingStd
+        | FixtureOperation::DataFrameGroupByRollingVar
         | FixtureOperation::DataFrameGroupByResampleMin
         | FixtureOperation::DataFrameGroupByResampleMax
         | FixtureOperation::DataFrameGroupByResampleCount => fixture
@@ -11152,6 +11413,8 @@ fn capture_live_oracle_expected(
         | FixtureOperation::DataFrameGroupByRollingMin
         | FixtureOperation::DataFrameGroupByRollingMax
         | FixtureOperation::DataFrameGroupByRollingCount
+        | FixtureOperation::DataFrameGroupByRollingStd
+        | FixtureOperation::DataFrameGroupByRollingVar
         | FixtureOperation::DataFrameGroupByResampleMin
         | FixtureOperation::DataFrameGroupByResampleMax
         | FixtureOperation::DataFrameGroupByResampleCount => response
@@ -13496,7 +13759,9 @@ fn execute_dataframe_fixture_operation(fixture: &PacketFixture) -> Result<DataFr
         | FixtureOperation::DataFrameGroupByRollingSum
         | FixtureOperation::DataFrameGroupByRollingMin
         | FixtureOperation::DataFrameGroupByRollingMax
-        | FixtureOperation::DataFrameGroupByRollingCount => {
+        | FixtureOperation::DataFrameGroupByRollingCount
+        | FixtureOperation::DataFrameGroupByRollingStd
+        | FixtureOperation::DataFrameGroupByRollingVar => {
             execute_dataframe_groupby_rolling_fixture_operation(fixture)
         }
         FixtureOperation::DataFrameAtTime => {
@@ -13633,6 +13898,14 @@ fn execute_dataframe_groupby_rolling_fixture_operation(
         FixtureOperation::DataFrameGroupByRollingCount => groupby
             .rolling(window_size)
             .count()
+            .map_err(|err| err.to_string()),
+        FixtureOperation::DataFrameGroupByRollingStd => groupby
+            .rolling(window_size)
+            .std()
+            .map_err(|err| err.to_string()),
+        FixtureOperation::DataFrameGroupByRollingVar => groupby
+            .rolling(window_size)
+            .var()
             .map_err(|err| err.to_string()),
         other => Err(format!(
             "unsupported dataframe groupby rolling operation: {other:?}"
@@ -18873,6 +19146,8 @@ fn execute_and_compare_differential(
         | FixtureOperation::DataFrameGroupByRollingMin
         | FixtureOperation::DataFrameGroupByRollingMax
         | FixtureOperation::DataFrameGroupByRollingCount
+        | FixtureOperation::DataFrameGroupByRollingStd
+        | FixtureOperation::DataFrameGroupByRollingVar
         | FixtureOperation::DataFrameGroupByResampleMin
         | FixtureOperation::DataFrameGroupByResampleMax
         | FixtureOperation::DataFrameGroupByResampleCount
@@ -21134,21 +21409,22 @@ mod tests {
     use super::{
         ArtifactId, CaseEvidenceEntry, CaseResult, CaseStatus, CiGate, CiGateResult,
         CiPipelineConfig, CiPipelineResult, ComparisonCategory, DecodeProofArtifact,
-        DecodeProofStatus, DifferentialResult, DriftLevel, DriftRecord, E2eConfig, FailureDigest,
-        FailureForensicsReport, FailureSurfaceEntry, FaultInjectionClassification,
-        FixtureExpectedAlignment, FixtureOperation, FixtureOracleSource, ForensicEventKind,
-        ForensicLog, HarnessConfig, LifecycleHooks, NoopHooks, OracleMode, PacketParityReport,
-        RaptorQSidecarArtifact, SuiteOptions, append_phase2c_drift_history,
-        build_case_evidence_entries, build_case_evidence_entries_for_report,
-        build_ci_forensics_report, build_compat_closure_e2e_scenario_report,
-        build_compat_closure_final_evidence_pack, build_differential_report,
-        build_differential_validation_log, build_failure_forensics, build_failure_surface_entries,
-        build_failure_surface_entries_for_report, enforce_packet_gates, evaluate_ci_gate,
-        evaluate_parity_gate, fuzz_column_arith_bytes, fuzz_common_dtype_bytes,
-        fuzz_csv_parse_bytes, fuzz_dataframe_eval_bytes, fuzz_excel_io_bytes,
-        fuzz_feather_io_bytes, fuzz_fixture_parse_bytes, fuzz_format_cross_round_trip_bytes,
-        fuzz_groupby_sum_bytes, fuzz_index_align_bytes, fuzz_ipc_stream_io_bytes,
-        fuzz_join_series_bytes, fuzz_json_io_bytes, fuzz_parquet_io_bytes, fuzz_scalar_cast_bytes,
+        DecodeProofStatus, DifferentialResult, DriftLevel, DriftRecord, E2eConfig,
+        FUZZ_PIVOT_AGGFUNCS, FailureDigest, FailureForensicsReport, FailureSurfaceEntry,
+        FaultInjectionClassification, FixtureExpectedAlignment, FixtureOperation,
+        FixtureOracleSource, ForensicEventKind, ForensicLog, HarnessConfig, LifecycleHooks,
+        NoopHooks, OracleMode, PacketParityReport, RaptorQSidecarArtifact, SuiteOptions,
+        append_phase2c_drift_history, build_case_evidence_entries,
+        build_case_evidence_entries_for_report, build_ci_forensics_report,
+        build_compat_closure_e2e_scenario_report, build_compat_closure_final_evidence_pack,
+        build_differential_report, build_differential_validation_log, build_failure_forensics,
+        build_failure_surface_entries, build_failure_surface_entries_for_report,
+        enforce_packet_gates, evaluate_ci_gate, evaluate_parity_gate, fuzz_column_arith_bytes,
+        fuzz_common_dtype_bytes, fuzz_csv_parse_bytes, fuzz_dataframe_eval_bytes,
+        fuzz_excel_io_bytes, fuzz_feather_io_bytes, fuzz_fixture_parse_bytes,
+        fuzz_format_cross_round_trip_bytes, fuzz_groupby_sum_bytes, fuzz_index_align_bytes,
+        fuzz_ipc_stream_io_bytes, fuzz_join_series_bytes, fuzz_json_io_bytes,
+        fuzz_parquet_io_bytes, fuzz_pivot_table_bytes, fuzz_scalar_cast_bytes,
         fuzz_semantic_eq_bytes, fuzz_series_add_bytes, generate_raptorq_sidecar, run_ci_pipeline,
         run_differential_by_id, run_differential_suite, run_e2e_suite,
         run_fault_injection_validation_by_id, run_packet_by_id, run_packet_suite,
@@ -21638,6 +21914,35 @@ mod tests {
     #[test]
     fn fuzz_format_cross_round_trip_bytes_accepts_empty_input() {
         fuzz_format_cross_round_trip_bytes(&[]).expect("empty input should be a no-op");
+    }
+
+    #[test]
+    fn fuzz_pivot_table_bytes_accepts_empty_input() {
+        fuzz_pivot_table_bytes(&[]).expect("empty input should be a no-op");
+    }
+
+    #[test]
+    fn fuzz_pivot_table_bytes_accepts_all_supported_aggfuncs() {
+        let payload = [
+            7, 1, 10, 20, 30, 40, 50, 2, 11, 21, 31, 41, 51, 3, 12, 22, 32, 42, 52, 4, 13, 23, 33,
+            43, 53, 5, 14, 24, 34, 44, 54, 6, 15, 25, 35, 45, 55, 7, 16, 26, 36, 46, 56,
+        ];
+        for agg_tag in 0..FUZZ_PIVOT_AGGFUNCS.len() {
+            let mut seed = vec![1, agg_tag as u8];
+            seed.extend(payload);
+            fuzz_pivot_table_bytes(&seed)
+                .expect("pivot_table fuzz seed should satisfy invariants for all aggfuncs");
+        }
+    }
+
+    #[test]
+    fn fuzz_pivot_table_bytes_accepts_raw_projection_mode() {
+        let seed = [
+            0, 3, 6, 0, 1, 0, 5, 0, 2, 1, 6, 1, 7, 2, 0, 2, 8, 3, 9, 1, 1, 4, 10, 2, 11, 0, 12, 3,
+            13, 1, 14, 2,
+        ];
+        fuzz_pivot_table_bytes(&seed)
+            .expect("raw projection mode should satisfy pivot_table invariants");
     }
 
     #[test]
@@ -27646,6 +27951,108 @@ mod tests {
                         { "kind": "null", "value": "na_n" },
                         { "kind": "float64", "value": 6.0 },
                         { "kind": "float64", "value": 4.0 }
+                    ]
+                }
+            }
+        }))
+        .expect("fixture");
+
+        assert_live_oracle_dataframe_groupby_rolling_frame_parity(fixture);
+    }
+
+    #[test]
+    fn live_oracle_dataframe_groupby_rolling_std_matches_pandas() {
+        let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+            "packet_id": "FP-P2D-449",
+            "case_id": "dataframe_groupby_rolling_std_live",
+            "mode": "strict",
+            "operation": "dataframe_groupby_rolling_std",
+            "oracle_source": "live_legacy_pandas",
+            "groupby_columns": ["grp"],
+            "window_size": 3,
+            "frame": {
+                "index": [
+                    { "kind": "int64", "value": 0 },
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "int64", "value": 2 },
+                    { "kind": "int64", "value": 3 },
+                    { "kind": "int64", "value": 4 },
+                    { "kind": "int64", "value": 5 },
+                    { "kind": "int64", "value": 6 },
+                    { "kind": "int64", "value": 7 }
+                ],
+                "column_order": ["grp", "val"],
+                "columns": {
+                    "grp": [
+                        { "kind": "utf8", "value": "a" },
+                        { "kind": "utf8", "value": "b" },
+                        { "kind": "utf8", "value": "a" },
+                        { "kind": "utf8", "value": "b" },
+                        { "kind": "utf8", "value": "a" },
+                        { "kind": "utf8", "value": "b" },
+                        { "kind": "utf8", "value": "a" },
+                        { "kind": "utf8", "value": "b" }
+                    ],
+                    "val": [
+                        { "kind": "float64", "value": 1.0 },
+                        { "kind": "float64", "value": 10.0 },
+                        { "kind": "float64", "value": 3.0 },
+                        { "kind": "float64", "value": 30.0 },
+                        { "kind": "float64", "value": 5.0 },
+                        { "kind": "null", "value": "na_n" },
+                        { "kind": "float64", "value": 9.0 },
+                        { "kind": "float64", "value": 50.0 }
+                    ]
+                }
+            }
+        }))
+        .expect("fixture");
+
+        assert_live_oracle_dataframe_groupby_rolling_frame_parity(fixture);
+    }
+
+    #[test]
+    fn live_oracle_dataframe_groupby_rolling_var_matches_pandas() {
+        let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+            "packet_id": "FP-P2D-450",
+            "case_id": "dataframe_groupby_rolling_var_live",
+            "mode": "strict",
+            "operation": "dataframe_groupby_rolling_var",
+            "oracle_source": "live_legacy_pandas",
+            "groupby_columns": ["grp"],
+            "window_size": 3,
+            "frame": {
+                "index": [
+                    { "kind": "int64", "value": 0 },
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "int64", "value": 2 },
+                    { "kind": "int64", "value": 3 },
+                    { "kind": "int64", "value": 4 },
+                    { "kind": "int64", "value": 5 },
+                    { "kind": "int64", "value": 6 },
+                    { "kind": "int64", "value": 7 }
+                ],
+                "column_order": ["grp", "val"],
+                "columns": {
+                    "grp": [
+                        { "kind": "utf8", "value": "a" },
+                        { "kind": "utf8", "value": "b" },
+                        { "kind": "utf8", "value": "a" },
+                        { "kind": "utf8", "value": "b" },
+                        { "kind": "utf8", "value": "a" },
+                        { "kind": "utf8", "value": "b" },
+                        { "kind": "utf8", "value": "a" },
+                        { "kind": "utf8", "value": "b" }
+                    ],
+                    "val": [
+                        { "kind": "float64", "value": 2.0 },
+                        { "kind": "float64", "value": 4.0 },
+                        { "kind": "float64", "value": 5.0 },
+                        { "kind": "float64", "value": 8.0 },
+                        { "kind": "float64", "value": 11.0 },
+                        { "kind": "float64", "value": 16.0 },
+                        { "kind": "null", "value": "na_n" },
+                        { "kind": "float64", "value": 32.0 }
                     ]
                 }
             }

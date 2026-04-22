@@ -3195,6 +3195,18 @@ def op_dataframe_groupby_rolling_count(pd, payload: dict[str, Any]) -> dict[str,
     )
 
 
+def op_dataframe_groupby_rolling_std(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return op_dataframe_groupby_rolling_builtin(
+        pd, payload, "std", "dataframe_groupby_rolling_std"
+    )
+
+
+def op_dataframe_groupby_rolling_var(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return op_dataframe_groupby_rolling_builtin(
+        pd, payload, "var", "dataframe_groupby_rolling_var"
+    )
+
+
 def op_dataframe_groupby_cumcount(pd, payload: dict[str, Any]) -> dict[str, Any]:
     frame_payload = payload.get("frame")
     groupby_columns = payload.get("groupby_columns")
@@ -4622,6 +4634,10 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_dataframe_groupby_rolling_max(pd, payload)
     if op in {"dataframe_groupby_rolling_count", "data_frame_groupby_rolling_count"}:
         return op_dataframe_groupby_rolling_count(pd, payload)
+    if op in {"dataframe_groupby_rolling_std", "data_frame_groupby_rolling_std"}:
+        return op_dataframe_groupby_rolling_std(pd, payload)
+    if op in {"dataframe_groupby_rolling_var", "data_frame_groupby_rolling_var"}:
+        return op_dataframe_groupby_rolling_var(pd, payload)
     if op in {"dataframe_groupby_cumcount", "data_frame_groupby_cumcount"}:
         return op_dataframe_groupby_cumcount(pd, payload)
     if op in {"dataframe_groupby_ngroup", "data_frame_groupby_ngroup"}:
