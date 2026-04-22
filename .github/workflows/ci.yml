@@ -16,7 +16,7 @@ jobs:
       FP_REQUIRE_LIVE_ORACLE: "1"
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Resolve pinned Rust toolchain
         id: rust_toolchain
@@ -36,7 +36,7 @@ jobs:
           components: rustfmt, clippy, rust-src
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
@@ -90,7 +90,7 @@ jobs:
 
       - name: Upload gate forensics artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ci-gate-forensics
           path: |
@@ -104,7 +104,7 @@ jobs:
 
       - name: Upload governance gate artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: governance-gate-report
           path: artifacts/ci/governance_gate_report.json
@@ -117,7 +117,7 @@ jobs:
       CARGO_TARGET_DIR: ${{ github.workspace }}/.target-audit
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Resolve pinned Rust toolchain
         id: rust_toolchain
@@ -148,7 +148,7 @@ jobs:
       CARGO_TARGET_DIR: ${{ github.workspace }}/.target-deny
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Resolve pinned Rust toolchain
         id: rust_toolchain
@@ -180,7 +180,7 @@ jobs:
       CARGO_TARGET_DIR: ${{ github.workspace }}/fuzz/.target
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Resolve pinned Rust toolchain
         id: rust_toolchain
@@ -213,7 +213,7 @@ jobs:
 
       - name: Upload fuzz artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: fuzz-regression-artifacts
           path: fuzz/artifacts
