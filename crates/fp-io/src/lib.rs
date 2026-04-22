@@ -13,7 +13,7 @@ use arrow::datatypes::{DataType as ArrowDataType, Field, Schema, TimeUnit};
 use csv::{ReaderBuilder, StringRecord, WriterBuilder};
 use fp_columnar::{Column, ColumnError};
 use fp_frame::{DataFrame, FrameError, Series, to_datetime};
-use fp_index::{Index, IndexLabel, format_datetime_ns};
+use fp_index::{Index, IndexError, IndexLabel, format_datetime_ns};
 use fp_types::{DType, NullKind, Scalar, Timedelta};
 use parquet::arrow::ArrowWriter;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -53,6 +53,8 @@ pub enum IoError {
     Column(#[from] ColumnError),
     #[error(transparent)]
     Frame(#[from] FrameError),
+    #[error(transparent)]
+    Index(#[from] IndexError),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -280,6 +282,14 @@ pub fn write_csv_string_with_options(
     frame: &DataFrame,
     options: &CsvWriteOptions,
 ) -> Result<String, IoError> {
+    if options.include_index && frame.row_multiindex().is_some() {
+        let materialized = materialize_named_row_multiindex_columns(frame)?;
+        let mut nested_options = options.clone();
+        nested_options.include_index = false;
+        nested_options.index_label = None;
+        return write_csv_string_with_options(&materialized, &nested_options);
+    }
+
     let mut writer = WriterBuilder::new()
         .delimiter(options.delimiter)
         .from_writer(Vec::new());
@@ -918,6 +928,18 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
     }
 }
 
+/// Read CSV and promote the named columns into a row index / row MultiIndex.
+///
+/// For multiple names this mirrors pandas `index_col=[...]`.
+pub fn read_csv_with_index_cols(
+    input: &str,
+    options: &CsvReadOptions,
+    index_cols: &[&str],
+) -> Result<DataFrame, IoError> {
+    let frame = read_csv_with_options(input, options)?;
+    promote_frame_index_columns(&frame, index_cols)
+}
+
 // ── File-based CSV ─────────────────────────────────────────────────────
 
 pub fn read_csv(path: &Path) -> Result<DataFrame, IoError> {
@@ -930,6 +952,15 @@ pub fn read_csv_with_options_path(
 ) -> Result<DataFrame, IoError> {
     let content = std::fs::read_to_string(path)?;
     read_csv_with_options(&content, options)
+}
+
+pub fn read_csv_with_index_cols_path(
+    path: &Path,
+    options: &CsvReadOptions,
+    index_cols: &[&str],
+) -> Result<DataFrame, IoError> {
+    let content = std::fs::read_to_string(path)?;
+    read_csv_with_index_cols(&content, options, index_cols)
 }
 
 pub fn write_csv(frame: &DataFrame, path: &Path) -> Result<(), IoError> {
@@ -1020,6 +1051,118 @@ fn index_label_to_json(label: &IndexLabel) -> serde_json::Value {
     }
 }
 
+const SYNTHETIC_ROW_MULTIINDEX_PREFIX: &str = "__index_level_";
+
+fn index_label_to_scalar_value(label: &IndexLabel) -> Scalar {
+    match label {
+        IndexLabel::Int64(v) => Scalar::Int64(*v),
+        IndexLabel::Utf8(v) => Scalar::Utf8(v.clone()),
+        IndexLabel::Timedelta64(v) => Scalar::Timedelta64(*v),
+        IndexLabel::Datetime64(v) => Scalar::Utf8(format_datetime_ns(*v)),
+    }
+}
+
+fn synthetic_row_multiindex_names(nlevels: usize) -> Vec<String> {
+    (0..nlevels)
+        .map(|level| format!("{SYNTHETIC_ROW_MULTIINDEX_PREFIX}{level}__"))
+        .collect()
+}
+
+fn materialize_row_multiindex_columns(
+    frame: &DataFrame,
+    names: &[String],
+) -> Result<DataFrame, IoError> {
+    let Some(row_multiindex) = frame.row_multiindex() else {
+        return Ok(frame.clone());
+    };
+
+    let mut columns = BTreeMap::new();
+    let mut column_order = Vec::with_capacity(names.len() + frame.column_names().len());
+    for (level, name) in names.iter().enumerate() {
+        let level_index = row_multiindex.get_level_values(level)?;
+        let values = level_index
+            .labels()
+            .iter()
+            .map(index_label_to_scalar_value)
+            .collect::<Vec<_>>();
+        columns.insert(name.clone(), Column::from_values(values)?);
+        column_order.push(name.clone());
+    }
+
+    for name in frame.column_names() {
+        let column = frame
+            .column(name)
+            .ok_or_else(|| {
+                IoError::Frame(FrameError::CompatibilityRejected(format!(
+                    "column not found: '{name}'"
+                )))
+            })?
+            .clone();
+        columns.insert(name.clone(), column);
+        column_order.push(name.clone());
+    }
+
+    let index = Index::from_i64((0..frame.len() as i64).collect());
+    DataFrame::new_with_column_order(index, columns, column_order).map_err(IoError::from)
+}
+
+fn materialize_named_row_multiindex_columns(frame: &DataFrame) -> Result<DataFrame, IoError> {
+    if frame.row_multiindex().is_some() {
+        frame.reset_index(false).map_err(IoError::from)
+    } else {
+        Ok(frame.clone())
+    }
+}
+
+fn materialize_synthetic_row_multiindex_columns(frame: &DataFrame) -> Result<DataFrame, IoError> {
+    let Some(row_multiindex) = frame.row_multiindex() else {
+        return Ok(frame.clone());
+    };
+    let names = synthetic_row_multiindex_names(row_multiindex.nlevels());
+    materialize_row_multiindex_columns(frame, &names)
+}
+
+fn promote_frame_index_columns(
+    frame: &DataFrame,
+    index_cols: &[&str],
+) -> Result<DataFrame, IoError> {
+    if index_cols.is_empty() {
+        return Ok(frame.clone());
+    }
+    if index_cols.len() == 1 {
+        frame.set_index(index_cols[0], true).map_err(IoError::from)
+    } else {
+        frame
+            .set_index_multi(index_cols, true, "|")
+            .map_err(IoError::from)
+    }
+}
+
+fn detect_synthetic_row_multiindex_columns(frame: &DataFrame) -> Vec<String> {
+    let mut out = Vec::new();
+    for (level, name) in frame.column_names().iter().enumerate() {
+        let expected = format!("{SYNTHETIC_ROW_MULTIINDEX_PREFIX}{level}__");
+        if **name == expected {
+            out.push(expected);
+        } else {
+            break;
+        }
+    }
+    out
+}
+
+fn promote_synthetic_row_multiindex_if_present(frame: &DataFrame) -> Result<DataFrame, IoError> {
+    let synthetic_cols = detect_synthetic_row_multiindex_columns(frame);
+    if synthetic_cols.len() < 2 {
+        return Ok(frame.clone());
+    }
+    let refs = synthetic_cols
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    promote_frame_index_columns(frame, &refs)
+}
+
 pub fn read_json_str(input: &str, orient: JsonOrient) -> Result<DataFrame, IoError> {
     let parsed: serde_json::Value = serde_json::from_str(input)?;
 
@@ -1074,7 +1217,8 @@ pub fn read_json_str(input: &str, orient: JsonOrient) -> Result<DataFrame, IoErr
                 out.insert(name, Column::from_values(vals)?);
             }
             let index = Index::from_i64((0..row_count).collect());
-            Ok(DataFrame::new_with_column_order(index, out, col_names)?)
+            let frame = DataFrame::new_with_column_order(index, out, col_names)?;
+            promote_synthetic_row_multiindex_if_present(&frame)
         }
         JsonOrient::Columns => {
             let obj = parsed
@@ -1125,11 +1269,9 @@ pub fn read_json_str(input: &str, orient: JsonOrient) -> Result<DataFrame, IoErr
                 out.insert(name, Column::from_values(vals)?);
             }
 
-            Ok(DataFrame::new_with_column_order(
-                Index::new(index_labels),
-                out,
-                column_order,
-            )?)
+            let frame =
+                DataFrame::new_with_column_order(Index::new(index_labels), out, column_order)?;
+            promote_synthetic_row_multiindex_if_present(&frame)
         }
         JsonOrient::Index => {
             let obj = parsed
@@ -1182,11 +1324,9 @@ pub fn read_json_str(input: &str, orient: JsonOrient) -> Result<DataFrame, IoErr
             for (name, vals) in columns {
                 out.insert(name, Column::from_values(vals)?);
             }
-            Ok(DataFrame::new_with_column_order(
-                Index::new(index_labels),
-                out,
-                column_order,
-            )?)
+            let frame =
+                DataFrame::new_with_column_order(Index::new(index_labels), out, column_order)?;
+            promote_synthetic_row_multiindex_if_present(&frame)
         }
         JsonOrient::Split => {
             let obj = parsed
@@ -1268,7 +1408,8 @@ pub fn read_json_str(input: &str, orient: JsonOrient) -> Result<DataFrame, IoErr
                 }
                 None => Index::from_i64((0..row_count).collect()),
             };
-            Ok(DataFrame::new_with_column_order(index, out, col_names)?)
+            let frame = DataFrame::new_with_column_order(index, out, col_names)?;
+            promote_synthetic_row_multiindex_if_present(&frame)
         }
         JsonOrient::Values => {
             let rows = parsed
@@ -1316,12 +1457,18 @@ pub fn read_json_str(input: &str, orient: JsonOrient) -> Result<DataFrame, IoErr
                 out.insert(name, Column::from_values(vals)?);
             }
             let index = Index::from_i64((0..rows.len() as i64).collect());
-            Ok(DataFrame::new_with_column_order(index, out, column_order)?)
+            let frame = DataFrame::new_with_column_order(index, out, column_order)?;
+            promote_synthetic_row_multiindex_if_present(&frame)
         }
     }
 }
 
 pub fn write_json_string(frame: &DataFrame, orient: JsonOrient) -> Result<String, IoError> {
+    if frame.row_multiindex().is_some() && orient != JsonOrient::Values {
+        let materialized = materialize_synthetic_row_multiindex_columns(frame)?;
+        return write_json_string(&materialized, orient);
+    }
+
     let headers: Vec<String> = frame.column_names().into_iter().cloned().collect();
     let row_count = frame.index().len();
 
@@ -1667,6 +1814,13 @@ pub fn series_from_arrow_array(
 
 /// Build an Arrow RecordBatch from a DataFrame.
 fn dataframe_to_record_batch(frame: &DataFrame) -> Result<RecordBatch, IoError> {
+    let materialized = if frame.row_multiindex().is_some() {
+        Some(materialize_synthetic_row_multiindex_columns(frame)?)
+    } else {
+        None
+    };
+    let frame = materialized.as_ref().unwrap_or(frame);
+
     let col_names: Vec<String> = frame.column_names().into_iter().cloned().collect();
     let mut fields = Vec::with_capacity(col_names.len());
     let mut arrays: Vec<Arc<dyn Array>> = Vec::with_capacity(col_names.len());
@@ -1704,7 +1858,8 @@ fn record_batch_to_dataframe(batch: &RecordBatch) -> Result<DataFrame, IoError> 
     let labels: Vec<IndexLabel> = (0..n_rows).map(|i| IndexLabel::Int64(i as i64)).collect();
     let index = Index::new(labels);
 
-    DataFrame::new_with_column_order(index, columns, col_order).map_err(IoError::from)
+    let frame = DataFrame::new_with_column_order(index, columns, col_order)?;
+    promote_synthetic_row_multiindex_if_present(&frame)
 }
 
 /// Convert an Arrow array + data type to a Vec of Scalars.
@@ -2289,6 +2444,15 @@ pub fn read_excel(path: &Path, options: &ExcelReadOptions) -> Result<DataFrame, 
     parse_excel_rows(rows, options)
 }
 
+pub fn read_excel_with_index_cols(
+    path: &Path,
+    options: &ExcelReadOptions,
+    index_cols: &[&str],
+) -> Result<DataFrame, IoError> {
+    let frame = read_excel(path, options)?;
+    promote_frame_index_columns(&frame, index_cols)
+}
+
 /// Read Excel from in-memory bytes.
 pub fn read_excel_bytes(data: &[u8], options: &ExcelReadOptions) -> Result<DataFrame, IoError> {
     use calamine::{Reader, open_workbook_auto_from_rs};
@@ -2318,6 +2482,15 @@ pub fn read_excel_bytes(data: &[u8], options: &ExcelReadOptions) -> Result<DataF
         .collect();
 
     parse_excel_rows(rows, options)
+}
+
+pub fn read_excel_bytes_with_index_cols(
+    data: &[u8],
+    options: &ExcelReadOptions,
+    index_cols: &[&str],
+) -> Result<DataFrame, IoError> {
+    let frame = read_excel_bytes(data, options)?;
+    promote_frame_index_columns(&frame, index_cols)
 }
 
 /// Read multiple sheets from an Excel file.
@@ -2646,6 +2819,14 @@ pub fn write_excel_bytes_with_options(
     frame: &DataFrame,
     options: &ExcelWriteOptions,
 ) -> Result<Vec<u8>, IoError> {
+    if options.index && frame.row_multiindex().is_some() {
+        let materialized = materialize_named_row_multiindex_columns(frame)?;
+        let mut nested_options = options.clone();
+        nested_options.index = false;
+        nested_options.index_label = None;
+        return write_excel_bytes_with_options(&materialized, &nested_options);
+    }
+
     use rust_xlsxwriter::Workbook;
 
     let mut workbook = Workbook::new();
@@ -3472,7 +3653,8 @@ mod tests {
     use fp_types::{DType, NullKind, Scalar};
 
     use super::{
-        CsvWriteOptions, IoError, read_csv_str, write_csv_string, write_csv_string_with_options,
+        CsvWriteOptions, IoError, read_csv_str, read_csv_with_index_cols, write_csv_string,
+        write_csv_string_with_options,
     };
 
     #[test]
@@ -4092,6 +4274,29 @@ mod tests {
     }
 
     #[test]
+    fn test_csv_multiindex_roundtrip_with_explicit_index_cols() {
+        let frame = make_row_multiindex_test_dataframe();
+        let csv = write_csv_string_with_options(
+            &frame,
+            &CsvWriteOptions {
+                include_index: true,
+                ..CsvWriteOptions::default()
+            },
+        )
+        .expect("write");
+
+        let roundtrip = read_csv_with_index_cols(
+            &csv,
+            &CsvReadOptions::default(),
+            &["region", "product", "year"],
+        )
+        .expect("read");
+
+        assert!(roundtrip.equals(&frame));
+        assert_eq!(roundtrip.row_multiindex(), frame.row_multiindex());
+    }
+
+    #[test]
     fn test_write_csv_options_default_matches_write_csv_string() {
         let input = "a,b\n1,2\n3,4\n";
         let frame = read_csv_str(input).expect("read");
@@ -4485,6 +4690,28 @@ mod tests {
     }
 
     #[test]
+    fn json_records_multiindex_roundtrip_restores_logical_row_axis() {
+        let frame = make_row_multiindex_test_dataframe();
+        let json = write_json_string(&frame, JsonOrient::Records).expect("write");
+        let roundtrip = read_json_str(&json, JsonOrient::Records).expect("read");
+
+        assert!(roundtrip.equals(&frame));
+        assert!(roundtrip.row_multiindex().is_some());
+        assert!(roundtrip.column("__index_level_0__").is_none());
+    }
+
+    #[test]
+    fn json_split_multiindex_roundtrip_restores_logical_row_axis() {
+        let frame = make_row_multiindex_test_dataframe();
+        let json = write_json_string(&frame, JsonOrient::Split).expect("write");
+        let roundtrip = read_json_str(&json, JsonOrient::Split).expect("read");
+
+        assert!(roundtrip.equals(&frame));
+        assert!(roundtrip.row_multiindex().is_some());
+        assert!(roundtrip.column("__index_level_0__").is_none());
+    }
+
+    #[test]
     fn json_split_without_index_defaults_to_range_index() {
         let input = r#"{"columns":["x"],"data":[[10],[20]]}"#;
         let frame = read_json_str(input, JsonOrient::Split).expect("read json split");
@@ -4768,6 +4995,49 @@ mod tests {
         .unwrap()
     }
 
+    fn make_row_multiindex_test_dataframe() -> DataFrame {
+        let df = DataFrame::from_dict(
+            &["region", "product", "year", "sales", "cost"],
+            vec![
+                (
+                    "region",
+                    vec![
+                        Scalar::Utf8("north".into()),
+                        Scalar::Utf8("north".into()),
+                        Scalar::Utf8("south".into()),
+                    ],
+                ),
+                (
+                    "product",
+                    vec![
+                        Scalar::Utf8("apple".into()),
+                        Scalar::Utf8("pear".into()),
+                        Scalar::Utf8("apple".into()),
+                    ],
+                ),
+                (
+                    "year",
+                    vec![
+                        Scalar::Int64(2023),
+                        Scalar::Int64(2024),
+                        Scalar::Int64(2023),
+                    ],
+                ),
+                (
+                    "sales",
+                    vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+                ),
+                (
+                    "cost",
+                    vec![Scalar::Int64(4), Scalar::Int64(7), Scalar::Int64(12)],
+                ),
+            ],
+        )
+        .unwrap();
+        df.set_index_multi(&["region", "product", "year"], true, "|")
+            .unwrap()
+    }
+
     #[test]
     fn parquet_bytes_roundtrip() {
         let frame = make_test_dataframe();
@@ -4800,6 +5070,30 @@ mod tests {
         assert_eq!(names.values()[0], Scalar::Utf8("alice".into()));
         assert_eq!(names.values()[1], Scalar::Utf8("bob".into()));
         assert_eq!(names.values()[2], Scalar::Utf8("carol".into()));
+    }
+
+    #[test]
+    fn parquet_row_multiindex_roundtrip_restores_logical_row_axis() {
+        let frame = make_row_multiindex_test_dataframe();
+        let bytes = super::write_parquet_bytes(&frame).expect("write parquet");
+        let roundtrip = super::read_parquet_bytes(&bytes).expect("read parquet");
+
+        assert!(roundtrip.equals(&frame));
+        assert!(roundtrip.column("__index_level_0__").is_none());
+        assert_eq!(
+            roundtrip
+                .row_multiindex()
+                .expect("row multiindex should be restored")
+                .get_level_values(0)
+                .unwrap()
+                .labels(),
+            frame
+                .row_multiindex()
+                .expect("source row multiindex")
+                .get_level_values(0)
+                .unwrap()
+                .labels()
+        );
     }
 
     #[test]
@@ -5026,6 +5320,23 @@ mod tests {
             super::write_excel_bytes_with_options(&frame, &super::ExcelWriteOptions::default())
                 .expect("options");
         assert_eq!(default_bytes, options_bytes);
+    }
+
+    #[test]
+    fn excel_multiindex_roundtrip_with_explicit_index_cols() {
+        let frame = make_row_multiindex_test_dataframe();
+        let bytes =
+            super::write_excel_bytes_with_options(&frame, &super::ExcelWriteOptions::default())
+                .expect("write");
+        let roundtrip = super::read_excel_bytes_with_index_cols(
+            &bytes,
+            &super::ExcelReadOptions::default(),
+            &["region", "product", "year"],
+        )
+        .expect("read");
+
+        assert!(roundtrip.equals(&frame));
+        assert_eq!(roundtrip.row_multiindex(), frame.row_multiindex());
     }
 
     fn build_two_sheet_workbook_bytes() -> Vec<u8> {
@@ -6297,6 +6608,30 @@ mod tests {
     }
 
     #[test]
+    fn feather_row_multiindex_roundtrip_restores_logical_row_axis() {
+        let frame = make_row_multiindex_test_dataframe();
+        let bytes = super::write_feather_bytes(&frame).expect("write feather");
+        let roundtrip = super::read_feather_bytes(&bytes).expect("read feather");
+
+        assert!(roundtrip.equals(&frame));
+        assert!(roundtrip.column("__index_level_0__").is_none());
+        assert_eq!(
+            roundtrip
+                .row_multiindex()
+                .expect("row multiindex should be restored")
+                .get_level_values(1)
+                .unwrap()
+                .labels(),
+            frame
+                .row_multiindex()
+                .expect("source row multiindex")
+                .get_level_values(1)
+                .unwrap()
+                .labels()
+        );
+    }
+
+    #[test]
     fn feather_file_roundtrip() {
         let frame = make_test_dataframe();
         let dir = std::env::temp_dir();
@@ -6328,6 +6663,16 @@ mod tests {
             frame2.column("names").unwrap().values()[1],
             Scalar::Utf8("bob".into())
         );
+    }
+
+    #[test]
+    fn ipc_stream_row_multiindex_roundtrip_restores_logical_row_axis() {
+        let frame = make_row_multiindex_test_dataframe();
+        let bytes = super::write_ipc_stream_bytes(&frame).expect("write ipc stream");
+        let roundtrip = super::read_ipc_stream_bytes(&bytes).expect("read ipc stream");
+
+        assert!(roundtrip.equals(&frame));
+        assert!(roundtrip.row_multiindex().is_some());
     }
 
     #[test]

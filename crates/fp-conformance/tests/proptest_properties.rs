@@ -9618,6 +9618,77 @@ fn arb_int64_dataframe(
     })
 }
 
+fn arb_int64_row_multiindex_dataframe(
+    max_rows: usize,
+    max_cols: usize,
+) -> impl Strategy<Value = fp_frame::DataFrame> {
+    (1..=max_rows, 1..=max_cols).prop_flat_map(|(nrows, ncols)| {
+        let col_names = proptest::collection::vec(arb_column_name(), ncols);
+        let columns = proptest::collection::vec(
+            proptest::collection::vec((-100_000i64..100_000i64).prop_map(Scalar::Int64), nrows),
+            ncols,
+        );
+        (col_names, columns).prop_filter_map(
+            "row multiindex dataframe construction must succeed",
+            move |(names, cols)| {
+                let mut seen = std::collections::HashSet::new();
+                let mut unique_names = Vec::new();
+                for name in &names {
+                    let mut candidate = name.clone();
+                    let mut suffix = 0;
+                    while seen.contains(&candidate)
+                        || matches!(candidate.as_str(), "region" | "product" | "year")
+                    {
+                        suffix += 1;
+                        candidate = format!("{name}{suffix}");
+                    }
+                    seen.insert(candidate.clone());
+                    unique_names.push(candidate);
+                }
+
+                let mut col_order = vec![
+                    "region".to_string(),
+                    "product".to_string(),
+                    "year".to_string(),
+                ];
+                col_order.extend(unique_names.iter().cloned());
+                let col_order_refs = col_order.iter().map(String::as_str).collect::<Vec<_>>();
+
+                let mut data: Vec<(&str, Vec<Scalar>)> = vec![
+                    (
+                        "region",
+                        (0..nrows)
+                            .map(|idx| Scalar::Utf8(format!("r{}", idx % 3)))
+                            .collect(),
+                    ),
+                    (
+                        "product",
+                        (0..nrows)
+                            .map(|idx| Scalar::Utf8(format!("p{}", idx % 2)))
+                            .collect(),
+                    ),
+                    (
+                        "year",
+                        (0..nrows)
+                            .map(|idx| Scalar::Int64(2020 + (idx % 4) as i64))
+                            .collect(),
+                    ),
+                ];
+                data.extend(
+                    unique_names
+                        .iter()
+                        .zip(cols.iter())
+                        .map(|(name, values)| (name.as_str(), values.clone())),
+                );
+
+                let df = fp_frame::DataFrame::from_dict(&col_order_refs, data).ok()?;
+                df.set_index_multi(&["region", "product", "year"], true, "|")
+                    .ok()
+            },
+        )
+    })
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(50))]
 
@@ -9813,5 +9884,84 @@ proptest! {
                 "Int64 values must survive Excel round-trip for column {}", name
             );
         }
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(20))]
+
+    #[test]
+    fn prop_csv_row_multiindex_round_trip_preserves_logical_row_axis(
+        df in arb_int64_row_multiindex_dataframe(8, 3)
+    ) {
+        let csv = fp_io::write_csv_string_with_options(
+            &df,
+            &fp_io::CsvWriteOptions {
+                include_index: true,
+                ..fp_io::CsvWriteOptions::default()
+            },
+        )
+        .unwrap();
+        let parsed = fp_io::read_csv_with_index_cols(
+            &csv,
+            &fp_io::CsvReadOptions::default(),
+            &["region", "product", "year"],
+        )
+        .unwrap();
+
+        prop_assert!(parsed.equals(&df));
+        prop_assert_eq!(parsed.row_multiindex(), df.row_multiindex());
+    }
+
+    #[test]
+    fn prop_excel_row_multiindex_round_trip_preserves_logical_row_axis(
+        df in arb_int64_row_multiindex_dataframe(8, 3)
+    ) {
+        let bytes = fp_io::write_excel_bytes(&df).unwrap();
+        let parsed = fp_io::read_excel_bytes_with_index_cols(
+            &bytes,
+            &fp_io::ExcelReadOptions::default(),
+            &["region", "product", "year"],
+        )
+        .unwrap();
+
+        prop_assert!(parsed.equals(&df));
+        prop_assert_eq!(parsed.row_multiindex(), df.row_multiindex());
+    }
+
+    #[test]
+    fn prop_parquet_row_multiindex_round_trip_preserves_logical_row_axis(
+        df in arb_int64_row_multiindex_dataframe(8, 3)
+    ) {
+        let bytes = fp_io::write_parquet_bytes(&df).unwrap();
+        let parsed = fp_io::read_parquet_bytes(&bytes).unwrap();
+
+        prop_assert!(parsed.equals(&df));
+        prop_assert!(parsed.row_multiindex().is_some());
+        prop_assert_eq!(parsed.index().labels(), df.index().labels());
+    }
+
+    #[test]
+    fn prop_feather_row_multiindex_round_trip_preserves_logical_row_axis(
+        df in arb_int64_row_multiindex_dataframe(8, 3)
+    ) {
+        let bytes = fp_io::write_feather_bytes(&df).unwrap();
+        let parsed = fp_io::read_feather_bytes(&bytes).unwrap();
+
+        prop_assert!(parsed.equals(&df));
+        prop_assert!(parsed.row_multiindex().is_some());
+        prop_assert_eq!(parsed.index().labels(), df.index().labels());
+    }
+
+    #[test]
+    fn prop_json_split_row_multiindex_round_trip_preserves_logical_row_axis(
+        df in arb_int64_row_multiindex_dataframe(8, 3)
+    ) {
+        let json = fp_io::write_json_string(&df, fp_io::JsonOrient::Split).unwrap();
+        let parsed = fp_io::read_json_str(&json, fp_io::JsonOrient::Split).unwrap();
+
+        prop_assert!(parsed.equals(&df));
+        prop_assert!(parsed.row_multiindex().is_some());
+        prop_assert_eq!(parsed.index().labels(), df.index().labels());
     }
 }
