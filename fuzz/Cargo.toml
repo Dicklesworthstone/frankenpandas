@@ -144,5 +144,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_rolling_window"
+path = "fuzz_targets/fuzz_rolling_window.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

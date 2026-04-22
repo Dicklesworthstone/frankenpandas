@@ -6434,6 +6434,157 @@ pub fn fuzz_series_add_bytes(input: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
+const FUZZ_ROLLING_AGGFUNCS: &[&str] = &[
+    "sum", "mean", "min", "max", "std", "var", "count", "first", "last", "prod", "median",
+];
+
+fn fuzz_rolling_series_from_bytes(bytes: &[u8]) -> Result<Series, FrameError> {
+    let len = bytes
+        .first()
+        .map(|byte| 4 + (usize::from(*byte) % 29))
+        .unwrap_or(4);
+    let mut labels = Vec::with_capacity(len);
+    let mut values = Vec::with_capacity(len);
+
+    for idx in 0..len {
+        labels.push(
+            i64::try_from(idx)
+                .expect("bounded fuzz rolling index")
+                .into(),
+        );
+        let tag = bytes.get(1 + idx * 2).copied().unwrap_or(idx as u8);
+        let value = bytes
+            .get(1 + idx * 2 + 1)
+            .copied()
+            .unwrap_or((idx as u8).wrapping_mul(17));
+        if tag % 5 == 0 {
+            values.push(Scalar::Null(NullKind::NaN));
+        } else {
+            values.push(Scalar::Float64((f64::from(value) - 96.0) / 8.0));
+        }
+    }
+
+    Series::from_values("x", labels, values)
+}
+
+fn fuzz_rolling_window_from_byte(byte: u8, len: usize) -> usize {
+    match byte % 6 {
+        0 => 0,
+        1 => 1,
+        2 => len.max(1),
+        3 => len.saturating_add(1),
+        4 => usize::MAX,
+        _ => 1 + (usize::from(byte) % len.max(1)),
+    }
+}
+
+fn fuzz_rolling_min_periods_from_byte(byte: u8, window: usize) -> Option<usize> {
+    match byte % 6 {
+        0 => None,
+        1 => Some(0),
+        2 => Some(1),
+        3 => Some(window),
+        4 => Some(window.saturating_add(1)),
+        _ => Some(usize::from(byte) % window.saturating_add(2).max(1)),
+    }
+}
+
+fn fuzz_validate_rolling_result(
+    aggfunc: &str,
+    result: Result<Series, FrameError>,
+    input_len: usize,
+    window: usize,
+    min_periods: Option<usize>,
+) -> Result<(), String> {
+    match result {
+        Ok(series) => {
+            if series.len() != input_len {
+                return Err(format!(
+                    "rolling {aggfunc} length mismatch: window={window} min_periods={min_periods:?} result_len={} input_len={input_len}",
+                    series.len()
+                ));
+            }
+            if window == 0 {
+                return Err(format!(
+                    "rolling {aggfunc} unexpectedly succeeded for window=0"
+                ));
+            }
+
+            if min_periods.is_none() {
+                let required_missing = input_len.min(window.saturating_sub(1));
+                for idx in 0..required_missing {
+                    if !series.values()[idx].is_missing() {
+                        return Err(format!(
+                            "rolling {aggfunc} violated default-min_periods prefix null contract at index={idx}: window={window} value={:?}",
+                            series.values()[idx]
+                        ));
+                    }
+                }
+            }
+
+            if let Some(min_periods) = min_periods
+                && min_periods > window
+                && series.values().iter().any(|value| !value.is_missing())
+            {
+                return Err(format!(
+                    "rolling {aggfunc} produced non-missing output even though min_periods={min_periods} > window={window}: values={:?}",
+                    series.values()
+                ));
+            }
+
+            Ok(())
+        }
+        Err(FrameError::CompatibilityRejected(_)) if window == 0 => Ok(()),
+        Err(err) => Err(format!(
+            "rolling {aggfunc} unexpectedly failed: window={window} min_periods={min_periods:?} err={err:?}"
+        )),
+    }
+}
+
+/// Structure-aware fuzz entrypoint for `Series::rolling(window, min_periods)`.
+///
+/// The first two bytes select `window` and `min_periods`; remaining bytes are
+/// projected into a small numeric-or-missing series. Successful runs must
+/// preserve output length and the default-prefix-null contract. Invalid
+/// `window=0` runs may reject via `FrameError::CompatibilityRejected` but must
+/// never panic.
+pub fn fuzz_rolling_window_bytes(input: &[u8]) -> Result<(), String> {
+    let Some((&window_tag, rest)) = input.split_first() else {
+        return Ok(());
+    };
+    let Some((&min_periods_tag, series_bytes)) = rest.split_first() else {
+        return Ok(());
+    };
+
+    let series = fuzz_rolling_series_from_bytes(series_bytes)
+        .map_err(|err| format!("rolling fuzz series projection failed: {err:?}"))?;
+    let window = fuzz_rolling_window_from_byte(window_tag, series.len());
+    let min_periods = fuzz_rolling_min_periods_from_byte(min_periods_tag, window);
+    let rolling = series.rolling(window, min_periods);
+
+    for aggfunc in FUZZ_ROLLING_AGGFUNCS {
+        let result = match *aggfunc {
+            "sum" => rolling.sum(),
+            "mean" => rolling.mean(),
+            "min" => rolling.min(),
+            "max" => rolling.max(),
+            "std" => rolling.std(),
+            "var" => rolling.var(),
+            "count" => rolling.count(),
+            "first" => rolling.first(),
+            "last" => rolling.last(),
+            "prod" => rolling.prod(),
+            "median" => rolling.median(),
+            other => {
+                return Err(format!("unknown rolling aggfunc in fuzz harness: {other}"));
+            }
+        };
+        fuzz_validate_rolling_result(aggfunc, result, series.len(), window, min_periods)?;
+    }
+
+    Ok(())
+}
+
 /// Structure-aware fuzz entrypoint for `join_series()` invariants.
 ///
 /// The first byte selects the join type; remaining bytes are split at `|`
@@ -21635,16 +21786,16 @@ mod tests {
         fuzz_excel_io_bytes, fuzz_feather_io_bytes, fuzz_fixture_parse_bytes,
         fuzz_format_cross_round_trip_bytes, fuzz_groupby_agg_bytes, fuzz_groupby_sum_bytes,
         fuzz_index_align_bytes, fuzz_ipc_stream_io_bytes, fuzz_join_series_bytes,
-        fuzz_json_io_bytes, fuzz_parquet_io_bytes, fuzz_pivot_table_bytes, fuzz_scalar_cast_bytes,
-        fuzz_semantic_eq_bytes, fuzz_series_add_bytes, generate_raptorq_sidecar, run_ci_pipeline,
-        run_differential_by_id, run_differential_suite, run_e2e_suite,
-        run_fault_injection_validation_by_id, run_packet_by_id, run_packet_suite,
-        run_packet_suite_with_options, run_packets_grouped, run_raptorq_decode_recovery_drill,
-        run_smoke, verify_all_sidecars_ci, verify_packet_sidecar_integrity,
-        write_case_evidence_jsonl, write_compat_closure_e2e_scenario_report,
-        write_compat_closure_final_evidence_pack, write_differential_validation_log,
-        write_failure_surface_jsonl, write_fault_injection_validation_report,
-        write_packet_artifacts,
+        fuzz_json_io_bytes, fuzz_parquet_io_bytes, fuzz_pivot_table_bytes,
+        fuzz_rolling_window_bytes, fuzz_scalar_cast_bytes, fuzz_semantic_eq_bytes,
+        fuzz_series_add_bytes, generate_raptorq_sidecar, run_ci_pipeline, run_differential_by_id,
+        run_differential_suite, run_e2e_suite, run_fault_injection_validation_by_id,
+        run_packet_by_id, run_packet_suite, run_packet_suite_with_options, run_packets_grouped,
+        run_raptorq_decode_recovery_drill, run_smoke, verify_all_sidecars_ci,
+        verify_packet_sidecar_integrity, write_case_evidence_jsonl,
+        write_compat_closure_e2e_scenario_report, write_compat_closure_final_evidence_pack,
+        write_differential_validation_log, write_failure_surface_jsonl,
+        write_fault_injection_validation_report, write_packet_artifacts,
     };
     use fp_runtime::RuntimeMode;
 
@@ -22154,6 +22305,25 @@ mod tests {
         ];
         fuzz_pivot_table_bytes(&seed)
             .expect("raw projection mode should satisfy pivot_table invariants");
+    }
+
+    #[test]
+    fn fuzz_rolling_window_bytes_accepts_empty_input() {
+        fuzz_rolling_window_bytes(&[]).expect("empty input should be a no-op");
+    }
+
+    #[test]
+    fn fuzz_rolling_window_bytes_accepts_window_zero_seed() {
+        let seed = [0, 0, 6, 1, 100, 2, 110, 0, 0, 3, 120];
+        fuzz_rolling_window_bytes(&seed)
+            .expect("window=0 rolling seed should reject cleanly without panicking");
+    }
+
+    #[test]
+    fn fuzz_rolling_window_bytes_accepts_min_periods_gt_window_seed() {
+        let seed = [1, 4, 5, 1, 100, 2, 110, 3, 120, 4, 130, 1, 140];
+        fuzz_rolling_window_bytes(&seed)
+            .expect("min_periods > window seed should stay bounded and non-panicking");
     }
 
     #[test]

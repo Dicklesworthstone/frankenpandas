@@ -6566,6 +6566,15 @@ pub struct Rolling<'a> {
 }
 
 impl Rolling<'_> {
+    fn validate(&self) -> Result<(), FrameError> {
+        if self.window == 0 {
+            return Err(FrameError::CompatibilityRejected(
+                "rolling window must be >= 1".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Helper: collect non-null f64 values from a window slice.
     fn window_values(vals: &[Scalar]) -> Vec<f64> {
         vals.iter()
@@ -6584,6 +6593,7 @@ impl Rolling<'_> {
     where
         F: Fn(&[f64]) -> f64,
     {
+        self.validate()?;
         let vals = self.series.column().values();
         let len = vals.len();
         let mut out = Vec::with_capacity(len);
@@ -6639,6 +6649,7 @@ impl Rolling<'_> {
 
     /// Rolling minimum.
     pub fn min(&self) -> Result<Series, FrameError> {
+        self.validate()?;
         let vals = self.series.column().values();
         let len = vals.len();
         let mut out = Vec::with_capacity(len);
@@ -6706,6 +6717,7 @@ impl Rolling<'_> {
 
     /// Rolling count of non-null values.
     pub fn count(&self) -> Result<Series, FrameError> {
+        self.validate()?;
         let vals = self.series.column().values();
         let len = vals.len();
         let mut out = Vec::with_capacity(len);
@@ -6781,6 +6793,7 @@ impl Rolling<'_> {
 
     /// Rolling first non-null value.
     pub fn first(&self) -> Result<Series, FrameError> {
+        self.validate()?;
         let vals = self.series.column().values();
         let len = vals.len();
         let mut out = Vec::with_capacity(len);
@@ -6822,6 +6835,7 @@ impl Rolling<'_> {
 
     /// Rolling last non-null value.
     pub fn last(&self) -> Result<Series, FrameError> {
+        self.validate()?;
         let vals = self.series.column().values();
         let len = vals.len();
         let mut out = Vec::with_capacity(len);
@@ -6909,6 +6923,7 @@ impl Rolling<'_> {
     /// Matches `series.rolling(window).corr(other)`. Computes Pearson
     /// correlation over each rolling window.
     pub fn corr(&self, other: &Series) -> Result<Series, FrameError> {
+        self.validate()?;
         if self.series.len() != other.len() {
             return Err(FrameError::LengthMismatch {
                 index_len: self.series.len(),
@@ -6976,6 +6991,7 @@ impl Rolling<'_> {
     /// Matches `series.rolling(window).cov(other)`. Computes sample
     /// covariance (ddof=1) over each rolling window.
     pub fn cov(&self, other: &Series) -> Result<Series, FrameError> {
+        self.validate()?;
         if self.series.len() != other.len() {
             return Err(FrameError::LengthMismatch {
                 index_len: self.series.len(),
@@ -35992,6 +36008,30 @@ mod tests {
         assert!((std_val - 2.0).abs() < 1e-10);
     }
 
+    #[test]
+    fn rolling_window_zero_is_rejected() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Float64(2.0),
+                Scalar::Float64(4.0),
+                Scalar::Float64(6.0),
+            ],
+        )
+        .unwrap();
+
+        let mean_err = s.rolling(0, None).mean().unwrap_err();
+        assert!(
+            matches!(mean_err, FrameError::CompatibilityRejected(msg) if msg == "rolling window must be >= 1")
+        );
+
+        let count_err = s.rolling(0, Some(0)).count().unwrap_err();
+        assert!(
+            matches!(count_err, FrameError::CompatibilityRejected(msg) if msg == "rolling window must be >= 1")
+        );
+    }
+
     // --- Expanding window tests ---
 
     #[test]
@@ -58924,6 +58964,10 @@ mod tests {
         let val_dtype = result.column("val").unwrap().dtype();
         let val_vals = result.column("val").unwrap().values();
         // Sum is correct regardless of dtype: a=20, b=45.
+        assert!(
+            matches!(val_dtype, DType::Float64 | DType::Int64),
+            "unexpected dtype for grouped resample sum: {val_dtype:?}"
+        );
         match val_dtype {
             DType::Float64 => {
                 assert_eq!(val_vals[0], Scalar::Float64(20.0));
@@ -58933,7 +58977,7 @@ mod tests {
                 assert_eq!(val_vals[0], Scalar::Int64(20));
                 assert_eq!(val_vals[1], Scalar::Int64(45));
             }
-            other => panic!("unexpected dtype for grouped resample sum: {other:?}"),
+            _ => unreachable!("dtype already constrained by assertion"),
         }
     }
 
