@@ -64,14 +64,14 @@
   },
   "expected_series": {
     "index": [
-      { "kind": "utf8", "value": "s:\"b\"|i:2" },
       { "kind": "utf8", "value": "s:\"a\"|i:1" },
-      { "kind": "utf8", "value": "s:\"b\"|i:1" }
+      { "kind": "utf8", "value": "s:\"b\"|i:1" },
+      { "kind": "utf8", "value": "s:\"b\"|i:2" }
     ],
     "values": [
-      { "kind": "float64", "value": 20.0 },
       { "kind": "float64", "value": 40.0 },
-      { "kind": "float64", "value": 50.0 }
+      { "kind": "float64", "value": 50.0 },
+      { "kind": "float64", "value": 20.0 }
     ]
   }
 }

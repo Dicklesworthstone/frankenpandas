@@ -27,7 +27,7 @@ use fp_io::{
     CsvOnBadLines, CsvReadOptions, ExcelReadOptions, ExcelWriteOptions, IoError as FpIoError,
     JsonOrient, read_csv_str, read_csv_with_options, read_excel_bytes, read_feather_bytes,
     read_ipc_stream_bytes, read_json_str, read_jsonl_str, read_parquet_bytes,
-    series_from_arrow_array, series_to_arrow_array, write_csv_string, write_excel_bytes,
+    series_from_arrow_array, series_to_arrow_array, write_csv_string,
     write_excel_bytes_with_options, write_feather_bytes, write_ipc_stream_bytes,
     write_json_string, write_jsonl_string, write_parquet_bytes,
 };
