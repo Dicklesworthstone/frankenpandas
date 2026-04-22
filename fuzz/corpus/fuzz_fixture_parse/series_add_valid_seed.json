@@ -1,0 +1,38 @@
+{
+  "packet_id": "FUZZ-SEED-001",
+  "case_id": "series_add_valid_seed",
+  "mode": "strict",
+  "operation": "series_add",
+  "left": {
+    "name": "lhs",
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 }
+    ],
+    "values": [
+      { "kind": "int64", "value": 10 },
+      { "kind": "null", "value": "null" }
+    ]
+  },
+  "right": {
+    "name": "rhs",
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 }
+    ],
+    "values": [
+      { "kind": "int64", "value": 1 },
+      { "kind": "int64", "value": 2 }
+    ]
+  },
+  "expected_series": {
+    "index": [
+      { "kind": "int64", "value": 0 },
+      { "kind": "int64", "value": 1 }
+    ],
+    "values": [
+      { "kind": "int64", "value": 11 },
+      { "kind": "null", "value": "na_n" }
+    ]
+  }
+}

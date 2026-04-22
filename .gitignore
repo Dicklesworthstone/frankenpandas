@@ -138,8 +138,10 @@ repro_*.rs
 crates/*/target/
 
 # cargo-fuzz output
-fuzz/artifacts/
-fuzz/corpus/
+fuzz/artifacts/*
+!fuzz/artifacts/README.md
+!fuzz/artifacts/*/
+!fuzz/artifacts/*/README.md
 fuzz/coverage/
 fuzz/target/
 

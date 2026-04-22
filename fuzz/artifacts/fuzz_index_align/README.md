@@ -1,0 +1,4 @@
+# fuzz_index_align artifacts
+
+New crashes from local or CI fuzz runs land here first.
+Minimize them with cargo fuzz tmin fuzz_index_align <artifact> and then promote the minimized input into fuzz/corpus/fuzz_index_align/.

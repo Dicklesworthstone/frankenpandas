@@ -87,3 +87,37 @@ jobs:
           name: governance-gate-report
           path: artifacts/ci/governance_gate_report.json
           if-no-files-found: warn
+
+  fuzz-regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_TARGET_DIR: ${{ github.workspace }}/fuzz/.target
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust (nightly)
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: Fuzz regression corpus
+        working-directory: fuzz
+        run: |
+          set -euo pipefail
+          targets="$(cargo metadata --no-deps --format-version=1 | jq -r '.packages[] | select(.name == "fp-fuzz") | .targets[] | select(.kind[] == "bin") | .name')"
+          for target in $targets; do
+            mkdir -p "artifacts/$target"
+            cargo fuzz run "$target" "corpus/$target" -- -runs=1000 -artifact_prefix="artifacts/$target/"
+          done
+
+      - name: Upload fuzz artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-regression-artifacts
+          path: fuzz/artifacts
+          if-no-files-found: warn

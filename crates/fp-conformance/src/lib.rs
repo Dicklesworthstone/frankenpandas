@@ -22005,6 +22005,7 @@ pub fn write_case_evidence_jsonl(
 mod tests {
     use std::collections::BTreeSet;
     use std::fs;
+    use std::path::{Path, PathBuf};
     use std::sync::{Mutex, OnceLock};
 
     use super::{
@@ -32013,6 +32014,84 @@ mod tests {
         assert!(
             content.contains("\"ledger_id\""),
             "expected machine-readable ledger id in artifact: {content}"
+        );
+    }
+
+    fn repo_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+    }
+
+    fn fuzz_target_names(root: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(root.join("fuzz/fuzz_targets"))
+            .expect("read fuzz targets")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("rs"))
+            .filter_map(|path| {
+                path.file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .map(str::to_owned)
+            })
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn fuzz_targets_have_committed_regression_corpus_and_artifact_dirs() {
+        let root = repo_root();
+        let targets = fuzz_target_names(&root);
+        assert!(!targets.is_empty(), "expected at least one fuzz target");
+
+        for target in targets {
+            let corpus_dir = root.join("fuzz/corpus").join(&target);
+            assert!(corpus_dir.is_dir(), "missing corpus dir for {target}");
+
+            let seed_count = fs::read_dir(&corpus_dir)
+                .expect("read corpus dir")
+                .filter_map(Result::ok)
+                .filter(|entry| entry.path().is_file())
+                .count();
+            assert!(
+                seed_count >= 4,
+                "expected at least four committed seeds for {target}, found {seed_count}"
+            );
+
+            let artifact_readme = root.join("fuzz/artifacts").join(&target).join("README.md");
+            assert!(
+                artifact_readme.is_file(),
+                "missing artifact README for {target}: {}",
+                artifact_readme.display()
+            );
+        }
+    }
+
+    #[test]
+    fn ci_workflows_lock_in_fuzz_regressions() {
+        let root = repo_root();
+        let ci = fs::read_to_string(root.join(".github/workflows/ci.yml")).expect("read ci");
+        assert!(
+            ci.contains("fuzz-regression"),
+            "expected fuzz-regression job in ci.yml"
+        );
+        assert!(
+            ci.contains("cargo fuzz run"),
+            "expected cargo fuzz replay command in ci.yml"
+        );
+        assert!(
+            ci.contains("corpus/$target"),
+            "expected committed fuzz corpus replay in ci.yml"
+        );
+
+        let nightly = fs::read_to_string(root.join(".github/workflows/fuzz-nightly.yml"))
+            .expect("read nightly fuzz workflow");
+        assert!(
+            nightly.contains("schedule:"),
+            "expected nightly fuzz workflow schedule"
+        );
+        assert!(
+            nightly.contains("-max_total_time=60"),
+            "expected nightly fuzz workflow to spend real time mutating"
         );
     }
 

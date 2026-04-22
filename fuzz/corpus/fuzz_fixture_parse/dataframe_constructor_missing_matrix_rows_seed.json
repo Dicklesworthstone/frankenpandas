@@ -1,0 +1,7 @@
+{
+  "packet_id": "FUZZ-SEED-002",
+  "case_id": "dataframe_constructor_missing_matrix_rows_seed",
+  "mode": "strict",
+  "operation": "dataframe_constructor_list_like",
+  "expected_error_contains": "matrix_rows is required"
+}
