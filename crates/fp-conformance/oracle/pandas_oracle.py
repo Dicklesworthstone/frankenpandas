@@ -2763,16 +2763,21 @@ def format_groupby_resample_bucket_label(value: Any, freq: str) -> str:
     return str(value)
 
 
-def normalize_groupby_resample_frame(frame, freq: str):
+def normalize_groupby_resample_frame(frame, groupby_columns: list[str], freq: str):
     out = frame.copy()
+    if getattr(out.index, "nlevels", 1) > 1:
+        group_levels = list(range(out.index.nlevels - 1))
+        out = out.reset_index(level=group_levels)
+        rename_map: dict[Any, str] = {}
+        for position, column in enumerate(groupby_columns):
+            actual = out.columns[position]
+            if actual != column:
+                rename_map[actual] = column
+        if rename_map:
+            out = out.rename(columns=rename_map)
     labels = []
     for label in out.index.tolist():
-        if isinstance(label, tuple) and label:
-            parts = [str(part) for part in label[:-1]]
-            parts.append(format_groupby_resample_bucket_label(label[-1], freq))
-            labels.append(f"({', '.join(parts)})")
-        else:
-            labels.append(format_groupby_resample_bucket_label(label, freq))
+        labels.append(format_groupby_resample_bucket_label(label, freq))
     out.index = labels
     return out
 
@@ -2791,7 +2796,7 @@ def op_dataframe_groupby_resample_builtin(
 
     try:
         out = getattr(frame.groupby(columns).resample(freq), func)()
-        out = normalize_groupby_resample_frame(out, freq)
+        out = normalize_groupby_resample_frame(out, columns, freq)
     except Exception as exc:
         raise OracleError(f"{op_name} failed: {exc}") from exc
 

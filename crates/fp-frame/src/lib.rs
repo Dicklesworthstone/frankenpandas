@@ -25731,15 +25731,6 @@ impl DataFrameGroupBy<'_> {
         }
     }
 
-    /// Flatten grouped window output into a tuple-like row label.
-    ///
-    /// Until row `MultiIndex` support is wired through `DataFrame`, grouped
-    /// rolling/resample emits pandas-observable grouped row structure via
-    /// flattened labels like `(group, row)` or `(group_a, group_b, bucket)`.
-    fn grouped_window_label(&self, row: usize, leaf: &IndexLabel) -> IndexLabel {
-        IndexLabel::Utf8(format!("({}, {})", self.group_key_label(row), leaf))
-    }
-
     /// Helper to format the final aggregated DataFrame respecting `as_index`.
     fn format_output(
         &self,
@@ -27973,7 +27964,7 @@ pub struct GroupByRolling<'a> {
 
 impl GroupByRolling<'_> {
     /// Apply a rolling aggregation function per-group for all numeric columns.
-    fn apply_grouped_rolling<F>(&self, agg_name: &str, agg: F) -> Result<DataFrame, FrameError>
+    fn apply_grouped_rolling<F>(&self, agg: F) -> Result<DataFrame, FrameError>
     where
         F: Fn(&Series, usize, usize) -> Result<Series, FrameError>,
     {
@@ -27993,52 +27984,10 @@ impl GroupByRolling<'_> {
             .cloned()
             .collect();
 
-        if self.groupby.as_index {
-            let mut result_data: std::collections::HashMap<String, Vec<Scalar>> =
-                value_cols.iter().map(|c| (c.clone(), Vec::new())).collect();
-            let mut out_labels = Vec::new();
-
-            for gkey in &group_order {
-                let indices = &groups[gkey];
-                out_labels.extend(indices.iter().map(|&row| {
-                    self.groupby
-                        .grouped_window_label(row, &self.groupby.df.index.labels()[row])
-                }));
-
-                for col_name in &value_cols {
-                    let col = &self.groupby.df.columns[col_name];
-                    let group_vals: Vec<Scalar> =
-                        indices.iter().map(|&i| col.values()[i].clone()).collect();
-                    let group_idx: Vec<IndexLabel> =
-                        (0..group_vals.len() as i64).map(IndexLabel::from).collect();
-                    let group_series = Series::from_values(col_name, group_idx, group_vals)?;
-                    let rolled = agg(&group_series, self.window, self.min_periods)?;
-                    result_data
-                        .get_mut(col_name)
-                        .unwrap()
-                        .extend(rolled.values().iter().cloned());
-                }
-            }
-
-            let mut cols = BTreeMap::new();
-            let mut col_order = Vec::new();
-            for col_name in &value_cols {
-                let _ = agg_name;
-                cols.insert(
-                    col_name.clone(),
-                    Column::from_values(result_data.remove(col_name).unwrap())?,
-                );
-                col_order.push(col_name.clone());
-            }
-
-            return Ok(DataFrame {
-                columns: cols,
-                column_order: col_order,
-                index: Index::new(out_labels),
-                column_multiindex: None,
-            });
-        }
-
+        // Until row MultiIndex support is real, keep the long-standing
+        // fallback contract: preserve the original flat row index and expose
+        // group keys as regular columns instead of emitting lossy tuple
+        // strings that only look MultiIndex-like.
         let n = self.groupby.df.len();
         let mut result_data: std::collections::HashMap<String, Vec<Scalar>> = value_cols
             .iter()
@@ -28072,7 +28021,6 @@ impl GroupByRolling<'_> {
             }
         }
         for col_name in &value_cols {
-            let _ = agg_name;
             cols.insert(
                 col_name.clone(),
                 Column::from_values(result_data.remove(col_name).unwrap())?,
@@ -28090,37 +28038,37 @@ impl GroupByRolling<'_> {
 
     /// Grouped rolling sum.
     pub fn sum(&self) -> Result<DataFrame, FrameError> {
-        self.apply_grouped_rolling("sum", |s, w, mp| s.rolling(w, Some(mp)).sum())
+        self.apply_grouped_rolling(|s, w, mp| s.rolling(w, Some(mp)).sum())
     }
 
     /// Grouped rolling mean.
     pub fn mean(&self) -> Result<DataFrame, FrameError> {
-        self.apply_grouped_rolling("mean", |s, w, mp| s.rolling(w, Some(mp)).mean())
+        self.apply_grouped_rolling(|s, w, mp| s.rolling(w, Some(mp)).mean())
     }
 
     /// Grouped rolling min.
     pub fn min(&self) -> Result<DataFrame, FrameError> {
-        self.apply_grouped_rolling("min", |s, w, mp| s.rolling(w, Some(mp)).min())
+        self.apply_grouped_rolling(|s, w, mp| s.rolling(w, Some(mp)).min())
     }
 
     /// Grouped rolling max.
     pub fn max(&self) -> Result<DataFrame, FrameError> {
-        self.apply_grouped_rolling("max", |s, w, mp| s.rolling(w, Some(mp)).max())
+        self.apply_grouped_rolling(|s, w, mp| s.rolling(w, Some(mp)).max())
     }
 
     /// Grouped rolling standard deviation.
     pub fn std(&self) -> Result<DataFrame, FrameError> {
-        self.apply_grouped_rolling("std", |s, w, mp| s.rolling(w, Some(mp)).std())
+        self.apply_grouped_rolling(|s, w, mp| s.rolling(w, Some(mp)).std())
     }
 
     /// Grouped rolling count.
     pub fn count(&self) -> Result<DataFrame, FrameError> {
-        self.apply_grouped_rolling("count", |s, w, mp| s.rolling(w, Some(mp)).count())
+        self.apply_grouped_rolling(|s, w, mp| s.rolling(w, Some(mp)).count())
     }
 
     /// Grouped rolling variance.
     pub fn var(&self) -> Result<DataFrame, FrameError> {
-        self.apply_grouped_rolling("var", |s, w, mp| s.rolling(w, Some(mp)).var())
+        self.apply_grouped_rolling(|s, w, mp| s.rolling(w, Some(mp)).var())
     }
 }
 
@@ -28155,69 +28103,8 @@ impl GroupByResample<'_> {
             .cloned()
             .collect();
 
-        if self.groupby.as_index {
-            let mut all_labels = Vec::new();
-            let mut all_values: std::collections::HashMap<String, Vec<Scalar>> =
-                value_cols.iter().map(|c| (c.clone(), Vec::new())).collect();
-
-            for gkey in &group_order {
-                let indices = &groups[gkey];
-                let first_row = indices[0];
-
-                if let Some(first_col) = value_cols.first() {
-                    let col = &self.groupby.df.columns[first_col];
-                    let group_idx: Vec<IndexLabel> = indices
-                        .iter()
-                        .map(|&i| self.groupby.df.index.labels()[i].clone())
-                        .collect();
-                    let group_vals: Vec<Scalar> =
-                        indices.iter().map(|&i| col.values()[i].clone()).collect();
-                    let group_series =
-                        Series::from_values(first_col, group_idx.clone(), group_vals)?;
-                    let resampled = agg(&group_series, &self.freq)?;
-
-                    all_labels.extend(
-                        resampled
-                            .index()
-                            .labels()
-                            .iter()
-                            .map(|bucket| self.groupby.grouped_window_label(first_row, bucket)),
-                    );
-                    all_values
-                        .get_mut(first_col)
-                        .unwrap()
-                        .extend(resampled.values().iter().cloned());
-
-                    for col_name in value_cols.iter().skip(1) {
-                        let col = &self.groupby.df.columns[col_name];
-                        let gv: Vec<Scalar> =
-                            indices.iter().map(|&i| col.values()[i].clone()).collect();
-                        let gs = Series::from_values(col_name, group_idx.clone(), gv)?;
-                        let rs = agg(&gs, &self.freq)?;
-                        all_values
-                            .get_mut(col_name)
-                            .unwrap()
-                            .extend(rs.values().iter().cloned());
-                    }
-                }
-            }
-
-            let mut cols = BTreeMap::new();
-            let mut col_order = Vec::new();
-            for col_name in &value_cols {
-                let vals = all_values.remove(col_name).unwrap();
-                cols.insert(col_name.clone(), Column::from_values(vals)?);
-                col_order.push(col_name.clone());
-            }
-
-            return Ok(DataFrame {
-                columns: cols,
-                column_order: col_order,
-                index: Index::new(all_labels),
-                column_multiindex: None,
-            });
-        }
-
+        // Until row MultiIndex support exists, grouped resample keeps bucket
+        // labels in the flat index and materializes group keys as columns.
         let mut all_labels = Vec::new();
         let mut all_values: std::collections::HashMap<String, Vec<Scalar>> =
             value_cols.iter().map(|c| (c.clone(), Vec::new())).collect();
@@ -28397,6 +28284,13 @@ mod tests {
         assert_eq!(index.labels().len(), expected.len());
         for (label, expected_label) in index.labels().iter().zip(expected) {
             assert_eq!(expect_utf8_label(label), *expected_label);
+        }
+    }
+
+    fn assert_int64_index_labels(index: &Index, expected: &[i64]) {
+        assert_eq!(index.labels().len(), expected.len());
+        for (label, expected_label) in index.labels().iter().zip(expected) {
+            assert_eq!(label, &IndexLabel::Int64(*expected_label));
         }
     }
 
@@ -58387,10 +58281,17 @@ mod tests {
         .unwrap();
 
         let result = df.groupby(&["grp"]).unwrap().rolling(2).sum().unwrap();
-        assert_eq!(result.column_names(), vec!["val"]);
-        assert_utf8_index_labels(
-            result.index(),
-            &["(a, 0)", "(a, 1)", "(a, 2)", "(b, 3)", "(b, 4)"],
+        assert_eq!(result.column_names(), vec!["grp", "val"]);
+        assert_int64_index_labels(result.index(), &[0, 1, 2, 3, 4]);
+        assert_eq!(
+            result.column("grp").unwrap().values(),
+            &[
+                Scalar::Utf8("a".to_string()),
+                Scalar::Utf8("a".to_string()),
+                Scalar::Utf8("a".to_string()),
+                Scalar::Utf8("b".to_string()),
+                Scalar::Utf8("b".to_string()),
+            ]
         );
         let vals = result.column("val").unwrap().values();
         assert!(vals[0].is_missing());
@@ -58426,8 +58327,16 @@ mod tests {
         .unwrap();
 
         let result = df.groupby(&["grp"]).unwrap().rolling(3).mean().unwrap();
-        assert_eq!(result.column_names(), vec!["val"]);
-        assert_utf8_index_labels(result.index(), &["(x, 0)", "(x, 1)", "(x, 2)"]);
+        assert_eq!(result.column_names(), vec!["grp", "val"]);
+        assert_int64_index_labels(result.index(), &[0, 1, 2]);
+        assert_eq!(
+            result.column("grp").unwrap().values(),
+            &[
+                Scalar::Utf8("x".to_string()),
+                Scalar::Utf8("x".to_string()),
+                Scalar::Utf8("x".to_string()),
+            ]
+        );
         let vals = result.column("val").unwrap().values();
         assert!(vals[0].is_missing());
         assert!(vals[1].is_missing());
@@ -58470,41 +58379,48 @@ mod tests {
         let gb = df.groupby(&["grp"]).unwrap();
 
         let mins = gb.rolling(2).min().unwrap();
-        assert_eq!(mins.column_names(), vec!["val"]);
-        assert_utf8_index_labels(
-            mins.index(),
+        assert_eq!(mins.column_names(), vec!["grp", "val"]);
+        assert_int64_index_labels(mins.index(), &[0, 1, 2, 3, 4, 5, 6]);
+        assert_eq!(
+            mins.column("grp").unwrap().values(),
             &[
-                "(a, 0)", "(a, 2)", "(a, 4)", "(a, 6)", "(b, 1)", "(b, 3)", "(b, 5)",
-            ],
+                Scalar::Utf8("a".to_string()),
+                Scalar::Utf8("b".to_string()),
+                Scalar::Utf8("a".to_string()),
+                Scalar::Utf8("b".to_string()),
+                Scalar::Utf8("a".to_string()),
+                Scalar::Utf8("b".to_string()),
+                Scalar::Utf8("a".to_string()),
+            ]
         );
         let min_vals = mins.column("val").unwrap().values();
         assert!(min_vals[0].is_missing());
-        assert_eq!(min_vals[1], Scalar::Float64(1.0));
-        assert!(min_vals[2].is_missing());
-        assert!(min_vals[3].is_missing());
+        assert!(min_vals[1].is_missing());
+        assert_eq!(min_vals[2], Scalar::Float64(1.0));
+        assert_eq!(min_vals[3], Scalar::Float64(2.0));
         assert!(min_vals[4].is_missing());
-        assert_eq!(min_vals[5], Scalar::Float64(2.0));
-        assert_eq!(min_vals[6], Scalar::Float64(6.0));
+        assert_eq!(min_vals[5], Scalar::Float64(6.0));
+        assert!(min_vals[6].is_missing());
 
         let maxs = gb.rolling(2).max().unwrap();
         let max_vals = maxs.column("val").unwrap().values();
         assert!(max_vals[0].is_missing());
-        assert_eq!(max_vals[1], Scalar::Float64(5.0));
-        assert!(max_vals[2].is_missing());
-        assert!(max_vals[3].is_missing());
+        assert!(max_vals[1].is_missing());
+        assert_eq!(max_vals[2], Scalar::Float64(5.0));
+        assert_eq!(max_vals[3], Scalar::Float64(7.0));
         assert!(max_vals[4].is_missing());
         assert_eq!(max_vals[5], Scalar::Float64(7.0));
-        assert_eq!(max_vals[6], Scalar::Float64(7.0));
+        assert!(max_vals[6].is_missing());
 
         let counts = gb.rolling(2).count().unwrap();
         let count_vals = counts.column("val").unwrap().values();
         assert!(count_vals[0].is_missing());
-        assert_eq!(count_vals[1], Scalar::Float64(2.0));
-        assert!(count_vals[2].is_missing());
-        assert!(count_vals[3].is_missing());
+        assert!(count_vals[1].is_missing());
+        assert_eq!(count_vals[2], Scalar::Float64(2.0));
+        assert_eq!(count_vals[3], Scalar::Float64(2.0));
         assert!(count_vals[4].is_missing());
         assert_eq!(count_vals[5], Scalar::Float64(2.0));
-        assert_eq!(count_vals[6], Scalar::Float64(2.0));
+        assert!(count_vals[6].is_missing());
     }
 
     #[test]
@@ -58547,23 +58463,25 @@ mod tests {
         let gb = df.groupby(&["grp"]).unwrap();
 
         let mins = gb.rolling(2).min().unwrap();
+        assert_eq!(mins.column_names(), vec!["grp", "v"]);
+        assert_int64_index_labels(mins.index(), &[0, 1, 2, 3, 4, 5]);
         let min_vals = mins.column("v").unwrap().values();
         assert_eq!(mins.column("v").unwrap().dtype(), DType::Float64);
         assert!(min_vals[0].is_missing());
-        assert_eq!(min_vals[1], Scalar::Float64(4.0));
+        assert!(min_vals[1].is_missing());
         assert_eq!(min_vals[2], Scalar::Float64(4.0));
-        assert!(min_vals[3].is_missing());
-        assert_eq!(min_vals[4], Scalar::Float64(2.0));
+        assert_eq!(min_vals[3], Scalar::Float64(2.0));
+        assert_eq!(min_vals[4], Scalar::Float64(4.0));
         assert_eq!(min_vals[5], Scalar::Float64(2.0));
 
         let maxs = gb.rolling(2).max().unwrap();
         let max_vals = maxs.column("v").unwrap().values();
         assert_eq!(maxs.column("v").unwrap().dtype(), DType::Float64);
         assert!(max_vals[0].is_missing());
-        assert_eq!(max_vals[1], Scalar::Float64(10.0));
-        assert_eq!(max_vals[2], Scalar::Float64(8.0));
-        assert!(max_vals[3].is_missing());
-        assert_eq!(max_vals[4], Scalar::Float64(7.0));
+        assert!(max_vals[1].is_missing());
+        assert_eq!(max_vals[2], Scalar::Float64(10.0));
+        assert_eq!(max_vals[3], Scalar::Float64(7.0));
+        assert_eq!(max_vals[4], Scalar::Float64(8.0));
         assert_eq!(max_vals[5], Scalar::Float64(5.0));
 
         let counts = gb.rolling(2).count().unwrap();
@@ -58572,9 +58490,9 @@ mod tests {
             counts.column("v").unwrap().values(),
             &[
                 Scalar::Null(NullKind::NaN),
-                Scalar::Float64(2.0),
-                Scalar::Float64(2.0),
                 Scalar::Null(NullKind::NaN),
+                Scalar::Float64(2.0),
+                Scalar::Float64(2.0),
                 Scalar::Float64(2.0),
                 Scalar::Float64(2.0),
             ]
@@ -58624,16 +58542,16 @@ mod tests {
 
         assert_eq!(min_vals[0], Scalar::Float64(3.0));
         assert_eq!(max_vals[0], Scalar::Float64(3.0));
-        assert_eq!(min_vals[1], Scalar::Float64(7.0));
-        assert_eq!(max_vals[1], Scalar::Float64(7.0));
-        assert!(min_vals[2].is_missing());
-        assert!(max_vals[2].is_missing());
+        assert!(min_vals[1].is_missing());
+        assert!(max_vals[1].is_missing());
+        assert_eq!(min_vals[2], Scalar::Float64(7.0));
+        assert_eq!(max_vals[2], Scalar::Float64(7.0));
         assert_eq!(min_vals[3], Scalar::Float64(9.0));
         assert_eq!(max_vals[3], Scalar::Float64(9.0));
 
         assert_eq!(count_vals[0], Scalar::Float64(1.0));
-        assert_eq!(count_vals[1], Scalar::Float64(1.0));
-        assert!(count_vals[2].is_missing());
+        assert!(count_vals[1].is_missing());
+        assert_eq!(count_vals[2], Scalar::Float64(1.0));
         assert_eq!(count_vals[3], Scalar::Float64(1.0));
     }
 
@@ -58673,30 +58591,26 @@ mod tests {
         let gb = df.groupby(&["grp"]).unwrap();
 
         let stds = gb.rolling(3).std().unwrap();
-        assert_utf8_index_labels(
-            stds.index(),
-            &[
-                "(a, 0)", "(a, 2)", "(a, 4)", "(a, 6)", "(b, 1)", "(b, 3)", "(b, 5)",
-            ],
-        );
+        assert_eq!(stds.column_names(), vec!["grp", "val"]);
+        assert_int64_index_labels(stds.index(), &[0, 1, 2, 3, 4, 5, 6]);
         let std_vals = stds.column("val").unwrap().values();
         assert!(std_vals[0].is_missing());
         assert!(std_vals[1].is_missing());
-        assert!((expect_float64(&std_vals[2]) - 2.0).abs() < 1e-10);
+        assert!(std_vals[2].is_missing());
         assert!(std_vals[3].is_missing());
-        assert!(std_vals[4].is_missing());
-        assert!(std_vals[5].is_missing());
-        assert!((expect_float64(&std_vals[6]) - 1.0).abs() < 1e-10);
+        assert!((expect_float64(&std_vals[4]) - 2.0).abs() < 1e-10);
+        assert!((expect_float64(&std_vals[5]) - 1.0).abs() < 1e-10);
+        assert!(std_vals[6].is_missing());
 
         let vars = gb.rolling(3).var().unwrap();
         let var_vals = vars.column("val").unwrap().values();
         assert!(var_vals[0].is_missing());
         assert!(var_vals[1].is_missing());
-        assert!((expect_float64(&var_vals[2]) - 4.0).abs() < 1e-10);
+        assert!(var_vals[2].is_missing());
         assert!(var_vals[3].is_missing());
-        assert!(var_vals[4].is_missing());
-        assert!(var_vals[5].is_missing());
-        assert!((expect_float64(&var_vals[6]) - 1.0).abs() < 1e-10);
+        assert!((expect_float64(&var_vals[4]) - 4.0).abs() < 1e-10);
+        assert!((expect_float64(&var_vals[5]) - 1.0).abs() < 1e-10);
+        assert!(var_vals[6].is_missing());
     }
 
     #[test]
@@ -58808,19 +58722,19 @@ mod tests {
         let stds = gb.rolling(2).std().unwrap();
         let std_vals = stds.column("v").unwrap().values();
         assert!(std_vals[0].is_missing());
-        assert!((expect_float64(&std_vals[1]) - (1.0_f64 / 2.0).sqrt()).abs() < 1e-10);
+        assert!(std_vals[1].is_missing());
         assert!((expect_float64(&std_vals[2]) - (1.0_f64 / 2.0).sqrt()).abs() < 1e-10);
         assert!(std_vals[3].is_missing());
-        assert!(std_vals[4].is_missing());
+        assert!((expect_float64(&std_vals[4]) - (1.0_f64 / 2.0).sqrt()).abs() < 1e-10);
         assert!(std_vals[5].is_missing());
 
         let vars = gb.rolling(2).var().unwrap();
         let var_vals = vars.column("v").unwrap().values();
         assert!(var_vals[0].is_missing());
-        assert!((expect_float64(&var_vals[1]) - 0.5).abs() < 1e-10);
+        assert!(var_vals[1].is_missing());
         assert!((expect_float64(&var_vals[2]) - 0.5).abs() < 1e-10);
         assert!(var_vals[3].is_missing());
-        assert!(var_vals[4].is_missing());
+        assert!((expect_float64(&var_vals[4]) - 0.5).abs() < 1e-10);
         assert!(var_vals[5].is_missing());
     }
 
@@ -58864,16 +58778,20 @@ mod tests {
             .resample("M")
             .sum()
             .unwrap();
-        assert_eq!(result.column_names(), vec!["val"]);
+        assert_eq!(result.column_names(), vec!["grp", "val"]);
         assert_eq!(result.len(), 4);
         assert_utf8_index_labels(
             result.index(),
+            &["2024-01", "2024-02", "2024-01", "2024-02"],
+        );
+        assert_eq!(
+            result.column("grp").unwrap().values(),
             &[
-                "(a, 2024-01)",
-                "(a, 2024-02)",
-                "(b, 2024-01)",
-                "(b, 2024-02)",
-            ],
+                Scalar::Utf8("a".to_string()),
+                Scalar::Utf8("a".to_string()),
+                Scalar::Utf8("b".to_string()),
+                Scalar::Utf8("b".to_string()),
+            ]
         );
         assert_eq!(
             result.column("val").unwrap().values(),
@@ -58931,16 +58849,20 @@ mod tests {
             .mean()
             .unwrap();
 
-        assert_eq!(result.column_names(), vec!["val"]);
+        assert_eq!(result.column_names(), vec!["grp", "val"]);
         assert_eq!(result.len(), 4);
         assert_utf8_index_labels(
             result.index(),
+            &["2024-01", "2024-02", "2024-01", "2024-02"],
+        );
+        assert_eq!(
+            result.column("grp").unwrap().values(),
             &[
-                "(a, 2024-01)",
-                "(a, 2024-02)",
-                "(b, 2024-01)",
-                "(b, 2024-02)",
-            ],
+                Scalar::Utf8("a".to_string()),
+                Scalar::Utf8("a".to_string()),
+                Scalar::Utf8("b".to_string()),
+                Scalar::Utf8("b".to_string()),
+            ]
         );
 
         let values = result.column("val").unwrap().values();
@@ -59000,16 +58922,20 @@ mod tests {
             .count()
             .unwrap();
 
-        assert_eq!(result.column_names(), vec!["val"]);
+        assert_eq!(result.column_names(), vec!["grp", "val"]);
         assert_eq!(result.len(), 4);
         assert_utf8_index_labels(
             result.index(),
+            &["2024-01", "2024-02", "2024-01", "2024-02"],
+        );
+        assert_eq!(
+            result.column("grp").unwrap().values(),
             &[
-                "(a, 2024-01)",
-                "(a, 2024-02)",
-                "(b, 2024-01)",
-                "(b, 2024-02)",
-            ],
+                Scalar::Utf8("a".to_string()),
+                Scalar::Utf8("a".to_string()),
+                Scalar::Utf8("b".to_string()),
+                Scalar::Utf8("b".to_string()),
+            ]
         );
 
         let values = result.column("val").unwrap().values();
@@ -59081,15 +59007,17 @@ mod tests {
             .max()
             .unwrap();
 
-        let expected_index = &[
-            "(a, 2024-01)",
-            "(a, 2024-02)",
-            "(b, 2024-01)",
-            "(b, 2024-02)",
+        let expected_index = &["2024-01", "2024-02", "2024-01", "2024-02"];
+        let expected_groups = &[
+            Scalar::Utf8("a".to_string()),
+            Scalar::Utf8("a".to_string()),
+            Scalar::Utf8("b".to_string()),
+            Scalar::Utf8("b".to_string()),
         ];
 
-        assert_eq!(min_result.column_names(), vec!["val"]);
+        assert_eq!(min_result.column_names(), vec!["grp", "val"]);
         assert_utf8_index_labels(min_result.index(), expected_index);
+        assert_eq!(min_result.column("grp").unwrap().values(), expected_groups);
         assert_eq!(
             min_result.column("val").unwrap().values(),
             &[
@@ -59100,8 +59028,9 @@ mod tests {
             ]
         );
 
-        assert_eq!(max_result.column_names(), vec!["val"]);
+        assert_eq!(max_result.column_names(), vec!["grp", "val"]);
         assert_utf8_index_labels(max_result.index(), expected_index);
+        assert_eq!(max_result.column("grp").unwrap().values(), expected_groups);
         assert_eq!(
             max_result.column("val").unwrap().values(),
             &[
@@ -59170,15 +59099,20 @@ mod tests {
             .last()
             .unwrap();
 
-        let expected_index = &[
-            "(a, 2024-01)",
-            "(a, 2024-02)",
-            "(b, 2024-01)",
-            "(b, 2024-02)",
+        let expected_index = &["2024-01", "2024-02", "2024-01", "2024-02"];
+        let expected_groups = &[
+            Scalar::Utf8("a".to_string()),
+            Scalar::Utf8("a".to_string()),
+            Scalar::Utf8("b".to_string()),
+            Scalar::Utf8("b".to_string()),
         ];
 
-        assert_eq!(first_result.column_names(), vec!["val"]);
+        assert_eq!(first_result.column_names(), vec!["grp", "val"]);
         assert_utf8_index_labels(first_result.index(), expected_index);
+        assert_eq!(
+            first_result.column("grp").unwrap().values(),
+            expected_groups
+        );
         assert_eq!(
             first_result.column("val").unwrap().values(),
             &[
@@ -59189,8 +59123,9 @@ mod tests {
             ]
         );
 
-        assert_eq!(last_result.column_names(), vec!["val"]);
+        assert_eq!(last_result.column_names(), vec!["grp", "val"]);
         assert_utf8_index_labels(last_result.index(), expected_index);
+        assert_eq!(last_result.column("grp").unwrap().values(), expected_groups);
         assert_eq!(
             last_result.column("val").unwrap().values(),
             &[
@@ -59251,10 +59186,18 @@ mod tests {
             .last()
             .unwrap();
 
-        assert_eq!(firsts.column_names(), vec!["val"]);
-        assert_eq!(lasts.column_names(), vec!["val"]);
-        assert_utf8_index_labels(firsts.index(), &["(a, 2024-01)", "(b, 2024-01)"]);
-        assert_utf8_index_labels(lasts.index(), &["(a, 2024-01)", "(b, 2024-01)"]);
+        assert_eq!(firsts.column_names(), vec!["grp", "val"]);
+        assert_eq!(lasts.column_names(), vec!["grp", "val"]);
+        assert_utf8_index_labels(firsts.index(), &["2024-01", "2024-01"]);
+        assert_utf8_index_labels(lasts.index(), &["2024-01", "2024-01"]);
+        assert_eq!(
+            firsts.column("grp").unwrap().values(),
+            &[Scalar::Utf8("a".to_string()), Scalar::Utf8("b".to_string()),]
+        );
+        assert_eq!(
+            lasts.column("grp").unwrap().values(),
+            &[Scalar::Utf8("a".to_string()), Scalar::Utf8("b".to_string()),]
+        );
         assert_eq!(firsts.column("val").unwrap().values()[0], Scalar::Int64(11));
         assert_eq!(lasts.column("val").unwrap().values()[0], Scalar::Int64(13));
         assert_eq!(firsts.column("val").unwrap().values()[1], Scalar::Int64(20));
@@ -59311,16 +59254,29 @@ mod tests {
             .last()
             .unwrap();
 
-        assert_eq!(firsts.column_names(), vec!["val"]);
-        assert_eq!(lasts.column_names(), vec!["val"]);
+        assert_eq!(firsts.column_names(), vec!["grp", "val"]);
+        assert_eq!(lasts.column_names(), vec!["grp", "val"]);
         assert_utf8_index_labels(
             firsts.index(),
+            &["2024-01", "2024-02", "2024-01", "2024-02"],
+        );
+        assert_eq!(
+            firsts.column("grp").unwrap().values(),
             &[
-                "(a, 2024-01)",
-                "(a, 2024-02)",
-                "(b, 2024-01)",
-                "(b, 2024-02)",
-            ],
+                Scalar::Utf8("a".to_string()),
+                Scalar::Utf8("a".to_string()),
+                Scalar::Utf8("b".to_string()),
+                Scalar::Utf8("b".to_string()),
+            ]
+        );
+        assert_eq!(
+            lasts.column("grp").unwrap().values(),
+            &[
+                Scalar::Utf8("a".to_string()),
+                Scalar::Utf8("a".to_string()),
+                Scalar::Utf8("b".to_string()),
+                Scalar::Utf8("b".to_string()),
+            ]
         );
         assert_eq!(
             firsts.column("val").unwrap().values()[0],
@@ -59396,14 +59352,11 @@ mod tests {
         let lasts_vals = lasts.column("val").unwrap().values();
         assert_eq!(firsts_vals.len(), 4);
         assert_eq!(firsts_vals, lasts_vals);
+        assert_eq!(firsts.column_names(), vec!["grp", "val"]);
+        assert_eq!(lasts.column_names(), vec!["grp", "val"]);
         assert_utf8_index_labels(
             firsts.index(),
-            &[
-                "(a, 2024-01)",
-                "(a, 2024-02)",
-                "(b, 2024-01)",
-                "(b, 2024-02)",
-            ],
+            &["2024-01", "2024-02", "2024-01", "2024-02"],
         );
         assert_eq!(firsts_vals[0], Scalar::Float64(1.0));
         assert_eq!(firsts_vals[1], Scalar::Float64(2.0));
