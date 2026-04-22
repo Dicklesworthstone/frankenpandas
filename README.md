@@ -1370,7 +1370,7 @@ Every parity report gets a **RaptorQ repair-symbol sidecar** for bit-rot detecti
 | Limitation | Status | Workaround |
 |-----------|--------|------------|
 | No native Datetime dtype | Datetimes stored as ISO 8601 Utf8 strings | Use `to_datetime()` for normalization |
-| MultiIndex not yet integrated as DataFrame row index | Foundation type exists | Use `set_index_multi()` for composite keys |
+| MultiIndex not yet integrated as DataFrame row index | Foundation type exists; tracked by `frankenpandas-1zzp` | Use `set_index_multi()` for flat composite keys only |
 | Categorical metadata not propagated through arithmetic | By design (matches pandas) | Use `.cat().to_values()` to materialize |
 | No HDF5, Clipboard, or HTML IO | System-library dependencies | Use Feather (faster) or Parquet instead |
 | Single-threaded execution | No parallel execution yet | Profile-proven fast paths compensate |
@@ -1548,7 +1548,7 @@ Uses a deterministic LCG (Linear Congruential Generator) with Fisher-Yates shuff
 |----------|---------|--------|
 | High | PyO3 Python bindings | Planned; would enable `import frankenpandas as fpd` from Python |
 | High | Native Datetime DType | Design phase; would replace Utf8 ISO 8601 string representation |
-| High | Full MultiIndex ↔ DataFrame integration | Foundation exists; needs integration with groupby output, stack/unstack |
+| High | Native row MultiIndex ↔ DataFrame integration | Column/standalone MultiIndex foundation exists; row-axis integration tracked by `frankenpandas-1zzp` |
 | Medium | Parallel execution (rayon) | Not started; architecture supports it (columns are independent) |
 | Medium | DataFrame.plot() via plotters crate | Not started; would enable terminal/SVG chart output |
 | Medium | Lazy evaluation / query planning | Not started; would enable optimization across chained operations |
