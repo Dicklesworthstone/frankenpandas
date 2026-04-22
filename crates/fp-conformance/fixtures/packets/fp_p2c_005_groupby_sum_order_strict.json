@@ -35,12 +35,12 @@
   },
   "expected_series": {
     "index": [
-      { "kind": "utf8", "value": "b" },
-      { "kind": "utf8", "value": "a" }
+      { "kind": "utf8", "value": "a" },
+      { "kind": "utf8", "value": "b" }
     ],
     "values": [
-      { "kind": "float64", "value": 4.0 },
-      { "kind": "float64", "value": 6.0 }
+      { "kind": "float64", "value": 6.0 },
+      { "kind": "float64", "value": 4.0 }
     ]
   }
 }

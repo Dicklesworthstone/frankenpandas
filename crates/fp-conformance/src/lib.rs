@@ -7798,18 +7798,16 @@ fn run_fixture_operation(
                 FixtureOperation::DataFrameIdxmax => frame.idxmax().map_err(|err| err.to_string()),
                 FixtureOperation::DataFrameSem => frame.sem_agg().map_err(|err| err.to_string()),
                 FixtureOperation::DataFrameApplySemAxis0 => {
-                    frame.apply("sem", 0).map_err(|err| err.to_string())
+                    execute_dataframe_apply_alias_fixture_operation(fixture)
                 }
                 FixtureOperation::DataFrameSkew => frame.skew_agg().map_err(|err| err.to_string()),
                 FixtureOperation::DataFrameKurtosis => {
                     frame.kurtosis_agg().map_err(|err| err.to_string())
                 }
                 FixtureOperation::DataFrameProd => frame.prod_agg().map_err(|err| err.to_string()),
-                FixtureOperation::DataFrameApplyProdAxis1 => {
-                    frame.apply("prod", 1).map_err(|err| err.to_string())
-                }
-                FixtureOperation::DataFrameApplyProductAxis1 => {
-                    frame.apply("product", 1).map_err(|err| err.to_string())
+                FixtureOperation::DataFrameApplyProdAxis1
+                | FixtureOperation::DataFrameApplyProductAxis1 => {
+                    execute_dataframe_apply_alias_fixture_operation(fixture)
                 }
                 FixtureOperation::DataFrameSum => frame.sum().map_err(|err| err.to_string()),
                 FixtureOperation::DataFrameMean => frame.mean().map_err(|err| err.to_string()),
@@ -7826,7 +7824,7 @@ fn run_fixture_operation(
                     frame.nunique().map_err(|err| err.to_string())
                 }
                 FixtureOperation::DataFrameApplyNuniqueAxis0 => {
-                    frame.apply("nunique", 0).map_err(|err| err.to_string())
+                    execute_dataframe_apply_alias_fixture_operation(fixture)
                 }
                 FixtureOperation::DataFrameQuantile => {
                     frame.quantile(0.5).map_err(|err| err.to_string())
@@ -16391,18 +16389,16 @@ fn execute_and_compare_differential(
                 FixtureOperation::DataFrameIdxmax => frame.idxmax().map_err(|err| err.to_string()),
                 FixtureOperation::DataFrameSem => frame.sem_agg().map_err(|err| err.to_string()),
                 FixtureOperation::DataFrameApplySemAxis0 => {
-                    frame.apply("sem", 0).map_err(|err| err.to_string())
+                    execute_dataframe_apply_alias_fixture_operation(fixture)
                 }
                 FixtureOperation::DataFrameSkew => frame.skew_agg().map_err(|err| err.to_string()),
                 FixtureOperation::DataFrameKurtosis => {
                     frame.kurtosis_agg().map_err(|err| err.to_string())
                 }
                 FixtureOperation::DataFrameProd => frame.prod_agg().map_err(|err| err.to_string()),
-                FixtureOperation::DataFrameApplyProdAxis1 => {
-                    frame.apply("prod", 1).map_err(|err| err.to_string())
-                }
-                FixtureOperation::DataFrameApplyProductAxis1 => {
-                    frame.apply("product", 1).map_err(|err| err.to_string())
+                FixtureOperation::DataFrameApplyProdAxis1
+                | FixtureOperation::DataFrameApplyProductAxis1 => {
+                    execute_dataframe_apply_alias_fixture_operation(fixture)
                 }
                 FixtureOperation::DataFrameSum => frame.sum().map_err(|err| err.to_string()),
                 FixtureOperation::DataFrameMean => frame.mean().map_err(|err| err.to_string()),
@@ -16419,7 +16415,7 @@ fn execute_and_compare_differential(
                     frame.nunique().map_err(|err| err.to_string())
                 }
                 FixtureOperation::DataFrameApplyNuniqueAxis0 => {
-                    frame.apply("nunique", 0).map_err(|err| err.to_string())
+                    execute_dataframe_apply_alias_fixture_operation(fixture)
                 }
                 FixtureOperation::DataFrameQuantile => {
                     frame.quantile(0.5).map_err(|err| err.to_string())
@@ -20931,7 +20927,7 @@ mod tests {
             report.fixture_count >= 4,
             "expected groupby packet fixtures"
         );
-        assert!(report.is_green());
+        assert!(report.is_green(), "expected report green: {report:?}");
     }
 
     #[test]
