@@ -5,7 +5,7 @@
 
   **Clean-room Rust reimplementation of the full pandas API surface.**
 
-  Drop-in replacement. Zero `unsafe`. Profile-proven performance.
+  Drop-in pandas API in safe Rust — today. Python bindings (`import frankenpandas`) planned via PyO3; see the Roadmap. Zero `unsafe`. Profile-proven performance.
 
   ![Rust](https://img.shields.io/badge/Rust-2024_edition-orange)
   ![License](https://img.shields.io/badge/license-MIT-blue)
@@ -1381,7 +1381,7 @@ Every parity report gets a **RaptorQ repair-symbol sidecar** for bit-rot detecti
 A: We target absolute API parity. The same method names, same parameter names, same edge-case behavior. Differential conformance tests verify against the actual pandas oracle. We're in early development so not every method is implemented yet, but the architecture is designed for full coverage.
 
 **Q: Why not just use Polars?**
-A: Polars is excellent but has a fundamentally different API (lazy evaluation, no index alignment, different method names). FrankenPandas targets teams that want pandas semantics with Rust performance. No code rewrite required; just change the import.
+A: Polars is excellent but has a fundamentally different API (lazy evaluation, no index alignment, different method names). FrankenPandas targets Rust teams that want pandas semantics rather than Polars' query-planner style — identical method names, identical edge-case behavior. (Python drop-in requires the planned PyO3 bindings; today FrankenPandas is a Rust library.)
 
 **Q: Is `unsafe` code used anywhere?**
 A: No. Every crate in the workspace uses `#![forbid(unsafe_code)]`. Memory safety comes from the Rust type system.
