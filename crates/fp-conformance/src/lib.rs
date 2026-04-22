@@ -4944,7 +4944,19 @@ fn assert_csv_roundtrip(frame: &DataFrame) -> Result<(), FpIoError> {
 }
 
 fn assert_excel_roundtrip(frame: &DataFrame) -> Result<(), FpIoError> {
-    let encoded = write_excel_bytes(frame)?;
+    // Mirror 989b's fix in execute_excel_round_trip_fixture_operation:
+    // the public write_excel_bytes default emits the row index as a
+    // leading column (pandas-aligned), but the default reader does not
+    // promote any column back to an index. Writing with index=false
+    // keeps the writer output column-equivalent to the reader's
+    // recovery so the round-trip closes cleanly.
+    let encoded = write_excel_bytes_with_options(
+        frame,
+        &ExcelWriteOptions {
+            index: false,
+            ..ExcelWriteOptions::default()
+        },
+    )?;
     let reparsed = read_excel_bytes(&encoded, &ExcelReadOptions::default())?;
     if !frame.equals(&reparsed) {
         return Err(FpIoError::Io(std::io::Error::other(
