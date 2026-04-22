@@ -23,7 +23,7 @@ license-file = "LICENSE"
 [workspace.dependencies]
 arrow = { version = "54.3.0", default-features = false, features = ["prettyprint", "ipc"] }
 bumpalo = { version = "3.16.0", features = ["collections"] }
-bytes = "1.10.1"
+bytes = "1.11.1"
 calamine = "0.26.1"
 chrono = { version = "0.4.44", default-features = false, features = ["std"] }
 chrono-tz = "0.10.4"
