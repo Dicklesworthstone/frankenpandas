@@ -22628,12 +22628,31 @@ impl DataFrame {
                 modes
             })
             .collect::<Vec<_>>();
+
+        // axis=1 output columns span rows whose source columns may have
+        // different dtypes. Pandas treats the per-row numeric slice as a
+        // single dtype-promoted Series, so any Float64 source column
+        // promotes the whole output column to Float64 (matching
+        // row-wise broadcast semantics). Without this, an Int64 mode
+        // value landing beside NaN padding would keep the column at
+        // Int64, diverging from pandas for numeric_only row-mode.
+        let any_source_is_float = selected_columns
+            .iter()
+            .any(|name| matches!(self.columns[name.as_str()].dtype(), DType::Float64));
+
         let mut result_cols = BTreeMap::new();
         for (col_idx, name) in mode_columns.iter().enumerate() {
-            let values = padded_rows
+            let mut values: Vec<Scalar> = padded_rows
                 .iter()
                 .map(|row| row[col_idx].clone())
-                .collect::<Vec<_>>();
+                .collect();
+            if any_source_is_float {
+                for value in &mut values {
+                    if let Scalar::Int64(v) = *value {
+                        *value = Scalar::Float64(v as f64);
+                    }
+                }
+            }
             result_cols.insert(name.clone(), build_mode_column(values)?);
         }
 
