@@ -2109,6 +2109,28 @@ def op_dataframe_sem(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return {"expected_series": series_to_expected(out)}
 
 
+def op_dataframe_apply_builtin(
+    pd, payload: dict[str, Any], func: str, axis: int, op_name: str
+) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    if frame_payload is None:
+        raise OracleError(f"{op_name} requires frame payload")
+
+    frame = dataframe_from_json(pd, frame_payload)
+
+    try:
+        out = frame.apply(func, axis=axis)
+    except Exception as exc:
+        raise OracleError(f"{op_name} failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
+def op_dataframe_apply_sem_axis0(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return op_dataframe_apply_builtin(
+        pd, payload, "sem", 0, "dataframe_apply_sem_axis0"
+    )
+
+
 def op_dataframe_skew(pd, payload: dict[str, Any]) -> dict[str, Any]:
     frame_payload = payload.get("frame")
     if frame_payload is None:
@@ -2155,6 +2177,18 @@ def op_dataframe_prod(pd, payload: dict[str, Any]) -> dict[str, Any]:
     except Exception as exc:
         raise OracleError(f"dataframe_prod failed: {exc}") from exc
     return {"expected_series": series_to_expected(out)}
+
+
+def op_dataframe_apply_prod_axis1(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return op_dataframe_apply_builtin(
+        pd, payload, "prod", 1, "dataframe_apply_prod_axis1"
+    )
+
+
+def op_dataframe_apply_product_axis1(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return op_dataframe_apply_builtin(
+        pd, payload, "product", 1, "dataframe_apply_product_axis1"
+    )
 
 
 def op_dataframe_sum(pd, payload: dict[str, Any]) -> dict[str, Any]:
@@ -2317,6 +2351,12 @@ def op_dataframe_nunique(pd, payload: dict[str, Any]) -> dict[str, Any]:
     except Exception as exc:
         raise OracleError(f"dataframe_nunique failed: {exc}") from exc
     return {"expected_series": series_to_expected(out)}
+
+
+def op_dataframe_apply_nunique_axis0(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return op_dataframe_apply_builtin(
+        pd, payload, "nunique", 0, "dataframe_apply_nunique_axis0"
+    )
 
 
 def op_dataframe_quantile(pd, payload: dict[str, Any]) -> dict[str, Any]:
@@ -4471,12 +4511,18 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_dataframe_idxmax(pd, payload)
     if op in {"dataframe_sem", "data_frame_sem"}:
         return op_dataframe_sem(pd, payload)
+    if op in {"dataframe_apply_sem_axis0", "data_frame_apply_sem_axis0"}:
+        return op_dataframe_apply_sem_axis0(pd, payload)
     if op in {"dataframe_skew", "data_frame_skew"}:
         return op_dataframe_skew(pd, payload)
     if op in {"dataframe_kurtosis", "data_frame_kurtosis"}:
         return op_dataframe_kurtosis(pd, payload)
     if op in {"dataframe_prod", "data_frame_prod"}:
         return op_dataframe_prod(pd, payload)
+    if op in {"dataframe_apply_prod_axis1", "data_frame_apply_prod_axis1"}:
+        return op_dataframe_apply_prod_axis1(pd, payload)
+    if op in {"dataframe_apply_product_axis1", "data_frame_apply_product_axis1"}:
+        return op_dataframe_apply_product_axis1(pd, payload)
     if op in {"dataframe_sum", "data_frame_sum"}:
         return op_dataframe_sum(pd, payload)
     if op in {"dataframe_mean", "data_frame_mean"}:
@@ -4497,6 +4543,8 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_dataframe_all(pd, payload)
     if op in {"dataframe_nunique", "data_frame_nunique"}:
         return op_dataframe_nunique(pd, payload)
+    if op in {"dataframe_apply_nunique_axis0", "data_frame_apply_nunique_axis0"}:
+        return op_dataframe_apply_nunique_axis0(pd, payload)
     if op in {"dataframe_quantile", "data_frame_quantile"}:
         return op_dataframe_quantile(pd, payload)
     if op in {"dataframe_value_counts", "data_frame_value_counts"}:

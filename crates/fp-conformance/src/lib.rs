@@ -12326,7 +12326,9 @@ fn execute_dataframe_window_fixture_operation(
     }
 }
 
-fn execute_dataframe_apply_alias_fixture_operation(fixture: &PacketFixture) -> Result<Series, String> {
+fn execute_dataframe_apply_alias_fixture_operation(
+    fixture: &PacketFixture,
+) -> Result<Series, String> {
     let frame = build_dataframe(require_frame(fixture)?)
         .map_err(|err| format!("frame build failed: {err}"))?;
 
@@ -26328,8 +26330,8 @@ mod tests {
             return;
         };
 
-        let actual =
-            super::execute_dataframe_apply_alias_fixture_operation(&fixture).expect("actual series");
+        let actual = super::execute_dataframe_apply_alias_fixture_operation(&fixture)
+            .expect("actual series");
         super::compare_series_expected(&actual, &expected).expect("pandas parity");
     }
 
