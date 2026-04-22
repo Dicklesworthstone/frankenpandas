@@ -31,7 +31,7 @@
 | GroupBy with named aggregation | Yes | Yes (different syntax) | Yes (`agg_named`) |
 | `eval()`/`query()` string expressions | Yes | No | Yes |
 | Column MultiIndex | Yes | No | Yes (foundation) |
-| Row MultiIndex | Yes | No | Scaffolded (standalone type; DataFrame row-axis integration pending — see Limitations) |
+| Row MultiIndex | Yes | No | Yes (DataFrame/groupby/indexing/reshape/IO integration) |
 | Categorical dtype | Yes | Yes | Yes (metadata layer) |
 | 7 IO formats (CSV/JSON/JSONL/Parquet/Excel/SQL/Feather) | Yes (SQL: any SQLAlchemy engine) | Partial | Yes (SQL: SQLite-only via rusqlite; PostgreSQL/MySQL planned) |
 | Conformance testing against pandas oracle | - | - | Yes (430+ packet suites, 1249 fixtures, all green) |
@@ -394,7 +394,7 @@ MultiIndex {
 
 Constructors mirror pandas: `from_tuples`, `from_arrays`, `from_product` (Cartesian product). Operations: `get_level_values(level)`, `droplevel(level)` → `MultiIndexOrIndex`, `swaplevel(i,j)`, `reorder_levels(order)`, `to_flat_index(sep)`.
 
-DataFrame integration via `set_index_multi(&["col1", "col2"], drop, sep)` currently flattens the composite keys into a single `Index<IndexLabel>` using a separator (e.g. `"a|1"`); `to_multi_index(&["col1", "col2"])` extracts a standalone tuple-keyed `MultiIndex` from columns. Tuple-keyed `.loc[("a", 1)]` indexing and real row-MultiIndex output from `groupby([k1, k2]).sum` / `stack` / `unstack` / `reset_index` round-trips are scaffolded but not behaviorally complete — tracked under the Row MultiIndex row in the capability table and the Limitations section.
+DataFrame integration now carries a logical row MultiIndex alongside the flat storage index. `set_index_multi(&["col1", "col2"], drop, sep)` attaches real row-axis MultiIndex metadata, tuple-key `.loc[("a", 1)]` / `.xs(...)` / `.get_loc(...)` dispatch through that metadata, multi-key `groupby([k1, k2]).sum()` emits row-MultiIndex output, and reshape / IO round-trips preserve the row axis across `reset_index`, `stack`, `unstack`, CSV, Excel, Parquet, Feather, IPC, and JSON paths. `to_multi_index(&["col1", "col2"])` remains available when you want a standalone extracted MultiIndex value.
 
 ### String Accessor
 
@@ -795,7 +795,7 @@ match result {
 
 When constructing from multiple Series with different indexes, `from_series` automatically performs N-way index alignment (AG-05 leapfrog triejoin) to produce a DataFrame with the union of all index labels.
 
-For row-axis MultiIndex foundation work, `DataFrame::row_index()` returns the logical row axis as `MultiIndexOrIndex`, and `DataFrame::row_multiindex()` exposes the optional row-side `MultiIndex` metadata directly. `DataFrame::index()` remains the flat storage fallback until the full `frankenpandas-1zzp` row-axis integration epic lands.
+`DataFrame::row_index()` returns the logical row axis as `MultiIndexOrIndex`, and `DataFrame::row_multiindex()` exposes the optional row-side `MultiIndex` metadata directly. `DataFrame::index()` remains the flat storage fallback used internally for compatibility with existing code paths.
 
 ## Merge: Advanced Options
 
@@ -1373,7 +1373,6 @@ Every parity report gets a **RaptorQ repair-symbol sidecar** for bit-rot detecti
 | Limitation | Status | Workaround |
 |-----------|--------|------------|
 | No native Datetime dtype | Datetimes stored as ISO 8601 Utf8 strings | Use `to_datetime()` for normalization |
-| MultiIndex not yet integrated as DataFrame row index | Foundation type exists; tracked by `frankenpandas-1zzp` | Use `set_index_multi()` for flat composite keys only |
 | Categorical metadata not propagated through arithmetic | By design (matches pandas) | Use `.cat().to_values()` to materialize |
 | No HDF5, Clipboard, or HTML IO | System-library dependencies | Use Feather (faster) or Parquet instead |
 | SQL IO is SQLite-only | `read_sql` / `write_sql` hardcode `rusqlite::Connection`; no DBAPI2 / SqlConnection trait yet; no PostgreSQL, MySQL, MS SQL, or Oracle backends; no chunksize streaming; `coerce_float` absent. Tracked by `frankenpandas-fd90` (SQL backend abstraction epic) | Use SQLite via `rusqlite::Connection::open[_in_memory]` today; export to Parquet/Feather for other DBs |
@@ -1552,7 +1551,6 @@ Uses a deterministic LCG (Linear Congruential Generator) with Fisher-Yates shuff
 |----------|---------|--------|
 | High | PyO3 Python bindings | Planned; would enable `import frankenpandas as fpd` from Python |
 | High | Native Datetime DType | Design phase; would replace Utf8 ISO 8601 string representation |
-| High | Native row MultiIndex ↔ DataFrame integration | Column/standalone MultiIndex foundation exists; row-axis integration tracked by `frankenpandas-1zzp` |
 | Medium | Parallel execution (rayon) | Not started; architecture supports it (columns are independent) |
 | Medium | DataFrame.plot() via plotters crate | Not started; would enable terminal/SVG chart output |
 | Medium | Lazy evaluation / query planning | Not started; would enable optimization across chained operations |
