@@ -24,12 +24,12 @@ use fp_index::{
     validate_alignment_plan,
 };
 use fp_io::{
-    CsvOnBadLines, CsvReadOptions, ExcelReadOptions, IoError as FpIoError, JsonOrient,
-    read_csv_str, read_csv_with_options, read_excel_bytes, read_feather_bytes,
+    CsvOnBadLines, CsvReadOptions, ExcelReadOptions, ExcelWriteOptions, IoError as FpIoError,
+    JsonOrient, read_csv_str, read_csv_with_options, read_excel_bytes, read_feather_bytes,
     read_ipc_stream_bytes, read_json_str, read_jsonl_str, read_parquet_bytes,
     series_from_arrow_array, series_to_arrow_array, write_csv_string, write_excel_bytes,
-    write_feather_bytes, write_ipc_stream_bytes, write_json_string, write_jsonl_string,
-    write_parquet_bytes,
+    write_excel_bytes_with_options, write_feather_bytes, write_ipc_stream_bytes,
+    write_json_string, write_jsonl_string, write_parquet_bytes,
 };
 use fp_join::{
     JoinExecutionOptions, JoinType, JoinedSeries, MergeExecutionOptions, MergeValidateMode,
@@ -12073,7 +12073,23 @@ fn execute_feather_round_trip_fixture_operation(fixture: &PacketFixture) -> Resu
 
 fn execute_excel_round_trip_fixture_operation(fixture: &PacketFixture) -> Result<bool, String> {
     let frame = build_dataframe(require_frame(fixture)?)?;
-    let bytes = write_excel_bytes(&frame).map_err(|err| format!("excel write failed: {err}"))?;
+    // The public write_excel_bytes default emits the row index as the
+    // first column (matching pandas to_excel). The conformance check
+    // uses ExcelReadOptions::default(), which does not promote any
+    // column back to an index — so a write/read pair through the
+    // defaults would leak the original index back as a data column and
+    // dataframes_semantically_equal would fail on column_names. Round-
+    // trip parity here is column-oriented; explicitly disable the
+    // index emission so what the writer produces is exactly what the
+    // reader recovers.
+    let bytes = write_excel_bytes_with_options(
+        &frame,
+        &ExcelWriteOptions {
+            index: false,
+            ..ExcelWriteOptions::default()
+        },
+    )
+    .map_err(|err| format!("excel write failed: {err}"))?;
     let reparsed = read_excel_bytes(&bytes, &ExcelReadOptions::default())
         .map_err(|err| format!("excel read failed: {err}"))?;
     Ok(dataframes_semantically_equal(&frame, &reparsed))
