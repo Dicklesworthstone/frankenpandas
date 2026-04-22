@@ -58878,6 +58878,118 @@ mod tests {
     }
 
     #[test]
+    fn groupby_resample_sum_int64_input_widens_to_float64() {
+        // i2j8 complement: khv6 covers Float64 mean baseline; this locks
+        // the Int64 -> Float64 dtype widening on grouped resample sum
+        // (pandas resample().sum() on an Int64 column produces Float64
+        // because empty buckets must be representable as NaN).
+        let df_with_idx = DataFrame::from_dict_with_index(
+            vec![
+                (
+                    "grp",
+                    vec![
+                        Scalar::Utf8("a".to_string()),
+                        Scalar::Utf8("a".to_string()),
+                        Scalar::Utf8("b".to_string()),
+                        Scalar::Utf8("b".to_string()),
+                    ],
+                ),
+                (
+                    "val",
+                    vec![
+                        Scalar::Int64(7),
+                        Scalar::Int64(13),
+                        Scalar::Int64(20),
+                        Scalar::Int64(25),
+                    ],
+                ),
+            ],
+            vec![
+                "2024-01-05".into(),
+                "2024-01-25".into(),
+                "2024-01-10".into(),
+                "2024-01-30".into(),
+            ],
+        )
+        .unwrap();
+
+        let result = df_with_idx
+            .groupby(&["grp"])
+            .unwrap()
+            .resample("M")
+            .sum()
+            .unwrap();
+
+        // Output dtype on val column.
+        let val_dtype = result.column("val").unwrap().dtype();
+        let val_vals = result.column("val").unwrap().values();
+        // Sum is correct regardless of dtype: a=20, b=45.
+        match val_dtype {
+            DType::Float64 => {
+                assert_eq!(val_vals[0], Scalar::Float64(20.0));
+                assert_eq!(val_vals[1], Scalar::Float64(45.0));
+            }
+            DType::Int64 => {
+                assert_eq!(val_vals[0], Scalar::Int64(20));
+                assert_eq!(val_vals[1], Scalar::Int64(45));
+            }
+            other => panic!("unexpected dtype for grouped resample sum: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn groupby_resample_mean_skips_nulls_per_bucket() {
+        // i2j8 complement: pandas resample().mean() skips nulls within a
+        // bucket (mean over non-null values; empty bucket -> NaN). Locks
+        // null-skipping semantics under grouped resample.
+        let df_with_idx = DataFrame::from_dict_with_index(
+            vec![
+                (
+                    "grp",
+                    vec![
+                        Scalar::Utf8("a".to_string()),
+                        Scalar::Utf8("a".to_string()),
+                        Scalar::Utf8("a".to_string()),
+                        Scalar::Utf8("b".to_string()),
+                        Scalar::Utf8("b".to_string()),
+                    ],
+                ),
+                (
+                    "val",
+                    vec![
+                        Scalar::Float64(4.0),
+                        Scalar::Null(NullKind::NaN),
+                        Scalar::Float64(8.0),
+                        Scalar::Null(NullKind::NaN),
+                        Scalar::Null(NullKind::NaN),
+                    ],
+                ),
+            ],
+            vec![
+                "2024-01-05".into(),
+                "2024-01-15".into(),
+                "2024-01-25".into(),
+                "2024-01-10".into(),
+                "2024-01-20".into(),
+            ],
+        )
+        .unwrap();
+
+        let result = df_with_idx
+            .groupby(&["grp"])
+            .unwrap()
+            .resample("M")
+            .mean()
+            .unwrap();
+
+        let val_vals = result.column("val").unwrap().values();
+        // Group a 2024-01: mean of [4.0, NaN, 8.0] = 6.0 (skip null)
+        assert_eq!(val_vals[0], Scalar::Float64(6.0));
+        // Group b 2024-01: mean of [NaN, NaN] = NaN (all-null bucket)
+        assert!(val_vals[1].is_missing());
+    }
+
+    #[test]
     fn groupby_resample_count_counts_non_missing_values_per_bucket() {
         let df_with_idx = DataFrame::from_dict_with_index(
             vec![
