@@ -1,0 +1,36 @@
+{
+  "status": "clean_finish",
+  "session_started": "2026-04-22T01:10:00Z",
+  "session_finished": "2026-04-22T01:45:00Z",
+  "agent": "Clawdstein-libupdater-frankenpandas",
+  "current": null,
+  "completed": [
+    {"name": "asupersync", "from": "0.3.0", "to": "0.3.1", "commit": "54f9526", "note": "pre-workflow focused bump"},
+    {"name": "libfuzzer-sys", "from": "0.4.10", "to": "0.4.12", "commit": "b3f3322"},
+    {"name": "bytes", "from": "1.10.1", "to": "1.11.1", "commit": "410b673"},
+    {"name": "bumpalo", "from": "3.16.0", "to": "3.20.2", "commit": "52241ca"},
+    {"name": "regex", "from": "1.11.1", "to": "1.12.3", "commit": "9a3b962"},
+    {"name": "serde", "from": "1.0.219", "to": "1.0.228", "commit": "063f238"},
+    {"name": "serde_json", "from": "1.0.140", "to": "1.0.149", "commit": "06fc0ec"},
+    {"name": "thiserror", "from": "2.0.12", "to": "2.0.18", "commit": "62c258b"},
+    {"name": "raptorq", "from": "2.0.0", "to": "2.0.1", "commit": "f58d9b6"},
+    {"name": "proptest", "from": "1.10.0", "to": "1.11.0", "commit": "bbccfda"},
+    {"name": "tempfile", "from": "3.14.0", "to": "3.27.0", "commit": "c35d33f"},
+    {"name": "sha2", "from": "0.10.9", "to": "0.11.0", "commit": "0f254f4", "note": "SemVer-major; required 2 call-site fixes"},
+    {"name": "calamine", "from": "0.26.1", "to": "0.34.0", "commit": "2f9d325", "note": "8-minor jump; transitive quick-xml 0.31 → 0.39"},
+    {"name": "arrow", "from": "54.3.0", "to": "58.1.0", "commit": "795cdd0", "note": "4 major versions; bumped in lockstep with parquet"},
+    {"name": "parquet", "from": "54.3.0", "to": "58.1.0", "commit": "795cdd0", "note": "4 major versions; lockstep with arrow"}
+  ],
+  "failed": [],
+  "skipped": [
+    {"name": "chrono", "version": "0.4.44", "reason": "already at latest"},
+    {"name": "chrono-tz", "version": "0.10.4", "reason": "already at latest"},
+    {"name": "csv", "version": "1.4.0", "reason": "already at latest"},
+    {"name": "rust_xlsxwriter", "version": "0.94.0", "reason": "already at latest"},
+    {"name": "rusqlite", "version": "0.39.0", "reason": "already at latest"},
+    {"name": "unicode-casefold", "version": "0.2.0", "reason": "already at latest"},
+    {"name": "serde_yaml", "version": "0.9.34+deprecated", "reason": "upstream archived; no newer stable. Flagged for migration to serde_yml or serde_yaml_ng."}
+  ],
+  "pending": [],
+  "pre_existing_baseline_issue": "cargo test -p fp-conformance --lib reports 334 passed / 18 FAILED on main prior to this sweep. Failing tests are env-dependent conformance-gate / packet-filter / CI-pipeline cases that depend on sidecar artifacts. Verified baseline before and after each risky bump (sha2, arrow, parquet) via stash/unstash diff — the 334/18 split is stable regardless of dependency version."
+}
