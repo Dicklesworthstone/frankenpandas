@@ -31,4 +31,4 @@ fp-io = { path = "../fp-io" }
 fp-join = { path = "../fp-join" }
 proptest = "1.11.0"
 rusqlite = { workspace = true }
-tempfile = "3.14.0"
+tempfile = "3.27.0"
