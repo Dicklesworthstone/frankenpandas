@@ -130,5 +130,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_pivot_table"
+path = "fuzz_targets/fuzz_pivot_table.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

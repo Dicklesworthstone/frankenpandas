@@ -5181,21 +5181,21 @@ fn fuzz_pivot_key_scalar_from_bytes(bytes: &[u8], synth_mode: bool, prefix: char
         match tag % 5 {
             0 => Scalar::Null(NullKind::Null),
             1 => Scalar::Utf8(format!("{prefix}{}", payload % 3)),
-            2 => Scalar::Int64(i64::from(payload % 3)),
+            2 => Scalar::Utf8(format!("{prefix}{}", (payload / 3) % 3)),
             3 => Scalar::Utf8(format!("{prefix}{}", (payload / 3) % 3)),
-            _ => Scalar::Int64(i64::from(payload % 3) - 1),
+            _ => Scalar::Utf8(format!("{prefix}{}", payload % 5)),
         }
     } else {
         match tag % 6 {
             0 => Scalar::Null(NullKind::Null),
-            1 => Scalar::Utf8(char::from(b'a' + (payload % 4)).to_string()),
-            2 => Scalar::Int64(i64::from(payload % 5)),
+            1 => Scalar::Utf8(format!("{prefix}{}", char::from(b'a' + (payload % 4)))),
+            2 => Scalar::Utf8(format!("{prefix}{}", payload % 5)),
             3 => Scalar::Utf8(format!(
                 "{prefix}{}{}",
                 char::from(b'a' + (payload % 3)),
                 payload % 2
             )),
-            4 => Scalar::Int64(i64::from(payload % 7) - 3),
+            4 => Scalar::Utf8(format!("{prefix}{}", payload % 7)),
             _ => Scalar::Utf8(format!("{prefix}{}", payload % 5)),
         }
     }
@@ -5639,6 +5639,22 @@ pub fn fuzz_pivot_table_bytes(input: &[u8]) -> Result<(), String> {
     let mut seen_cols = BTreeSet::new();
     let mut numeric_counts = BTreeMap::<(String, String), usize>::new();
 
+    for value in row_series.values() {
+        let Some(row_key) = fuzz_pivot_key_name(value) else {
+            continue;
+        };
+        if seen_rows.insert(row_key.clone()) {
+            expected_rows.push(row_key);
+        }
+    }
+    for value in col_series.values() {
+        let Some(col_key) = fuzz_pivot_key_name(value) else {
+            continue;
+        };
+        if seen_cols.insert(col_key.clone()) {
+            expected_cols.push(col_key);
+        }
+    }
     for idx in 0..frame.index().len() {
         let Some(row_key) = fuzz_pivot_key_name(&row_series.values()[idx]) else {
             continue;
@@ -5646,12 +5662,6 @@ pub fn fuzz_pivot_table_bytes(input: &[u8]) -> Result<(), String> {
         let Some(col_key) = fuzz_pivot_key_name(&col_series.values()[idx]) else {
             continue;
         };
-        if seen_rows.insert(row_key.clone()) {
-            expected_rows.push(row_key.clone());
-        }
-        if seen_cols.insert(col_key.clone()) {
-            expected_cols.push(col_key.clone());
-        }
         if val_series.values()[idx].to_f64().is_ok() && !val_series.values()[idx].is_missing() {
             *numeric_counts.entry((row_key, col_key)).or_insert(0) += 1;
         }
