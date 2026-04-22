@@ -4,7 +4,7 @@ use fp_conformance::{
     E2eConfig, HarnessConfig, NoopHooks, OracleMode, SuiteOptions, append_phase2c_drift_history,
     build_compat_closure_e2e_scenario_report, build_compat_closure_final_evidence_pack,
     enforce_packet_gates, run_differential_by_id, run_e2e_suite,
-    run_fault_injection_validation_by_id, run_packets_grouped,
+    run_fault_injection_validation_by_id, run_packets_grouped, write_case_evidence_jsonl,
     write_compat_closure_e2e_scenario_report, write_compat_closure_final_evidence_pack,
     write_differential_validation_log, write_fault_injection_validation_report,
     write_grouped_artifacts,
@@ -23,6 +23,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut write_e2e_scenarios = false;
     let mut write_final_evidence_pack = false;
     let mut print_mismatches = false;
+    let mut emit_evidence = false;
 
     let mut args = std::env::args().skip(1).peekable();
     while let Some(arg) = args.next() {
@@ -71,6 +72,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             "--print-mismatches" => {
                 print_mismatches = true;
+            }
+            "--emit-evidence" => {
+                emit_evidence = true;
             }
             "--help" | "-h" => {
                 print_help();
@@ -140,6 +144,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if write_artifacts || write_drift_history {
         let history_path = append_phase2c_drift_history(&config, &reports)?;
         println!("wrote drift_history={}", history_path.display());
+    }
+
+    if emit_evidence {
+        for path in write_case_evidence_jsonl(&config, &reports)? {
+            println!("wrote case_evidence={}", path.display());
+        }
     }
 
     if write_differential_validation {
@@ -244,6 +254,7 @@ fn print_help() {
          \t--write-drift-history Append packet run summary to artifacts/phase2c/drift_history.jsonl\n\
          \t--write-differential-validation Emit differential validation JSONL per packet\n\
          \t--write-fault-injection Emit deterministic fault-injection validation report per packet\n\
+         \t--emit-evidence    Emit per-case machine-readable failure ledgers under artifacts/conformance/<packet>/<case>.jsonl\n\
          \t--write-e2e-scenarios Emit compat-closure E2E scenario matrix + replay bundle report\n\
          \t--write-final-evidence-pack Emit final compatibility evidence pack + migration + attestation bundle\n\
          \t--require-green      Fail with non-zero exit when any packet parity/gate check fails\n\

@@ -20494,6 +20494,105 @@ pub struct FailureSurfaceEntry {
     pub evidence_records: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CaseEvidenceEntry {
+    pub suite: String,
+    pub packet_id: String,
+    pub case_id: String,
+    pub operation: FixtureOperation,
+    pub mode: RuntimeMode,
+    pub mismatch_class: String,
+    pub mismatch: String,
+    pub replay_key: String,
+    pub trace_id: String,
+    pub evidence_records: usize,
+    pub ledger_id: String,
+    #[serde(default)]
+    pub expected_dtype: Option<String>,
+    #[serde(default)]
+    pub actual_dtype: Option<String>,
+    #[serde(default)]
+    pub first_mismatch_idx: Option<usize>,
+    #[serde(default)]
+    pub first_mismatch_actual: Option<String>,
+    #[serde(default)]
+    pub first_mismatch_expected: Option<String>,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct ExtractedMismatchDetails {
+    expected_dtype: Option<String>,
+    actual_dtype: Option<String>,
+    first_mismatch_idx: Option<usize>,
+    first_mismatch_actual: Option<String>,
+    first_mismatch_expected: Option<String>,
+}
+
+fn extract_segment_value(segment: &str, prefix: &str, terminators: &[&str]) -> Option<String> {
+    let start = segment.find(prefix)? + prefix.len();
+    let tail = &segment[start..];
+    let end = terminators
+        .iter()
+        .filter_map(|needle| tail.find(needle))
+        .min()
+        .unwrap_or(tail.len());
+    let value = tail[..end].trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_owned())
+    }
+}
+
+fn extract_first_mismatch_details(mismatch: &str) -> ExtractedMismatchDetails {
+    let mut details = ExtractedMismatchDetails::default();
+
+    for segment in mismatch.split("; ") {
+        if (details.actual_dtype.is_none() || details.expected_dtype.is_none())
+            && let Some(actual_dtype) =
+                extract_segment_value(segment, "dtype mismatch: actual=", &[", expected="])
+        {
+            details.actual_dtype = Some(actual_dtype);
+            details.expected_dtype =
+                extract_segment_value(segment, ", expected=", &["; ", "] ", "\n"]);
+        }
+
+        if details.first_mismatch_idx.is_none()
+            && let Some(idx_tail) = segment.split("idx=").nth(1)
+        {
+            let digits: String = idx_tail
+                .chars()
+                .take_while(|ch| ch.is_ascii_digit())
+                .collect();
+            if !digits.is_empty() {
+                details.first_mismatch_idx = digits.parse::<usize>().ok();
+            }
+        }
+
+        if (details.first_mismatch_actual.is_none() || details.first_mismatch_expected.is_none())
+            && segment.contains("idx=")
+            && let Some(actual_value) = extract_segment_value(segment, "actual=", &[", expected="])
+        {
+            details.first_mismatch_actual = Some(actual_value);
+            details.first_mismatch_expected =
+                extract_segment_value(segment, ", expected=", &["; ", "] ", "\n"]);
+        }
+    }
+
+    details
+}
+
+fn failure_evidence_ledger_id(packet_id: &str, case_id: &str, mode: RuntimeMode) -> String {
+    format!(
+        "evidence:{}",
+        stable_json_digest(&serde_json::json!({
+            "packet_id": packet_id,
+            "case_id": case_id,
+            "mode": runtime_mode_slug(mode),
+        }))
+    )
+}
+
 #[must_use]
 pub fn build_failure_surface_entries_for_report(
     report: &PacketParityReport,
@@ -20562,6 +20661,90 @@ pub fn build_failure_surface_entries(reports: &[PacketParityReport]) -> Vec<Fail
     entries
 }
 
+#[must_use]
+pub fn build_case_evidence_entries_for_report(
+    report: &PacketParityReport,
+) -> Vec<CaseEvidenceEntry> {
+    build_case_evidence_entries(std::slice::from_ref(report))
+}
+
+#[must_use]
+pub fn build_case_evidence_entries(reports: &[PacketParityReport]) -> Vec<CaseEvidenceEntry> {
+    let mut entries: Vec<_> = reports
+        .iter()
+        .flat_map(|report| {
+            let packet_id = report
+                .packet_id
+                .clone()
+                .unwrap_or_else(|| "<unknown>".to_owned());
+            report
+                .results
+                .iter()
+                .filter(|result| matches!(result.status, CaseStatus::Fail))
+                .map(move |result| {
+                    let mismatch = result
+                        .mismatch
+                        .clone()
+                        .unwrap_or_else(|| "(no details)".to_owned());
+                    let details = extract_first_mismatch_details(&mismatch);
+                    CaseEvidenceEntry {
+                        suite: report.suite.clone(),
+                        packet_id: packet_id.clone(),
+                        case_id: result.case_id.clone(),
+                        operation: result.operation,
+                        mode: result.mode,
+                        mismatch_class: result
+                            .mismatch_class
+                            .clone()
+                            .unwrap_or_else(|| "unknown".to_owned()),
+                        mismatch,
+                        replay_key: if result.replay_key.is_empty() {
+                            deterministic_replay_key(
+                                &result.packet_id,
+                                &result.case_id,
+                                result.mode,
+                            )
+                        } else {
+                            result.replay_key.clone()
+                        },
+                        trace_id: if result.trace_id.is_empty() {
+                            deterministic_trace_id(&result.packet_id, &result.case_id, result.mode)
+                        } else {
+                            result.trace_id.clone()
+                        },
+                        evidence_records: result.evidence_records,
+                        ledger_id: failure_evidence_ledger_id(
+                            &result.packet_id,
+                            &result.case_id,
+                            result.mode,
+                        ),
+                        expected_dtype: details.expected_dtype,
+                        actual_dtype: details.actual_dtype,
+                        first_mismatch_idx: details.first_mismatch_idx,
+                        first_mismatch_actual: details.first_mismatch_actual,
+                        first_mismatch_expected: details.first_mismatch_expected,
+                    }
+                })
+        })
+        .collect();
+
+    entries.sort_by(|a, b| {
+        (
+            a.suite.as_str(),
+            a.packet_id.as_str(),
+            a.case_id.as_str(),
+            runtime_mode_slug(a.mode),
+        )
+            .cmp(&(
+                b.suite.as_str(),
+                b.packet_id.as_str(),
+                b.case_id.as_str(),
+                runtime_mode_slug(b.mode),
+            ))
+    });
+    entries
+}
+
 fn sanitize_failure_surface_artifact_name(label: &str) -> String {
     let sanitized: String = label
         .chars()
@@ -20602,6 +20785,41 @@ pub fn write_failure_surface_jsonl(
     Ok(Some(output_path))
 }
 
+pub fn write_case_evidence_jsonl(
+    config: &HarnessConfig,
+    reports: &[PacketParityReport],
+) -> Result<Vec<PathBuf>, HarnessError> {
+    let mut entries_by_case: BTreeMap<(String, String), Vec<CaseEvidenceEntry>> = BTreeMap::new();
+    for entry in build_case_evidence_entries(reports) {
+        entries_by_case
+            .entry((entry.packet_id.clone(), entry.case_id.clone()))
+            .or_default()
+            .push(entry);
+    }
+
+    let mut paths = Vec::with_capacity(entries_by_case.len());
+    for ((packet_id, case_id), mut entries) in entries_by_case {
+        entries.sort_by(|a, b| runtime_mode_slug(a.mode).cmp(runtime_mode_slug(b.mode)));
+        let output_path = config
+            .repo_root
+            .join("artifacts/conformance")
+            .join(&packet_id)
+            .join(format!("{case_id}.jsonl"));
+        if let Some(parent) = output_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        let mut file = fs::File::create(&output_path)?;
+        for entry in &entries {
+            writeln!(file, "{}", serde_json::to_string(entry)?)?;
+        }
+        paths.push(output_path);
+    }
+
+    paths.sort();
+    Ok(paths)
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
@@ -20609,13 +20827,14 @@ mod tests {
     use std::sync::{Mutex, OnceLock};
 
     use super::{
-        ArtifactId, CaseResult, CaseStatus, CiGate, CiGateResult, CiPipelineConfig,
-        CiPipelineResult, ComparisonCategory, DecodeProofArtifact, DecodeProofStatus,
-        DifferentialResult, DriftLevel, DriftRecord, E2eConfig, FailureDigest,
+        ArtifactId, CaseEvidenceEntry, CaseResult, CaseStatus, CiGate, CiGateResult,
+        CiPipelineConfig, CiPipelineResult, ComparisonCategory, DecodeProofArtifact,
+        DecodeProofStatus, DifferentialResult, DriftLevel, DriftRecord, E2eConfig, FailureDigest,
         FailureForensicsReport, FailureSurfaceEntry, FaultInjectionClassification,
         FixtureExpectedAlignment, FixtureOperation, FixtureOracleSource, ForensicEventKind,
         ForensicLog, HarnessConfig, LifecycleHooks, NoopHooks, OracleMode, PacketParityReport,
         RaptorQSidecarArtifact, SuiteOptions, append_phase2c_drift_history,
+        build_case_evidence_entries, build_case_evidence_entries_for_report,
         build_ci_forensics_report, build_compat_closure_e2e_scenario_report,
         build_compat_closure_final_evidence_pack, build_differential_report,
         build_differential_validation_log, build_failure_forensics, build_failure_surface_entries,
@@ -20629,9 +20848,10 @@ mod tests {
         run_e2e_suite, run_fault_injection_validation_by_id, run_packet_by_id, run_packet_suite,
         run_packet_suite_with_options, run_packets_grouped, run_raptorq_decode_recovery_drill,
         run_smoke, verify_all_sidecars_ci, verify_packet_sidecar_integrity,
-        write_compat_closure_e2e_scenario_report, write_compat_closure_final_evidence_pack,
-        write_differential_validation_log, write_failure_surface_jsonl,
-        write_fault_injection_validation_report, write_packet_artifacts,
+        write_case_evidence_jsonl, write_compat_closure_e2e_scenario_report,
+        write_compat_closure_final_evidence_pack, write_differential_validation_log,
+        write_failure_surface_jsonl, write_fault_injection_validation_report,
+        write_packet_artifacts,
     };
     use fp_runtime::RuntimeMode;
 
@@ -29478,6 +29698,120 @@ mod tests {
         ] {
             assert!(row.get(required).is_some(), "missing field: {required}");
         }
+    }
+
+    #[test]
+    fn case_evidence_entries_extract_machine_readable_mismatch_fields() {
+        let report = PacketParityReport {
+            suite: "phase2c_packets:FP-P2C-001".to_owned(),
+            packet_id: Some("FP-P2C-001".to_owned()),
+            oracle_present: true,
+            fixture_count: 1,
+            passed: 0,
+            failed: 1,
+            results: vec![CaseResult {
+                packet_id: "FP-P2C-001".to_owned(),
+                case_id: "case_a".to_owned(),
+                mode: RuntimeMode::Strict,
+                operation: FixtureOperation::SeriesAdd,
+                status: CaseStatus::Fail,
+                mismatch: Some(
+                    "[Type/Critical] dtype mismatch: actual=Float64, expected=Int64; \
+                     [Value/Critical] value mismatch at idx=2: actual=Float64(1.5), expected=Int64(1)"
+                        .to_owned(),
+                ),
+                mismatch_class: Some("type_critical".to_owned()),
+                replay_key: "FP-P2C-001/case_a/strict".to_owned(),
+                trace_id: "FP-P2C-001:case_a:strict".to_owned(),
+                elapsed_us: 11,
+                evidence_records: 3,
+            }],
+        };
+
+        let entries = build_case_evidence_entries_for_report(&report);
+        assert_eq!(entries.len(), 1);
+        let entry = &entries[0];
+        assert_eq!(entry.packet_id, "FP-P2C-001");
+        assert_eq!(entry.case_id, "case_a");
+        assert_eq!(entry.actual_dtype.as_deref(), Some("Float64"));
+        assert_eq!(entry.expected_dtype.as_deref(), Some("Int64"));
+        assert_eq!(entry.first_mismatch_idx, Some(2));
+        assert_eq!(entry.first_mismatch_actual.as_deref(), Some("Float64(1.5)"));
+        assert_eq!(entry.first_mismatch_expected.as_deref(), Some("Int64(1)"));
+        assert!(entry.ledger_id.starts_with("evidence:"));
+    }
+
+    #[test]
+    fn case_evidence_jsonl_writes_per_case_artifacts() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let mut cfg = HarnessConfig::default_paths();
+        cfg.repo_root = tmp.path().to_path_buf();
+
+        let report = PacketParityReport {
+            suite: "phase2c_packets:FP-P2C-001".to_owned(),
+            packet_id: Some("FP-P2C-001".to_owned()),
+            oracle_present: true,
+            fixture_count: 2,
+            passed: 0,
+            failed: 2,
+            results: vec![
+                CaseResult {
+                    packet_id: "FP-P2C-001".to_owned(),
+                    case_id: "case_a".to_owned(),
+                    mode: RuntimeMode::Strict,
+                    operation: FixtureOperation::SeriesAdd,
+                    status: CaseStatus::Fail,
+                    mismatch: Some(
+                        "[Value/Critical] value mismatch at idx=1: actual=Int64(2), expected=Int64(3)"
+                            .to_owned(),
+                    ),
+                    mismatch_class: Some("value_critical".to_owned()),
+                    replay_key: "FP-P2C-001/case_a/strict".to_owned(),
+                    trace_id: "FP-P2C-001:case_a:strict".to_owned(),
+                    elapsed_us: 7,
+                    evidence_records: 1,
+                },
+                CaseResult {
+                    packet_id: "FP-P2C-001".to_owned(),
+                    case_id: "case_a".to_owned(),
+                    mode: RuntimeMode::Hardened,
+                    operation: FixtureOperation::SeriesAdd,
+                    status: CaseStatus::Fail,
+                    mismatch: Some(
+                        "[Type/Critical] dtype mismatch: actual=Float64, expected=Int64"
+                            .to_owned(),
+                    ),
+                    mismatch_class: Some("type_critical".to_owned()),
+                    replay_key: "FP-P2C-001/case_a/hardened".to_owned(),
+                    trace_id: "FP-P2C-001:case_a:hardened".to_owned(),
+                    elapsed_us: 9,
+                    evidence_records: 2,
+                },
+            ],
+        };
+
+        let paths = write_case_evidence_jsonl(&cfg, std::slice::from_ref(&report)).expect("write");
+        assert_eq!(paths.len(), 1);
+        let path = &paths[0];
+        assert!(
+            path.ends_with("artifacts/conformance/FP-P2C-001/case_a.jsonl"),
+            "unexpected path: {}",
+            path.display()
+        );
+
+        let content = fs::read_to_string(path).expect("read");
+        let rows: Vec<CaseEvidenceEntry> = content
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("json row"))
+            .collect();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].mode, RuntimeMode::Hardened);
+        assert_eq!(rows[1].mode, RuntimeMode::Strict);
+        assert_eq!(rows[0].actual_dtype.as_deref(), Some("Float64"));
+        assert_eq!(rows[1].first_mismatch_idx, Some(1));
+
+        let aggregated = build_case_evidence_entries(&[report]);
+        assert_eq!(aggregated.len(), 2);
     }
 
     #[test]
