@@ -32,7 +32,7 @@ parquet = { version = "54.3.0", default-features = false, features = ["arrow", "
 regex = "1.12.3"
 rust_xlsxwriter = "0.94.0"
 rusqlite = { version = "0.39.0", features = ["bundled"] }
-serde = { version = "1.0.219", features = ["derive"] }
+serde = { version = "1.0.228", features = ["derive"] }
 serde_json = { version = "1.0.140", features = ["preserve_order"] }
 thiserror = "2.0.12"
 unicode-casefold = "0.2.0"
