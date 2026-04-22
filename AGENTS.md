@@ -691,6 +691,12 @@ git push                # Push to remote
 - Create new issues with `br create` when you discover tasks
 - Use descriptive titles and set appropriate priority/type
 - Always `br sync --flush-only && git add .beads/` before ending session
+- Run `git diff --stat` immediately before every commit. If the staged diff
+  includes work from more than one bead, either split it into separate commits
+  or explicitly cite every co-landed bead id in the commit message.
+- Never let a commit message imply ownership for only one bead when the diff
+  intentionally includes another bead's work. If you co-land, say so directly
+  in the subject/body.
 
 <!-- end-bv-agent-instructions -->
 
