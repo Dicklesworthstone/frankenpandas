@@ -20180,9 +20180,14 @@ mod tests {
 
     fn phase2c_artifact_test_lock() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .expect("phase2c artifact test lock poisoned")
+        // The lock guards only side-effect sequencing for artifact-writing
+        // tests; the inner tuple is (), so recovering a poisoned guard via
+        // `into_inner()` is safe and prevents a single panicking test from
+        // cascading 18 downstream tests into `PoisonError` failures.
+        match LOCK.get_or_init(|| Mutex::new(())).lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
     }
 
     fn assert_text_golden(golden_name: &str, actual: &str) {
