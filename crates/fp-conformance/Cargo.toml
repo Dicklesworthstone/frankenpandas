@@ -19,7 +19,7 @@ fp-io = { path = "../fp-io" }
 fp-join = { path = "../fp-join" }
 fp-runtime = { path = "../fp-runtime" }
 fp-types = { path = "../fp-types" }
-raptorq = { version = "2.0.0", features = ["serde_support"] }
+raptorq = { version = "2.0.1", features = ["serde_support"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = "0.9.34"
