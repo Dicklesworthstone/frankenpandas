@@ -1,0 +1,12 @@
+# GitHub Sponsors / external funding channels for frankenpandas.
+# Remove entries that are not set up for the maintainer; leave the
+# file with at least one active channel for GitHub to render the
+# "Sponsor" button. If no channels apply, delete this file rather
+# than shipping empty entries (empty entries render as broken
+# Sponsor links).
+
+github: [Dicklesworthstone]
+# open_collective: frankenpandas     # Uncomment if an OpenCollective is set up.
+# liberapay: frankenpandas           # Uncomment if a Liberapay account exists.
+# ko_fi: frankenpandas               # Uncomment if a Ko-fi page exists.
+# custom: ["https://frankenpandas.dev/sponsor"]  # Uncomment for a custom landing page.
