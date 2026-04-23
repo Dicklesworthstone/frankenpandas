@@ -47,6 +47,14 @@ jobs:
           - ""                        # default features
           - "--no-default-features"   # minimum-viable build
           - "--all-features"          # every feature on (asupersync etc.)
+        include:
+          # Windows: single default-feature build surfacing path /
+          # newline / toolchain regressions without the full 3x feature
+          # fan-out. Per br-frankenpandas-0l5r incremental step 2: add
+          # windows `cargo check` coverage before committing to full
+          # IO-suite on that runner.
+          - os: windows-latest
+            features: ""
     runs-on: ${{ matrix.os }}
     env:
       CARGO_TERM_COLOR: always
