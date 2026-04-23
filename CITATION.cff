@@ -1,0 +1,32 @@
+cff-version: 1.2.0
+message: "If you use frankenpandas in published research, please cite it."
+title: "frankenpandas: clean-room Rust reimplementation of the pandas API"
+abstract: >
+  frankenpandas rebuilds the pandas API surface in safe Rust with
+  differential conformance testing against the live pandas oracle.
+  Provides DataFrame, Series, GroupBy, Rolling, Resample, MultiIndex,
+  and 7 IO formats (CSV, JSON, JSONL, Parquet, Excel, Feather,
+  Arrow IPC, SQL). Memory safety via #![forbid(unsafe_code)].
+authors:
+  - family-names: "Emanuel"
+    given-names: "Jeffrey"
+repository-code: "https://github.com/Dicklesworthstone/frankenpandas"
+url: "https://github.com/Dicklesworthstone/frankenpandas"
+license: MIT
+version: "0.1.0"
+date-released: "2026-04-23"
+keywords:
+  - dataframe
+  - pandas
+  - rust
+  - data-analysis
+  - columnar-storage
+  - conformance-testing
+preferred-citation:
+  type: software
+  authors:
+    - family-names: "Emanuel"
+      given-names: "Jeffrey"
+  title: "frankenpandas"
+  url: "https://github.com/Dicklesworthstone/frankenpandas"
+  year: 2026

@@ -1,0 +1,10 @@
+# git-log author normalization for the multi-agent swarm.
+#
+# Format:
+#   Proper Name <proper@email>  Alt Name <alt@email>
+#
+# See: git-mailmap(5).
+
+Dicklesworthstone <jeff141421@gmail.com> cc-pandas <jeff141421@gmail.com>
+Dicklesworthstone <jeff141421@gmail.com> cod-pandas <jeff141421@gmail.com>
+Dicklesworthstone <jeff141421@gmail.com> Clawdstein-libupdater-frankenpandas <jeff141421@gmail.com>
