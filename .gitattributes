@@ -1,0 +1,34 @@
+# Normalize line endings across OS checkouts (matters once br-0l5r's
+# cross-platform CI matrix lands with Windows runners).
+* text=auto eol=lf
+
+# Source files — always LF.
+*.rs    text eol=lf
+*.py    text eol=lf
+*.toml  text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.sh    text eol=lf
+*.md    text eol=lf
+*.json  text eol=lf
+*.jsonl text eol=lf
+
+# Binary files — never touched by git's EOL normalization.
+*.png     binary
+*.webp    binary
+*.jpg     binary
+*.jpeg    binary
+*.gif     binary
+*.xlsx    binary
+*.xls     binary
+*.xlsb    binary
+*.ods     binary
+*.parquet binary
+*.feather binary
+*.arrow   binary
+*.sqlite  binary
+*.db      binary
+
+# Shell scripts keep UNIX line endings even on Windows checkouts.
+*.sh text eol=lf
+scripts/* text eol=lf
