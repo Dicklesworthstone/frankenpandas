@@ -39,7 +39,15 @@ jobs:
         run: cargo fmt --check
 
   lint:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        features:
+          - ""                        # default features
+          - "--no-default-features"   # minimum-viable build
+          - "--all-features"          # every feature on (asupersync etc.)
+    runs-on: ${{ matrix.os }}
     env:
       CARGO_TERM_COLOR: always
       CARGO_TARGET_DIR: ${{ github.workspace }}/.target-lint
@@ -65,18 +73,23 @@ jobs:
           components: clippy, rust-src
 
       - name: Check
-        run: cargo check --all-targets
+        run: cargo check --all-targets ${{ matrix.features }}
 
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --all-targets ${{ matrix.features }} -- -D warnings
 
       - name: Rustdoc
+        if: matrix.features == '--all-features'
         env:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --workspace --no-deps --all-features
 
   test:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     env:
       CARGO_TERM_COLOR: always
       CARGO_TARGET_DIR: ${{ github.workspace }}/.target
