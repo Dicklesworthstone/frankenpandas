@@ -252,6 +252,47 @@ Required evidence for substantive changes:
 
 ---
 
+## Commit provenance (br-frankenpandas-3d5q)
+
+**Identity → signing-key binding.** Every active swarm agent publishes
+an SSH signing key fingerprint in [AUTHORS.md](AUTHORS.md). A commit
+claiming `AGENT_NAME=<identity>` whose SSH signature does not match the
+key on file is spoofed and should be rejected at review time.
+
+**Required setup (one-time per agent identity):**
+
+```bash
+ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519_<agent-name>
+git config --local user.signingkey ~/.ssh/id_ed25519_<agent-name>.pub
+git config --local gpg.format ssh
+git config --local commit.gpgsign true
+git config --local tag.gpgsign true
+```
+
+Register the public key under the agent's GitHub account as a **Signing
+Key** (Settings → SSH and GPG keys → New SSH key → Key type: Signing
+Key) and commit the fingerprint to AUTHORS.md.
+
+**Verifying a commit locally:**
+
+```bash
+git log --show-signature -1 <commit>     # human-readable
+git log --format='%G?' -1 <commit>       # G = good, U = good with
+                                         # unknown key, B = bad, N = none
+```
+
+**Branch protection rollout.** Once every listed AUTHORS.md identity
+has a published key, the maintainer toggles GitHub's "Require signed
+commits" for `main`. Until then, signature verification is
+non-enforcing — unsigned commits pass CI but are flagged in review.
+
+**Release provenance (follow-up, br-frankenpandas-4clx).** Tags for
+every release are signed (`git tag -s vX.Y.Z`) by the release manager.
+release-plz's release job reads the signed tag before publishing to
+crates.io so the chain source → tag → crate is verifiable.
+
+---
+
 ## Testing
 
 ### Testing Policy

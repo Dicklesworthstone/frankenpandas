@@ -94,6 +94,30 @@ full protocol.
 - Shell: `set -euo pipefail` at the top; LF line endings enforced
   by [`.gitattributes`](.gitattributes).
 
+### Commit signing (br-frankenpandas-3d5q)
+
+Starting from 0.1.0 prep, commits on `main` are expected to be SSH-signed.
+GitHub supports SSH signing natively (no GPG setup needed):
+
+```bash
+ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519_commit   # one-time
+git config --global user.signingkey ~/.ssh/id_ed25519_commit.pub
+git config --global gpg.format ssh
+git config --global commit.gpgsign true
+git config --global tag.gpgsign true
+```
+
+Add the public key to your GitHub account under **Settings → SSH and GPG
+keys → New SSH key** with **Key type: Signing Key**.
+
+Swarm-agent identities publish their signing-key fingerprints in
+[AUTHORS.md](AUTHORS.md). A commit claiming `AGENT_NAME=cc-pandas`
+whose SSH signature does not match the `cc-pandas` row is spoofed.
+
+Branch-protection enforcement ("require signed commits to merge into
+main") will be toggled by the maintainer once every active agent has
+published its key.
+
 ### Commit messages
 
 Conventional-commit prefix + bead ID:
