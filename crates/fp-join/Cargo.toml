@@ -18,3 +18,8 @@ fp-frame = { path = "../fp-frame" }
 fp-index = { path = "../fp-index" }
 fp-types = { path = "../fp-types" }
 thiserror = { workspace = true }
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+targets = ["x86_64-unknown-linux-gnu"]

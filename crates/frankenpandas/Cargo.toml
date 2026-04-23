@@ -20,3 +20,8 @@ fp-io = { path = "../fp-io" }
 fp-join = { path = "../fp-join" }
 fp-runtime = { path = "../fp-runtime" }
 fp-types = { path = "../fp-types" }
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+targets = ["x86_64-unknown-linux-gnu"]

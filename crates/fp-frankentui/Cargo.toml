@@ -21,3 +21,8 @@ thiserror = { workspace = true }
 [dev-dependencies]
 tempfile = "3.27.0"
 proptest = "1.11.0"
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+targets = ["x86_64-unknown-linux-gnu"]
