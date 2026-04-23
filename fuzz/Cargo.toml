@@ -179,5 +179,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_dataframe_op_chain"
+path = "fuzz_targets/fuzz_dataframe_op_chain.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

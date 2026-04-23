@@ -6014,6 +6014,95 @@ pub fn fuzz_query_str_with_locals_bytes(input: &[u8]) -> Result<(), String> {
     }
 }
 
+/// Stateful fuzz entrypoint: apply a sequence of `DataFrame` operations.
+///
+/// Per br-frankenpandas-wr9n Phase 1: all 22 existing fuzz targets run a
+/// single op against a fresh frame. State bugs — where op N's output
+/// becomes op N+1's input and only the compound sequence surfaces the
+/// defect — are invisible to single-op targets. This harness walks a
+/// 2-to-8-step op chain driven by the input byte tags and asserts the
+/// frame-integrity invariants on every intermediate state.
+///
+/// Op alphabet (byte-tag % len):
+/// 0: select_columns(first_column)
+/// 1: drop_column(last_column)
+/// 2: sort_values(first_column, ascending)
+/// 3: reset_index(drop=false)
+///
+/// Invariants checked after every op:
+/// - every column's length matches the index length
+/// - `columns().len()` matches `column_order().len()`
+pub fn fuzz_dataframe_op_chain_bytes(input: &[u8]) -> Result<(), String> {
+    if input.len() < 3 || input.len() > 64 * 1024 {
+        return Ok(());
+    }
+
+    let mut frame = fuzz_eval_frame_from_bytes(input)
+        .map_err(|err| format!("op-chain fuzz frame projection failed: {err}"))?;
+
+    assert_op_chain_invariants(&frame, "initial")?;
+
+    let op_count = usize::from(input.get(2).copied().unwrap_or(2) % 7) + 2;
+    for (step, op_byte) in input.iter().skip(3).take(op_count).enumerate() {
+        let tag = *op_byte % 4;
+        let col_names: Vec<String> = frame.column_names().iter().map(|s| (*s).clone()).collect();
+        if col_names.is_empty() {
+            break;
+        }
+        let pick = |idx: usize| col_names[idx % col_names.len()].clone();
+
+        let outcome = match tag {
+            0 => {
+                let col = pick(0);
+                frame.select_columns(&[col.as_str()])
+            }
+            1 => {
+                let col = pick(col_names.len().saturating_sub(1));
+                frame.drop_column(&col)
+            }
+            2 => {
+                let col = pick(*op_byte as usize);
+                let ascending = op_byte.is_multiple_of(2);
+                frame.sort_values(&col, ascending)
+            }
+            _ => frame.reset_index(false),
+        };
+
+        match outcome {
+            Ok(next) => {
+                frame = next;
+                assert_op_chain_invariants(&frame, &format!("step {step} (tag {tag})"))?;
+            }
+            Err(_) => break, // some op sequences are genuinely invalid
+        }
+    }
+    Ok(())
+}
+
+fn assert_op_chain_invariants(frame: &DataFrame, label: &str) -> Result<(), String> {
+    let index_len = frame.index().len();
+    let order_len = frame.column_names().len();
+    let columns = frame.columns();
+    if order_len != columns.len() {
+        return Err(format!(
+            "{label}: column_names len {order_len} != columns len {}",
+            columns.len()
+        ));
+    }
+    for name in frame.column_names() {
+        let Some(column) = columns.get(name) else {
+            return Err(format!("{label}: column_names mentions missing column {name}"));
+        };
+        if column.len() != index_len {
+            return Err(format!(
+                "{label}: column {name} len {} != index len {index_len}",
+                column.len()
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Structure-aware fuzz entrypoint for `fp_io::read_sql(...)` against an
 /// in-memory SQLite connection.
 ///
