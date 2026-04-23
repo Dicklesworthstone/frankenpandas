@@ -138,6 +138,14 @@ jobs:
       - name: Workspace tests
         run: cargo test --workspace
 
+      - name: Doctest (--doc)
+        # Per br-frankenpandas-ddox: `cargo test --workspace` does NOT
+        # execute doctests by default. Run them explicitly so the 8
+        # (growing) doctests across frankenpandas / fp-index / fp-columnar
+        # stay exercised on every PR and don't rot into broken docs.rs
+        # builds at release time.
+        run: cargo test --doc --workspace
+
   conformance:
     runs-on: ubuntu-latest
     needs: [test]
