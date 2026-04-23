@@ -1,7 +1,17 @@
 # FrankenPandas Conformance Coverage
 
 > Coverage accounting for pandas API parity testing.
-> Generated: 2026-04-18
+> **Deprecated: use the auto-generated [`COVERAGE_MATRIX.md`](../../COVERAGE_MATRIX.md)
+> at the repo root instead (br-frankenpandas-zk1j).**
+>
+> The matrix generator re-runs via `scripts/gen_pandas_api_listing.py`
+> then `scripts/gen_coverage_matrix.py`, producing a per-pandas-class
+> Full/Zero table with every member name listed. This hand-maintained
+> file drifted 814 vs 1,249 actual fixtures before the generator
+> landed; keeping it frozen as a historical artifact, not a current
+> source of truth.
+>
+> Historical snapshot (frozen 2026-04-18) follows — do not update.
 
 ## Coverage Summary
 
