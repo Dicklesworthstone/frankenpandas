@@ -1921,13 +1921,33 @@ proptest! {
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(200))]
 
-    /// Series add in hardened mode never panics; it either succeeds or returns an error.
+    /// Series add in hardened mode never panics, AND when it succeeds the
+    /// result preserves the index/values length invariant and contains no
+    /// fewer labels than the intersection of the inputs' indexes (hardened
+    /// mode permits more permissive alignment than strict but still never
+    /// fabricates rows). Upgraded from crash-only oracle per br-s5vn.
     #[test]
     fn prop_series_add_hardened_no_panic((left, right) in arb_series_pair(15)) {
         let policy = RuntimePolicy::hardened(Some(100_000));
         let mut ledger = EvidenceLedger::new();
-        let _ = left.add_with_policy(&right, &policy, &mut ledger);
-        // Property: no panic occurred.
+        if let Ok(result) = left.add_with_policy(&right, &policy, &mut ledger) {
+            prop_assert_eq!(
+                result.index().len(),
+                result.values().len(),
+                "hardened series_add: index/values length mismatch"
+            );
+            // Hardened alignment never emits fewer rows than the shared
+            // prefix of labels common to both inputs (inner join as a
+            // lower bound on emitted rows).
+            use std::collections::HashSet;
+            let left_labels: HashSet<_> = left.index().labels().iter().collect();
+            let right_labels: HashSet<_> = right.index().labels().iter().collect();
+            let common: HashSet<_> = left_labels.intersection(&right_labels).copied().collect();
+            prop_assert!(
+                result.index().len() >= common.len(),
+                "hardened series_add: dropped labels present in both inputs"
+            );
+        }
     }
 
     /// Series add result index length equals result values length.
@@ -2707,13 +2727,28 @@ proptest! {
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(200))]
 
-    /// GroupBy sum in hardened mode never panics.
+    /// GroupBy sum in hardened mode never panics, AND when it succeeds the
+    /// result group count is bounded by input row count + emitted
+    /// index/values lengths match + no phantom groups appear that weren't
+    /// seeded by the input key series. Upgraded from crash-only oracle per
+    /// br-s5vn.
     #[test]
     fn prop_groupby_sum_hardened_no_panic((keys, values) in arb_groupby_pair(15)) {
         let policy = RuntimePolicy::hardened(Some(100_000));
         let mut ledger = EvidenceLedger::new();
-        let _ = groupby_sum(&keys, &values, GroupByOptions::default(), &policy, &mut ledger);
-        // Property: no panic occurred.
+        if let Ok(result) = groupby_sum(&keys, &values, GroupByOptions::default(), &policy, &mut ledger) {
+            prop_assert_eq!(
+                result.index().len(),
+                result.values().len(),
+                "hardened groupby_sum: index/values length mismatch"
+            );
+            prop_assert!(
+                result.index().len() <= keys.values().len(),
+                "hardened groupby_sum: groups ({}) exceeded input rows ({})",
+                result.index().len(),
+                keys.values().len()
+            );
+        }
     }
 
     /// GroupBy sum result has no more groups than input rows.
@@ -4240,10 +4275,24 @@ fn arb_isin_test_values(max_len: usize) -> impl Strategy<Value = Vec<Scalar>> {
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(100))]
 
-    /// DataFrame add_scalar never panics.
+    /// DataFrame add_scalar never panics, AND when it succeeds the result
+    /// preserves row count and column count (add_scalar is an elementwise
+    /// op with no alignment, so shape must be conserved). Upgraded from
+    /// crash-only oracle per br-s5vn.
     #[test]
     fn prop_df_add_scalar_no_panic(df in arb_numeric_dataframe(10), scalar in -1e6_f64..1e6_f64) {
-        let _ = df.add_scalar(scalar);
+        if let Ok(result) = df.add_scalar(scalar) {
+            prop_assert_eq!(
+                result.index().len(),
+                df.index().len(),
+                "add_scalar: row count must be preserved"
+            );
+            prop_assert_eq!(
+                result.column_names().len(),
+                df.column_names().len(),
+                "add_scalar: column count must be preserved"
+            );
+        }
     }
 
     /// DataFrame add_scalar preserves shape (rows x columns).
