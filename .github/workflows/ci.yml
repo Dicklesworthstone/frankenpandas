@@ -142,6 +142,12 @@ jobs:
       - name: RustSec advisory audit
         run: cargo audit --deny warnings
 
+      - name: Install cargo-machete
+        run: cargo install cargo-machete --locked
+
+      - name: Unused dependency audit
+        run: cargo machete
+
   licenses:
     runs-on: ubuntu-latest
     env:
