@@ -193,5 +193,33 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_dataframe_from_dict"
+path = "fuzz_targets/fuzz_dataframe_from_dict.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_dataframe_from_records"
+path = "fuzz_targets/fuzz_dataframe_from_records.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_dataframe_from_series"
+path = "fuzz_targets/fuzz_dataframe_from_series.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_dataframe_merge"
+path = "fuzz_targets/fuzz_dataframe_merge.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

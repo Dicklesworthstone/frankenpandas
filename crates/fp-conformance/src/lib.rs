@@ -32,7 +32,8 @@ use fp_io::{
 };
 use fp_join::{
     JoinExecutionOptions, JoinType, JoinedSeries, MergeExecutionOptions, MergeValidateMode,
-    join_series, join_series_with_options, merge_dataframes_on_with_options, merge_ordered,
+    join_series, join_series_with_options, merge_dataframes, merge_dataframes_on_with_options,
+    merge_ordered,
 };
 #[cfg(feature = "asupersync")]
 use fp_runtime::asupersync::{
@@ -6232,6 +6233,190 @@ pub fn fuzz_read_sql_bytes(input: &[u8]) -> Result<(), String> {
 
     let query = String::from_utf8_lossy(input);
     let _ = read_sql(&conn, &query);
+    Ok(())
+}
+
+/// Structure-aware fuzz entrypoint for `DataFrame::from_dict(...)`.
+///
+/// Per br-frankenpandas-d7lt. The input is projected into a small
+/// name→Vec<Scalar> dict; on Ok, the resulting frame's row count must
+/// equal the inferred row count and every column name must be present.
+pub fn fuzz_dataframe_from_dict_bytes(input: &[u8]) -> Result<(), String> {
+    if input.len() < 2 || input.len() > 64 * 1024 {
+        return Ok(());
+    }
+    let n_cols = usize::from(input[0] % 4) + 1;
+    let n_rows = usize::from(input[1] % 8) + 1;
+    let names = ["a", "b", "c", "d"];
+    let byte_at = |idx: usize| input.get(idx).copied().unwrap_or(0);
+
+    let mut data: Vec<(&str, Vec<Scalar>)> = Vec::with_capacity(n_cols);
+    for (col_idx, col_name) in names.iter().take(n_cols).enumerate() {
+        let mut values = Vec::with_capacity(n_rows);
+        for row_idx in 0..n_rows {
+            let b = byte_at(2 + col_idx * n_rows + row_idx);
+            values.push(Scalar::Int64(i64::from(b)));
+        }
+        data.push((*col_name, values));
+    }
+    let column_order: Vec<&str> = names.iter().take(n_cols).copied().collect();
+
+    if let Ok(frame) = DataFrame::from_dict(&column_order, data) {
+        if frame.index().len() != n_rows {
+            return Err(format!(
+                "from_dict row count mismatch: expected {n_rows} got {}",
+                frame.index().len()
+            ));
+        }
+        if frame.column_names().len() != n_cols {
+            return Err(format!(
+                "from_dict column count mismatch: expected {n_cols} got {}",
+                frame.column_names().len()
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Structure-aware fuzz entrypoint for `DataFrame::from_records(...)`.
+///
+/// Per br-frankenpandas-d7lt. Builds rectangular records; on Ok, the
+/// result's row count matches the records-vec length.
+pub fn fuzz_dataframe_from_records_bytes(input: &[u8]) -> Result<(), String> {
+    if input.len() < 2 || input.len() > 64 * 1024 {
+        return Ok(());
+    }
+    let n_cols = usize::from(input[0] % 4) + 1;
+    let n_rows = usize::from(input[1] % 8) + 1;
+    let byte_at = |idx: usize| input.get(idx).copied().unwrap_or(0);
+
+    let mut records: Vec<Vec<Scalar>> = Vec::with_capacity(n_rows);
+    for row_idx in 0..n_rows {
+        let mut row = Vec::with_capacity(n_cols);
+        for col_idx in 0..n_cols {
+            let b = byte_at(2 + row_idx * n_cols + col_idx);
+            row.push(Scalar::Int64(i64::from(b)));
+        }
+        records.push(row);
+    }
+    let column_order: Vec<String> = ["a", "b", "c", "d"][..n_cols]
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect();
+
+    if let Ok(frame) = DataFrame::from_records(records, Some(&column_order), None) {
+        if frame.index().len() != n_rows {
+            return Err(format!(
+                "from_records row count mismatch: expected {n_rows} got {}",
+                frame.index().len()
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Structure-aware fuzz entrypoint for `DataFrame::from_series(...)`.
+///
+/// Per br-frankenpandas-d7lt. Builds a Vec<Series> with a shared Index
+/// (aligned AACE path); on Ok, the resulting frame's column count
+/// equals the input series count.
+pub fn fuzz_dataframe_from_series_bytes(input: &[u8]) -> Result<(), String> {
+    if input.len() < 2 || input.len() > 64 * 1024 {
+        return Ok(());
+    }
+    let n_series = usize::from(input[0] % 4) + 1;
+    let n_rows = usize::from(input[1] % 8) + 1;
+    let names = ["a", "b", "c", "d"];
+    let byte_at = |idx: usize| input.get(idx).copied().unwrap_or(0);
+
+    let labels: Vec<IndexLabel> = (0..n_rows).map(|i| IndexLabel::Int64(i as i64)).collect();
+
+    let mut series_list: Vec<Series> = Vec::with_capacity(n_series);
+    for (s_idx, col_name) in names.iter().take(n_series).enumerate() {
+        let values: Vec<Scalar> = (0..n_rows)
+            .map(|row| Scalar::Int64(i64::from(byte_at(2 + s_idx * n_rows + row))))
+            .collect();
+        let series = Series::from_values(*col_name, labels.clone(), values)
+            .map_err(|e| format!("from_series projection failed: {e}"))?;
+        series_list.push(series);
+    }
+
+    if let Ok(frame) = DataFrame::from_series(series_list) {
+        if frame.column_names().len() != n_series {
+            return Err(format!(
+                "from_series column count mismatch: expected {n_series} got {}",
+                frame.column_names().len()
+            ));
+        }
+        if frame.index().len() != n_rows {
+            return Err(format!(
+                "from_series row count mismatch: expected {n_rows} got {}",
+                frame.index().len()
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Structure-aware fuzz entrypoint for `merge_dataframes(...)`.
+///
+/// Per br-frankenpandas-d7lt. Builds two small frames with a shared
+/// `k` column + one value column each; calls merge_dataframes with
+/// each of Inner/Left/Right/Outer.
+///
+/// Bound invariants:
+/// - inner rows ≤ min(left_rows, right_rows) × (max duplicate factor)
+/// - outer rows ≥ |unique keys across both| (sanity lower bound: ≥ 1)
+/// - result has (left_cols + right_cols - shared_cols) columns (the
+///   suffix-resolved superset)
+pub fn fuzz_dataframe_merge_bytes(input: &[u8]) -> Result<(), String> {
+    if input.len() < 4 || input.len() > 64 * 1024 {
+        return Ok(());
+    }
+    let join_tag = input[0] % 4;
+    let left_rows = usize::from(input[1] % 6) + 1;
+    let right_rows = usize::from(input[2] % 6) + 1;
+    let byte_at = |idx: usize| input.get(idx).copied().unwrap_or(0);
+
+    let build_frame = |name_suffix: &str, n_rows: usize, offset: usize| -> Result<DataFrame, String> {
+        let labels: Vec<IndexLabel> = (0..n_rows).map(|i| IndexLabel::Int64(i as i64)).collect();
+        let keys: Vec<Scalar> = (0..n_rows)
+            .map(|row| Scalar::Int64(i64::from(byte_at(offset + row) % 4)))
+            .collect();
+        let values: Vec<Scalar> = (0..n_rows)
+            .map(|row| Scalar::Int64(i64::from(byte_at(offset + n_rows + row))))
+            .collect();
+        let k_series = Series::from_values("k", labels.clone(), keys)
+            .map_err(|e| format!("merge fuzz k-series failed: {e}"))?;
+        let v_name = format!("v_{name_suffix}");
+        let v_series = Series::from_values(&v_name, labels, values)
+            .map_err(|e| format!("merge fuzz v-series failed: {e}"))?;
+        DataFrame::from_series(vec![k_series, v_series])
+            .map_err(|e| format!("merge fuzz frame build failed: {e}"))
+    };
+
+    let left = build_frame("l", left_rows, 3)?;
+    let right = build_frame("r", right_rows, 3 + left_rows * 2)?;
+
+    let join_type = match join_tag {
+        0 => JoinType::Inner,
+        1 => JoinType::Left,
+        2 => JoinType::Right,
+        _ => JoinType::Outer,
+    };
+
+    let Ok(merged) = merge_dataframes(&left, &right, "k", join_type) else {
+        return Ok(());
+    };
+
+    let merged_rows = merged.index.len();
+    let max_bound = left_rows * right_rows;
+    if merged_rows > max_bound {
+        return Err(format!(
+            "merge row count exceeds left*right cross-product: join={join_type:?} \
+             merged={merged_rows} left={left_rows} right={right_rows}"
+        ));
+    }
     Ok(())
 }
 

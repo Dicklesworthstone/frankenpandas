@@ -1,0 +1,4 @@
+# fuzz_dataframe_merge artifacts
+
+New crashes from local or CI fuzz runs land here first.
+Minimize them with cargo fuzz tmin fuzz_dataframe_merge <artifact> and then promote the minimized input into fuzz/corpus/fuzz_dataframe_merge/.
