@@ -10,7 +10,7 @@
   ![Rust](https://img.shields.io/badge/Rust-2024_edition-orange)
   ![License](https://img.shields.io/badge/license-MIT-blue)
   ![Tests](https://img.shields.io/badge/tests-1500%2B-brightgreen)
-  ![IO Formats](https://img.shields.io/badge/IO_formats-7-purple)
+  ![IO Formats](https://img.shields.io/badge/IO_formats-8-purple)
 </div>
 
 ---
@@ -143,7 +143,8 @@ frankenpandas/
 | **JSONL** | `read_jsonl_str` | `write_jsonl_string` | Yes | Yes | One object per line, blank-line tolerant, union-key detection |
 | **Parquet** | `read_parquet_bytes` | `write_parquet_bytes` | Yes | Yes | Arrow RecordBatch integration, multi-batch reading |
 | **Excel** | `read_excel_bytes` | `write_excel_bytes` | Yes | Yes | sheet_name, has_headers, index_col, skip_rows; .xlsx/.xls/.xlsb/.ods |
-| **Feather** | `read_feather_bytes` | `write_feather_bytes` | Yes | Yes | Arrow IPC file + stream formats |
+| **Feather** | `read_feather_bytes` | `write_feather_bytes` | Yes | Yes | Arrow IPC file format (random-access footer) |
+| **Arrow IPC stream** | `read_ipc_stream_bytes` | `write_ipc_stream_bytes` | Yes | Yes | Streaming wire format (forward-only; pipes + zero-copy interchange) |
 | **SQL** | `read_sql` | `write_sql` | N/A | SQLite | query or table, SqlIfExists (Fail/Replace/Append), transaction-wrapped |
 
 All formats accessible through `DataFrameIoExt` trait methods on DataFrame.

@@ -531,7 +531,7 @@ Evidence-driven optimization with formal isomorphism proofs and baseline/opportu
 | Workspace crates | 12 |
 | Lines of Rust | 146,933 |
 | Public functions | 1,532 |
-| IO formats | 7 |
+| IO formats | 8 |
 | Conformance packets | 430 (across 1,249 fixtures, all green) |
 | License | MIT + OpenAI/Anthropic rider |
 
