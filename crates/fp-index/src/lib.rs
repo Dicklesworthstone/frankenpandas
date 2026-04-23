@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use std::cell::OnceCell;
+use std::sync::OnceLock;
 use std::collections::HashMap;
 use std::fmt;
 
@@ -83,7 +83,7 @@ pub fn format_datetime_ns(nanos: i64) -> String {
 /// AG-13: Detected sort order of an index's labels.
 ///
 /// Enables adaptive backend selection: binary search for sorted indexes,
-/// HashMap fallback for unsorted. Computed lazily via `OnceCell`.
+/// HashMap fallback for unsorted. Computed lazily via `OnceLock`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SortOrder {
     /// Labels are not in any recognized sorted order.
@@ -190,10 +190,10 @@ pub struct Index {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     name: Option<String>,
     #[serde(skip)]
-    duplicate_cache: OnceCell<bool>,
+    duplicate_cache: OnceLock<bool>,
     /// AG-13: Cached sort order for adaptive backend selection.
     #[serde(skip)]
-    sort_order_cache: OnceCell<SortOrder>,
+    sort_order_cache: OnceLock<SortOrder>,
 }
 
 impl PartialEq for Index {
@@ -220,8 +220,8 @@ impl Index {
         Self {
             labels,
             name: None,
-            duplicate_cache: OnceCell::new(),
-            sort_order_cache: OnceCell::new(),
+            duplicate_cache: OnceLock::new(),
+            sort_order_cache: OnceLock::new(),
         }
     }
 
@@ -2563,6 +2563,18 @@ pub enum MultiIndexOrIndex {
 mod tests {
     use super::{Index, IndexLabel, MultiIndex, align_union, validate_alignment_plan};
     use fp_types::{Scalar, Timedelta};
+
+    /// Regression lock for br-frankenpandas-i3t8. `Index` must stay
+    /// `Send + Sync` so `DataFrame` can be wrapped in `Arc` and shared
+    /// across reader threads. A future refactor that reintroduces
+    /// `std::cell::OnceCell` (or any `!Sync` interior-mutability primitive)
+    /// breaks this test at compile time.
+    #[test]
+    fn index_is_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<Index>();
+        assert_send_sync::<MultiIndex>();
+    }
 
     #[test]
     fn union_alignment_preserves_left_then_right_unseen_order() {

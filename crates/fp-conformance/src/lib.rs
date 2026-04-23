@@ -6042,29 +6042,32 @@ pub fn fuzz_query_str_with_locals_bytes(input: &[u8]) -> Result<(), String> {
     }
 }
 
-/// Concurrency-oriented fuzz entrypoint: exercise per-thread `DataFrame`
-/// clones in parallel.
+/// Concurrency-oriented fuzz entrypoint: exercise an `Arc<DataFrame>`
+/// shared across multiple reader threads.
 ///
-/// Per br-frankenpandas-bahw Phase 1: /testing-fuzzing Rule 6 + Rule 7
-/// (concurrency archetype, TSan campaign). `DataFrame` is `Send` but
-/// currently not `Sync` (some internal cached-sort caches use
-/// `std::cell::OnceCell`, which is `!Sync`). The valid parallel-use
-/// pattern is therefore "clone per thread", not "share `Arc`". This
-/// harness verifies that pattern stays panic-free and that every
-/// independently-cloned reader observes the same shape invariants as
-/// the source frame.
+/// Per br-frankenpandas-bahw Phase 1 + br-frankenpandas-i3t8 (Sync
+/// contract fix). /testing-fuzzing Rule 6 + Rule 7 (concurrency
+/// archetype, TSan campaign). As of br-i3t8, `Index`'s internal caches
+/// switched from `std::cell::OnceCell` (!Sync) to `std::sync::OnceLock`
+/// (Sync), so `DataFrame` is now `Send + Sync`. This harness exercises
+/// the shared-Arc pattern directly — any hidden race in the lazy cache
+/// initialization surfaces as a TSan report or as a divergent observed
+/// shape across threads.
 ///
 /// Shape:
 /// - Project bytes into a small frame via the existing helper.
-/// - Spawn 4 threads; each takes ownership of an independent clone.
+/// - Wrap in `Arc` and clone the Arc into 4 reader threads.
 /// - Each thread does a read-only traversal (index len, column_names
-///   len) in a hot loop and returns the observed shape.
+///   len, has_duplicates, is_sorted — the last two trigger OnceLock
+///   init) in a hot loop and returns the observed shape.
 /// - Join all threads; assert all four observed shapes match.
 ///
 /// Under TSan (`RUSTFLAGS="-Zsanitizer=thread" cargo +nightly fuzz run
-/// fuzz_parallel_dataframe`) this harness detects any hidden shared-
-/// state race that the clone-per-thread pattern should prevent.
+/// fuzz_parallel_dataframe`) this harness detects races in the
+/// OnceLock init path or in any other shared-state that future Sync
+/// work might introduce.
 pub fn fuzz_parallel_dataframe_bytes(input: &[u8]) -> Result<(), String> {
+    use std::sync::Arc;
     use std::thread;
 
     if input.is_empty() || input.len() > 64 * 1024 {
@@ -6076,12 +6079,17 @@ pub fn fuzz_parallel_dataframe_bytes(input: &[u8]) -> Result<(), String> {
     let expected_index_len = frame.index().len();
     let expected_col_count = frame.column_names().len();
 
+    let shared = Arc::new(frame);
     let mut handles = Vec::with_capacity(4);
     for _ in 0..4 {
-        let f = frame.clone();
+        let f = Arc::clone(&shared);
         handles.push(thread::spawn(move || -> (usize, usize) {
             let mut last = (0, 0);
             for _ in 0..64 {
+                // index().has_duplicates() + is_sorted() exercise the
+                // OnceLock lazy-init path under contention.
+                let _dup = f.index().has_duplicates();
+                let _sorted = f.index().is_sorted();
                 last = (f.index().len(), f.column_names().len());
             }
             last
