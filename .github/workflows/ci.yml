@@ -379,7 +379,11 @@ jobs:
           targets="$(cargo metadata --no-deps --format-version=1 | jq -r '.packages[] | select(.name == "fp-fuzz") | .targets[] | select(.kind[] == "bin") | .name')"
           for target in $targets; do
             mkdir -p "artifacts/$target"
-            cargo fuzz run "$target" "corpus/$target" -- -runs=1000 -artifact_prefix="artifacts/$target/"
+            cargo fuzz run "$target" "corpus/$target" -- \
+              -runs=1000 \
+              -rss_limit_mb=512 \
+              -timeout=60 \
+              -artifact_prefix="artifacts/$target/"
           done
 
       - name: Upload fuzz artifacts
