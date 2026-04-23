@@ -151,5 +151,26 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_parse_expr"
+path = "fuzz_targets/fuzz_parse_expr.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_query_str"
+path = "fuzz_targets/fuzz_query_str.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_query_str_with_locals"
+path = "fuzz_targets/fuzz_query_str_with_locals.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

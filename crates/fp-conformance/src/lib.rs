@@ -9,7 +9,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime};
 use fp_columnar::{ArithmeticOp, Column};
-use fp_expr::{eval_str_with_locals, query_str_with_locals};
+use fp_expr::{eval_str_with_locals, parse_expr, query_str, query_str_with_locals};
 use fp_frame::{
     ConcatJoin, DataFrame, FrameError, Series, concat_dataframes_with_axis_join, concat_series,
     cut, qcut, to_numeric,
@@ -5893,6 +5893,119 @@ pub fn fuzz_dataframe_eval_bytes(input: &[u8]) -> Result<(), String> {
                 return Err(format!(
                     "eval result length mismatch: expr={expr:?} result_len={} frame_len={}",
                     series.len(),
+                    frame.index().len()
+                ));
+            }
+            Ok(())
+        }
+        Err(_) => Ok(()),
+    }
+}
+
+/// Structure-aware fuzz entrypoint for `fp_expr::parse_expr(...)`.
+///
+/// The narrowest expr-surface fuzz target per /testing-fuzzing Rule 2
+/// ("fuzz the parser, not the application"). Every eval/query caller
+/// inherits parser bugs, so this target catches bugs at their source.
+///
+/// Per br-frankenpandas-jkhg Rule 3 coverage. Input is clamped to 4096
+/// bytes and interpreted as lossy UTF-8. Panics in parse_expr are
+/// failures; Err returns are allowed.
+pub fn fuzz_parse_expr_bytes(input: &[u8]) -> Result<(), String> {
+    if input.len() > 4096 {
+        return Ok(());
+    }
+    let expr_str = String::from_utf8_lossy(input);
+    let _ = parse_expr(&expr_str);
+    Ok(())
+}
+
+/// Structure-aware fuzz entrypoint for `fp_expr::query_str(...)`.
+///
+/// Projects the input into a small numeric `DataFrame` (via
+/// fuzz_eval_frame_from_bytes) and then issues a query against it.
+/// query_str produces a DataFrame (filter-semantics), a different
+/// post-parse code path than eval_str which covers it indirectly.
+///
+/// Per br-frankenpandas-jkhg Rule 3 coverage. Size guard matches
+/// fuzz_dataframe_eval_bytes at 256 KB. Successful queries must not
+/// expand the row count (filter can only shrink).
+pub fn fuzz_query_str_bytes(input: &[u8]) -> Result<(), String> {
+    let Some((&policy_tag, expr_bytes)) = input.split_first() else {
+        return Ok(());
+    };
+
+    let frame = fuzz_eval_frame_from_bytes(input)
+        .map_err(|err| format!("query fuzz frame projection failed: {err}"))?;
+    let expr = String::from_utf8_lossy(&expr_bytes[..expr_bytes.len().min(96)]).into_owned();
+    let policy = if policy_tag.is_multiple_of(2) {
+        RuntimePolicy::strict()
+    } else {
+        RuntimePolicy::hardened(Some(100_000))
+    };
+    let mut ledger = EvidenceLedger::new();
+
+    match query_str(&expr, &frame, &policy, &mut ledger) {
+        Ok(filtered) => {
+            if filtered.index().len() > frame.index().len() {
+                return Err(format!(
+                    "query result expanded rows: expr={expr:?} result_len={} frame_len={}",
+                    filtered.index().len(),
+                    frame.index().len()
+                ));
+            }
+            Ok(())
+        }
+        Err(_) => Ok(()),
+    }
+}
+
+/// Structure-aware fuzz entrypoint for `fp_expr::query_str_with_locals(...)`.
+///
+/// Extends `fuzz_query_str_bytes` by constructing a 3-key `BTreeMap`
+/// of local bindings from the first byte: one key deliberately named
+/// to collide with an existing frame column, one with a reserved
+/// dunder-style name. Locals-propagation has its own precedence
+/// semantics that query_str alone cannot exercise.
+///
+/// Per br-frankenpandas-jkhg Rule 3 coverage. Same filter-shrinks
+/// invariant as query_str.
+pub fn fuzz_query_str_with_locals_bytes(input: &[u8]) -> Result<(), String> {
+    let Some((&policy_tag, expr_bytes)) = input.split_first() else {
+        return Ok(());
+    };
+
+    let frame = fuzz_eval_frame_from_bytes(input)
+        .map_err(|err| format!("query-with-locals fuzz frame projection failed: {err}"))?;
+    let expr = String::from_utf8_lossy(&expr_bytes[..expr_bytes.len().min(96)]).into_owned();
+    let policy = if policy_tag.is_multiple_of(2) {
+        RuntimePolicy::strict()
+    } else {
+        RuntimePolicy::hardened(Some(100_000))
+    };
+    let mut ledger = EvidenceLedger::new();
+
+    let mut locals = BTreeMap::<String, Scalar>::new();
+    let key_tag = policy_tag as usize;
+    let key = match key_tag % 3 {
+        0 => "x",
+        1 => "a",           // collides with fuzz_eval_frame column name
+        _ => "__secret__",  // reserved-style identifier
+    };
+    let value = match (policy_tag >> 2) % 4 {
+        0 => Scalar::Int64(0),
+        1 => Scalar::Int64(1),
+        2 => Scalar::Utf8("test".to_string()),
+        _ => Scalar::Null(NullKind::Null),
+    };
+    locals.insert(key.to_string(), value);
+
+    match query_str_with_locals(&expr, &frame, &locals, &policy, &mut ledger) {
+        Ok(filtered) => {
+            if filtered.index().len() > frame.index().len() {
+                return Err(format!(
+                    "query-with-locals result expanded rows: expr={expr:?} result_len={} frame_len={}",
+                    filtered.index().len(),
                     frame.index().len()
                 ));
             }
