@@ -1,0 +1,50 @@
+# libFuzzer dictionary for Excel .xlsx / .xls fuzz targets.
+# Per br-frankenpandas-gztr + /testing-fuzzing Rule 4.
+# XLSX is a zip archive; XLS is a compound file binary format.
+
+# ZIP local-file header magic ("PK\x03\x04").
+"\x50\x4b\x03\x04"
+
+# ZIP central-directory header.
+"\x50\x4b\x01\x02"
+
+# ZIP end-of-central-directory record.
+"\x50\x4b\x05\x06"
+
+# ZIP64 extensions.
+"\x50\x4b\x06\x06"
+"\x50\x4b\x06\x07"
+
+# XLS / compound file binary format (CFB) magic.
+"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+
+# xlsx sharedStrings.xml / workbook.xml token fragments.
+"<sharedStrings"
+"<si><t>"
+"</t></si>"
+"<sheet "
+"<workbook "
+"<sst "
+"<row "
+"<c "
+" t=\"s\""
+" t=\"n\""
+" t=\"b\""
+" t=\"e\""
+"#REF!"
+"#VALUE!"
+"#NAME?"
+"#DIV/0!"
+
+# Relationship file fragments.
+"<Relationship"
+"xmlns=\"http://schemas.openxmlformats.org/"
+
+# Content-types / app.xml fragments.
+"[Content_Types].xml"
+"_rels/.rels"
+
+# Formula-injection tokens (CVE-2014-3524 et al.).
+"=cmd|"
+"=HYPERLINK("
+"+cmd|"

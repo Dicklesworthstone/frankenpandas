@@ -1,0 +1,65 @@
+# libFuzzer dictionary for JSON / JSONL fuzz targets.
+# Per br-frankenpandas-gztr + /testing-fuzzing Rule 4.
+
+# Structural tokens.
+"{"
+"}"
+"["
+"]"
+":"
+","
+"\""
+
+# Literals.
+"true"
+"false"
+"null"
+"NaN"
+"Infinity"
+"-Infinity"
+
+# String escape sequences (RFC 7159 §7).
+"\\\""
+"\\\\"
+"\\/"
+"\\b"
+"\\f"
+"\\n"
+"\\r"
+"\\t"
+"\\u0000"
+"\\u0041"
+"\\u00ff"
+"\\uffff"
+"\\uD83D\\uDE00"
+"\\uD800"
+"\\uDFFF"
+
+# Numeric edges.
+"0"
+"-0"
+"0.0"
+"-1.7976931348623157e+308"
+"1.7976931348623157e+308"
+"5e-324"
+"2.2250738585072014e-308"
+
+# Deep-nesting seeds (stack-overflow amplifiers).
+"[[[[[["
+"{\"a\":{\"a\":{\"a\":"
+"]]]]]]"
+"}}}"
+
+# JSON Lines separators.
+"\n"
+"\r\n"
+
+# Common key name tokens.
+"\"id\""
+"\"name\""
+"\"data\""
+"\"value\""
+"\"error\""
+"\"schema\""
+"\"rows\""
+"\"columns\""

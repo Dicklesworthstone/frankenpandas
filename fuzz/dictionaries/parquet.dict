@@ -1,0 +1,70 @@
+# libFuzzer dictionary for Apache Parquet fuzz targets.
+# Per br-frankenpandas-gztr + /testing-fuzzing Rule 4.
+
+# PAR1 file magic (header + footer).
+"PAR1"
+"PARE"
+
+# Thrift compact protocol tokens commonly used in page/column headers.
+"\x15"
+"\x16"
+"\x19"
+"\x1c"
+
+# Physical type tokens.
+"BOOLEAN"
+"INT32"
+"INT64"
+"INT96"
+"FLOAT"
+"DOUBLE"
+"BYTE_ARRAY"
+"FIXED_LEN_BYTE_ARRAY"
+
+# Logical type tokens.
+"STRING"
+"UTF8"
+"DATE"
+"TIME_MILLIS"
+"TIMESTAMP_MILLIS"
+"TIMESTAMP_MICROS"
+"TIMESTAMP_NANOS"
+"DECIMAL"
+"MAP"
+"LIST"
+"ENUM"
+
+# Codec tokens.
+"SNAPPY"
+"GZIP"
+"LZ4"
+"ZSTD"
+"BROTLI"
+"LZO"
+"UNCOMPRESSED"
+
+# Encoding tokens.
+"PLAIN"
+"PLAIN_DICTIONARY"
+"RLE"
+"RLE_DICTIONARY"
+"BIT_PACKED"
+"DELTA_BINARY_PACKED"
+"DELTA_BYTE_ARRAY"
+"BYTE_STREAM_SPLIT"
+
+# Page-type tokens.
+"DATA_PAGE"
+"DATA_PAGE_V2"
+"DICTIONARY_PAGE"
+"INDEX_PAGE"
+
+# Repetition tokens.
+"REQUIRED"
+"OPTIONAL"
+"REPEATED"
+
+# Row-group / column chunk metadata tokens.
+"num_rows"
+"total_byte_size"
+"column_chunks"

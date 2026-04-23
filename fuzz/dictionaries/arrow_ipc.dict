@@ -1,0 +1,61 @@
+# libFuzzer dictionary for Apache Arrow IPC (stream + file) fuzz targets.
+# Per br-frankenpandas-gztr + /testing-fuzzing Rule 4.
+
+# Arrow file format magic (header + footer).
+"ARROW1"
+
+# IPC stream end-of-stream marker (continuation).
+"\xff\xff\xff\xff\x00\x00\x00\x00"
+
+# IPC continuation marker.
+"\xff\xff\xff\xff"
+
+# Record-batch metadata tokens (flatbuffer schemas).
+"Schema"
+"RecordBatch"
+"DictionaryBatch"
+"Message"
+"Field"
+"Tensor"
+"SparseTensor"
+
+# Type tokens.
+"Null"
+"Int"
+"FloatingPoint"
+"Binary"
+"Utf8"
+"LargeUtf8"
+"LargeBinary"
+"Bool"
+"Decimal"
+"Date"
+"Time"
+"Timestamp"
+"Interval"
+"Duration"
+"List"
+"LargeList"
+"FixedSizeList"
+"Struct_"
+"Union"
+"Map"
+
+# Endianness tokens.
+"Little"
+"Big"
+
+# Metadata tokens common to IPC headers.
+"version"
+"endianness"
+"features"
+"custom_metadata"
+"dictionaries"
+"buffers"
+"nodes"
+
+# Common small flatbuffer offsets.
+"\x04\x00"
+"\x08\x00"
+"\x10\x00"
+"\x20\x00"
