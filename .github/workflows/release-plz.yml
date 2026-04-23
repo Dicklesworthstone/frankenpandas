@@ -1,0 +1,95 @@
+name: release-plz
+
+# Per br-frankenpandas-4clx: release automation via release-plz.
+# Opens (and keeps updating) a "Release PR" bumping workspace.package
+# version + per-crate CHANGELOG sections based on conventional-commit
+# prefixes. Merging that PR triggers the release job which tags + (when
+# maintainer enables) publishes crates in topological order.
+#
+# Publish is gated by the CARGO_REGISTRY_TOKEN secret; without it,
+# the release step still tags + pushes GitHub Releases but skips
+# cargo publish. Safe default for pre-0.1.0.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  pull-requests: write
+  contents: write
+
+concurrency:
+  group: release-plz-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-plz-release:
+    name: Release-plz release
+    runs-on: ubuntu-latest
+    if: ${{ github.repository_owner == 'Dicklesworthstone' }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Resolve pinned Rust toolchain
+        id: rust_toolchain
+        shell: bash
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import tomllib
+
+          with open("rust-toolchain.toml", "rb") as fh:
+              print(f"channel={tomllib.load(fh)['toolchain']['channel']}")
+          PY
+
+      - name: Setup Rust (pinned nightly)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.rust_toolchain.outputs.channel }}
+
+      - name: Run release-plz (release step)
+        uses: release-plz/action@v0.5
+        with:
+          command: release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  release-plz-pr:
+    name: Release-plz PR
+    runs-on: ubuntu-latest
+    if: ${{ github.repository_owner == 'Dicklesworthstone' }}
+    concurrency:
+      group: release-plz-pr-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Resolve pinned Rust toolchain
+        id: rust_toolchain
+        shell: bash
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import tomllib
+
+          with open("rust-toolchain.toml", "rb") as fh:
+              print(f"channel={tomllib.load(fh)['toolchain']['channel']}")
+          PY
+
+      - name: Setup Rust (pinned nightly)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.rust_toolchain.outputs.channel }}
+
+      - name: Run release-plz (release-pr step)
+        uses: release-plz/action@v0.5
+        with:
+          command: release-pr
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

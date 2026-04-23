@@ -1,0 +1,39 @@
+# release-plz config for frankenpandas.
+#
+# Per br-frankenpandas-4clx: automate version bumps + changelog entries +
+# cargo-publish in topological order, gated on a release tag.
+#
+# Docs: https://release-plz.ieni.dev/docs/config
+
+[workspace]
+# Single source of truth for version — every crate inherits via
+# `version.workspace = true` in its Cargo.toml (per br-h8a8).
+dependencies_update = true
+git_release_enable = true
+git_tag_enable = true
+# Changelog + PR body derive from conventional-commit prefixes
+# (feat / fix / chore / docs / ci / test / refactor / perf) already in
+# use across the swarm.
+changelog_update = true
+# Don't publish to crates.io in the PR step; maintainer flips
+# publish_timeout + runs a manual release workflow for 0.1.0.
+publish = false
+publish_timeout = "30m"
+# Pre-1.0 semver policy (per CONTRIBUTING.md):
+# breaking changes CAN land in minor bumps; patch bumps never break.
+# release-plz applies this by default when version < 1.0.
+semver_check = true
+
+[changelog]
+# Conventional-commit prefix → section mapping.
+commit_parsers = [
+  { message = "^feat", group = "<!-- 0 -->Added" },
+  { message = "^fix", group = "<!-- 1 -->Fixed" },
+  { message = "^perf", group = "<!-- 2 -->Performance" },
+  { message = "^refactor", group = "<!-- 3 -->Changed" },
+  { message = "^docs", group = "<!-- 4 -->Documentation" },
+  { message = "^test", group = "<!-- 5 -->Testing" },
+  { message = "^ci", group = "<!-- 6 -->CI" },
+  { message = "^chore", skip = true },
+  { message = "^Revert", group = "<!-- 9 -->Reverted" },
+]
