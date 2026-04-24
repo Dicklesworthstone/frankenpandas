@@ -6304,13 +6304,13 @@ pub fn fuzz_dataframe_from_records_bytes(input: &[u8]) -> Result<(), String> {
         .map(|s| (*s).to_owned())
         .collect();
 
-    if let Ok(frame) = DataFrame::from_records(records, Some(&column_order), None) {
-        if frame.index().len() != n_rows {
-            return Err(format!(
-                "from_records row count mismatch: expected {n_rows} got {}",
-                frame.index().len()
-            ));
-        }
+    if let Ok(frame) = DataFrame::from_records(records, Some(&column_order), None)
+        && frame.index().len() != n_rows
+    {
+        return Err(format!(
+            "from_records row count mismatch: expected {n_rows} got {}",
+            frame.index().len()
+        ));
     }
     Ok(())
 }
@@ -6365,8 +6365,8 @@ pub fn fuzz_dataframe_from_series_bytes(input: &[u8]) -> Result<(), String> {
 /// each of Inner/Left/Right/Outer.
 ///
 /// Bound invariants:
-/// - inner rows ≤ min(left_rows, right_rows) × (max duplicate factor)
-/// - outer rows ≥ |unique keys across both| (sanity lower bound: ≥ 1)
+/// - generated keys are unique within each side, so inner rows ≤ min input rows
+/// - left/right/outer joins retain at least the matching input-side row counts
 /// - result has (left_cols + right_cols - shared_cols) columns (the
 ///   suffix-resolved superset)
 pub fn fuzz_dataframe_merge_bytes(input: &[u8]) -> Result<(), String> {
@@ -6378,22 +6378,27 @@ pub fn fuzz_dataframe_merge_bytes(input: &[u8]) -> Result<(), String> {
     let right_rows = usize::from(input[2] % 6) + 1;
     let byte_at = |idx: usize| input.get(idx).copied().unwrap_or(0);
 
-    let build_frame = |name_suffix: &str, n_rows: usize, offset: usize| -> Result<DataFrame, String> {
-        let labels: Vec<IndexLabel> = (0..n_rows).map(|i| IndexLabel::Int64(i as i64)).collect();
-        let keys: Vec<Scalar> = (0..n_rows)
-            .map(|row| Scalar::Int64(i64::from(byte_at(offset + row) % 4)))
-            .collect();
-        let values: Vec<Scalar> = (0..n_rows)
-            .map(|row| Scalar::Int64(i64::from(byte_at(offset + n_rows + row))))
-            .collect();
-        let k_series = Series::from_values("k", labels.clone(), keys)
-            .map_err(|e| format!("merge fuzz k-series failed: {e}"))?;
-        let v_name = format!("v_{name_suffix}");
-        let v_series = Series::from_values(&v_name, labels, values)
-            .map_err(|e| format!("merge fuzz v-series failed: {e}"))?;
-        DataFrame::from_series(vec![k_series, v_series])
-            .map_err(|e| format!("merge fuzz frame build failed: {e}"))
-    };
+    let build_frame =
+        |name_suffix: &str, n_rows: usize, offset: usize| -> Result<DataFrame, String> {
+            let labels: Vec<IndexLabel> =
+                (0..n_rows).map(|i| IndexLabel::Int64(i as i64)).collect();
+            let keys: Vec<Scalar> = (0..n_rows)
+                .map(|row| {
+                    let overlap_bucket = i64::from(byte_at(offset + row) & 1);
+                    Scalar::Int64(row as i64 + overlap_bucket * 8)
+                })
+                .collect();
+            let values: Vec<Scalar> = (0..n_rows)
+                .map(|row| Scalar::Int64(i64::from(byte_at(offset + n_rows + row))))
+                .collect();
+            let k_series = Series::from_values("k", labels.clone(), keys)
+                .map_err(|e| format!("merge fuzz k-series failed: {e}"))?;
+            let v_name = format!("v_{name_suffix}");
+            let v_series = Series::from_values(&v_name, labels, values)
+                .map_err(|e| format!("merge fuzz v-series failed: {e}"))?;
+            DataFrame::from_series(vec![k_series, v_series])
+                .map_err(|e| format!("merge fuzz frame build failed: {e}"))
+        };
 
     let left = build_frame("l", left_rows, 3)?;
     let right = build_frame("r", right_rows, 3 + left_rows * 2)?;
@@ -6415,6 +6420,39 @@ pub fn fuzz_dataframe_merge_bytes(input: &[u8]) -> Result<(), String> {
         return Err(format!(
             "merge row count exceeds left*right cross-product: join={join_type:?} \
              merged={merged_rows} left={left_rows} right={right_rows}"
+        ));
+    }
+
+    match join_type {
+        JoinType::Inner if merged_rows > left_rows.min(right_rows) => {
+            return Err(format!(
+                "inner merge with unique keys exceeded min input rows: merged={merged_rows} \
+                 left={left_rows} right={right_rows}"
+            ));
+        }
+        JoinType::Left if merged_rows < left_rows => {
+            return Err(format!(
+                "left merge dropped left rows: merged={merged_rows} left={left_rows}"
+            ));
+        }
+        JoinType::Right if merged_rows < right_rows => {
+            return Err(format!(
+                "right merge dropped right rows: merged={merged_rows} right={right_rows}"
+            ));
+        }
+        JoinType::Outer if merged_rows < left_rows.max(right_rows) => {
+            return Err(format!(
+                "outer merge smaller than max input rows: merged={merged_rows} \
+                 left={left_rows} right={right_rows}"
+            ));
+        }
+        _ => {}
+    }
+
+    if merged.columns.len() != 3 {
+        return Err(format!(
+            "merge column count mismatch: expected 3 got {}",
+            merged.columns.len()
         ));
     }
     Ok(())
