@@ -24,6 +24,10 @@ Every packet fixture now carries a top-level `fixture_provenance` object with:
 - `oracle_script_sha256`
 - `generated_at`
 
+Oracle error responses also carry the same provenance whenever pandas has been
+loaded successfully, so failed regeneration attempts can still be tied to the
+exact pandas version and oracle script revision that produced them.
+
 ## Fixture Format
 
 Each packet fixture is a JSON object with:

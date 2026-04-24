@@ -48,6 +48,45 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def base_oracle_response() -> dict[str, Any]:
+    return {
+        "expected_series": None,
+        "expected_join": None,
+        "expected_frame": None,
+        "expected_alignment": None,
+        "expected_bool": None,
+        "expected_positions": None,
+        "expected_scalar": None,
+        "expected_dtype": None,
+        "fixture_provenance": None,
+        "error": None,
+    }
+
+
+def oracle_script_sha256() -> str:
+    with open(__file__, "rb") as script_handle:
+        return hashlib.sha256(script_handle.read()).hexdigest()
+
+
+def build_fixture_provenance(pd_mod: Any) -> dict[str, str]:
+    return {
+        "pandas_version": str(pd_mod.__version__),
+        "oracle_script_sha256": oracle_script_sha256(),
+        "generated_at": datetime.now(timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z"),
+    }
+
+
+def error_response(message: str, pd_mod: Any | None = None) -> dict[str, Any]:
+    response = base_oracle_response()
+    if pd_mod is not None:
+        response["fixture_provenance"] = build_fixture_provenance(pd_mod)
+    response["error"] = message
+    return response
+
+
 def setup_pandas(args: argparse.Namespace):
     def validate_pandas_module(pd_mod: Any) -> None:
         required_attrs = ("Series", "DataFrame", "Index")
@@ -4934,6 +4973,7 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
 
 def main() -> int:
     args = parse_args()
+    pd = None
     try:
         pd = setup_pandas(args)
         try:
@@ -4941,60 +4981,17 @@ def main() -> int:
         except json.JSONDecodeError as exc:
             raise OracleError(f"invalid oracle request JSON: {exc}") from exc
         response = dispatch(pd, payload)
-        response.setdefault("expected_series", None)
-        response.setdefault("expected_join", None)
-        response.setdefault("expected_frame", None)
-        response.setdefault("expected_alignment", None)
-        response.setdefault("expected_bool", None)
-        response.setdefault("expected_positions", None)
-        response.setdefault("expected_scalar", None)
-        response.setdefault("expected_dtype", None)
-        with open(__file__, "rb") as script_handle:
-            oracle_script_sha256 = hashlib.sha256(script_handle.read()).hexdigest()
-        response["fixture_provenance"] = {
-            "pandas_version": str(pd.__version__),
-            "oracle_script_sha256": oracle_script_sha256,
-            "generated_at": datetime.now(timezone.utc)
-            .replace(microsecond=0)
-            .isoformat()
-            .replace("+00:00", "Z"),
-        }
+        for key, value in base_oracle_response().items():
+            response.setdefault(key, value)
+        response["fixture_provenance"] = build_fixture_provenance(pd)
         response["error"] = None
         json.dump(response, sys.stdout)
         return 0
     except OracleError as exc:
-        json.dump(
-            {
-                "expected_series": None,
-                "expected_join": None,
-                "expected_frame": None,
-                "expected_alignment": None,
-                "expected_bool": None,
-                "expected_positions": None,
-                "expected_scalar": None,
-                "expected_dtype": None,
-                "fixture_provenance": None,
-                "error": str(exc),
-            },
-            sys.stdout,
-        )
+        json.dump(error_response(str(exc), pd), sys.stdout)
         return 1
     except Exception as exc:  # pragma: no cover - defensive
-        json.dump(
-            {
-                "expected_series": None,
-                "expected_join": None,
-                "expected_frame": None,
-                "expected_alignment": None,
-                "expected_bool": None,
-                "expected_positions": None,
-                "expected_scalar": None,
-                "expected_dtype": None,
-                "fixture_provenance": None,
-                "error": f"unexpected oracle failure: {exc}",
-            },
-            sys.stdout,
-        )
+        json.dump(error_response(f"unexpected oracle failure: {exc}", pd), sys.stdout)
         return 2
 
 

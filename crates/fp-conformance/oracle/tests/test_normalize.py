@@ -84,3 +84,19 @@ def test_label_from_json_rejects_unknown_kind(oracle):
 
     with pytest.raises(oracle.OracleError):
         oracle.label_from_json({"kind": "rocket", "value": "🚀"})
+
+
+def test_fixture_provenance_records_pandas_version_and_oracle_hash(oracle, pd):
+    provenance = oracle.build_fixture_provenance(pd)
+
+    assert provenance["pandas_version"] == pd.__version__
+    assert len(provenance["oracle_script_sha256"]) == 64
+    assert provenance["generated_at"].endswith("Z")
+
+
+def test_error_response_keeps_fixture_provenance_when_pandas_loaded(oracle, pd):
+    response = oracle.error_response("bad request", pd)
+
+    assert response["error"] == "bad request"
+    assert response["fixture_provenance"]["pandas_version"] == pd.__version__
+    assert response["expected_series"] is None
