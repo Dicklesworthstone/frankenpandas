@@ -1,8 +1,6 @@
 #![forbid(unsafe_code)]
 
-use std::sync::OnceLock;
-use std::collections::HashMap;
-use std::fmt;
+use std::{collections::HashMap, fmt, sync::OnceLock};
 
 use fp_types::{Scalar, Timedelta};
 use serde::{Deserialize, Serialize};
@@ -1798,6 +1796,8 @@ pub fn timedelta_range(
 pub enum DateRangeError {
     #[error("must specify at least two of start, end, periods")]
     InsufficientParams,
+    #[error("must specify no more than two of start, end, periods")]
+    TooManyParams,
     #[error("freq must be positive")]
     NonPositiveFreq,
     #[error("cannot compute range: end < start with positive freq")]
@@ -1827,6 +1827,95 @@ fn parse_datetime_to_nanos(s: &str) -> Result<i64, DateRangeError> {
     }
 
     Err(DateRangeError::ParseError(trimmed.to_owned()))
+}
+
+fn datetime_nanos_to_date(nanos: i64) -> Result<chrono::NaiveDate, DateRangeError> {
+    let days = nanos.div_euclid(Timedelta::NANOS_PER_DAY);
+    let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).ok_or(DateRangeError::InvalidRange)?;
+    epoch
+        .checked_add_signed(chrono::Duration::days(days))
+        .ok_or(DateRangeError::InvalidRange)
+}
+
+fn date_to_midnight_nanos(date: chrono::NaiveDate) -> Result<i64, DateRangeError> {
+    let dt = date
+        .and_hms_opt(0, 0, 0)
+        .ok_or(DateRangeError::InvalidRange)?;
+    dt.and_utc()
+        .timestamp_nanos_opt()
+        .ok_or(DateRangeError::InvalidRange)
+}
+
+fn checked_day_step(
+    date: chrono::NaiveDate,
+    days: i64,
+) -> Result<chrono::NaiveDate, DateRangeError> {
+    date.checked_add_signed(chrono::Duration::days(days))
+        .ok_or(DateRangeError::InvalidRange)
+}
+
+fn is_business_day(date: chrono::NaiveDate) -> bool {
+    use chrono::{Datelike, Weekday};
+
+    !matches!(date.weekday(), Weekday::Sat | Weekday::Sun)
+}
+
+fn next_business_day(mut date: chrono::NaiveDate) -> Result<chrono::NaiveDate, DateRangeError> {
+    while !is_business_day(date) {
+        date = checked_day_step(date, 1)?;
+    }
+    Ok(date)
+}
+
+fn previous_business_day(mut date: chrono::NaiveDate) -> Result<chrono::NaiveDate, DateRangeError> {
+    while !is_business_day(date) {
+        date = checked_day_step(date, -1)?;
+    }
+    Ok(date)
+}
+
+fn collect_business_days_from_start(
+    start: chrono::NaiveDate,
+    periods: usize,
+) -> Result<Vec<i64>, DateRangeError> {
+    let mut values = Vec::with_capacity(periods);
+    let mut date = next_business_day(start)?;
+    while values.len() < periods {
+        values.push(date_to_midnight_nanos(date)?);
+        date = next_business_day(checked_day_step(date, 1)?)?;
+    }
+    Ok(values)
+}
+
+fn collect_business_days_through_end(
+    end: chrono::NaiveDate,
+    periods: usize,
+) -> Result<Vec<i64>, DateRangeError> {
+    let mut values = Vec::with_capacity(periods);
+    let mut date = previous_business_day(end)?;
+    while values.len() < periods {
+        values.push(date_to_midnight_nanos(date)?);
+        date = previous_business_day(checked_day_step(date, -1)?)?;
+    }
+    values.reverse();
+    Ok(values)
+}
+
+fn collect_business_days_between(
+    start: chrono::NaiveDate,
+    end: chrono::NaiveDate,
+) -> Result<Vec<i64>, DateRangeError> {
+    if end < start {
+        return Err(DateRangeError::InvalidRange);
+    }
+
+    let mut values = Vec::new();
+    let mut date = next_business_day(start)?;
+    while date <= end {
+        values.push(date_to_midnight_nanos(date)?);
+        date = next_business_day(checked_day_step(date, 1)?)?;
+    }
+    Ok(values)
 }
 
 /// Create a DatetimeIndex with evenly spaced values.
@@ -1888,6 +1977,42 @@ pub fn date_range(
     };
 
     let nanos: Vec<i64> = (0..count).map(|i| start_val + (i as i64) * freq).collect();
+    let mut idx = Index::from_datetime64(nanos);
+    if let Some(n) = name {
+        idx = idx.set_name(n);
+    }
+    Ok(idx)
+}
+
+/// Create a DatetimeIndex with default weekday-only business-day values.
+///
+/// Analogous to `pd.bdate_range(..., freq="B")` for the default Monday-Friday
+/// calendar. Exactly two of start, end, and periods must be specified.
+pub fn bdate_range(
+    start: Option<&str>,
+    end: Option<&str>,
+    periods: Option<usize>,
+    name: Option<&str>,
+) -> Result<Index, DateRangeError> {
+    let start_date = start
+        .map(parse_datetime_to_nanos)
+        .transpose()?
+        .map(datetime_nanos_to_date)
+        .transpose()?;
+    let end_date = end
+        .map(parse_datetime_to_nanos)
+        .transpose()?
+        .map(datetime_nanos_to_date)
+        .transpose()?;
+
+    let nanos = match (start_date, end_date, periods) {
+        (Some(start), Some(end), None) => collect_business_days_between(start, end)?,
+        (Some(start), None, Some(periods)) => collect_business_days_from_start(start, periods)?,
+        (None, Some(end), Some(periods)) => collect_business_days_through_end(end, periods)?,
+        (Some(_), Some(_), Some(_)) => return Err(DateRangeError::TooManyParams),
+        _ => return Err(DateRangeError::InsufficientParams),
+    };
+
     let mut idx = Index::from_datetime64(nanos);
     if let Some(n) = name {
         idx = idx.set_name(n);
@@ -2561,8 +2686,9 @@ pub enum MultiIndexOrIndex {
 
 #[cfg(test)]
 mod tests {
-    use super::{Index, IndexLabel, MultiIndex, align_union, validate_alignment_plan};
     use fp_types::{Scalar, Timedelta};
+
+    use super::{Index, IndexLabel, MultiIndex, align_union, bdate_range, validate_alignment_plan};
 
     /// Regression lock for br-frankenpandas-i3t8. `Index` must stay
     /// `Send + Sync` so `DataFrame` can be wrapped in `Arc` and shared
@@ -2574,6 +2700,33 @@ mod tests {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<Index>();
         assert_send_sync::<MultiIndex>();
+    }
+
+    #[test]
+    fn bdate_range_rolls_weekend_start_forward() {
+        let idx = bdate_range(Some("2024-01-06"), None, Some(3), None).unwrap();
+        assert_eq!(
+            idx.labels(),
+            &[
+                IndexLabel::Datetime64(1_704_672_000_000_000_000),
+                IndexLabel::Datetime64(1_704_758_400_000_000_000),
+                IndexLabel::Datetime64(1_704_844_800_000_000_000),
+            ]
+        );
+    }
+
+    #[test]
+    fn bdate_range_rolls_weekend_end_backward_and_preserves_name() {
+        let idx = bdate_range(None, Some("2024-01-07"), Some(3), Some("biz")).unwrap();
+        assert_eq!(
+            idx.labels(),
+            &[
+                IndexLabel::Datetime64(1_704_240_000_000_000_000),
+                IndexLabel::Datetime64(1_704_326_400_000_000_000),
+                IndexLabel::Datetime64(1_704_412_800_000_000_000),
+            ]
+        );
+        assert_eq!(idx.name(), Some("biz"));
     }
 
     #[test]
