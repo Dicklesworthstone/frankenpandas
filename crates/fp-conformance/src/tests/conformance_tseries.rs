@@ -39,6 +39,17 @@ struct BusinessDateRangeCase<'a> {
 }
 
 #[derive(Debug, Clone, Copy)]
+struct PandasRangeOracleCase<'a> {
+    case_id: &'a str,
+    pandas_function: &'a str,
+    start: Option<&'a str>,
+    end: Option<&'a str>,
+    periods: Option<usize>,
+    pandas_freq: &'a str,
+    name: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, Copy)]
 struct DateOffsetCase<'a> {
     case_id: &'a str,
     timestamp: &'a str,
@@ -73,14 +84,11 @@ struct PandasInferFreqResult {
 
 fn pandas_tseries_range_or_skip(
     config: &HarnessConfig,
-    case_id: &str,
-    pandas_function: &str,
-    start: Option<&str>,
-    end: Option<&str>,
-    periods: Option<usize>,
-    pandas_freq: &str,
-    name: Option<&str>,
+    case: PandasRangeOracleCase<'_>,
 ) -> Result<Option<PandasDateRange>, String> {
+    let case_id = case.case_id;
+    let pandas_function = case.pandas_function;
+
     if !config.oracle_root.exists() && !config.allows_live_oracle_fallback() {
         eprintln!(
             "live pandas unavailable; skipping tseries conformance test {}: legacy oracle root does not exist: {}",
@@ -92,11 +100,11 @@ fn pandas_tseries_range_or_skip(
 
     let payload = serde_json::json!({
         "function": pandas_function,
-        "start": start,
-        "end": end,
-        "periods": periods,
-        "freq": pandas_freq,
-        "name": name,
+        "start": case.start,
+        "end": case.end,
+        "periods": case.periods,
+        "freq": case.pandas_freq,
+        "name": case.name,
     });
 
     let script = r#"
@@ -179,13 +187,15 @@ fn pandas_date_range_or_skip(
 ) -> Result<Option<PandasDateRange>, String> {
     pandas_tseries_range_or_skip(
         config,
-        case.case_id,
-        "date_range",
-        case.start,
-        case.end,
-        case.periods,
-        case.pandas_freq,
-        case.name,
+        PandasRangeOracleCase {
+            case_id: case.case_id,
+            pandas_function: "date_range",
+            start: case.start,
+            end: case.end,
+            periods: case.periods,
+            pandas_freq: case.pandas_freq,
+            name: case.name,
+        },
     )
 }
 
@@ -195,13 +205,15 @@ fn pandas_bdate_range_or_skip(
 ) -> Result<Option<PandasDateRange>, String> {
     pandas_tseries_range_or_skip(
         config,
-        case.case_id,
-        "bdate_range",
-        case.start,
-        case.end,
-        case.periods,
-        "B",
-        case.name,
+        PandasRangeOracleCase {
+            case_id: case.case_id,
+            pandas_function: "bdate_range",
+            start: case.start,
+            end: case.end,
+            periods: case.periods,
+            pandas_freq: "B",
+            name: case.name,
+        },
     )
 }
 
