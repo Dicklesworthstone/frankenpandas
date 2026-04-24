@@ -6763,7 +6763,7 @@ impl Rolling<'_> {
                 let window_slice = &vals[start..end];
                 let count = window_slice.iter().filter(|v| !v.is_missing()).count();
 
-                if count < self.min_periods || window_slice.len() < self.window {
+                if window_slice.len() < self.min_periods {
                     out.push(Scalar::Null(NullKind::NaN));
                 } else {
                     out.push(Scalar::Float64(count as f64));
@@ -6775,7 +6775,7 @@ impl Rolling<'_> {
                 let window_slice = &vals[start..=i];
                 let count = window_slice.iter().filter(|v| !v.is_missing()).count();
 
-                if i + 1 < self.window || count < self.min_periods {
+                if window_slice.len() < self.min_periods {
                     out.push(Scalar::Null(NullKind::NaN));
                 } else {
                     out.push(Scalar::Float64(count as f64));
@@ -36620,6 +36620,44 @@ mod tests {
     }
 
     #[test]
+    fn rolling_count_counts_non_nulls_after_physical_window_is_ready() {
+        let s = Series::from_values(
+            "value",
+            vec!["dup".into(), "dup".into(), "tail".into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Null(NullKind::Null),
+                Scalar::Float64(3.0),
+            ],
+        )
+        .unwrap();
+
+        let result = s.rolling(2, None).count().unwrap();
+        assert_eq!(result.values()[0], Scalar::Null(NullKind::NaN));
+        assert_eq!(result.values()[1], Scalar::Float64(1.0));
+        assert_eq!(result.values()[2], Scalar::Float64(1.0));
+    }
+
+    #[test]
+    fn rolling_count_emits_zero_for_full_all_null_window() {
+        let s = Series::from_values(
+            "value",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Null(NullKind::Null),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::Null),
+            ],
+        )
+        .unwrap();
+
+        let result = s.rolling(2, None).count().unwrap();
+        assert_eq!(result.values()[0], Scalar::Null(NullKind::NaN));
+        assert_eq!(result.values()[1], Scalar::Float64(0.0));
+        assert_eq!(result.values()[2], Scalar::Float64(0.0));
+    }
+
+    #[test]
     fn rolling_std() {
         let s = Series::from_values(
             "x",
@@ -59103,9 +59141,9 @@ mod tests {
         assert!(count_vals[1].is_missing());
         assert_eq!(count_vals[2], Scalar::Float64(2.0));
         assert_eq!(count_vals[3], Scalar::Float64(2.0));
-        assert!(count_vals[4].is_missing());
+        assert_eq!(count_vals[4], Scalar::Float64(1.0));
         assert_eq!(count_vals[5], Scalar::Float64(2.0));
-        assert!(count_vals[6].is_missing());
+        assert_eq!(count_vals[6], Scalar::Float64(1.0));
     }
 
     #[test]
@@ -59187,9 +59225,8 @@ mod tests {
     #[test]
     fn groupby_rolling_window_one_emits_per_row_identity() {
         // Window=1 is degenerate: every row's window is the row itself.
-        // min == max == original value; count == 1 for non-null rows,
-        // NaN for null rows. Locks this invariant against future
-        // min_periods-default drift.
+        // min == max == original value for non-null rows; count follows pandas
+        // and emits 0 for a full window containing only a missing value.
         let df = DataFrame::from_dict(
             &["grp", "v"],
             vec![
@@ -59235,7 +59272,7 @@ mod tests {
         assert_eq!(max_vals[3], Scalar::Float64(9.0));
 
         assert_eq!(count_vals[0], Scalar::Float64(1.0));
-        assert!(count_vals[1].is_missing());
+        assert_eq!(count_vals[1], Scalar::Float64(0.0));
         assert_eq!(count_vals[2], Scalar::Float64(1.0));
         assert_eq!(count_vals[3], Scalar::Float64(1.0));
     }

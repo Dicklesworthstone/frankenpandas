@@ -204,6 +204,22 @@ fn conformance_window_series_rolling_mean_duplicate_index_labels() {
 }
 
 #[test]
+fn conformance_window_series_rolling_count_duplicate_index_null_window() {
+    let fixture = series_fixture(
+        "FP-CONF-WINDOW-004B",
+        "window_series_rolling_count_duplicate_index_null_window",
+        "series_rolling_count",
+        series(
+            "value",
+            vec![s("dup"), s("dup"), s("tail")],
+            vec![f(1.0), null(), f(3.0)],
+        ),
+        &[("window_size", serde_json::json!(2))],
+    );
+    check_window_fixture(fixture);
+}
+
+#[test]
 fn conformance_window_series_rolling_var_boundary_window_equals_length() {
     let fixture = series_fixture(
         "FP-CONF-WINDOW-005",
