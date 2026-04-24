@@ -22619,6 +22619,10 @@ mod conformance_index;
 mod conformance_dataframe;
 
 #[cfg(test)]
+#[path = "tests/conformance_groupby.rs"]
+mod conformance_groupby;
+
+#[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
     use std::fs;
