@@ -22668,6 +22668,10 @@ mod conformance_merge_join_concat;
 mod conformance_multiindex;
 
 #[cfg(test)]
+#[path = "tests/conformance_reshape.rs"]
+mod conformance_reshape;
+
+#[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
     use std::fs;
