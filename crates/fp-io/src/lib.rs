@@ -12,7 +12,7 @@ use arrow::array::{
 use arrow::datatypes::{DataType as ArrowDataType, Field, Schema, TimeUnit};
 use csv::{ReaderBuilder, StringRecord, WriterBuilder};
 use fp_columnar::{Column, ColumnError};
-use fp_frame::{DataFrame, FrameError, Series, to_datetime};
+use fp_frame::{DataFrame, FrameError, Series, ToDatetimeOptions, to_datetime_with_options};
 use fp_index::{Index, IndexError, IndexLabel, format_datetime_ns};
 use fp_types::{DType, NullKind, Scalar, Timedelta};
 use parquet::arrow::ArrowWriter;
@@ -557,7 +557,13 @@ fn apply_parse_dates(
             index_labels,
             columns[column_idx].clone(),
         )?;
-        let parsed = to_datetime(&series)?;
+        let parsed = to_datetime_with_options(
+            &series,
+            ToDatetimeOptions {
+                infer_mixed_timezone: false,
+                ..ToDatetimeOptions::default()
+            },
+        )?;
         columns[column_idx] = parsed.values().to_vec();
     }
 
@@ -619,7 +625,13 @@ fn apply_one_parse_date_combination(
     );
     let combined_series =
         Series::from_values(combined_name.clone(), index_labels, combined_values)?;
-    let parsed = to_datetime(&combined_series)?;
+    let parsed = to_datetime_with_options(
+        &combined_series,
+        ToDatetimeOptions {
+            infer_mixed_timezone: false,
+            ..ToDatetimeOptions::default()
+        },
+    )?;
 
     for idx in positions.iter().rev() {
         headers.remove(*idx);

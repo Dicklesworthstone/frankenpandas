@@ -12851,12 +12851,25 @@ pub enum ToDatetimeOrigin<'a> {
     Float(f64),
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub struct ToDatetimeOptions<'a> {
     pub format: Option<&'a str>,
     pub unit: Option<&'a str>,
     pub utc: bool,
     pub origin: Option<ToDatetimeOrigin<'a>>,
+    pub infer_mixed_timezone: bool,
+}
+
+impl Default for ToDatetimeOptions<'_> {
+    fn default() -> Self {
+        Self {
+            format: None,
+            unit: None,
+            utc: false,
+            origin: None,
+            infer_mixed_timezone: true,
+        }
+    }
 }
 
 /// Convert to datetime with an explicit format string.
@@ -12904,6 +12917,12 @@ pub fn to_datetime_with_options(
         ));
     }
     let origin = resolve_datetime_origin(options.origin, parsed_unit)?;
+    let inferred_timezone_pattern =
+        if parsed_unit.is_none() && options.format.is_none() && options.infer_mixed_timezone {
+            infer_series_datetime_timezone_pattern(series)
+        } else {
+            None
+        };
     let mut converted = Vec::with_capacity(series.len());
 
     for val in series.values() {
@@ -12912,7 +12931,13 @@ pub fn to_datetime_with_options(
         } else {
             let parsed = match val {
                 Scalar::Null(_) => Scalar::Null(NullKind::NaT),
-                Scalar::Utf8(s) => parse_datetime_string(s, options.format),
+                Scalar::Utf8(s) => {
+                    if let Some(pattern) = inferred_timezone_pattern {
+                        parse_datetime_string_with_timezone_pattern(s, pattern)
+                    } else {
+                        parse_datetime_string(s, options.format)
+                    }
+                }
                 Scalar::Int64(epoch) => {
                     // Auto-detect: values > 1e11 are likely milliseconds, else seconds.
                     let secs = if epoch.unsigned_abs() > 100_000_000_000 {
@@ -13314,6 +13339,63 @@ fn parse_datetime_string(s: &str, format: Option<&str>) -> Scalar {
     }
 
     Scalar::Null(NullKind::NaT)
+}
+
+#[derive(Debug, Clone, Copy)]
+enum DatetimeTimezonePattern {
+    Aware,
+    Naive,
+}
+
+fn infer_series_datetime_timezone_pattern(series: &Series) -> Option<DatetimeTimezonePattern> {
+    series.values().iter().find_map(|value| match value {
+        Scalar::Utf8(value) => infer_datetime_timezone_pattern(value),
+        _ => None,
+    })
+}
+
+fn infer_datetime_timezone_pattern(value: &str) -> Option<DatetimeTimezonePattern> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if has_tz_suffix(trimmed) && parse_tz_aware_datetime(trimmed).is_ok() {
+        return Some(DatetimeTimezonePattern::Aware);
+    }
+
+    match parse_datetime_string(trimmed, None) {
+        Scalar::Utf8(_) => Some(DatetimeTimezonePattern::Naive),
+        _ => None,
+    }
+}
+
+fn parse_datetime_string_with_timezone_pattern(
+    value: &str,
+    pattern: DatetimeTimezonePattern,
+) -> Scalar {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Scalar::Null(NullKind::NaT);
+    }
+
+    match pattern {
+        DatetimeTimezonePattern::Aware => {
+            if !has_tz_suffix(trimmed) {
+                return Scalar::Null(NullKind::NaT);
+            }
+            parse_tz_aware_datetime(trimmed).map_or_else(
+                |_| Scalar::Null(NullKind::NaT),
+                |parsed| Scalar::Utf8(format_aware_datetime(parsed.fixed, None)),
+            )
+        }
+        DatetimeTimezonePattern::Naive => {
+            if has_tz_suffix(trimmed) {
+                return Scalar::Null(NullKind::NaT);
+            }
+            parse_datetime_string(trimmed, None)
+        }
+    }
 }
 
 /// Error handling mode for to_timedelta conversions.
@@ -62792,7 +62874,7 @@ mod tests {
             vec![0_i64.into(), 1_i64.into()],
             vec![
                 Scalar::Utf8("2024-01-15 10:30:00".into()),
-                Scalar::Utf8("2024-01-16".into()),
+                Scalar::Utf8("2024-01-16 00:00:00".into()),
             ],
         )
         .unwrap();
@@ -62820,7 +62902,7 @@ mod tests {
             vec![0_i64.into(), 1_i64.into()],
             vec![
                 Scalar::Utf8("2024-01-15 10:30:00+05:30".into()),
-                Scalar::Utf8("2024-01-15T10:30:00Z".into()),
+                Scalar::Utf8("2024-01-15 10:30:00+00:00".into()),
             ],
         )
         .unwrap();
@@ -62839,6 +62921,32 @@ mod tests {
                 Scalar::Utf8("2024-01-15 10:30:00+00:00".into()),
             ]
         );
+    }
+
+    #[test]
+    fn to_datetime_with_options_utc_coerces_mixed_naive_offset_sequence() {
+        let s = Series::from_values(
+            "ts",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![
+                Scalar::Utf8("2024-01-15 10:30:00".into()),
+                Scalar::Utf8("2024-01-15 10:30:00+05:30".into()),
+            ],
+        )
+        .unwrap();
+        let result = super::to_datetime_with_options(
+            &s,
+            super::ToDatetimeOptions {
+                utc: true,
+                ..super::ToDatetimeOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            result.values()[0],
+            Scalar::Utf8("2024-01-15 10:30:00+00:00".into())
+        );
+        assert!(result.values()[1].is_missing());
     }
 
     #[test]
@@ -62904,7 +63012,7 @@ mod tests {
             vec![0_i64.into(), 1_i64.into()],
             vec![
                 Scalar::Utf8("2024-01-15T10:30:00Z".into()),
-                Scalar::Utf8("2024-01-15 10:30:00+05:30".into()),
+                Scalar::Utf8("2024-01-15T10:30:00+05:30".into()),
             ],
         )
         .unwrap();
@@ -62919,7 +63027,7 @@ mod tests {
     }
 
     #[test]
-    fn to_datetime_mixed_naive_and_aware_strings_preserves_object_like_values() {
+    fn to_datetime_mixed_naive_and_aware_strings_coerces_format_mismatch() {
         let s = Series::from_values(
             "mixed_tz",
             vec![0_i64.into(), 1_i64.into()],
@@ -62931,12 +63039,10 @@ mod tests {
         .unwrap();
         let result = super::to_datetime(&s).unwrap();
         assert_eq!(
-            result.values(),
-            &[
-                Scalar::Utf8("2024-01-15 10:30:00".into()),
-                Scalar::Utf8("2024-01-15 10:30:00+00:00".into()),
-            ]
+            result.values()[0],
+            Scalar::Utf8("2024-01-15 10:30:00".into())
         );
+        assert!(result.values()[1].is_missing());
     }
 
     // ── agg_named tests ──

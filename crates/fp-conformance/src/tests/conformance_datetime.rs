@@ -173,6 +173,21 @@ fn conformance_datetime_utc_timezone_normalization() {
 }
 
 #[test]
+fn conformance_datetime_utc_mixed_naive_offset_coercion() {
+    let fixture = datetime_fixture(
+        "FP-CONF-DATETIME-009",
+        "datetime_utc_mixed_naive_offset_coercion",
+        "ts",
+        vec![
+            scalar_utf8("2024-01-15 10:30:00"),
+            scalar_utf8("2024-01-15 10:30:00+05:30"),
+        ],
+        &[("datetime_utc", serde_json::json!(true))],
+    );
+    check_datetime_fixture(fixture);
+}
+
+#[test]
 fn conformance_datetime_epoch_seconds_boundary_values() {
     let fixture = datetime_fixture(
         "FP-CONF-DATETIME-006",

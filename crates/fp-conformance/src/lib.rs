@@ -8123,6 +8123,7 @@ fn run_fixture_operation(
                             unit: fixture.datetime_unit.as_deref(),
                             utc: fixture.datetime_utc.unwrap_or(false),
                             origin,
+                            infer_mixed_timezone: true,
                         },
                     )
                     .map_err(|err| err.to_string())
@@ -16551,6 +16552,7 @@ fn execute_and_compare_differential(
                             unit: fixture.datetime_unit.as_deref(),
                             utc: fixture.datetime_utc.unwrap_or(false),
                             origin,
+                            infer_mixed_timezone: true,
                         },
                     )
                     .map_err(|err| err.to_string())
