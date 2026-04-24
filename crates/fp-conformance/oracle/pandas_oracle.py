@@ -652,6 +652,24 @@ def op_index_has_duplicates(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return {"expected_bool": bool(idx.has_duplicates)}
 
 
+def op_index_is_monotonic_increasing(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    labels_raw = payload.get("index")
+    if labels_raw is None:
+        raise OracleError("index_is_monotonic_increasing requires index payload")
+    labels = [label_from_json(item) for item in labels_raw]
+    idx = pd.Index(labels)
+    return {"expected_bool": bool(idx.is_monotonic_increasing)}
+
+
+def op_index_is_monotonic_decreasing(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    labels_raw = payload.get("index")
+    if labels_raw is None:
+        raise OracleError("index_is_monotonic_decreasing requires index payload")
+    labels = [label_from_json(item) for item in labels_raw]
+    idx = pd.Index(labels)
+    return {"expected_bool": bool(idx.is_monotonic_decreasing)}
+
+
 def op_index_first_positions(pd, payload: dict[str, Any]) -> dict[str, Any]:
     labels_raw = payload.get("index")
     if labels_raw is None:
@@ -4684,6 +4702,10 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_index_align_union(pd, payload)
     if op == "index_has_duplicates":
         return op_index_has_duplicates(pd, payload)
+    if op == "index_is_monotonic_increasing":
+        return op_index_is_monotonic_increasing(pd, payload)
+    if op == "index_is_monotonic_decreasing":
+        return op_index_is_monotonic_decreasing(pd, payload)
     if op == "index_first_positions":
         return op_index_first_positions(pd, payload)
     if op == "series_loc":

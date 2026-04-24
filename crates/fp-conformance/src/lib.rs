@@ -22611,6 +22611,10 @@ mod packet_filter_runs;
 mod conformance_series;
 
 #[cfg(test)]
+#[path = "tests/conformance_index.rs"]
+mod conformance_index;
+
+#[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
     use std::fs;
