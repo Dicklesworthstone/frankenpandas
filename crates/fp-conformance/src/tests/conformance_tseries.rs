@@ -9,7 +9,7 @@ use std::{
     process::{Command, Stdio},
 };
 
-use fp_index::{Index, IndexLabel, bdate_range, date_range};
+use fp_index::{DateOffset, Index, IndexLabel, apply_date_offset, bdate_range, date_range};
 use fp_types::Timedelta;
 use serde::Deserialize;
 
@@ -35,10 +35,23 @@ struct BusinessDateRangeCase<'a> {
     name: Option<&'a str>,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct DateOffsetCase<'a> {
+    case_id: &'a str,
+    timestamp: &'a str,
+    pandas_offset: &'a str,
+    offset: DateOffset,
+}
+
 #[derive(Debug, Deserialize)]
 struct PandasDateRange {
     values: Vec<i64>,
     name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PandasOffsetResult {
+    value: i64,
 }
 
 fn pandas_tseries_range_or_skip(
@@ -175,6 +188,102 @@ fn pandas_bdate_range_or_skip(
     )
 }
 
+fn pandas_offset_or_skip(
+    config: &HarnessConfig,
+    case: DateOffsetCase<'_>,
+) -> Result<Option<PandasOffsetResult>, String> {
+    if !config.oracle_root.exists() && !config.allows_live_oracle_fallback() {
+        eprintln!(
+            "live pandas unavailable; skipping tseries conformance test {}: legacy oracle root does not exist: {}",
+            case.case_id,
+            config.oracle_root.display()
+        );
+        return Ok(None);
+    }
+
+    let n = match case.offset {
+        DateOffset::Day(value) | DateOffset::BusinessDay(value) | DateOffset::MonthEnd(value) => {
+            value
+        }
+    };
+    let payload = serde_json::json!({
+        "timestamp": case.timestamp,
+        "offset": case.pandas_offset,
+        "n": n,
+    });
+
+    let script = r#"
+import importlib
+import json
+import os
+import sys
+
+legacy_root = os.path.abspath(sys.argv[1])
+allow_system_fallback = sys.argv[2] == "1"
+candidate_parent = os.path.dirname(legacy_root)
+if os.path.isdir(candidate_parent):
+    sys.path.insert(0, candidate_parent)
+
+try:
+    import pandas as pd
+except Exception:
+    if not allow_system_fallback:
+        raise
+    while candidate_parent in sys.path:
+        sys.path.remove(candidate_parent)
+    sys.modules.pop("pandas", None)
+    pd = importlib.import_module("pandas")
+
+request = json.loads(sys.stdin.read())
+offsets = {
+    "Day": pd.offsets.Day,
+    "BDay": pd.offsets.BDay,
+    "MonthEnd": pd.offsets.MonthEnd,
+}
+result = pd.Timestamp(request["timestamp"]) + offsets[request["offset"]](request["n"])
+print(json.dumps({"value": int(result.value)}, separators=(",", ":")))
+"#;
+
+    let mut child = Command::new(&config.python_bin)
+        .arg("-c")
+        .arg(script)
+        .arg(&config.oracle_root)
+        .arg(if config.allows_live_oracle_fallback() {
+            "1"
+        } else {
+            "0"
+        })
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| format!("spawn pandas offset oracle failed: {err}"))?;
+
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| "pandas offset oracle stdin unavailable".to_owned())?;
+    stdin
+        .write_all(payload.to_string().as_bytes())
+        .map_err(|err| format!("write pandas offset oracle payload failed: {err}"))?;
+    drop(stdin);
+
+    let output = child
+        .wait_with_output()
+        .map_err(|err| format!("wait for pandas offset oracle failed: {err}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "pandas offset oracle failed for {}: {}",
+            case.case_id,
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    serde_json::from_slice(&output.stdout)
+        .map(Some)
+        .map_err(|err| format!("parse pandas offset json failed: {err}"))
+}
+
 fn datetime_labels(index: &Index) -> Result<Vec<i64>, String> {
     index
         .labels()
@@ -235,6 +344,23 @@ fn assert_bdate_range_matches_pandas(case: BusinessDateRangeCase<'_>) -> Result<
         actual.name().map(str::to_owned),
         expected.name,
         "pandas.tseries bdate_range name parity drift for {}",
+        case.case_id
+    );
+    Ok(())
+}
+
+fn assert_offset_matches_pandas(case: DateOffsetCase<'_>) -> Result<(), String> {
+    let config = HarnessConfig::default_paths();
+    let Some(expected) = pandas_offset_or_skip(&config, case)? else {
+        return Ok(());
+    };
+
+    let actual = apply_date_offset(case.timestamp, case.offset)
+        .map_err(|err| format!("fp offset failed for {}: {err}", case.case_id))?;
+
+    assert_eq!(
+        actual, expected.value,
+        "pandas.tseries offset value parity drift for {}",
         case.case_id
     );
     Ok(())
@@ -368,5 +494,95 @@ fn conformance_tseries_bdate_range_preserves_name() -> Result<(), String> {
         end: None,
         periods: Some(2),
         name: Some("bizday"),
+    })
+}
+
+#[test]
+fn conformance_tseries_offsets_day_preserves_time() -> Result<(), String> {
+    assert_offset_matches_pandas(DateOffsetCase {
+        case_id: "tseries_offsets_day_preserves_time",
+        timestamp: "2024-01-01 12:30:00",
+        pandas_offset: "Day",
+        offset: DateOffset::Day(2),
+    })
+}
+
+#[test]
+fn conformance_tseries_offsets_day_zero_is_noop() -> Result<(), String> {
+    assert_offset_matches_pandas(DateOffsetCase {
+        case_id: "tseries_offsets_day_zero_is_noop",
+        timestamp: "2024-01-01",
+        pandas_offset: "Day",
+        offset: DateOffset::Day(0),
+    })
+}
+
+#[test]
+fn conformance_tseries_offsets_bday_friday_to_monday() -> Result<(), String> {
+    assert_offset_matches_pandas(DateOffsetCase {
+        case_id: "tseries_offsets_bday_friday_to_monday",
+        timestamp: "2024-01-05",
+        pandas_offset: "BDay",
+        offset: DateOffset::BusinessDay(1),
+    })
+}
+
+#[test]
+fn conformance_tseries_offsets_bday_weekend_rolls_forward() -> Result<(), String> {
+    assert_offset_matches_pandas(DateOffsetCase {
+        case_id: "tseries_offsets_bday_weekend_rolls_forward",
+        timestamp: "2024-01-06",
+        pandas_offset: "BDay",
+        offset: DateOffset::BusinessDay(1),
+    })
+}
+
+#[test]
+fn conformance_tseries_offsets_bday_negative_skips_weekend() -> Result<(), String> {
+    assert_offset_matches_pandas(DateOffsetCase {
+        case_id: "tseries_offsets_bday_negative_skips_weekend",
+        timestamp: "2024-01-08",
+        pandas_offset: "BDay",
+        offset: DateOffset::BusinessDay(-1),
+    })
+}
+
+#[test]
+fn conformance_tseries_offsets_bday_zero_weekend_rolls_forward() -> Result<(), String> {
+    assert_offset_matches_pandas(DateOffsetCase {
+        case_id: "tseries_offsets_bday_zero_weekend_rolls_forward",
+        timestamp: "2024-01-06",
+        pandas_offset: "BDay",
+        offset: DateOffset::BusinessDay(0),
+    })
+}
+
+#[test]
+fn conformance_tseries_offsets_month_end_midmonth_leap_year() -> Result<(), String> {
+    assert_offset_matches_pandas(DateOffsetCase {
+        case_id: "tseries_offsets_month_end_midmonth_leap_year",
+        timestamp: "2024-02-10",
+        pandas_offset: "MonthEnd",
+        offset: DateOffset::MonthEnd(1),
+    })
+}
+
+#[test]
+fn conformance_tseries_offsets_month_end_on_anchor_advances() -> Result<(), String> {
+    assert_offset_matches_pandas(DateOffsetCase {
+        case_id: "tseries_offsets_month_end_on_anchor_advances",
+        timestamp: "2024-02-29",
+        pandas_offset: "MonthEnd",
+        offset: DateOffset::MonthEnd(1),
+    })
+}
+
+#[test]
+fn conformance_tseries_offsets_month_end_negative_rolls_back() -> Result<(), String> {
+    assert_offset_matches_pandas(DateOffsetCase {
+        case_id: "tseries_offsets_month_end_negative_rolls_back",
+        timestamp: "2024-02-10",
+        pandas_offset: "MonthEnd",
+        offset: DateOffset::MonthEnd(-1),
     })
 }

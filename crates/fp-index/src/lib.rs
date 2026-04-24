@@ -1830,11 +1830,18 @@ fn parse_datetime_to_nanos(s: &str) -> Result<i64, DateRangeError> {
 }
 
 fn datetime_nanos_to_date(nanos: i64) -> Result<chrono::NaiveDate, DateRangeError> {
+    let (date, _) = split_datetime_nanos(nanos)?;
+    Ok(date)
+}
+
+fn split_datetime_nanos(nanos: i64) -> Result<(chrono::NaiveDate, i64), DateRangeError> {
     let days = nanos.div_euclid(Timedelta::NANOS_PER_DAY);
+    let time_nanos = nanos.rem_euclid(Timedelta::NANOS_PER_DAY);
     let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).ok_or(DateRangeError::InvalidRange)?;
-    epoch
+    let date = epoch
         .checked_add_signed(chrono::Duration::days(days))
-        .ok_or(DateRangeError::InvalidRange)
+        .ok_or(DateRangeError::InvalidRange)?;
+    Ok((date, time_nanos))
 }
 
 fn date_to_midnight_nanos(date: chrono::NaiveDate) -> Result<i64, DateRangeError> {
@@ -1843,6 +1850,12 @@ fn date_to_midnight_nanos(date: chrono::NaiveDate) -> Result<i64, DateRangeError
         .ok_or(DateRangeError::InvalidRange)?;
     dt.and_utc()
         .timestamp_nanos_opt()
+        .ok_or(DateRangeError::InvalidRange)
+}
+
+fn date_and_time_to_nanos(date: chrono::NaiveDate, time_nanos: i64) -> Result<i64, DateRangeError> {
+    date_to_midnight_nanos(date)?
+        .checked_add(time_nanos)
         .ok_or(DateRangeError::InvalidRange)
 }
 
@@ -1916,6 +1929,119 @@ fn collect_business_days_between(
         date = next_business_day(checked_day_step(date, 1)?)?;
     }
     Ok(values)
+}
+
+/// A small subset of pandas `pandas.tseries.offsets` date offsets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DateOffset {
+    Day(i32),
+    BusinessDay(i32),
+    MonthEnd(i32),
+}
+
+/// Apply a date offset to a timestamp string and return nanoseconds since epoch.
+///
+/// This mirrors `pd.Timestamp(timestamp) + pd.offsets.<Offset>(n)` for the
+/// supported offsets.
+pub fn apply_date_offset(timestamp: &str, offset: DateOffset) -> Result<i64, DateRangeError> {
+    let nanos = parse_datetime_to_nanos(timestamp)?;
+    apply_date_offset_to_nanos(nanos, offset)
+}
+
+/// Apply a date offset to a nanosecond timestamp.
+pub fn apply_date_offset_to_nanos(nanos: i64, offset: DateOffset) -> Result<i64, DateRangeError> {
+    match offset {
+        DateOffset::Day(days) => nanos
+            .checked_add(
+                i64::from(days)
+                    .checked_mul(Timedelta::NANOS_PER_DAY)
+                    .ok_or(DateRangeError::InvalidRange)?,
+            )
+            .ok_or(DateRangeError::InvalidRange),
+        DateOffset::BusinessDay(days) => {
+            let (date, time_nanos) = split_datetime_nanos(nanos)?;
+            let shifted = apply_business_day_offset(date, days)?;
+            date_and_time_to_nanos(shifted, time_nanos)
+        }
+        DateOffset::MonthEnd(months) => {
+            let (date, time_nanos) = split_datetime_nanos(nanos)?;
+            let shifted = apply_month_end_offset(date, months)?;
+            date_and_time_to_nanos(shifted, time_nanos)
+        }
+    }
+}
+
+fn apply_business_day_offset(
+    date: chrono::NaiveDate,
+    days: i32,
+) -> Result<chrono::NaiveDate, DateRangeError> {
+    if days == 0 {
+        return next_business_day(date);
+    }
+
+    let mut shifted = date;
+    if days > 0 {
+        for _ in 0..days.unsigned_abs() {
+            shifted = next_business_day(checked_day_step(shifted, 1)?)?;
+        }
+    } else {
+        for _ in 0..days.unsigned_abs() {
+            shifted = previous_business_day(checked_day_step(shifted, -1)?)?;
+        }
+    }
+    Ok(shifted)
+}
+
+fn last_day_of_month(year: i32, month: u32) -> Result<chrono::NaiveDate, DateRangeError> {
+    let (next_year, next_month) = if month == 12 {
+        (year.checked_add(1).ok_or(DateRangeError::InvalidRange)?, 1)
+    } else {
+        (year, month + 1)
+    };
+    let first_next_month = chrono::NaiveDate::from_ymd_opt(next_year, next_month, 1)
+        .ok_or(DateRangeError::InvalidRange)?;
+    checked_day_step(first_next_month, -1)
+}
+
+fn add_months_to_month_end(
+    date: chrono::NaiveDate,
+    months: i32,
+) -> Result<chrono::NaiveDate, DateRangeError> {
+    use chrono::Datelike;
+
+    let month_index = i64::from(date.year())
+        .checked_mul(12)
+        .and_then(|value| value.checked_add(i64::from(date.month()) - 1))
+        .and_then(|value| value.checked_add(i64::from(months)))
+        .ok_or(DateRangeError::InvalidRange)?;
+    let year =
+        i32::try_from(month_index.div_euclid(12)).map_err(|_| DateRangeError::InvalidRange)?;
+    let month =
+        u32::try_from(month_index.rem_euclid(12) + 1).map_err(|_| DateRangeError::InvalidRange)?;
+    last_day_of_month(year, month)
+}
+
+fn apply_month_end_offset(
+    date: chrono::NaiveDate,
+    months: i32,
+) -> Result<chrono::NaiveDate, DateRangeError> {
+    use chrono::Datelike;
+
+    let current_month_end = last_day_of_month(date.year(), date.month())?;
+    if months == 0 {
+        return if date == current_month_end {
+            Ok(date)
+        } else {
+            Ok(current_month_end)
+        };
+    }
+
+    let month_steps = if months > 0 && date != current_month_end {
+        months - 1
+    } else {
+        months
+    };
+    add_months_to_month_end(current_month_end, month_steps)
 }
 
 /// Create a DatetimeIndex with evenly spaced values.
@@ -2688,7 +2814,10 @@ pub enum MultiIndexOrIndex {
 mod tests {
     use fp_types::{Scalar, Timedelta};
 
-    use super::{Index, IndexLabel, MultiIndex, align_union, bdate_range, validate_alignment_plan};
+    use super::{
+        DateOffset, Index, IndexLabel, MultiIndex, align_union, apply_date_offset, bdate_range,
+        validate_alignment_plan,
+    };
 
     /// Regression lock for br-frankenpandas-i3t8. `Index` must stay
     /// `Send + Sync` so `DataFrame` can be wrapped in `Arc` and shared
@@ -2727,6 +2856,18 @@ mod tests {
             ]
         );
         assert_eq!(idx.name(), Some("biz"));
+    }
+
+    #[test]
+    fn date_offset_business_day_skips_weekend() {
+        let nanos = apply_date_offset("2024-01-05", DateOffset::BusinessDay(1)).unwrap();
+        assert_eq!(nanos, 1_704_672_000_000_000_000);
+    }
+
+    #[test]
+    fn date_offset_month_end_handles_leap_year() {
+        let nanos = apply_date_offset("2024-02-10", DateOffset::MonthEnd(1)).unwrap();
+        assert_eq!(nanos, 1_709_164_800_000_000_000);
     }
 
     #[test]
