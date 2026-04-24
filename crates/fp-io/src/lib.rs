@@ -3184,6 +3184,15 @@ pub trait SqlConnection {
     fn dtype_sql(&self, dtype: DType) -> &'static str;
 
     fn index_dtype_sql(&self, index: &Index) -> &'static str;
+
+    /// Return the bind marker for the one-based parameter ordinal.
+    ///
+    /// SQLite and MySQL accept `?`; PostgreSQL-style backends use `$1`,
+    /// `$2`, ... . Keeping marker generation on the backend trait lets
+    /// write_sql stay generic without leaking backend dialect branches.
+    fn parameter_marker(&self, _ordinal: usize) -> String {
+        "?".to_owned()
+    }
 }
 
 /// Map an fp-types DType to an SQLite column type declaration.
@@ -3658,7 +3667,9 @@ pub fn write_sql_with_options<C: SqlConnection>(
     );
     conn.execute_batch(&create_sql)?;
 
-    let placeholders: Vec<&str> = sql_col_names.iter().map(|_| "?").collect();
+    let placeholders: Vec<String> = (1..=sql_col_names.len())
+        .map(|ordinal| conn.parameter_marker(ordinal))
+        .collect();
     let insert_sql = format!(
         "INSERT INTO \"{}\" ({}) VALUES ({})",
         escaped_table,
@@ -6335,6 +6346,72 @@ mod tests {
         assert_eq!(names.values()[0], Scalar::Utf8("alice".into()));
         assert_eq!(names.values()[1], Scalar::Utf8("bob".into()));
         assert_eq!(names.values()[2], Scalar::Utf8("carol".into()));
+    }
+
+    #[derive(Default)]
+    struct DollarMarkerSqlConn {
+        insert_sql: std::cell::RefCell<Vec<String>>,
+        inserted_rows: std::cell::RefCell<Vec<Vec<Vec<Scalar>>>>,
+    }
+
+    impl super::SqlConnection for DollarMarkerSqlConn {
+        fn query(
+            &self,
+            _query: &str,
+            _params: &[Scalar],
+        ) -> Result<super::SqlQueryResult, IoError> {
+            Err(IoError::Sql("mock connection does not read".to_owned()))
+        }
+
+        fn execute_batch(&self, _sql: &str) -> Result<(), IoError> {
+            Ok(())
+        }
+
+        fn table_exists(&self, _table_name: &str) -> Result<bool, IoError> {
+            Ok(false)
+        }
+
+        fn insert_rows(&self, insert_sql: &str, rows: &[Vec<Scalar>]) -> Result<(), IoError> {
+            self.insert_sql.borrow_mut().push(insert_sql.to_owned());
+            self.inserted_rows.borrow_mut().push(rows.to_vec());
+            Ok(())
+        }
+
+        fn dtype_sql(&self, dtype: DType) -> &'static str {
+            match dtype {
+                DType::Int64 | DType::Bool | DType::Timedelta64 => "BIGINT",
+                DType::Float64 => "DOUBLE PRECISION",
+                DType::Utf8 | DType::Categorical | DType::Null => "TEXT",
+            }
+        }
+
+        fn index_dtype_sql(&self, _index: &Index) -> &'static str {
+            "TEXT"
+        }
+
+        fn parameter_marker(&self, ordinal: usize) -> String {
+            format!("${ordinal}")
+        }
+    }
+
+    #[test]
+    fn sql_write_uses_backend_parameter_markers() {
+        let frame = make_test_dataframe();
+        let conn = DollarMarkerSqlConn::default();
+
+        write_sql(&frame, &conn, "portable_tbl", SqlIfExists::Fail)
+            .expect("write through marker-aware mock backend");
+
+        let insert_sql = conn.insert_sql.borrow();
+        assert_eq!(
+            insert_sql.as_slice(),
+            &["INSERT INTO \"portable_tbl\" (\"ints\", \"floats\", \"names\") VALUES ($1, $2, $3)"
+                .to_owned()]
+        );
+        let inserted_rows = conn.inserted_rows.borrow();
+        assert_eq!(inserted_rows[0].len(), frame.index().len());
+        assert_eq!(inserted_rows[0][0][0], Scalar::Int64(10));
+        assert_eq!(inserted_rows[0][2][2], Scalar::Utf8("carol".into()));
     }
 
     #[test]
