@@ -3390,6 +3390,16 @@ pub struct SqlWriteOptions {
     ///
     /// Per br-frankenpandas-udn6 (fd90.15).
     pub schema: Option<String>,
+    /// Per-column SQL-type override applied during CREATE TABLE.
+    ///
+    /// Matches `pd.DataFrame.to_sql(.., dtype={'amount': 'NUMERIC(10,2)'})`.
+    /// Each entry's value is the literal SQL type string emitted in the
+    /// column definition for that column. Map entries for columns not
+    /// in the frame are silently ignored (matches pandas). Falls back
+    /// to `conn.dtype_sql(DType)` when no override is present.
+    ///
+    /// Per br-frankenpandas-ev2s (fd90.18).
+    pub dtype: Option<BTreeMap<String, String>>,
 }
 
 /// Backend-agnostic in-memory representation of a SQL query result.
@@ -4618,6 +4628,7 @@ pub fn write_sql<C: SqlConnection>(
             index: false,
             index_label: None,
             schema: None,
+            dtype: None,
         },
     )
 }
@@ -4675,12 +4686,22 @@ pub fn write_sql_with_options<C: SqlConnection>(
             conn.index_dtype_sql(frame.index()),
         )?);
     }
+    let dtype_overrides = options.dtype.as_ref();
     col_defs.extend(
         col_names
             .iter()
             .map(|name| {
-                let dt = frame.column(name).map_or(DType::Utf8, |c| c.dtype());
-                sql_column_definition(conn, name, conn.dtype_sql(dt))
+                // Per br-frankenpandas-ev2s (fd90.18): explicit per-column
+                // SQL-type override wins over the inferred conn.dtype_sql.
+                let override_sql = dtype_overrides.and_then(|m| m.get(name)).map(|s| s.as_str());
+                let sql_type = match override_sql {
+                    Some(s) => s,
+                    None => {
+                        let dt = frame.column(name).map_or(DType::Utf8, |c| c.dtype());
+                        conn.dtype_sql(dt)
+                    }
+                };
+                sql_column_definition(conn, name, sql_type)
             })
             .collect::<Result<Vec<_>, IoError>>()?,
     );
@@ -7754,6 +7775,7 @@ mod tests {
                 index: true,
                 index_label: None,
             schema: None,
+            dtype: None,
             },
         )
         .expect("write with named index");
@@ -7783,6 +7805,7 @@ mod tests {
                 index: true,
                 index_label: None,
             schema: None,
+            dtype: None,
             },
         )
         .expect("write with unnamed index");
@@ -7818,6 +7841,7 @@ mod tests {
                 index: true,
                 index_label: Some("custom_id".to_string()),
             schema: None,
+            dtype: None,
             },
         )
         .expect("write with custom index label");
@@ -7860,6 +7884,7 @@ mod tests {
                 index: false,
                 index_label: Some("custom_id".to_string()),
             schema: None,
+            dtype: None,
             },
         )
         .expect("write without index");
@@ -10720,6 +10745,7 @@ mod tests {
                 index: false,
                 index_label: None,
                 schema: Some("ignored_on_sqlite".to_owned()),
+                dtype: None,
             },
         )
         .expect("write with schema=Some on SQLite");
@@ -10871,6 +10897,7 @@ mod tests {
                 index: false,
                 index_label: None,
                 schema: Some("ignored_on_sqlite".to_owned()),
+                dtype: None,
             },
         )
         .expect("replace + schema=Some on SQLite");
@@ -11002,9 +11029,173 @@ mod tests {
                 index: false,
                 index_label: None,
                 schema: Some("ignored_on_sqlite".to_owned()),
+                dtype: None,
             },
         )
         .expect_err("Fail branch must still reject pre-existing");
         assert!(matches!(err, IoError::Sql(msg) if msg.contains("already exists")));
+    }
+
+    // ── SqlWriteOptions::dtype overrides (br-frankenpandas-ev2s / fd90.18) ─
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn write_sql_dtype_override_emits_custom_sql_type() {
+        // SQLite is permissive on declared types — the column-type string
+        // ends up in sqlite_master.sql verbatim, which we can grep to verify
+        // the override took effect during CREATE TABLE.
+        let conn = make_sql_test_conn();
+        let frame = fp_frame::DataFrame::from_dict(
+            &["amount"],
+            vec![("amount", vec![Scalar::Int64(100), Scalar::Int64(250)])],
+        )
+        .unwrap();
+        let mut overrides = BTreeMap::new();
+        overrides.insert("amount".to_owned(), "NUMERIC(10,2)".to_owned());
+        write_sql_with_options(
+            &frame,
+            &conn,
+            "money_tbl",
+            &SqlWriteOptions {
+                if_exists: SqlIfExists::Fail,
+                index: false,
+                index_label: None,
+                schema: None,
+                dtype: Some(overrides),
+            },
+        )
+        .expect("write with dtype override");
+        let sm = super::SqlConnection::query(
+            &conn,
+            "SELECT sql FROM sqlite_master WHERE name = 'money_tbl'",
+            &[],
+        )
+        .unwrap();
+        let create_sql = match &sm.rows[0][0] {
+            Scalar::Utf8(s) => s.clone(),
+            other => unreachable!("unexpected sqlite_master payload: {other:?}"),
+        };
+        assert!(
+            create_sql.contains("NUMERIC(10,2)"),
+            "expected override to land in CREATE TABLE; got: {create_sql}"
+        );
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn write_sql_dtype_override_multiple_columns() {
+        let conn = make_sql_test_conn();
+        let frame = fp_frame::DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1)]),
+                ("b", vec![Scalar::Float64(1.5)]),
+            ],
+        )
+        .unwrap();
+        let mut overrides = BTreeMap::new();
+        overrides.insert("a".to_owned(), "BIGINT".to_owned());
+        overrides.insert("b".to_owned(), "DECIMAL(8,4)".to_owned());
+        write_sql_with_options(
+            &frame,
+            &conn,
+            "multi_tbl",
+            &SqlWriteOptions {
+                if_exists: SqlIfExists::Fail,
+                index: false,
+                index_label: None,
+                schema: None,
+                dtype: Some(overrides),
+            },
+        )
+        .expect("write with multi-column overrides");
+        let sm = super::SqlConnection::query(
+            &conn,
+            "SELECT sql FROM sqlite_master WHERE name = 'multi_tbl'",
+            &[],
+        )
+        .unwrap();
+        let create_sql = match &sm.rows[0][0] {
+            Scalar::Utf8(s) => s.clone(),
+            other => unreachable!("unexpected sqlite_master payload: {other:?}"),
+        };
+        assert!(create_sql.contains("BIGINT"));
+        assert!(create_sql.contains("DECIMAL(8,4)"));
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn write_sql_dtype_override_for_missing_column_silently_ignored() {
+        let conn = make_sql_test_conn();
+        let frame = fp_frame::DataFrame::from_dict(
+            &["x"],
+            vec![("x", vec![Scalar::Int64(1)])],
+        )
+        .unwrap();
+        let mut overrides = BTreeMap::new();
+        overrides.insert("nonexistent".to_owned(), "BIGINT".to_owned());
+        // No error — pandas silently ignores dtype entries for columns not in the frame.
+        write_sql_with_options(
+            &frame,
+            &conn,
+            "missing_col_tbl",
+            &SqlWriteOptions {
+                if_exists: SqlIfExists::Fail,
+                index: false,
+                index_label: None,
+                schema: None,
+                dtype: Some(overrides),
+            },
+        )
+        .expect("write with override on missing col");
+        // The actual 'x' column kept its inferred type.
+        let sm = super::SqlConnection::query(
+            &conn,
+            "SELECT sql FROM sqlite_master WHERE name = 'missing_col_tbl'",
+            &[],
+        )
+        .unwrap();
+        let create_sql = match &sm.rows[0][0] {
+            Scalar::Utf8(s) => s.clone(),
+            other => unreachable!("unexpected sqlite_master payload: {other:?}"),
+        };
+        assert!(create_sql.contains("INTEGER"));
+        assert!(!create_sql.contains("BIGINT"));
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn write_sql_dtype_none_falls_back_to_inferred_type() {
+        let conn = make_sql_test_conn();
+        let frame = fp_frame::DataFrame::from_dict(
+            &["x"],
+            vec![("x", vec![Scalar::Int64(1)])],
+        )
+        .unwrap();
+        write_sql_with_options(
+            &frame,
+            &conn,
+            "no_override_tbl",
+            &SqlWriteOptions {
+                if_exists: SqlIfExists::Fail,
+                index: false,
+                index_label: None,
+                schema: None,
+                dtype: None,
+            },
+        )
+        .expect("write without override");
+        let sm = super::SqlConnection::query(
+            &conn,
+            "SELECT sql FROM sqlite_master WHERE name = 'no_override_tbl'",
+            &[],
+        )
+        .unwrap();
+        let create_sql = match &sm.rows[0][0] {
+            Scalar::Utf8(s) => s.clone(),
+            other => unreachable!("unexpected sqlite_master payload: {other:?}"),
+        };
+        // INTEGER is conn.dtype_sql(DType::Int64) for rusqlite.
+        assert!(create_sql.contains("INTEGER"));
     }
 }
