@@ -3621,6 +3621,23 @@ pub trait SqlConnection {
     fn default_schema(&self) -> Option<String> {
         None
     }
+
+    /// Schema-aware table-existence check.
+    ///
+    /// Per br-frankenpandas-70d1 (fd90.17). Default impl delegates to
+    /// `table_exists(table)` and ignores the schema argument — matches
+    /// single-namespace embedded backends like SQLite. Multi-schema
+    /// backends (PostgreSQL, MySQL, MSSQL) override to scope the check
+    /// to the requested schema (or `default_schema()` when `schema` is
+    /// `None`), so write_sql's `Fail` branch correctly distinguishes
+    /// `analytics.users` from `audit.users`.
+    fn table_exists_in_schema(
+        &self,
+        table_name: &str,
+        _schema: Option<&str>,
+    ) -> Result<bool, IoError> {
+        self.table_exists(table_name)
+    }
 }
 
 /// Map an fp-types DType to an SQLite column type declaration.
@@ -4635,7 +4652,7 @@ pub fn write_sql_with_options<C: SqlConnection>(
     let schema = options.schema.as_deref();
     match options.if_exists {
         SqlIfExists::Fail => {
-            let exists = conn.table_exists(table_name)?;
+            let exists = conn.table_exists_in_schema(table_name, schema)?;
             if exists {
                 return Err(IoError::Sql(format!("table '{table_name}' already exists")));
             }
@@ -10863,5 +10880,131 @@ mod tests {
         assert_eq!(col.values().len(), 2);
         assert_eq!(col.values()[0], Scalar::Int64(1));
         assert_eq!(col.values()[1], Scalar::Int64(2));
+    }
+
+    // ── table_exists_in_schema (br-frankenpandas-70d1 / fd90.17) ────────
+
+    #[test]
+    fn default_table_exists_in_schema_delegates_to_table_exists() {
+        // A stub that returns table_exists=true for "users" must report the
+        // same value via the schema-aware default impl regardless of schema.
+        struct StubExistsTrue;
+        impl super::SqlConnection for StubExistsTrue {
+            fn query(&self, _q: &str, _p: &[Scalar]) -> Result<super::SqlQueryResult, IoError> {
+                Ok(super::SqlQueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                })
+            }
+            fn execute_batch(&self, _sql: &str) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn table_exists(&self, name: &str) -> Result<bool, IoError> {
+                Ok(name == "users")
+            }
+            fn insert_rows(&self, _sql: &str, _rows: &[Vec<Scalar>]) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn dtype_sql(&self, _dtype: DType) -> &'static str {
+                "TEXT"
+            }
+            fn index_dtype_sql(&self, _index: &Index) -> &'static str {
+                "TEXT"
+            }
+        }
+        let conn = StubExistsTrue;
+        // Schema is ignored by the default impl.
+        assert!(super::SqlConnection::table_exists_in_schema(&conn, "users", None).unwrap());
+        assert!(
+            super::SqlConnection::table_exists_in_schema(&conn, "users", Some("ignored"))
+                .unwrap()
+        );
+        assert!(!super::SqlConnection::table_exists_in_schema(&conn, "missing", None).unwrap());
+    }
+
+    #[test]
+    fn multi_schema_override_scopes_table_exists() {
+        // PgLikeSchemaCheck overrides table_exists_in_schema to scope by
+        // schema: only ('analytics', 'users') exists.
+        struct PgLikeSchemaCheck;
+        impl super::SqlConnection for PgLikeSchemaCheck {
+            fn query(&self, _q: &str, _p: &[Scalar]) -> Result<super::SqlQueryResult, IoError> {
+                Ok(super::SqlQueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                })
+            }
+            fn execute_batch(&self, _sql: &str) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn table_exists(&self, _name: &str) -> Result<bool, IoError> {
+                // Bare table_exists isn't queried by the override path.
+                Ok(false)
+            }
+            fn insert_rows(&self, _sql: &str, _rows: &[Vec<Scalar>]) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn dtype_sql(&self, _dtype: DType) -> &'static str {
+                "TEXT"
+            }
+            fn index_dtype_sql(&self, _index: &Index) -> &'static str {
+                "TEXT"
+            }
+            fn supports_schemas(&self) -> bool {
+                true
+            }
+            fn table_exists_in_schema(
+                &self,
+                table: &str,
+                schema: Option<&str>,
+            ) -> Result<bool, IoError> {
+                Ok(table == "users" && schema == Some("analytics"))
+            }
+        }
+        let conn = PgLikeSchemaCheck;
+        assert!(
+            super::SqlConnection::table_exists_in_schema(&conn, "users", Some("analytics"))
+                .unwrap()
+        );
+        // Different schema → false.
+        assert!(
+            !super::SqlConnection::table_exists_in_schema(&conn, "users", Some("audit"))
+                .unwrap()
+        );
+        // No schema → false (override scopes by Some).
+        assert!(
+            !super::SqlConnection::table_exists_in_schema(&conn, "users", None).unwrap()
+        );
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn write_sql_fail_with_schema_some_still_rejects_existing_on_sqlite() {
+        // SQLite ignores schema everywhere; the Fail branch still reports
+        // 'table already exists' when the bare table is present.
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE TABLE preexists_tbl (x INTEGER);",
+        )
+        .unwrap();
+        let frame = fp_frame::DataFrame::from_dict(
+            &["x"],
+            vec![("x", vec![Scalar::Int64(1)])],
+        )
+        .unwrap();
+        let err = write_sql_with_options(
+            &frame,
+            &conn,
+            "preexists_tbl",
+            &SqlWriteOptions {
+                if_exists: SqlIfExists::Fail,
+                index: false,
+                index_label: None,
+                schema: Some("ignored_on_sqlite".to_owned()),
+            },
+        )
+        .expect_err("Fail branch must still reject pre-existing");
+        assert!(matches!(err, IoError::Sql(msg) if msg.contains("already exists")));
     }
 }
