@@ -71,6 +71,7 @@ pub use fp_io::{
     SqlWriteOptions,
     list_sql_schemas,
     list_sql_tables,
+    sql_server_version,
     sql_table_schema,
     truncate_sql_table,
     read_csv,

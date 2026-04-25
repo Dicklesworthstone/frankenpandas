@@ -3714,6 +3714,20 @@ pub trait SqlConnection {
         Ok(Vec::new())
     }
 
+    /// Probe the backend server's version string.
+    ///
+    /// Per br-frankenpandas-e23k (fd90.24). Useful for dialect-version
+    /// gating (INSERT ... RETURNING needs PG 8.2+ / SQLite 3.35.0+,
+    /// JSON operators need MySQL 5.7.8+, etc.) and for diagnostics.
+    /// Default impl returns `Ok(None)` so backends that can't probe
+    /// (or that haven't yet implemented this) report "unknown" rather
+    /// than raising. rusqlite override returns the SQLite library
+    /// version. PostgreSQL/MySQL impls should override with
+    /// `SHOW server_version` / `SELECT VERSION()`.
+    fn server_version(&self) -> Result<Option<String>, IoError> {
+        Ok(None)
+    }
+
     /// Reset a table to empty without dropping its definition.
     ///
     /// Per br-frankenpandas-phum (fd90.23). Default impl emits
@@ -4029,6 +4043,15 @@ impl SqlConnection for rusqlite::Connection {
                 columns,
             }))
         }
+    }
+
+    fn server_version(&self) -> Result<Option<String>, IoError> {
+        // sqlite_version() is a built-in scalar that returns the
+        // SQLite library version string (e.g. "3.45.1").
+        let version: String = self
+            .query_row("SELECT sqlite_version()", [], |row| row.get(0))
+            .map_err(|e| IoError::Sql(format!("server_version query failed: {e}")))?;
+        Ok(Some(version))
     }
 }
 
@@ -4743,6 +4766,19 @@ pub fn truncate_sql_table<C: SqlConnection>(
     schema: Option<&str>,
 ) -> Result<(), IoError> {
     conn.truncate_table(table_name, schema)
+}
+
+/// Probe the SQL backend's server version string.
+///
+/// Returns `Ok(None)` for backends that can't (or don't) introspect
+/// their version. SQLite returns `Some("3.x.y")`. PostgreSQL/MySQL
+/// impls return their respective `SHOW server_version` /
+/// `SELECT VERSION()` payloads. Useful for dialect-version gating
+/// (RETURNING, JSON ops, generated columns) and diagnostics.
+///
+/// Per br-frankenpandas-e23k (fd90.24).
+pub fn sql_server_version<C: SqlConnection>(conn: &C) -> Result<Option<String>, IoError> {
+    conn.server_version()
 }
 
 /// Read an entire SQL table into a DataFrame with read-time options.
@@ -7557,8 +7593,8 @@ mod tests {
         read_sql_table_columns_chunks, read_sql_table_columns_chunks_with_index_col,
         read_sql_table_columns_with_index_col, read_sql_table_with_index_col,
         read_sql_table_with_options, read_sql_table_with_options_and_index_col,
-        read_sql_with_index_col, read_sql_with_options, sql_table_schema, truncate_sql_table,
-        write_sql, write_sql_with_options,
+        read_sql_with_index_col, read_sql_with_options, sql_server_version, sql_table_schema,
+        truncate_sql_table, write_sql, write_sql_with_options,
     };
 
     fn make_sql_test_conn() -> rusqlite::Connection {
@@ -12517,5 +12553,135 @@ mod tests {
         let stmts = conn.statements.borrow();
         assert_eq!(stmts.len(), 1);
         assert!(stmts[0].starts_with("TRUNCATE TABLE"), "got: {}", stmts[0]);
+    }
+
+    // ── sql_server_version / SqlConnection::server_version (br-e23k / fd90.24) ─
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn sql_server_version_returns_sqlite_version_string() {
+        let conn = make_sql_test_conn();
+        let version = sql_server_version(&conn).unwrap().expect("SQLite reports version");
+        // Expect dotted-version format like "3.45.1". The parts must be
+        // non-empty digits — exact value depends on the bundled SQLite.
+        let parts: Vec<&str> = version.split('.').collect();
+        assert!(
+            parts.len() >= 2,
+            "expected dotted version; got: {version}"
+        );
+        for part in &parts {
+            assert!(
+                !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()),
+                "expected numeric version parts; got {version}"
+            );
+        }
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn sql_server_version_starts_with_three_for_sqlite_3_x() {
+        // SQLite has been at major version 3 since 2004; bundled
+        // rusqlite is current (3.40+), so the major must be "3".
+        let conn = make_sql_test_conn();
+        let version = sql_server_version(&conn).unwrap().unwrap();
+        assert!(version.starts_with("3."), "expected SQLite 3.x; got {version}");
+    }
+
+    #[test]
+    fn sql_server_version_default_impl_returns_none() {
+        struct NoIntrospection;
+        impl super::SqlConnection for NoIntrospection {
+            fn query(&self, _q: &str, _p: &[Scalar]) -> Result<SqlQueryResult, IoError> {
+                Ok(SqlQueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                })
+            }
+            fn execute_batch(&self, _sql: &str) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn table_exists(&self, _name: &str) -> Result<bool, IoError> {
+                Ok(false)
+            }
+            fn insert_rows(&self, _sql: &str, _rows: &[Vec<Scalar>]) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn dtype_sql(&self, _dtype: DType) -> &'static str {
+                "TEXT"
+            }
+            fn index_dtype_sql(&self, _index: &Index) -> &'static str {
+                "TEXT"
+            }
+        }
+        let conn = NoIntrospection;
+        assert!(sql_server_version(&conn).unwrap().is_none());
+    }
+
+    #[test]
+    fn sql_server_version_routes_to_backend_override() {
+        struct PgLikeStub;
+        impl super::SqlConnection for PgLikeStub {
+            fn query(&self, _q: &str, _p: &[Scalar]) -> Result<SqlQueryResult, IoError> {
+                Ok(SqlQueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                })
+            }
+            fn execute_batch(&self, _sql: &str) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn table_exists(&self, _name: &str) -> Result<bool, IoError> {
+                Ok(false)
+            }
+            fn insert_rows(&self, _sql: &str, _rows: &[Vec<Scalar>]) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn dtype_sql(&self, _dtype: DType) -> &'static str {
+                "TEXT"
+            }
+            fn index_dtype_sql(&self, _index: &Index) -> &'static str {
+                "TEXT"
+            }
+            fn server_version(&self) -> Result<Option<String>, IoError> {
+                // Mimic `SHOW server_version` payload.
+                Ok(Some("16.2".to_owned()))
+            }
+        }
+        let conn = PgLikeStub;
+        assert_eq!(sql_server_version(&conn).unwrap().as_deref(), Some("16.2"));
+    }
+
+    #[test]
+    fn sql_server_version_propagates_backend_error() {
+        struct BrokenIntrospection;
+        impl super::SqlConnection for BrokenIntrospection {
+            fn query(&self, _q: &str, _p: &[Scalar]) -> Result<SqlQueryResult, IoError> {
+                Ok(SqlQueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                })
+            }
+            fn execute_batch(&self, _sql: &str) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn table_exists(&self, _name: &str) -> Result<bool, IoError> {
+                Ok(false)
+            }
+            fn insert_rows(&self, _sql: &str, _rows: &[Vec<Scalar>]) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn dtype_sql(&self, _dtype: DType) -> &'static str {
+                "TEXT"
+            }
+            fn index_dtype_sql(&self, _index: &Index) -> &'static str {
+                "TEXT"
+            }
+            fn server_version(&self) -> Result<Option<String>, IoError> {
+                Err(IoError::Sql("connection lost".to_owned()))
+            }
+        }
+        let conn = BrokenIntrospection;
+        let err = sql_server_version(&conn).expect_err("should surface backend error");
+        assert!(matches!(err, IoError::Sql(msg) if msg.contains("connection lost")));
     }
 }
