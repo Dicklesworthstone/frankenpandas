@@ -1887,6 +1887,29 @@ impl std::fmt::Display for Period {
     }
 }
 
+/// Build `periods` consecutive Periods starting at `start`.
+///
+/// Matches `pd.period_range(start, periods=N, freq=start.freq)` for the
+/// count-based form. The frequency is taken from `start` — pandas requires
+/// `freq` to match when both are passed; mismatches are an error in
+/// pandas, but here we sidestep ambiguity by deriving from `start.freq`.
+///
+/// Per br-frankenpandas-2jef (epoj Phase 2). Pure ordinal arithmetic — no
+/// calendar conversion (Phase 3 wires chrono). `periods=0` returns empty.
+///
+/// ```
+/// use fp_types::{period_range, Period, PeriodFreq};
+/// let q1 = Period::new(216, PeriodFreq::Quarterly);
+/// let year = period_range(q1, 4);
+/// assert_eq!(year.len(), 4);
+/// assert_eq!(year[0].ordinal, 216);
+/// assert_eq!(year[3].ordinal, 219);
+/// ```
+#[must_use]
+pub fn period_range(start: Period, periods: usize) -> Vec<Period> {
+    (0..periods).map(|i| start.shift(i as i64)).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{DType, NullKind, Scalar, SparseDType, cast_scalar, common_dtype, infer_dtype};
@@ -2891,6 +2914,59 @@ mod tests {
         let json = serde_json::to_string(&p).expect("serialize");
         let back: Period = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(p, back);
+    }
+
+    // ── period_range tests (br-frankenpandas-2jef — epoj Phase 2) ───────
+
+    use super::period_range;
+
+    #[test]
+    fn period_range_zero_periods_is_empty() {
+        let start = Period::new(216, PeriodFreq::Quarterly);
+        assert!(period_range(start, 0).is_empty());
+    }
+
+    #[test]
+    fn period_range_single_period_returns_start_only() {
+        let start = Period::new(216, PeriodFreq::Quarterly);
+        let r = period_range(start, 1);
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0], start);
+    }
+
+    #[test]
+    fn period_range_increments_ordinal_by_one_per_step() {
+        let start = Period::new(216, PeriodFreq::Quarterly);
+        let r = period_range(start, 4);
+        assert_eq!(r.len(), 4);
+        assert_eq!(r[0].ordinal, 216);
+        assert_eq!(r[1].ordinal, 217);
+        assert_eq!(r[2].ordinal, 218);
+        assert_eq!(r[3].ordinal, 219);
+    }
+
+    #[test]
+    fn period_range_preserves_frequency() {
+        let start = Period::new(0, PeriodFreq::Monthly);
+        let r = period_range(start, 12);
+        assert!(r.iter().all(|p| p.freq == PeriodFreq::Monthly));
+    }
+
+    #[test]
+    fn period_range_negative_starting_ordinal_works() {
+        // Ordinal axis is signed — pre-epoch periods are valid.
+        let start = Period::new(-3, PeriodFreq::Annual);
+        let r = period_range(start, 5);
+        assert_eq!(r.iter().map(|p| p.ordinal).collect::<Vec<_>>(), vec![-3, -2, -1, 0, 1]);
+    }
+
+    #[test]
+    fn period_range_large_n_does_not_panic() {
+        // 1024 monthly periods — large enough to catch any allocation bug.
+        let start = Period::new(0, PeriodFreq::Monthly);
+        let r = period_range(start, 1024);
+        assert_eq!(r.len(), 1024);
+        assert_eq!(r[1023].ordinal, 1023);
     }
 
     // ── interval_range tests (br-frankenpandas-xaom) ────────────────────
