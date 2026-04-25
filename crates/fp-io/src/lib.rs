@@ -4158,6 +4158,30 @@ fn validate_sql_table_name(table_name: &str) -> Result<(), IoError> {
     Ok(())
 }
 
+/// Validate `name` against the backend's identifier-length cap.
+///
+/// Per br-frankenpandas-9ynk (fd90.27). When `max` is `Some(n)`, errors
+/// out when `name.len() > n`. When `max` is `None`, accepts any length
+/// (e.g. SQLite, where the engine has no documented limit). `kind` is
+/// the user-facing label used in the error message ("table", "column",
+/// "index label", ...) so misuse points cleanly back to the offending
+/// identifier without callers having to format the message.
+fn validate_sql_identifier_length(
+    name: &str,
+    max: Option<usize>,
+    kind: &str,
+) -> Result<(), IoError> {
+    if let Some(limit) = max
+        && name.len() > limit
+    {
+        return Err(IoError::Sql(format!(
+            "invalid {kind} name '{name}': length {len} exceeds backend identifier limit ({limit})",
+            len = name.len()
+        )));
+    }
+    Ok(())
+}
+
 fn sql_select_all_query<C: SqlConnection>(
     conn: &C,
     table_name: &str,
@@ -5065,6 +5089,21 @@ pub fn write_sql_with_options<C: SqlConnection>(
         sql_col_names.push(label.clone());
     }
     sql_col_names.extend(col_names.iter().cloned());
+
+    // Per fd90.27: when the backend reports an identifier-length cap
+    // (PG=63, MySQL=64, MSSQL=128), reject any identifier that exceeds
+    // it before emitting DDL. SQLite (None) is unaffected.
+    let max_ident = conn.max_identifier_length();
+    validate_sql_identifier_length(table_name, max_ident, "table")?;
+    if let Some(ref label) = index_label {
+        validate_sql_identifier_length(label, max_ident, "index label")?;
+    }
+    for name in &col_names {
+        validate_sql_identifier_length(name, max_ident, "column")?;
+    }
+    if let Some(s) = options.schema.as_deref() {
+        validate_sql_identifier_length(s, max_ident, "schema")?;
+    }
 
     // Handle if_exists policy.
     let schema = options.schema.as_deref();
@@ -13072,5 +13111,209 @@ mod tests {
             }
         }
         assert_eq!(sql_max_identifier_length(&MsSqlLikeStub), Some(128));
+    }
+
+    // ── write_sql identifier-length validation (br-9ynk / fd90.27) ────────
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn write_sql_long_column_name_succeeds_on_sqlite() {
+        // SQLite reports max_identifier_length() == None → no validation.
+        let conn = make_sql_test_conn();
+        // 80 chars > PG/MySQL caps but fine on SQLite.
+        let long_col: String = std::iter::repeat_n('a', 80).collect();
+        let frame = fp_frame::DataFrame::from_dict(
+            &[long_col.as_str()],
+            vec![(long_col.as_str(), vec![Scalar::Int64(1)])],
+        )
+        .unwrap();
+        write_sql_with_options(
+            &frame,
+            &conn,
+            "long_col_tbl",
+            &SqlWriteOptions {
+                if_exists: SqlIfExists::Fail,
+                index: false,
+                index_label: None,
+                schema: None,
+                dtype: None,
+                method: SqlInsertMethod::Single,
+            },
+        )
+        .expect("SQLite has no identifier limit");
+    }
+
+    fn make_pg_like_recorder()
+    -> impl super::SqlConnection + 'static {
+        // Stub PG-like backend: enforces 63-char limit, accepts all
+        // execute_batch / insert_rows so write_sql can reach the
+        // identifier-length check before failing on emit.
+        struct PgLikeLimit;
+        impl super::SqlConnection for PgLikeLimit {
+            fn query(&self, _q: &str, _p: &[Scalar]) -> Result<SqlQueryResult, IoError> {
+                Ok(SqlQueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                })
+            }
+            fn execute_batch(&self, _sql: &str) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn table_exists(&self, _name: &str) -> Result<bool, IoError> {
+                Ok(false)
+            }
+            fn insert_rows(&self, _sql: &str, _rows: &[Vec<Scalar>]) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn dtype_sql(&self, _dtype: DType) -> &'static str {
+                "TEXT"
+            }
+            fn index_dtype_sql(&self, _index: &Index) -> &'static str {
+                "TEXT"
+            }
+            fn max_identifier_length(&self) -> Option<usize> {
+                Some(63)
+            }
+            fn supports_schemas(&self) -> bool {
+                true
+            }
+        }
+        PgLikeLimit
+    }
+
+    #[test]
+    fn write_sql_rejects_long_column_name_on_pg_like_backend() {
+        let conn = make_pg_like_recorder();
+        let long_col: String = std::iter::repeat_n('c', 64).collect();
+        let frame = fp_frame::DataFrame::from_dict(
+            &[long_col.as_str()],
+            vec![(long_col.as_str(), vec![Scalar::Int64(1)])],
+        )
+        .unwrap();
+        let err = write_sql_with_options(
+            &frame,
+            &conn,
+            "ok_tbl",
+            &SqlWriteOptions {
+                if_exists: SqlIfExists::Fail,
+                index: false,
+                index_label: None,
+                schema: None,
+                dtype: None,
+                method: SqlInsertMethod::Single,
+            },
+        )
+        .expect_err("64-char column must exceed PG limit");
+        assert!(matches!(err, IoError::Sql(msg) if msg.contains("column") && msg.contains("63")));
+    }
+
+    #[test]
+    fn write_sql_rejects_long_table_name_on_pg_like_backend() {
+        let conn = make_pg_like_recorder();
+        // 64-char identifier (table names also subject to the PG cap).
+        // Use only alphanumeric so validate_sql_table_name passes first.
+        let long_tbl: String = std::iter::repeat_n('t', 64).collect();
+        let frame = fp_frame::DataFrame::from_dict(
+            &["x"],
+            vec![("x", vec![Scalar::Int64(1)])],
+        )
+        .unwrap();
+        let err = write_sql_with_options(
+            &frame,
+            &conn,
+            &long_tbl,
+            &SqlWriteOptions {
+                if_exists: SqlIfExists::Fail,
+                index: false,
+                index_label: None,
+                schema: None,
+                dtype: None,
+                method: SqlInsertMethod::Single,
+            },
+        )
+        .expect_err("64-char table must exceed PG limit");
+        assert!(matches!(err, IoError::Sql(msg) if msg.contains("table") && msg.contains("63")));
+    }
+
+    #[test]
+    fn write_sql_rejects_long_index_label_on_pg_like_backend() {
+        let conn = make_pg_like_recorder();
+        let long_label: String = std::iter::repeat_n('i', 64).collect();
+        let frame = fp_frame::DataFrame::from_dict(
+            &["x"],
+            vec![("x", vec![Scalar::Int64(1)])],
+        )
+        .unwrap();
+        let err = write_sql_with_options(
+            &frame,
+            &conn,
+            "ok_tbl",
+            &SqlWriteOptions {
+                if_exists: SqlIfExists::Fail,
+                index: true,
+                index_label: Some(long_label),
+                schema: None,
+                dtype: None,
+                method: SqlInsertMethod::Single,
+            },
+        )
+        .expect_err("64-char index label must exceed PG limit");
+        assert!(
+            matches!(err, IoError::Sql(msg) if msg.contains("index label") && msg.contains("63"))
+        );
+    }
+
+    #[test]
+    fn write_sql_rejects_long_schema_name_on_pg_like_backend() {
+        let conn = make_pg_like_recorder();
+        let long_schema: String = std::iter::repeat_n('s', 64).collect();
+        let frame = fp_frame::DataFrame::from_dict(
+            &["x"],
+            vec![("x", vec![Scalar::Int64(1)])],
+        )
+        .unwrap();
+        let err = write_sql_with_options(
+            &frame,
+            &conn,
+            "ok_tbl",
+            &SqlWriteOptions {
+                if_exists: SqlIfExists::Fail,
+                index: false,
+                index_label: None,
+                schema: Some(long_schema),
+                dtype: None,
+                method: SqlInsertMethod::Single,
+            },
+        )
+        .expect_err("64-char schema must exceed PG limit");
+        assert!(
+            matches!(err, IoError::Sql(msg) if msg.contains("schema") && msg.contains("63"))
+        );
+    }
+
+    #[test]
+    fn write_sql_just_at_the_boundary_is_accepted() {
+        let conn = make_pg_like_recorder();
+        // Exactly 63 chars: at the PG limit, must be accepted.
+        let just_fits: String = std::iter::repeat_n('a', 63).collect();
+        let frame = fp_frame::DataFrame::from_dict(
+            &[just_fits.as_str()],
+            vec![(just_fits.as_str(), vec![Scalar::Int64(1)])],
+        )
+        .unwrap();
+        write_sql_with_options(
+            &frame,
+            &conn,
+            "ok_tbl",
+            &SqlWriteOptions {
+                if_exists: SqlIfExists::Fail,
+                index: false,
+                index_label: None,
+                schema: None,
+                dtype: None,
+                method: SqlInsertMethod::Single,
+            },
+        )
+        .expect("63-char column at boundary should be accepted");
     }
 }
