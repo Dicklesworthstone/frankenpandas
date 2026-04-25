@@ -5707,6 +5707,13 @@ impl<'a, C: SqlConnection> SqlInspector<'a, C> {
     /// returning `None`); otherwise all derived calls run and any
     /// missing pieces (e.g. SQLite's always-None `table_comment`)
     /// are simply preserved as their natural empty values.
+    ///
+    /// Per br-frankenpandas-2kzv (fd90.43): primary-key columns are
+    /// derived directly from the `SqlTableSchema` we already fetched
+    /// rather than dispatching `primary_key_columns()` again — that
+    /// trait method's default impl calls `table_schema()` internally,
+    /// which would double the round-trip count for backends where
+    /// each call is a real network hop.
     pub fn reflect_table(
         &self,
         table_name: &str,
@@ -5715,8 +5722,7 @@ impl<'a, C: SqlConnection> SqlInspector<'a, C> {
         let Some(meta) = self.conn.table_schema(table_name, schema)? else {
             return Ok(None);
         };
-        let primary_key_columns =
-            self.conn.primary_key_columns(table_name, schema)?;
+        let primary_key_columns = primary_keys_from_schema(&meta);
         let indexes = self.conn.list_indexes(table_name, schema)?;
         let foreign_keys = self.conn.list_foreign_keys(table_name, schema)?;
         let unique_constraints =
@@ -5732,6 +5738,26 @@ impl<'a, C: SqlConnection> SqlInspector<'a, C> {
             comment,
         }))
     }
+}
+
+/// Derive the primary-key column names from an already-fetched
+/// `SqlTableSchema`, sorted ascending by `primary_key_ordinal`.
+///
+/// Per br-frankenpandas-2kzv (fd90.43). This mirrors the default
+/// `SqlConnection::primary_key_columns` impl but operates on
+/// already-fetched metadata so callers that already have a
+/// `SqlTableSchema` (such as `SqlInspector::reflect_table`) avoid a
+/// redundant `table_schema()` round-trip.
+fn primary_keys_from_schema(meta: &SqlTableSchema) -> Vec<String> {
+    let mut pk: Vec<(usize, String)> = meta
+        .columns
+        .iter()
+        .filter_map(|c| {
+            c.primary_key_ordinal.map(|ord| (ord, c.name.clone()))
+        })
+        .collect();
+    pk.sort_by_key(|(ord, _)| *ord);
+    pk.into_iter().map(|(_, name)| name).collect()
 }
 
 /// Convenience constructor for `SqlInspector`.
@@ -16766,6 +16792,71 @@ mod tests {
         };
         assert_eq!(bundle.table_name, "t");
         assert!(bundle.columns.is_empty());
+    }
+
+    #[test]
+    fn sql_inspector_reflect_table_calls_table_schema_only_once() {
+        // Per fd90.43: reflect_table must derive primary_key_columns
+        // from the fetched SqlTableSchema rather than dispatching
+        // primary_key_columns() (which itself calls table_schema). A
+        // recording stub counts table_schema invocations and asserts
+        // exactly one round-trip.
+        use std::cell::Cell;
+        struct CountingTableSchema {
+            table_schema_calls: Cell<usize>,
+        }
+        impl super::SqlConnection for CountingTableSchema {
+            fn query(&self, _q: &str, _p: &[Scalar]) -> Result<SqlQueryResult, IoError> {
+                Ok(SqlQueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                })
+            }
+            fn execute_batch(&self, _sql: &str) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn table_exists(&self, _name: &str) -> Result<bool, IoError> {
+                Ok(false)
+            }
+            fn insert_rows(&self, _sql: &str, _rows: &[Vec<Scalar>]) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn dtype_sql(&self, _dtype: DType) -> &'static str {
+                "TEXT"
+            }
+            fn index_dtype_sql(&self, _index: &Index) -> &'static str {
+                "TEXT"
+            }
+            fn table_schema(
+                &self,
+                _table: &str,
+                _schema: Option<&str>,
+            ) -> Result<Option<SqlTableSchema>, IoError> {
+                self.table_schema_calls
+                    .set(self.table_schema_calls.get() + 1);
+                Ok(Some(SqlTableSchema {
+                    table_name: "x".to_owned(),
+                    columns: vec![SqlColumnSchema {
+                        name: "id".to_owned(),
+                        declared_type: Some("BIGINT".to_owned()),
+                        nullable: false,
+                        default_value: None,
+                        primary_key_ordinal: Some(0),
+                        comment: None,
+                        autoincrement: true,
+                    }],
+                }))
+            }
+        }
+        let conn = CountingTableSchema {
+            table_schema_calls: Cell::new(0),
+        };
+        let inspector = SqlInspector::new(&conn);
+        let bundle = inspector.reflect_table("x", None).unwrap().unwrap();
+        // Exactly one table_schema fetch — primary_key_columns derived
+        // from the fetched meta, NOT a second round-trip.
+        assert_eq!(conn.table_schema_calls.get(), 1);
+        assert_eq!(bundle.primary_key_columns, vec!["id"]);
     }
 
     // ── SqlReadOptions default coerce_float (br-o0x6 / fd90.41) ──────────
