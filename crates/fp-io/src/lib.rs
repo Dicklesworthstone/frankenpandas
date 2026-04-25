@@ -570,6 +570,68 @@ fn apply_parse_dates(
     Ok(())
 }
 
+fn parse_sql_float_text(text: &str) -> Option<f64> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let mut normalized = String::with_capacity(trimmed.len());
+    for ch in trimmed.chars() {
+        match ch {
+            ',' => {}
+            '$' if normalized.is_empty() || normalized == "+" || normalized == "-" => {}
+            _ => normalized.push(ch),
+        }
+    }
+
+    if matches!(normalized.as_str(), "" | "+" | "-" | ".") {
+        return None;
+    }
+
+    let value = normalized.parse::<f64>().ok()?;
+    value.is_finite().then_some(value)
+}
+
+fn apply_sql_coerce_float(columns: &mut [Vec<Scalar>]) {
+    for column in columns {
+        let mut saw_text_float = false;
+        let mut parsed_values = Vec::with_capacity(column.len());
+
+        for value in column.iter() {
+            match value {
+                Scalar::Utf8(text) => {
+                    let Some(parsed) = parse_sql_float_text(text) else {
+                        saw_text_float = false;
+                        parsed_values.clear();
+                        break;
+                    };
+                    saw_text_float = true;
+                    parsed_values.push(Some(parsed));
+                }
+                Scalar::Null(_) | Scalar::Int64(_) | Scalar::Float64(_) => {
+                    parsed_values.push(None);
+                }
+                Scalar::Bool(_) | Scalar::Timedelta64(_) => {
+                    saw_text_float = false;
+                    parsed_values.clear();
+                    break;
+                }
+            }
+        }
+
+        if !saw_text_float {
+            continue;
+        }
+
+        for (value, parsed) in column.iter_mut().zip(parsed_values) {
+            if let Some(parsed) = parsed {
+                *value = Scalar::Float64(parsed);
+            }
+        }
+    }
+}
+
 fn combine_parse_date_values(column_group: &[Vec<Scalar>]) -> Vec<Scalar> {
     let len = column_group.first().map_or(0, Vec::len);
     let mut combined = Vec::with_capacity(len);
@@ -3152,6 +3214,12 @@ pub struct SqlReadOptions {
     /// Column names to coerce via pandas-style parse_dates handling.
     /// Currently supports explicit column-name selection.
     pub parse_dates: Option<Vec<String>>,
+    /// Promote decimal-like SQL text result columns to Float64.
+    ///
+    /// This is an opt-in form of pandas' `coerce_float` behavior for
+    /// backends that expose NUMERIC/DECIMAL/MONEY values through text.
+    /// Columns containing any non-numeric strings are left unchanged.
+    pub coerce_float: bool,
 }
 
 /// Options for writing a DataFrame to SQL.
@@ -3425,6 +3493,9 @@ pub fn read_sql_with_options<C: SqlConnection>(
 
     if let Some(ref parse_dates) = options.parse_dates {
         apply_parse_dates(&headers, &mut columns, parse_dates)?;
+    }
+    if options.coerce_float {
+        apply_sql_coerce_float(&mut columns);
     }
 
     let row_count = columns.first().map_or(0, Vec::len);
@@ -6593,6 +6664,7 @@ mod tests {
             &SqlReadOptions {
                 params: None,
                 parse_dates: Some(vec!["ts".to_owned()]),
+                coerce_float: false,
             },
         )
         .expect("read sql with parse_dates");
@@ -6624,6 +6696,7 @@ mod tests {
             &SqlReadOptions {
                 params: None,
                 parse_dates: Some(vec!["ts".to_owned()]),
+                coerce_float: false,
             },
         )
         .expect_err("missing parse_dates column should error");
@@ -6645,6 +6718,7 @@ mod tests {
             &SqlReadOptions {
                 params: Some(vec![Scalar::Int64(15), Scalar::Utf8("bob".to_owned())]),
                 parse_dates: None,
+                coerce_float: false,
             },
         )
         .expect("read sql with params");
@@ -6672,11 +6746,93 @@ mod tests {
             &SqlReadOptions {
                 params: Some(vec![Scalar::Int64(15)]),
                 parse_dates: None,
+                coerce_float: false,
             },
         )
         .expect_err("wrong arity should error");
 
         assert!(matches!(err, IoError::Sql(msg) if msg.contains("parameter")));
+    }
+
+    #[test]
+    fn sql_read_coerce_float_promotes_decimal_like_text_columns() {
+        let conn = make_sql_test_conn();
+        conn.execute_batch(
+            "CREATE TABLE payments (id INTEGER, amount TEXT, fee TEXT);
+             INSERT INTO payments (id, amount, fee) VALUES
+                (1, '12.50', '$1,234.50'),
+                (2, '-3.25', NULL);",
+        )
+        .expect("create payments table");
+
+        let default_frame =
+            read_sql(&conn, "SELECT amount FROM payments ORDER BY id").expect("default read");
+        assert_eq!(
+            default_frame.column("amount").unwrap().values(),
+            &[
+                Scalar::Utf8("12.50".to_owned()),
+                Scalar::Utf8("-3.25".to_owned()),
+            ],
+        );
+
+        let coerced = read_sql_with_options(
+            &conn,
+            "SELECT amount, fee FROM payments ORDER BY id",
+            &SqlReadOptions {
+                coerce_float: true,
+                ..SqlReadOptions::default()
+            },
+        )
+        .expect("read with coerce_float");
+
+        let amount = coerced.column("amount").expect("amount");
+        assert_eq!(amount.dtype(), DType::Float64);
+        assert_eq!(
+            amount.values(),
+            &[Scalar::Float64(12.5), Scalar::Float64(-3.25)],
+        );
+
+        let fee = coerced.column("fee").expect("fee");
+        assert_eq!(fee.dtype(), DType::Float64);
+        assert_eq!(fee.values()[0], Scalar::Float64(1234.5));
+        assert!(matches!(fee.values()[1], Scalar::Null(NullKind::NaN)));
+    }
+
+    #[test]
+    fn sql_read_coerce_float_leaves_non_numeric_text_columns_unchanged() {
+        let conn = make_sql_test_conn();
+        conn.execute_batch(
+            "CREATE TABLE mixed (id INTEGER, maybe_amount TEXT, label TEXT);
+             INSERT INTO mixed (id, maybe_amount, label) VALUES
+                (1, '12.50', 'alpha'),
+                (2, 'not numeric', '20.0');",
+        )
+        .expect("create mixed table");
+
+        let frame = read_sql_with_options(
+            &conn,
+            "SELECT maybe_amount, label FROM mixed ORDER BY id",
+            &SqlReadOptions {
+                coerce_float: true,
+                ..SqlReadOptions::default()
+            },
+        )
+        .expect("read with coerce_float");
+
+        assert_eq!(
+            frame.column("maybe_amount").unwrap().values(),
+            &[
+                Scalar::Utf8("12.50".to_owned()),
+                Scalar::Utf8("not numeric".to_owned()),
+            ],
+        );
+        assert_eq!(
+            frame.column("label").unwrap().values(),
+            &[
+                Scalar::Utf8("alpha".to_owned()),
+                Scalar::Utf8("20.0".to_owned()),
+            ],
+        );
     }
 
     #[test]
