@@ -3479,6 +3479,17 @@ pub struct SqlColumnSchema {
     pub nullable: bool,
     pub default_value: Option<String>,
     pub primary_key_ordinal: Option<usize>,
+    /// Column-level comment text, when the backend exposes one.
+    ///
+    /// Per br-frankenpandas-cfld (fd90.35). SQLite has no column-comment
+    /// storage so the rusqlite override always emits `None`. PostgreSQL
+    /// impls populate from `pg_catalog.pg_description.col_description`;
+    /// MySQL uses `information_schema.columns.column_comment`; MSSQL
+    /// reads from `sys.extended_properties`. Companion to the
+    /// table-level `table_comment` (fd90.32) — together they round
+    /// out SQLAlchemy.Inspector.get_columns() parity (its dict shape
+    /// includes a `'comment'` key).
+    pub comment: Option<String>,
 }
 
 /// Backend-neutral SQL table metadata.
@@ -4257,6 +4268,7 @@ impl SqlConnection for rusqlite::Connection {
                 } else {
                     None
                 },
+                comment: None,
             });
         }
         if columns.is_empty() {
@@ -12982,6 +12994,7 @@ mod tests {
                             nullable: false,
                             default_value: None,
                             primary_key_ordinal: Some(0),
+                            comment: None,
                         }],
                     }))
                 } else {
@@ -13539,6 +13552,7 @@ mod tests {
                                 nullable: false,
                                 default_value: None,
                                 primary_key_ordinal: Some(2),
+                                comment: None,
                             },
                             SqlColumnSchema {
                                 name: "year".to_owned(),
@@ -13546,6 +13560,7 @@ mod tests {
                                 nullable: false,
                                 default_value: None,
                                 primary_key_ordinal: Some(0),
+                                comment: None,
                             },
                             SqlColumnSchema {
                                 name: "value".to_owned(),
@@ -13553,6 +13568,7 @@ mod tests {
                                 nullable: true,
                                 default_value: None,
                                 primary_key_ordinal: None,
+                                comment: None,
                             },
                             SqlColumnSchema {
                                 name: "month".to_owned(),
@@ -13560,6 +13576,7 @@ mod tests {
                                 nullable: false,
                                 default_value: None,
                                 primary_key_ordinal: Some(1),
+                                comment: None,
                             },
                         ],
                     }))
@@ -15334,5 +15351,109 @@ mod tests {
             frame.column("ts").unwrap().values()[0],
             Scalar::Utf8("2024-01-15 00:00:00".to_owned())
         );
+    }
+
+    // ── SqlColumnSchema::comment (br-cfld / fd90.35) ─────────────────────
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn sql_table_schema_comment_is_none_on_sqlite() {
+        // SQLite has no column-comment storage; the rusqlite override
+        // must always emit comment=None even when the table is real.
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE TABLE labeled (id INTEGER, name TEXT);",
+        )
+        .unwrap();
+        let schema = sql_table_schema(&conn, "labeled", None).unwrap().unwrap();
+        for col in &schema.columns {
+            assert!(
+                col.comment.is_none(),
+                "SQLite should report no column comment; got {:?} on {}",
+                col.comment,
+                col.name
+            );
+        }
+    }
+
+    #[test]
+    fn sql_table_schema_comment_routes_to_backend_override() {
+        // PG-like backend stub returns explicit comment text per column.
+        struct PgLikeWithComments;
+        impl super::SqlConnection for PgLikeWithComments {
+            fn query(&self, _q: &str, _p: &[Scalar]) -> Result<SqlQueryResult, IoError> {
+                Ok(SqlQueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                })
+            }
+            fn execute_batch(&self, _sql: &str) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn table_exists(&self, _name: &str) -> Result<bool, IoError> {
+                Ok(false)
+            }
+            fn insert_rows(&self, _sql: &str, _rows: &[Vec<Scalar>]) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn dtype_sql(&self, _dtype: DType) -> &'static str {
+                "TEXT"
+            }
+            fn index_dtype_sql(&self, _index: &Index) -> &'static str {
+                "TEXT"
+            }
+            fn supports_schemas(&self) -> bool {
+                true
+            }
+            fn table_schema(
+                &self,
+                table: &str,
+                _schema: Option<&str>,
+            ) -> Result<Option<SqlTableSchema>, IoError> {
+                if table == "users" {
+                    Ok(Some(SqlTableSchema {
+                        table_name: "users".to_owned(),
+                        columns: vec![
+                            SqlColumnSchema {
+                                name: "id".to_owned(),
+                                declared_type: Some("BIGINT".to_owned()),
+                                nullable: false,
+                                default_value: None,
+                                primary_key_ordinal: Some(0),
+                                comment: Some("Surrogate primary key".to_owned()),
+                            },
+                            SqlColumnSchema {
+                                name: "email".to_owned(),
+                                declared_type: Some("TEXT".to_owned()),
+                                nullable: false,
+                                default_value: None,
+                                primary_key_ordinal: None,
+                                comment: Some("Login identifier".to_owned()),
+                            },
+                            SqlColumnSchema {
+                                name: "name".to_owned(),
+                                declared_type: Some("TEXT".to_owned()),
+                                nullable: true,
+                                default_value: None,
+                                primary_key_ordinal: None,
+                                comment: None,
+                            },
+                        ],
+                    }))
+                } else {
+                    Ok(None)
+                }
+            }
+        }
+        let conn = PgLikeWithComments;
+        let schema = sql_table_schema(&conn, "users", None).unwrap().unwrap();
+        let id = schema.column("id").unwrap();
+        assert_eq!(id.comment.as_deref(), Some("Surrogate primary key"));
+        let email = schema.column("email").unwrap();
+        assert_eq!(email.comment.as_deref(), Some("Login identifier"));
+        // Mixed: some columns may have no comment even on PG.
+        let name = schema.column("name").unwrap();
+        assert!(name.comment.is_none());
     }
 }
