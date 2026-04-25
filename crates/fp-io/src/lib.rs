@@ -3619,6 +3619,21 @@ fn escape_sql_ident(name: &str) -> Result<String, IoError> {
     Ok(name.replace('"', "\"\""))
 }
 
+fn validate_sql_table_name(table_name: &str) -> Result<(), IoError> {
+    if table_name.is_empty() || !table_name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+        return Err(IoError::Sql(format!(
+            "invalid table name: '{table_name}' (must be non-empty, only alphanumeric and underscore allowed)"
+        )));
+    }
+    Ok(())
+}
+
+fn sql_select_all_query(table_name: &str) -> Result<String, IoError> {
+    validate_sql_table_name(table_name)?;
+    let escaped_table = escape_sql_ident(table_name)?;
+    Ok(format!("SELECT * FROM \"{escaped_table}\""))
+}
+
 /// Read the result of a SQL query into a DataFrame.
 ///
 /// Matches `pd.read_sql(sql, con)`.
@@ -3859,14 +3874,18 @@ fn promote_column_to_index(frame: &DataFrame, col_name: &str) -> Result<DataFram
 ///
 /// Matches `pd.read_sql_table(table_name, con)`.
 pub fn read_sql_table<C: SqlConnection>(conn: &C, table_name: &str) -> Result<DataFrame, IoError> {
-    // Validate table name to prevent SQL injection (only allow alphanumeric + underscore, non-empty).
-    if table_name.is_empty() || !table_name.chars().all(|c| c.is_alphanumeric() || c == '_') {
-        return Err(IoError::Sql(format!(
-            "invalid table name: '{table_name}' (must be non-empty, only alphanumeric and underscore allowed)"
-        )));
-    }
-    let escaped_table = escape_sql_ident(table_name)?;
-    read_sql(conn, &format!("SELECT * FROM \"{escaped_table}\""))
+    read_sql(conn, &sql_select_all_query(table_name)?)
+}
+
+/// Read an entire SQL table as an iterator of DataFrame chunks.
+///
+/// Matches the supported subset of `pd.read_sql_table(table_name, con, chunksize=...)`.
+pub fn read_sql_table_chunks<C: SqlConnection>(
+    conn: &C,
+    table_name: &str,
+    chunk_size: usize,
+) -> Result<SqlChunkIterator, IoError> {
+    read_sql_chunks(conn, &sql_select_all_query(table_name)?, chunk_size)
 }
 
 /// Read a subset of columns from a SQL table.
@@ -6526,7 +6545,7 @@ mod tests {
         SqlIfExists, SqlReadOptions, SqlWriteOptions, read_sql, read_sql_chunks,
         read_sql_chunks_with_options, read_sql_query, read_sql_query_chunks,
         read_sql_query_chunks_with_options, read_sql_query_with_index_col,
-        read_sql_query_with_options, read_sql_table, read_sql_table_columns,
+        read_sql_query_with_options, read_sql_table, read_sql_table_chunks, read_sql_table_columns,
         read_sql_table_with_index_col, read_sql_with_index_col, read_sql_with_options, write_sql,
         write_sql_with_options,
     };
@@ -7094,6 +7113,58 @@ mod tests {
             .expect_err("zero query chunksize should be rejected");
 
         assert!(matches!(err, IoError::Sql(msg) if msg.contains("chunksize")));
+    }
+
+    #[test]
+    fn sql_read_table_chunks_batches_rows() {
+        let conn = make_sql_test_conn();
+        conn.execute_batch(
+            "CREATE TABLE table_chunked (id INTEGER, name TEXT);
+             INSERT INTO table_chunked (id, name) VALUES
+                (1, 'alpha'),
+                (2, 'beta'),
+                (3, 'gamma'),
+                (4, 'delta');",
+        )
+        .expect("create table_chunked table");
+
+        let chunks = read_sql_table_chunks(&conn, "table_chunked", 3)
+            .expect("table chunk iterator")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("all chunks");
+
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].column_names(), vec!["id", "name"]);
+        assert_eq!(
+            chunks[0].column("id").unwrap().values(),
+            &[Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]
+        );
+        assert_eq!(
+            chunks[1].column("name").unwrap().values(),
+            &[Scalar::Utf8("delta".to_owned())]
+        );
+    }
+
+    #[test]
+    fn sql_read_table_chunks_rejects_zero_chunksize() {
+        let conn = make_sql_test_conn();
+        conn.execute_batch("CREATE TABLE zero_chunked (id INTEGER);")
+            .expect("create zero_chunked table");
+
+        let err = read_sql_table_chunks(&conn, "zero_chunked", 0)
+            .expect_err("zero table chunksize should be rejected");
+
+        assert!(matches!(err, IoError::Sql(msg) if msg.contains("chunksize")));
+    }
+
+    #[test]
+    fn sql_read_table_chunks_rejects_invalid_table_name() {
+        let conn = make_sql_test_conn();
+
+        let err = read_sql_table_chunks(&conn, "bad table", 1)
+            .expect_err("invalid table name should be rejected");
+
+        assert!(matches!(err, IoError::Sql(msg) if msg.contains("invalid table name")));
     }
 
     #[test]
