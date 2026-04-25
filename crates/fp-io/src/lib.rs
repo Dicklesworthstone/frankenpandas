@@ -3379,6 +3379,17 @@ pub struct SqlWriteOptions {
     pub index: bool,
     /// Optional override for the emitted index column name.
     pub index_label: Option<String>,
+    /// Optional schema namespace for CREATE TABLE / INSERT routing.
+    ///
+    /// Matches `pd.DataFrame.to_sql(table, con, schema=...)`. When the
+    /// backend reports `supports_schemas() == true` and `schema` is
+    /// `Some(s)`, generated CREATE TABLE / INSERT statements target
+    /// `\"s\".\"table\"`. On backends that report `false` (SQLite),
+    /// `Some(s)` is silently ignored — preserves SQLite users' existing
+    /// option structs.
+    ///
+    /// Per br-frankenpandas-udn6 (fd90.15).
+    pub schema: Option<String>,
 }
 
 /// Backend-agnostic in-memory representation of a SQL query result.
@@ -3959,25 +3970,77 @@ fn sql_column_definition<C: SqlConnection>(
     ))
 }
 
+#[cfg(test)]
 fn sql_create_table_query<C: SqlConnection>(
     conn: &C,
     table_name: &str,
     column_defs: &[String],
 ) -> Result<String, IoError> {
+    sql_create_table_query_in_schema(conn, table_name, None, column_defs)
+}
+
+/// Build a `CREATE TABLE IF NOT EXISTS ...` statement, optionally
+/// schema-qualified.
+///
+/// Per br-frankenpandas-udn6 (fd90.15). When `schema` is `Some(s)` AND
+/// `conn.supports_schemas()`, the target becomes `"schema"."table"`. On
+/// backends that report false, any `Some(s)` is silently ignored.
+fn sql_create_table_query_in_schema<C: SqlConnection>(
+    conn: &C,
+    table_name: &str,
+    schema: Option<&str>,
+    column_defs: &[String],
+) -> Result<String, IoError> {
     validate_sql_table_name(table_name)?;
+    let qualified = match schema {
+        Some(s) if conn.supports_schemas() => {
+            validate_sql_table_name(s)?;
+            format!(
+                "{}.{}",
+                conn.quote_identifier(s)?,
+                conn.quote_identifier(table_name)?
+            )
+        }
+        _ => conn.quote_identifier(table_name)?,
+    };
     Ok(format!(
-        "CREATE TABLE IF NOT EXISTS {} ({})",
-        conn.quote_identifier(table_name)?,
+        "CREATE TABLE IF NOT EXISTS {qualified} ({})",
         column_defs.join(", ")
     ))
 }
 
+#[cfg(test)]
 fn sql_insert_rows_query<C: SqlConnection>(
     conn: &C,
     table_name: &str,
     column_names: &[String],
 ) -> Result<String, IoError> {
+    sql_insert_rows_query_in_schema(conn, table_name, None, column_names)
+}
+
+/// Build an `INSERT INTO ... VALUES (...)` statement, optionally
+/// schema-qualified.
+///
+/// Per br-frankenpandas-udn6 (fd90.15). Same schema rules as the CREATE
+/// TABLE counterpart.
+fn sql_insert_rows_query_in_schema<C: SqlConnection>(
+    conn: &C,
+    table_name: &str,
+    schema: Option<&str>,
+    column_names: &[String],
+) -> Result<String, IoError> {
     validate_sql_table_name(table_name)?;
+    let qualified = match schema {
+        Some(s) if conn.supports_schemas() => {
+            validate_sql_table_name(s)?;
+            format!(
+                "{}.{}",
+                conn.quote_identifier(s)?,
+                conn.quote_identifier(table_name)?
+            )
+        }
+        _ => conn.quote_identifier(table_name)?,
+    };
     let quoted_columns = column_names
         .iter()
         .map(|name| conn.quote_identifier(name))
@@ -3988,8 +4051,7 @@ fn sql_insert_rows_query<C: SqlConnection>(
         .collect::<Vec<_>>()
         .join(", ");
     Ok(format!(
-        "INSERT INTO {} ({quoted_columns}) VALUES ({placeholders})",
-        conn.quote_identifier(table_name)?
+        "INSERT INTO {qualified} ({quoted_columns}) VALUES ({placeholders})"
     ))
 }
 
@@ -4509,6 +4571,7 @@ pub fn write_sql<C: SqlConnection>(
             if_exists,
             index: false,
             index_label: None,
+            schema: None,
         },
     )
 }
@@ -4577,10 +4640,11 @@ pub fn write_sql_with_options<C: SqlConnection>(
             .collect::<Result<Vec<_>, IoError>>()?,
     );
 
-    let create_sql = sql_create_table_query(conn, table_name, &col_defs)?;
+    let schema = options.schema.as_deref();
+    let create_sql = sql_create_table_query_in_schema(conn, table_name, schema, &col_defs)?;
     conn.execute_batch(&create_sql)?;
 
-    let insert_sql = sql_insert_rows_query(conn, table_name, &sql_col_names)?;
+    let insert_sql = sql_insert_rows_query_in_schema(conn, table_name, schema, &sql_col_names)?;
 
     let nrows = frame.index().len();
     let mut rows = Vec::with_capacity(nrows);
@@ -7645,6 +7709,7 @@ mod tests {
                 if_exists: SqlIfExists::Fail,
                 index: true,
                 index_label: None,
+            schema: None,
             },
         )
         .expect("write with named index");
@@ -7673,6 +7738,7 @@ mod tests {
                 if_exists: SqlIfExists::Fail,
                 index: true,
                 index_label: None,
+            schema: None,
             },
         )
         .expect("write with unnamed index");
@@ -7707,6 +7773,7 @@ mod tests {
                 if_exists: SqlIfExists::Fail,
                 index: true,
                 index_label: Some("custom_id".to_string()),
+            schema: None,
             },
         )
         .expect("write with custom index label");
@@ -7748,6 +7815,7 @@ mod tests {
                 if_exists: SqlIfExists::Fail,
                 index: false,
                 index_label: Some("custom_id".to_string()),
+            schema: None,
             },
         )
         .expect("write without index");
@@ -10494,6 +10562,167 @@ mod tests {
         let conn = PgLikeValidate;
         let err = super::sql_select_all_query_in_schema(&conn, "users", Some("evil; DROP"))
             .expect_err("malformed schema must reject");
+        assert!(matches!(err, IoError::Sql(msg) if msg.contains("invalid table name")));
+    }
+
+    // ── SqlWriteOptions::schema tests (br-frankenpandas-udn6 / fd90.15) ─
+
+    #[test]
+    fn sql_create_table_query_in_schema_qualifies_on_multi_schema_backend() {
+        struct PgLikeWrite;
+        impl super::SqlConnection for PgLikeWrite {
+            fn query(&self, _q: &str, _p: &[Scalar]) -> Result<super::SqlQueryResult, IoError> {
+                Ok(super::SqlQueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                })
+            }
+            fn execute_batch(&self, _sql: &str) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn table_exists(&self, _name: &str) -> Result<bool, IoError> {
+                Ok(false)
+            }
+            fn insert_rows(&self, _sql: &str, _rows: &[Vec<Scalar>]) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn dtype_sql(&self, _dtype: DType) -> &'static str {
+                "TEXT"
+            }
+            fn index_dtype_sql(&self, _index: &Index) -> &'static str {
+                "TEXT"
+            }
+            fn supports_schemas(&self) -> bool {
+                true
+            }
+        }
+        let conn = PgLikeWrite;
+        let cols = vec!["id INTEGER".to_owned(), "name TEXT".to_owned()];
+        let q = super::sql_create_table_query_in_schema(
+            &conn,
+            "users",
+            Some("analytics"),
+            &cols,
+        )
+        .expect("create");
+        assert_eq!(
+            q,
+            "CREATE TABLE IF NOT EXISTS \"analytics\".\"users\" (id INTEGER, name TEXT)"
+        );
+        let bare = super::sql_create_table_query_in_schema(&conn, "users", None, &cols)
+            .expect("bare");
+        assert_eq!(
+            bare,
+            "CREATE TABLE IF NOT EXISTS \"users\" (id INTEGER, name TEXT)"
+        );
+    }
+
+    #[test]
+    fn sql_insert_rows_query_in_schema_qualifies_on_multi_schema_backend() {
+        struct PgLikeInsert;
+        impl super::SqlConnection for PgLikeInsert {
+            fn query(&self, _q: &str, _p: &[Scalar]) -> Result<super::SqlQueryResult, IoError> {
+                Ok(super::SqlQueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                })
+            }
+            fn execute_batch(&self, _sql: &str) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn table_exists(&self, _name: &str) -> Result<bool, IoError> {
+                Ok(false)
+            }
+            fn insert_rows(&self, _sql: &str, _rows: &[Vec<Scalar>]) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn dtype_sql(&self, _dtype: DType) -> &'static str {
+                "TEXT"
+            }
+            fn index_dtype_sql(&self, _index: &Index) -> &'static str {
+                "TEXT"
+            }
+            fn supports_schemas(&self) -> bool {
+                true
+            }
+        }
+        let conn = PgLikeInsert;
+        let cols = vec!["id".to_owned(), "name".to_owned()];
+        let q = super::sql_insert_rows_query_in_schema(&conn, "users", Some("analytics"), &cols)
+            .expect("insert");
+        assert_eq!(
+            q,
+            "INSERT INTO \"analytics\".\"users\" (\"id\", \"name\") VALUES (?, ?)"
+        );
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn write_sql_with_options_schema_silently_ignored_on_sqlite() {
+        let conn = make_sql_test_conn();
+        let frame = fp_frame::DataFrame::from_dict(
+            &["x"],
+            vec![("x", vec![Scalar::Int64(1), Scalar::Int64(2)])],
+        )
+        .unwrap();
+        // SQLite reports supports_schemas=false; passing schema=Some(s) must
+        // not break the write — the bare table reference is used.
+        write_sql_with_options(
+            &frame,
+            &conn,
+            "bare_write_tbl",
+            &SqlWriteOptions {
+                if_exists: SqlIfExists::Fail,
+                index: false,
+                index_label: None,
+                schema: Some("ignored_on_sqlite".to_owned()),
+            },
+        )
+        .expect("write with schema=Some on SQLite");
+        let back = read_sql_table(&conn, "bare_write_tbl").expect("read");
+        let col = back.column("x").expect("x");
+        assert_eq!(col.values()[0], Scalar::Int64(1));
+        assert_eq!(col.values()[1], Scalar::Int64(2));
+    }
+
+    #[test]
+    fn sql_create_table_query_in_schema_validates_schema_name() {
+        struct PgLikeValidate;
+        impl super::SqlConnection for PgLikeValidate {
+            fn query(&self, _q: &str, _p: &[Scalar]) -> Result<super::SqlQueryResult, IoError> {
+                Ok(super::SqlQueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                })
+            }
+            fn execute_batch(&self, _sql: &str) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn table_exists(&self, _name: &str) -> Result<bool, IoError> {
+                Ok(false)
+            }
+            fn insert_rows(&self, _sql: &str, _rows: &[Vec<Scalar>]) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn dtype_sql(&self, _dtype: DType) -> &'static str {
+                "TEXT"
+            }
+            fn index_dtype_sql(&self, _index: &Index) -> &'static str {
+                "TEXT"
+            }
+            fn supports_schemas(&self) -> bool {
+                true
+            }
+        }
+        let conn = PgLikeValidate;
+        let cols = vec!["x INTEGER".to_owned()];
+        let err = super::sql_create_table_query_in_schema(
+            &conn,
+            "users",
+            Some("evil; DROP"),
+            &cols,
+        )
+        .expect_err("malformed schema must reject");
         assert!(matches!(err, IoError::Sql(msg) if msg.contains("invalid table name")));
     }
 }
