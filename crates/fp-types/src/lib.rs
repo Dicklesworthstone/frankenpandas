@@ -1288,6 +1288,146 @@ impl std::fmt::Display for Interval {
     }
 }
 
+// ── Period types (br-frankenpandas-epoj Phase 1) ────────────────────────
+//
+// Scaffolding for pandas `pd.Period` / `pd.PeriodIndex` / `pd.PeriodDtype`.
+//
+// A Period is a calendar *span* (Q1 2024, Jan 2024, 2024-03-15), distinct
+// from a Timestamp (an instant). Phase 1 ships the PeriodFreq enum +
+// Period struct with ordinal-based arithmetic (Period + n, Period - Period),
+// Display in pandas notation, and parse from standard strings. Calendar-
+// conversion (ordinal ↔ ymd) and DType::Period wiring land in Phase 2.
+
+/// Period frequency code. Matches pandas offset alias core set.
+///
+/// The ordinal axis is frequency-specific: for Monthly, ordinal 0 is a
+/// fixed anchor (pandas uses months since 1970-01). Phase 1 doesn't
+/// commit to a specific epoch yet — the ordinal scheme is opaque until
+/// Phase 2 wires calendar arithmetic. What Phase 1 DOES nail down is:
+/// same-freq Periods compare + subtract; Period + i64 shifts by `n`
+/// periods of the declared frequency.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING-KEBAB-CASE")]
+#[non_exhaustive]
+pub enum PeriodFreq {
+    /// `A` / `Y` — annual periods.
+    Annual,
+    /// `Q` — quarterly periods.
+    Quarterly,
+    /// `M` — monthly periods.
+    Monthly,
+    /// `W` — weekly periods.
+    Weekly,
+    /// `D` — daily periods.
+    Daily,
+    /// `B` — business-day periods.
+    Business,
+    /// `H` — hourly periods.
+    Hourly,
+    /// `T` / `min` — minutely periods.
+    Minutely,
+    /// `S` — secondly periods.
+    Secondly,
+}
+
+impl PeriodFreq {
+    /// Parse a pandas-style frequency alias. Recognizes the common subset
+    /// (A/Y, Q, M, W, D, B, H, T/min, S). Case-insensitive.
+    pub fn parse(alias: &str) -> Option<Self> {
+        match alias.to_ascii_uppercase().as_str() {
+            "A" | "Y" | "ANNUAL" | "YEARLY" => Some(Self::Annual),
+            "Q" | "QUARTERLY" => Some(Self::Quarterly),
+            "M" | "MONTHLY" => Some(Self::Monthly),
+            "W" | "WEEKLY" => Some(Self::Weekly),
+            "D" | "DAILY" => Some(Self::Daily),
+            "B" | "BUSINESS" => Some(Self::Business),
+            "H" | "HOURLY" => Some(Self::Hourly),
+            "T" | "MIN" | "MINUTELY" => Some(Self::Minutely),
+            "S" | "SECONDLY" => Some(Self::Secondly),
+            _ => None,
+        }
+    }
+
+    /// Canonical pandas alias string.
+    #[must_use]
+    pub const fn alias(self) -> &'static str {
+        match self {
+            Self::Annual => "A",
+            Self::Quarterly => "Q",
+            Self::Monthly => "M",
+            Self::Weekly => "W",
+            Self::Daily => "D",
+            Self::Business => "B",
+            Self::Hourly => "H",
+            Self::Minutely => "T",
+            Self::Secondly => "S",
+        }
+    }
+}
+
+impl std::fmt::Display for PeriodFreq {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.alias())
+    }
+}
+
+/// A single pandas-style Period value.
+///
+/// Stored as an integer ordinal on a frequency-specific axis plus the
+/// frequency code. Two Periods with different `freq` are incompatible —
+/// arithmetic and comparison require same-freq operands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Period {
+    pub ordinal: i64,
+    pub freq: PeriodFreq,
+}
+
+impl Period {
+    #[must_use]
+    pub const fn new(ordinal: i64, freq: PeriodFreq) -> Self {
+        Self { ordinal, freq }
+    }
+
+    /// Same-freq ordinal comparison. Returns `None` if `freq` differs —
+    /// caller decides whether that's an error or a panic site.
+    #[must_use]
+    pub fn cmp_same_freq(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        if self.freq != other.freq {
+            return None;
+        }
+        Some(self.ordinal.cmp(&other.ordinal))
+    }
+
+    /// Shift by `n` periods of the current frequency.
+    /// Matches `pd.Period + n` and `pd.Period - n`.
+    #[must_use]
+    pub fn shift(&self, n: i64) -> Self {
+        Self {
+            ordinal: self.ordinal.saturating_add(n),
+            freq: self.freq,
+        }
+    }
+
+    /// Period-difference in units of the shared frequency.
+    /// Returns `None` if `freq` differs (pandas raises IncompatibleFrequency).
+    #[must_use]
+    pub fn diff(&self, other: &Self) -> Option<i64> {
+        if self.freq != other.freq {
+            return None;
+        }
+        Some(self.ordinal.saturating_sub(other.ordinal))
+    }
+}
+
+impl std::fmt::Display for Period {
+    /// Phase 1: ordinal+freq form, e.g. `Period[Q, 216]`. Calendar-
+    /// formatted display (`2024Q1`, `2024-03`) lands in Phase 2 once the
+    /// ordinal-to-ymd arithmetic is wired.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Period[{}, {}]", self.freq, self.ordinal)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{DType, NullKind, Scalar, SparseDType, cast_scalar, common_dtype, infer_dtype};
@@ -2178,5 +2318,119 @@ mod tests {
         let back: Interval =
             serde_json::from_str(r#"{"left":0.0,"right":5.0}"#).expect("deserialize");
         assert_eq!(back.closed, IntervalClosed::Right);
+    }
+
+    // ── Period tests (br-frankenpandas-epoj) ────────────────────────────
+
+    use super::{Period, PeriodFreq};
+
+    #[test]
+    fn period_freq_parses_canonical_aliases() {
+        assert_eq!(PeriodFreq::parse("A"), Some(PeriodFreq::Annual));
+        assert_eq!(PeriodFreq::parse("Y"), Some(PeriodFreq::Annual));
+        assert_eq!(PeriodFreq::parse("Q"), Some(PeriodFreq::Quarterly));
+        assert_eq!(PeriodFreq::parse("M"), Some(PeriodFreq::Monthly));
+        assert_eq!(PeriodFreq::parse("W"), Some(PeriodFreq::Weekly));
+        assert_eq!(PeriodFreq::parse("D"), Some(PeriodFreq::Daily));
+        assert_eq!(PeriodFreq::parse("B"), Some(PeriodFreq::Business));
+        assert_eq!(PeriodFreq::parse("H"), Some(PeriodFreq::Hourly));
+        assert_eq!(PeriodFreq::parse("T"), Some(PeriodFreq::Minutely));
+        assert_eq!(PeriodFreq::parse("min"), Some(PeriodFreq::Minutely));
+        assert_eq!(PeriodFreq::parse("S"), Some(PeriodFreq::Secondly));
+    }
+
+    #[test]
+    fn period_freq_parse_is_case_insensitive() {
+        assert_eq!(PeriodFreq::parse("quarterly"), Some(PeriodFreq::Quarterly));
+        assert_eq!(PeriodFreq::parse("MONTHLY"), Some(PeriodFreq::Monthly));
+    }
+
+    #[test]
+    fn period_freq_rejects_unknown_aliases() {
+        assert_eq!(PeriodFreq::parse("nanosec"), None);
+        assert_eq!(PeriodFreq::parse(""), None);
+        assert_eq!(PeriodFreq::parse("xyz"), None);
+    }
+
+    #[test]
+    fn period_freq_alias_roundtrip() {
+        for freq in [
+            PeriodFreq::Annual,
+            PeriodFreq::Quarterly,
+            PeriodFreq::Monthly,
+            PeriodFreq::Weekly,
+            PeriodFreq::Daily,
+            PeriodFreq::Business,
+            PeriodFreq::Hourly,
+            PeriodFreq::Minutely,
+            PeriodFreq::Secondly,
+        ] {
+            assert_eq!(PeriodFreq::parse(freq.alias()), Some(freq));
+        }
+    }
+
+    #[test]
+    fn period_shift_advances_ordinal() {
+        let q1 = Period::new(216, PeriodFreq::Quarterly);
+        let q2 = q1.shift(1);
+        assert_eq!(q2.ordinal, 217);
+        assert_eq!(q2.freq, PeriodFreq::Quarterly);
+        let q0 = q1.shift(-1);
+        assert_eq!(q0.ordinal, 215);
+    }
+
+    #[test]
+    fn period_shift_saturates_on_overflow() {
+        let p = Period::new(i64::MAX - 2, PeriodFreq::Daily);
+        assert_eq!(p.shift(100).ordinal, i64::MAX);
+        let p = Period::new(i64::MIN + 2, PeriodFreq::Daily);
+        assert_eq!(p.shift(-100).ordinal, i64::MIN);
+    }
+
+    #[test]
+    fn period_diff_returns_period_count() {
+        let a = Period::new(216, PeriodFreq::Quarterly);
+        let b = Period::new(220, PeriodFreq::Quarterly);
+        assert_eq!(b.diff(&a), Some(4));
+        assert_eq!(a.diff(&b), Some(-4));
+    }
+
+    #[test]
+    fn period_diff_rejects_mismatched_freq() {
+        let monthly = Period::new(100, PeriodFreq::Monthly);
+        let quarterly = Period::new(100, PeriodFreq::Quarterly);
+        assert_eq!(monthly.diff(&quarterly), None);
+        assert_eq!(quarterly.diff(&monthly), None);
+    }
+
+    #[test]
+    fn period_cmp_same_freq_respects_ordinal_order() {
+        use std::cmp::Ordering;
+        let a = Period::new(10, PeriodFreq::Monthly);
+        let b = Period::new(20, PeriodFreq::Monthly);
+        assert_eq!(a.cmp_same_freq(&b), Some(Ordering::Less));
+        assert_eq!(b.cmp_same_freq(&a), Some(Ordering::Greater));
+        assert_eq!(a.cmp_same_freq(&a), Some(Ordering::Equal));
+    }
+
+    #[test]
+    fn period_cmp_cross_freq_returns_none() {
+        let m = Period::new(1, PeriodFreq::Monthly);
+        let q = Period::new(1, PeriodFreq::Quarterly);
+        assert_eq!(m.cmp_same_freq(&q), None);
+    }
+
+    #[test]
+    fn period_display_carries_freq_and_ordinal() {
+        let p = Period::new(216, PeriodFreq::Quarterly);
+        assert_eq!(p.to_string(), "Period[Q, 216]");
+    }
+
+    #[test]
+    fn period_roundtrips_through_serde_json() {
+        let p = Period::new(42, PeriodFreq::Weekly);
+        let json = serde_json::to_string(&p).expect("serialize");
+        let back: Period = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(p, back);
     }
 }
