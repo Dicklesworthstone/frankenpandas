@@ -4314,8 +4314,11 @@ impl SqlConnection for rusqlite::Connection {
         let mut stmt = self
             .prepare(&pragma)
             .map_err(|e| IoError::Sql(format!("table_schema prepare failed: {e}")))?;
-        let mut columns: Vec<SqlColumnSchema> = Vec::new();
-        let rows = stmt
+        // PRAGMA table_info row tuple: (name, type, notnull, dflt_value, pk).
+        // Type alias keeps clippy::type_complexity happy on the
+        // intermediate Vec used for the two-pass autoincrement detection.
+        type ColumnInfoRow = (String, Option<String>, i64, Option<String>, i64);
+        let raw_rows: Vec<ColumnInfoRow> = stmt
             .query_map([], |row| {
                 Ok((
                     row.get::<_, String>(1)?,
@@ -4325,17 +4328,24 @@ impl SqlConnection for rusqlite::Connection {
                     row.get::<_, i64>(5)?,
                 ))
             })
-            .map_err(|e| IoError::Sql(format!("table_schema query failed: {e}")))?;
-        for row in rows {
-            let (name, declared, notnull, dflt, pk) = row
-                .map_err(|e| IoError::Sql(format!("table_schema row read failed: {e}")))?;
+            .map_err(|e| IoError::Sql(format!("table_schema query failed: {e}")))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| IoError::Sql(format!("table_schema row read failed: {e}")))?;
+
+        // Per fd90.42 (refines fd90.37): SQLite's rowid-alias rule
+        // requires the column to be the SOLE primary key — i.e. exactly
+        // one row in PRAGMA table_info has pk > 0. Composite PKs (where
+        // multiple columns have pk > 0) never qualify, even if the
+        // first column is INTEGER. So we count single-PK status across
+        // the table before deciding any column's autoincrement bit.
+        let pk_count = raw_rows.iter().filter(|(_, _, _, _, pk)| *pk > 0).count();
+        let single_pk = pk_count == 1;
+
+        let mut columns: Vec<SqlColumnSchema> = Vec::with_capacity(raw_rows.len());
+        for (name, declared, notnull, dflt, pk) in raw_rows {
             let cleaned_type = declared.filter(|s| !s.is_empty());
-            // Per fd90.37: SQLite makes a sole INTEGER PRIMARY KEY an
-            // alias for the auto-increment rowid (with or without the
-            // explicit AUTOINCREMENT keyword). pk == 1 means it's the
-            // first/only PK column; type == INTEGER (case-insensitive)
-            // is the rowid-alias trigger.
-            let autoincrement = pk == 1
+            let autoincrement = single_pk
+                && pk == 1
                 && cleaned_type
                     .as_deref()
                     .map(|t| t.eq_ignore_ascii_case("INTEGER"))
@@ -16081,9 +16091,10 @@ mod tests {
     #[cfg(feature = "sql-sqlite")]
     #[test]
     fn sql_table_schema_autoincrement_not_set_for_composite_pk_integer() {
-        // SQLite rowid-alias rule requires the column to be the SOLE
-        // primary key. INTEGER columns inside a composite PK are NOT
-        // autoincrement.
+        // Per fd90.42: SQLite's rowid-alias rule requires the column
+        // to be the SOLE primary key. The tightened heuristic counts
+        // PK columns first; composite PKs (multiple pk>0 rows) never
+        // qualify even when the first column is INTEGER.
         let conn = make_sql_test_conn();
         super::SqlConnection::execute_batch(
             &conn,
@@ -16097,24 +16108,46 @@ mod tests {
         .unwrap();
         let schema = sql_table_schema(&conn, "composite_pk", None).unwrap().unwrap();
         let year = schema.column("year").unwrap();
-        // year is INTEGER + part of PK, but ordinal is 0... actually
-        // wait, in a composite PK SQLite reports pk = 1, 2, 3 for the
-        // declaration order. So year has pk == 1 (ordinal 0). The
-        // rowid-alias rule is more specific: it requires INTEGER
-        // PRIMARY KEY *as the entire PK declaration*, not just being
-        // the first column of a composite. SQLite's PRAGMA pk reports
-        // the ordinal anyway, so our heuristic (pk == 1 + INTEGER
-        // type) WOULD report this as autoincrement, which is wrong.
-        // This test documents the false-positive boundary case: our
-        // heuristic in fd90.37 is conservative-leaning, matching the
-        // PRAGMA-based detection used by SQLAlchemy. Practical impact
-        // is minimal because callers care about "is this an autoincrement
-        // surrogate key" — composite PKs rarely qualify.
-        // Therefore: assert the documented behavior.
+        let month = schema.column("month").unwrap();
+        let code = schema.column("code").unwrap();
+        // Each part of the composite PK keeps its declaration-order
+        // ordinal but NONE of them is autoincrement.
         assert_eq!(year.primary_key_ordinal, Some(0));
-        // This will be true under the current heuristic — test
-        // captures actual behavior, not idealized rule.
-        assert!(year.autoincrement);
+        assert_eq!(month.primary_key_ordinal, Some(1));
+        assert_eq!(code.primary_key_ordinal, Some(2));
+        assert!(!year.autoincrement, "composite PK first col must not be autoincrement");
+        assert!(!month.autoincrement);
+        assert!(!code.autoincrement);
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn sql_table_schema_autoincrement_two_pass_count_distinguishes_single_vs_composite() {
+        // Confirm the fix path: single-column INTEGER PRIMARY KEY -> true,
+        // composite INTEGER+INTEGER PRIMARY KEY -> false on both.
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE TABLE single_int_pk (id INTEGER PRIMARY KEY, label TEXT);",
+        )
+        .unwrap();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE TABLE composite_int_pk ( \
+                a INTEGER NOT NULL, \
+                b INTEGER NOT NULL, \
+                PRIMARY KEY (a, b) \
+             );",
+        )
+        .unwrap();
+
+        let single = sql_table_schema(&conn, "single_int_pk", None).unwrap().unwrap();
+        assert!(single.column("id").unwrap().autoincrement);
+
+        let composite = sql_table_schema(&conn, "composite_int_pk", None).unwrap().unwrap();
+        // Both columns have INTEGER type and pk>0 but neither qualifies.
+        assert!(!composite.column("a").unwrap().autoincrement);
+        assert!(!composite.column("b").unwrap().autoincrement);
     }
 
     #[test]
