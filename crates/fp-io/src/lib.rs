@@ -3542,6 +3542,26 @@ pub trait SqlConnection {
     {
         f(self)
     }
+
+    /// Quote a SQL identifier (table name, column name, schema name) for
+    /// safe inclusion in a generated statement.
+    ///
+    /// Default impl: ANSI `"..."` form with embedded `"` doubled (matches
+    /// SQLite + PostgreSQL). MySQL/MariaDB backends must override to
+    /// produce `\`...\`` (backtick). MSSQL backends use `[...]`. Per
+    /// br-frankenpandas-2y7w (fd90.10).
+    ///
+    /// NUL bytes in the identifier are rejected (security: prevents
+    /// statement-injection via embedded null terminators in C-string
+    /// driver layers).
+    fn quote_identifier(&self, ident: &str) -> Result<String, IoError> {
+        if ident.contains('\0') {
+            return Err(IoError::Sql(
+                "invalid SQL identifier: NUL byte".to_owned(),
+            ));
+        }
+        Ok(format!("\"{}\"", ident.replace('"', "\"\"")))
+    }
 }
 
 /// Map an fp-types DType to an SQLite column type declaration.
@@ -3744,6 +3764,14 @@ impl SqlConnection for rusqlite::Connection {
                 Err(err)
             }
         }
+    }
+
+    fn quote_identifier(&self, ident: &str) -> Result<String, IoError> {
+        // SQLite accepts ANSI double-quotes for identifiers (it ALSO accepts
+        // backticks for MySQL compat, but ANSI is the recommended form per
+        // SQLite docs). Delegate to the existing free-fn helper to keep the
+        // exact escaping policy in one place.
+        quote_sql_ident(ident)
     }
 }
 
@@ -9777,5 +9805,77 @@ mod tests {
         // Default with_transaction passes through (no BEGIN/COMMIT).
         let result: Result<i64, IoError> = super::SqlConnection::with_transaction(&stub, |_| Ok(7));
         assert_eq!(result.unwrap(), 7);
+        // Default quote_identifier produces ANSI double-quotes.
+        assert_eq!(
+            super::SqlConnection::quote_identifier(&stub, "col").unwrap(),
+            r#""col""#
+        );
+    }
+
+    // ── quote_identifier tests (br-frankenpandas-2y7w / fd90.10) ────────
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn rusqlite_quote_identifier_uses_ansi_double_quotes() {
+        let conn = make_sql_test_conn();
+        assert_eq!(
+            super::SqlConnection::quote_identifier(&conn, "users").unwrap(),
+            r#""users""#
+        );
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn rusqlite_quote_identifier_doubles_embedded_quotes() {
+        let conn = make_sql_test_conn();
+        // Identifier containing a `"` must be escaped by doubling the quote.
+        assert_eq!(
+            super::SqlConnection::quote_identifier(&conn, r#"value"raw"#).unwrap(),
+            r#""value""raw""#
+        );
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn rusqlite_quote_identifier_rejects_null_bytes() {
+        let conn = make_sql_test_conn();
+        let err = super::SqlConnection::quote_identifier(&conn, "evil\0name").expect_err("nul");
+        assert!(matches!(err, IoError::Sql(_)));
+    }
+
+    #[test]
+    fn default_quote_identifier_doubles_embedded_quotes() {
+        // Verify the default impl on a non-overriding stub matches the
+        // SQLite behavior (ANSI is the shared default for SQLite + Postgres).
+        struct StubSql;
+        impl super::SqlConnection for StubSql {
+            fn query(&self, _q: &str, _p: &[Scalar]) -> Result<super::SqlQueryResult, IoError> {
+                Ok(super::SqlQueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                })
+            }
+            fn execute_batch(&self, _sql: &str) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn table_exists(&self, _name: &str) -> Result<bool, IoError> {
+                Ok(false)
+            }
+            fn insert_rows(&self, _sql: &str, _rows: &[Vec<Scalar>]) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn dtype_sql(&self, _dtype: DType) -> &'static str {
+                "TEXT"
+            }
+            fn index_dtype_sql(&self, _index: &Index) -> &'static str {
+                "TEXT"
+            }
+        }
+        let stub = StubSql;
+        assert_eq!(
+            super::SqlConnection::quote_identifier(&stub, r#"value"raw"#).unwrap(),
+            r#""value""raw""#
+        );
+        assert!(super::SqlConnection::quote_identifier(&stub, "evil\0").is_err());
     }
 }
