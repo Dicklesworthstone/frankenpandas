@@ -3728,6 +3728,40 @@ pub trait SqlConnection {
         Ok(None)
     }
 
+    /// Return the primary-key column names for a table, ordered by
+    /// the `primary_key_ordinal` reported by `table_schema`.
+    ///
+    /// Per br-frankenpandas-uw3y (fd90.25). Default impl delegates to
+    /// `table_schema(table, schema)` and pulls out columns whose
+    /// `primary_key_ordinal` is `Some(_)`, sorted ascending. Returns
+    /// an empty vector when:
+    /// - the table doesn't exist (`table_schema` returns `Ok(None)`),
+    /// - the table has no primary key,
+    /// - the backend can't introspect (default `table_schema`).
+    ///
+    /// Useful for upsert conflict-target generation, `index_label`
+    /// defaulting, and schema validation. Backends can override to
+    /// query their catalog directly when `table_schema` is too heavy.
+    fn primary_key_columns(
+        &self,
+        table_name: &str,
+        schema: Option<&str>,
+    ) -> Result<Vec<String>, IoError> {
+        let Some(meta) = self.table_schema(table_name, schema)? else {
+            return Ok(Vec::new());
+        };
+        let mut pk: Vec<(usize, String)> = meta
+            .columns
+            .iter()
+            .filter_map(|c| {
+                c.primary_key_ordinal
+                    .map(|ord| (ord, c.name.clone()))
+            })
+            .collect();
+        pk.sort_by_key(|(ord, _)| *ord);
+        Ok(pk.into_iter().map(|(_, name)| name).collect())
+    }
+
     /// Reset a table to empty without dropping its definition.
     ///
     /// Per br-frankenpandas-phum (fd90.23). Default impl emits
@@ -4779,6 +4813,23 @@ pub fn truncate_sql_table<C: SqlConnection>(
 /// Per br-frankenpandas-e23k (fd90.24).
 pub fn sql_server_version<C: SqlConnection>(conn: &C) -> Result<Option<String>, IoError> {
     conn.server_version()
+}
+
+/// Return the primary-key column names for a SQL table, ordered by
+/// the table's primary-key ordinal.
+///
+/// Returns an empty vector when the table doesn't exist, has no
+/// primary key, or the backend can't introspect column metadata.
+/// Useful for upsert conflict-target generation and `index_label`
+/// defaulting.
+///
+/// Per br-frankenpandas-uw3y (fd90.25).
+pub fn sql_primary_key_columns<C: SqlConnection>(
+    conn: &C,
+    table_name: &str,
+    schema: Option<&str>,
+) -> Result<Vec<String>, IoError> {
+    conn.primary_key_columns(table_name, schema)
 }
 
 /// Read an entire SQL table into a DataFrame with read-time options.
@@ -7593,8 +7644,8 @@ mod tests {
         read_sql_table_columns_chunks, read_sql_table_columns_chunks_with_index_col,
         read_sql_table_columns_with_index_col, read_sql_table_with_index_col,
         read_sql_table_with_options, read_sql_table_with_options_and_index_col,
-        read_sql_with_index_col, read_sql_with_options, sql_server_version, sql_table_schema,
-        truncate_sql_table, write_sql, write_sql_with_options,
+        read_sql_with_index_col, read_sql_with_options, sql_primary_key_columns,
+        sql_server_version, sql_table_schema, truncate_sql_table, write_sql, write_sql_with_options,
     };
 
     fn make_sql_test_conn() -> rusqlite::Connection {
@@ -12683,5 +12734,178 @@ mod tests {
         let conn = BrokenIntrospection;
         let err = sql_server_version(&conn).expect_err("should surface backend error");
         assert!(matches!(err, IoError::Sql(msg) if msg.contains("connection lost")));
+    }
+
+    // ── sql_primary_key_columns / SqlConnection::primary_key_columns
+    //    (br-uw3y / fd90.25) ────────────────────────────────────────────────
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn sql_primary_key_columns_unknown_table_returns_empty() {
+        let conn = make_sql_test_conn();
+        let pk = sql_primary_key_columns(&conn, "no_such_table", None).unwrap();
+        assert!(pk.is_empty());
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn sql_primary_key_columns_table_without_pk_returns_empty() {
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE TABLE no_pk (a INTEGER, b TEXT);",
+        )
+        .unwrap();
+        let pk = sql_primary_key_columns(&conn, "no_pk", None).unwrap();
+        assert!(pk.is_empty());
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn sql_primary_key_columns_single_pk() {
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE TABLE single_pk (id INTEGER PRIMARY KEY, name TEXT);",
+        )
+        .unwrap();
+        let pk = sql_primary_key_columns(&conn, "single_pk", None).unwrap();
+        assert_eq!(pk, vec!["id"]);
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn sql_primary_key_columns_composite_pk_ordered_by_ordinal() {
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE TABLE composite ( \
+                year INTEGER NOT NULL, \
+                month INTEGER NOT NULL, \
+                code TEXT NOT NULL, \
+                value REAL, \
+                PRIMARY KEY (year, month, code) \
+             );",
+        )
+        .unwrap();
+        let pk = sql_primary_key_columns(&conn, "composite", None).unwrap();
+        // PK declaration order: year, month, code.
+        assert_eq!(pk, vec!["year", "month", "code"]);
+    }
+
+    #[test]
+    fn sql_primary_key_columns_default_impl_returns_empty_when_no_introspection() {
+        // Backend with no table_schema override returns Ok(None) →
+        // primary_key_columns falls through to empty Vec.
+        struct NoIntrospection;
+        impl super::SqlConnection for NoIntrospection {
+            fn query(&self, _q: &str, _p: &[Scalar]) -> Result<SqlQueryResult, IoError> {
+                Ok(SqlQueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                })
+            }
+            fn execute_batch(&self, _sql: &str) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn table_exists(&self, _name: &str) -> Result<bool, IoError> {
+                Ok(false)
+            }
+            fn insert_rows(&self, _sql: &str, _rows: &[Vec<Scalar>]) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn dtype_sql(&self, _dtype: DType) -> &'static str {
+                "TEXT"
+            }
+            fn index_dtype_sql(&self, _index: &Index) -> &'static str {
+                "TEXT"
+            }
+        }
+        let conn = NoIntrospection;
+        assert!(sql_primary_key_columns(&conn, "anything", None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn sql_primary_key_columns_routes_schema_to_table_schema_override() {
+        // Backend that returns ordinal-sorted PK columns from a
+        // multi-schema introspection.
+        struct MultiSchemaPk;
+        impl super::SqlConnection for MultiSchemaPk {
+            fn query(&self, _q: &str, _p: &[Scalar]) -> Result<SqlQueryResult, IoError> {
+                Ok(SqlQueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                })
+            }
+            fn execute_batch(&self, _sql: &str) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn table_exists(&self, _name: &str) -> Result<bool, IoError> {
+                Ok(false)
+            }
+            fn insert_rows(&self, _sql: &str, _rows: &[Vec<Scalar>]) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn dtype_sql(&self, _dtype: DType) -> &'static str {
+                "TEXT"
+            }
+            fn index_dtype_sql(&self, _index: &Index) -> &'static str {
+                "TEXT"
+            }
+            fn supports_schemas(&self) -> bool {
+                true
+            }
+            fn table_schema(
+                &self,
+                table: &str,
+                schema: Option<&str>,
+            ) -> Result<Option<SqlTableSchema>, IoError> {
+                if table == "events" && schema == Some("analytics") {
+                    Ok(Some(SqlTableSchema {
+                        table_name: "events".to_owned(),
+                        columns: vec![
+                            // Intentionally out-of-declaration-order to
+                            // verify the helper sorts by ordinal.
+                            SqlColumnSchema {
+                                name: "code".to_owned(),
+                                declared_type: Some("TEXT".to_owned()),
+                                nullable: false,
+                                default_value: None,
+                                primary_key_ordinal: Some(2),
+                            },
+                            SqlColumnSchema {
+                                name: "year".to_owned(),
+                                declared_type: Some("INTEGER".to_owned()),
+                                nullable: false,
+                                default_value: None,
+                                primary_key_ordinal: Some(0),
+                            },
+                            SqlColumnSchema {
+                                name: "value".to_owned(),
+                                declared_type: Some("REAL".to_owned()),
+                                nullable: true,
+                                default_value: None,
+                                primary_key_ordinal: None,
+                            },
+                            SqlColumnSchema {
+                                name: "month".to_owned(),
+                                declared_type: Some("INTEGER".to_owned()),
+                                nullable: false,
+                                default_value: None,
+                                primary_key_ordinal: Some(1),
+                            },
+                        ],
+                    }))
+                } else {
+                    Ok(None)
+                }
+            }
+        }
+        let conn = MultiSchemaPk;
+        let pk = sql_primary_key_columns(&conn, "events", Some("analytics")).unwrap();
+        // Sorted by primary_key_ordinal: 0=year, 1=month, 2=code.
+        assert_eq!(pk, vec!["year", "month", "code"]);
+        // Wrong schema → empty (table_schema returns None).
+        assert!(sql_primary_key_columns(&conn, "events", Some("audit")).unwrap().is_empty());
     }
 }
