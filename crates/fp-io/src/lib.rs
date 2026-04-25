@@ -3475,6 +3475,24 @@ pub struct SqlIndexSchema {
     pub unique: bool,
 }
 
+/// Backend-neutral SQL foreign-key constraint metadata.
+///
+/// Per br-frankenpandas-uht8 (fd90.29). Aligns with
+/// `SQLAlchemy.Inspector.get_foreign_keys()` shape: a single FK
+/// constraint may span multiple columns (composite FK), and
+/// `columns[i]` references `referenced_columns[i]` on
+/// `referenced_table`. `constraint_name` is `None` for SQLite
+/// inline FKs declared without an explicit CONSTRAINT name (PRAGMA
+/// foreign_key_list does not surface a name, so we return None
+/// there rather than fabricating one).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqlForeignKeySchema {
+    pub constraint_name: Option<String>,
+    pub columns: Vec<String>,
+    pub referenced_table: String,
+    pub referenced_columns: Vec<String>,
+}
+
 /// Iterator over DataFrame chunks produced by a SQL query.
 #[derive(Debug, Clone)]
 pub struct SqlChunkIterator {
@@ -3768,6 +3786,24 @@ pub trait SqlConnection {
         _table_name: &str,
         _schema: Option<&str>,
     ) -> Result<Vec<SqlIndexSchema>, IoError> {
+        Ok(Vec::new())
+    }
+
+    /// List foreign-key constraints declared on a table, optionally
+    /// schema-scoped.
+    ///
+    /// Per br-frankenpandas-uht8 (fd90.29). Default impl returns
+    /// `Ok(Vec::new())`. rusqlite override uses
+    /// `PRAGMA foreign_key_list(table)`, grouping rows by their `id`
+    /// column (each id is a single FK constraint that may span multiple
+    /// columns) and ordering paired columns by `seq`. Multi-schema
+    /// backends override with `information_schema.referential_constraints`
+    /// + `key_column_usage` joined queries.
+    fn list_foreign_keys(
+        &self,
+        _table_name: &str,
+        _schema: Option<&str>,
+    ) -> Result<Vec<SqlForeignKeySchema>, IoError> {
         Ok(Vec::new())
     }
 
@@ -4199,6 +4235,95 @@ impl SqlConnection for rusqlite::Connection {
             });
         }
         Ok(indexes)
+    }
+
+    fn list_foreign_keys(
+        &self,
+        table_name: &str,
+        _schema: Option<&str>,
+    ) -> Result<Vec<SqlForeignKeySchema>, IoError> {
+        // PRAGMA foreign_key_list rows: (seq, referenced_table, from_col, to_col).
+        // The constraint id is the BTreeMap key; we don't repeat it inside the
+        // value tuple. Type alias keeps clippy::type_complexity happy and
+        // the grouping logic readable.
+        type FkRow = (i64, String, String, Option<String>);
+
+        validate_sql_table_name(table_name)?;
+        // PRAGMA foreign_key_list(table) returns: id, seq, table, from, to,
+        // on_update, on_delete, match. Each `id` is one FK constraint;
+        // multiple rows with the same id describe a composite FK.
+        let pragma = format!(
+            "PRAGMA foreign_key_list(\"{}\")",
+            table_name.replace('"', "\"\"")
+        );
+        let mut stmt = self
+            .prepare(&pragma)
+            .map_err(|e| IoError::Sql(format!("list_foreign_keys prepare failed: {e}")))?;
+        let rows: Vec<(i64, FkRow)> = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?, // id
+                    (
+                        row.get::<_, i64>(1)?,            // seq
+                        row.get::<_, String>(2)?,         // referenced table
+                        row.get::<_, String>(3)?,         // from column
+                        row.get::<_, Option<String>>(4)?, // to column (nullable)
+                    ),
+                ))
+            })
+            .map_err(|e| IoError::Sql(format!("list_foreign_keys query failed: {e}")))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| IoError::Sql(format!("list_foreign_keys row read failed: {e}")))?;
+
+        // Group by id; preserve discovery order across distinct ids.
+        let mut order: Vec<i64> = Vec::new();
+        let mut grouped: std::collections::BTreeMap<i64, Vec<FkRow>> =
+            std::collections::BTreeMap::new();
+        for (id, fk_row) in rows {
+            let (seq, ref_table, from_col, to_col) = fk_row;
+            if !grouped.contains_key(&id) {
+                order.push(id);
+            }
+            grouped.entry(id).or_default().push((seq, ref_table, from_col, to_col));
+        }
+
+        let mut fks = Vec::with_capacity(order.len());
+        for id in order {
+            let mut group = grouped.remove(&id).unwrap_or_default();
+            group.sort_by_key(|(seq, _, _, _)| *seq);
+            let ref_table = group
+                .first()
+                .map(|(_, t, _, _)| t.clone())
+                .unwrap_or_default();
+            let mut columns = Vec::with_capacity(group.len());
+            let mut referenced_columns = Vec::with_capacity(group.len());
+            for (_, _, from_col, to_col) in group {
+                columns.push(from_col);
+                // SQLite returns NULL for the referenced column when the FK
+                // references the parent table's PRIMARY KEY implicitly. Skip
+                // such partial FK rows rather than fabricating a name —
+                // callers needing the resolved PK can use primary_key_columns
+                // on the referenced table.
+                if let Some(name) = to_col {
+                    referenced_columns.push(name);
+                }
+            }
+            // Skip implicit-PK FKs: they would surface as columns.len() !=
+            // referenced_columns.len(), which would mislead callers into
+            // pairing the wrong columns.
+            if columns.len() != referenced_columns.len() {
+                continue;
+            }
+            fks.push(SqlForeignKeySchema {
+                // SQLite PRAGMA foreign_key_list does not surface a
+                // CONSTRAINT name; pandas/SQLAlchemy report None there too.
+                constraint_name: None,
+                columns,
+                referenced_table: ref_table,
+                referenced_columns,
+            });
+        }
+        Ok(fks)
     }
 }
 
@@ -4984,6 +5109,25 @@ pub fn list_sql_indexes<C: SqlConnection>(
     schema: Option<&str>,
 ) -> Result<Vec<SqlIndexSchema>, IoError> {
     conn.list_indexes(table_name, schema)
+}
+
+/// List foreign-key constraints declared on a SQL table, optionally
+/// schema-scoped.
+///
+/// Matches `SQLAlchemy.Inspector.get_foreign_keys()` shape. Returns
+/// an empty vector when the table has no FKs or the backend can't
+/// introspect. Composite FKs are returned as a single entry with
+/// paired `columns` / `referenced_columns` ordered by declaration
+/// position. SQLite does not expose constraint names via PRAGMA, so
+/// `constraint_name` is `None` there.
+///
+/// Per br-frankenpandas-uht8 (fd90.29).
+pub fn list_sql_foreign_keys<C: SqlConnection>(
+    conn: &C,
+    table_name: &str,
+    schema: Option<&str>,
+) -> Result<Vec<SqlForeignKeySchema>, IoError> {
+    conn.list_foreign_keys(table_name, schema)
 }
 
 /// Maximum identifier length supported by the SQL backend, or `None`
@@ -7814,9 +7958,9 @@ mod tests {
     // ── SQL I/O tests ──────────────────────────────────────────────
 
     use super::{
-        SqlColumnSchema, SqlIfExists, SqlIndexSchema, SqlInsertMethod, SqlQueryResult,
-        SqlReadOptions, SqlTableSchema, SqlWriteOptions, list_sql_indexes, list_sql_schemas,
-        list_sql_tables, read_sql,
+        SqlColumnSchema, SqlForeignKeySchema, SqlIfExists, SqlIndexSchema, SqlInsertMethod,
+        SqlQueryResult, SqlReadOptions, SqlTableSchema, SqlWriteOptions, list_sql_foreign_keys,
+        list_sql_indexes, list_sql_schemas, list_sql_tables, read_sql,
         read_sql_chunks, read_sql_chunks_with_index_col, read_sql_chunks_with_options,
         read_sql_chunks_with_options_and_index_col, read_sql_query, read_sql_query_chunks,
         read_sql_query_chunks_with_index_col, read_sql_query_chunks_with_options,
@@ -13636,5 +13780,215 @@ mod tests {
         assert!(indexes.iter().any(|i| i.unique && i.name == "uq_events_uid"));
         // Wrong schema → empty (override scopes by Some).
         assert!(list_sql_indexes(&conn, "events", Some("audit")).unwrap().is_empty());
+    }
+
+    // ── list_sql_foreign_keys / SqlConnection::list_foreign_keys
+    //    (br-uht8 / fd90.29) ────────────────────────────────────────────────
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn list_sql_foreign_keys_unknown_table_returns_empty() {
+        let conn = make_sql_test_conn();
+        let fks = list_sql_foreign_keys(&conn, "no_such_tbl", None).unwrap();
+        assert!(fks.is_empty());
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn list_sql_foreign_keys_table_without_fk() {
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE TABLE plain (a INTEGER, b TEXT);",
+        )
+        .unwrap();
+        let fks = list_sql_foreign_keys(&conn, "plain", None).unwrap();
+        assert!(fks.is_empty());
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn list_sql_foreign_keys_single_column_fk() {
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE TABLE parent (id INTEGER PRIMARY KEY, label TEXT);",
+        )
+        .unwrap();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE TABLE child (cid INTEGER, parent_id INTEGER, \
+             FOREIGN KEY (parent_id) REFERENCES parent(id));",
+        )
+        .unwrap();
+        let fks = list_sql_foreign_keys(&conn, "child", None).unwrap();
+        assert_eq!(fks.len(), 1);
+        assert_eq!(fks[0].columns, vec!["parent_id"]);
+        assert_eq!(fks[0].referenced_table, "parent");
+        assert_eq!(fks[0].referenced_columns, vec!["id"]);
+        // SQLite PRAGMA does not surface constraint names.
+        assert!(fks[0].constraint_name.is_none());
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn list_sql_foreign_keys_composite_fk_ordered_by_seq() {
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE TABLE rolling ( \
+                year INTEGER NOT NULL, \
+                month INTEGER NOT NULL, \
+                code TEXT NOT NULL, \
+                PRIMARY KEY (year, month, code) \
+             );",
+        )
+        .unwrap();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE TABLE rolling_fact ( \
+                fact_id INTEGER, year INTEGER, month INTEGER, code TEXT, \
+                FOREIGN KEY (year, month, code) \
+                  REFERENCES rolling(year, month, code) \
+             );",
+        )
+        .unwrap();
+        let fks = list_sql_foreign_keys(&conn, "rolling_fact", None).unwrap();
+        assert_eq!(fks.len(), 1);
+        // Pairs preserved in declaration order (seq=0,1,2).
+        assert_eq!(fks[0].columns, vec!["year", "month", "code"]);
+        assert_eq!(fks[0].referenced_columns, vec!["year", "month", "code"]);
+        assert_eq!(fks[0].referenced_table, "rolling");
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn list_sql_foreign_keys_multiple_fks_on_one_table() {
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE TABLE users (id INTEGER PRIMARY KEY);",
+        )
+        .unwrap();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE TABLE products (sku TEXT PRIMARY KEY);",
+        )
+        .unwrap();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE TABLE orders ( \
+                oid INTEGER, \
+                user_id INTEGER, \
+                product_sku TEXT, \
+                FOREIGN KEY (user_id) REFERENCES users(id), \
+                FOREIGN KEY (product_sku) REFERENCES products(sku) \
+             );",
+        )
+        .unwrap();
+        let fks = list_sql_foreign_keys(&conn, "orders", None).unwrap();
+        assert_eq!(fks.len(), 2);
+        let user_fk = fks.iter().find(|f| f.referenced_table == "users").unwrap();
+        assert_eq!(user_fk.columns, vec!["user_id"]);
+        assert_eq!(user_fk.referenced_columns, vec!["id"]);
+        let prod_fk = fks.iter().find(|f| f.referenced_table == "products").unwrap();
+        assert_eq!(prod_fk.columns, vec!["product_sku"]);
+        assert_eq!(prod_fk.referenced_columns, vec!["sku"]);
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn list_sql_foreign_keys_rejects_invalid_table_name() {
+        let conn = make_sql_test_conn();
+        let err = list_sql_foreign_keys(&conn, "x; DROP TABLE users", None)
+            .expect_err("must reject invalid identifier");
+        assert!(matches!(err, IoError::Sql(msg) if msg.contains("invalid")));
+    }
+
+    #[test]
+    fn list_sql_foreign_keys_default_impl_returns_empty() {
+        struct NoIntrospection;
+        impl super::SqlConnection for NoIntrospection {
+            fn query(&self, _q: &str, _p: &[Scalar]) -> Result<SqlQueryResult, IoError> {
+                Ok(SqlQueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                })
+            }
+            fn execute_batch(&self, _sql: &str) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn table_exists(&self, _name: &str) -> Result<bool, IoError> {
+                Ok(false)
+            }
+            fn insert_rows(&self, _sql: &str, _rows: &[Vec<Scalar>]) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn dtype_sql(&self, _dtype: DType) -> &'static str {
+                "TEXT"
+            }
+            fn index_dtype_sql(&self, _index: &Index) -> &'static str {
+                "TEXT"
+            }
+        }
+        assert!(
+            list_sql_foreign_keys(&NoIntrospection, "anything", None)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn list_sql_foreign_keys_routes_to_backend_override() {
+        struct MultiSchemaFk;
+        impl super::SqlConnection for MultiSchemaFk {
+            fn query(&self, _q: &str, _p: &[Scalar]) -> Result<SqlQueryResult, IoError> {
+                Ok(SqlQueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                })
+            }
+            fn execute_batch(&self, _sql: &str) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn table_exists(&self, _name: &str) -> Result<bool, IoError> {
+                Ok(false)
+            }
+            fn insert_rows(&self, _sql: &str, _rows: &[Vec<Scalar>]) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn dtype_sql(&self, _dtype: DType) -> &'static str {
+                "TEXT"
+            }
+            fn index_dtype_sql(&self, _index: &Index) -> &'static str {
+                "TEXT"
+            }
+            fn supports_schemas(&self) -> bool {
+                true
+            }
+            fn list_foreign_keys(
+                &self,
+                table: &str,
+                schema: Option<&str>,
+            ) -> Result<Vec<SqlForeignKeySchema>, IoError> {
+                if table == "orders" && schema == Some("sales") {
+                    Ok(vec![SqlForeignKeySchema {
+                        constraint_name: Some("orders_user_fk".to_owned()),
+                        columns: vec!["user_id".to_owned()],
+                        referenced_table: "users".to_owned(),
+                        referenced_columns: vec!["id".to_owned()],
+                    }])
+                } else {
+                    Ok(vec![])
+                }
+            }
+        }
+        let conn = MultiSchemaFk;
+        let fks = list_sql_foreign_keys(&conn, "orders", Some("sales")).unwrap();
+        assert_eq!(fks.len(), 1);
+        assert_eq!(fks[0].constraint_name.as_deref(), Some("orders_user_fk"));
+        assert_eq!(fks[0].referenced_table, "users");
+        // Wrong schema → empty (override scopes by Some).
+        assert!(list_sql_foreign_keys(&conn, "orders", Some("audit")).unwrap().is_empty());
     }
 }
