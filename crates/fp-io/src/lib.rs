@@ -3431,6 +3431,22 @@ pub struct SqlWriteOptions {
     ///
     /// Per br-frankenpandas-i0ml (fd90.19).
     pub method: SqlInsertMethod,
+    /// Maximum rows per transaction-bounded INSERT chunk.
+    ///
+    /// Matches `pd.DataFrame.to_sql(.., chunksize=...)`. When `Some(n)`,
+    /// the row emit loop batches into chunks of `n` rows, each routed
+    /// through its own `insert_rows` call (which on transactional
+    /// backends commits a fresh transaction per chunk). This caps WAL /
+    /// journal size for huge frames where the default `Single`
+    /// single-transaction mode would balloon. For `Multi` mode the
+    /// effective per-chunk row count is `min(chunksize,
+    /// max_param_count / num_cols)`. `None` preserves existing
+    /// single-transaction semantics.
+    ///
+    /// `Some(0)` is rejected — pandas raises ValueError there too.
+    ///
+    /// Per br-frankenpandas-ls9z (fd90.33).
+    pub chunksize: Option<usize>,
 }
 
 /// Backend-agnostic in-memory representation of a SQL query result.
@@ -5523,6 +5539,7 @@ pub fn write_sql<C: SqlConnection>(
             schema: None,
             dtype: None,
             method: SqlInsertMethod::Single,
+            chunksize: None,
         },
     )
 }
@@ -5641,16 +5658,35 @@ pub fn write_sql_with_options<C: SqlConnection>(
         return Ok(());
     }
 
+    // Per fd90.33: pandas-style chunksize. None preserves prior
+    // single-transaction semantics; Some(0) is rejected (matches pandas).
+    if let Some(0) = options.chunksize {
+        return Err(IoError::Sql(
+            "invalid chunksize: 0 (must be > 0 if Some)".to_owned(),
+        ));
+    }
+
     match options.method {
         SqlInsertMethod::Single => {
             let insert_sql =
                 sql_insert_rows_query_in_schema(conn, table_name, schema, &sql_col_names)?;
-            conn.insert_rows(&insert_sql, &rows)?;
+            match options.chunksize {
+                None => {
+                    conn.insert_rows(&insert_sql, &rows)?;
+                }
+                Some(n) => {
+                    for chunk in rows.chunks(n) {
+                        conn.insert_rows(&insert_sql, chunk)?;
+                    }
+                }
+            }
         }
         SqlInsertMethod::Multi => {
             // Per fd90.19: chunk rows to fit `max_param_count`. When the
             // backend reports None, send the whole frame in one statement.
-            let chunk_rows = match conn.max_param_count() {
+            // Per fd90.33: when chunksize is also Some(n), the effective
+            // chunk row count is min(n, max_param_count / num_cols).
+            let param_chunk = match conn.max_param_count() {
                 Some(max) if ncols > 0 => {
                     let per_chunk = max / ncols;
                     if per_chunk == 0 {
@@ -5662,6 +5698,10 @@ pub fn write_sql_with_options<C: SqlConnection>(
                 }
                 _ => rows.len(),
             };
+            let chunk_rows = options
+                .chunksize
+                .map(|cs| cs.min(param_chunk))
+                .unwrap_or(param_chunk);
             for chunk in rows.chunks(chunk_rows) {
                 let chunk_sql = sql_multi_row_insert_query_in_schema(
                     conn,
@@ -8731,6 +8771,7 @@ mod tests {
             schema: None,
             dtype: None,
             method: SqlInsertMethod::Single,
+            chunksize: None,
             },
         )
         .expect("write with named index");
@@ -8762,6 +8803,7 @@ mod tests {
             schema: None,
             dtype: None,
             method: SqlInsertMethod::Single,
+            chunksize: None,
             },
         )
         .expect("write with unnamed index");
@@ -8799,6 +8841,7 @@ mod tests {
             schema: None,
             dtype: None,
             method: SqlInsertMethod::Single,
+            chunksize: None,
             },
         )
         .expect("write with custom index label");
@@ -8843,6 +8886,7 @@ mod tests {
             schema: None,
             dtype: None,
             method: SqlInsertMethod::Single,
+            chunksize: None,
             },
         )
         .expect("write without index");
@@ -11705,6 +11749,7 @@ mod tests {
                 schema: Some("ignored_on_sqlite".to_owned()),
                 dtype: None,
                 method: SqlInsertMethod::Single,
+                chunksize: None,
             },
         )
         .expect("write with schema=Some on SQLite");
@@ -11858,6 +11903,7 @@ mod tests {
                 schema: Some("ignored_on_sqlite".to_owned()),
                 dtype: None,
                 method: SqlInsertMethod::Single,
+                chunksize: None,
             },
         )
         .expect("replace + schema=Some on SQLite");
@@ -11991,6 +12037,7 @@ mod tests {
                 schema: Some("ignored_on_sqlite".to_owned()),
                 dtype: None,
                 method: SqlInsertMethod::Single,
+                chunksize: None,
             },
         )
         .expect_err("Fail branch must still reject pre-existing");
@@ -12024,6 +12071,7 @@ mod tests {
                 schema: None,
                 dtype: Some(overrides),
                 method: SqlInsertMethod::Single,
+                chunksize: None,
             },
         )
         .expect("write with dtype override");
@@ -12069,6 +12117,7 @@ mod tests {
                 schema: None,
                 dtype: Some(overrides),
                 method: SqlInsertMethod::Single,
+                chunksize: None,
             },
         )
         .expect("write with multi-column overrides");
@@ -12109,6 +12158,7 @@ mod tests {
                 schema: None,
                 dtype: Some(overrides),
                 method: SqlInsertMethod::Single,
+                chunksize: None,
             },
         )
         .expect("write with override on missing col");
@@ -12147,6 +12197,7 @@ mod tests {
                 schema: None,
                 dtype: None,
                 method: SqlInsertMethod::Single,
+                chunksize: None,
             },
         )
         .expect("write without override");
@@ -12211,6 +12262,7 @@ mod tests {
                 schema: None,
                 dtype: None,
                 method: SqlInsertMethod::Single,
+                chunksize: None,
             },
         )
         .unwrap();
@@ -12228,6 +12280,7 @@ mod tests {
                 schema: None,
                 dtype: None,
                 method: SqlInsertMethod::Multi,
+                chunksize: None,
             },
         )
         .unwrap();
@@ -12395,6 +12448,7 @@ mod tests {
                 schema: None,
                 dtype: None,
                 method: SqlInsertMethod::Multi,
+                chunksize: None,
             },
         )
         .unwrap();
@@ -12464,6 +12518,7 @@ mod tests {
                 schema: None,
                 dtype: None,
                 method: SqlInsertMethod::Multi,
+                chunksize: None,
             },
         )
         .unwrap();
@@ -12516,6 +12571,7 @@ mod tests {
                 schema: None,
                 dtype: None,
                 method: SqlInsertMethod::Multi,
+                chunksize: None,
             },
         )
         .unwrap();
@@ -13603,6 +13659,7 @@ mod tests {
                 schema: None,
                 dtype: None,
                 method: SqlInsertMethod::Single,
+                chunksize: None,
             },
         )
         .expect("SQLite has no identifier limit");
@@ -13666,6 +13723,7 @@ mod tests {
                 schema: None,
                 dtype: None,
                 method: SqlInsertMethod::Single,
+                chunksize: None,
             },
         )
         .expect_err("64-char column must exceed PG limit");
@@ -13694,6 +13752,7 @@ mod tests {
                 schema: None,
                 dtype: None,
                 method: SqlInsertMethod::Single,
+                chunksize: None,
             },
         )
         .expect_err("64-char table must exceed PG limit");
@@ -13720,6 +13779,7 @@ mod tests {
                 schema: None,
                 dtype: None,
                 method: SqlInsertMethod::Single,
+                chunksize: None,
             },
         )
         .expect_err("64-char index label must exceed PG limit");
@@ -13748,6 +13808,7 @@ mod tests {
                 schema: Some(long_schema),
                 dtype: None,
                 method: SqlInsertMethod::Single,
+                chunksize: None,
             },
         )
         .expect_err("64-char schema must exceed PG limit");
@@ -13777,6 +13838,7 @@ mod tests {
                 schema: None,
                 dtype: None,
                 method: SqlInsertMethod::Single,
+                chunksize: None,
             },
         )
         .expect("63-char column at boundary should be accepted");
@@ -14673,5 +14735,365 @@ mod tests {
         let err = sql_table_comment(&conn, "anything", None)
             .expect_err("backend error must surface");
         assert!(matches!(err, IoError::Sql(msg) if msg.contains("permission denied")));
+    }
+
+    // ── SqlWriteOptions::chunksize (br-ls9z / fd90.33) ────────────────────
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn write_sql_chunksize_zero_rejected() {
+        let conn = make_sql_test_conn();
+        let frame = fp_frame::DataFrame::from_dict(
+            &["x"],
+            vec![("x", vec![Scalar::Int64(1)])],
+        )
+        .unwrap();
+        let err = write_sql_with_options(
+            &frame,
+            &conn,
+            "t",
+            &SqlWriteOptions {
+                if_exists: SqlIfExists::Fail,
+                index: false,
+                index_label: None,
+                schema: None,
+                dtype: None,
+                method: SqlInsertMethod::Single,
+                chunksize: Some(0),
+            },
+        )
+        .expect_err("chunksize=0 must be rejected");
+        assert!(matches!(err, IoError::Sql(msg) if msg.contains("chunksize")));
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn write_sql_chunksize_none_preserves_single_transaction_semantics() {
+        // 5 rows, chunksize=None — should round-trip cleanly into one
+        // transaction (same as before fd90.33 landed).
+        let conn = make_sql_test_conn();
+        let frame = fp_frame::DataFrame::from_dict(
+            &["id"],
+            vec![(
+                "id",
+                vec![
+                    Scalar::Int64(1),
+                    Scalar::Int64(2),
+                    Scalar::Int64(3),
+                    Scalar::Int64(4),
+                    Scalar::Int64(5),
+                ],
+            )],
+        )
+        .unwrap();
+        write_sql_with_options(
+            &frame,
+            &conn,
+            "no_chunk",
+            &SqlWriteOptions {
+                if_exists: SqlIfExists::Fail,
+                index: false,
+                index_label: None,
+                schema: None,
+                dtype: None,
+                method: SqlInsertMethod::Single,
+                chunksize: None,
+            },
+        )
+        .unwrap();
+        let count =
+            super::SqlConnection::query(&conn, "SELECT COUNT(*) FROM no_chunk", &[]).unwrap();
+        assert_eq!(count.rows[0][0], Scalar::Int64(5));
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn write_sql_single_chunksize_round_trips_all_rows() {
+        // 5 rows with chunksize=2: chunks of (2, 2, 1). All rows must
+        // round-trip and the table must contain every row regardless
+        // of how the chunks committed.
+        let conn = make_sql_test_conn();
+        let frame = fp_frame::DataFrame::from_dict(
+            &["id"],
+            vec![(
+                "id",
+                vec![
+                    Scalar::Int64(1),
+                    Scalar::Int64(2),
+                    Scalar::Int64(3),
+                    Scalar::Int64(4),
+                    Scalar::Int64(5),
+                ],
+            )],
+        )
+        .unwrap();
+        write_sql_with_options(
+            &frame,
+            &conn,
+            "chunked",
+            &SqlWriteOptions {
+                if_exists: SqlIfExists::Fail,
+                index: false,
+                index_label: None,
+                schema: None,
+                dtype: None,
+                method: SqlInsertMethod::Single,
+                chunksize: Some(2),
+            },
+        )
+        .unwrap();
+        let result =
+            super::SqlConnection::query(&conn, "SELECT id FROM chunked ORDER BY id", &[]).unwrap();
+        let ids: Vec<i64> = result
+            .rows
+            .iter()
+            .map(|r| match &r[0] {
+                Scalar::Int64(v) => *v,
+                other => unreachable!("unexpected scalar: {other:?}"),
+            })
+            .collect();
+        assert_eq!(ids, vec![1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn write_sql_single_chunksize_dispatches_correct_chunk_counts() {
+        // Recording stub verifies the chunk boundaries.
+        use std::cell::RefCell;
+        struct Recorder {
+            row_counts: RefCell<Vec<usize>>,
+        }
+        impl super::SqlConnection for Recorder {
+            fn query(&self, _q: &str, _p: &[Scalar]) -> Result<SqlQueryResult, IoError> {
+                Ok(SqlQueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                })
+            }
+            fn execute_batch(&self, _sql: &str) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn table_exists(&self, _name: &str) -> Result<bool, IoError> {
+                Ok(false)
+            }
+            fn insert_rows(&self, _sql: &str, rows: &[Vec<Scalar>]) -> Result<(), IoError> {
+                self.row_counts.borrow_mut().push(rows.len());
+                Ok(())
+            }
+            fn dtype_sql(&self, _dtype: DType) -> &'static str {
+                "TEXT"
+            }
+            fn index_dtype_sql(&self, _index: &Index) -> &'static str {
+                "TEXT"
+            }
+        }
+        let conn = Recorder {
+            row_counts: RefCell::new(vec![]),
+        };
+        let frame = fp_frame::DataFrame::from_dict(
+            &["x"],
+            vec![(
+                "x",
+                vec![
+                    Scalar::Int64(1),
+                    Scalar::Int64(2),
+                    Scalar::Int64(3),
+                    Scalar::Int64(4),
+                    Scalar::Int64(5),
+                ],
+            )],
+        )
+        .unwrap();
+        write_sql_with_options(
+            &frame,
+            &conn,
+            "chunked",
+            &SqlWriteOptions {
+                if_exists: SqlIfExists::Fail,
+                index: false,
+                index_label: None,
+                schema: None,
+                dtype: None,
+                method: SqlInsertMethod::Single,
+                chunksize: Some(2),
+            },
+        )
+        .unwrap();
+        // Single mode: each chunk submits a slice of rows to insert_rows.
+        // chunks of size 2, 2, 1 → 3 calls with row counts [2, 2, 1].
+        assert_eq!(*conn.row_counts.borrow(), vec![2usize, 2, 1]);
+    }
+
+    #[test]
+    fn write_sql_multi_chunksize_takes_min_with_param_cap() {
+        // Multi mode with max_param_count=10, ncols=2 → param chunk = 5
+        // rows. chunksize=3 should win (min(3, 5) = 3).
+        // Multi mode flattens each chunk to a single insert_rows call
+        // where rows[0].len() = chunk_size * ncols.
+        use std::cell::RefCell;
+        struct ParamCapRecorder {
+            row_counts: RefCell<Vec<usize>>,
+        }
+        impl super::SqlConnection for ParamCapRecorder {
+            fn query(&self, _q: &str, _p: &[Scalar]) -> Result<SqlQueryResult, IoError> {
+                Ok(SqlQueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                })
+            }
+            fn execute_batch(&self, _sql: &str) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn table_exists(&self, _name: &str) -> Result<bool, IoError> {
+                Ok(false)
+            }
+            fn insert_rows(&self, _sql: &str, rows: &[Vec<Scalar>]) -> Result<(), IoError> {
+                // Multi mode passes a single flattened "row" per chunk.
+                self.row_counts
+                    .borrow_mut()
+                    .push(rows.first().map_or(0, std::vec::Vec::len));
+                Ok(())
+            }
+            fn dtype_sql(&self, _dtype: DType) -> &'static str {
+                "TEXT"
+            }
+            fn index_dtype_sql(&self, _index: &Index) -> &'static str {
+                "TEXT"
+            }
+            fn max_param_count(&self) -> Option<usize> {
+                Some(10)
+            }
+        }
+        let conn = ParamCapRecorder {
+            row_counts: RefCell::new(vec![]),
+        };
+        let frame = fp_frame::DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                (
+                    "a",
+                    vec![
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                        Scalar::Int64(3),
+                        Scalar::Int64(4),
+                        Scalar::Int64(5),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Int64(10),
+                        Scalar::Int64(20),
+                        Scalar::Int64(30),
+                        Scalar::Int64(40),
+                        Scalar::Int64(50),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        write_sql_with_options(
+            &frame,
+            &conn,
+            "chunked",
+            &SqlWriteOptions {
+                if_exists: SqlIfExists::Fail,
+                index: false,
+                index_label: None,
+                schema: None,
+                dtype: None,
+                method: SqlInsertMethod::Multi,
+                chunksize: Some(3),
+            },
+        )
+        .unwrap();
+        // chunksize=3 wins over param cap (5). 5 rows / 3 per chunk = 2
+        // chunks (3, 2). Flat scalars per chunk: 3*2=6 then 2*2=4.
+        assert_eq!(*conn.row_counts.borrow(), vec![6usize, 4]);
+    }
+
+    #[test]
+    fn write_sql_multi_chunksize_param_cap_wins_when_smaller() {
+        // Param cap = 4 (ncols=2 → 2 rows/chunk). chunksize=10 (loose).
+        // Effective chunk = min(10, 2) = 2.
+        use std::cell::RefCell;
+        struct TightCap {
+            row_counts: RefCell<Vec<usize>>,
+        }
+        impl super::SqlConnection for TightCap {
+            fn query(&self, _q: &str, _p: &[Scalar]) -> Result<SqlQueryResult, IoError> {
+                Ok(SqlQueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                })
+            }
+            fn execute_batch(&self, _sql: &str) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn table_exists(&self, _name: &str) -> Result<bool, IoError> {
+                Ok(false)
+            }
+            fn insert_rows(&self, _sql: &str, rows: &[Vec<Scalar>]) -> Result<(), IoError> {
+                self.row_counts
+                    .borrow_mut()
+                    .push(rows.first().map_or(0, std::vec::Vec::len));
+                Ok(())
+            }
+            fn dtype_sql(&self, _dtype: DType) -> &'static str {
+                "TEXT"
+            }
+            fn index_dtype_sql(&self, _index: &Index) -> &'static str {
+                "TEXT"
+            }
+            fn max_param_count(&self) -> Option<usize> {
+                Some(4)
+            }
+        }
+        let conn = TightCap {
+            row_counts: RefCell::new(vec![]),
+        };
+        let frame = fp_frame::DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                (
+                    "a",
+                    vec![
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                        Scalar::Int64(3),
+                        Scalar::Int64(4),
+                        Scalar::Int64(5),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Int64(10),
+                        Scalar::Int64(20),
+                        Scalar::Int64(30),
+                        Scalar::Int64(40),
+                        Scalar::Int64(50),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        write_sql_with_options(
+            &frame,
+            &conn,
+            "chunked",
+            &SqlWriteOptions {
+                if_exists: SqlIfExists::Fail,
+                index: false,
+                index_label: None,
+                schema: None,
+                dtype: None,
+                method: SqlInsertMethod::Multi,
+                chunksize: Some(10),
+            },
+        )
+        .unwrap();
+        // 5 rows / 2 per chunk = 3 chunks (2, 2, 1). Flat scalars: 4, 4, 2.
+        assert_eq!(*conn.row_counts.borrow(), vec![4usize, 4, 2]);
     }
 }
