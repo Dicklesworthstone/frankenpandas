@@ -81,6 +81,7 @@ pub use fp_io::{
     sql_max_identifier_length,
     sql_primary_key_columns,
     sql_server_version,
+    sql_table_comment,
     sql_table_schema,
     truncate_sql_table,
     read_csv,

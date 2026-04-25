@@ -3835,6 +3835,25 @@ pub trait SqlConnection {
         Ok(Vec::new())
     }
 
+    /// Probe the table-level comment, optionally schema-scoped.
+    ///
+    /// Per br-frankenpandas-yu3w (fd90.32). Default impl returns
+    /// `Ok(None)` — SQLite has no native table-comment storage so it
+    /// inherits the default. PostgreSQL impls should override using
+    /// `pg_catalog.obj_description(...)` or
+    /// `pg_catalog.pg_class.relkind` joined to `pg_description`;
+    /// MySQL uses `information_schema.tables.table_comment`; MSSQL
+    /// reads from `sys.extended_properties`. Aligns with
+    /// `SQLAlchemy.Inspector.get_table_comment()` shape (returns
+    /// `{'text': comment_or_none}`).
+    fn table_comment(
+        &self,
+        _table_name: &str,
+        _schema: Option<&str>,
+    ) -> Result<Option<String>, IoError> {
+        Ok(None)
+    }
+
     /// List foreign-key constraints declared on a table, optionally
     /// schema-scoped.
     ///
@@ -5277,6 +5296,24 @@ pub fn list_sql_foreign_keys<C: SqlConnection>(
     schema: Option<&str>,
 ) -> Result<Vec<SqlForeignKeySchema>, IoError> {
     conn.list_foreign_keys(table_name, schema)
+}
+
+/// Probe the table-level comment for a SQL table, optionally
+/// schema-scoped.
+///
+/// Matches `SQLAlchemy.Inspector.get_table_comment()` shape — returns
+/// `Ok(Some(text))` when a comment exists, `Ok(None)` otherwise.
+/// SQLite has no native table-comment storage and returns `None`.
+/// PostgreSQL/MySQL/MSSQL impls override with their respective
+/// catalog queries.
+///
+/// Per br-frankenpandas-yu3w (fd90.32).
+pub fn sql_table_comment<C: SqlConnection>(
+    conn: &C,
+    table_name: &str,
+    schema: Option<&str>,
+) -> Result<Option<String>, IoError> {
+    conn.table_comment(table_name, schema)
 }
 
 /// List UNIQUE constraints declared on a SQL table.
@@ -8139,8 +8176,8 @@ mod tests {
         read_sql_table_columns_with_index_col, read_sql_table_with_index_col,
         read_sql_table_with_options, read_sql_table_with_options_and_index_col,
         read_sql_with_index_col, read_sql_with_options, sql_max_identifier_length,
-        sql_primary_key_columns, sql_server_version, sql_table_schema, truncate_sql_table,
-        write_sql, write_sql_with_options,
+        sql_primary_key_columns, sql_server_version, sql_table_comment, sql_table_schema,
+        truncate_sql_table, write_sql, write_sql_with_options,
     };
 
     fn make_sql_test_conn() -> rusqlite::Connection {
@@ -14497,5 +14534,144 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    // ── sql_table_comment / SqlConnection::table_comment (br-yu3w / fd90.32) ─
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn sql_table_comment_returns_none_on_sqlite() {
+        // SQLite has no native table-comment storage; the trait default
+        // returns None even for a real table.
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(&conn, "CREATE TABLE t (x INTEGER);").unwrap();
+        let comment = sql_table_comment(&conn, "t", None).unwrap();
+        assert!(comment.is_none());
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn sql_table_comment_returns_none_on_sqlite_for_unknown_table() {
+        let conn = make_sql_test_conn();
+        let comment = sql_table_comment(&conn, "no_such", None).unwrap();
+        assert!(comment.is_none());
+    }
+
+    #[test]
+    fn sql_table_comment_default_impl_returns_none() {
+        struct NoIntrospection;
+        impl super::SqlConnection for NoIntrospection {
+            fn query(&self, _q: &str, _p: &[Scalar]) -> Result<SqlQueryResult, IoError> {
+                Ok(SqlQueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                })
+            }
+            fn execute_batch(&self, _sql: &str) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn table_exists(&self, _name: &str) -> Result<bool, IoError> {
+                Ok(false)
+            }
+            fn insert_rows(&self, _sql: &str, _rows: &[Vec<Scalar>]) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn dtype_sql(&self, _dtype: DType) -> &'static str {
+                "TEXT"
+            }
+            fn index_dtype_sql(&self, _index: &Index) -> &'static str {
+                "TEXT"
+            }
+        }
+        let conn = NoIntrospection;
+        assert!(sql_table_comment(&conn, "anything", None).unwrap().is_none());
+    }
+
+    #[test]
+    fn sql_table_comment_routes_to_backend_override() {
+        struct PgLikeStub;
+        impl super::SqlConnection for PgLikeStub {
+            fn query(&self, _q: &str, _p: &[Scalar]) -> Result<SqlQueryResult, IoError> {
+                Ok(SqlQueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                })
+            }
+            fn execute_batch(&self, _sql: &str) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn table_exists(&self, _name: &str) -> Result<bool, IoError> {
+                Ok(false)
+            }
+            fn insert_rows(&self, _sql: &str, _rows: &[Vec<Scalar>]) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn dtype_sql(&self, _dtype: DType) -> &'static str {
+                "TEXT"
+            }
+            fn index_dtype_sql(&self, _index: &Index) -> &'static str {
+                "TEXT"
+            }
+            fn supports_schemas(&self) -> bool {
+                true
+            }
+            fn table_comment(
+                &self,
+                table: &str,
+                schema: Option<&str>,
+            ) -> Result<Option<String>, IoError> {
+                if table == "users" && schema == Some("public") {
+                    Ok(Some("Customer accounts table".to_owned()))
+                } else {
+                    Ok(None)
+                }
+            }
+        }
+        let conn = PgLikeStub;
+        assert_eq!(
+            sql_table_comment(&conn, "users", Some("public")).unwrap().as_deref(),
+            Some("Customer accounts table")
+        );
+        assert!(sql_table_comment(&conn, "users", Some("audit")).unwrap().is_none());
+        assert!(sql_table_comment(&conn, "missing", Some("public")).unwrap().is_none());
+    }
+
+    #[test]
+    fn sql_table_comment_propagates_backend_error() {
+        struct BrokenIntrospection;
+        impl super::SqlConnection for BrokenIntrospection {
+            fn query(&self, _q: &str, _p: &[Scalar]) -> Result<SqlQueryResult, IoError> {
+                Ok(SqlQueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                })
+            }
+            fn execute_batch(&self, _sql: &str) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn table_exists(&self, _name: &str) -> Result<bool, IoError> {
+                Ok(false)
+            }
+            fn insert_rows(&self, _sql: &str, _rows: &[Vec<Scalar>]) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn dtype_sql(&self, _dtype: DType) -> &'static str {
+                "TEXT"
+            }
+            fn index_dtype_sql(&self, _index: &Index) -> &'static str {
+                "TEXT"
+            }
+            fn table_comment(
+                &self,
+                _table: &str,
+                _schema: Option<&str>,
+            ) -> Result<Option<String>, IoError> {
+                Err(IoError::Sql("permission denied for pg_description".to_owned()))
+            }
+        }
+        let conn = BrokenIntrospection;
+        let err = sql_table_comment(&conn, "anything", None)
+            .expect_err("backend error must surface");
+        assert!(matches!(err, IoError::Sql(msg) if msg.contains("permission denied")));
     }
 }
