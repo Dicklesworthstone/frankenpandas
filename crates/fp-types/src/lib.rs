@@ -825,6 +825,80 @@ impl Timestamp {
         }
         self.nanos == other.nanos && self.tz == other.tz
     }
+
+    // ── Rounding to a Timedelta unit (br-frankenpandas-5h6n) ────────────
+    //
+    // Pure i64 arithmetic on the nanos axis. tz is preserved. Phase 3
+    // chrono_tz integration will add a tz-aware variant that handles DST
+    // boundaries correctly; these methods operate on the absolute time
+    // axis, matching pandas's tz-naive `.floor` / `.ceil` / `.round`
+    // semantics for unit values smaller than a day.
+
+    /// Round down to the nearest multiple of `unit_nanos`.
+    ///
+    /// Matches `pd.Timestamp(...).floor(unit)`. NaT in `self` or a
+    /// non-positive `unit_nanos` returns NaT.
+    #[must_use]
+    pub fn floor_to(&self, unit_nanos: i64) -> Self {
+        if self.is_nat() || unit_nanos <= 0 {
+            return Self::nat();
+        }
+        Self {
+            nanos: self.nanos.div_euclid(unit_nanos) * unit_nanos,
+            tz: self.tz.clone(),
+        }
+    }
+
+    /// Round up to the nearest multiple of `unit_nanos`.
+    ///
+    /// Matches `pd.Timestamp(...).ceil(unit)`. NaT or non-positive
+    /// `unit_nanos` returns NaT. Already-multiple inputs return self.
+    #[must_use]
+    pub fn ceil_to(&self, unit_nanos: i64) -> Self {
+        if self.is_nat() || unit_nanos <= 0 {
+            return Self::nat();
+        }
+        let rem = self.nanos.rem_euclid(unit_nanos);
+        let nanos = if rem == 0 {
+            self.nanos
+        } else {
+            self.nanos.saturating_add(unit_nanos - rem)
+        };
+        Self {
+            nanos,
+            tz: self.tz.clone(),
+        }
+    }
+
+    /// Round to the nearest multiple of `unit_nanos`, banker's rounding
+    /// (half-to-even) on ties.
+    ///
+    /// Matches `pd.Timestamp(...).round(unit)`. NaT or non-positive
+    /// `unit_nanos` returns NaT.
+    #[must_use]
+    pub fn round_to(&self, unit_nanos: i64) -> Self {
+        if self.is_nat() || unit_nanos <= 0 {
+            return Self::nat();
+        }
+        let floor = self.nanos.div_euclid(unit_nanos);
+        let rem = self.nanos.rem_euclid(unit_nanos);
+        let half = unit_nanos / 2;
+        let chosen_floor = if rem < half {
+            floor
+        } else if rem > half {
+            floor + 1
+        } else if unit_nanos % 2 != 0 {
+            // Odd unit can't have a true half; treat as round-up.
+            floor + 1
+        } else {
+            // Tie: pick the even multiple.
+            if floor % 2 == 0 { floor } else { floor + 1 }
+        };
+        Self {
+            nanos: chosen_floor.saturating_mul(unit_nanos),
+            tz: self.tz.clone(),
+        }
+    }
 }
 
 impl std::fmt::Display for Timestamp {
@@ -3102,5 +3176,115 @@ mod tests {
     fn timestamp_is_send_and_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<Timestamp>();
+    }
+
+    // ── Timestamp rounding tests (br-frankenpandas-5h6n) ────────────────
+
+    #[test]
+    fn timestamp_floor_to_rounds_down() {
+        // 12:34:56 → floor by 1H → 12:00:00
+        let h = Timedelta::NANOS_PER_HOUR;
+        let twelve_h = h * 12;
+        let twelve_thirty_four = twelve_h + Timedelta::NANOS_PER_MIN * 34 + Timedelta::NANOS_PER_SEC * 56;
+        let ts = Timestamp::from_nanos(twelve_thirty_four);
+        let floored = ts.floor_to(h);
+        assert_eq!(floored.nanos, twelve_h);
+    }
+
+    #[test]
+    fn timestamp_floor_to_handles_already_aligned() {
+        // 12:00:00 floored by 1H → 12:00:00 (no change).
+        let h = Timedelta::NANOS_PER_HOUR;
+        let twelve_h = h * 12;
+        let ts = Timestamp::from_nanos(twelve_h);
+        assert_eq!(ts.floor_to(h).nanos, twelve_h);
+    }
+
+    #[test]
+    fn timestamp_floor_to_handles_negative_nanos() {
+        // -100 ns floored by 60 ns:
+        //   div_euclid(-100, 60) = -2 (since -2*60=-120, rem=20 ≥ 0).
+        //   result = -2 * 60 = -120.
+        let ts = Timestamp::from_nanos(-100);
+        assert_eq!(ts.floor_to(60).nanos, -120);
+    }
+
+    #[test]
+    fn timestamp_ceil_to_rounds_up() {
+        // 12:34:56 → ceil by 1H → 13:00:00.
+        let h = Timedelta::NANOS_PER_HOUR;
+        let twelve_h = h * 12;
+        let thirteen_h = h * 13;
+        let twelve_thirty_four = twelve_h + Timedelta::NANOS_PER_MIN * 34 + Timedelta::NANOS_PER_SEC * 56;
+        let ts = Timestamp::from_nanos(twelve_thirty_four);
+        assert_eq!(ts.ceil_to(h).nanos, thirteen_h);
+    }
+
+    #[test]
+    fn timestamp_ceil_to_no_op_on_aligned() {
+        let h = Timedelta::NANOS_PER_HOUR;
+        let twelve_h = h * 12;
+        let ts = Timestamp::from_nanos(twelve_h);
+        assert_eq!(ts.ceil_to(h).nanos, twelve_h);
+    }
+
+    #[test]
+    fn timestamp_round_to_rounds_to_nearest() {
+        // 12:30:01 (one second past the half-hour): round to 1H → 13:00:00.
+        let h = Timedelta::NANOS_PER_HOUR;
+        let twelve_h = h * 12;
+        let twelve_thirty_one_sec = twelve_h + Timedelta::NANOS_PER_MIN * 30 + Timedelta::NANOS_PER_SEC;
+        let ts = Timestamp::from_nanos(twelve_thirty_one_sec);
+        assert_eq!(ts.round_to(h).nanos, h * 13);
+
+        // 12:29:59 (one second before half): round to 1H → 12:00:00.
+        let twelve_twenty_nine_sec = twelve_h + Timedelta::NANOS_PER_MIN * 29 + Timedelta::NANOS_PER_SEC * 59;
+        let ts = Timestamp::from_nanos(twelve_twenty_nine_sec);
+        assert_eq!(ts.round_to(h).nanos, twelve_h);
+    }
+
+    #[test]
+    fn timestamp_round_to_bankers_tie_to_even() {
+        // Tie cases: rem == unit/2 exactly. Pick even-multiple floor.
+        // unit=10, so half=5. nanos=5: floor=0 (even), so → 0.
+        // nanos=15: floor=1 (odd), so → 20.
+        // nanos=25: floor=2 (even), so → 20.
+        // nanos=35: floor=3 (odd), so → 40.
+        assert_eq!(Timestamp::from_nanos(5).round_to(10).nanos, 0);
+        assert_eq!(Timestamp::from_nanos(15).round_to(10).nanos, 20);
+        assert_eq!(Timestamp::from_nanos(25).round_to(10).nanos, 20);
+        assert_eq!(Timestamp::from_nanos(35).round_to(10).nanos, 40);
+    }
+
+    #[test]
+    fn timestamp_round_to_zero_unit_returns_nat() {
+        let ts = Timestamp::from_nanos(100);
+        assert!(ts.round_to(0).is_nat());
+        assert!(ts.floor_to(0).is_nat());
+        assert!(ts.ceil_to(0).is_nat());
+    }
+
+    #[test]
+    fn timestamp_round_to_negative_unit_returns_nat() {
+        let ts = Timestamp::from_nanos(100);
+        assert!(ts.round_to(-10).is_nat());
+        assert!(ts.floor_to(-10).is_nat());
+        assert!(ts.ceil_to(-10).is_nat());
+    }
+
+    #[test]
+    fn timestamp_rounding_propagates_nat() {
+        let nat = Timestamp::nat();
+        assert!(nat.floor_to(60).is_nat());
+        assert!(nat.ceil_to(60).is_nat());
+        assert!(nat.round_to(60).is_nat());
+    }
+
+    #[test]
+    fn timestamp_rounding_preserves_tz() {
+        let ts = Timestamp::from_nanos_tz(100, "US/Eastern");
+        assert_eq!(ts.floor_to(60).tz.as_deref(), Some("US/Eastern"));
+        assert_eq!(ts.ceil_to(60).tz.as_deref(), Some("US/Eastern"));
+        assert_eq!(ts.round_to(60).tz.as_deref(), Some("US/Eastern"));
     }
 }
