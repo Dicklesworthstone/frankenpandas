@@ -4669,6 +4669,11 @@ fn resolve_sql_index_label(
     Ok(Some(label))
 }
 
+// Per br-frankenpandas-ld8h (fd90.45): these helpers are only called
+// from the rusqlite SqlConnection impl, which is gated behind
+// `feature = "sql-sqlite"`. Mirroring the gate here keeps
+// --no-default-features builds clean of dead-code warnings.
+#[cfg(feature = "sql-sqlite")]
 fn escape_sql_ident(name: &str) -> Result<String, IoError> {
     if name.contains('\0') {
         return Err(IoError::Sql("invalid SQL identifier: NUL byte".to_owned()));
@@ -4676,6 +4681,7 @@ fn escape_sql_ident(name: &str) -> Result<String, IoError> {
     Ok(name.replace('"', "\"\""))
 }
 
+#[cfg(feature = "sql-sqlite")]
 fn quote_sql_ident(name: &str) -> Result<String, IoError> {
     Ok(format!("\"{}\"", escape_sql_ident(name)?))
 }
