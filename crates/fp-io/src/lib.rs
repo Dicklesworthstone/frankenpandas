@@ -4004,19 +4004,13 @@ pub trait SqlConnection {
         table_name: &str,
         schema: Option<&str>,
     ) -> Result<Vec<String>, IoError> {
+        // Per fd90.47: defer to the shared primary_keys_from_schema
+        // helper so the filter+sort logic lives in exactly one place
+        // (the helper is also used by SqlInspector::reflect_table).
         let Some(meta) = self.table_schema(table_name, schema)? else {
             return Ok(Vec::new());
         };
-        let mut pk: Vec<(usize, String)> = meta
-            .columns
-            .iter()
-            .filter_map(|c| {
-                c.primary_key_ordinal
-                    .map(|ord| (ord, c.name.clone()))
-            })
-            .collect();
-        pk.sort_by_key(|(ord, _)| *ord);
-        Ok(pk.into_iter().map(|(_, name)| name).collect())
+        Ok(primary_keys_from_schema(&meta))
     }
 
     /// Reset a table to empty without dropping its definition.
@@ -5767,11 +5761,11 @@ impl<'a, C: SqlConnection> SqlInspector<'a, C> {
 /// Derive the primary-key column names from an already-fetched
 /// `SqlTableSchema`, sorted ascending by `primary_key_ordinal`.
 ///
-/// Per br-frankenpandas-2kzv (fd90.43). This mirrors the default
-/// `SqlConnection::primary_key_columns` impl but operates on
-/// already-fetched metadata so callers that already have a
-/// `SqlTableSchema` (such as `SqlInspector::reflect_table`) avoid a
-/// redundant `table_schema()` round-trip.
+/// Per br-frankenpandas-2kzv (fd90.43) / fd90.47: this is the
+/// canonical filter+sort impl shared by both
+/// `SqlConnection::primary_key_columns` (the trait default) and
+/// `SqlInspector::reflect_table` (which uses already-fetched
+/// metadata to avoid a redundant `table_schema()` round-trip).
 fn primary_keys_from_schema(meta: &SqlTableSchema) -> Vec<String> {
     let mut pk: Vec<(usize, String)> = meta
         .columns
