@@ -15914,6 +15914,25 @@ fn build_series_with_optional_categorical(
 
 fn build_series_for_dtype_check(fixture: &PacketFixture) -> Result<Series, String> {
     let left = require_left_series(fixture)?;
+    if fixture.expected_dtype.as_deref() == Some("Sparse") {
+        let dtype_spec = fixture
+            .constructor_dtype
+            .as_deref()
+            .ok_or_else(|| "constructor_dtype required for sparse series_dtype_check".to_owned())?;
+        let value_dtype = parse_constructor_dtype_spec(dtype_spec)?;
+        let fill_value = fixture
+            .fill_value
+            .clone()
+            .unwrap_or_else(|| Scalar::missing_for_dtype(value_dtype));
+        return Series::from_sparse_dense(
+            left.name.clone(),
+            left.index.clone(),
+            left.values.clone(),
+            value_dtype,
+            fill_value,
+        )
+        .map_err(|err| err.to_string());
+    }
     build_series_with_optional_categorical(fixture, left)
 }
 

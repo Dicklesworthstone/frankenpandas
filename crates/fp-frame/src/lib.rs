@@ -17,7 +17,7 @@ use fp_index::{
     format_datetime_ns, validate_alignment_plan,
 };
 use fp_runtime::{DecisionAction, EvidenceLedger, RuntimePolicy};
-use fp_types::{DType, NullKind, Scalar, Timedelta, cast_scalar_owned, common_dtype};
+use fp_types::{DType, NullKind, Scalar, SparseDType, Timedelta, cast_scalar_owned, common_dtype};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -61,6 +61,11 @@ pub struct Series {
     /// Int64 codes indexing into `categorical.categories`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     categorical: Option<CategoricalMetadata>,
+    /// Optional pandas-style sparse metadata. Until fp-columnar grows a
+    /// compressed sparse storage backend, `column` stores dense values and
+    /// this descriptor preserves the observable sparse dtype/accessor surface.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sparse: Option<SparseDType>,
 }
 
 fn normalize_iloc_position(position: i64, len: usize) -> Result<usize, FrameError> {
@@ -1033,6 +1038,7 @@ impl Series {
             index,
             column,
             categorical: None,
+            sparse: None,
         })
     }
 
@@ -1154,7 +1160,9 @@ impl Series {
     /// Matches `pd.Series.dtype`.
     #[must_use]
     pub fn dtype(&self) -> DType {
-        if self.categorical.is_some() {
+        if self.sparse.is_some() {
+            DType::Sparse
+        } else if self.categorical.is_some() {
             DType::Categorical
         } else {
             self.column.dtype()
@@ -6406,10 +6414,28 @@ impl Series {
             .map(|meta| CategoricalAccessor { series: self, meta })
     }
 
+    /// Access sparse methods on this Series.
+    ///
+    /// Matches the `pd.Series.sparse` namespace for dense-backed sparse
+    /// descriptors. Returns `None` if the Series is not sparse.
+    #[must_use]
+    pub fn sparse(&self) -> Option<SparseAccessor<'_>> {
+        self.sparse.as_ref().map(|dtype| SparseAccessor {
+            series: self,
+            dtype,
+        })
+    }
+
     /// Returns `true` if this Series has categorical metadata.
     #[must_use]
     pub fn is_categorical(&self) -> bool {
         self.categorical.is_some()
+    }
+
+    /// Returns `true` if this Series has sparse dtype metadata.
+    #[must_use]
+    pub fn is_sparse(&self) -> bool {
+        self.sparse.is_some()
     }
 
     /// Create a categorical Series from values.
@@ -6457,6 +6483,7 @@ impl Series {
                 categories,
                 ordered,
             }),
+            sparse: None,
         })
     }
 
@@ -6498,6 +6525,39 @@ impl Series {
                 categories,
                 ordered,
             }),
+            sparse: None,
+        })
+    }
+
+    /// Create a sparse Series from dense values.
+    ///
+    /// Matches the pandas `SparseDtype(value_dtype, fill_value)` contract for
+    /// the Series-level dtype/accessor surface. The current storage remains
+    /// dense; compressed sparse storage is tracked separately in fp-columnar.
+    pub fn from_sparse_dense(
+        name: impl Into<String>,
+        index_labels: Vec<IndexLabel>,
+        values: Vec<Scalar>,
+        value_dtype: DType,
+        fill_value: Scalar,
+    ) -> Result<Self, FrameError> {
+        let sparse_dtype = SparseDType::new(value_dtype, fill_value)
+            .map_err(|err| FrameError::CompatibilityRejected(err.to_string()))?;
+        let index = Index::new(index_labels);
+        let column = Column::new(sparse_dtype.value_dtype, values)?;
+        if index.len() != column.len() {
+            return Err(FrameError::LengthMismatch {
+                index_len: index.len(),
+                column_len: column.len(),
+            });
+        }
+
+        Ok(Self {
+            name: name.into(),
+            index,
+            column,
+            categorical: None,
+            sparse: Some(sparse_dtype),
         })
     }
 
@@ -9056,6 +9116,7 @@ impl CategoricalAccessor<'_> {
             index: self.series.index.clone(),
             column: self.series.column.clone(),
             categorical: None,
+            sparse: None,
         })
     }
 
@@ -9079,6 +9140,7 @@ impl CategoricalAccessor<'_> {
                 categories: new_categories,
                 ordered: self.meta.ordered,
             }),
+            sparse: None,
         })
     }
 
@@ -9096,6 +9158,7 @@ impl CategoricalAccessor<'_> {
                 categories: cats,
                 ordered: self.meta.ordered,
             }),
+            sparse: None,
         })
     }
 
@@ -9147,6 +9210,7 @@ impl CategoricalAccessor<'_> {
                 categories: new_categories,
                 ordered: self.meta.ordered,
             }),
+            sparse: None,
         })
     }
 
@@ -9189,6 +9253,7 @@ impl CategoricalAccessor<'_> {
                 categories: new_categories,
                 ordered: self.meta.ordered,
             }),
+            sparse: None,
         })
     }
 
@@ -9204,6 +9269,7 @@ impl CategoricalAccessor<'_> {
                 categories: self.meta.categories.clone(),
                 ordered: true,
             }),
+            sparse: None,
         }
     }
 
@@ -9219,6 +9285,7 @@ impl CategoricalAccessor<'_> {
                 categories: self.meta.categories.clone(),
                 ordered: false,
             }),
+            sparse: None,
         }
     }
 
@@ -9249,6 +9316,73 @@ impl CategoricalAccessor<'_> {
             self.series.index.labels().to_vec(),
             values,
         )
+    }
+}
+
+// ── SparseAccessor ──────────────────────────────────────────────────────
+
+/// Accessor for sparse operations on a Series.
+///
+/// Created by `Series::sparse()`. Provides the pandas `Series.sparse`
+/// namespace over the current dense-backed sparse dtype descriptor.
+pub struct SparseAccessor<'a> {
+    series: &'a Series,
+    dtype: &'a SparseDType,
+}
+
+impl SparseAccessor<'_> {
+    /// Return the logical sparse value dtype.
+    ///
+    /// Matches `pd.Series.sparse.dtype.subtype`.
+    #[must_use]
+    pub fn value_dtype(&self) -> DType {
+        self.dtype.value_dtype
+    }
+
+    /// Return the sparse fill value.
+    ///
+    /// Matches `pd.Series.sparse.fill_value`.
+    #[must_use]
+    pub fn fill_value(&self) -> &Scalar {
+        &self.dtype.fill_value
+    }
+
+    /// Count stored non-fill values.
+    ///
+    /// Matches the `SparseArray.sp_values` cardinality used by pandas density.
+    #[must_use]
+    pub fn npoints(&self) -> usize {
+        self.series
+            .values()
+            .iter()
+            .filter(|value| !value.semantic_eq(&self.dtype.fill_value))
+            .count()
+    }
+
+    /// Return non-fill density as `npoints / len`.
+    ///
+    /// Matches `pd.Series.sparse.density`.
+    #[must_use]
+    pub fn density(&self) -> f64 {
+        if self.series.is_empty() {
+            0.0
+        } else {
+            self.npoints() as f64 / self.series.len() as f64
+        }
+    }
+
+    /// Materialize this sparse Series as a dense Series.
+    ///
+    /// Matches `pd.Series.sparse.to_dense()`.
+    #[must_use]
+    pub fn to_dense(&self) -> Series {
+        Series {
+            name: self.series.name.clone(),
+            index: self.series.index.clone(),
+            column: self.series.column.clone(),
+            categorical: None,
+            sparse: None,
+        }
     }
 }
 
@@ -42203,6 +42337,82 @@ mod tests {
 
         assert_eq!(s.dtype(), DType::Categorical);
         assert_eq!(s.column().dtype(), DType::Int64);
+    }
+
+    #[test]
+    fn series_sparse_accessor_reports_density_and_fill_value() {
+        let s = Series::from_sparse_dense(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Int64(0),
+                Scalar::Int64(5),
+                Scalar::Int64(0),
+                Scalar::Int64(7),
+            ],
+            DType::Int64,
+            Scalar::Int64(0),
+        )
+        .unwrap();
+
+        assert!(s.is_sparse());
+        assert_eq!(s.dtype(), DType::Sparse);
+        assert_eq!(s.column().dtype(), DType::Int64);
+
+        let sparse = s.sparse().expect("sparse accessor");
+        assert_eq!(sparse.value_dtype(), DType::Int64);
+        assert_eq!(sparse.fill_value(), &Scalar::Int64(0));
+        assert_eq!(sparse.npoints(), 2);
+        assert_eq!(sparse.density(), 0.5);
+    }
+
+    #[test]
+    fn series_sparse_to_dense_drops_sparse_metadata() {
+        let s = Series::from_sparse_dense(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(0), Scalar::Int64(5), Scalar::Int64(0)],
+            DType::Int64,
+            Scalar::Int64(0),
+        )
+        .unwrap();
+
+        let dense = s.sparse().expect("sparse accessor").to_dense();
+        assert!(!dense.is_sparse());
+        assert!(dense.sparse().is_none());
+        assert_eq!(dense.dtype(), DType::Int64);
+        assert_eq!(dense.values(), s.values());
+        assert_eq!(dense.index().labels(), s.index().labels());
+    }
+
+    #[test]
+    fn series_sparse_constructor_coerces_values_and_fill_value() {
+        let s = Series::from_sparse_dense(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Int64(0),
+                Scalar::Int64(5),
+                Scalar::Null(NullKind::Null),
+            ],
+            DType::Float64,
+            Scalar::Int64(0),
+        )
+        .unwrap();
+
+        assert_eq!(s.column().dtype(), DType::Float64);
+        assert_eq!(
+            s.values(),
+            &[
+                Scalar::Float64(0.0),
+                Scalar::Float64(5.0),
+                Scalar::Null(NullKind::NaN)
+            ]
+        );
+        assert_eq!(
+            s.sparse().expect("sparse accessor").fill_value(),
+            &Scalar::Float64(0.0)
+        );
     }
 
     // ── Series.copy tests ──
