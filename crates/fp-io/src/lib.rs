@@ -3595,6 +3595,20 @@ pub trait SqlConnection {
         None
     }
 
+    /// Maximum identifier length supported by the backend, or `None`
+    /// when no documented limit exists (or the limit is irrelevant for
+    /// the deployment).
+    ///
+    /// Per br-frankenpandas-cs81 (fd90.26). Defaults to `None`. Known
+    /// caps: PostgreSQL = 63, MySQL = 64, MSSQL = 128, Oracle = 30
+    /// (pre-12.2) or 128 (12.2+), SQLite = no documented limit.
+    /// Useful for to_sql validation when emitting auto-generated
+    /// index/constraint/column names that could otherwise exceed
+    /// backend limits and produce truncated or rejected DDL.
+    fn max_identifier_length(&self) -> Option<usize> {
+        None
+    }
+
     /// Run `f` inside a transaction. The default impl runs `f` without
     /// BEGIN/COMMIT — backends that support transactions should override
     /// to wrap in their native transaction primitive (rusqlite `BEGIN`,
@@ -4830,6 +4844,19 @@ pub fn sql_primary_key_columns<C: SqlConnection>(
     schema: Option<&str>,
 ) -> Result<Vec<String>, IoError> {
     conn.primary_key_columns(table_name, schema)
+}
+
+/// Maximum identifier length supported by the SQL backend, or `None`
+/// when no documented limit exists.
+///
+/// Useful for to_sql validation: backends that override this report
+/// their cap (PostgreSQL=63, MySQL=64, MSSQL=128) so auto-generated
+/// index / constraint / column names can be truncated or rejected
+/// before round-tripping through DDL that would silently truncate.
+///
+/// Per br-frankenpandas-cs81 (fd90.26).
+pub fn sql_max_identifier_length<C: SqlConnection>(conn: &C) -> Option<usize> {
+    conn.max_identifier_length()
 }
 
 /// Read an entire SQL table into a DataFrame with read-time options.
@@ -7644,8 +7671,9 @@ mod tests {
         read_sql_table_columns_chunks, read_sql_table_columns_chunks_with_index_col,
         read_sql_table_columns_with_index_col, read_sql_table_with_index_col,
         read_sql_table_with_options, read_sql_table_with_options_and_index_col,
-        read_sql_with_index_col, read_sql_with_options, sql_primary_key_columns,
-        sql_server_version, sql_table_schema, truncate_sql_table, write_sql, write_sql_with_options,
+        read_sql_with_index_col, read_sql_with_options, sql_max_identifier_length,
+        sql_primary_key_columns, sql_server_version, sql_table_schema, truncate_sql_table,
+        write_sql, write_sql_with_options,
     };
 
     fn make_sql_test_conn() -> rusqlite::Connection {
@@ -12907,5 +12935,142 @@ mod tests {
         assert_eq!(pk, vec!["year", "month", "code"]);
         // Wrong schema → empty (table_schema returns None).
         assert!(sql_primary_key_columns(&conn, "events", Some("audit")).unwrap().is_empty());
+    }
+
+    // ── sql_max_identifier_length / SqlConnection::max_identifier_length
+    //    (br-cs81 / fd90.26) ────────────────────────────────────────────────
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn sql_max_identifier_length_returns_none_on_sqlite() {
+        // SQLite has no documented identifier-length limit; the trait
+        // default (None) is the right answer.
+        let conn = make_sql_test_conn();
+        assert_eq!(sql_max_identifier_length(&conn), None);
+    }
+
+    #[test]
+    fn sql_max_identifier_length_default_impl_returns_none() {
+        struct Generic;
+        impl super::SqlConnection for Generic {
+            fn query(&self, _q: &str, _p: &[Scalar]) -> Result<SqlQueryResult, IoError> {
+                Ok(SqlQueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                })
+            }
+            fn execute_batch(&self, _sql: &str) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn table_exists(&self, _name: &str) -> Result<bool, IoError> {
+                Ok(false)
+            }
+            fn insert_rows(&self, _sql: &str, _rows: &[Vec<Scalar>]) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn dtype_sql(&self, _dtype: DType) -> &'static str {
+                "TEXT"
+            }
+            fn index_dtype_sql(&self, _index: &Index) -> &'static str {
+                "TEXT"
+            }
+        }
+        assert_eq!(sql_max_identifier_length(&Generic), None);
+    }
+
+    #[test]
+    fn sql_max_identifier_length_pg_override_reports_63() {
+        struct PgLikeStub;
+        impl super::SqlConnection for PgLikeStub {
+            fn query(&self, _q: &str, _p: &[Scalar]) -> Result<SqlQueryResult, IoError> {
+                Ok(SqlQueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                })
+            }
+            fn execute_batch(&self, _sql: &str) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn table_exists(&self, _name: &str) -> Result<bool, IoError> {
+                Ok(false)
+            }
+            fn insert_rows(&self, _sql: &str, _rows: &[Vec<Scalar>]) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn dtype_sql(&self, _dtype: DType) -> &'static str {
+                "TEXT"
+            }
+            fn index_dtype_sql(&self, _index: &Index) -> &'static str {
+                "TEXT"
+            }
+            fn max_identifier_length(&self) -> Option<usize> {
+                Some(63)
+            }
+        }
+        assert_eq!(sql_max_identifier_length(&PgLikeStub), Some(63));
+    }
+
+    #[test]
+    fn sql_max_identifier_length_mysql_override_reports_64() {
+        struct MySqlLikeStub;
+        impl super::SqlConnection for MySqlLikeStub {
+            fn query(&self, _q: &str, _p: &[Scalar]) -> Result<SqlQueryResult, IoError> {
+                Ok(SqlQueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                })
+            }
+            fn execute_batch(&self, _sql: &str) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn table_exists(&self, _name: &str) -> Result<bool, IoError> {
+                Ok(false)
+            }
+            fn insert_rows(&self, _sql: &str, _rows: &[Vec<Scalar>]) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn dtype_sql(&self, _dtype: DType) -> &'static str {
+                "TEXT"
+            }
+            fn index_dtype_sql(&self, _index: &Index) -> &'static str {
+                "TEXT"
+            }
+            fn max_identifier_length(&self) -> Option<usize> {
+                Some(64)
+            }
+        }
+        assert_eq!(sql_max_identifier_length(&MySqlLikeStub), Some(64));
+    }
+
+    #[test]
+    fn sql_max_identifier_length_mssql_override_reports_128() {
+        struct MsSqlLikeStub;
+        impl super::SqlConnection for MsSqlLikeStub {
+            fn query(&self, _q: &str, _p: &[Scalar]) -> Result<SqlQueryResult, IoError> {
+                Ok(SqlQueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                })
+            }
+            fn execute_batch(&self, _sql: &str) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn table_exists(&self, _name: &str) -> Result<bool, IoError> {
+                Ok(false)
+            }
+            fn insert_rows(&self, _sql: &str, _rows: &[Vec<Scalar>]) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn dtype_sql(&self, _dtype: DType) -> &'static str {
+                "TEXT"
+            }
+            fn index_dtype_sql(&self, _index: &Index) -> &'static str {
+                "TEXT"
+            }
+            fn max_identifier_length(&self) -> Option<usize> {
+                Some(128)
+            }
+        }
+        assert_eq!(sql_max_identifier_length(&MsSqlLikeStub), Some(128));
     }
 }
