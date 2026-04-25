@@ -5612,6 +5612,44 @@ impl<'a, C: SqlConnection> SqlInspector<'a, C> {
     pub fn dialect_name(&self) -> &'static str {
         self.conn.dialect_name()
     }
+
+    /// Check whether a specific column exists on a table.
+    ///
+    /// Per br-frankenpandas-ppry (fd90.39). Returns `Ok(false)` when
+    /// the table doesn't exist (i.e. `columns` returns `None`), or
+    /// when the table exists but has no column matching `column_name`.
+    /// Returns `Ok(true)` only when the named column is present.
+    /// Mirrors `SQLAlchemy.Inspector.has_column()` semantics.
+    pub fn has_column(
+        &self,
+        table_name: &str,
+        column_name: &str,
+        schema: Option<&str>,
+    ) -> Result<bool, IoError> {
+        let Some(meta) = self.conn.table_schema(table_name, schema)? else {
+            return Ok(false);
+        };
+        Ok(meta.column(column_name).is_some())
+    }
+
+    /// Look up the metadata bundle for a single column.
+    ///
+    /// Per br-frankenpandas-ppry (fd90.39). Returns `Ok(None)` when the
+    /// table doesn't exist or the column isn't present. The returned
+    /// `SqlColumnSchema` carries the full set of fields populated by
+    /// the underlying `table_schema` impl (declared_type, nullable,
+    /// default_value, primary_key_ordinal, comment, autoincrement).
+    pub fn column(
+        &self,
+        table_name: &str,
+        column_name: &str,
+        schema: Option<&str>,
+    ) -> Result<Option<SqlColumnSchema>, IoError> {
+        let Some(meta) = self.conn.table_schema(table_name, schema)? else {
+            return Ok(None);
+        };
+        Ok(meta.column(column_name).cloned())
+    }
 }
 
 /// Convenience constructor for `SqlInspector`.
@@ -16247,5 +16285,147 @@ mod tests {
         );
         assert_eq!(inspector.dialect_name(), "postgresql");
         assert_eq!(inspector.max_identifier_length(), Some(63));
+    }
+
+    // ── SqlInspector::has_column / column (br-ppry / fd90.39) ─────────────
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn sql_inspector_has_column_returns_true_for_present_column() {
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE TABLE has_col_tbl (id INTEGER, name TEXT);",
+        )
+        .unwrap();
+        let inspector = SqlInspector::new(&conn);
+        assert!(inspector.has_column("has_col_tbl", "id", None).unwrap());
+        assert!(inspector.has_column("has_col_tbl", "name", None).unwrap());
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn sql_inspector_has_column_returns_false_for_missing_column() {
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE TABLE only_id (id INTEGER);",
+        )
+        .unwrap();
+        let inspector = SqlInspector::new(&conn);
+        // Table exists but no such column.
+        assert!(!inspector.has_column("only_id", "name", None).unwrap());
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn sql_inspector_has_column_returns_false_for_missing_table() {
+        let conn = make_sql_test_conn();
+        let inspector = SqlInspector::new(&conn);
+        // Table doesn't exist → has_column propagates Ok(false), not error.
+        assert!(!inspector.has_column("no_such_tbl", "any_col", None).unwrap());
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn sql_inspector_column_returns_full_metadata_for_present_column() {
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE TABLE detailed (id INTEGER PRIMARY KEY, status TEXT DEFAULT 'active');",
+        )
+        .unwrap();
+        let inspector = SqlInspector::new(&conn);
+        let id = inspector.column("detailed", "id", None).unwrap().unwrap();
+        assert_eq!(id.name, "id");
+        assert_eq!(id.declared_type.as_deref(), Some("INTEGER"));
+        assert_eq!(id.primary_key_ordinal, Some(0));
+        // INTEGER PRIMARY KEY → SQLite autoincrement (rowid alias).
+        assert!(id.autoincrement);
+
+        let status = inspector.column("detailed", "status", None).unwrap().unwrap();
+        assert_eq!(status.declared_type.as_deref(), Some("TEXT"));
+        assert!(status.nullable);
+        assert_eq!(status.default_value.as_deref(), Some("'active'"));
+        assert!(!status.autoincrement);
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn sql_inspector_column_returns_none_for_missing_column_or_table() {
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(&conn, "CREATE TABLE only_x (x INTEGER);")
+            .unwrap();
+        let inspector = SqlInspector::new(&conn);
+        // Existing table, missing column → None.
+        assert!(inspector.column("only_x", "missing", None).unwrap().is_none());
+        // Missing table → None.
+        assert!(inspector.column("no_such", "any", None).unwrap().is_none());
+    }
+
+    #[test]
+    fn sql_inspector_has_column_routes_schema_arg_to_backend() {
+        struct PgLikeColumns;
+        impl super::SqlConnection for PgLikeColumns {
+            fn query(&self, _q: &str, _p: &[Scalar]) -> Result<SqlQueryResult, IoError> {
+                Ok(SqlQueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                })
+            }
+            fn execute_batch(&self, _sql: &str) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn table_exists(&self, _name: &str) -> Result<bool, IoError> {
+                Ok(false)
+            }
+            fn insert_rows(&self, _sql: &str, _rows: &[Vec<Scalar>]) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn dtype_sql(&self, _dtype: DType) -> &'static str {
+                "TEXT"
+            }
+            fn index_dtype_sql(&self, _index: &Index) -> &'static str {
+                "TEXT"
+            }
+            fn supports_schemas(&self) -> bool {
+                true
+            }
+            fn table_schema(
+                &self,
+                table: &str,
+                schema: Option<&str>,
+            ) -> Result<Option<SqlTableSchema>, IoError> {
+                if table == "users" && schema == Some("public") {
+                    Ok(Some(SqlTableSchema {
+                        table_name: "users".to_owned(),
+                        columns: vec![SqlColumnSchema {
+                            name: "id".to_owned(),
+                            declared_type: Some("BIGINT".to_owned()),
+                            nullable: false,
+                            default_value: None,
+                            primary_key_ordinal: Some(0),
+                            comment: None,
+                            autoincrement: true,
+                        }],
+                    }))
+                } else {
+                    Ok(None)
+                }
+            }
+        }
+        let conn = PgLikeColumns;
+        let inspector = SqlInspector::new(&conn);
+        assert!(inspector.has_column("users", "id", Some("public")).unwrap());
+        assert!(!inspector.has_column("users", "id", Some("audit")).unwrap());
+        assert!(!inspector.has_column("users", "missing", Some("public")).unwrap());
+
+        let id_col = inspector
+            .column("users", "id", Some("public"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(id_col.declared_type.as_deref(), Some("BIGINT"));
+        assert!(id_col.autoincrement);
+        assert!(inspector.column("users", "id", Some("audit")).unwrap().is_none());
     }
 }
