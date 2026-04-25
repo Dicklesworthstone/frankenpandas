@@ -3713,6 +3713,37 @@ pub trait SqlConnection {
     fn list_schemas(&self) -> Result<Vec<String>, IoError> {
         Ok(Vec::new())
     }
+
+    /// Reset a table to empty without dropping its definition.
+    ///
+    /// Per br-frankenpandas-phum (fd90.23). Default impl emits
+    /// `DELETE FROM <table>` — universal SQL that every backend
+    /// supports, but slower than TRUNCATE on large tables because the
+    /// row deletes are logged in the transaction journal. PostgreSQL
+    /// and MySQL backends should override with `TRUNCATE TABLE`,
+    /// which is dramatically faster (DDL-style fast-path) and resets
+    /// auto-increment sequences. The schema arg routes through
+    /// `quote_identifier` and is silently ignored when
+    /// `supports_schemas() == false`.
+    fn truncate_table(
+        &self,
+        table_name: &str,
+        schema: Option<&str>,
+    ) -> Result<(), IoError> {
+        validate_sql_table_name(table_name)?;
+        let qualified = match schema {
+            Some(s) if self.supports_schemas() => {
+                validate_sql_table_name(s)?;
+                format!(
+                    "{}.{}",
+                    self.quote_identifier(s)?,
+                    self.quote_identifier(table_name)?
+                )
+            }
+            _ => self.quote_identifier(table_name)?,
+        };
+        self.execute_batch(&format!("DELETE FROM {qualified}"))
+    }
 }
 
 /// Map an fp-types DType to an SQLite column type declaration.
@@ -4695,6 +4726,23 @@ pub fn sql_table_schema<C: SqlConnection>(
 /// Per br-frankenpandas-lxhi (fd90.22).
 pub fn list_sql_schemas<C: SqlConnection>(conn: &C) -> Result<Vec<String>, IoError> {
     conn.list_schemas()
+}
+
+/// Reset a SQL table to empty without dropping its definition.
+///
+/// On backends that override the default (PostgreSQL, MySQL), this
+/// uses `TRUNCATE TABLE` for a DDL-style fast-path reset. On backends
+/// that inherit the default (SQLite), this emits `DELETE FROM <table>`,
+/// which is universal but slower on large tables. Schema arg is
+/// silently ignored when `supports_schemas() == false`.
+///
+/// Per br-frankenpandas-phum (fd90.23).
+pub fn truncate_sql_table<C: SqlConnection>(
+    conn: &C,
+    table_name: &str,
+    schema: Option<&str>,
+) -> Result<(), IoError> {
+    conn.truncate_table(table_name, schema)
 }
 
 /// Read an entire SQL table into a DataFrame with read-time options.
@@ -7509,8 +7557,8 @@ mod tests {
         read_sql_table_columns_chunks, read_sql_table_columns_chunks_with_index_col,
         read_sql_table_columns_with_index_col, read_sql_table_with_index_col,
         read_sql_table_with_options, read_sql_table_with_options_and_index_col,
-        read_sql_with_index_col, read_sql_with_options, sql_table_schema, write_sql,
-        write_sql_with_options,
+        read_sql_with_index_col, read_sql_with_options, sql_table_schema, truncate_sql_table,
+        write_sql, write_sql_with_options,
     };
 
     fn make_sql_test_conn() -> rusqlite::Connection {
@@ -12321,5 +12369,153 @@ mod tests {
         let conn = BrokenIntrospection;
         let err = list_sql_schemas(&conn).expect_err("should surface backend error");
         assert!(matches!(err, IoError::Sql(msg) if msg.contains("permission denied")));
+    }
+
+    // ── truncate_sql_table / SqlConnection::truncate_table (br-phum / fd90.23) ─
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn truncate_sql_table_clears_rows_but_preserves_schema() {
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE TABLE rolling (id INTEGER, val TEXT);",
+        )
+        .unwrap();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "INSERT INTO rolling VALUES (1, 'a'), (2, 'b'), (3, 'c');",
+        )
+        .unwrap();
+        // Sanity: rows present.
+        let before = super::SqlConnection::query(&conn, "SELECT COUNT(*) FROM rolling", &[])
+            .unwrap();
+        assert_eq!(before.rows[0][0], Scalar::Int64(3));
+
+        truncate_sql_table(&conn, "rolling", None).unwrap();
+
+        // Rows gone, table still there.
+        let after = super::SqlConnection::query(&conn, "SELECT COUNT(*) FROM rolling", &[])
+            .unwrap();
+        assert_eq!(after.rows[0][0], Scalar::Int64(0));
+        assert!(super::SqlConnection::table_exists(&conn, "rolling").unwrap());
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn truncate_sql_table_schema_silently_ignored_on_sqlite() {
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(&conn, "CREATE TABLE t (x INTEGER);").unwrap();
+        super::SqlConnection::execute_batch(&conn, "INSERT INTO t VALUES (1);").unwrap();
+        truncate_sql_table(&conn, "t", Some("ignored_on_sqlite"))
+            .expect("schema arg must not error on SQLite");
+        let count = super::SqlConnection::query(&conn, "SELECT COUNT(*) FROM t", &[]).unwrap();
+        assert_eq!(count.rows[0][0], Scalar::Int64(0));
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn truncate_sql_table_rejects_invalid_table_name() {
+        let conn = make_sql_test_conn();
+        let err = truncate_sql_table(&conn, "x; DROP TABLE users", None)
+            .expect_err("must reject invalid identifier");
+        assert!(matches!(err, IoError::Sql(msg) if msg.contains("invalid")));
+    }
+
+    #[test]
+    fn truncate_sql_table_routes_schema_to_quote_identifier() {
+        // Multi-schema backend stub records the SQL it receives.
+        use std::cell::RefCell;
+        struct PgLikeRecorder {
+            statements: RefCell<Vec<String>>,
+        }
+        impl super::SqlConnection for PgLikeRecorder {
+            fn query(&self, _q: &str, _p: &[Scalar]) -> Result<SqlQueryResult, IoError> {
+                Ok(SqlQueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                })
+            }
+            fn execute_batch(&self, sql: &str) -> Result<(), IoError> {
+                self.statements.borrow_mut().push(sql.to_owned());
+                Ok(())
+            }
+            fn table_exists(&self, _name: &str) -> Result<bool, IoError> {
+                Ok(false)
+            }
+            fn insert_rows(&self, _sql: &str, _rows: &[Vec<Scalar>]) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn dtype_sql(&self, _dtype: DType) -> &'static str {
+                "TEXT"
+            }
+            fn index_dtype_sql(&self, _index: &Index) -> &'static str {
+                "TEXT"
+            }
+            fn supports_schemas(&self) -> bool {
+                true
+            }
+        }
+        let conn = PgLikeRecorder {
+            statements: RefCell::new(vec![]),
+        };
+        truncate_sql_table(&conn, "events", Some("analytics")).unwrap();
+        let stmts = conn.statements.borrow();
+        assert_eq!(stmts.len(), 1);
+        // Default impl uses DELETE FROM ... and quote_identifier on
+        // both schema + table parts.
+        assert!(
+            stmts[0].contains("DELETE FROM \"analytics\".\"events\""),
+            "expected schema-qualified DELETE; got: {}",
+            stmts[0]
+        );
+    }
+
+    #[test]
+    fn truncate_sql_table_backend_override_uses_truncate_keyword() {
+        // PG/MySQL impls would override with TRUNCATE TABLE for speed.
+        // Verify the trait dispatch picks up the override.
+        use std::cell::RefCell;
+        struct FastTruncate {
+            statements: RefCell<Vec<String>>,
+        }
+        impl super::SqlConnection for FastTruncate {
+            fn query(&self, _q: &str, _p: &[Scalar]) -> Result<SqlQueryResult, IoError> {
+                Ok(SqlQueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                })
+            }
+            fn execute_batch(&self, sql: &str) -> Result<(), IoError> {
+                self.statements.borrow_mut().push(sql.to_owned());
+                Ok(())
+            }
+            fn table_exists(&self, _name: &str) -> Result<bool, IoError> {
+                Ok(false)
+            }
+            fn insert_rows(&self, _sql: &str, _rows: &[Vec<Scalar>]) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn dtype_sql(&self, _dtype: DType) -> &'static str {
+                "TEXT"
+            }
+            fn index_dtype_sql(&self, _index: &Index) -> &'static str {
+                "TEXT"
+            }
+            fn truncate_table(
+                &self,
+                table_name: &str,
+                _schema: Option<&str>,
+            ) -> Result<(), IoError> {
+                self.execute_batch(&format!("TRUNCATE TABLE \"{table_name}\""))
+            }
+        }
+        let conn = FastTruncate {
+            statements: RefCell::new(vec![]),
+        };
+        truncate_sql_table(&conn, "events", None).unwrap();
+        let stmts = conn.statements.borrow();
+        assert_eq!(stmts.len(), 1);
+        assert!(stmts[0].starts_with("TRUNCATE TABLE"), "got: {}", stmts[0]);
     }
 }

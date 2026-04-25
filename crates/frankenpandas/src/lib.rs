@@ -72,6 +72,7 @@ pub use fp_io::{
     list_sql_schemas,
     list_sql_tables,
     sql_table_schema,
+    truncate_sql_table,
     read_csv,
     read_csv_str,
     read_csv_with_options,
