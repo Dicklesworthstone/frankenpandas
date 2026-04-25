@@ -3330,6 +3330,28 @@ pub enum SqlIfExists {
     Append,
 }
 
+/// Strategy for emitting INSERT statements during `write_sql`.
+///
+/// Matches `pd.DataFrame.to_sql(.., method=...)` shape:
+/// `Single` (default) emits one `INSERT INTO t VALUES (?, ...)` per row,
+/// reusing a prepared statement under a transaction. `Multi` builds a
+/// single multi-row `INSERT INTO t VALUES (...), (...), ...` statement
+/// per chunk, where chunk size is `max_param_count() / num_cols` (or
+/// the whole frame when the backend reports no max). `Multi` typically
+/// wins on backends with high per-statement overhead (PostgreSQL,
+/// MySQL); SQLite is already fast under prepared-statement reuse so the
+/// gap there is small.
+///
+/// Per br-frankenpandas-i0ml (fd90.19).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SqlInsertMethod {
+    /// One INSERT per row, prepared once and re-bound per row.
+    #[default]
+    Single,
+    /// Multi-row INSERT, chunked by the backend's parameter limit.
+    Multi,
+}
+
 /// Options for reading SQL query results into a DataFrame.
 #[derive(Debug, Clone, Default)]
 pub struct SqlReadOptions {
@@ -3400,6 +3422,15 @@ pub struct SqlWriteOptions {
     ///
     /// Per br-frankenpandas-ev2s (fd90.18).
     pub dtype: Option<BTreeMap<String, String>>,
+    /// INSERT-emission strategy.
+    ///
+    /// Default `Single` matches pandas' default: one INSERT per row,
+    /// re-binding a prepared statement under a transaction. `Multi`
+    /// switches to multi-row VALUES batched by `conn.max_param_count()`,
+    /// matching `pd.to_sql(.., method='multi')`.
+    ///
+    /// Per br-frankenpandas-i0ml (fd90.19).
+    pub method: SqlInsertMethod,
 }
 
 /// Backend-agnostic in-memory representation of a SQL query result.
@@ -4082,6 +4113,64 @@ fn sql_insert_rows_query_in_schema<C: SqlConnection>(
     ))
 }
 
+/// Build a multi-row `INSERT INTO ... VALUES (...), (...), ...`
+/// statement, optionally schema-qualified.
+///
+/// Placeholder ordinals span 1..=`num_rows` * `column_names.len()` so
+/// PostgreSQL-style `$N` markers stay unique across the whole statement.
+/// SQLite's `?N` and the bare `?` default also work because positional
+/// binding consumes ordinals in left-to-right order.
+///
+/// Per br-frankenpandas-i0ml (fd90.19).
+fn sql_multi_row_insert_query_in_schema<C: SqlConnection>(
+    conn: &C,
+    table_name: &str,
+    schema: Option<&str>,
+    column_names: &[String],
+    num_rows: usize,
+) -> Result<String, IoError> {
+    validate_sql_table_name(table_name)?;
+    if num_rows == 0 || column_names.is_empty() {
+        return Err(IoError::Sql(
+            "multi-row insert requires at least one row and one column".to_owned(),
+        ));
+    }
+    let qualified = match schema {
+        Some(s) if conn.supports_schemas() => {
+            validate_sql_table_name(s)?;
+            format!(
+                "{}.{}",
+                conn.quote_identifier(s)?,
+                conn.quote_identifier(table_name)?
+            )
+        }
+        _ => conn.quote_identifier(table_name)?,
+    };
+    let quoted_columns = column_names
+        .iter()
+        .map(|name| conn.quote_identifier(name))
+        .collect::<Result<Vec<_>, _>>()?
+        .join(", ");
+    let cols = column_names.len();
+    let mut tuples = Vec::with_capacity(num_rows);
+    let mut next_ord = 1usize;
+    for _ in 0..num_rows {
+        let row_placeholders = (0..cols)
+            .map(|_| {
+                let marker = conn.parameter_marker(next_ord);
+                next_ord += 1;
+                marker
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        tuples.push(format!("({row_placeholders})"));
+    }
+    Ok(format!(
+        "INSERT INTO {qualified} ({quoted_columns}) VALUES {}",
+        tuples.join(", ")
+    ))
+}
+
 /// Build a `DROP TABLE IF EXISTS ...` statement, optionally
 /// schema-qualified.
 ///
@@ -4629,6 +4718,7 @@ pub fn write_sql<C: SqlConnection>(
             index_label: None,
             schema: None,
             dtype: None,
+            method: SqlInsertMethod::Single,
         },
     )
 }
@@ -4709,12 +4799,11 @@ pub fn write_sql_with_options<C: SqlConnection>(
     let create_sql = sql_create_table_query_in_schema(conn, table_name, schema, &col_defs)?;
     conn.execute_batch(&create_sql)?;
 
-    let insert_sql = sql_insert_rows_query_in_schema(conn, table_name, schema, &sql_col_names)?;
-
     let nrows = frame.index().len();
+    let ncols = sql_col_names.len();
     let mut rows = Vec::with_capacity(nrows);
     for row_idx in 0..nrows {
-        let mut row = Vec::with_capacity(sql_col_names.len());
+        let mut row = Vec::with_capacity(ncols);
         if options.index {
             row.push(scalar_from_index_label(&frame.index().labels()[row_idx]));
         }
@@ -4728,7 +4817,48 @@ pub fn write_sql_with_options<C: SqlConnection>(
         rows.push(row);
     }
 
-    conn.insert_rows(&insert_sql, &rows)?;
+    if rows.is_empty() {
+        // Empty frame: still emit CREATE TABLE (already done) but skip INSERT.
+        return Ok(());
+    }
+
+    match options.method {
+        SqlInsertMethod::Single => {
+            let insert_sql =
+                sql_insert_rows_query_in_schema(conn, table_name, schema, &sql_col_names)?;
+            conn.insert_rows(&insert_sql, &rows)?;
+        }
+        SqlInsertMethod::Multi => {
+            // Per fd90.19: chunk rows to fit `max_param_count`. When the
+            // backend reports None, send the whole frame in one statement.
+            let chunk_rows = match conn.max_param_count() {
+                Some(max) if ncols > 0 => {
+                    let per_chunk = max / ncols;
+                    if per_chunk == 0 {
+                        return Err(IoError::Sql(format!(
+                            "multi-row insert: ncols={ncols} exceeds backend max_param_count={max}"
+                        )));
+                    }
+                    per_chunk
+                }
+                _ => rows.len(),
+            };
+            for chunk in rows.chunks(chunk_rows) {
+                let chunk_sql = sql_multi_row_insert_query_in_schema(
+                    conn,
+                    table_name,
+                    schema,
+                    &sql_col_names,
+                    chunk.len(),
+                )?;
+                let mut flat = Vec::with_capacity(chunk.len() * ncols);
+                for row in chunk {
+                    flat.extend(row.iter().cloned());
+                }
+                conn.insert_rows(&chunk_sql, &[flat])?;
+            }
+        }
+    }
 
     Ok(())
 }
@@ -7212,8 +7342,8 @@ mod tests {
     // ── SQL I/O tests ──────────────────────────────────────────────
 
     use super::{
-        SqlIfExists, SqlReadOptions, SqlWriteOptions, read_sql, read_sql_chunks,
-        read_sql_chunks_with_index_col, read_sql_chunks_with_options,
+        SqlIfExists, SqlInsertMethod, SqlQueryResult, SqlReadOptions, SqlWriteOptions, read_sql,
+        read_sql_chunks, read_sql_chunks_with_index_col, read_sql_chunks_with_options,
         read_sql_chunks_with_options_and_index_col, read_sql_query, read_sql_query_chunks,
         read_sql_query_chunks_with_index_col, read_sql_query_chunks_with_options,
         read_sql_query_chunks_with_options_and_index_col, read_sql_query_with_index_col,
@@ -7776,6 +7906,7 @@ mod tests {
                 index_label: None,
             schema: None,
             dtype: None,
+            method: SqlInsertMethod::Single,
             },
         )
         .expect("write with named index");
@@ -7806,6 +7937,7 @@ mod tests {
                 index_label: None,
             schema: None,
             dtype: None,
+            method: SqlInsertMethod::Single,
             },
         )
         .expect("write with unnamed index");
@@ -7842,6 +7974,7 @@ mod tests {
                 index_label: Some("custom_id".to_string()),
             schema: None,
             dtype: None,
+            method: SqlInsertMethod::Single,
             },
         )
         .expect("write with custom index label");
@@ -7885,6 +8018,7 @@ mod tests {
                 index_label: Some("custom_id".to_string()),
             schema: None,
             dtype: None,
+            method: SqlInsertMethod::Single,
             },
         )
         .expect("write without index");
@@ -10746,6 +10880,7 @@ mod tests {
                 index_label: None,
                 schema: Some("ignored_on_sqlite".to_owned()),
                 dtype: None,
+                method: SqlInsertMethod::Single,
             },
         )
         .expect("write with schema=Some on SQLite");
@@ -10898,6 +11033,7 @@ mod tests {
                 index_label: None,
                 schema: Some("ignored_on_sqlite".to_owned()),
                 dtype: None,
+                method: SqlInsertMethod::Single,
             },
         )
         .expect("replace + schema=Some on SQLite");
@@ -11030,6 +11166,7 @@ mod tests {
                 index_label: None,
                 schema: Some("ignored_on_sqlite".to_owned()),
                 dtype: None,
+                method: SqlInsertMethod::Single,
             },
         )
         .expect_err("Fail branch must still reject pre-existing");
@@ -11062,6 +11199,7 @@ mod tests {
                 index_label: None,
                 schema: None,
                 dtype: Some(overrides),
+                method: SqlInsertMethod::Single,
             },
         )
         .expect("write with dtype override");
@@ -11106,6 +11244,7 @@ mod tests {
                 index_label: None,
                 schema: None,
                 dtype: Some(overrides),
+                method: SqlInsertMethod::Single,
             },
         )
         .expect("write with multi-column overrides");
@@ -11145,6 +11284,7 @@ mod tests {
                 index_label: None,
                 schema: None,
                 dtype: Some(overrides),
+                method: SqlInsertMethod::Single,
             },
         )
         .expect("write with override on missing col");
@@ -11182,6 +11322,7 @@ mod tests {
                 index_label: None,
                 schema: None,
                 dtype: None,
+                method: SqlInsertMethod::Single,
             },
         )
         .expect("write without override");
@@ -11197,5 +11338,376 @@ mod tests {
         };
         // INTEGER is conn.dtype_sql(DType::Int64) for rusqlite.
         assert!(create_sql.contains("INTEGER"));
+    }
+
+    // ── SqlInsertMethod::Multi (br-frankenpandas-i0ml / fd90.19) ─────────
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn write_sql_multi_round_trip_matches_single() {
+        // Same frame written via Single vs Multi must produce identical
+        // SELECT * results — the only observable difference should be
+        // the wire-format efficiency, never the stored values.
+        let frame = fp_frame::DataFrame::from_dict(
+            &["id", "name", "amount"],
+            vec![
+                (
+                    "id",
+                    vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                ),
+                (
+                    "name",
+                    vec![
+                        Scalar::Utf8("alice".into()),
+                        Scalar::Utf8("bob".into()),
+                        Scalar::Utf8("carol".into()),
+                    ],
+                ),
+                (
+                    "amount",
+                    vec![
+                        Scalar::Float64(1.5),
+                        Scalar::Float64(2.5),
+                        Scalar::Float64(3.5),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let conn_single = make_sql_test_conn();
+        write_sql_with_options(
+            &frame,
+            &conn_single,
+            "single_tbl",
+            &SqlWriteOptions {
+                if_exists: SqlIfExists::Fail,
+                index: false,
+                index_label: None,
+                schema: None,
+                dtype: None,
+                method: SqlInsertMethod::Single,
+            },
+        )
+        .unwrap();
+        let single = read_sql(&conn_single, "SELECT * FROM single_tbl ORDER BY id").unwrap();
+
+        let conn_multi = make_sql_test_conn();
+        write_sql_with_options(
+            &frame,
+            &conn_multi,
+            "multi_tbl",
+            &SqlWriteOptions {
+                if_exists: SqlIfExists::Fail,
+                index: false,
+                index_label: None,
+                schema: None,
+                dtype: None,
+                method: SqlInsertMethod::Multi,
+            },
+        )
+        .unwrap();
+        let multi = read_sql(&conn_multi, "SELECT * FROM multi_tbl ORDER BY id").unwrap();
+
+        assert_eq!(single.column_names(), multi.column_names());
+        for name in single.column_names() {
+            let s = single.column(name).unwrap().values().to_vec();
+            let m = multi.column(name).unwrap().values().to_vec();
+            assert_eq!(s, m, "column {name} diverged between Single and Multi");
+        }
+    }
+
+    #[test]
+    fn sql_multi_row_insert_query_emits_correct_placeholder_count() {
+        // 3 rows × 2 cols = 6 placeholders, ordinals 1..=6.
+        struct PgLikeStub;
+        impl super::SqlConnection for PgLikeStub {
+            fn query(&self, _q: &str, _p: &[Scalar]) -> Result<SqlQueryResult, IoError> {
+                Ok(SqlQueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                })
+            }
+            fn execute_batch(&self, _sql: &str) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn table_exists(&self, _name: &str) -> Result<bool, IoError> {
+                Ok(false)
+            }
+            fn insert_rows(&self, _sql: &str, _rows: &[Vec<Scalar>]) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn dtype_sql(&self, _dtype: DType) -> &'static str {
+                "TEXT"
+            }
+            fn index_dtype_sql(&self, _index: &Index) -> &'static str {
+                "TEXT"
+            }
+            fn parameter_marker(&self, ordinal: usize) -> String {
+                format!("${ordinal}")
+            }
+        }
+        let conn = PgLikeStub;
+        let cols = vec!["a".to_owned(), "b".to_owned()];
+        let sql =
+            super::sql_multi_row_insert_query_in_schema(&conn, "tbl", None, &cols, 3).unwrap();
+        // Expect: INSERT INTO "tbl" ("a", "b") VALUES ($1, $2), ($3, $4), ($5, $6)
+        assert!(sql.contains("VALUES ($1, $2), ($3, $4), ($5, $6)"), "got: {sql}");
+    }
+
+    #[test]
+    fn sql_multi_row_insert_query_rejects_zero_rows() {
+        struct StubConn;
+        impl super::SqlConnection for StubConn {
+            fn query(&self, _q: &str, _p: &[Scalar]) -> Result<SqlQueryResult, IoError> {
+                Ok(SqlQueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                })
+            }
+            fn execute_batch(&self, _sql: &str) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn table_exists(&self, _name: &str) -> Result<bool, IoError> {
+                Ok(false)
+            }
+            fn insert_rows(&self, _sql: &str, _rows: &[Vec<Scalar>]) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn dtype_sql(&self, _dtype: DType) -> &'static str {
+                "TEXT"
+            }
+            fn index_dtype_sql(&self, _index: &Index) -> &'static str {
+                "TEXT"
+            }
+        }
+        let conn = StubConn;
+        let cols = vec!["a".to_owned()];
+        let err = super::sql_multi_row_insert_query_in_schema(&conn, "tbl", None, &cols, 0)
+            .expect_err("zero rows must be rejected");
+        assert!(matches!(err, IoError::Sql(msg) if msg.contains("at least one row")));
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn write_sql_multi_chunks_at_max_param_boundary() {
+        // Verify the chunking logic dispatches multiple INSERT statements
+        // when num_rows * num_cols exceeds max_param_count. We override
+        // max_param_count on a recording stub to force a tiny budget.
+        use std::cell::RefCell;
+        struct ChunkRecorder {
+            statements: RefCell<Vec<String>>,
+            row_counts: RefCell<Vec<usize>>,
+        }
+        impl super::SqlConnection for ChunkRecorder {
+            fn query(&self, _q: &str, _p: &[Scalar]) -> Result<SqlQueryResult, IoError> {
+                Ok(SqlQueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                })
+            }
+            fn execute_batch(&self, _sql: &str) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn table_exists(&self, _name: &str) -> Result<bool, IoError> {
+                Ok(false)
+            }
+            fn insert_rows(&self, sql: &str, rows: &[Vec<Scalar>]) -> Result<(), IoError> {
+                self.statements.borrow_mut().push(sql.to_owned());
+                self.row_counts
+                    .borrow_mut()
+                    .push(rows.first().map_or(0, std::vec::Vec::len));
+                Ok(())
+            }
+            fn dtype_sql(&self, _dtype: DType) -> &'static str {
+                "TEXT"
+            }
+            fn index_dtype_sql(&self, _index: &Index) -> &'static str {
+                "TEXT"
+            }
+            fn max_param_count(&self) -> Option<usize> {
+                // 4 params total, ncols=2 → 2 rows per chunk.
+                Some(4)
+            }
+        }
+        let conn = ChunkRecorder {
+            statements: RefCell::new(vec![]),
+            row_counts: RefCell::new(vec![]),
+        };
+        let frame = fp_frame::DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                (
+                    "a",
+                    vec![
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                        Scalar::Int64(3),
+                        Scalar::Int64(4),
+                        Scalar::Int64(5),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Int64(10),
+                        Scalar::Int64(20),
+                        Scalar::Int64(30),
+                        Scalar::Int64(40),
+                        Scalar::Int64(50),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        write_sql_with_options(
+            &frame,
+            &conn,
+            "chunked",
+            &SqlWriteOptions {
+                if_exists: SqlIfExists::Fail,
+                index: false,
+                index_label: None,
+                schema: None,
+                dtype: None,
+                method: SqlInsertMethod::Multi,
+            },
+        )
+        .unwrap();
+        // 5 rows / 2 per chunk = 3 chunks (2, 2, 1).
+        let stmts = conn.statements.borrow();
+        let counts = conn.row_counts.borrow();
+        assert_eq!(stmts.len(), 3, "expected 3 chunked INSERTs");
+        // Flat row payloads: 2 rows * 2 cols = 4 scalars, 4, then 1 row * 2 = 2.
+        assert_eq!(counts.as_slice(), &[4, 4, 2]);
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn write_sql_multi_no_max_param_sends_single_statement() {
+        // When the backend reports max_param_count() == None, the whole
+        // frame should ship in a single multi-row INSERT.
+        use std::cell::RefCell;
+        struct UnboundedStub {
+            statements: RefCell<Vec<String>>,
+        }
+        impl super::SqlConnection for UnboundedStub {
+            fn query(&self, _q: &str, _p: &[Scalar]) -> Result<SqlQueryResult, IoError> {
+                Ok(SqlQueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                })
+            }
+            fn execute_batch(&self, _sql: &str) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn table_exists(&self, _name: &str) -> Result<bool, IoError> {
+                Ok(false)
+            }
+            fn insert_rows(&self, sql: &str, _rows: &[Vec<Scalar>]) -> Result<(), IoError> {
+                self.statements.borrow_mut().push(sql.to_owned());
+                Ok(())
+            }
+            fn dtype_sql(&self, _dtype: DType) -> &'static str {
+                "TEXT"
+            }
+            fn index_dtype_sql(&self, _index: &Index) -> &'static str {
+                "TEXT"
+            }
+            fn max_param_count(&self) -> Option<usize> {
+                None
+            }
+        }
+        let conn = UnboundedStub {
+            statements: RefCell::new(vec![]),
+        };
+        let frame = fp_frame::DataFrame::from_dict(
+            &["x"],
+            vec![(
+                "x",
+                vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            )],
+        )
+        .unwrap();
+        write_sql_with_options(
+            &frame,
+            &conn,
+            "uncapped",
+            &SqlWriteOptions {
+                if_exists: SqlIfExists::Fail,
+                index: false,
+                index_label: None,
+                schema: None,
+                dtype: None,
+                method: SqlInsertMethod::Multi,
+            },
+        )
+        .unwrap();
+        let stmts = conn.statements.borrow();
+        assert_eq!(stmts.len(), 1, "expected exactly one multi-row INSERT");
+        // 3 tuples → 2 commas separating tuples in VALUES (...), (...), (...).
+        let stmt = &stmts[0];
+        assert_eq!(
+            stmt.matches("(?)").count(),
+            3,
+            "expected 3 row tuples in: {stmt}"
+        );
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn write_sql_multi_preserves_nulls() {
+        // NaT/Null values must round-trip through the multi-row path.
+        let frame = fp_frame::DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                (
+                    "a",
+                    vec![
+                        Scalar::Int64(1),
+                        Scalar::Null(NullKind::Null),
+                        Scalar::Int64(3),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Utf8("x".into()),
+                        Scalar::Utf8("y".into()),
+                        Scalar::Null(NullKind::Null),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let conn = make_sql_test_conn();
+        write_sql_with_options(
+            &frame,
+            &conn,
+            "nulls_tbl",
+            &SqlWriteOptions {
+                if_exists: SqlIfExists::Fail,
+                index: false,
+                index_label: None,
+                schema: None,
+                dtype: None,
+                method: SqlInsertMethod::Multi,
+            },
+        )
+        .unwrap();
+        let back = read_sql(&conn, "SELECT a, b FROM nulls_tbl ORDER BY rowid").unwrap();
+        let a = back.column("a").unwrap().values();
+        let b = back.column("b").unwrap().values();
+        assert_eq!(a[0], Scalar::Int64(1));
+        assert!(matches!(a[1], Scalar::Null(_)));
+        assert_eq!(a[2], Scalar::Int64(3));
+        assert_eq!(b[0], Scalar::Utf8("x".into()));
+        assert_eq!(b[1], Scalar::Utf8("y".into()));
+        assert!(matches!(b[2], Scalar::Null(_)));
+    }
+
+    #[test]
+    fn sql_insert_method_default_is_single() {
+        assert_eq!(SqlInsertMethod::default(), SqlInsertMethod::Single);
     }
 }
