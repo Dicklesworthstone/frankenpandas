@@ -3772,6 +3772,20 @@ pub trait SqlConnection {
         Ok(None)
     }
 
+    /// List user-visible view names, optionally scoped to `schema`.
+    ///
+    /// Per br-frankenpandas-gm3r (fd90.30). Default impl returns an
+    /// empty vector. rusqlite override queries `sqlite_master WHERE
+    /// type='view'`, excluding internal `sqlite_*` views. Multi-schema
+    /// backends override with `information_schema.views` filtered by
+    /// the schema arg. Schema is silently ignored when
+    /// `supports_schemas() == false`. Companion to `list_tables` —
+    /// pandas/SQLAlchemy keep tables and views in distinct buckets so
+    /// `pd.read_sql_table` can distinguish them.
+    fn list_views(&self, _schema: Option<&str>) -> Result<Vec<String>, IoError> {
+        Ok(Vec::new())
+    }
+
     /// List indexes defined on a table, optionally schema-scoped.
     ///
     /// Per br-frankenpandas-bgv9 (fd90.28). Default impl returns
@@ -4101,6 +4115,24 @@ impl SqlConnection for rusqlite::Connection {
             .map_err(|e| IoError::Sql(format!("list_tables query failed: {e}")))?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| IoError::Sql(format!("list_tables row read failed: {e}")))?;
+        Ok(names)
+    }
+
+    fn list_views(&self, _schema: Option<&str>) -> Result<Vec<String>, IoError> {
+        // Same single-namespace policy as list_tables; type='view'
+        // distinguishes the two buckets in sqlite_master.
+        let mut stmt = self
+            .prepare(
+                "SELECT name FROM sqlite_master \
+                 WHERE type='view' AND name NOT LIKE 'sqlite_%' \
+                 ORDER BY name",
+            )
+            .map_err(|e| IoError::Sql(format!("list_views prepare failed: {e}")))?;
+        let names = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| IoError::Sql(format!("list_views query failed: {e}")))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| IoError::Sql(format!("list_views row read failed: {e}")))?;
         Ok(names)
     }
 
@@ -5109,6 +5141,21 @@ pub fn list_sql_indexes<C: SqlConnection>(
     schema: Option<&str>,
 ) -> Result<Vec<SqlIndexSchema>, IoError> {
     conn.list_indexes(table_name, schema)
+}
+
+/// List user-visible view names known to the SQL backend.
+///
+/// Matches `SQLAlchemy.Inspector.get_view_names()` shape. Companion
+/// to `list_sql_tables` — pandas/SQLAlchemy keep tables and views in
+/// distinct buckets so `pd.read_sql_table` can distinguish them.
+/// Schema arg is silently ignored when `supports_schemas() == false`.
+///
+/// Per br-frankenpandas-gm3r (fd90.30).
+pub fn list_sql_views<C: SqlConnection>(
+    conn: &C,
+    schema: Option<&str>,
+) -> Result<Vec<String>, IoError> {
+    conn.list_views(schema)
 }
 
 /// List foreign-key constraints declared on a SQL table, optionally
@@ -7960,7 +8007,7 @@ mod tests {
     use super::{
         SqlColumnSchema, SqlForeignKeySchema, SqlIfExists, SqlIndexSchema, SqlInsertMethod,
         SqlQueryResult, SqlReadOptions, SqlTableSchema, SqlWriteOptions, list_sql_foreign_keys,
-        list_sql_indexes, list_sql_schemas, list_sql_tables, read_sql,
+        list_sql_indexes, list_sql_schemas, list_sql_tables, list_sql_views, read_sql,
         read_sql_chunks, read_sql_chunks_with_index_col, read_sql_chunks_with_options,
         read_sql_chunks_with_options_and_index_col, read_sql_query, read_sql_query_chunks,
         read_sql_query_chunks_with_index_col, read_sql_query_chunks_with_options,
@@ -13990,5 +14037,151 @@ mod tests {
         assert_eq!(fks[0].referenced_table, "users");
         // Wrong schema → empty (override scopes by Some).
         assert!(list_sql_foreign_keys(&conn, "orders", Some("audit")).unwrap().is_empty());
+    }
+
+    // ── list_sql_views / SqlConnection::list_views (br-gm3r / fd90.30) ────
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn list_sql_views_empty_db_returns_empty() {
+        let conn = make_sql_test_conn();
+        let views = list_sql_views(&conn, None).unwrap();
+        assert!(views.is_empty());
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn list_sql_views_returns_user_views_sorted() {
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(&conn, "CREATE TABLE base (id INTEGER, val TEXT);")
+            .unwrap();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE VIEW zebra_view AS SELECT id FROM base;",
+        )
+        .unwrap();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE VIEW alpha_view AS SELECT val FROM base;",
+        )
+        .unwrap();
+        let views = list_sql_views(&conn, None).unwrap();
+        assert_eq!(views, vec!["alpha_view", "zebra_view"]);
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn list_sql_views_separated_from_list_tables() {
+        // list_views must NOT surface tables; list_tables must NOT surface
+        // views. The two buckets are disjoint per SQLAlchemy.Inspector.
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(&conn, "CREATE TABLE just_tbl (x INTEGER);").unwrap();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE VIEW just_view AS SELECT x FROM just_tbl;",
+        )
+        .unwrap();
+
+        let tables = list_sql_tables(&conn, None).unwrap();
+        let views = list_sql_views(&conn, None).unwrap();
+        assert_eq!(tables, vec!["just_tbl"]);
+        assert_eq!(views, vec!["just_view"]);
+        assert!(!tables.contains(&"just_view".to_owned()));
+        assert!(!views.contains(&"just_tbl".to_owned()));
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn list_sql_views_schema_silently_ignored_on_sqlite() {
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(&conn, "CREATE TABLE t (x INTEGER);").unwrap();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE VIEW v AS SELECT x FROM t;",
+        )
+        .unwrap();
+        let with_schema =
+            list_sql_views(&conn, Some("ignored_on_sqlite")).expect("schema arg must not error");
+        let without_schema = list_sql_views(&conn, None).unwrap();
+        assert_eq!(with_schema, without_schema);
+    }
+
+    #[test]
+    fn list_sql_views_default_impl_returns_empty() {
+        struct NoIntrospection;
+        impl super::SqlConnection for NoIntrospection {
+            fn query(&self, _q: &str, _p: &[Scalar]) -> Result<SqlQueryResult, IoError> {
+                Ok(SqlQueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                })
+            }
+            fn execute_batch(&self, _sql: &str) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn table_exists(&self, _name: &str) -> Result<bool, IoError> {
+                Ok(false)
+            }
+            fn insert_rows(&self, _sql: &str, _rows: &[Vec<Scalar>]) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn dtype_sql(&self, _dtype: DType) -> &'static str {
+                "TEXT"
+            }
+            fn index_dtype_sql(&self, _index: &Index) -> &'static str {
+                "TEXT"
+            }
+        }
+        let conn = NoIntrospection;
+        assert!(list_sql_views(&conn, None).unwrap().is_empty());
+        assert!(list_sql_views(&conn, Some("any")).unwrap().is_empty());
+    }
+
+    #[test]
+    fn list_sql_views_routes_schema_to_backend_override() {
+        struct MultiSchemaViews;
+        impl super::SqlConnection for MultiSchemaViews {
+            fn query(&self, _q: &str, _p: &[Scalar]) -> Result<SqlQueryResult, IoError> {
+                Ok(SqlQueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                })
+            }
+            fn execute_batch(&self, _sql: &str) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn table_exists(&self, _name: &str) -> Result<bool, IoError> {
+                Ok(false)
+            }
+            fn insert_rows(&self, _sql: &str, _rows: &[Vec<Scalar>]) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn dtype_sql(&self, _dtype: DType) -> &'static str {
+                "TEXT"
+            }
+            fn index_dtype_sql(&self, _index: &Index) -> &'static str {
+                "TEXT"
+            }
+            fn supports_schemas(&self) -> bool {
+                true
+            }
+            fn list_views(&self, schema: Option<&str>) -> Result<Vec<String>, IoError> {
+                Ok(match schema {
+                    Some("reporting") => vec!["daily".to_owned(), "weekly".to_owned()],
+                    Some("audit") => vec!["log_view".to_owned()],
+                    _ => vec![],
+                })
+            }
+        }
+        let conn = MultiSchemaViews;
+        assert_eq!(
+            list_sql_views(&conn, Some("reporting")).unwrap(),
+            vec!["daily", "weekly"]
+        );
+        assert_eq!(
+            list_sql_views(&conn, Some("audit")).unwrap(),
+            vec!["log_view"]
+        );
+        assert!(list_sql_views(&conn, None).unwrap().is_empty());
     }
 }

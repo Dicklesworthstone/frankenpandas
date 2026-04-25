@@ -75,6 +75,7 @@ pub use fp_io::{
     list_sql_indexes,
     list_sql_schemas,
     list_sql_tables,
+    list_sql_views,
     sql_max_identifier_length,
     sql_primary_key_columns,
     sql_server_version,
