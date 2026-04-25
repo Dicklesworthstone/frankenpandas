@@ -3405,6 +3405,22 @@ pub struct SqlReadOptions {
     ///
     /// Per br-frankenpandas-d3e9 (fd90.34).
     pub columns: Option<Vec<String>>,
+    /// Optional column name to promote to the DataFrame index.
+    ///
+    /// Matches `pd.read_sql(.., index_col=...)` and
+    /// `pd.read_sql_table(table, con, index_col=...)`. When
+    /// `Some(name)`, after row materialization the named column is
+    /// removed from the result and used as the DataFrame index. The
+    /// column must exist in the read result (or in the projection
+    /// when `columns` is also set). `None` preserves the default
+    /// RangeIndex.
+    ///
+    /// Empty string is rejected with `IoError::Sql` to match
+    /// pandas' ValueError. List-of-strings (for MultiIndex) is out
+    /// of scope for this slice — single index only.
+    ///
+    /// Per br-frankenpandas-c1h9 (fd90.36).
+    pub index_col: Option<String>,
 }
 
 /// Options for writing a DataFrame to SQL.
@@ -4899,7 +4915,25 @@ pub fn read_sql_with_options<C: SqlConnection>(
     options: &SqlReadOptions,
 ) -> Result<DataFrame, IoError> {
     let (headers, columns) = sql_query_to_columns(conn, query, options)?;
-    dataframe_from_sql_columns(headers, columns)
+    let frame = dataframe_from_sql_columns(headers, columns)?;
+    apply_sql_index_col(frame, options.index_col.as_deref())
+}
+
+/// Per br-frankenpandas-c1h9 (fd90.36): promote `options.index_col`
+/// to the DataFrame index when set, with empty-string rejection.
+fn apply_sql_index_col(
+    frame: DataFrame,
+    index_col: Option<&str>,
+) -> Result<DataFrame, IoError> {
+    let Some(name) = index_col else {
+        return Ok(frame);
+    };
+    if name.is_empty() {
+        return Err(IoError::Sql(
+            "index_col: empty string is not a valid column name".to_owned(),
+        ));
+    }
+    promote_column_to_index(&frame, name)
 }
 
 /// Read the result of a SQL query into a DataFrame.
@@ -5453,11 +5487,18 @@ pub fn read_sql_table_with_options_and_index_col<C: SqlConnection>(
     options: &SqlReadOptions,
     index_col: Option<&str>,
 ) -> Result<DataFrame, IoError> {
-    let frame = read_sql_table_with_options(conn, table_name, options)?;
-    let Some(col_name) = index_col else {
-        return Ok(frame);
-    };
-    promote_column_to_index(&frame, col_name)
+    // Per br-frankenpandas-c1h9 (fd90.36): explicit `index_col` arg
+    // always wins over `options.index_col`. Avoid double-promotion by
+    // clearing the option-struct copy when the explicit arg is set.
+    if let Some(col_name) = index_col {
+        let cleared = SqlReadOptions {
+            index_col: None,
+            ..options.clone()
+        };
+        let frame = read_sql_table_with_options(conn, table_name, &cleared)?;
+        return promote_column_to_index(&frame, col_name);
+    }
+    read_sql_table_with_options(conn, table_name, options)
 }
 
 /// Read an entire SQL table as an iterator of DataFrame chunks.
@@ -9036,6 +9077,7 @@ mod tests {
                 dtype: None,
                 schema: None,
                 columns: None,
+                index_col: None,
             },
         )
         .expect("read_sql_query with options");
@@ -9135,6 +9177,7 @@ mod tests {
                 dtype: None,
                 schema: None,
                 columns: None,
+                index_col: None,
             },
             1,
         )
@@ -9183,6 +9226,7 @@ mod tests {
                 dtype: None,
                 schema: None,
                 columns: None,
+                index_col: None,
             },
             Some("ts"),
             1,
@@ -9233,6 +9277,7 @@ mod tests {
                 dtype: None,
                 schema: None,
                 columns: None,
+                index_col: None,
             },
             None,
             1,
@@ -9273,6 +9318,7 @@ mod tests {
                 dtype: None,
                 schema: None,
                 columns: None,
+                index_col: None,
             },
             Some("missing"),
             1,
@@ -9485,6 +9531,7 @@ mod tests {
                 dtype: None,
                 schema: None,
                 columns: None,
+                index_col: None,
             },
         )
         .expect("read table with options");
@@ -9528,6 +9575,7 @@ mod tests {
                 dtype: None,
                 schema: None,
                 columns: None,
+                index_col: None,
             },
             2,
         )
@@ -9604,6 +9652,7 @@ mod tests {
                 dtype: None,
                 schema: None,
                 columns: None,
+                index_col: None,
             },
             Some("ts"),
         )
@@ -9645,6 +9694,7 @@ mod tests {
                 dtype: None,
                 schema: None,
                 columns: None,
+                index_col: None,
             },
             None,
         )
@@ -9683,6 +9733,7 @@ mod tests {
                 dtype: None,
                 schema: None,
                 columns: None,
+                index_col: None,
             },
             Some("ts"),
             2,
@@ -9734,6 +9785,7 @@ mod tests {
                 dtype: None,
                 schema: None,
                 columns: None,
+                index_col: None,
             },
             Some("missing"),
             1,
@@ -9764,6 +9816,7 @@ mod tests {
                 dtype: None,
                 schema: None,
                 columns: None,
+                index_col: None,
             },
         )
         .expect("read sql with parse_dates");
@@ -9799,6 +9852,7 @@ mod tests {
                 dtype: None,
                 schema: None,
                 columns: None,
+                index_col: None,
             },
         )
         .expect_err("missing parse_dates column should error");
@@ -9824,6 +9878,7 @@ mod tests {
                 dtype: None,
                 schema: None,
                 columns: None,
+                index_col: None,
             },
         )
         .expect("read sql with params");
@@ -9855,6 +9910,7 @@ mod tests {
                 dtype: None,
                 schema: None,
                 columns: None,
+                index_col: None,
             },
         )
         .expect_err("wrong arity should error");
@@ -9891,6 +9947,7 @@ mod tests {
                 dtype: None,
                 schema: None,
                 columns: None,
+                index_col: None,
                 ..SqlReadOptions::default()
             },
         )
@@ -9928,6 +9985,7 @@ mod tests {
                 dtype: None,
                 schema: None,
                 columns: None,
+                index_col: None,
                 ..SqlReadOptions::default()
             },
         )
@@ -10014,6 +10072,7 @@ mod tests {
                 dtype: None,
                 schema: None,
                 columns: None,
+                index_col: None,
             },
             1,
         )
@@ -11368,6 +11427,7 @@ mod tests {
                 dtype: Some(dtype_map),
                 schema: None,
                 columns: None,
+                index_col: None,
             },
         )
         .expect("read with dtype");
@@ -11402,6 +11462,7 @@ mod tests {
                 dtype: Some(dtype_map),
                 schema: None,
                 columns: None,
+                index_col: None,
             },
         )
         .expect_err("expected dtype override error");
@@ -11441,6 +11502,7 @@ mod tests {
                 dtype: Some(dtype_map),
                 schema: None,
                 columns: None,
+                index_col: None,
             },
         )
         .expect("read with dtype-on-missing-col");
@@ -11469,6 +11531,7 @@ mod tests {
                 dtype: Some(dtype_map),
                 schema: None,
                 columns: None,
+                index_col: None,
             },
         )
         .expect("read with dtype + nulls");
@@ -11498,6 +11561,7 @@ mod tests {
                 dtype: Some(dtype_map),
                 schema: None,
                 columns: None,
+                index_col: None,
             },
         )
         .expect("read with parse_dates priority");
@@ -11684,6 +11748,7 @@ mod tests {
                 dtype: None,
                 schema: Some("ignored_on_sqlite".to_owned()),
                 columns: None,
+                index_col: None,
             },
         )
         .expect("read with schema=Some on SQLite");
@@ -15338,6 +15403,7 @@ mod tests {
             "events",
             &SqlReadOptions {
                 columns: Some(vec!["id".to_owned(), "ts".to_owned()]),
+                index_col: None,
                 parse_dates: Some(vec!["ts".to_owned()]),
                 ..Default::default()
             },
@@ -15455,5 +15521,183 @@ mod tests {
         // Mixed: some columns may have no comment even on PG.
         let name = schema.column("name").unwrap();
         assert!(name.comment.is_none());
+    }
+
+    // ── SqlReadOptions::index_col (br-c1h9 / fd90.36) ─────────────────────
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn read_sql_with_options_index_col_none_keeps_range_index() {
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE TABLE keyed (id INTEGER, val INTEGER);",
+        )
+        .unwrap();
+        super::SqlConnection::execute_batch(&conn, "INSERT INTO keyed VALUES (1, 10), (2, 20);")
+            .unwrap();
+        let frame = read_sql_with_options(
+            &conn,
+            "SELECT id, val FROM keyed ORDER BY id",
+            &SqlReadOptions {
+                index_col: None,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        // Default RangeIndex: labels 0, 1.
+        assert_eq!(frame.index().len(), 2);
+        assert_eq!(frame.column_names(), vec!["id", "val"]);
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn read_sql_with_options_index_col_promotes_named_column() {
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE TABLE keyed (id INTEGER, val INTEGER);",
+        )
+        .unwrap();
+        super::SqlConnection::execute_batch(&conn, "INSERT INTO keyed VALUES (10, 1), (20, 2);")
+            .unwrap();
+        let frame = read_sql_with_options(
+            &conn,
+            "SELECT id, val FROM keyed ORDER BY id",
+            &SqlReadOptions {
+                index_col: Some("id".to_owned()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        // 'id' removed from columns, used as index labels.
+        assert_eq!(frame.column_names(), vec!["val"]);
+        assert_eq!(frame.index().len(), 2);
+        // Index labels should be the id values (10, 20).
+        let labels: Vec<i64> = frame
+            .index()
+            .labels()
+            .iter()
+            .filter_map(|l| match l {
+                IndexLabel::Int64(v) => Some(*v),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(labels, vec![10, 20]);
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn read_sql_with_options_index_col_missing_column_errors() {
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(&conn, "CREATE TABLE t (a INTEGER);").unwrap();
+        super::SqlConnection::execute_batch(&conn, "INSERT INTO t VALUES (1);").unwrap();
+        let err = read_sql_with_options(
+            &conn,
+            "SELECT a FROM t",
+            &SqlReadOptions {
+                index_col: Some("nonexistent".to_owned()),
+                ..Default::default()
+            },
+        )
+        .expect_err("missing index_col must error");
+        assert!(matches!(err, IoError::Sql(msg) if msg.contains("not present")));
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn read_sql_with_options_index_col_empty_string_rejected() {
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(&conn, "CREATE TABLE t (a INTEGER);").unwrap();
+        let err = read_sql_with_options(
+            &conn,
+            "SELECT a FROM t",
+            &SqlReadOptions {
+                index_col: Some(String::new()),
+                ..Default::default()
+            },
+        )
+        .expect_err("empty index_col must be rejected");
+        assert!(matches!(err, IoError::Sql(msg) if msg.contains("empty string")));
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn read_sql_table_with_options_index_col_combines_with_columns_projection() {
+        // columns + index_col: project ['id', 'val'], promote 'id' to
+        // index, leaving only 'val' as a data column.
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE TABLE wide (id INTEGER, val INTEGER, ts TEXT, note TEXT);",
+        )
+        .unwrap();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "INSERT INTO wide VALUES (5, 100, 't1', 'first');",
+        )
+        .unwrap();
+        let frame = read_sql_table_with_options(
+            &conn,
+            "wide",
+            &SqlReadOptions {
+                columns: Some(vec!["id".to_owned(), "val".to_owned()]),
+                index_col: Some("id".to_owned()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(frame.column_names(), vec!["val"]);
+        let labels: Vec<i64> = frame
+            .index()
+            .labels()
+            .iter()
+            .filter_map(|l| match l {
+                IndexLabel::Int64(v) => Some(*v),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(labels, vec![5]);
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn read_sql_table_with_options_and_index_col_explicit_arg_wins_over_options() {
+        // Both options.index_col=Some('a') and explicit index_col=Some('b').
+        // The explicit arg must win — options.index_col is silently
+        // overridden to avoid double-promotion.
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE TABLE both (a INTEGER, b INTEGER, c TEXT);",
+        )
+        .unwrap();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "INSERT INTO both VALUES (1, 100, 'x'), (2, 200, 'y');",
+        )
+        .unwrap();
+        let frame = read_sql_table_with_options_and_index_col(
+            &conn,
+            "both",
+            &SqlReadOptions {
+                index_col: Some("a".to_owned()),
+                ..Default::default()
+            },
+            Some("b"),
+        )
+        .unwrap();
+        // 'b' is promoted to index, 'a' and 'c' remain as columns.
+        assert_eq!(frame.column_names(), vec!["a", "c"]);
+        let labels: Vec<i64> = frame
+            .index()
+            .labels()
+            .iter()
+            .filter_map(|l| match l {
+                IndexLabel::Int64(v) => Some(*v),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(labels, vec![100, 200]);
     }
 }
