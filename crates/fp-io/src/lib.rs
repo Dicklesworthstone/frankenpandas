@@ -5482,6 +5482,147 @@ pub fn sql_max_identifier_length<C: SqlConnection>(conn: &C) -> Option<usize> {
     conn.max_identifier_length()
 }
 
+/// Backend-agnostic introspection facade matching the
+/// `SQLAlchemy.Inspector` shape.
+///
+/// Per br-frankenpandas-szs9 (fd90.38). Wraps a `&C: SqlConnection`
+/// and exposes the full fd90.20-37 introspection surface as methods
+/// on a single bundle so callers don't have to remember which
+/// `list_sql_*` / `sql_*` free-fn to use. Pure delegation — no new
+/// behavior, just API ergonomics.
+///
+/// ```rust,ignore
+/// use frankenpandas::SqlInspector;
+/// let inspector = SqlInspector::new(&conn);
+/// for table in inspector.tables(None)? {
+///     for col in inspector.columns(&table, None)?
+///         .map(|s| s.columns)
+///         .unwrap_or_default()
+///     {
+///         println!("{}: {:?}", col.name, col.declared_type);
+///     }
+/// }
+/// ```
+#[derive(Debug)]
+pub struct SqlInspector<'a, C: SqlConnection> {
+    conn: &'a C,
+}
+
+impl<'a, C: SqlConnection> SqlInspector<'a, C> {
+    /// Create a new inspector bound to the given connection.
+    #[must_use]
+    pub fn new(conn: &'a C) -> Self {
+        Self { conn }
+    }
+
+    /// List user-visible table names. See `list_sql_tables`.
+    pub fn tables(&self, schema: Option<&str>) -> Result<Vec<String>, IoError> {
+        self.conn.list_tables(schema)
+    }
+
+    /// List user-visible view names. See `list_sql_views`.
+    pub fn views(&self, schema: Option<&str>) -> Result<Vec<String>, IoError> {
+        self.conn.list_views(schema)
+    }
+
+    /// List user-visible schemas. See `list_sql_schemas`.
+    pub fn schemas(&self) -> Result<Vec<String>, IoError> {
+        self.conn.list_schemas()
+    }
+
+    /// Introspect a table's columns. See `sql_table_schema`.
+    pub fn columns(
+        &self,
+        table_name: &str,
+        schema: Option<&str>,
+    ) -> Result<Option<SqlTableSchema>, IoError> {
+        self.conn.table_schema(table_name, schema)
+    }
+
+    /// List user-defined indexes. See `list_sql_indexes`.
+    pub fn indexes(
+        &self,
+        table_name: &str,
+        schema: Option<&str>,
+    ) -> Result<Vec<SqlIndexSchema>, IoError> {
+        self.conn.list_indexes(table_name, schema)
+    }
+
+    /// List foreign-key constraints. See `list_sql_foreign_keys`.
+    pub fn foreign_keys(
+        &self,
+        table_name: &str,
+        schema: Option<&str>,
+    ) -> Result<Vec<SqlForeignKeySchema>, IoError> {
+        self.conn.list_foreign_keys(table_name, schema)
+    }
+
+    /// List UNIQUE constraints. See `list_sql_unique_constraints`.
+    pub fn unique_constraints(
+        &self,
+        table_name: &str,
+        schema: Option<&str>,
+    ) -> Result<Vec<SqlUniqueConstraintSchema>, IoError> {
+        self.conn.list_unique_constraints(table_name, schema)
+    }
+
+    /// Return primary-key columns sorted by ordinal.
+    /// See `sql_primary_key_columns`.
+    pub fn primary_key_columns(
+        &self,
+        table_name: &str,
+        schema: Option<&str>,
+    ) -> Result<Vec<String>, IoError> {
+        self.conn.primary_key_columns(table_name, schema)
+    }
+
+    /// Probe the table-level comment. See `sql_table_comment`.
+    pub fn table_comment(
+        &self,
+        table_name: &str,
+        schema: Option<&str>,
+    ) -> Result<Option<String>, IoError> {
+        self.conn.table_comment(table_name, schema)
+    }
+
+    /// Schema-aware existence check. Routes to
+    /// `SqlConnection::table_exists_in_schema`.
+    pub fn table_exists(
+        &self,
+        table_name: &str,
+        schema: Option<&str>,
+    ) -> Result<bool, IoError> {
+        self.conn.table_exists_in_schema(table_name, schema)
+    }
+
+    /// Probe the backend server version. See `sql_server_version`.
+    pub fn server_version(&self) -> Result<Option<String>, IoError> {
+        self.conn.server_version()
+    }
+
+    /// Maximum identifier length, when the backend exposes one.
+    /// See `sql_max_identifier_length`.
+    #[must_use]
+    pub fn max_identifier_length(&self) -> Option<usize> {
+        self.conn.max_identifier_length()
+    }
+
+    /// Backend dialect name (`"sqlite"`, `"postgresql"`, etc.).
+    #[must_use]
+    pub fn dialect_name(&self) -> &'static str {
+        self.conn.dialect_name()
+    }
+}
+
+/// Convenience constructor for `SqlInspector`.
+///
+/// `let inspector = inspect(&conn);` reads more naturally than
+/// `SqlInspector::new(&conn)` for one-shot uses. Per br-frankenpandas-szs9 (fd90.38).
+#[must_use]
+pub fn inspect<C: SqlConnection>(conn: &C) -> SqlInspector<'_, C> {
+    SqlInspector::new(conn)
+}
+
 /// Read an entire SQL table into a DataFrame with read-time options.
 ///
 /// Matches the supported subset of
@@ -8341,9 +8482,10 @@ mod tests {
 
     use super::{
         SqlColumnSchema, SqlForeignKeySchema, SqlIfExists, SqlIndexSchema, SqlInsertMethod,
-        SqlQueryResult, SqlReadOptions, SqlTableSchema, SqlUniqueConstraintSchema,
-        SqlWriteOptions, list_sql_foreign_keys, list_sql_indexes, list_sql_schemas,
-        list_sql_tables, list_sql_unique_constraints, list_sql_views, read_sql,
+        SqlInspector, SqlQueryResult, SqlReadOptions, SqlTableSchema,
+        SqlUniqueConstraintSchema, SqlWriteOptions, inspect, list_sql_foreign_keys,
+        list_sql_indexes, list_sql_schemas, list_sql_tables, list_sql_unique_constraints,
+        list_sql_views, read_sql,
         read_sql_chunks, read_sql_chunks_with_index_col, read_sql_chunks_with_options,
         read_sql_chunks_with_options_and_index_col, read_sql_query, read_sql_query_chunks,
         read_sql_query_chunks_with_index_col, read_sql_query_chunks_with_options,
@@ -15918,5 +16060,192 @@ mod tests {
         let schema = sql_table_schema(&conn, "users", None).unwrap().unwrap();
         assert!(schema.column("id").unwrap().autoincrement);
         assert!(!schema.column("email").unwrap().autoincrement);
+    }
+
+    // ── SqlInspector facade (br-szs9 / fd90.38) ──────────────────────────
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn sql_inspector_tables_views_schemas() {
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(&conn, "CREATE TABLE t1 (x INTEGER);").unwrap();
+        super::SqlConnection::execute_batch(&conn, "CREATE TABLE t2 (y TEXT);").unwrap();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE VIEW v1 AS SELECT x FROM t1;",
+        )
+        .unwrap();
+
+        let inspector = SqlInspector::new(&conn);
+        assert_eq!(inspector.tables(None).unwrap(), vec!["t1", "t2"]);
+        assert_eq!(inspector.views(None).unwrap(), vec!["v1"]);
+        // SQLite has no meaningful schemas → empty vec.
+        assert!(inspector.schemas().unwrap().is_empty());
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn sql_inspector_columns_pk_indexes_fks() {
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE TABLE parent (pid INTEGER PRIMARY KEY);",
+        )
+        .unwrap();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE TABLE child ( \
+                cid INTEGER PRIMARY KEY, \
+                parent_id INTEGER, \
+                tag TEXT, \
+                FOREIGN KEY (parent_id) REFERENCES parent(pid) \
+             );",
+        )
+        .unwrap();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE INDEX idx_child_tag ON child(tag);",
+        )
+        .unwrap();
+
+        let inspector = SqlInspector::new(&conn);
+
+        // columns: 3 columns on 'child', cid + parent_id + tag.
+        let schema = inspector.columns("child", None).unwrap().unwrap();
+        let names: Vec<&str> = schema.columns.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["cid", "parent_id", "tag"]);
+
+        // primary_key_columns: cid is the sole PK.
+        let pk = inspector.primary_key_columns("child", None).unwrap();
+        assert_eq!(pk, vec!["cid"]);
+
+        // indexes: only the explicit user index (PK auto-index filtered).
+        let indexes = inspector.indexes("child", None).unwrap();
+        assert_eq!(indexes.len(), 1);
+        assert_eq!(indexes[0].name, "idx_child_tag");
+
+        // foreign_keys: child references parent.
+        let fks = inspector.foreign_keys("child", None).unwrap();
+        assert_eq!(fks.len(), 1);
+        assert_eq!(fks[0].columns, vec!["parent_id"]);
+        assert_eq!(fks[0].referenced_table, "parent");
+        assert_eq!(fks[0].referenced_columns, vec!["pid"]);
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn sql_inspector_unique_constraints_and_table_exists() {
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT UNIQUE);",
+        )
+        .unwrap();
+        let inspector = SqlInspector::new(&conn);
+        let uqs = inspector.unique_constraints("users", None).unwrap();
+        assert_eq!(uqs.len(), 1);
+        assert_eq!(uqs[0].columns, vec!["email"]);
+        assert!(inspector.table_exists("users", None).unwrap());
+        assert!(!inspector.table_exists("not_there", None).unwrap());
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn sql_inspector_server_version_and_dialect() {
+        let conn = make_sql_test_conn();
+        let inspector = SqlInspector::new(&conn);
+        let version = inspector.server_version().unwrap().unwrap();
+        assert!(version.starts_with("3."));
+        assert_eq!(inspector.dialect_name(), "sqlite");
+        // SQLite has no documented identifier-length cap.
+        assert_eq!(inspector.max_identifier_length(), None);
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn sql_inspector_table_comment_returns_none_on_sqlite() {
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(&conn, "CREATE TABLE t (x INTEGER);").unwrap();
+        let inspector = SqlInspector::new(&conn);
+        assert!(inspector.table_comment("t", None).unwrap().is_none());
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn sql_inspector_via_inspect_helper() {
+        // The free-fn `inspect(&conn)` is the one-shot construction helper.
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(&conn, "CREATE TABLE one (x INTEGER);").unwrap();
+        let inspector = inspect(&conn);
+        assert_eq!(inspector.tables(None).unwrap(), vec!["one"]);
+    }
+
+    #[test]
+    fn sql_inspector_routes_schema_arg_to_backend() {
+        // Multi-schema backend: verifies SqlInspector forwards the schema
+        // arg to every method that accepts one.
+        struct PgLikeStub;
+        impl super::SqlConnection for PgLikeStub {
+            fn query(&self, _q: &str, _p: &[Scalar]) -> Result<SqlQueryResult, IoError> {
+                Ok(SqlQueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                })
+            }
+            fn execute_batch(&self, _sql: &str) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn table_exists(&self, _name: &str) -> Result<bool, IoError> {
+                Ok(false)
+            }
+            fn insert_rows(&self, _sql: &str, _rows: &[Vec<Scalar>]) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn dtype_sql(&self, _dtype: DType) -> &'static str {
+                "TEXT"
+            }
+            fn index_dtype_sql(&self, _index: &Index) -> &'static str {
+                "TEXT"
+            }
+            fn supports_schemas(&self) -> bool {
+                true
+            }
+            fn list_tables(&self, schema: Option<&str>) -> Result<Vec<String>, IoError> {
+                Ok(match schema {
+                    Some("analytics") => vec!["events".to_owned()],
+                    _ => vec![],
+                })
+            }
+            fn list_views(&self, schema: Option<&str>) -> Result<Vec<String>, IoError> {
+                Ok(match schema {
+                    Some("analytics") => vec!["daily".to_owned()],
+                    _ => vec![],
+                })
+            }
+            fn list_schemas(&self) -> Result<Vec<String>, IoError> {
+                Ok(vec!["public".to_owned(), "analytics".to_owned()])
+            }
+            fn dialect_name(&self) -> &'static str {
+                "postgresql"
+            }
+            fn max_identifier_length(&self) -> Option<usize> {
+                Some(63)
+            }
+        }
+        let conn = PgLikeStub;
+        let inspector = SqlInspector::new(&conn);
+
+        assert_eq!(
+            inspector.tables(Some("analytics")).unwrap(),
+            vec!["events"]
+        );
+        assert_eq!(inspector.views(Some("analytics")).unwrap(), vec!["daily"]);
+        assert!(inspector.tables(Some("audit")).unwrap().is_empty());
+        assert_eq!(
+            inspector.schemas().unwrap(),
+            vec!["public", "analytics"]
+        );
+        assert_eq!(inspector.dialect_name(), "postgresql");
+        assert_eq!(inspector.max_identifier_length(), Some(63));
     }
 }
