@@ -4042,6 +4042,25 @@ pub fn read_sql_table_columns<C: SqlConnection>(
     read_sql(conn, &sql_select_columns_query(table_name, columns)?)
 }
 
+/// Read a subset of columns from a SQL table with optional index promotion.
+///
+/// Matches the supported subset of
+/// `pd.read_sql_table(table, con, columns=[...], index_col=...)`. When
+/// `index_col` is set it must be included in `columns`; the promoted column is
+/// removed from the data columns after projection.
+pub fn read_sql_table_columns_with_index_col<C: SqlConnection>(
+    conn: &C,
+    table_name: &str,
+    columns: &[&str],
+    index_col: Option<&str>,
+) -> Result<DataFrame, IoError> {
+    let frame = read_sql_table_columns(conn, table_name, columns)?;
+    let Some(col_name) = index_col else {
+        return Ok(frame);
+    };
+    promote_column_to_index(&frame, col_name)
+}
+
 /// Read a subset of columns from a SQL table as DataFrame chunks.
 ///
 /// Matches the supported subset of
@@ -4059,6 +4078,23 @@ pub fn read_sql_table_columns_chunks<C: SqlConnection>(
         &sql_select_columns_query(table_name, columns)?,
         chunk_size,
     )
+}
+
+/// Read a subset of columns from a SQL table as chunks with optional index promotion.
+///
+/// Matches the supported subset of
+/// `pd.read_sql_table(table, con, columns=[...], index_col=..., chunksize=...)`.
+/// When `index_col` is set it must be included in `columns`; the promoted
+/// column is removed from each chunk after projection.
+pub fn read_sql_table_columns_chunks_with_index_col<C: SqlConnection>(
+    conn: &C,
+    table_name: &str,
+    columns: &[&str],
+    index_col: Option<&str>,
+    chunk_size: usize,
+) -> Result<SqlIndexedChunkIterator, IoError> {
+    let inner = read_sql_table_columns_chunks(conn, table_name, columns, chunk_size)?;
+    sql_indexed_chunks(inner, index_col)
 }
 
 /// Write a DataFrame to a SQL table.
@@ -6678,8 +6714,9 @@ mod tests {
         read_sql_query_chunks_with_options_and_index_col, read_sql_query_with_index_col,
         read_sql_query_with_options, read_sql_table, read_sql_table_chunks,
         read_sql_table_chunks_with_index_col, read_sql_table_columns,
-        read_sql_table_columns_chunks, read_sql_table_with_index_col, read_sql_with_index_col,
-        read_sql_with_options, write_sql, write_sql_with_options,
+        read_sql_table_columns_chunks, read_sql_table_columns_chunks_with_index_col,
+        read_sql_table_columns_with_index_col, read_sql_table_with_index_col,
+        read_sql_with_index_col, read_sql_with_options, write_sql, write_sql_with_options,
     };
 
     fn make_sql_test_conn() -> rusqlite::Connection {
@@ -6838,6 +6875,144 @@ mod tests {
 
         let invalid = read_sql_table_columns_chunks(&conn, "proj_chunk_tbl", &["bad column"], 1)
             .expect_err("invalid projection name should be rejected");
+        assert!(matches!(invalid, IoError::Sql(msg) if msg.contains("invalid column name")));
+    }
+
+    #[test]
+    fn sql_read_table_columns_with_index_col_promotes_projected_column() {
+        let frame = make_test_dataframe();
+        let conn = make_sql_test_conn();
+        write_sql(&frame, &conn, "proj_index_tbl", SqlIfExists::Fail).expect("write");
+
+        let result = read_sql_table_columns_with_index_col(
+            &conn,
+            "proj_index_tbl",
+            &["names", "ints"],
+            Some("ints"),
+        )
+        .expect("projection with index_col");
+
+        assert_eq!(result.index().name(), Some("ints"));
+        assert_eq!(
+            result.index().labels(),
+            &[
+                IndexLabel::Int64(10),
+                IndexLabel::Int64(20),
+                IndexLabel::Int64(30)
+            ]
+        );
+        assert_eq!(result.column_names(), vec!["names"]);
+        assert_eq!(
+            result.column("names").unwrap().values(),
+            &[
+                Scalar::Utf8("alice".to_owned()),
+                Scalar::Utf8("bob".to_owned()),
+                Scalar::Utf8("carol".to_owned())
+            ]
+        );
+        assert!(result.column("ints").is_none());
+    }
+
+    #[test]
+    fn sql_read_table_columns_with_index_col_none_keeps_projection_and_range_index() {
+        let frame = make_test_dataframe();
+        let conn = make_sql_test_conn();
+        write_sql(&frame, &conn, "proj_no_index_tbl", SqlIfExists::Fail).expect("write");
+
+        let result = read_sql_table_columns_with_index_col(
+            &conn,
+            "proj_no_index_tbl",
+            &["floats", "names"],
+            None,
+        )
+        .expect("projection without index_col");
+
+        assert_eq!(
+            result.index().labels(),
+            &[
+                IndexLabel::Int64(0),
+                IndexLabel::Int64(1),
+                IndexLabel::Int64(2)
+            ]
+        );
+        assert_eq!(result.column_names(), vec!["floats", "names"]);
+        assert_eq!(
+            result.column("floats").unwrap().values()[1],
+            Scalar::Float64(2.5)
+        );
+    }
+
+    #[test]
+    fn sql_read_table_columns_chunks_with_index_col_promotes_each_chunk_index() {
+        let frame = make_test_dataframe();
+        let conn = make_sql_test_conn();
+        write_sql(&frame, &conn, "proj_index_chunk_tbl", SqlIfExists::Fail).expect("write");
+
+        let chunks = read_sql_table_columns_chunks_with_index_col(
+            &conn,
+            "proj_index_chunk_tbl",
+            &["ints", "names"],
+            Some("ints"),
+            2,
+        )
+        .expect("indexed projection chunk iterator")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("all chunks");
+
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].index().name(), Some("ints"));
+        assert_eq!(
+            chunks[0].index().labels(),
+            &[IndexLabel::Int64(10), IndexLabel::Int64(20)]
+        );
+        assert_eq!(chunks[0].column_names(), vec!["names"]);
+        assert_eq!(
+            chunks[0].column("names").unwrap().values(),
+            &[
+                Scalar::Utf8("alice".to_owned()),
+                Scalar::Utf8("bob".to_owned())
+            ]
+        );
+        assert_eq!(chunks[1].index().labels(), &[IndexLabel::Int64(30)]);
+        assert_eq!(
+            chunks[1].column("names").unwrap().values(),
+            &[Scalar::Utf8("carol".to_owned())]
+        );
+    }
+
+    #[test]
+    fn sql_read_table_columns_chunks_with_index_col_validates_projection_and_index() {
+        let frame = make_test_dataframe();
+        let conn = make_sql_test_conn();
+        write_sql(&frame, &conn, "proj_index_error_tbl", SqlIfExists::Fail).expect("write");
+
+        let missing = read_sql_table_columns_chunks_with_index_col(
+            &conn,
+            "proj_index_error_tbl",
+            &["names"],
+            Some("ints"),
+            1,
+        )
+        .expect_err("missing index_col should error during iterator construction");
+        assert!(matches!(missing, IoError::Sql(msg) if msg.contains("index_col")));
+
+        let empty = read_sql_table_columns_chunks_with_index_col(
+            &conn,
+            "proj_index_error_tbl",
+            &[],
+            Some("ints"),
+            1,
+        )
+        .expect_err("empty projection should be rejected");
+        assert!(matches!(empty, IoError::Sql(msg) if msg.contains("columns must be non-empty")));
+
+        let invalid = read_sql_table_columns_with_index_col(
+            &conn,
+            "proj_index_error_tbl",
+            &["bad column"],
+            Some("ints"),
+        )
+        .expect_err("invalid projection name should be rejected");
         assert!(matches!(invalid, IoError::Sql(msg) if msg.contains("invalid column name")));
     }
 

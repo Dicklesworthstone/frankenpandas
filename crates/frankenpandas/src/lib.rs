@@ -100,6 +100,8 @@ pub use fp_io::{
     read_sql_table_chunks,
     read_sql_table_chunks_with_index_col,
     read_sql_table_columns_chunks,
+    read_sql_table_columns_chunks_with_index_col,
+    read_sql_table_columns_with_index_col,
     read_sql_with_options,
     write_csv,
     write_csv_string,
