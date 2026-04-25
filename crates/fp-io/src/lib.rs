@@ -19,7 +19,7 @@ use csv::{ReaderBuilder, StringRecord, WriterBuilder};
 use fp_columnar::{Column, ColumnError};
 use fp_frame::{DataFrame, FrameError, Series, ToDatetimeOptions, to_datetime_with_options};
 use fp_index::{Index, IndexError, IndexLabel, format_datetime_ns};
-use fp_types::{DType, NullKind, Scalar, Timedelta};
+use fp_types::{DType, NullKind, Scalar, Timedelta, cast_scalar_owned};
 use parquet::arrow::{ArrowWriter, arrow_reader::ParquetRecordBatchReaderBuilder};
 use thiserror::Error;
 
@@ -3344,6 +3344,16 @@ pub struct SqlReadOptions {
     /// backends that expose NUMERIC/DECIMAL/MONEY values through text.
     /// Columns containing any non-numeric strings are left unchanged.
     pub coerce_float: bool,
+    /// Per-column dtype override applied after row materialization.
+    ///
+    /// Matches `pd.read_sql(.., dtype={'col': 'float64'})`. Each entry casts
+    /// the named column to the declared dtype using `fp_types::cast_scalar_owned`.
+    /// Map entries for columns not present in the result are silently
+    /// ignored (matches pandas). Columns also listed in `parse_dates` are
+    /// skipped to avoid double-cast errors — parse_dates wins.
+    ///
+    /// Per br-frankenpandas-l9pt (fd90.11).
+    pub dtype: Option<BTreeMap<String, DType>>,
 }
 
 /// Options for writing a DataFrame to SQL.
@@ -4027,8 +4037,51 @@ fn sql_query_to_columns<C: SqlConnection>(
     if options.coerce_float {
         apply_sql_coerce_float(&mut columns);
     }
+    if let Some(ref dtype_map) = options.dtype {
+        apply_sql_dtype_overrides(
+            &headers,
+            &mut columns,
+            dtype_map,
+            options.parse_dates.as_deref().unwrap_or(&[]),
+        )?;
+    }
 
     Ok((headers, columns))
+}
+
+/// Apply pandas-style `dtype={'col': dtype}` overrides to materialized
+/// SQL result columns. Skips columns also listed in `parse_dates` to
+/// avoid double-cast errors. Per br-frankenpandas-l9pt (fd90.11).
+fn apply_sql_dtype_overrides(
+    headers: &[String],
+    columns: &mut [Vec<Scalar>],
+    dtype_map: &BTreeMap<String, DType>,
+    parse_dates: &[String],
+) -> Result<(), IoError> {
+    for (idx, header) in headers.iter().enumerate() {
+        let Some(target_dtype) = dtype_map.get(header) else {
+            continue;
+        };
+        if parse_dates.iter().any(|d| d == header) {
+            // parse_dates wins; skip dtype override for this column.
+            continue;
+        }
+        let Some(col) = columns.get_mut(idx) else {
+            continue;
+        };
+        for value in col.iter_mut() {
+            // Take ownership of the scalar, cast, and write back. NaT/Null
+            // pass through cast_scalar_owned unchanged so missingness is
+            // preserved across the override.
+            let taken = std::mem::replace(value, Scalar::Null(NullKind::Null));
+            *value = cast_scalar_owned(taken, *target_dtype).map_err(|e| {
+                IoError::Sql(format!(
+                    "dtype override on column '{header}' to {target_dtype:?} failed: {e}"
+                ))
+            })?;
+        }
+    }
+    Ok(())
 }
 
 fn dataframe_from_sql_columns(
@@ -7621,6 +7674,7 @@ mod tests {
                 params: Some(vec![Scalar::Int64(1)]),
                 parse_dates: Some(vec!["ts".to_owned()]),
                 coerce_float: false,
+                dtype: None,
             },
         )
         .expect("read_sql_query with options");
@@ -7717,6 +7771,7 @@ mod tests {
                 params: Some(vec![Scalar::Int64(1)]),
                 parse_dates: Some(vec!["ts".to_owned()]),
                 coerce_float: true,
+                dtype: None,
             },
             1,
         )
@@ -7762,6 +7817,7 @@ mod tests {
                 params: Some(vec![Scalar::Int64(1)]),
                 parse_dates: Some(vec!["ts".to_owned()]),
                 coerce_float: true,
+                dtype: None,
             },
             Some("ts"),
             1,
@@ -7809,6 +7865,7 @@ mod tests {
                 params: None,
                 parse_dates: None,
                 coerce_float: true,
+                dtype: None,
             },
             None,
             1,
@@ -7846,6 +7903,7 @@ mod tests {
                 params: None,
                 parse_dates: None,
                 coerce_float: true,
+                dtype: None,
             },
             Some("missing"),
             1,
@@ -8055,6 +8113,7 @@ mod tests {
                 params: None,
                 parse_dates: Some(vec!["ts".to_owned()]),
                 coerce_float: true,
+                dtype: None,
             },
         )
         .expect("read table with options");
@@ -8095,6 +8154,7 @@ mod tests {
                 params: None,
                 parse_dates: Some(vec!["ts".to_owned()]),
                 coerce_float: true,
+                dtype: None,
             },
             2,
         )
@@ -8168,6 +8228,7 @@ mod tests {
                 params: None,
                 parse_dates: Some(vec!["ts".to_owned()]),
                 coerce_float: true,
+                dtype: None,
             },
             Some("ts"),
         )
@@ -8206,6 +8267,7 @@ mod tests {
                 params: None,
                 parse_dates: None,
                 coerce_float: true,
+                dtype: None,
             },
             None,
         )
@@ -8241,6 +8303,7 @@ mod tests {
                 params: None,
                 parse_dates: Some(vec!["ts".to_owned()]),
                 coerce_float: true,
+                dtype: None,
             },
             Some("ts"),
             2,
@@ -8289,6 +8352,7 @@ mod tests {
                 params: None,
                 parse_dates: None,
                 coerce_float: true,
+                dtype: None,
             },
             Some("missing"),
             1,
@@ -8316,6 +8380,7 @@ mod tests {
                 params: None,
                 parse_dates: Some(vec!["ts".to_owned()]),
                 coerce_float: false,
+                dtype: None,
             },
         )
         .expect("read sql with parse_dates");
@@ -8348,6 +8413,7 @@ mod tests {
                 params: None,
                 parse_dates: Some(vec!["ts".to_owned()]),
                 coerce_float: false,
+                dtype: None,
             },
         )
         .expect_err("missing parse_dates column should error");
@@ -8370,6 +8436,7 @@ mod tests {
                 params: Some(vec![Scalar::Int64(15), Scalar::Utf8("bob".to_owned())]),
                 parse_dates: None,
                 coerce_float: false,
+                dtype: None,
             },
         )
         .expect("read sql with params");
@@ -8398,6 +8465,7 @@ mod tests {
                 params: Some(vec![Scalar::Int64(15)]),
                 parse_dates: None,
                 coerce_float: false,
+                dtype: None,
             },
         )
         .expect_err("wrong arity should error");
@@ -8431,6 +8499,7 @@ mod tests {
             "SELECT amount, fee FROM payments ORDER BY id",
             &SqlReadOptions {
                 coerce_float: true,
+                dtype: None,
                 ..SqlReadOptions::default()
             },
         )
@@ -8465,6 +8534,7 @@ mod tests {
             "SELECT maybe_amount, label FROM mixed ORDER BY id",
             &SqlReadOptions {
                 coerce_float: true,
+                dtype: None,
                 ..SqlReadOptions::default()
             },
         )
@@ -8548,6 +8618,7 @@ mod tests {
                 params: Some(vec![Scalar::Int64(1)]),
                 parse_dates: Some(vec!["ts".to_owned()]),
                 coerce_float: true,
+                dtype: None,
             },
             1,
         )
@@ -9877,5 +9948,155 @@ mod tests {
             r#""value""raw""#
         );
         assert!(super::SqlConnection::quote_identifier(&stub, "evil\0").is_err());
+    }
+
+    // ── SqlReadOptions::dtype tests (br-frankenpandas-l9pt / fd90.11) ───
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn read_sql_dtype_override_int_to_float() {
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE TABLE amounts (amount INTEGER); INSERT INTO amounts VALUES (1), (2), (3);",
+        )
+        .unwrap();
+        let mut dtype_map = BTreeMap::new();
+        dtype_map.insert("amount".to_owned(), DType::Float64);
+        let frame = read_sql_with_options(
+            &conn,
+            "SELECT amount FROM amounts ORDER BY amount",
+            &SqlReadOptions {
+                params: None,
+                parse_dates: None,
+                coerce_float: false,
+                dtype: Some(dtype_map),
+            },
+        )
+        .expect("read with dtype");
+        let col = frame.column("amount").expect("amount");
+        assert_eq!(col.dtype(), DType::Float64);
+        assert_eq!(col.values()[0], Scalar::Float64(1.0));
+        assert_eq!(col.values()[2], Scalar::Float64(3.0));
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn read_sql_dtype_override_unsupported_cast_returns_typed_error() {
+        // fp_types::cast_scalar_owned doesn't currently support Int64→Utf8
+        // (that gap is tracked separately). This test asserts that when the
+        // cast is unsupported, dtype override surfaces a typed IoError::Sql
+        // with diagnostic context, NOT a panic and not a silent skip.
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE TABLE labels (id INTEGER); INSERT INTO labels VALUES (10), (20);",
+        )
+        .unwrap();
+        let mut dtype_map = BTreeMap::new();
+        dtype_map.insert("id".to_owned(), DType::Utf8);
+        let err = read_sql_with_options(
+            &conn,
+            "SELECT id FROM labels ORDER BY id",
+            &SqlReadOptions {
+                params: None,
+                parse_dates: None,
+                coerce_float: false,
+                dtype: Some(dtype_map),
+            },
+        )
+        .expect_err("expected dtype override error");
+        match err {
+            IoError::Sql(message) => {
+                assert!(
+                    message.contains("dtype override on column 'id'"),
+                    "unexpected error message: {message}"
+                );
+                assert!(
+                    message.contains("Utf8"),
+                    "unexpected error message: {message}"
+                );
+            }
+            other => unreachable!("expected IoError::Sql, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn read_sql_dtype_override_missing_column_is_ignored() {
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE TABLE t (x INTEGER); INSERT INTO t VALUES (1);",
+        )
+        .unwrap();
+        let mut dtype_map = BTreeMap::new();
+        dtype_map.insert("nonexistent".to_owned(), DType::Float64);
+        let frame = read_sql_with_options(
+            &conn,
+            "SELECT x FROM t",
+            &SqlReadOptions {
+                params: None,
+                parse_dates: None,
+                coerce_float: false,
+                dtype: Some(dtype_map),
+            },
+        )
+        .expect("read with dtype-on-missing-col");
+        let col = frame.column("x").expect("x");
+        assert_eq!(col.dtype(), DType::Int64);
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn read_sql_dtype_override_preserves_nulls() {
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE TABLE nulls_tbl (v INTEGER); INSERT INTO nulls_tbl VALUES (1), (NULL), (3);",
+        )
+        .unwrap();
+        let mut dtype_map = BTreeMap::new();
+        dtype_map.insert("v".to_owned(), DType::Float64);
+        let frame = read_sql_with_options(
+            &conn,
+            "SELECT v FROM nulls_tbl ORDER BY rowid",
+            &SqlReadOptions {
+                params: None,
+                parse_dates: None,
+                coerce_float: false,
+                dtype: Some(dtype_map),
+            },
+        )
+        .expect("read with dtype + nulls");
+        let col = frame.column("v").expect("v");
+        assert_eq!(col.dtype(), DType::Float64);
+        assert!(col.values()[1].is_missing());
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn read_sql_dtype_skipped_when_column_in_parse_dates() {
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE TABLE evt (ts TEXT); INSERT INTO evt VALUES ('2024-01-01 00:00:00');",
+        )
+        .unwrap();
+        let mut dtype_map = BTreeMap::new();
+        dtype_map.insert("ts".to_owned(), DType::Float64);
+        let frame = read_sql_with_options(
+            &conn,
+            "SELECT ts FROM evt",
+            &SqlReadOptions {
+                params: None,
+                parse_dates: Some(vec!["ts".to_owned()]),
+                coerce_float: false,
+                dtype: Some(dtype_map),
+            },
+        )
+        .expect("read with parse_dates priority");
+        let col = frame.column("ts").expect("ts");
+        assert_eq!(col.dtype(), DType::Utf8);
     }
 }
