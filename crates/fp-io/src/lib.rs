@@ -4055,6 +4055,35 @@ fn sql_insert_rows_query_in_schema<C: SqlConnection>(
     ))
 }
 
+/// Build a `DROP TABLE IF EXISTS ...` statement, optionally
+/// schema-qualified.
+///
+/// Per br-frankenpandas-hxob (fd90.16). Companion to
+/// `sql_create_table_query_in_schema`. Same schema rules: when
+/// `schema` is `Some(s)` AND `conn.supports_schemas()`, the target
+/// becomes `\"schema\".\"table\"`; otherwise the bare table name is
+/// used. Routes through `conn.quote_identifier` so backend dialect
+/// overrides (MySQL backticks etc.) take effect on the drop path.
+fn sql_drop_table_query_in_schema<C: SqlConnection>(
+    conn: &C,
+    table_name: &str,
+    schema: Option<&str>,
+) -> Result<String, IoError> {
+    validate_sql_table_name(table_name)?;
+    let qualified = match schema {
+        Some(s) if conn.supports_schemas() => {
+            validate_sql_table_name(s)?;
+            format!(
+                "{}.{}",
+                conn.quote_identifier(s)?,
+                conn.quote_identifier(table_name)?
+            )
+        }
+        _ => conn.quote_identifier(table_name)?,
+    };
+    Ok(format!("DROP TABLE IF EXISTS {qualified}"))
+}
+
 /// Read the result of a SQL query into a DataFrame.
 ///
 /// Matches `pd.read_sql(sql, con)`.
@@ -4603,6 +4632,7 @@ pub fn write_sql_with_options<C: SqlConnection>(
     sql_col_names.extend(col_names.iter().cloned());
 
     // Handle if_exists policy.
+    let schema = options.schema.as_deref();
     match options.if_exists {
         SqlIfExists::Fail => {
             let exists = conn.table_exists(table_name)?;
@@ -4611,10 +4641,8 @@ pub fn write_sql_with_options<C: SqlConnection>(
             }
         }
         SqlIfExists::Replace => {
-            conn.execute_batch(&format!(
-                "DROP TABLE IF EXISTS {}",
-                quote_sql_ident(table_name)?
-            ))?;
+            let drop_sql = sql_drop_table_query_in_schema(conn, table_name, schema)?;
+            conn.execute_batch(&drop_sql)?;
         }
         SqlIfExists::Append => {
             // Table may or may not exist; CREATE TABLE IF NOT EXISTS handles both.
@@ -4640,7 +4668,6 @@ pub fn write_sql_with_options<C: SqlConnection>(
             .collect::<Result<Vec<_>, IoError>>()?,
     );
 
-    let schema = options.schema.as_deref();
     let create_sql = sql_create_table_query_in_schema(conn, table_name, schema, &col_defs)?;
     conn.execute_batch(&create_sql)?;
 
@@ -10724,5 +10751,117 @@ mod tests {
         )
         .expect_err("malformed schema must reject");
         assert!(matches!(err, IoError::Sql(msg) if msg.contains("invalid table name")));
+    }
+
+    // ── DROP TABLE schema-qualification (br-frankenpandas-hxob / fd90.16) ─
+
+    #[test]
+    fn sql_drop_table_query_bare_on_non_multi_schema() {
+        struct StubSql;
+        impl super::SqlConnection for StubSql {
+            fn query(&self, _q: &str, _p: &[Scalar]) -> Result<super::SqlQueryResult, IoError> {
+                Ok(super::SqlQueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                })
+            }
+            fn execute_batch(&self, _sql: &str) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn table_exists(&self, _name: &str) -> Result<bool, IoError> {
+                Ok(false)
+            }
+            fn insert_rows(&self, _sql: &str, _rows: &[Vec<Scalar>]) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn dtype_sql(&self, _dtype: DType) -> &'static str {
+                "TEXT"
+            }
+            fn index_dtype_sql(&self, _index: &Index) -> &'static str {
+                "TEXT"
+            }
+        }
+        let conn = StubSql;
+        let q = super::sql_drop_table_query_in_schema(&conn, "users", None).expect("drop none");
+        assert_eq!(q, "DROP TABLE IF EXISTS \"users\"");
+        // schema=Some on non-multi-schema is silently ignored.
+        let q2 =
+            super::sql_drop_table_query_in_schema(&conn, "users", Some("ignored")).expect("drop");
+        assert_eq!(q2, "DROP TABLE IF EXISTS \"users\"");
+    }
+
+    #[test]
+    fn sql_drop_table_query_qualifies_on_multi_schema_backend() {
+        struct PgLikeDrop;
+        impl super::SqlConnection for PgLikeDrop {
+            fn query(&self, _q: &str, _p: &[Scalar]) -> Result<super::SqlQueryResult, IoError> {
+                Ok(super::SqlQueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                })
+            }
+            fn execute_batch(&self, _sql: &str) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn table_exists(&self, _name: &str) -> Result<bool, IoError> {
+                Ok(false)
+            }
+            fn insert_rows(&self, _sql: &str, _rows: &[Vec<Scalar>]) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn dtype_sql(&self, _dtype: DType) -> &'static str {
+                "TEXT"
+            }
+            fn index_dtype_sql(&self, _index: &Index) -> &'static str {
+                "TEXT"
+            }
+            fn supports_schemas(&self) -> bool {
+                true
+            }
+        }
+        let conn = PgLikeDrop;
+        let q = super::sql_drop_table_query_in_schema(&conn, "users", Some("analytics"))
+            .expect("drop qualified");
+        assert_eq!(q, "DROP TABLE IF EXISTS \"analytics\".\"users\"");
+        let bare =
+            super::sql_drop_table_query_in_schema(&conn, "users", None).expect("drop bare");
+        assert_eq!(bare, "DROP TABLE IF EXISTS \"users\"");
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn write_sql_replace_with_schema_silently_ignored_on_sqlite() {
+        // Replace path drops + recreates. SQLite reports supports_schemas
+        // == false; the schema is silently ignored on the DROP and on the
+        // CREATE/INSERT — the round trip lands data in the bare table.
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE TABLE replace_tbl (x INTEGER); INSERT INTO replace_tbl VALUES (99);",
+        )
+        .unwrap();
+        let frame = fp_frame::DataFrame::from_dict(
+            &["x"],
+            vec![("x", vec![Scalar::Int64(1), Scalar::Int64(2)])],
+        )
+        .unwrap();
+        write_sql_with_options(
+            &frame,
+            &conn,
+            "replace_tbl",
+            &SqlWriteOptions {
+                if_exists: SqlIfExists::Replace,
+                index: false,
+                index_label: None,
+                schema: Some("ignored_on_sqlite".to_owned()),
+            },
+        )
+        .expect("replace + schema=Some on SQLite");
+        let back = read_sql_table(&conn, "replace_tbl").expect("read");
+        let col = back.column("x").expect("x");
+        // Pre-existing 99 was dropped; new rows present.
+        assert_eq!(col.values().len(), 2);
+        assert_eq!(col.values()[0], Scalar::Int64(1));
+        assert_eq!(col.values()[1], Scalar::Int64(2));
     }
 }
