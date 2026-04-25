@@ -3542,13 +3542,6 @@ pub trait SqlConnection {
 
     fn table_exists(&self, table_name: &str) -> Result<bool, IoError>;
 
-    fn table_schema(&self, table_name: &str) -> Result<SqlTableSchema, IoError> {
-        Err(IoError::Sql(format!(
-            "schema introspection is not supported for {} SQL connections (table {table_name:?})",
-            self.dialect_name()
-        )))
-    }
-
     fn insert_rows(&self, insert_sql: &str, rows: &[Vec<Scalar>]) -> Result<(), IoError>;
 
     fn dtype_sql(&self, dtype: DType) -> &'static str;
@@ -3690,6 +3683,22 @@ pub trait SqlConnection {
     /// override to query their internal catalog and ignore `schema`.
     fn list_tables(&self, _schema: Option<&str>) -> Result<Vec<String>, IoError> {
         Ok(Vec::new())
+    }
+
+    /// Introspect a table's column metadata, optionally schema-scoped.
+    ///
+    /// Per br-frankenpandas-w43q (fd90.21). Returns `Ok(None)` if the
+    /// table does not exist. Default impl returns `Ok(None)` for
+    /// backends that cannot introspect; rusqlite overrides to use
+    /// `PRAGMA table_info`. Multi-schema backends override to query
+    /// `information_schema.columns` filtered by `schema`. Schema arg is
+    /// silently ignored when `supports_schemas() == false`.
+    fn table_schema(
+        &self,
+        _table_name: &str,
+        _schema: Option<&str>,
+    ) -> Result<Option<SqlTableSchema>, IoError> {
+        Ok(None)
     }
 }
 
@@ -3922,6 +3931,60 @@ impl SqlConnection for rusqlite::Connection {
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| IoError::Sql(format!("list_tables row read failed: {e}")))?;
         Ok(names)
+    }
+
+    fn table_schema(
+        &self,
+        table_name: &str,
+        _schema: Option<&str>,
+    ) -> Result<Option<SqlTableSchema>, IoError> {
+        // Validate the table name first — PRAGMA table_info doesn't
+        // accept parameter binding, so we must reject anything that
+        // could break out of the identifier slot.
+        validate_sql_table_name(table_name)?;
+        // PRAGMA table_info returns: cid, name, type, notnull, dflt_value, pk.
+        let pragma = format!("PRAGMA table_info(\"{}\")", table_name.replace('"', "\"\""));
+        let mut stmt = self
+            .prepare(&pragma)
+            .map_err(|e| IoError::Sql(format!("table_schema prepare failed: {e}")))?;
+        let mut columns: Vec<SqlColumnSchema> = Vec::new();
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, i64>(5)?,
+                ))
+            })
+            .map_err(|e| IoError::Sql(format!("table_schema query failed: {e}")))?;
+        for row in rows {
+            let (name, declared, notnull, dflt, pk) = row
+                .map_err(|e| IoError::Sql(format!("table_schema row read failed: {e}")))?;
+            columns.push(SqlColumnSchema {
+                name,
+                declared_type: declared.filter(|s| !s.is_empty()),
+                nullable: notnull == 0,
+                default_value: dflt,
+                primary_key_ordinal: if pk > 0 {
+                    Some(usize::try_from(pk - 1).unwrap_or(0))
+                } else {
+                    None
+                },
+            });
+        }
+        if columns.is_empty() {
+            // PRAGMA table_info on a non-existent table returns 0 rows
+            // without erroring; map that to None so callers can
+            // distinguish missing tables from empty ones.
+            Ok(None)
+        } else {
+            Ok(Some(SqlTableSchema {
+                table_name: table_name.to_owned(),
+                columns,
+            }))
+        }
     }
 }
 
@@ -4590,6 +4653,23 @@ pub fn list_sql_tables<C: SqlConnection>(
     schema: Option<&str>,
 ) -> Result<Vec<String>, IoError> {
     conn.list_tables(schema)
+}
+
+/// Introspect a SQL table's column metadata, optionally schema-scoped.
+///
+/// Matches the supported subset of
+/// `pd.io.sql.SQLDatabase.has_table` + `SQLAlchemy.MetaData.reflect`
+/// for column-level details. Returns `Ok(None)` when the table does
+/// not exist. Schema arg is silently ignored when the backend reports
+/// `supports_schemas() == false` (SQLite).
+///
+/// Per br-frankenpandas-w43q (fd90.21).
+pub fn sql_table_schema<C: SqlConnection>(
+    conn: &C,
+    table_name: &str,
+    schema: Option<&str>,
+) -> Result<Option<SqlTableSchema>, IoError> {
+    conn.table_schema(table_name, schema)
 }
 
 /// Read an entire SQL table into a DataFrame with read-time options.
@@ -7392,19 +7472,20 @@ mod tests {
     // ── SQL I/O tests ──────────────────────────────────────────────
 
     use super::{
-        SqlIfExists, SqlInsertMethod, SqlQueryResult, SqlReadOptions, SqlWriteOptions,
-        list_sql_tables, read_sql, read_sql_chunks, read_sql_chunks_with_index_col,
-        read_sql_chunks_with_options, read_sql_chunks_with_options_and_index_col, read_sql_query,
-        read_sql_query_chunks, read_sql_query_chunks_with_index_col,
-        read_sql_query_chunks_with_options, read_sql_query_chunks_with_options_and_index_col,
-        read_sql_query_with_index_col, read_sql_query_with_options, read_sql_table,
-        read_sql_table_chunks, read_sql_table_chunks_with_index_col,
-        read_sql_table_chunks_with_options, read_sql_table_chunks_with_options_and_index_col,
-        read_sql_table_columns, read_sql_table_columns_chunks,
-        read_sql_table_columns_chunks_with_index_col, read_sql_table_columns_with_index_col,
-        read_sql_table_with_index_col, read_sql_table_with_options,
-        read_sql_table_with_options_and_index_col, read_sql_with_index_col, read_sql_with_options,
-        write_sql, write_sql_with_options,
+        SqlColumnSchema, SqlIfExists, SqlInsertMethod, SqlQueryResult, SqlReadOptions,
+        SqlTableSchema, SqlWriteOptions, list_sql_tables, read_sql, read_sql_chunks,
+        read_sql_chunks_with_index_col, read_sql_chunks_with_options,
+        read_sql_chunks_with_options_and_index_col, read_sql_query, read_sql_query_chunks,
+        read_sql_query_chunks_with_index_col, read_sql_query_chunks_with_options,
+        read_sql_query_chunks_with_options_and_index_col, read_sql_query_with_index_col,
+        read_sql_query_with_options, read_sql_table, read_sql_table_chunks,
+        read_sql_table_chunks_with_index_col, read_sql_table_chunks_with_options,
+        read_sql_table_chunks_with_options_and_index_col, read_sql_table_columns,
+        read_sql_table_columns_chunks, read_sql_table_columns_chunks_with_index_col,
+        read_sql_table_columns_with_index_col, read_sql_table_with_index_col,
+        read_sql_table_with_options, read_sql_table_with_options_and_index_col,
+        read_sql_with_index_col, read_sql_with_options, sql_table_schema, write_sql,
+        write_sql_with_options,
     };
 
     fn make_sql_test_conn() -> rusqlite::Connection {
@@ -11908,5 +11989,185 @@ mod tests {
             list_sql_tables(&conn, None).unwrap(),
             vec!["public_table"]
         );
+    }
+
+    // ── sql_table_schema / SqlConnection::table_schema (br-w43q / fd90.21) ─
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn sql_table_schema_unknown_table_returns_none() {
+        let conn = make_sql_test_conn();
+        let result = sql_table_schema(&conn, "no_such_table", None).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn sql_table_schema_simple_table() {
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE TABLE simple (id INTEGER, name TEXT);",
+        )
+        .unwrap();
+        let schema = sql_table_schema(&conn, "simple", None).unwrap().unwrap();
+        assert_eq!(schema.table_name, "simple");
+        assert_eq!(schema.columns.len(), 2);
+        assert_eq!(schema.columns[0].name, "id");
+        assert_eq!(schema.columns[0].declared_type.as_deref(), Some("INTEGER"));
+        assert!(schema.columns[0].nullable);
+        assert!(schema.columns[0].primary_key_ordinal.is_none());
+        assert_eq!(schema.columns[1].name, "name");
+        assert_eq!(schema.columns[1].declared_type.as_deref(), Some("TEXT"));
+        assert!(schema.columns[1].nullable);
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn sql_table_schema_pk_notnull_default() {
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE TABLE meta ( \
+                id INTEGER PRIMARY KEY, \
+                name TEXT NOT NULL, \
+                status TEXT DEFAULT 'active' \
+             );",
+        )
+        .unwrap();
+        let schema = sql_table_schema(&conn, "meta", None).unwrap().unwrap();
+        assert_eq!(schema.columns.len(), 3);
+
+        let id = schema.column("id").expect("id col");
+        assert_eq!(id.primary_key_ordinal, Some(0));
+        // PRIMARY KEY columns in SQLite (without explicit NOT NULL on
+        // INTEGER PRIMARY KEY) are reported as nullable=true by
+        // table_info — we surface that as-is rather than fabricating.
+        // The point is just that primary_key_ordinal is populated.
+
+        let name = schema.column("name").expect("name col");
+        assert!(!name.nullable);
+        assert!(name.default_value.is_none());
+        assert!(name.primary_key_ordinal.is_none());
+
+        let status = schema.column("status").expect("status col");
+        assert!(status.nullable);
+        assert_eq!(
+            status.default_value.as_deref(),
+            Some("'active'"),
+            "expected SQL literal default text"
+        );
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn sql_table_schema_schema_silently_ignored_on_sqlite() {
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(&conn, "CREATE TABLE only_one (x INTEGER);")
+            .unwrap();
+        let with_schema = sql_table_schema(&conn, "only_one", Some("ignored_on_sqlite"))
+            .expect("schema arg must not error")
+            .expect("table exists");
+        let without_schema = sql_table_schema(&conn, "only_one", None).unwrap().unwrap();
+        assert_eq!(with_schema, without_schema);
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn sql_table_schema_rejects_invalid_table_name() {
+        // The PRAGMA path can't bind parameters, so we validate the
+        // identifier first. Reject anything with non-alphanumeric chars.
+        let conn = make_sql_test_conn();
+        let err =
+            sql_table_schema(&conn, "x; DROP TABLE users", None).expect_err("must reject");
+        assert!(matches!(err, IoError::Sql(msg) if msg.contains("invalid")));
+    }
+
+    #[test]
+    fn sql_table_schema_default_impl_returns_none() {
+        struct NoIntrospection;
+        impl super::SqlConnection for NoIntrospection {
+            fn query(&self, _q: &str, _p: &[Scalar]) -> Result<SqlQueryResult, IoError> {
+                Ok(SqlQueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                })
+            }
+            fn execute_batch(&self, _sql: &str) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn table_exists(&self, _name: &str) -> Result<bool, IoError> {
+                Ok(false)
+            }
+            fn insert_rows(&self, _sql: &str, _rows: &[Vec<Scalar>]) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn dtype_sql(&self, _dtype: DType) -> &'static str {
+                "TEXT"
+            }
+            fn index_dtype_sql(&self, _index: &Index) -> &'static str {
+                "TEXT"
+            }
+        }
+        let conn = NoIntrospection;
+        assert!(sql_table_schema(&conn, "anything", None).unwrap().is_none());
+    }
+
+    #[test]
+    fn sql_table_schema_routes_schema_to_backend_override() {
+        struct MultiSchema;
+        impl super::SqlConnection for MultiSchema {
+            fn query(&self, _q: &str, _p: &[Scalar]) -> Result<SqlQueryResult, IoError> {
+                Ok(SqlQueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                })
+            }
+            fn execute_batch(&self, _sql: &str) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn table_exists(&self, _name: &str) -> Result<bool, IoError> {
+                Ok(false)
+            }
+            fn insert_rows(&self, _sql: &str, _rows: &[Vec<Scalar>]) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn dtype_sql(&self, _dtype: DType) -> &'static str {
+                "TEXT"
+            }
+            fn index_dtype_sql(&self, _index: &Index) -> &'static str {
+                "TEXT"
+            }
+            fn supports_schemas(&self) -> bool {
+                true
+            }
+            fn table_schema(
+                &self,
+                table: &str,
+                schema: Option<&str>,
+            ) -> Result<Option<SqlTableSchema>, IoError> {
+                if table == "users" && schema == Some("analytics") {
+                    Ok(Some(SqlTableSchema {
+                        table_name: "users".to_owned(),
+                        columns: vec![SqlColumnSchema {
+                            name: "id".to_owned(),
+                            declared_type: Some("BIGINT".to_owned()),
+                            nullable: false,
+                            default_value: None,
+                            primary_key_ordinal: Some(0),
+                        }],
+                    }))
+                } else {
+                    Ok(None)
+                }
+            }
+        }
+        let conn = MultiSchema;
+        let analytics_users = sql_table_schema(&conn, "users", Some("analytics"))
+            .unwrap()
+            .expect("found");
+        assert_eq!(analytics_users.columns[0].declared_type.as_deref(), Some("BIGINT"));
+        assert!(sql_table_schema(&conn, "users", Some("audit")).unwrap().is_none());
+        assert!(sql_table_schema(&conn, "users", None).unwrap().is_none());
     }
 }
