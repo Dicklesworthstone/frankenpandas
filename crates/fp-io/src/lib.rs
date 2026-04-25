@@ -3639,6 +3639,37 @@ pub fn read_sql_with_options<C: SqlConnection>(
     )?)
 }
 
+/// Read the result of a SQL query into a DataFrame.
+///
+/// Matches `pd.read_sql_query(sql, con)`. This is the query-only spelling of
+/// `read_sql`; table-name dispatch stays on `read_sql_table`.
+pub fn read_sql_query<C: SqlConnection>(conn: &C, query: &str) -> Result<DataFrame, IoError> {
+    read_sql(conn, query)
+}
+
+/// Read the result of a SQL query into a DataFrame with read-time options.
+///
+/// Matches the supported subset of
+/// `pd.read_sql_query(sql, con, params=[...], parse_dates=..., coerce_float=...)`.
+pub fn read_sql_query_with_options<C: SqlConnection>(
+    conn: &C,
+    query: &str,
+    options: &SqlReadOptions,
+) -> Result<DataFrame, IoError> {
+    read_sql_with_options(conn, query, options)
+}
+
+/// Read a SQL query result with one column promoted to the index.
+///
+/// Matches `pd.read_sql_query(sql, con, index_col=...)`.
+pub fn read_sql_query_with_index_col<C: SqlConnection>(
+    conn: &C,
+    query: &str,
+    index_col: Option<&str>,
+) -> Result<DataFrame, IoError> {
+    read_sql_with_index_col(conn, query, index_col)
+}
+
 /// Read a SQL query result with one column promoted to the index.
 ///
 /// Matches `pd.read_sql(sql, con, index_col=...)`. When
@@ -6379,7 +6410,8 @@ mod tests {
     // ── SQL I/O tests ──────────────────────────────────────────────
 
     use super::{
-        SqlIfExists, SqlReadOptions, SqlWriteOptions, read_sql, read_sql_table,
+        SqlIfExists, SqlReadOptions, SqlWriteOptions, read_sql, read_sql_query,
+        read_sql_query_with_index_col, read_sql_query_with_options, read_sql_table,
         read_sql_table_columns, read_sql_table_with_index_col, read_sql_with_index_col,
         read_sql_with_options, write_sql, write_sql_with_options,
     };
@@ -6768,6 +6800,99 @@ mod tests {
         assert_eq!(
             filtered.column("names").unwrap().values()[1],
             Scalar::Utf8("carol".into())
+        );
+    }
+
+    #[test]
+    fn sql_read_query_alias_matches_read_sql_query_path() {
+        let frame = make_test_dataframe();
+        let conn = make_sql_test_conn();
+        write_sql(&frame, &conn, "data", SqlIfExists::Fail).unwrap();
+
+        let queried = read_sql_query(
+            &conn,
+            "SELECT names, ints FROM data WHERE ints >= 20 ORDER BY ints",
+        )
+        .unwrap();
+
+        assert_eq!(queried.column_names(), vec!["names", "ints"]);
+        assert_eq!(queried.index().len(), 2);
+        assert_eq!(
+            queried.column("names").unwrap().values(),
+            &[
+                Scalar::Utf8("bob".to_owned()),
+                Scalar::Utf8("carol".to_owned())
+            ]
+        );
+        assert_eq!(
+            queried.column("ints").unwrap().values(),
+            &[Scalar::Int64(20), Scalar::Int64(30)]
+        );
+    }
+
+    #[test]
+    fn sql_read_query_with_options_applies_params_and_parse_dates() {
+        let conn = make_sql_test_conn();
+        conn.execute_batch(
+            "CREATE TABLE events (ts TEXT, value INTEGER);
+             INSERT INTO events (ts, value) VALUES
+                ('2024-01-15', 1),
+                ('2024-02-01 05:06:07', 2),
+                ('2024-03-03', 3);",
+        )
+        .expect("create events table");
+
+        let frame = read_sql_query_with_options(
+            &conn,
+            "SELECT ts, value FROM events WHERE value > ? ORDER BY value",
+            &SqlReadOptions {
+                params: Some(vec![Scalar::Int64(1)]),
+                parse_dates: Some(vec!["ts".to_owned()]),
+                coerce_float: false,
+            },
+        )
+        .expect("read_sql_query with options");
+
+        assert_eq!(frame.column_names(), vec!["ts", "value"]);
+        assert_eq!(
+            frame.column("ts").unwrap().values(),
+            &[
+                Scalar::Utf8("2024-02-01 05:06:07".to_owned()),
+                Scalar::Utf8("2024-03-03 00:00:00".to_owned())
+            ]
+        );
+        assert_eq!(
+            frame.column("value").unwrap().values(),
+            &[Scalar::Int64(2), Scalar::Int64(3)]
+        );
+    }
+
+    #[test]
+    fn sql_read_query_with_index_col_promotes_named_column() {
+        let frame = make_test_dataframe();
+        let conn = make_sql_test_conn();
+        write_sql(&frame, &conn, "data", SqlIfExists::Fail).unwrap();
+
+        let indexed = read_sql_query_with_index_col(
+            &conn,
+            "SELECT names, ints FROM data ORDER BY ints",
+            Some("names"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            indexed.index().labels(),
+            &[
+                IndexLabel::Utf8("alice".to_owned()),
+                IndexLabel::Utf8("bob".to_owned()),
+                IndexLabel::Utf8("carol".to_owned())
+            ]
+        );
+        assert_eq!(indexed.index().name(), Some("names"));
+        assert!(indexed.column("names").is_none());
+        assert_eq!(
+            indexed.column("ints").unwrap().values(),
+            &[Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)]
         );
     }
 
