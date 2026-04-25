@@ -3700,6 +3700,19 @@ pub trait SqlConnection {
     ) -> Result<Option<SqlTableSchema>, IoError> {
         Ok(None)
     }
+
+    /// List user-visible schemas (PostgreSQL "schemas", MySQL "databases").
+    ///
+    /// Per br-frankenpandas-lxhi (fd90.22). Default impl returns an empty
+    /// vector. Single-namespace backends (SQLite) return empty as well —
+    /// they have no meaningful schema concept. Multi-schema backends
+    /// (PostgreSQL, MySQL, MSSQL) override to query their catalog and
+    /// filter out internal/system schemas (`pg_*`, `information_schema`,
+    /// `mysql`, `performance_schema`, etc.) so user-visible schemas
+    /// surface cleanly.
+    fn list_schemas(&self) -> Result<Vec<String>, IoError> {
+        Ok(Vec::new())
+    }
 }
 
 /// Map an fp-types DType to an SQLite column type declaration.
@@ -4670,6 +4683,18 @@ pub fn sql_table_schema<C: SqlConnection>(
     schema: Option<&str>,
 ) -> Result<Option<SqlTableSchema>, IoError> {
     conn.table_schema(table_name, schema)
+}
+
+/// List user-visible schemas exposed by the SQL backend.
+///
+/// Matches `SQLAlchemy.Inspector.get_schema_names()` shape. Single
+/// namespace backends (SQLite) return an empty vector. Multi-schema
+/// backends return the schemas the connection's role can see, with
+/// internal/system schemas filtered out.
+///
+/// Per br-frankenpandas-lxhi (fd90.22).
+pub fn list_sql_schemas<C: SqlConnection>(conn: &C) -> Result<Vec<String>, IoError> {
+    conn.list_schemas()
 }
 
 /// Read an entire SQL table into a DataFrame with read-time options.
@@ -7473,8 +7498,8 @@ mod tests {
 
     use super::{
         SqlColumnSchema, SqlIfExists, SqlInsertMethod, SqlQueryResult, SqlReadOptions,
-        SqlTableSchema, SqlWriteOptions, list_sql_tables, read_sql, read_sql_chunks,
-        read_sql_chunks_with_index_col, read_sql_chunks_with_options,
+        SqlTableSchema, SqlWriteOptions, list_sql_schemas, list_sql_tables, read_sql,
+        read_sql_chunks, read_sql_chunks_with_index_col, read_sql_chunks_with_options,
         read_sql_chunks_with_options_and_index_col, read_sql_query, read_sql_query_chunks,
         read_sql_query_chunks_with_index_col, read_sql_query_chunks_with_options,
         read_sql_query_chunks_with_options_and_index_col, read_sql_query_with_index_col,
@@ -12169,5 +12194,132 @@ mod tests {
         assert_eq!(analytics_users.columns[0].declared_type.as_deref(), Some("BIGINT"));
         assert!(sql_table_schema(&conn, "users", Some("audit")).unwrap().is_none());
         assert!(sql_table_schema(&conn, "users", None).unwrap().is_none());
+    }
+
+    // ── list_sql_schemas / SqlConnection::list_schemas (br-lxhi / fd90.22) ─
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn list_sql_schemas_returns_empty_on_sqlite() {
+        // SQLite has no meaningful schema concept; the trait default
+        // (empty Vec) is the right answer.
+        let conn = make_sql_test_conn();
+        let schemas = list_sql_schemas(&conn).unwrap();
+        assert!(schemas.is_empty(), "expected no schemas; got {schemas:?}");
+    }
+
+    #[test]
+    fn list_sql_schemas_default_impl_returns_empty() {
+        struct NoIntrospection;
+        impl super::SqlConnection for NoIntrospection {
+            fn query(&self, _q: &str, _p: &[Scalar]) -> Result<SqlQueryResult, IoError> {
+                Ok(SqlQueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                })
+            }
+            fn execute_batch(&self, _sql: &str) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn table_exists(&self, _name: &str) -> Result<bool, IoError> {
+                Ok(false)
+            }
+            fn insert_rows(&self, _sql: &str, _rows: &[Vec<Scalar>]) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn dtype_sql(&self, _dtype: DType) -> &'static str {
+                "TEXT"
+            }
+            fn index_dtype_sql(&self, _index: &Index) -> &'static str {
+                "TEXT"
+            }
+        }
+        let conn = NoIntrospection;
+        assert!(list_sql_schemas(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn list_sql_schemas_routes_to_backend_override() {
+        // Multi-schema backend stub: returns the schemas the connection's
+        // role can see, with internal schemas filtered out.
+        struct MultiSchemaServer;
+        impl super::SqlConnection for MultiSchemaServer {
+            fn query(&self, _q: &str, _p: &[Scalar]) -> Result<SqlQueryResult, IoError> {
+                Ok(SqlQueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                })
+            }
+            fn execute_batch(&self, _sql: &str) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn table_exists(&self, _name: &str) -> Result<bool, IoError> {
+                Ok(false)
+            }
+            fn insert_rows(&self, _sql: &str, _rows: &[Vec<Scalar>]) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn dtype_sql(&self, _dtype: DType) -> &'static str {
+                "TEXT"
+            }
+            fn index_dtype_sql(&self, _index: &Index) -> &'static str {
+                "TEXT"
+            }
+            fn supports_schemas(&self) -> bool {
+                true
+            }
+            fn list_schemas(&self) -> Result<Vec<String>, IoError> {
+                // Filter out information_schema + pg_catalog by default.
+                Ok(vec![
+                    "public".to_owned(),
+                    "analytics".to_owned(),
+                    "audit".to_owned(),
+                ])
+            }
+        }
+        let conn = MultiSchemaServer;
+        let schemas = list_sql_schemas(&conn).unwrap();
+        assert_eq!(schemas, vec!["public", "analytics", "audit"]);
+        // Verify the override actually filters internal schemas
+        // (test contract: stub never returns 'pg_catalog' or
+        // 'information_schema').
+        assert!(!schemas.iter().any(|s| s.starts_with("pg_")));
+        assert!(!schemas.iter().any(|s| s == "information_schema"));
+    }
+
+    #[test]
+    fn list_sql_schemas_propagates_backend_error() {
+        // If the backend errors during introspection, the error should
+        // surface through the wrapper unchanged.
+        struct BrokenIntrospection;
+        impl super::SqlConnection for BrokenIntrospection {
+            fn query(&self, _q: &str, _p: &[Scalar]) -> Result<SqlQueryResult, IoError> {
+                Ok(SqlQueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                })
+            }
+            fn execute_batch(&self, _sql: &str) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn table_exists(&self, _name: &str) -> Result<bool, IoError> {
+                Ok(false)
+            }
+            fn insert_rows(&self, _sql: &str, _rows: &[Vec<Scalar>]) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn dtype_sql(&self, _dtype: DType) -> &'static str {
+                "TEXT"
+            }
+            fn index_dtype_sql(&self, _index: &Index) -> &'static str {
+                "TEXT"
+            }
+            fn list_schemas(&self) -> Result<Vec<String>, IoError> {
+                Err(IoError::Sql("permission denied for catalog".to_owned()))
+            }
+        }
+        let conn = BrokenIntrospection;
+        let err = list_sql_schemas(&conn).expect_err("should surface backend error");
+        assert!(matches!(err, IoError::Sql(msg) if msg.contains("permission denied")));
     }
 }

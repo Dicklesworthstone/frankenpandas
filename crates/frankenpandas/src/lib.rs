@@ -69,6 +69,7 @@ pub use fp_io::{
     SqlReadOptions,
     SqlTableSchema,
     SqlWriteOptions,
+    list_sql_schemas,
     list_sql_tables,
     sql_table_schema,
     read_csv,
