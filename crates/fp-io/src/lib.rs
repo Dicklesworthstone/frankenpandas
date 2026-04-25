@@ -3475,6 +3475,21 @@ pub struct SqlIndexSchema {
     pub unique: bool,
 }
 
+/// Backend-neutral SQL unique-constraint metadata.
+///
+/// Per br-frankenpandas-sh4v (fd90.31). Surfaces inline `UNIQUE`
+/// declarations and `UNIQUE (...)` table constraints separately from
+/// user-created `CREATE UNIQUE INDEX` (those land in
+/// `SqlIndexSchema` via `list_indexes`). `name` may be backend-
+/// generated (SQLite reports `sqlite_autoindex_<table>_<n>`) when
+/// the constraint was declared inline without an explicit name —
+/// we surface the backend's name verbatim rather than fabricating.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqlUniqueConstraintSchema {
+    pub name: String,
+    pub columns: Vec<String>,
+}
+
 /// Backend-neutral SQL foreign-key constraint metadata.
 ///
 /// Per br-frankenpandas-uht8 (fd90.29). Aligns with
@@ -3800,6 +3815,23 @@ pub trait SqlConnection {
         _table_name: &str,
         _schema: Option<&str>,
     ) -> Result<Vec<SqlIndexSchema>, IoError> {
+        Ok(Vec::new())
+    }
+
+    /// List UNIQUE constraints declared on a table (inline or table-level),
+    /// excluding `CREATE UNIQUE INDEX` indexes (those land in `list_indexes`).
+    ///
+    /// Per br-frankenpandas-sh4v (fd90.31). Default impl returns
+    /// `Ok(Vec::new())`. rusqlite override uses
+    /// `PRAGMA index_list(table)` filtered by `origin == 'u'` (the
+    /// auto-created indexes that back declared UNIQUE constraints)
+    /// then `PRAGMA index_info` per match. Multi-schema backends
+    /// override with information_schema queries.
+    fn list_unique_constraints(
+        &self,
+        _table_name: &str,
+        _schema: Option<&str>,
+    ) -> Result<Vec<SqlUniqueConstraintSchema>, IoError> {
         Ok(Vec::new())
     }
 
@@ -4234,6 +4266,14 @@ impl SqlConnection for rusqlite::Connection {
                 // Auto-created PK index — pandas/SQLAlchemy hide it.
                 continue;
             }
+            if origin == "u" {
+                // Auto-created index backing a declared UNIQUE
+                // constraint — surfaced via list_unique_constraints
+                // (fd90.31), not here, to match SQLAlchemy disjoint
+                // bucketing between get_indexes and
+                // get_unique_constraints.
+                continue;
+            }
             // PRAGMA index_info(idx) returns: seqno, cid, column_name (col2 may
             // be NULL for expression-based indexes — skip those rather than
             // surfacing partial column lists).
@@ -4267,6 +4307,68 @@ impl SqlConnection for rusqlite::Connection {
             });
         }
         Ok(indexes)
+    }
+
+    fn list_unique_constraints(
+        &self,
+        table_name: &str,
+        _schema: Option<&str>,
+    ) -> Result<Vec<SqlUniqueConstraintSchema>, IoError> {
+        validate_sql_table_name(table_name)?;
+        // PRAGMA index_list(table) origin column:
+        //   'c' = CREATE INDEX (user) — surfaces via list_indexes
+        //   'u' = UNIQUE constraint   — surfaces here
+        //   'pk' = PRIMARY KEY auto   — surfaces via primary_key_columns
+        let pragma_list = format!(
+            "PRAGMA index_list(\"{}\")",
+            table_name.replace('"', "\"\"")
+        );
+        let mut list_stmt = self
+            .prepare(&pragma_list)
+            .map_err(|e| IoError::Sql(format!("list_unique_constraints prepare failed: {e}")))?;
+        let candidates = list_stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(1)?, // index name
+                    row.get::<_, String>(3)?, // origin
+                ))
+            })
+            .map_err(|e| IoError::Sql(format!("list_unique_constraints query failed: {e}")))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| IoError::Sql(format!("list_unique_constraints row read failed: {e}")))?;
+
+        let mut constraints = Vec::new();
+        for (name, origin) in candidates {
+            if origin != "u" {
+                continue;
+            }
+            let pragma_info =
+                format!("PRAGMA index_info(\"{}\")", name.replace('"', "\"\""));
+            let mut info_stmt = self
+                .prepare(&pragma_info)
+                .map_err(|e| IoError::Sql(format!("uq index_info prepare failed: {e}")))?;
+            let cols = info_stmt
+                .query_map([], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(2)?))
+                })
+                .map_err(|e| IoError::Sql(format!("uq index_info query failed: {e}")))?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| IoError::Sql(format!("uq index_info row read failed: {e}")))?;
+            // Skip expression-based unique constraints (column NULL).
+            if cols.iter().any(|(_, c)| c.is_none()) {
+                continue;
+            }
+            let mut sorted: Vec<(i64, String)> = cols
+                .into_iter()
+                .map(|(seq, c)| (seq, c.unwrap_or_default()))
+                .collect();
+            sorted.sort_by_key(|(seq, _)| *seq);
+            constraints.push(SqlUniqueConstraintSchema {
+                name,
+                columns: sorted.into_iter().map(|(_, c)| c).collect(),
+            });
+        }
+        Ok(constraints)
     }
 
     fn list_foreign_keys(
@@ -5175,6 +5277,23 @@ pub fn list_sql_foreign_keys<C: SqlConnection>(
     schema: Option<&str>,
 ) -> Result<Vec<SqlForeignKeySchema>, IoError> {
     conn.list_foreign_keys(table_name, schema)
+}
+
+/// List UNIQUE constraints declared on a SQL table.
+///
+/// Matches `SQLAlchemy.Inspector.get_unique_constraints()` shape.
+/// Surfaces only inline `UNIQUE` declarations and `UNIQUE (...)`
+/// table constraints. User-created `CREATE UNIQUE INDEX` indexes
+/// remain in `list_sql_indexes` (with `unique == true`). The two
+/// listings are intentionally disjoint to match SQLAlchemy.
+///
+/// Per br-frankenpandas-sh4v (fd90.31).
+pub fn list_sql_unique_constraints<C: SqlConnection>(
+    conn: &C,
+    table_name: &str,
+    schema: Option<&str>,
+) -> Result<Vec<SqlUniqueConstraintSchema>, IoError> {
+    conn.list_unique_constraints(table_name, schema)
 }
 
 /// Maximum identifier length supported by the SQL backend, or `None`
@@ -8006,8 +8125,9 @@ mod tests {
 
     use super::{
         SqlColumnSchema, SqlForeignKeySchema, SqlIfExists, SqlIndexSchema, SqlInsertMethod,
-        SqlQueryResult, SqlReadOptions, SqlTableSchema, SqlWriteOptions, list_sql_foreign_keys,
-        list_sql_indexes, list_sql_schemas, list_sql_tables, list_sql_views, read_sql,
+        SqlQueryResult, SqlReadOptions, SqlTableSchema, SqlUniqueConstraintSchema,
+        SqlWriteOptions, list_sql_foreign_keys, list_sql_indexes, list_sql_schemas,
+        list_sql_tables, list_sql_unique_constraints, list_sql_views, read_sql,
         read_sql_chunks, read_sql_chunks_with_index_col, read_sql_chunks_with_options,
         read_sql_chunks_with_options_and_index_col, read_sql_query, read_sql_query_chunks,
         read_sql_query_chunks_with_index_col, read_sql_query_chunks_with_options,
@@ -14183,5 +14303,199 @@ mod tests {
             vec!["log_view"]
         );
         assert!(list_sql_views(&conn, None).unwrap().is_empty());
+    }
+
+    // ── list_sql_unique_constraints / SqlConnection::list_unique_constraints
+    //    (br-sh4v / fd90.31) ────────────────────────────────────────────────
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn list_sql_unique_constraints_unknown_table_returns_empty() {
+        let conn = make_sql_test_conn();
+        let uqs = list_sql_unique_constraints(&conn, "no_such", None).unwrap();
+        assert!(uqs.is_empty());
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn list_sql_unique_constraints_table_without_uq() {
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(&conn, "CREATE TABLE plain (a INTEGER, b TEXT);")
+            .unwrap();
+        let uqs = list_sql_unique_constraints(&conn, "plain", None).unwrap();
+        assert!(uqs.is_empty());
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn list_sql_unique_constraints_inline_unique() {
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT UNIQUE);",
+        )
+        .unwrap();
+        let uqs = list_sql_unique_constraints(&conn, "users", None).unwrap();
+        assert_eq!(uqs.len(), 1);
+        assert_eq!(uqs[0].columns, vec!["email"]);
+        // SQLite gives backend-generated names like sqlite_autoindex_users_1.
+        assert!(
+            uqs[0].name.starts_with("sqlite_autoindex_users_"),
+            "expected sqlite_autoindex_ name; got {}",
+            uqs[0].name
+        );
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn list_sql_unique_constraints_composite_table_constraint() {
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE TABLE rolling ( \
+                year INTEGER, month INTEGER, code TEXT, val REAL, \
+                UNIQUE (year, month, code) \
+             );",
+        )
+        .unwrap();
+        let uqs = list_sql_unique_constraints(&conn, "rolling", None).unwrap();
+        assert_eq!(uqs.len(), 1);
+        assert_eq!(uqs[0].columns, vec!["year", "month", "code"]);
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn list_sql_unique_constraints_disjoint_from_create_unique_index() {
+        // Per SQLAlchemy: get_unique_constraints surfaces declared UNIQUE
+        // constraints (origin='u'); get_indexes surfaces user-created
+        // CREATE UNIQUE INDEX (origin='c'). The two must be disjoint.
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE TABLE mixed ( \
+                a INTEGER, \
+                b TEXT, \
+                c TEXT, \
+                UNIQUE (a) \
+             );",
+        )
+        .unwrap();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE UNIQUE INDEX idx_mixed_b ON mixed (b);",
+        )
+        .unwrap();
+
+        let uqs = list_sql_unique_constraints(&conn, "mixed", None).unwrap();
+        let idxs = list_sql_indexes(&conn, "mixed", None).unwrap();
+
+        // The UNIQUE constraint is in uqs only.
+        assert_eq!(uqs.len(), 1);
+        assert_eq!(uqs[0].columns, vec!["a"]);
+        // The CREATE UNIQUE INDEX is in idxs only.
+        assert_eq!(idxs.len(), 1);
+        assert_eq!(idxs[0].name, "idx_mixed_b");
+        assert!(idxs[0].unique);
+        assert_eq!(idxs[0].columns, vec!["b"]);
+
+        // No overlap by name (uqs uses sqlite_autoindex_, idxs uses idx_).
+        assert!(!uqs.iter().any(|u| u.name == "idx_mixed_b"));
+        assert!(!idxs.iter().any(|i| i.name.starts_with("sqlite_autoindex_")));
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn list_sql_unique_constraints_rejects_invalid_table_name() {
+        let conn = make_sql_test_conn();
+        let err = list_sql_unique_constraints(&conn, "x; DROP TABLE users", None)
+            .expect_err("must reject invalid identifier");
+        assert!(matches!(err, IoError::Sql(msg) if msg.contains("invalid")));
+    }
+
+    #[test]
+    fn list_sql_unique_constraints_default_impl_returns_empty() {
+        struct NoIntrospection;
+        impl super::SqlConnection for NoIntrospection {
+            fn query(&self, _q: &str, _p: &[Scalar]) -> Result<SqlQueryResult, IoError> {
+                Ok(SqlQueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                })
+            }
+            fn execute_batch(&self, _sql: &str) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn table_exists(&self, _name: &str) -> Result<bool, IoError> {
+                Ok(false)
+            }
+            fn insert_rows(&self, _sql: &str, _rows: &[Vec<Scalar>]) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn dtype_sql(&self, _dtype: DType) -> &'static str {
+                "TEXT"
+            }
+            fn index_dtype_sql(&self, _index: &Index) -> &'static str {
+                "TEXT"
+            }
+        }
+        assert!(
+            list_sql_unique_constraints(&NoIntrospection, "anything", None)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn list_sql_unique_constraints_routes_to_backend_override() {
+        struct MultiSchemaUq;
+        impl super::SqlConnection for MultiSchemaUq {
+            fn query(&self, _q: &str, _p: &[Scalar]) -> Result<SqlQueryResult, IoError> {
+                Ok(SqlQueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                })
+            }
+            fn execute_batch(&self, _sql: &str) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn table_exists(&self, _name: &str) -> Result<bool, IoError> {
+                Ok(false)
+            }
+            fn insert_rows(&self, _sql: &str, _rows: &[Vec<Scalar>]) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn dtype_sql(&self, _dtype: DType) -> &'static str {
+                "TEXT"
+            }
+            fn index_dtype_sql(&self, _index: &Index) -> &'static str {
+                "TEXT"
+            }
+            fn supports_schemas(&self) -> bool {
+                true
+            }
+            fn list_unique_constraints(
+                &self,
+                table: &str,
+                schema: Option<&str>,
+            ) -> Result<Vec<SqlUniqueConstraintSchema>, IoError> {
+                if table == "users" && schema == Some("public") {
+                    Ok(vec![SqlUniqueConstraintSchema {
+                        name: "users_email_key".to_owned(),
+                        columns: vec!["email".to_owned()],
+                    }])
+                } else {
+                    Ok(vec![])
+                }
+            }
+        }
+        let conn = MultiSchemaUq;
+        let uqs = list_sql_unique_constraints(&conn, "users", Some("public")).unwrap();
+        assert_eq!(uqs.len(), 1);
+        assert_eq!(uqs[0].name, "users_email_key");
+        assert!(
+            list_sql_unique_constraints(&conn, "users", Some("audit"))
+                .unwrap()
+                .is_empty()
+        );
     }
 }
