@@ -255,6 +255,10 @@ pub enum TypeError {
     ValueIsMissing { kind: NullKind },
     #[error("sparse value dtype cannot be {dtype:?}")]
     InvalidSparseValueDType { dtype: DType },
+    #[error("interval_range step must be finite, positive, and not NaN (got {step})")]
+    InvalidIntervalStep { step: f64 },
+    #[error("interval_range step {step} does not evenly divide range end-start={span}")]
+    IntervalStepDoesNotDivide { step: f64, span: f64 },
 }
 
 pub fn common_dtype(left: DType, right: DType) -> Result<DType, TypeError> {
@@ -1286,6 +1290,95 @@ impl std::fmt::Display for Interval {
             self.left, self.right
         )
     }
+}
+
+// ── interval_range builders (br-frankenpandas-xaom — Phase 2 of j8k4) ────
+
+/// Build `periods` equal-width intervals spanning `[start, end]`.
+///
+/// Matches `pd.interval_range(start, end, periods=N, closed=...)` for the
+/// numeric-subtype case. Returns exactly `periods` intervals; when
+/// `periods == 0` or `start >= end`, returns an empty vector (matches
+/// pandas's empty IntervalIndex).
+///
+/// ```
+/// use fp_types::{interval_range_by_periods, IntervalClosed};
+/// let bins = interval_range_by_periods(0.0, 10.0, 5, IntervalClosed::Right);
+/// assert_eq!(bins.len(), 5);
+/// assert_eq!(bins[0].left, 0.0);
+/// assert_eq!(bins[0].right, 2.0);
+/// assert_eq!(bins[4].right, 10.0);
+/// ```
+#[must_use]
+pub fn interval_range_by_periods(
+    start: f64,
+    end: f64,
+    periods: usize,
+    closed: IntervalClosed,
+) -> Vec<Interval> {
+    if periods == 0 || !start.is_finite() || !end.is_finite() || start >= end {
+        return Vec::new();
+    }
+    let step = (end - start) / (periods as f64);
+    let mut out = Vec::with_capacity(periods);
+    for i in 0..periods {
+        let left = start + step * (i as f64);
+        // Use end exactly for the final right edge to avoid float drift.
+        let right = if i + 1 == periods {
+            end
+        } else {
+            start + step * ((i + 1) as f64)
+        };
+        out.push(Interval::new(left, right, closed));
+    }
+    out
+}
+
+/// Build equal-`step`-width intervals spanning `[start, end]`.
+///
+/// Matches `pd.interval_range(start, end, freq=step, closed=...)` for the
+/// numeric-subtype case. `step` must be finite and positive; `(end - start)`
+/// must be an integer multiple of `step` (within float tolerance) — pandas
+/// raises `ValueError` otherwise; this fn returns `Err(TypeError::IntervalStepDoesNotDivide)`.
+///
+/// Returns an empty vector when `start == end` (matches pandas' zero-bin
+/// IntervalIndex); returns an empty vector when `start > end` (pandas also
+/// returns empty rather than erroring in this case).
+pub fn interval_range_by_step(
+    start: f64,
+    end: f64,
+    step: f64,
+    closed: IntervalClosed,
+) -> Result<Vec<Interval>, TypeError> {
+    if !step.is_finite() || !step.is_sign_positive() || step == 0.0 {
+        return Err(TypeError::InvalidIntervalStep { step });
+    }
+    if !start.is_finite() || !end.is_finite() || start >= end {
+        return Ok(Vec::new());
+    }
+    let span = end - start;
+    let periods_f = span / step;
+    let periods = periods_f.round() as i64;
+    if periods <= 0 {
+        return Ok(Vec::new());
+    }
+    let reconstructed = step * (periods as f64);
+    // Relative tolerance: allow float-rounding noise proportional to span.
+    if (span - reconstructed).abs() > span.abs() * 1e-9 + 1e-12 {
+        return Err(TypeError::IntervalStepDoesNotDivide { step, span });
+    }
+    let periods = periods as usize;
+    let mut out = Vec::with_capacity(periods);
+    for i in 0..periods {
+        let left = start + step * (i as f64);
+        let right = if i + 1 == periods {
+            end
+        } else {
+            start + step * ((i + 1) as f64)
+        };
+        out.push(Interval::new(left, right, closed));
+    }
+    Ok(out)
 }
 
 // ── Period types (br-frankenpandas-epoj Phase 1) ────────────────────────
@@ -2432,5 +2525,111 @@ mod tests {
         let json = serde_json::to_string(&p).expect("serialize");
         let back: Period = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(p, back);
+    }
+
+    // ── interval_range tests (br-frankenpandas-xaom) ────────────────────
+
+    use super::{TypeError, interval_range_by_periods, interval_range_by_step};
+
+    #[test]
+    fn interval_range_by_periods_matches_pandas_default_case() {
+        // pd.interval_range(0, 10, periods=5) → [(0,2],(2,4],(4,6],(6,8],(8,10]]
+        let bins = interval_range_by_periods(0.0, 10.0, 5, IntervalClosed::Right);
+        assert_eq!(bins.len(), 5);
+        for (i, bin) in bins.iter().enumerate() {
+            assert_eq!(bin.left, (i as f64) * 2.0);
+            assert_eq!(bin.right, ((i + 1) as f64) * 2.0);
+            assert_eq!(bin.closed, IntervalClosed::Right);
+        }
+    }
+
+    #[test]
+    fn interval_range_by_periods_final_edge_is_exact_end() {
+        // Guards against accumulated float drift on the last right edge.
+        let bins = interval_range_by_periods(0.0, 1.0, 7, IntervalClosed::Right);
+        assert_eq!(bins.last().unwrap().right, 1.0);
+    }
+
+    #[test]
+    fn interval_range_by_periods_zero_periods_is_empty() {
+        assert!(interval_range_by_periods(0.0, 10.0, 0, IntervalClosed::Right).is_empty());
+    }
+
+    #[test]
+    fn interval_range_by_periods_reversed_range_is_empty() {
+        // pandas: pd.interval_range(10, 0, periods=5) → IntervalIndex([]).
+        assert!(interval_range_by_periods(10.0, 0.0, 5, IntervalClosed::Right).is_empty());
+    }
+
+    #[test]
+    fn interval_range_by_periods_preserves_closed_policy() {
+        for closed in [
+            IntervalClosed::Left,
+            IntervalClosed::Right,
+            IntervalClosed::Both,
+            IntervalClosed::Neither,
+        ] {
+            let bins = interval_range_by_periods(0.0, 4.0, 2, closed);
+            assert!(bins.iter().all(|b| b.closed == closed));
+        }
+    }
+
+    #[test]
+    fn interval_range_by_step_matches_pandas_default_case() {
+        // pd.interval_range(0, 10, freq=2) → [(0,2],(2,4],(4,6],(6,8],(8,10]]
+        let bins = interval_range_by_step(0.0, 10.0, 2.0, IntervalClosed::Right).expect("ok");
+        assert_eq!(bins.len(), 5);
+        assert_eq!(bins[0].left, 0.0);
+        assert_eq!(bins[4].right, 10.0);
+    }
+
+    #[test]
+    fn interval_range_by_step_rejects_non_positive_step() {
+        assert!(matches!(
+            interval_range_by_step(0.0, 10.0, 0.0, IntervalClosed::Right),
+            Err(TypeError::InvalidIntervalStep { .. })
+        ));
+        assert!(matches!(
+            interval_range_by_step(0.0, 10.0, -2.0, IntervalClosed::Right),
+            Err(TypeError::InvalidIntervalStep { .. })
+        ));
+        assert!(matches!(
+            interval_range_by_step(0.0, 10.0, f64::NAN, IntervalClosed::Right),
+            Err(TypeError::InvalidIntervalStep { .. })
+        ));
+        assert!(matches!(
+            interval_range_by_step(0.0, 10.0, f64::INFINITY, IntervalClosed::Right),
+            Err(TypeError::InvalidIntervalStep { .. })
+        ));
+    }
+
+    #[test]
+    fn interval_range_by_step_rejects_non_dividing_step() {
+        // pandas: pd.interval_range(0, 10, freq=3) → ValueError
+        // (span=10 not divisible by step=3). Reject with IntervalStepDoesNotDivide.
+        assert!(matches!(
+            interval_range_by_step(0.0, 10.0, 3.0, IntervalClosed::Right),
+            Err(TypeError::IntervalStepDoesNotDivide { .. })
+        ));
+    }
+
+    #[test]
+    fn interval_range_by_step_reversed_range_is_empty() {
+        let bins = interval_range_by_step(10.0, 0.0, 2.0, IntervalClosed::Right).expect("ok");
+        assert!(bins.is_empty());
+    }
+
+    #[test]
+    fn interval_range_by_step_degenerate_zero_span_is_empty() {
+        let bins = interval_range_by_step(5.0, 5.0, 1.0, IntervalClosed::Right).expect("ok");
+        assert!(bins.is_empty());
+    }
+
+    #[test]
+    fn interval_range_by_step_accepts_float_step_within_tolerance() {
+        // step=0.1 ten times == 1.0 but float arithmetic produces 0.9999...
+        let bins = interval_range_by_step(0.0, 1.0, 0.1, IntervalClosed::Right).expect("ok");
+        assert_eq!(bins.len(), 10);
+        assert_eq!(bins.last().unwrap().right, 1.0);
     }
 }
