@@ -3353,7 +3353,7 @@ pub enum SqlInsertMethod {
 }
 
 /// Options for reading SQL query results into a DataFrame.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct SqlReadOptions {
     /// Positional parameters to bind to `?` placeholders in the SQL query.
     pub params: Option<Vec<Scalar>>,
@@ -3421,6 +3421,24 @@ pub struct SqlReadOptions {
     ///
     /// Per br-frankenpandas-c1h9 (fd90.36).
     pub index_col: Option<String>,
+}
+
+impl Default for SqlReadOptions {
+    /// Per br-frankenpandas-o0x6 (fd90.41): pandas defaults
+    /// `coerce_float=True` for `read_sql` / `read_sql_query` /
+    /// `read_sql_table` so we follow suit. Other defaults are the
+    /// natural empty / None values.
+    fn default() -> Self {
+        Self {
+            params: None,
+            parse_dates: None,
+            coerce_float: true,
+            dtype: None,
+            schema: None,
+            columns: None,
+            index_col: None,
+        }
+    }
 }
 
 /// Options for writing a DataFrame to SQL.
@@ -10194,10 +10212,29 @@ mod tests {
         )
         .expect("create payments table");
 
+        // Per fd90.41: pandas default for coerce_float is True, and our
+        // SqlReadOptions::default() now matches. So the bare read_sql
+        // path coerces decimal-like text columns to Float64 by default.
         let default_frame =
             read_sql(&conn, "SELECT amount FROM payments ORDER BY id").expect("default read");
+        assert_eq!(default_frame.column("amount").unwrap().dtype(), DType::Float64);
         assert_eq!(
             default_frame.column("amount").unwrap().values(),
+            &[Scalar::Float64(12.5), Scalar::Float64(-3.25)],
+        );
+
+        // Explicitly opting out of coerce_float keeps the raw Utf8.
+        let no_coerce = read_sql_with_options(
+            &conn,
+            "SELECT amount FROM payments ORDER BY id",
+            &SqlReadOptions {
+                coerce_float: false,
+                ..SqlReadOptions::default()
+            },
+        )
+        .expect("read without coerce_float");
+        assert_eq!(
+            no_coerce.column("amount").unwrap().values(),
             &[
                 Scalar::Utf8("12.50".to_owned()),
                 Scalar::Utf8("-3.25".to_owned()),
@@ -10209,10 +10246,6 @@ mod tests {
             "SELECT amount, fee FROM payments ORDER BY id",
             &SqlReadOptions {
                 coerce_float: true,
-                dtype: None,
-                schema: None,
-                columns: None,
-                index_col: None,
                 ..SqlReadOptions::default()
             },
         )
@@ -16700,5 +16733,23 @@ mod tests {
         };
         assert_eq!(bundle.table_name, "t");
         assert!(bundle.columns.is_empty());
+    }
+
+    // ── SqlReadOptions default coerce_float (br-o0x6 / fd90.41) ──────────
+
+    #[test]
+    fn sql_read_options_default_coerce_float_matches_pandas() {
+        // Pandas defaults coerce_float=True for read_sql / read_sql_query
+        // / read_sql_table. We must match — any bare ::default() call
+        // should opt INTO coerce_float, not opt out.
+        let opts = SqlReadOptions::default();
+        assert!(opts.coerce_float, "default coerce_float must be true (pandas parity)");
+        // Sanity: other defaults are the natural empty / None values.
+        assert!(opts.params.is_none());
+        assert!(opts.parse_dates.is_none());
+        assert!(opts.dtype.is_none());
+        assert!(opts.schema.is_none());
+        assert!(opts.columns.is_none());
+        assert!(opts.index_col.is_none());
     }
 }
