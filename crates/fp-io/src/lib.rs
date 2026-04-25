@@ -4585,31 +4585,49 @@ impl SqlConnection for rusqlite::Connection {
                 .map(|(_, t, _, _)| t.clone())
                 .unwrap_or_default();
             let mut columns = Vec::with_capacity(group.len());
-            let mut referenced_columns = Vec::with_capacity(group.len());
+            let mut referenced_columns: Vec<Option<String>> =
+                Vec::with_capacity(group.len());
             for (_, _, from_col, to_col) in group {
                 columns.push(from_col);
-                // SQLite returns NULL for the referenced column when the FK
-                // references the parent table's PRIMARY KEY implicitly. Skip
-                // such partial FK rows rather than fabricating a name —
-                // callers needing the resolved PK can use primary_key_columns
-                // on the referenced table.
-                if let Some(name) = to_col {
-                    referenced_columns.push(name);
+                referenced_columns.push(to_col);
+            }
+            // Per fd90.44: when ALL `to` columns are NULL, the user
+            // declared `FOREIGN KEY (cols) REFERENCES parent` (implicit
+            // reference to parent's PK). Resolve by looking up the
+            // parent's primary key columns. SQLAlchemy.Inspector
+            // surfaces these as resolved-to-PK references; matching
+            // that behavior keeps callers from missing real FKs.
+            let resolved_columns: Vec<String> = if referenced_columns
+                .iter()
+                .all(Option::is_none)
+            {
+                // Implicit-PK reference: look up parent's PK.
+                let pk = self.primary_key_columns(&ref_table, None)?;
+                if pk.len() == columns.len() {
+                    pk
+                } else {
+                    // Parent PK shape doesn't match FK column count
+                    // (parent has no PK, or composite mismatch). Skip
+                    // — fabricating columns would mislead callers
+                    // worse than hiding the FK.
+                    continue;
                 }
-            }
-            // Skip implicit-PK FKs: they would surface as columns.len() !=
-            // referenced_columns.len(), which would mislead callers into
-            // pairing the wrong columns.
-            if columns.len() != referenced_columns.len() {
+            } else if referenced_columns.iter().all(Option::is_some) {
+                // Fully explicit: every column has a resolved 'to'.
+                referenced_columns.into_iter().flatten().collect()
+            } else {
+                // Mixed Some/None: SQLite shouldn't produce this for
+                // a single FK group, but if it ever does, skip rather
+                // than mispair.
                 continue;
-            }
+            };
             fks.push(SqlForeignKeySchema {
                 // SQLite PRAGMA foreign_key_list does not surface a
                 // CONSTRAINT name; pandas/SQLAlchemy report None there too.
                 constraint_name: None,
                 columns,
                 referenced_table: ref_table,
-                referenced_columns,
+                referenced_columns: resolved_columns,
             });
         }
         Ok(fks)
@@ -14669,6 +14687,94 @@ mod tests {
         let err = list_sql_foreign_keys(&conn, "x; DROP TABLE users", None)
             .expect_err("must reject invalid identifier");
         assert!(matches!(err, IoError::Sql(msg) if msg.contains("invalid")));
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn list_sql_foreign_keys_resolves_implicit_pk_single_column() {
+        // Per fd90.44: FOREIGN KEY (parent_id) REFERENCES parent
+        // (no column list) is an implicit reference to parent's PK.
+        // SQLite returns NULL for the 'to' column; we now resolve via
+        // the parent's primary_key_columns.
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE TABLE imp_parent (pid INTEGER PRIMARY KEY, label TEXT);",
+        )
+        .unwrap();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE TABLE imp_child ( \
+                cid INTEGER, \
+                parent_id INTEGER, \
+                FOREIGN KEY (parent_id) REFERENCES imp_parent \
+             );",
+        )
+        .unwrap();
+        let fks = list_sql_foreign_keys(&conn, "imp_child", None).unwrap();
+        assert_eq!(fks.len(), 1, "implicit-PK FK must surface (was being silently dropped)");
+        assert_eq!(fks[0].columns, vec!["parent_id"]);
+        assert_eq!(fks[0].referenced_table, "imp_parent");
+        // resolved from parent's PK.
+        assert_eq!(fks[0].referenced_columns, vec!["pid"]);
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn list_sql_foreign_keys_resolves_implicit_pk_composite() {
+        // Composite FK with implicit reference to composite PK.
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE TABLE imp_parent_comp ( \
+                year INTEGER NOT NULL, \
+                month INTEGER NOT NULL, \
+                PRIMARY KEY (year, month) \
+             );",
+        )
+        .unwrap();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE TABLE imp_child_comp ( \
+                cid INTEGER, \
+                fyear INTEGER NOT NULL, \
+                fmonth INTEGER NOT NULL, \
+                FOREIGN KEY (fyear, fmonth) REFERENCES imp_parent_comp \
+             );",
+        )
+        .unwrap();
+        let fks = list_sql_foreign_keys(&conn, "imp_child_comp", None).unwrap();
+        assert_eq!(fks.len(), 1);
+        assert_eq!(fks[0].columns, vec!["fyear", "fmonth"]);
+        assert_eq!(fks[0].referenced_table, "imp_parent_comp");
+        // Resolved from composite PK in declaration order.
+        assert_eq!(fks[0].referenced_columns, vec!["year", "month"]);
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn list_sql_foreign_keys_explicit_columns_unchanged() {
+        // Existing behavior preserved: explicit columns still
+        // round-trip exactly as before fd90.44.
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE TABLE exp_parent (pid INTEGER PRIMARY KEY);",
+        )
+        .unwrap();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE TABLE exp_child ( \
+                cid INTEGER, \
+                parent_id INTEGER, \
+                FOREIGN KEY (parent_id) REFERENCES exp_parent(pid) \
+             );",
+        )
+        .unwrap();
+        let fks = list_sql_foreign_keys(&conn, "exp_child", None).unwrap();
+        assert_eq!(fks.len(), 1);
+        assert_eq!(fks[0].columns, vec!["parent_id"]);
+        assert_eq!(fks[0].referenced_columns, vec!["pid"]);
     }
 
     #[test]
