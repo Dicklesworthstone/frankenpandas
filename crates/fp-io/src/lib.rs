@@ -3463,6 +3463,18 @@ impl SqlTableSchema {
     }
 }
 
+/// Backend-neutral SQL index metadata.
+///
+/// Per br-frankenpandas-bgv9 (fd90.28). Used by `list_indexes` /
+/// `list_sql_indexes` to surface user-defined indexes so callers can
+/// align with `SQLAlchemy.Inspector.get_indexes()` shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqlIndexSchema {
+    pub name: String,
+    pub columns: Vec<String>,
+    pub unique: bool,
+}
+
 /// Iterator over DataFrame chunks produced by a SQL query.
 #[derive(Debug, Clone)]
 pub struct SqlChunkIterator {
@@ -3740,6 +3752,23 @@ pub trait SqlConnection {
     /// `SHOW server_version` / `SELECT VERSION()`.
     fn server_version(&self) -> Result<Option<String>, IoError> {
         Ok(None)
+    }
+
+    /// List indexes defined on a table, optionally schema-scoped.
+    ///
+    /// Per br-frankenpandas-bgv9 (fd90.28). Default impl returns
+    /// `Ok(Vec::new())` for backends that can't introspect. rusqlite
+    /// override uses `PRAGMA index_list(table)` + `PRAGMA index_info`
+    /// per index, surfacing only user-created indexes (the auto-created
+    /// indexes for PRIMARY KEY constraints are filtered out to match
+    /// SQLAlchemy.Inspector.get_indexes() semantics). Multi-schema
+    /// backends override with information_schema queries.
+    fn list_indexes(
+        &self,
+        _table_name: &str,
+        _schema: Option<&str>,
+    ) -> Result<Vec<SqlIndexSchema>, IoError> {
+        Ok(Vec::new())
     }
 
     /// Return the primary-key column names for a table, ordered by
@@ -4100,6 +4129,76 @@ impl SqlConnection for rusqlite::Connection {
             .query_row("SELECT sqlite_version()", [], |row| row.get(0))
             .map_err(|e| IoError::Sql(format!("server_version query failed: {e}")))?;
         Ok(Some(version))
+    }
+
+    fn list_indexes(
+        &self,
+        table_name: &str,
+        _schema: Option<&str>,
+    ) -> Result<Vec<SqlIndexSchema>, IoError> {
+        validate_sql_table_name(table_name)?;
+        // PRAGMA index_list(table) returns: seq, name, unique, origin, partial.
+        // origin is 'c' for CREATE INDEX (user), 'pk' for PRIMARY KEY auto,
+        // 'u' for UNIQUE constraint auto. SQLAlchemy.Inspector surfaces
+        // only the user-created ones, so we filter out 'pk' to match.
+        let pragma_list = format!(
+            "PRAGMA index_list(\"{}\")",
+            table_name.replace('"', "\"\"")
+        );
+        let mut list_stmt = self
+            .prepare(&pragma_list)
+            .map_err(|e| IoError::Sql(format!("list_indexes prepare failed: {e}")))?;
+        let index_meta = list_stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(1)?, // name
+                    row.get::<_, i64>(2)?,    // unique flag
+                    row.get::<_, String>(3)?, // origin
+                ))
+            })
+            .map_err(|e| IoError::Sql(format!("list_indexes query failed: {e}")))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| IoError::Sql(format!("list_indexes row read failed: {e}")))?;
+
+        let mut indexes = Vec::new();
+        for (name, uniq, origin) in index_meta {
+            if origin == "pk" {
+                // Auto-created PK index — pandas/SQLAlchemy hide it.
+                continue;
+            }
+            // PRAGMA index_info(idx) returns: seqno, cid, column_name (col2 may
+            // be NULL for expression-based indexes — skip those rather than
+            // surfacing partial column lists).
+            let pragma_info = format!(
+                "PRAGMA index_info(\"{}\")",
+                name.replace('"', "\"\"")
+            );
+            let mut info_stmt = self
+                .prepare(&pragma_info)
+                .map_err(|e| IoError::Sql(format!("index_info prepare failed: {e}")))?;
+            let cols = info_stmt
+                .query_map([], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(2)?))
+                })
+                .map_err(|e| IoError::Sql(format!("index_info query failed: {e}")))?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| IoError::Sql(format!("index_info row read failed: {e}")))?;
+            // Skip expression-based indexes (any column_name is NULL).
+            if cols.iter().any(|(_, c)| c.is_none()) {
+                continue;
+            }
+            let mut sorted: Vec<(i64, String)> = cols
+                .into_iter()
+                .map(|(seq, c)| (seq, c.unwrap_or_default()))
+                .collect();
+            sorted.sort_by_key(|(seq, _)| *seq);
+            indexes.push(SqlIndexSchema {
+                name,
+                columns: sorted.into_iter().map(|(_, c)| c).collect(),
+                unique: uniq != 0,
+            });
+        }
+        Ok(indexes)
     }
 }
 
@@ -4868,6 +4967,23 @@ pub fn sql_primary_key_columns<C: SqlConnection>(
     schema: Option<&str>,
 ) -> Result<Vec<String>, IoError> {
     conn.primary_key_columns(table_name, schema)
+}
+
+/// List user-defined indexes on a SQL table, optionally schema-scoped.
+///
+/// Matches `SQLAlchemy.Inspector.get_indexes()` shape. Returns an
+/// empty vector when the table doesn't exist, has no user-created
+/// indexes, or the backend can't introspect. Auto-created PRIMARY-KEY
+/// indexes are filtered out (they're surfaced via primary_key_columns
+/// instead).
+///
+/// Per br-frankenpandas-bgv9 (fd90.28).
+pub fn list_sql_indexes<C: SqlConnection>(
+    conn: &C,
+    table_name: &str,
+    schema: Option<&str>,
+) -> Result<Vec<SqlIndexSchema>, IoError> {
+    conn.list_indexes(table_name, schema)
 }
 
 /// Maximum identifier length supported by the SQL backend, or `None`
@@ -7698,8 +7814,9 @@ mod tests {
     // ── SQL I/O tests ──────────────────────────────────────────────
 
     use super::{
-        SqlColumnSchema, SqlIfExists, SqlInsertMethod, SqlQueryResult, SqlReadOptions,
-        SqlTableSchema, SqlWriteOptions, list_sql_schemas, list_sql_tables, read_sql,
+        SqlColumnSchema, SqlIfExists, SqlIndexSchema, SqlInsertMethod, SqlQueryResult,
+        SqlReadOptions, SqlTableSchema, SqlWriteOptions, list_sql_indexes, list_sql_schemas,
+        list_sql_tables, read_sql,
         read_sql_chunks, read_sql_chunks_with_index_col, read_sql_chunks_with_options,
         read_sql_chunks_with_options_and_index_col, read_sql_query, read_sql_query_chunks,
         read_sql_query_chunks_with_index_col, read_sql_query_chunks_with_options,
@@ -13315,5 +13432,209 @@ mod tests {
             },
         )
         .expect("63-char column at boundary should be accepted");
+    }
+
+    // ── list_sql_indexes / SqlConnection::list_indexes (br-bgv9 / fd90.28) ─
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn list_sql_indexes_unknown_table_returns_empty() {
+        let conn = make_sql_test_conn();
+        let indexes = list_sql_indexes(&conn, "no_such_tbl", None).unwrap();
+        assert!(indexes.is_empty());
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn list_sql_indexes_table_without_indexes() {
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE TABLE plain (a INTEGER, b TEXT);",
+        )
+        .unwrap();
+        let indexes = list_sql_indexes(&conn, "plain", None).unwrap();
+        assert!(indexes.is_empty());
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn list_sql_indexes_single_column() {
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE TABLE events (id INTEGER, ts TEXT);",
+        )
+        .unwrap();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE INDEX idx_events_ts ON events (ts);",
+        )
+        .unwrap();
+        let indexes = list_sql_indexes(&conn, "events", None).unwrap();
+        assert_eq!(indexes.len(), 1);
+        assert_eq!(indexes[0].name, "idx_events_ts");
+        assert_eq!(indexes[0].columns, vec!["ts"]);
+        assert!(!indexes[0].unique);
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn list_sql_indexes_unique_index() {
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE TABLE users (id INTEGER, email TEXT);",
+        )
+        .unwrap();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE UNIQUE INDEX idx_users_email ON users (email);",
+        )
+        .unwrap();
+        let indexes = list_sql_indexes(&conn, "users", None).unwrap();
+        assert_eq!(indexes.len(), 1);
+        assert_eq!(indexes[0].name, "idx_users_email");
+        assert_eq!(indexes[0].columns, vec!["email"]);
+        assert!(indexes[0].unique);
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn list_sql_indexes_composite_columns_in_definition_order() {
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE TABLE rolling (year INT, month INT, code TEXT, val REAL);",
+        )
+        .unwrap();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE INDEX idx_rolling_y_m_c ON rolling (year, month, code);",
+        )
+        .unwrap();
+        let indexes = list_sql_indexes(&conn, "rolling", None).unwrap();
+        assert_eq!(indexes.len(), 1);
+        assert_eq!(indexes[0].columns, vec!["year", "month", "code"]);
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn list_sql_indexes_filters_pk_auto_index() {
+        // INTEGER PRIMARY KEY in SQLite creates an automatic index that
+        // SQLAlchemy.Inspector hides. We must hide it too — only the
+        // explicit CREATE INDEX should surface.
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE TABLE pk_only (id INTEGER PRIMARY KEY, name TEXT);",
+        )
+        .unwrap();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE INDEX idx_pk_only_name ON pk_only (name);",
+        )
+        .unwrap();
+        let indexes = list_sql_indexes(&conn, "pk_only", None).unwrap();
+        // Only the explicit user index should appear.
+        assert_eq!(indexes.len(), 1);
+        assert_eq!(indexes[0].name, "idx_pk_only_name");
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn list_sql_indexes_rejects_invalid_table_name() {
+        let conn = make_sql_test_conn();
+        let err = list_sql_indexes(&conn, "x; DROP TABLE users", None)
+            .expect_err("must reject invalid identifier");
+        assert!(matches!(err, IoError::Sql(msg) if msg.contains("invalid")));
+    }
+
+    #[test]
+    fn list_sql_indexes_default_impl_returns_empty() {
+        struct NoIntrospection;
+        impl super::SqlConnection for NoIntrospection {
+            fn query(&self, _q: &str, _p: &[Scalar]) -> Result<SqlQueryResult, IoError> {
+                Ok(SqlQueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                })
+            }
+            fn execute_batch(&self, _sql: &str) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn table_exists(&self, _name: &str) -> Result<bool, IoError> {
+                Ok(false)
+            }
+            fn insert_rows(&self, _sql: &str, _rows: &[Vec<Scalar>]) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn dtype_sql(&self, _dtype: DType) -> &'static str {
+                "TEXT"
+            }
+            fn index_dtype_sql(&self, _index: &Index) -> &'static str {
+                "TEXT"
+            }
+        }
+        assert!(list_sql_indexes(&NoIntrospection, "anything", None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn list_sql_indexes_routes_to_backend_override() {
+        struct MultiSchemaIdx;
+        impl super::SqlConnection for MultiSchemaIdx {
+            fn query(&self, _q: &str, _p: &[Scalar]) -> Result<SqlQueryResult, IoError> {
+                Ok(SqlQueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                })
+            }
+            fn execute_batch(&self, _sql: &str) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn table_exists(&self, _name: &str) -> Result<bool, IoError> {
+                Ok(false)
+            }
+            fn insert_rows(&self, _sql: &str, _rows: &[Vec<Scalar>]) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn dtype_sql(&self, _dtype: DType) -> &'static str {
+                "TEXT"
+            }
+            fn index_dtype_sql(&self, _index: &Index) -> &'static str {
+                "TEXT"
+            }
+            fn supports_schemas(&self) -> bool {
+                true
+            }
+            fn list_indexes(
+                &self,
+                table: &str,
+                schema: Option<&str>,
+            ) -> Result<Vec<SqlIndexSchema>, IoError> {
+                if table == "events" && schema == Some("analytics") {
+                    Ok(vec![
+                        SqlIndexSchema {
+                            name: "idx_events_ts".to_owned(),
+                            columns: vec!["ts".to_owned()],
+                            unique: false,
+                        },
+                        SqlIndexSchema {
+                            name: "uq_events_uid".to_owned(),
+                            columns: vec!["user_id".to_owned()],
+                            unique: true,
+                        },
+                    ])
+                } else {
+                    Ok(vec![])
+                }
+            }
+        }
+        let conn = MultiSchemaIdx;
+        let indexes = list_sql_indexes(&conn, "events", Some("analytics")).unwrap();
+        assert_eq!(indexes.len(), 2);
+        assert!(indexes.iter().any(|i| i.unique && i.name == "uq_events_uid"));
+        // Wrong schema → empty (override scopes by Some).
+        assert!(list_sql_indexes(&conn, "events", Some("audit")).unwrap().is_empty());
     }
 }
