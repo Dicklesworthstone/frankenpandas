@@ -8650,16 +8650,32 @@ mod tests {
     // `#[allow(unused_imports)]` covers the few free fns that are
     // exclusively used inside the cfg-gated SQLite-backed tests.
 
-    #[allow(unused_imports)]
+    // Per fd90.48: TYPE imports + introspection-helper free fns are
+    // used by both stub-backend tests (which compile under
+    // --no-default-features) and SQLite-backed tests. The
+    // read_sql_* / write_sql_* row-materialization free fns are only
+    // exercised inside SQLite-backed tests (cfg-gated below) so they
+    // get their own gated import group to avoid unused warnings.
+    // Per fd90.48: TYPE imports + introspection-helper free fns +
+    // write_sql / write_sql_with_options are used by both stub-backend
+    // tests (which compile under --no-default-features) and
+    // SQLite-backed tests. The read_sql_* row-materialization free fns
+    // are only exercised inside SQLite-backed tests (cfg-gated below).
     use super::{
         SqlColumnSchema, SqlForeignKeySchema, SqlIfExists, SqlIndexSchema, SqlInsertMethod,
         SqlInspector, SqlQueryResult, SqlReadOptions, SqlReflectedTable, SqlTableSchema,
         SqlUniqueConstraintSchema, SqlWriteOptions, list_sql_foreign_keys,
         list_sql_indexes, list_sql_schemas, list_sql_tables, list_sql_unique_constraints,
-        list_sql_views, read_sql,
-        read_sql_chunks, read_sql_chunks_with_index_col, read_sql_chunks_with_options,
-        read_sql_chunks_with_options_and_index_col, read_sql_query, read_sql_query_chunks,
-        read_sql_query_chunks_with_index_col, read_sql_query_chunks_with_options,
+        list_sql_views, sql_max_identifier_length, sql_primary_key_columns,
+        sql_server_version, sql_table_comment, sql_table_schema, truncate_sql_table,
+        write_sql, write_sql_with_options,
+    };
+    #[cfg(feature = "sql-sqlite")]
+    use super::{
+        read_sql, read_sql_chunks, read_sql_chunks_with_index_col,
+        read_sql_chunks_with_options, read_sql_chunks_with_options_and_index_col,
+        read_sql_query, read_sql_query_chunks, read_sql_query_chunks_with_index_col,
+        read_sql_query_chunks_with_options,
         read_sql_query_chunks_with_options_and_index_col, read_sql_query_with_index_col,
         read_sql_query_with_options, read_sql_table, read_sql_table_chunks,
         read_sql_table_chunks_with_index_col, read_sql_table_chunks_with_options,
@@ -8667,9 +8683,7 @@ mod tests {
         read_sql_table_columns_chunks, read_sql_table_columns_chunks_with_index_col,
         read_sql_table_columns_with_index_col, read_sql_table_with_index_col,
         read_sql_table_with_options, read_sql_table_with_options_and_index_col,
-        read_sql_with_index_col, read_sql_with_options, sql_max_identifier_length,
-        sql_primary_key_columns, sql_server_version, sql_table_comment, sql_table_schema,
-        truncate_sql_table, write_sql, write_sql_with_options,
+        read_sql_with_index_col, read_sql_with_options,
     };
 
     // Per br-frankenpandas-7a49 (fd90.48): the helper itself only
