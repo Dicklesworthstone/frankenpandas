@@ -3390,6 +3390,21 @@ pub struct SqlReadOptions {
     ///
     /// Per br-frankenpandas-u6zn (fd90.14).
     pub schema: Option<String>,
+    /// Optional projection list for `read_sql_table` reads.
+    ///
+    /// Matches `pd.read_sql_table(table, con, columns=[...])`. When
+    /// `Some(list)`, the emitted SELECT projects only those columns
+    /// (and in that order) instead of `SELECT *`. `None` preserves
+    /// `SELECT *`. An empty Vec is rejected with `IoError::Sql` —
+    /// pandas raises ValueError there. Each entry is validated via
+    /// the standard alphanumeric+underscore policy.
+    ///
+    /// Note: `read_sql` / `read_sql_query` ignore this field — it
+    /// only takes effect on `read_sql_table*` paths, where
+    /// frankenpandas builds the SELECT itself.
+    ///
+    /// Per br-frankenpandas-d3e9 (fd90.34).
+    pub columns: Option<Vec<String>>,
 }
 
 /// Options for writing a DataFrame to SQL.
@@ -4624,6 +4639,23 @@ fn sql_select_columns_query<C: SqlConnection>(
     table_name: &str,
     columns: &[&str],
 ) -> Result<String, IoError> {
+    sql_select_columns_query_in_schema(conn, table_name, None, columns)
+}
+
+/// Build a `SELECT col1, col2, ... FROM ...` statement, optionally
+/// schema-qualified.
+///
+/// Per br-frankenpandas-d3e9 (fd90.34). Companion to
+/// `sql_select_all_query_in_schema`. Same schema rules: when
+/// `schema` is `Some(s)` AND `conn.supports_schemas()`, the FROM
+/// clause becomes `\"schema\".\"table\"`; otherwise the bare table
+/// name is used.
+fn sql_select_columns_query_in_schema<C: SqlConnection>(
+    conn: &C,
+    table_name: &str,
+    schema: Option<&str>,
+    columns: &[&str],
+) -> Result<String, IoError> {
     validate_sql_table_name(table_name)?;
     if columns.is_empty() {
         return Err(IoError::Sql(
@@ -4634,6 +4666,17 @@ fn sql_select_columns_query<C: SqlConnection>(
         validate_sql_column_name(name)?;
     }
 
+    let qualified = match schema {
+        Some(s) if conn.supports_schemas() => {
+            validate_sql_table_name(s)?;
+            format!(
+                "{}.{}",
+                conn.quote_identifier(s)?,
+                conn.quote_identifier(table_name)?
+            )
+        }
+        _ => conn.quote_identifier(table_name)?,
+    };
     let projection: Vec<String> = columns
         .iter()
         .map(|name| conn.quote_identifier(name))
@@ -4641,7 +4684,7 @@ fn sql_select_columns_query<C: SqlConnection>(
     Ok(format!(
         "SELECT {} FROM {}",
         projection.join(", "),
-        conn.quote_identifier(table_name)?
+        qualified
     ))
 }
 
@@ -5371,8 +5414,20 @@ pub fn read_sql_table_with_options<C: SqlConnection>(
     table_name: &str,
     options: &SqlReadOptions,
 ) -> Result<DataFrame, IoError> {
-    let query =
-        sql_select_all_query_in_schema(conn, table_name, options.schema.as_deref())?;
+    // Per br-frankenpandas-d3e9 (fd90.34): when options.columns is
+    // Some(list), project only those columns instead of SELECT *.
+    let query = match options.columns.as_deref() {
+        Some(cols) => {
+            let refs: Vec<&str> = cols.iter().map(String::as_str).collect();
+            sql_select_columns_query_in_schema(
+                conn,
+                table_name,
+                options.schema.as_deref(),
+                &refs,
+            )?
+        }
+        None => sql_select_all_query_in_schema(conn, table_name, options.schema.as_deref())?,
+    };
     read_sql_with_options(conn, &query, options)
 }
 
@@ -8968,6 +9023,7 @@ mod tests {
                 coerce_float: false,
                 dtype: None,
                 schema: None,
+                columns: None,
             },
         )
         .expect("read_sql_query with options");
@@ -9066,6 +9122,7 @@ mod tests {
                 coerce_float: true,
                 dtype: None,
                 schema: None,
+                columns: None,
             },
             1,
         )
@@ -9113,6 +9170,7 @@ mod tests {
                 coerce_float: true,
                 dtype: None,
                 schema: None,
+                columns: None,
             },
             Some("ts"),
             1,
@@ -9162,6 +9220,7 @@ mod tests {
                 coerce_float: true,
                 dtype: None,
                 schema: None,
+                columns: None,
             },
             None,
             1,
@@ -9201,6 +9260,7 @@ mod tests {
                 coerce_float: true,
                 dtype: None,
                 schema: None,
+                columns: None,
             },
             Some("missing"),
             1,
@@ -9412,6 +9472,7 @@ mod tests {
                 coerce_float: true,
                 dtype: None,
                 schema: None,
+                columns: None,
             },
         )
         .expect("read table with options");
@@ -9454,6 +9515,7 @@ mod tests {
                 coerce_float: true,
                 dtype: None,
                 schema: None,
+                columns: None,
             },
             2,
         )
@@ -9529,6 +9591,7 @@ mod tests {
                 coerce_float: true,
                 dtype: None,
                 schema: None,
+                columns: None,
             },
             Some("ts"),
         )
@@ -9569,6 +9632,7 @@ mod tests {
                 coerce_float: true,
                 dtype: None,
                 schema: None,
+                columns: None,
             },
             None,
         )
@@ -9606,6 +9670,7 @@ mod tests {
                 coerce_float: true,
                 dtype: None,
                 schema: None,
+                columns: None,
             },
             Some("ts"),
             2,
@@ -9656,6 +9721,7 @@ mod tests {
                 coerce_float: true,
                 dtype: None,
                 schema: None,
+                columns: None,
             },
             Some("missing"),
             1,
@@ -9685,6 +9751,7 @@ mod tests {
                 coerce_float: false,
                 dtype: None,
                 schema: None,
+                columns: None,
             },
         )
         .expect("read sql with parse_dates");
@@ -9719,6 +9786,7 @@ mod tests {
                 coerce_float: false,
                 dtype: None,
                 schema: None,
+                columns: None,
             },
         )
         .expect_err("missing parse_dates column should error");
@@ -9743,6 +9811,7 @@ mod tests {
                 coerce_float: false,
                 dtype: None,
                 schema: None,
+                columns: None,
             },
         )
         .expect("read sql with params");
@@ -9773,6 +9842,7 @@ mod tests {
                 coerce_float: false,
                 dtype: None,
                 schema: None,
+                columns: None,
             },
         )
         .expect_err("wrong arity should error");
@@ -9808,6 +9878,7 @@ mod tests {
                 coerce_float: true,
                 dtype: None,
                 schema: None,
+                columns: None,
                 ..SqlReadOptions::default()
             },
         )
@@ -9844,6 +9915,7 @@ mod tests {
                 coerce_float: true,
                 dtype: None,
                 schema: None,
+                columns: None,
                 ..SqlReadOptions::default()
             },
         )
@@ -9929,6 +10001,7 @@ mod tests {
                 coerce_float: true,
                 dtype: None,
                 schema: None,
+                columns: None,
             },
             1,
         )
@@ -11282,6 +11355,7 @@ mod tests {
                 coerce_float: false,
                 dtype: Some(dtype_map),
                 schema: None,
+                columns: None,
             },
         )
         .expect("read with dtype");
@@ -11315,6 +11389,7 @@ mod tests {
                 coerce_float: false,
                 dtype: Some(dtype_map),
                 schema: None,
+                columns: None,
             },
         )
         .expect_err("expected dtype override error");
@@ -11353,6 +11428,7 @@ mod tests {
                 coerce_float: false,
                 dtype: Some(dtype_map),
                 schema: None,
+                columns: None,
             },
         )
         .expect("read with dtype-on-missing-col");
@@ -11380,6 +11456,7 @@ mod tests {
                 coerce_float: false,
                 dtype: Some(dtype_map),
                 schema: None,
+                columns: None,
             },
         )
         .expect("read with dtype + nulls");
@@ -11408,6 +11485,7 @@ mod tests {
                 coerce_float: false,
                 dtype: Some(dtype_map),
                 schema: None,
+                columns: None,
             },
         )
         .expect("read with parse_dates priority");
@@ -11593,6 +11671,7 @@ mod tests {
                 coerce_float: false,
                 dtype: None,
                 schema: Some("ignored_on_sqlite".to_owned()),
+                columns: None,
             },
         )
         .expect("read with schema=Some on SQLite");
@@ -15095,5 +15174,165 @@ mod tests {
         .unwrap();
         // 5 rows / 2 per chunk = 3 chunks (2, 2, 1). Flat scalars: 4, 4, 2.
         assert_eq!(*conn.row_counts.borrow(), vec![4usize, 4, 2]);
+    }
+
+    // ── SqlReadOptions::columns (br-d3e9 / fd90.34) ──────────────────────
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn read_sql_table_with_options_columns_none_selects_all() {
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE TABLE projection_default (a INTEGER, b TEXT, c REAL);",
+        )
+        .unwrap();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "INSERT INTO projection_default VALUES (1, 'x', 1.5);",
+        )
+        .unwrap();
+        let frame = read_sql_table_with_options(
+            &conn,
+            "projection_default",
+            &SqlReadOptions {
+                columns: None,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(frame.column_names(), vec!["a", "b", "c"]);
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn read_sql_table_with_options_columns_projects_subset() {
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE TABLE projection (id INTEGER, name TEXT, ts TEXT, value REAL);",
+        )
+        .unwrap();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "INSERT INTO projection VALUES (1, 'a', '2024-01-01', 1.5), \
+                                            (2, 'b', '2024-01-02', 2.5);",
+        )
+        .unwrap();
+        let frame = read_sql_table_with_options(
+            &conn,
+            "projection",
+            &SqlReadOptions {
+                columns: Some(vec!["id".to_owned(), "name".to_owned()]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        // Only id + name, in that order.
+        assert_eq!(frame.column_names(), vec!["id", "name"]);
+        assert_eq!(frame.column("id").unwrap().values()[0], Scalar::Int64(1));
+        assert_eq!(
+            frame.column("name").unwrap().values()[0],
+            Scalar::Utf8("a".into())
+        );
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn read_sql_table_with_options_columns_preserves_specified_order() {
+        // pandas: pd.read_sql_table(t, con, columns=['c', 'a']) →
+        // returns ['c', 'a'] in that exact order, NOT alphabetical.
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE TABLE ordered_proj (a INT, b INT, c INT);",
+        )
+        .unwrap();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "INSERT INTO ordered_proj VALUES (1, 2, 3);",
+        )
+        .unwrap();
+        let frame = read_sql_table_with_options(
+            &conn,
+            "ordered_proj",
+            &SqlReadOptions {
+                columns: Some(vec!["c".to_owned(), "a".to_owned()]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(frame.column_names(), vec!["c", "a"]);
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn read_sql_table_with_options_columns_empty_vec_rejected() {
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(&conn, "CREATE TABLE t (x INTEGER);").unwrap();
+        let err = read_sql_table_with_options(
+            &conn,
+            "t",
+            &SqlReadOptions {
+                columns: Some(vec![]),
+                ..Default::default()
+            },
+        )
+        .expect_err("empty columns must be rejected");
+        assert!(
+            matches!(err, IoError::Sql(msg) if msg.contains("columns must be non-empty"))
+        );
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn read_sql_table_with_options_columns_invalid_name_rejected() {
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(&conn, "CREATE TABLE t (x INTEGER);").unwrap();
+        let err = read_sql_table_with_options(
+            &conn,
+            "t",
+            &SqlReadOptions {
+                columns: Some(vec!["x; DROP TABLE t".to_owned()]),
+                ..Default::default()
+            },
+        )
+        .expect_err("invalid column name must be rejected");
+        assert!(matches!(err, IoError::Sql(msg) if msg.contains("invalid")));
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn read_sql_table_with_options_columns_combines_with_parse_dates() {
+        // columns + parse_dates: project a subset, then date-coerce.
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE TABLE events (id INT, ts TEXT, note TEXT);",
+        )
+        .unwrap();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "INSERT INTO events VALUES (1, '2024-01-15', 'launched');",
+        )
+        .unwrap();
+        let frame = read_sql_table_with_options(
+            &conn,
+            "events",
+            &SqlReadOptions {
+                columns: Some(vec!["id".to_owned(), "ts".to_owned()]),
+                parse_dates: Some(vec!["ts".to_owned()]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        // Only id + ts surfaced; ts was reformatted by parse_dates
+        // (the project-then-coerce path emits the canonical
+        // 'YYYY-MM-DD HH:MM:SS' shape via Scalar::Utf8).
+        assert_eq!(frame.column_names(), vec!["id", "ts"]);
+        assert_eq!(
+            frame.column("ts").unwrap().values()[0],
+            Scalar::Utf8("2024-01-15 00:00:00".to_owned())
+        );
     }
 }
