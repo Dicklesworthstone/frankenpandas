@@ -3354,6 +3354,20 @@ pub struct SqlReadOptions {
     ///
     /// Per br-frankenpandas-l9pt (fd90.11).
     pub dtype: Option<BTreeMap<String, DType>>,
+    /// Optional schema namespace for `read_sql_table` lookups.
+    ///
+    /// Matches `pd.read_sql_table(table, con, schema=...)`. When the
+    /// backend reports `supports_schemas() == true` (PostgreSQL, MySQL,
+    /// MSSQL, etc.) and `schema` is `Some(s)`, the SELECT references
+    /// `s.table` with each part quoted by `conn.quote_identifier(...)`.
+    /// When the backend reports `supports_schemas() == false` (SQLite),
+    /// any `Some(s)` here is silently ignored and the bare `table`
+    /// reference is used — pandas/SQLAlchemy raises NotImplementedError
+    /// there but we choose ignore-with-doc-note so SQLite users with
+    /// pandas-shaped option structs aren't broken.
+    ///
+    /// Per br-frankenpandas-u6zn (fd90.14).
+    pub schema: Option<String>,
 }
 
 /// Options for writing a DataFrame to SQL.
@@ -3868,11 +3882,35 @@ fn sql_select_all_query<C: SqlConnection>(
     conn: &C,
     table_name: &str,
 ) -> Result<String, IoError> {
+    sql_select_all_query_in_schema(conn, table_name, None)
+}
+
+/// Build a `SELECT * FROM ...` statement, optionally schema-qualified.
+///
+/// Per br-frankenpandas-u6zn (fd90.14). When `schema` is `Some(s)` AND
+/// `conn.supports_schemas()`, the FROM clause becomes `\"schema\".\"table\"`.
+/// When `supports_schemas` returns false, any `Some(s)` is ignored and the
+/// bare table name is used — preserves SQLite compatibility (pandas would
+/// raise NotImplementedError there; we choose silent fallback so existing
+/// SqlReadOptions consumers aren't broken).
+fn sql_select_all_query_in_schema<C: SqlConnection>(
+    conn: &C,
+    table_name: &str,
+    schema: Option<&str>,
+) -> Result<String, IoError> {
     validate_sql_table_name(table_name)?;
-    Ok(format!(
-        "SELECT * FROM {}",
-        conn.quote_identifier(table_name)?
-    ))
+    let qualified = match schema {
+        Some(s) if conn.supports_schemas() => {
+            validate_sql_table_name(s)?;
+            format!(
+                "{}.{}",
+                conn.quote_identifier(s)?,
+                conn.quote_identifier(table_name)?
+            )
+        }
+        _ => conn.quote_identifier(table_name)?,
+    };
+    Ok(format!("SELECT * FROM {qualified}"))
 }
 
 fn validate_sql_column_name(column_name: &str) -> Result<(), IoError> {
@@ -4306,7 +4344,9 @@ pub fn read_sql_table_with_options<C: SqlConnection>(
     table_name: &str,
     options: &SqlReadOptions,
 ) -> Result<DataFrame, IoError> {
-    read_sql_with_options(conn, &sql_select_all_query(conn, table_name)?, options)
+    let query =
+        sql_select_all_query_in_schema(conn, table_name, options.schema.as_deref())?;
+    read_sql_with_options(conn, &query, options)
 }
 
 /// Read an entire SQL table with read-time options and optional index promotion.
@@ -4347,12 +4387,9 @@ pub fn read_sql_table_chunks_with_options<C: SqlConnection>(
     options: &SqlReadOptions,
     chunk_size: usize,
 ) -> Result<SqlChunkIterator, IoError> {
-    read_sql_chunks_with_options(
-        conn,
-        &sql_select_all_query(conn, table_name)?,
-        options,
-        chunk_size,
-    )
+    let query =
+        sql_select_all_query_in_schema(conn, table_name, options.schema.as_deref())?;
+    read_sql_chunks_with_options(conn, &query, options, chunk_size)
 }
 
 /// Read an entire SQL table as chunks with read-time options and optional index promotion.
@@ -7791,6 +7828,7 @@ mod tests {
                 parse_dates: Some(vec!["ts".to_owned()]),
                 coerce_float: false,
                 dtype: None,
+                schema: None,
             },
         )
         .expect("read_sql_query with options");
@@ -7888,6 +7926,7 @@ mod tests {
                 parse_dates: Some(vec!["ts".to_owned()]),
                 coerce_float: true,
                 dtype: None,
+                schema: None,
             },
             1,
         )
@@ -7934,6 +7973,7 @@ mod tests {
                 parse_dates: Some(vec!["ts".to_owned()]),
                 coerce_float: true,
                 dtype: None,
+                schema: None,
             },
             Some("ts"),
             1,
@@ -7982,6 +8022,7 @@ mod tests {
                 parse_dates: None,
                 coerce_float: true,
                 dtype: None,
+                schema: None,
             },
             None,
             1,
@@ -8020,6 +8061,7 @@ mod tests {
                 parse_dates: None,
                 coerce_float: true,
                 dtype: None,
+                schema: None,
             },
             Some("missing"),
             1,
@@ -8230,6 +8272,7 @@ mod tests {
                 parse_dates: Some(vec!["ts".to_owned()]),
                 coerce_float: true,
                 dtype: None,
+                schema: None,
             },
         )
         .expect("read table with options");
@@ -8271,6 +8314,7 @@ mod tests {
                 parse_dates: Some(vec!["ts".to_owned()]),
                 coerce_float: true,
                 dtype: None,
+                schema: None,
             },
             2,
         )
@@ -8345,6 +8389,7 @@ mod tests {
                 parse_dates: Some(vec!["ts".to_owned()]),
                 coerce_float: true,
                 dtype: None,
+                schema: None,
             },
             Some("ts"),
         )
@@ -8384,6 +8429,7 @@ mod tests {
                 parse_dates: None,
                 coerce_float: true,
                 dtype: None,
+                schema: None,
             },
             None,
         )
@@ -8420,6 +8466,7 @@ mod tests {
                 parse_dates: Some(vec!["ts".to_owned()]),
                 coerce_float: true,
                 dtype: None,
+                schema: None,
             },
             Some("ts"),
             2,
@@ -8469,6 +8516,7 @@ mod tests {
                 parse_dates: None,
                 coerce_float: true,
                 dtype: None,
+                schema: None,
             },
             Some("missing"),
             1,
@@ -8497,6 +8545,7 @@ mod tests {
                 parse_dates: Some(vec!["ts".to_owned()]),
                 coerce_float: false,
                 dtype: None,
+                schema: None,
             },
         )
         .expect("read sql with parse_dates");
@@ -8530,6 +8579,7 @@ mod tests {
                 parse_dates: Some(vec!["ts".to_owned()]),
                 coerce_float: false,
                 dtype: None,
+                schema: None,
             },
         )
         .expect_err("missing parse_dates column should error");
@@ -8553,6 +8603,7 @@ mod tests {
                 parse_dates: None,
                 coerce_float: false,
                 dtype: None,
+                schema: None,
             },
         )
         .expect("read sql with params");
@@ -8582,6 +8633,7 @@ mod tests {
                 parse_dates: None,
                 coerce_float: false,
                 dtype: None,
+                schema: None,
             },
         )
         .expect_err("wrong arity should error");
@@ -8616,6 +8668,7 @@ mod tests {
             &SqlReadOptions {
                 coerce_float: true,
                 dtype: None,
+                schema: None,
                 ..SqlReadOptions::default()
             },
         )
@@ -8651,6 +8704,7 @@ mod tests {
             &SqlReadOptions {
                 coerce_float: true,
                 dtype: None,
+                schema: None,
                 ..SqlReadOptions::default()
             },
         )
@@ -8735,6 +8789,7 @@ mod tests {
                 parse_dates: Some(vec!["ts".to_owned()]),
                 coerce_float: true,
                 dtype: None,
+                schema: None,
             },
             1,
         )
@@ -10087,6 +10142,7 @@ mod tests {
                 parse_dates: None,
                 coerce_float: false,
                 dtype: Some(dtype_map),
+                schema: None,
             },
         )
         .expect("read with dtype");
@@ -10119,6 +10175,7 @@ mod tests {
                 parse_dates: None,
                 coerce_float: false,
                 dtype: Some(dtype_map),
+                schema: None,
             },
         )
         .expect_err("expected dtype override error");
@@ -10156,6 +10213,7 @@ mod tests {
                 parse_dates: None,
                 coerce_float: false,
                 dtype: Some(dtype_map),
+                schema: None,
             },
         )
         .expect("read with dtype-on-missing-col");
@@ -10182,6 +10240,7 @@ mod tests {
                 parse_dates: None,
                 coerce_float: false,
                 dtype: Some(dtype_map),
+                schema: None,
             },
         )
         .expect("read with dtype + nulls");
@@ -10209,6 +10268,7 @@ mod tests {
                 parse_dates: Some(vec!["ts".to_owned()]),
                 coerce_float: false,
                 dtype: Some(dtype_map),
+                schema: None,
             },
         )
         .expect("read with parse_dates priority");
@@ -10301,5 +10361,139 @@ mod tests {
             super::SqlConnection::default_schema(&conn).as_deref(),
             Some("public")
         );
+    }
+
+    // ── SqlReadOptions::schema tests (br-frankenpandas-u6zn / fd90.14) ──
+
+    #[test]
+    fn sql_select_all_query_no_schema_uses_bare_table() {
+        struct StubSql;
+        impl super::SqlConnection for StubSql {
+            fn query(&self, _q: &str, _p: &[Scalar]) -> Result<super::SqlQueryResult, IoError> {
+                Ok(super::SqlQueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                })
+            }
+            fn execute_batch(&self, _sql: &str) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn table_exists(&self, _name: &str) -> Result<bool, IoError> {
+                Ok(false)
+            }
+            fn insert_rows(&self, _sql: &str, _rows: &[Vec<Scalar>]) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn dtype_sql(&self, _dtype: DType) -> &'static str {
+                "TEXT"
+            }
+            fn index_dtype_sql(&self, _index: &Index) -> &'static str {
+                "TEXT"
+            }
+        }
+        let conn = StubSql;
+        let q1 = super::sql_select_all_query_in_schema(&conn, "users", None).expect("q1");
+        assert_eq!(q1, "SELECT * FROM \"users\"");
+        let q2 =
+            super::sql_select_all_query_in_schema(&conn, "users", Some("ignored")).expect("q2");
+        assert_eq!(q2, "SELECT * FROM \"users\"");
+    }
+
+    #[test]
+    fn sql_select_all_query_with_schema_qualifies_on_multi_schema_backend() {
+        struct PgLikeSchemaSql;
+        impl super::SqlConnection for PgLikeSchemaSql {
+            fn query(&self, _q: &str, _p: &[Scalar]) -> Result<super::SqlQueryResult, IoError> {
+                Ok(super::SqlQueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                })
+            }
+            fn execute_batch(&self, _sql: &str) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn table_exists(&self, _name: &str) -> Result<bool, IoError> {
+                Ok(false)
+            }
+            fn insert_rows(&self, _sql: &str, _rows: &[Vec<Scalar>]) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn dtype_sql(&self, _dtype: DType) -> &'static str {
+                "TEXT"
+            }
+            fn index_dtype_sql(&self, _index: &Index) -> &'static str {
+                "TEXT"
+            }
+            fn supports_schemas(&self) -> bool {
+                true
+            }
+        }
+        let conn = PgLikeSchemaSql;
+        let q = super::sql_select_all_query_in_schema(&conn, "users", Some("analytics"))
+            .expect("q");
+        assert_eq!(q, "SELECT * FROM \"analytics\".\"users\"");
+        let bare = super::sql_select_all_query_in_schema(&conn, "users", None).expect("bare");
+        assert_eq!(bare, "SELECT * FROM \"users\"");
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn read_sql_table_with_options_schema_silently_ignored_on_sqlite() {
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE TABLE bare_tbl (x INTEGER); INSERT INTO bare_tbl VALUES (1), (2);",
+        )
+        .unwrap();
+        let frame = read_sql_table_with_options(
+            &conn,
+            "bare_tbl",
+            &SqlReadOptions {
+                params: None,
+                parse_dates: None,
+                coerce_float: false,
+                dtype: None,
+                schema: Some("ignored_on_sqlite".to_owned()),
+            },
+        )
+        .expect("read with schema=Some on SQLite");
+        let col = frame.column("x").expect("x");
+        assert_eq!(col.values()[0], Scalar::Int64(1));
+        assert_eq!(col.values()[1], Scalar::Int64(2));
+    }
+
+    #[test]
+    fn sql_select_all_query_in_schema_validates_schema_name() {
+        struct PgLikeValidate;
+        impl super::SqlConnection for PgLikeValidate {
+            fn query(&self, _q: &str, _p: &[Scalar]) -> Result<super::SqlQueryResult, IoError> {
+                Ok(super::SqlQueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                })
+            }
+            fn execute_batch(&self, _sql: &str) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn table_exists(&self, _name: &str) -> Result<bool, IoError> {
+                Ok(false)
+            }
+            fn insert_rows(&self, _sql: &str, _rows: &[Vec<Scalar>]) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn dtype_sql(&self, _dtype: DType) -> &'static str {
+                "TEXT"
+            }
+            fn index_dtype_sql(&self, _index: &Index) -> &'static str {
+                "TEXT"
+            }
+            fn supports_schemas(&self) -> bool {
+                true
+            }
+        }
+        let conn = PgLikeValidate;
+        let err = super::sql_select_all_query_in_schema(&conn, "users", Some("evil; DROP"))
+            .expect_err("malformed schema must reject");
+        assert!(matches!(err, IoError::Sql(msg) if msg.contains("invalid table name")));
     }
 }
