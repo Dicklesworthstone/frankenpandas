@@ -14,6 +14,37 @@ pub enum DType {
     Utf8,
     Categorical,
     Timedelta64,
+    Sparse,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SparseDType {
+    pub value_dtype: DType,
+    pub fill_value: Scalar,
+}
+
+impl SparseDType {
+    /// Construct a pandas-style sparse dtype descriptor.
+    ///
+    /// This records the logical dense value dtype plus the scalar value that is
+    /// elided from storage. The concrete sparse column representation lives in
+    /// fp-columnar; this descriptor is the shared public contract.
+    pub fn new(value_dtype: DType, fill_value: Scalar) -> Result<Self, TypeError> {
+        if matches!(value_dtype, DType::Null | DType::Sparse) {
+            return Err(TypeError::InvalidSparseValueDType { dtype: value_dtype });
+        }
+
+        let fill_value = if fill_value.is_missing() {
+            Scalar::missing_for_dtype(value_dtype)
+        } else {
+            cast_scalar_owned(fill_value, value_dtype)?
+        };
+
+        Ok(Self {
+            value_dtype,
+            fill_value,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -85,7 +116,7 @@ impl Scalar {
             DType::Float64 => Self::Null(NullKind::NaN),
             DType::Timedelta64 => Self::Timedelta64(Timedelta::NAT),
             DType::Null => Self::Null(NullKind::Null),
-            DType::Bool | DType::Int64 | DType::Utf8 | DType::Categorical => {
+            DType::Bool | DType::Int64 | DType::Utf8 | DType::Categorical | DType::Sparse => {
                 Self::Null(NullKind::Null)
             }
         }
@@ -222,10 +253,12 @@ pub enum TypeError {
     NonNumericValue { value: String, dtype: DType },
     #[error("value is missing ({kind:?})")]
     ValueIsMissing { kind: NullKind },
+    #[error("sparse value dtype cannot be {dtype:?}")]
+    InvalidSparseValueDType { dtype: DType },
 }
 
 pub fn common_dtype(left: DType, right: DType) -> Result<DType, TypeError> {
-    use DType::{Bool, Categorical, Float64, Int64, Null, Timedelta64};
+    use DType::{Bool, Categorical, Float64, Int64, Null, Sparse, Timedelta64};
 
     let out = match (left, right) {
         (a, b) if a == b => a,
@@ -235,6 +268,7 @@ pub fn common_dtype(left: DType, right: DType) -> Result<DType, TypeError> {
         (Bool, Float64) | (Float64, Bool) => Float64,
         (Int64, Float64) | (Float64, Int64) => Float64,
         (Timedelta64, Timedelta64) => Timedelta64,
+        (Sparse, _) | (_, Sparse) => return Err(TypeError::IncompatibleDtypes { left, right }),
         _ => return Err(TypeError::IncompatibleDtypes { left, right }),
     };
 
@@ -348,6 +382,7 @@ pub fn cast_scalar_owned(value: Scalar, target: DType) -> Result<Scalar, TypeErr
                 .map_err(|_| TypeError::InvalidCast { from, to: target }),
             _ => Err(TypeError::InvalidCast { from, to: target }),
         },
+        DType::Sparse => Err(TypeError::InvalidCast { from, to: target }),
     }
 }
 
@@ -1093,9 +1128,169 @@ pub fn nannunique(values: &[Scalar]) -> Scalar {
     Scalar::Int64(seen.len() as i64)
 }
 
+// ── Interval types (br-frankenpandas-j8k4 Phase 1) ──────────────────────
+//
+// Scaffolding for pandas `pd.Interval` / `pd.IntervalIndex` / `pd.IntervalDtype`.
+//
+// Phase 1 ships float-valued intervals only (matches `cut`/`qcut` output on
+// numeric bins — the dominant pandas use case). Generic-subtype intervals
+// over Int64 / Timestamp are deferred to Phase 2 alongside the DType::Interval
+// enum-variant wiring. See br-j8k4 for the phased roadmap.
+//
+// Semantics mirror pandas: closed tells which endpoints are included.
+//   Left    → [left, right)
+//   Right   → (left, right]       ← pandas default
+//   Both    → [left, right]
+//   Neither → (left, right)
+
+/// Endpoint-inclusion policy for an `Interval`.
+///
+/// Matches pandas `pd.Interval.closed` / `pd.IntervalDtype.closed` string
+/// values ("left" / "right" / "both" / "neither").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum IntervalClosed {
+    /// `[left, right)` — left-inclusive, right-exclusive.
+    Left,
+    /// `(left, right]` — left-exclusive, right-inclusive. Pandas default.
+    #[default]
+    Right,
+    /// `[left, right]` — both endpoints included.
+    Both,
+    /// `(left, right)` — neither endpoint included.
+    Neither,
+}
+
+impl IntervalClosed {
+    /// Left endpoint included?
+    #[must_use]
+    pub fn left_closed(self) -> bool {
+        matches!(self, Self::Left | Self::Both)
+    }
+
+    /// Right endpoint included?
+    #[must_use]
+    pub fn right_closed(self) -> bool {
+        matches!(self, Self::Right | Self::Both)
+    }
+}
+
+impl std::fmt::Display for IntervalClosed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Left => write!(f, "left"),
+            Self::Right => write!(f, "right"),
+            Self::Both => write!(f, "both"),
+            Self::Neither => write!(f, "neither"),
+        }
+    }
+}
+
+/// A bounded numeric interval between two `f64` endpoints.
+///
+/// Matches `pd.Interval(left, right, closed)` on the numeric-subtype path.
+/// Accessors match pandas: `.left`, `.right`, `.closed`, `.length`, `.mid`,
+/// `.contains`, `.is_empty`, `.overlaps`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Interval {
+    pub left: f64,
+    pub right: f64,
+    #[serde(default)]
+    pub closed: IntervalClosed,
+}
+
+impl Interval {
+    /// Construct an interval. No validation on `left <= right` — pandas also
+    /// accepts reversed intervals (they're non-empty only if empty-by-design).
+    #[must_use]
+    pub const fn new(left: f64, right: f64, closed: IntervalClosed) -> Self {
+        Self {
+            left,
+            right,
+            closed,
+        }
+    }
+
+    /// `right - left` (pandas `.length`). Negative for reversed intervals.
+    #[must_use]
+    pub fn length(&self) -> f64 {
+        self.right - self.left
+    }
+
+    /// Midpoint `(left + right) / 2` (pandas `.mid`).
+    #[must_use]
+    pub fn mid(&self) -> f64 {
+        (self.left + self.right) / 2.0
+    }
+
+    /// Empty iff endpoints coincide AND at least one side is open.
+    /// Pandas semantics: `pd.Interval(3, 3, 'right').is_empty → True`.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.left == self.right && !matches!(self.closed, IntervalClosed::Both)
+    }
+
+    /// Does `value` fall inside this interval?
+    ///
+    /// NaN always returns false, matching pandas `pd.Interval.__contains__`
+    /// behavior (NaN doesn't compare equal to anything).
+    #[must_use]
+    pub fn contains(&self, value: f64) -> bool {
+        if value.is_nan() {
+            return false;
+        }
+        let left_ok = if self.closed.left_closed() {
+            value >= self.left
+        } else {
+            value > self.left
+        };
+        let right_ok = if self.closed.right_closed() {
+            value <= self.right
+        } else {
+            value < self.right
+        };
+        left_ok && right_ok
+    }
+
+    /// Do `self` and `other` share any point?
+    ///
+    /// Matches `pd.Interval.overlaps(other)`. Two intervals overlap iff the
+    /// max of their lefts is less than the min of their rights, with
+    /// endpoint-inclusion determining the strictness of the comparison when
+    /// they touch exactly.
+    #[must_use]
+    pub fn overlaps(&self, other: &Self) -> bool {
+        if self.left > other.right || other.left > self.right {
+            return false;
+        }
+        // Touching-at-a-point: overlap iff both sides at that touchpoint are closed.
+        if self.right == other.left {
+            return self.closed.right_closed() && other.closed.left_closed();
+        }
+        if other.right == self.left {
+            return other.closed.right_closed() && self.closed.left_closed();
+        }
+        true
+    }
+}
+
+impl std::fmt::Display for Interval {
+    /// Matches `str(pd.Interval(0, 5, 'right'))` → `"(0, 5]"`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let left_bracket = if self.closed.left_closed() { '[' } else { '(' };
+        let right_bracket = if self.closed.right_closed() { ']' } else { ')' };
+        write!(
+            f,
+            "{left_bracket}{}, {}{right_bracket}",
+            self.left, self.right
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{DType, NullKind, Scalar, cast_scalar, common_dtype, infer_dtype};
+    use super::{DType, NullKind, Scalar, SparseDType, cast_scalar, common_dtype, infer_dtype};
 
     #[test]
     fn dtype_inference_coerces_numeric_values() {
@@ -1138,6 +1333,32 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "dtype coercion from Float64 to Utf8 has no compatible common type"
+        );
+    }
+
+    #[test]
+    fn sparse_dtype_normalizes_fill_value_to_value_dtype() {
+        let dtype =
+            SparseDType::new(DType::Float64, Scalar::Int64(0)).expect("fill should cast");
+
+        assert_eq!(dtype.value_dtype, DType::Float64);
+        assert_eq!(dtype.fill_value, Scalar::Float64(0.0));
+    }
+
+    #[test]
+    fn sparse_dtype_rejects_sparse_value_dtype() {
+        let err = SparseDType::new(DType::Sparse, Scalar::Int64(0)).expect_err("must reject");
+
+        assert_eq!(err.to_string(), "sparse value dtype cannot be Sparse");
+    }
+
+    #[test]
+    fn common_dtype_rejects_sparse_dense_mix() {
+        let err = common_dtype(DType::Sparse, DType::Int64).expect_err("must fail");
+
+        assert_eq!(
+            err.to_string(),
+            "dtype coercion from Sparse to Int64 has no compatible common type"
         );
     }
 
@@ -1819,5 +2040,143 @@ mod tests {
             ]),
             Scalar::Float64(0.0)
         );
+    }
+
+    // ── Interval tests (br-frankenpandas-j8k4) ──────────────────────────
+
+    use super::{Interval, IntervalClosed};
+
+    #[test]
+    fn interval_default_closed_is_right() {
+        assert_eq!(IntervalClosed::default(), IntervalClosed::Right);
+    }
+
+    #[test]
+    fn interval_left_and_right_closed_helpers() {
+        assert!(IntervalClosed::Left.left_closed());
+        assert!(!IntervalClosed::Left.right_closed());
+        assert!(!IntervalClosed::Right.left_closed());
+        assert!(IntervalClosed::Right.right_closed());
+        assert!(IntervalClosed::Both.left_closed());
+        assert!(IntervalClosed::Both.right_closed());
+        assert!(!IntervalClosed::Neither.left_closed());
+        assert!(!IntervalClosed::Neither.right_closed());
+    }
+
+    #[test]
+    fn interval_display_matches_pandas_notation() {
+        assert_eq!(
+            Interval::new(0.0, 5.0, IntervalClosed::Right).to_string(),
+            "(0, 5]"
+        );
+        assert_eq!(
+            Interval::new(0.0, 5.0, IntervalClosed::Left).to_string(),
+            "[0, 5)"
+        );
+        assert_eq!(
+            Interval::new(0.0, 5.0, IntervalClosed::Both).to_string(),
+            "[0, 5]"
+        );
+        assert_eq!(
+            Interval::new(0.0, 5.0, IntervalClosed::Neither).to_string(),
+            "(0, 5)"
+        );
+    }
+
+    #[test]
+    fn interval_length_and_mid() {
+        let i = Interval::new(2.0, 10.0, IntervalClosed::Right);
+        assert_eq!(i.length(), 8.0);
+        assert_eq!(i.mid(), 6.0);
+    }
+
+    #[test]
+    fn interval_contains_matches_closed_policy() {
+        let right = Interval::new(0.0, 5.0, IntervalClosed::Right);
+        assert!(!right.contains(0.0));
+        assert!(right.contains(2.5));
+        assert!(right.contains(5.0));
+
+        let left = Interval::new(0.0, 5.0, IntervalClosed::Left);
+        assert!(left.contains(0.0));
+        assert!(left.contains(2.5));
+        assert!(!left.contains(5.0));
+
+        let both = Interval::new(0.0, 5.0, IntervalClosed::Both);
+        assert!(both.contains(0.0));
+        assert!(both.contains(5.0));
+
+        let neither = Interval::new(0.0, 5.0, IntervalClosed::Neither);
+        assert!(!neither.contains(0.0));
+        assert!(!neither.contains(5.0));
+        assert!(neither.contains(2.5));
+    }
+
+    #[test]
+    fn interval_contains_nan_returns_false() {
+        let i = Interval::new(0.0, 10.0, IntervalClosed::Both);
+        assert!(!i.contains(f64::NAN));
+    }
+
+    #[test]
+    fn interval_is_empty_matches_pandas() {
+        // pd.Interval(3, 3, 'right').is_empty → True
+        assert!(Interval::new(3.0, 3.0, IntervalClosed::Right).is_empty());
+        assert!(Interval::new(3.0, 3.0, IntervalClosed::Left).is_empty());
+        assert!(Interval::new(3.0, 3.0, IntervalClosed::Neither).is_empty());
+        // pd.Interval(3, 3, 'both').is_empty → False (single point)
+        assert!(!Interval::new(3.0, 3.0, IntervalClosed::Both).is_empty());
+        // Non-degenerate intervals are never empty.
+        assert!(!Interval::new(0.0, 5.0, IntervalClosed::Right).is_empty());
+    }
+
+    #[test]
+    fn interval_overlaps_disjoint_returns_false() {
+        let a = Interval::new(0.0, 1.0, IntervalClosed::Right);
+        let b = Interval::new(2.0, 3.0, IntervalClosed::Right);
+        assert!(!a.overlaps(&b));
+        assert!(!b.overlaps(&a));
+    }
+
+    #[test]
+    fn interval_overlaps_nested_returns_true() {
+        let outer = Interval::new(0.0, 10.0, IntervalClosed::Right);
+        let inner = Interval::new(3.0, 7.0, IntervalClosed::Right);
+        assert!(outer.overlaps(&inner));
+        assert!(inner.overlaps(&outer));
+    }
+
+    #[test]
+    fn interval_overlaps_touching_respects_closed_policy() {
+        // (0, 1] touching (1, 2] at point 1.
+        let right_right = (
+            Interval::new(0.0, 1.0, IntervalClosed::Right),
+            Interval::new(1.0, 2.0, IntervalClosed::Right),
+        );
+        // right_right.0 is closed at 1; right_right.1 is open at 1 → no overlap.
+        assert!(!right_right.0.overlaps(&right_right.1));
+
+        // [0, 1] touching [1, 2] — both closed at 1 → overlap.
+        let both_both = (
+            Interval::new(0.0, 1.0, IntervalClosed::Both),
+            Interval::new(1.0, 2.0, IntervalClosed::Both),
+        );
+        assert!(both_both.0.overlaps(&both_both.1));
+    }
+
+    #[test]
+    fn interval_roundtrips_through_serde_json() {
+        let i = Interval::new(1.5, 3.25, IntervalClosed::Both);
+        let json = serde_json::to_string(&i).expect("serialize");
+        let back: Interval = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(i, back);
+    }
+
+    #[test]
+    fn interval_serde_default_closed_is_right_when_missing() {
+        // JSON payloads that omit `closed` deserialize with the pandas default.
+        let back: Interval =
+            serde_json::from_str(r#"{"left":0.0,"right":5.0}"#).expect("deserialize");
+        assert_eq!(back.closed, IntervalClosed::Right);
     }
 }
