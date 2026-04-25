@@ -1,10 +1,10 @@
 #![forbid(unsafe_code)]
 
 use fp_types::{
-    DType, NullKind, Scalar, Timedelta, TypeError, cast_scalar, cast_scalar_owned, common_dtype,
-    infer_dtype, nanall, nanany, nanargmax, nanargmin, nancummax, nancummin, nancumprod, nancumsum,
-    nankurt, nanmax, nanmean, nanmedian, nanmin, nannunique, nanprod, nanptp, nanquantile, nansem,
-    nanskew, nanstd, nansum, nanvar,
+    DType, NullKind, Scalar, SparseDType, Timedelta, TypeError, cast_scalar, cast_scalar_owned,
+    common_dtype, infer_dtype, nanall, nanany, nanargmax, nanargmin, nancummax, nancummin,
+    nancumprod, nancumsum, nankurt, nanmax, nanmean, nanmedian, nanmin, nannunique, nanprod,
+    nanptp, nanquantile, nansem, nanskew, nanstd, nansum, nanvar,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -628,6 +628,14 @@ pub struct Column {
     validity: ValidityMask,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SparseColumn {
+    dtype: SparseDType,
+    len: usize,
+    indices: Vec<usize>,
+    values: Vec<Scalar>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ArithmeticOp {
@@ -755,6 +763,102 @@ pub enum ColumnError {
     DTypeMismatch { left: DType, right: DType },
     #[error(transparent)]
     Type(#[from] TypeError),
+}
+
+impl SparseColumn {
+    pub fn from_dense(dtype: SparseDType, values: Vec<Scalar>) -> Result<Self, ColumnError> {
+        let len = values.len();
+        let value_dtype = dtype.value_dtype;
+        let fill_value = dtype.fill_value.clone();
+        let mut indices = Vec::new();
+        let mut sparse_values = Vec::new();
+
+        for (idx, value) in values.into_iter().enumerate() {
+            let value = if value.dtype() == value_dtype || value.dtype() == DType::Null {
+                Column::normalize_missing_for_dtype(value, value_dtype)
+            } else {
+                cast_scalar_owned(value, value_dtype)?
+            };
+
+            if !value.semantic_eq(&fill_value) {
+                indices.push(idx);
+                sparse_values.push(value);
+            }
+        }
+
+        Ok(Self {
+            dtype,
+            len,
+            indices,
+            values: sparse_values,
+        })
+    }
+
+    pub fn from_dense_column(dtype: SparseDType, column: &Column) -> Result<Self, ColumnError> {
+        Self::from_dense(dtype, column.values().to_vec())
+    }
+
+    #[must_use]
+    pub fn sparse_dtype(&self) -> &SparseDType {
+        &self.dtype
+    }
+
+    #[must_use]
+    pub fn value_dtype(&self) -> DType {
+        self.dtype.value_dtype
+    }
+
+    #[must_use]
+    pub fn fill_value(&self) -> &Scalar {
+        &self.dtype.fill_value
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    #[must_use]
+    pub fn indices(&self) -> &[usize] {
+        &self.indices
+    }
+
+    #[must_use]
+    pub fn stored_values(&self) -> &[Scalar] {
+        &self.values
+    }
+
+    #[must_use]
+    pub fn npoints(&self) -> usize {
+        self.values.len()
+    }
+
+    #[must_use]
+    pub fn density(&self) -> f64 {
+        if self.len == 0 {
+            0.0
+        } else {
+            self.values.len() as f64 / self.len as f64
+        }
+    }
+
+    #[must_use]
+    pub fn to_dense_values(&self) -> Vec<Scalar> {
+        let mut values = vec![self.dtype.fill_value.clone(); self.len];
+        for (&idx, value) in self.indices.iter().zip(self.values.iter()) {
+            values[idx] = value.clone();
+        }
+        values
+    }
+
+    pub fn to_dense_column(&self) -> Result<Column, ColumnError> {
+        Column::new(self.dtype.value_dtype, self.to_dense_values())
+    }
 }
 
 fn saturating_i64_to_usize(value: i64) -> usize {
@@ -3725,9 +3829,9 @@ impl CrackIndex {
 
 #[cfg(test)]
 mod tests {
-    use fp_types::{DType, NullKind, Scalar};
+    use fp_types::{DType, NullKind, Scalar, SparseDType};
 
-    use super::{ArithmeticOp, Column, ValidityMask};
+    use super::{ArithmeticOp, Column, SparseColumn, ValidityMask};
 
     #[test]
     fn reindex_injects_missing_values() {
@@ -3766,6 +3870,100 @@ mod tests {
         assert_eq!(out.values()[0], Scalar::Float64(3.0));
         assert_eq!(out.values()[1], Scalar::Null(NullKind::NaN));
         assert_eq!(out.values()[2], Scalar::Null(NullKind::NaN));
+    }
+
+    #[test]
+    fn sparse_column_omits_fill_values_and_materializes_dense() {
+        let dtype = SparseDType::new(DType::Int64, Scalar::Int64(0)).expect("sparse dtype");
+        let sparse = SparseColumn::from_dense(
+            dtype,
+            vec![
+                Scalar::Int64(0),
+                Scalar::Int64(5),
+                Scalar::Int64(0),
+                Scalar::Int64(-2),
+            ],
+        )
+        .expect("sparse column");
+
+        assert_eq!(sparse.value_dtype(), DType::Int64);
+        assert_eq!(sparse.fill_value(), &Scalar::Int64(0));
+        assert_eq!(sparse.len(), 4);
+        assert_eq!(sparse.npoints(), 2);
+        assert_eq!(sparse.indices(), &[1, 3]);
+        assert_eq!(
+            sparse.stored_values(),
+            &[Scalar::Int64(5), Scalar::Int64(-2)]
+        );
+
+        let dense = sparse.to_dense_column().expect("dense column");
+        assert_eq!(dense.dtype(), DType::Int64);
+        assert_eq!(
+            dense.values(),
+            &[
+                Scalar::Int64(0),
+                Scalar::Int64(5),
+                Scalar::Int64(0),
+                Scalar::Int64(-2),
+            ]
+        );
+    }
+
+    #[test]
+    fn sparse_column_preserves_nulls_when_fill_is_not_missing() {
+        let dtype = SparseDType::new(DType::Float64, Scalar::Float64(0.0)).expect("sparse dtype");
+        let sparse = SparseColumn::from_dense(
+            dtype,
+            vec![
+                Scalar::Float64(0.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(2.5),
+            ],
+        )
+        .expect("sparse column");
+
+        assert_eq!(sparse.indices(), &[1, 2]);
+        assert_eq!(sparse.npoints(), 2);
+        assert!((sparse.density() - (2.0 / 3.0)).abs() < f64::EPSILON);
+        assert!(sparse.stored_values()[0].is_missing());
+        assert_eq!(sparse.stored_values()[1], Scalar::Float64(2.5));
+
+        let dense = sparse.to_dense_column().expect("dense column");
+        assert_eq!(
+            dense.values(),
+            &[
+                Scalar::Float64(0.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(2.5),
+            ]
+        );
+    }
+
+    #[test]
+    fn sparse_column_missing_fill_omits_missing_values() {
+        let dtype =
+            SparseDType::new(DType::Float64, Scalar::Null(NullKind::NaN)).expect("sparse dtype");
+        let sparse = SparseColumn::from_dense(
+            dtype,
+            vec![
+                Scalar::Null(NullKind::Null),
+                Scalar::Float64(1.5),
+                Scalar::Float64(f64::NAN),
+            ],
+        )
+        .expect("sparse column");
+
+        assert_eq!(sparse.fill_value(), &Scalar::Null(NullKind::NaN));
+        assert_eq!(sparse.indices(), &[1]);
+        assert_eq!(sparse.stored_values(), &[Scalar::Float64(1.5)]);
+        assert_eq!(
+            sparse.to_dense_values(),
+            vec![
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(1.5),
+                Scalar::Null(NullKind::NaN),
+            ]
+        );
     }
 
     // === Packed Bitvec ValidityMask Tests ===
@@ -4392,8 +4590,9 @@ mod tests {
     // === AG-14: Database Cracking Tests ===
 
     mod crack_tests {
-        use super::super::*;
         use fp_types::Scalar;
+
+        use super::super::*;
 
         fn make_column(values: &[f64]) -> Column {
             Column::from_values(values.iter().map(|&v| Scalar::Float64(v)).collect()).expect("col")
@@ -4606,8 +4805,9 @@ mod tests {
     // === Comparison, Filter, and Missing-Data Operation Tests ===
 
     mod comparison_tests {
-        use super::super::*;
         use fp_types::{NullKind, Scalar};
+
+        use super::super::*;
 
         #[test]
         fn comparison_gt_int64() {
@@ -4863,8 +5063,9 @@ mod tests {
     }
 
     mod iter_and_predicates {
-        use super::*;
         use fp_types::NullKind;
+
+        use super::*;
 
         #[test]
         fn iter_values_preserves_order() {
@@ -5181,8 +5382,9 @@ mod tests {
     }
 
     mod reverse_head_tail_cumulatives_unique {
-        use super::*;
         use fp_types::NullKind;
+
+        use super::*;
 
         #[test]
         fn reverse_swaps_order_and_preserves_dtype() {
@@ -5330,8 +5532,9 @@ mod tests {
     }
 
     mod abs_shift_clip_round_isin {
-        use super::*;
         use fp_types::NullKind;
+
+        use super::*;
 
         #[test]
         fn abs_int_and_float() {
@@ -5465,8 +5668,9 @@ mod tests {
     }
 
     mod sort_diff_duplicated_between {
-        use super::*;
         use fp_types::NullKind;
+
+        use super::*;
 
         #[test]
         fn sort_values_ascending_puts_nulls_last() {
@@ -5608,8 +5812,9 @@ mod tests {
     }
 
     mod factorize {
-        use super::*;
         use fp_types::NullKind;
+
+        use super::*;
 
         #[test]
         fn factorize_preserves_first_seen_order() {
@@ -5782,8 +5987,9 @@ mod tests {
     }
 
     mod aggregation_helpers {
-        use super::*;
         use fp_types::NullKind;
+
+        use super::*;
 
         #[test]
         fn sum_skips_nulls() {
@@ -7067,8 +7273,9 @@ mod tests {
     }
 
     mod where_mask {
-        use super::*;
         use fp_types::NullKind;
+
+        use super::*;
 
         #[test]
         fn where_cond_keeps_true_positions() {
@@ -7378,8 +7585,9 @@ mod tests {
     }
 
     mod nlargest_nsmallest {
-        use super::*;
         use fp_types::NullKind;
+
+        use super::*;
 
         #[test]
         fn nlargest_returns_top_n_descending() {
@@ -7446,8 +7654,9 @@ mod tests {
     }
 
     mod astype {
-        use super::*;
         use fp_types::NullKind;
+
+        use super::*;
 
         #[test]
         fn astype_int_to_float_preserves_values() {
@@ -7493,8 +7702,9 @@ mod tests {
     }
 
     mod rank_searchsorted {
-        use super::*;
         use fp_types::NullKind;
+
+        use super::*;
 
         #[test]
         fn rank_average_ties_get_midpoint() {
@@ -7802,8 +8012,9 @@ mod tests {
     }
 
     mod value_counts {
-        use super::*;
         use fp_types::NullKind;
+
+        use super::*;
 
         #[test]
         fn value_counts_default_drops_missing_and_sorts_descending() {
