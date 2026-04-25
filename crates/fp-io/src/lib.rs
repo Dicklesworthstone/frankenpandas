@@ -8653,7 +8653,7 @@ mod tests {
     use super::{
         SqlColumnSchema, SqlForeignKeySchema, SqlIfExists, SqlIndexSchema, SqlInsertMethod,
         SqlInspector, SqlQueryResult, SqlReadOptions, SqlReflectedTable, SqlTableSchema,
-        SqlUniqueConstraintSchema, SqlWriteOptions, inspect, list_sql_foreign_keys,
+        SqlUniqueConstraintSchema, SqlWriteOptions, list_sql_foreign_keys,
         list_sql_indexes, list_sql_schemas, list_sql_tables, list_sql_unique_constraints,
         list_sql_views, read_sql,
         read_sql_chunks, read_sql_chunks_with_index_col, read_sql_chunks_with_options,
@@ -16470,6 +16470,9 @@ mod tests {
     #[test]
     fn sql_inspector_via_inspect_helper() {
         // The free-fn `inspect(&conn)` is the one-shot construction helper.
+        // Per fd90.46: import lives inside the test so --no-default-features
+        // builds don't see it as unused.
+        use super::inspect;
         let conn = make_sql_test_conn();
         super::SqlConnection::execute_batch(&conn, "CREATE TABLE one (x INTEGER);").unwrap();
         let inspector = inspect(&conn);
