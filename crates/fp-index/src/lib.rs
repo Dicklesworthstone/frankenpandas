@@ -2327,6 +2327,58 @@ impl MultiIndex {
         self.len() == 0
     }
 
+    /// Compare two rows lexicographically across all levels.
+    ///
+    /// Private helper for sortedness predicates. Returns `Ordering::Equal`
+    /// only when every level value matches exactly.
+    fn row_cmp(&self, a: usize, b: usize) -> std::cmp::Ordering {
+        for level in 0..self.nlevels() {
+            let ord = self.levels[level][a].cmp(&self.levels[level][b]);
+            if ord != std::cmp::Ordering::Equal {
+                return ord;
+            }
+        }
+        std::cmp::Ordering::Equal
+    }
+
+    /// Whether this MultiIndex is sorted in lexicographic (row-major) order.
+    ///
+    /// Matches `pd.MultiIndex.is_monotonic_increasing`. Row `i` must be less
+    /// than or equal to row `i+1` under level-by-level comparison. Empty or
+    /// single-row indexes return `true` (trivially sorted).
+    ///
+    /// Per br-frankenpandas-w4uu: pandas `df.loc['A':'B']` on a MultiIndex
+    /// raises `KeyError: MultiIndex slicing requires the index to be
+    /// lexsorted` when this predicate is false. fp-frame's range-slice
+    /// callers should gate on this before delegating to `slice_locs`.
+    #[must_use]
+    pub fn is_monotonic_increasing(&self) -> bool {
+        if self.len() <= 1 {
+            return true;
+        }
+        (0..self.len() - 1).all(|i| self.row_cmp(i, i + 1) != std::cmp::Ordering::Greater)
+    }
+
+    /// Whether this MultiIndex is sorted in strictly descending order.
+    ///
+    /// Matches `pd.MultiIndex.is_monotonic_decreasing`. Row `i` must be
+    /// greater than or equal to row `i+1`. Empty / single-row: `true`.
+    #[must_use]
+    pub fn is_monotonic_decreasing(&self) -> bool {
+        if self.len() <= 1 {
+            return true;
+        }
+        (0..self.len() - 1).all(|i| self.row_cmp(i, i + 1) != std::cmp::Ordering::Less)
+    }
+
+    /// Alias for `is_monotonic_increasing` matching `pd.MultiIndex.is_lexsorted`
+    /// semantics (pandas deprecated the `is_lexsorted` name in 1.x; we keep
+    /// it as a convenience alias for migrated code).
+    #[must_use]
+    pub fn is_lexsorted(&self) -> bool {
+        self.is_monotonic_increasing()
+    }
+
     /// Level names.
     #[must_use]
     pub fn names(&self) -> &[Option<String>] {
@@ -5312,5 +5364,91 @@ mod tests {
         let mi = MultiIndex::from_tuples(vec![vec!["a".into(), 1_i64.into()]]).unwrap();
 
         assert!(mi.reorder_levels(&[0, 5]).is_err());
+    }
+
+    // ── is_monotonic / is_lexsorted tests (br-frankenpandas-w4uu) ───────
+
+    #[test]
+    fn multi_index_is_monotonic_increasing_on_sorted() {
+        // Rows: [(A,1), (A,2), (B,1)] — strictly increasing lexicographic.
+        let mi = MultiIndex::from_tuples(vec![
+            vec!["A".into(), 1_i64.into()],
+            vec!["A".into(), 2_i64.into()],
+            vec!["B".into(), 1_i64.into()],
+        ])
+        .unwrap();
+        assert!(mi.is_monotonic_increasing());
+        assert!(mi.is_lexsorted());
+        assert!(!mi.is_monotonic_decreasing());
+    }
+
+    #[test]
+    fn multi_index_is_monotonic_decreasing_on_reverse_sorted() {
+        // Rows: [(B,2), (B,1), (A,1)].
+        let mi = MultiIndex::from_tuples(vec![
+            vec!["B".into(), 2_i64.into()],
+            vec!["B".into(), 1_i64.into()],
+            vec!["A".into(), 1_i64.into()],
+        ])
+        .unwrap();
+        assert!(mi.is_monotonic_decreasing());
+        assert!(!mi.is_monotonic_increasing());
+    }
+
+    #[test]
+    fn multi_index_is_monotonic_both_directions_on_constant_inner() {
+        // Equal-level-value rows: [(A,1), (A,1)] — both monotonic trivially.
+        let mi = MultiIndex::from_tuples(vec![
+            vec!["A".into(), 1_i64.into()],
+            vec!["A".into(), 1_i64.into()],
+        ])
+        .unwrap();
+        assert!(mi.is_monotonic_increasing());
+        assert!(mi.is_monotonic_decreasing());
+    }
+
+    #[test]
+    fn multi_index_empty_is_monotonic() {
+        let mi = MultiIndex::from_tuples(Vec::new()).unwrap();
+        assert!(mi.is_monotonic_increasing());
+        assert!(mi.is_monotonic_decreasing());
+        assert!(mi.is_lexsorted());
+    }
+
+    #[test]
+    fn multi_index_single_row_is_monotonic() {
+        let mi = MultiIndex::from_tuples(vec![vec!["A".into(), 1_i64.into()]]).unwrap();
+        assert!(mi.is_monotonic_increasing());
+        assert!(mi.is_monotonic_decreasing());
+        assert!(mi.is_lexsorted());
+    }
+
+    #[test]
+    fn multi_index_unsorted_is_neither() {
+        // Rows: [(B,1), (A,2), (B,2)] — unsorted at the outer level.
+        let mi = MultiIndex::from_tuples(vec![
+            vec!["B".into(), 1_i64.into()],
+            vec!["A".into(), 2_i64.into()],
+            vec!["B".into(), 2_i64.into()],
+        ])
+        .unwrap();
+        assert!(!mi.is_monotonic_increasing());
+        assert!(!mi.is_monotonic_decreasing());
+        assert!(!mi.is_lexsorted());
+    }
+
+    #[test]
+    fn multi_index_outer_ascending_inner_descending_is_not_monotonic() {
+        // Rows: [(A,5), (A,1), (B,3)] — outer ascending, inner within A descends.
+        let mi = MultiIndex::from_tuples(vec![
+            vec!["A".into(), 5_i64.into()],
+            vec!["A".into(), 1_i64.into()],
+            vec!["B".into(), 3_i64.into()],
+        ])
+        .unwrap();
+        // Lexicographically (A,5) > (A,1) so the "increasing" check fails.
+        assert!(!mi.is_monotonic_increasing());
+        // (A,5) > (A,1) but (A,1) < (B,3) so decreasing also fails.
+        assert!(!mi.is_monotonic_decreasing());
     }
 }
