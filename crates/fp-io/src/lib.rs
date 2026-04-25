@@ -3567,6 +3567,24 @@ pub struct SqlUniqueConstraintSchema {
     pub columns: Vec<String>,
 }
 
+/// Bundle of all introspection metadata for a single SQL table.
+///
+/// Per br-frankenpandas-76mw (fd90.40). Returned by
+/// `SqlInspector::reflect_table` to give callers the full picture of
+/// a table in one call instead of 5 separate trait dispatches.
+/// Mirrors the bundled view that `SQLAlchemy.MetaData.reflect_table`
+/// builds internally.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqlReflectedTable {
+    pub table_name: String,
+    pub columns: Vec<SqlColumnSchema>,
+    pub primary_key_columns: Vec<String>,
+    pub indexes: Vec<SqlIndexSchema>,
+    pub foreign_keys: Vec<SqlForeignKeySchema>,
+    pub unique_constraints: Vec<SqlUniqueConstraintSchema>,
+    pub comment: Option<String>,
+}
+
 /// Backend-neutral SQL foreign-key constraint metadata.
 ///
 /// Per br-frankenpandas-uht8 (fd90.29). Aligns with
@@ -5649,6 +5667,42 @@ impl<'a, C: SqlConnection> SqlInspector<'a, C> {
             return Ok(None);
         };
         Ok(meta.column(column_name).cloned())
+    }
+
+    /// Reflect a full table's metadata in one call: columns, primary
+    /// key, indexes, foreign keys, unique constraints, and comment.
+    ///
+    /// Per br-frankenpandas-76mw (fd90.40). Mirrors
+    /// `SQLAlchemy.MetaData.reflect_table` shape — gives callers a
+    /// single bundle instead of 5 separate fetches. Returns `Ok(None)`
+    /// when the table doesn't exist (matched via `table_schema`
+    /// returning `None`); otherwise all derived calls run and any
+    /// missing pieces (e.g. SQLite's always-None `table_comment`)
+    /// are simply preserved as their natural empty values.
+    pub fn reflect_table(
+        &self,
+        table_name: &str,
+        schema: Option<&str>,
+    ) -> Result<Option<SqlReflectedTable>, IoError> {
+        let Some(meta) = self.conn.table_schema(table_name, schema)? else {
+            return Ok(None);
+        };
+        let primary_key_columns =
+            self.conn.primary_key_columns(table_name, schema)?;
+        let indexes = self.conn.list_indexes(table_name, schema)?;
+        let foreign_keys = self.conn.list_foreign_keys(table_name, schema)?;
+        let unique_constraints =
+            self.conn.list_unique_constraints(table_name, schema)?;
+        let comment = self.conn.table_comment(table_name, schema)?;
+        Ok(Some(SqlReflectedTable {
+            table_name: meta.table_name,
+            columns: meta.columns,
+            primary_key_columns,
+            indexes,
+            foreign_keys,
+            unique_constraints,
+            comment,
+        }))
     }
 }
 
@@ -8520,7 +8574,7 @@ mod tests {
 
     use super::{
         SqlColumnSchema, SqlForeignKeySchema, SqlIfExists, SqlIndexSchema, SqlInsertMethod,
-        SqlInspector, SqlQueryResult, SqlReadOptions, SqlTableSchema,
+        SqlInspector, SqlQueryResult, SqlReadOptions, SqlReflectedTable, SqlTableSchema,
         SqlUniqueConstraintSchema, SqlWriteOptions, inspect, list_sql_foreign_keys,
         list_sql_indexes, list_sql_schemas, list_sql_tables, list_sql_unique_constraints,
         list_sql_views, read_sql,
@@ -16427,5 +16481,224 @@ mod tests {
         assert_eq!(id_col.declared_type.as_deref(), Some("BIGINT"));
         assert!(id_col.autoincrement);
         assert!(inspector.column("users", "id", Some("audit")).unwrap().is_none());
+    }
+
+    // ── SqlInspector::reflect_table (br-76mw / fd90.40) ──────────────────
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn sql_inspector_reflect_table_unknown_returns_none() {
+        let conn = make_sql_test_conn();
+        let inspector = SqlInspector::new(&conn);
+        let result = inspector.reflect_table("no_such", None).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn sql_inspector_reflect_table_bundles_all_metadata() {
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE TABLE parent (pid INTEGER PRIMARY KEY, code TEXT);",
+        )
+        .unwrap();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE TABLE bundled ( \
+                id INTEGER PRIMARY KEY, \
+                parent_id INTEGER, \
+                slug TEXT, \
+                email TEXT UNIQUE, \
+                FOREIGN KEY (parent_id) REFERENCES parent(pid) \
+             );",
+        )
+        .unwrap();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE INDEX idx_bundled_slug ON bundled(slug);",
+        )
+        .unwrap();
+
+        let inspector = SqlInspector::new(&conn);
+        let bundle = inspector
+            .reflect_table("bundled", None)
+            .unwrap()
+            .expect("table exists");
+
+        assert_eq!(bundle.table_name, "bundled");
+
+        // Columns: id, parent_id, slug, email.
+        let names: Vec<&str> = bundle.columns.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["id", "parent_id", "slug", "email"]);
+        // INTEGER PRIMARY KEY id is autoincrement.
+        let id_col = bundle
+            .columns
+            .iter()
+            .find(|c| c.name == "id")
+            .expect("id col");
+        assert!(id_col.autoincrement);
+
+        // Primary key.
+        assert_eq!(bundle.primary_key_columns, vec!["id"]);
+
+        // Indexes (only the user CREATE INDEX; the UNIQUE constraint
+        // index goes via unique_constraints, the PK auto-index is
+        // hidden).
+        assert_eq!(bundle.indexes.len(), 1);
+        assert_eq!(bundle.indexes[0].name, "idx_bundled_slug");
+
+        // Unique constraints (the inline UNIQUE on email).
+        assert_eq!(bundle.unique_constraints.len(), 1);
+        assert_eq!(bundle.unique_constraints[0].columns, vec!["email"]);
+
+        // Foreign keys (parent_id -> parent.pid).
+        assert_eq!(bundle.foreign_keys.len(), 1);
+        assert_eq!(bundle.foreign_keys[0].columns, vec!["parent_id"]);
+        assert_eq!(bundle.foreign_keys[0].referenced_table, "parent");
+
+        // SQLite has no native column/table comment; comment is None.
+        assert!(bundle.comment.is_none());
+    }
+
+    #[test]
+    fn sql_inspector_reflect_table_routes_to_backend_override() {
+        // Multi-schema PG-like backend that returns explicit comment +
+        // populated metadata. Verifies all five sub-calls flow through
+        // and end up in the bundled struct.
+        struct PgLikeBundle;
+        impl super::SqlConnection for PgLikeBundle {
+            fn query(&self, _q: &str, _p: &[Scalar]) -> Result<SqlQueryResult, IoError> {
+                Ok(SqlQueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                })
+            }
+            fn execute_batch(&self, _sql: &str) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn table_exists(&self, _name: &str) -> Result<bool, IoError> {
+                Ok(false)
+            }
+            fn insert_rows(&self, _sql: &str, _rows: &[Vec<Scalar>]) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn dtype_sql(&self, _dtype: DType) -> &'static str {
+                "TEXT"
+            }
+            fn index_dtype_sql(&self, _index: &Index) -> &'static str {
+                "TEXT"
+            }
+            fn supports_schemas(&self) -> bool {
+                true
+            }
+            fn table_schema(
+                &self,
+                table: &str,
+                schema: Option<&str>,
+            ) -> Result<Option<SqlTableSchema>, IoError> {
+                if table == "users" && schema == Some("public") {
+                    Ok(Some(SqlTableSchema {
+                        table_name: "users".to_owned(),
+                        columns: vec![SqlColumnSchema {
+                            name: "id".to_owned(),
+                            declared_type: Some("BIGINT".to_owned()),
+                            nullable: false,
+                            default_value: None,
+                            primary_key_ordinal: Some(0),
+                            comment: None,
+                            autoincrement: true,
+                        }],
+                    }))
+                } else {
+                    Ok(None)
+                }
+            }
+            fn primary_key_columns(
+                &self,
+                table: &str,
+                schema: Option<&str>,
+            ) -> Result<Vec<String>, IoError> {
+                if table == "users" && schema == Some("public") {
+                    Ok(vec!["id".to_owned()])
+                } else {
+                    Ok(vec![])
+                }
+            }
+            fn list_indexes(
+                &self,
+                _table: &str,
+                _schema: Option<&str>,
+            ) -> Result<Vec<SqlIndexSchema>, IoError> {
+                Ok(vec![SqlIndexSchema {
+                    name: "users_status_idx".to_owned(),
+                    columns: vec!["status".to_owned()],
+                    unique: false,
+                }])
+            }
+            fn list_foreign_keys(
+                &self,
+                _table: &str,
+                _schema: Option<&str>,
+            ) -> Result<Vec<SqlForeignKeySchema>, IoError> {
+                Ok(vec![])
+            }
+            fn list_unique_constraints(
+                &self,
+                _table: &str,
+                _schema: Option<&str>,
+            ) -> Result<Vec<SqlUniqueConstraintSchema>, IoError> {
+                Ok(vec![SqlUniqueConstraintSchema {
+                    name: "users_email_key".to_owned(),
+                    columns: vec!["email".to_owned()],
+                }])
+            }
+            fn table_comment(
+                &self,
+                _table: &str,
+                _schema: Option<&str>,
+            ) -> Result<Option<String>, IoError> {
+                Ok(Some("Customer accounts".to_owned()))
+            }
+        }
+        let conn = PgLikeBundle;
+        let inspector = SqlInspector::new(&conn);
+        let bundle = inspector
+            .reflect_table("users", Some("public"))
+            .unwrap()
+            .expect("present");
+        assert_eq!(bundle.table_name, "users");
+        assert_eq!(bundle.columns.len(), 1);
+        assert_eq!(bundle.primary_key_columns, vec!["id"]);
+        assert_eq!(bundle.indexes.len(), 1);
+        assert_eq!(bundle.indexes[0].name, "users_status_idx");
+        assert_eq!(bundle.unique_constraints.len(), 1);
+        assert_eq!(bundle.foreign_keys.len(), 0);
+        assert_eq!(bundle.comment.as_deref(), Some("Customer accounts"));
+
+        // Wrong schema -> None (table_schema returns None).
+        assert!(
+            inspector
+                .reflect_table("users", Some("audit"))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    // Use SqlReflectedTable in a smoke test so the struct's named
+    // fields are exercised at the use-site too.
+    #[test]
+    fn sql_reflected_table_bundle_smoke_test() {
+        let bundle = SqlReflectedTable {
+            table_name: "t".to_owned(),
+            columns: vec![],
+            primary_key_columns: vec![],
+            indexes: vec![],
+            foreign_keys: vec![],
+            unique_constraints: vec![],
+            comment: None,
+        };
+        assert_eq!(bundle.table_name, "t");
+        assert!(bundle.columns.is_empty());
     }
 }

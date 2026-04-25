@@ -70,6 +70,7 @@ pub use fp_io::{
     SqlInspector,
     SqlQueryResult,
     SqlReadOptions,
+    SqlReflectedTable,
     SqlTableSchema,
     SqlUniqueConstraintSchema,
     SqlWriteOptions,
