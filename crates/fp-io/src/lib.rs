@@ -3679,6 +3679,18 @@ pub trait SqlConnection {
     ) -> Result<bool, IoError> {
         self.table_exists(table_name)
     }
+
+    /// List user-visible table names, optionally scoped to `schema`.
+    ///
+    /// Per br-frankenpandas-vhq2 (fd90.20). Default impl returns an empty
+    /// vector — backends that cannot introspect (or that haven't yet
+    /// implemented this method) report "no tables visible" rather than
+    /// raising. Multi-schema backends (PostgreSQL, MySQL, MSSQL) override
+    /// to query their information_schema; embedded backends (SQLite)
+    /// override to query their internal catalog and ignore `schema`.
+    fn list_tables(&self, _schema: Option<&str>) -> Result<Vec<String>, IoError> {
+        Ok(Vec::new())
+    }
 }
 
 /// Map an fp-types DType to an SQLite column type declaration.
@@ -3889,6 +3901,27 @@ impl SqlConnection for rusqlite::Connection {
         // SQLite docs). Delegate to the existing free-fn helper to keep the
         // exact escaping policy in one place.
         quote_sql_ident(ident)
+    }
+
+    fn list_tables(&self, _schema: Option<&str>) -> Result<Vec<String>, IoError> {
+        // SQLite has a single namespace; the schema arg is silently
+        // ignored to match `supports_schemas() == false`. We exclude
+        // SQLite's internal `sqlite_*` book-keeping tables to match
+        // pandas' SQLAlchemy dialect, which never surfaces them as
+        // user tables.
+        let mut stmt = self
+            .prepare(
+                "SELECT name FROM sqlite_master \
+                 WHERE type='table' AND name NOT LIKE 'sqlite_%' \
+                 ORDER BY name",
+            )
+            .map_err(|e| IoError::Sql(format!("list_tables prepare failed: {e}")))?;
+        let names = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| IoError::Sql(format!("list_tables query failed: {e}")))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| IoError::Sql(format!("list_tables row read failed: {e}")))?;
+        Ok(names)
     }
 }
 
@@ -4540,6 +4573,23 @@ fn promote_column_to_index(frame: &DataFrame, col_name: &str) -> Result<DataFram
 /// Matches `pd.read_sql_table(table_name, con)`.
 pub fn read_sql_table<C: SqlConnection>(conn: &C, table_name: &str) -> Result<DataFrame, IoError> {
     read_sql(conn, &sql_select_all_query(conn, table_name)?)
+}
+
+/// List user-visible table names known to the SQL backend.
+///
+/// Matches the supported subset of
+/// `pd.io.sql.SQLDatabase.list_tables(schema=...)`. When the backend
+/// reports `supports_schemas() == false` (SQLite), `schema` is ignored
+/// and all tables in the single namespace are returned. When the
+/// backend supports schemas (PostgreSQL, MySQL, MSSQL), `Some(s)`
+/// scopes the listing; `None` falls back to `default_schema()`.
+///
+/// Per br-frankenpandas-vhq2 (fd90.20).
+pub fn list_sql_tables<C: SqlConnection>(
+    conn: &C,
+    schema: Option<&str>,
+) -> Result<Vec<String>, IoError> {
+    conn.list_tables(schema)
 }
 
 /// Read an entire SQL table into a DataFrame with read-time options.
@@ -7342,18 +7392,19 @@ mod tests {
     // ── SQL I/O tests ──────────────────────────────────────────────
 
     use super::{
-        SqlIfExists, SqlInsertMethod, SqlQueryResult, SqlReadOptions, SqlWriteOptions, read_sql,
-        read_sql_chunks, read_sql_chunks_with_index_col, read_sql_chunks_with_options,
-        read_sql_chunks_with_options_and_index_col, read_sql_query, read_sql_query_chunks,
-        read_sql_query_chunks_with_index_col, read_sql_query_chunks_with_options,
-        read_sql_query_chunks_with_options_and_index_col, read_sql_query_with_index_col,
-        read_sql_query_with_options, read_sql_table, read_sql_table_chunks,
-        read_sql_table_chunks_with_index_col, read_sql_table_chunks_with_options,
-        read_sql_table_chunks_with_options_and_index_col, read_sql_table_columns,
-        read_sql_table_columns_chunks, read_sql_table_columns_chunks_with_index_col,
-        read_sql_table_columns_with_index_col, read_sql_table_with_index_col,
-        read_sql_table_with_options, read_sql_table_with_options_and_index_col,
-        read_sql_with_index_col, read_sql_with_options, write_sql, write_sql_with_options,
+        SqlIfExists, SqlInsertMethod, SqlQueryResult, SqlReadOptions, SqlWriteOptions,
+        list_sql_tables, read_sql, read_sql_chunks, read_sql_chunks_with_index_col,
+        read_sql_chunks_with_options, read_sql_chunks_with_options_and_index_col, read_sql_query,
+        read_sql_query_chunks, read_sql_query_chunks_with_index_col,
+        read_sql_query_chunks_with_options, read_sql_query_chunks_with_options_and_index_col,
+        read_sql_query_with_index_col, read_sql_query_with_options, read_sql_table,
+        read_sql_table_chunks, read_sql_table_chunks_with_index_col,
+        read_sql_table_chunks_with_options, read_sql_table_chunks_with_options_and_index_col,
+        read_sql_table_columns, read_sql_table_columns_chunks,
+        read_sql_table_columns_chunks_with_index_col, read_sql_table_columns_with_index_col,
+        read_sql_table_with_index_col, read_sql_table_with_options,
+        read_sql_table_with_options_and_index_col, read_sql_with_index_col, read_sql_with_options,
+        write_sql, write_sql_with_options,
     };
 
     fn make_sql_test_conn() -> rusqlite::Connection {
@@ -11709,5 +11760,153 @@ mod tests {
     #[test]
     fn sql_insert_method_default_is_single() {
         assert_eq!(SqlInsertMethod::default(), SqlInsertMethod::Single);
+    }
+
+    // ── list_sql_tables / SqlConnection::list_tables (br-vhq2 / fd90.20) ─
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn list_sql_tables_empty_db_returns_empty_vec() {
+        let conn = make_sql_test_conn();
+        let tables = list_sql_tables(&conn, None).unwrap();
+        assert!(tables.is_empty(), "expected no tables; got {tables:?}");
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn list_sql_tables_returns_user_tables_sorted() {
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(&conn, "CREATE TABLE zebra (x INTEGER);").unwrap();
+        super::SqlConnection::execute_batch(&conn, "CREATE TABLE alpha (y TEXT);").unwrap();
+        super::SqlConnection::execute_batch(&conn, "CREATE TABLE mango (z REAL);").unwrap();
+        let tables = list_sql_tables(&conn, None).unwrap();
+        assert_eq!(tables, vec!["alpha", "mango", "zebra"]);
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn list_sql_tables_excludes_sqlite_internal_tables() {
+        let conn = make_sql_test_conn();
+        // Forcing creation of an internal sqlite_sequence table by using
+        // AUTOINCREMENT — that table must NOT appear in the result.
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE TABLE seq_demo (id INTEGER PRIMARY KEY AUTOINCREMENT, v TEXT);",
+        )
+        .unwrap();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "INSERT INTO seq_demo (v) VALUES ('one');",
+        )
+        .unwrap();
+        let tables = list_sql_tables(&conn, None).unwrap();
+        assert_eq!(tables, vec!["seq_demo"]);
+        assert!(!tables.iter().any(|name| name.starts_with("sqlite_")));
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn list_sql_tables_schema_silently_ignored_on_sqlite() {
+        // SQLite reports supports_schemas() == false. Passing a schema
+        // arg must NOT error; it is silently dropped and all tables are
+        // returned (matches the documented option-struct ignore policy).
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(&conn, "CREATE TABLE only_one (x INTEGER);")
+            .unwrap();
+        let with_schema =
+            list_sql_tables(&conn, Some("ignored_on_sqlite")).expect("schema arg must not error");
+        let without_schema = list_sql_tables(&conn, None).unwrap();
+        assert_eq!(with_schema, without_schema);
+    }
+
+    #[test]
+    fn list_sql_tables_default_impl_returns_empty() {
+        // A backend that doesn't override list_tables falls through to
+        // the trait default — returns empty rather than erroring.
+        struct NoIntrospection;
+        impl super::SqlConnection for NoIntrospection {
+            fn query(&self, _q: &str, _p: &[Scalar]) -> Result<SqlQueryResult, IoError> {
+                Ok(SqlQueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                })
+            }
+            fn execute_batch(&self, _sql: &str) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn table_exists(&self, _name: &str) -> Result<bool, IoError> {
+                Ok(false)
+            }
+            fn insert_rows(&self, _sql: &str, _rows: &[Vec<Scalar>]) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn dtype_sql(&self, _dtype: DType) -> &'static str {
+                "TEXT"
+            }
+            fn index_dtype_sql(&self, _index: &Index) -> &'static str {
+                "TEXT"
+            }
+        }
+        let conn = NoIntrospection;
+        let tables = list_sql_tables(&conn, None).unwrap();
+        assert!(tables.is_empty());
+        let with_schema = list_sql_tables(&conn, Some("any")).unwrap();
+        assert!(with_schema.is_empty());
+    }
+
+    #[test]
+    fn list_sql_tables_routes_schema_to_backend_override() {
+        // Multi-schema backend stub: returns different tables per schema.
+        struct MultiSchema;
+        impl super::SqlConnection for MultiSchema {
+            fn query(&self, _q: &str, _p: &[Scalar]) -> Result<SqlQueryResult, IoError> {
+                Ok(SqlQueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                })
+            }
+            fn execute_batch(&self, _sql: &str) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn table_exists(&self, _name: &str) -> Result<bool, IoError> {
+                Ok(false)
+            }
+            fn insert_rows(&self, _sql: &str, _rows: &[Vec<Scalar>]) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn dtype_sql(&self, _dtype: DType) -> &'static str {
+                "TEXT"
+            }
+            fn index_dtype_sql(&self, _index: &Index) -> &'static str {
+                "TEXT"
+            }
+            fn supports_schemas(&self) -> bool {
+                true
+            }
+            fn list_tables(&self, schema: Option<&str>) -> Result<Vec<String>, IoError> {
+                Ok(match schema {
+                    Some("analytics") => {
+                        vec!["users".to_owned(), "events".to_owned()]
+                    }
+                    Some("audit") => vec!["logs".to_owned()],
+                    Some(_) => vec![],
+                    None => vec!["public_table".to_owned()],
+                })
+            }
+        }
+        let conn = MultiSchema;
+        assert_eq!(
+            list_sql_tables(&conn, Some("analytics")).unwrap(),
+            vec!["users", "events"]
+        );
+        assert_eq!(list_sql_tables(&conn, Some("audit")).unwrap(), vec!["logs"]);
+        assert_eq!(
+            list_sql_tables(&conn, Some("missing")).unwrap(),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            list_sql_tables(&conn, None).unwrap(),
+            vec!["public_table"]
+        );
     }
 }
