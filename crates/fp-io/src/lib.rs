@@ -8643,7 +8643,14 @@ mod tests {
     }
 
     // ── SQL I/O tests ──────────────────────────────────────────────
+    //
+    // Per br-frankenpandas-7a49 (fd90.48): keep the import block
+    // unconditional so stub-backend tests (which only need types and
+    // free-fns, not rusqlite) compile under --no-default-features.
+    // `#[allow(unused_imports)]` covers the few free fns that are
+    // exclusively used inside the cfg-gated SQLite-backed tests.
 
+    #[allow(unused_imports)]
     use super::{
         SqlColumnSchema, SqlForeignKeySchema, SqlIfExists, SqlIndexSchema, SqlInsertMethod,
         SqlInspector, SqlQueryResult, SqlReadOptions, SqlReflectedTable, SqlTableSchema,
@@ -8665,10 +8672,16 @@ mod tests {
         truncate_sql_table, write_sql, write_sql_with_options,
     };
 
+    // Per br-frankenpandas-7a49 (fd90.48): the helper itself only
+    // exists when sql-sqlite is on, since it directly references
+    // rusqlite::Connection. All tests that call this are also
+    // cfg-gated on the same feature.
+    #[cfg(feature = "sql-sqlite")]
     fn make_sql_test_conn() -> rusqlite::Connection {
         rusqlite::Connection::open_in_memory().expect("in-memory sqlite")
     }
 
+    #[cfg(feature = "sql-sqlite")]
     #[test]
     fn sql_read_with_index_col_promotes_named_column() {
         let frame = make_test_dataframe();
@@ -8691,6 +8704,7 @@ mod tests {
         assert!(names.contains(&"names"));
     }
 
+    #[cfg(feature = "sql-sqlite")]
     #[test]
     fn sql_read_with_index_col_none_is_unchanged() {
         let frame = make_test_dataframe();
@@ -8703,6 +8717,7 @@ mod tests {
         assert_eq!(result.column_names(), baseline.column_names());
     }
 
+    #[cfg(feature = "sql-sqlite")]
     #[test]
     fn sql_read_with_index_col_unknown_column_errors() {
         let frame = make_test_dataframe();
@@ -8712,6 +8727,7 @@ mod tests {
         assert!(matches!(err, crate::IoError::Sql(_)));
     }
 
+    #[cfg(feature = "sql-sqlite")]
     #[test]
     fn sql_read_table_columns_returns_requested_projection_in_order() {
         let frame = make_test_dataframe();
@@ -8733,6 +8749,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "sql-sqlite")]
     #[test]
     fn sql_read_table_columns_single_column_projection() {
         let frame = make_test_dataframe();
@@ -8749,6 +8766,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "sql-sqlite")]
     #[test]
     fn sql_read_table_columns_rejects_empty_columns() {
         let conn = make_sql_test_conn();
@@ -8756,6 +8774,7 @@ mod tests {
         assert!(matches!(err, crate::IoError::Sql(_)));
     }
 
+    #[cfg(feature = "sql-sqlite")]
     #[test]
     fn sql_read_table_columns_rejects_invalid_column_name() {
         let frame = make_test_dataframe();
@@ -8766,6 +8785,7 @@ mod tests {
         assert!(matches!(err, crate::IoError::Sql(_)));
     }
 
+    #[cfg(feature = "sql-sqlite")]
     #[test]
     fn sql_read_table_columns_rejects_invalid_table_name() {
         let conn = make_sql_test_conn();
@@ -8773,6 +8793,7 @@ mod tests {
         assert!(matches!(err, crate::IoError::Sql(_)));
     }
 
+    #[cfg(feature = "sql-sqlite")]
     #[test]
     fn sql_read_table_columns_chunks_returns_requested_projection_in_order() {
         let frame = make_test_dataframe();
@@ -8799,6 +8820,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "sql-sqlite")]
     #[test]
     fn sql_read_table_columns_chunks_rejects_zero_chunksize() {
         let frame = make_test_dataframe();
@@ -8811,6 +8833,7 @@ mod tests {
         assert!(matches!(err, IoError::Sql(msg) if msg.contains("chunksize")));
     }
 
+    #[cfg(feature = "sql-sqlite")]
     #[test]
     fn sql_read_table_columns_chunks_rejects_invalid_projection_inputs() {
         let conn = make_sql_test_conn();
@@ -8824,6 +8847,7 @@ mod tests {
         assert!(matches!(invalid, IoError::Sql(msg) if msg.contains("invalid column name")));
     }
 
+    #[cfg(feature = "sql-sqlite")]
     #[test]
     fn sql_read_table_columns_with_index_col_promotes_projected_column() {
         let frame = make_test_dataframe();
@@ -8859,6 +8883,7 @@ mod tests {
         assert!(result.column("ints").is_none());
     }
 
+    #[cfg(feature = "sql-sqlite")]
     #[test]
     fn sql_read_table_columns_with_index_col_none_keeps_projection_and_range_index() {
         let frame = make_test_dataframe();
@@ -8888,6 +8913,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "sql-sqlite")]
     #[test]
     fn sql_read_table_columns_chunks_with_index_col_promotes_each_chunk_index() {
         let frame = make_test_dataframe();
@@ -8926,6 +8952,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "sql-sqlite")]
     #[test]
     fn sql_read_table_columns_chunks_with_index_col_validates_projection_and_index() {
         let frame = make_test_dataframe();
@@ -8962,6 +8989,7 @@ mod tests {
         assert!(matches!(invalid, IoError::Sql(msg) if msg.contains("invalid column name")));
     }
 
+    #[cfg(feature = "sql-sqlite")]
     #[test]
     fn sql_read_query_with_index_col_works_on_arbitrary_select() {
         let frame = make_test_dataframe();
@@ -8986,6 +9014,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "sql-sqlite")]
     #[test]
     fn sql_write_read_roundtrip() {
         let frame = make_test_dataframe();
@@ -9189,6 +9218,7 @@ mod tests {
         assert_eq!(inserted_rows[0][2][2], Scalar::Utf8("carol".into()));
     }
 
+    #[cfg(feature = "sql-sqlite")]
     #[test]
     fn sql_write_with_options_includes_named_index_column() {
         let mut columns = BTreeMap::new();
@@ -9232,6 +9262,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "sql-sqlite")]
     #[test]
     fn sql_write_with_options_unnamed_index_defaults_to_index_column_name() {
         let frame = make_test_dataframe();
@@ -9259,6 +9290,7 @@ mod tests {
         assert_eq!(raw.column("index").unwrap().values()[2], Scalar::Int64(2));
     }
 
+    #[cfg(feature = "sql-sqlite")]
     #[test]
     fn sql_write_with_options_index_label_overrides_name() {
         let mut columns = BTreeMap::new();
@@ -9304,6 +9336,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "sql-sqlite")]
     #[test]
     fn sql_write_with_options_index_false_omits_index_column() {
         let mut columns = BTreeMap::new();
@@ -9347,6 +9380,7 @@ mod tests {
         assert_eq!(names, vec!["vals"]);
     }
 
+    #[cfg(feature = "sql-sqlite")]
     #[test]
     fn sql_read_with_query() {
         let frame = make_test_dataframe();
@@ -9365,6 +9399,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "sql-sqlite")]
     #[test]
     fn sql_read_query_alias_matches_read_sql_query_path() {
         let frame = make_test_dataframe();
@@ -9392,6 +9427,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "sql-sqlite")]
     #[test]
     fn sql_read_query_with_options_applies_params_and_parse_dates() {
         let conn = make_sql_test_conn();
@@ -9433,6 +9469,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "sql-sqlite")]
     #[test]
     fn sql_read_query_with_index_col_promotes_named_column() {
         let frame = make_test_dataframe();
@@ -9462,6 +9499,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "sql-sqlite")]
     #[test]
     fn sql_read_query_chunks_alias_batches_rows() {
         let conn = make_sql_test_conn();
@@ -9492,6 +9530,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "sql-sqlite")]
     #[test]
     fn sql_read_query_chunks_with_options_applies_params_parse_dates_and_coerce_float() {
         let conn = make_sql_test_conn();
@@ -9541,6 +9580,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "sql-sqlite")]
     #[test]
     fn sql_read_query_chunks_with_options_and_index_col_applies_options_before_indexing() {
         let conn = make_sql_test_conn();
@@ -9593,6 +9633,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "sql-sqlite")]
     #[test]
     fn sql_read_chunks_with_options_and_index_col_none_keeps_options_and_range_index() {
         let conn = make_sql_test_conn();
@@ -9636,6 +9677,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "sql-sqlite")]
     #[test]
     fn sql_read_query_chunks_with_options_and_index_col_missing_column_errors() {
         let conn = make_sql_test_conn();
@@ -9665,6 +9707,7 @@ mod tests {
         assert!(matches!(err, IoError::Sql(msg) if msg.contains("index_col")));
     }
 
+    #[cfg(feature = "sql-sqlite")]
     #[test]
     fn sql_read_query_chunks_rejects_zero_chunksize() {
         let conn = make_sql_test_conn();
@@ -9675,6 +9718,7 @@ mod tests {
         assert!(matches!(err, IoError::Sql(msg) if msg.contains("chunksize")));
     }
 
+    #[cfg(feature = "sql-sqlite")]
     #[test]
     fn sql_read_query_chunks_with_index_col_promotes_each_chunk_index() {
         let conn = make_sql_test_conn();
@@ -9717,6 +9761,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "sql-sqlite")]
     #[test]
     fn sql_read_chunks_with_index_col_none_keeps_fresh_chunk_range_indexes() {
         let conn = make_sql_test_conn();
@@ -9744,6 +9789,7 @@ mod tests {
         assert_eq!(chunks[1].column_names(), vec!["id", "label"]);
     }
 
+    #[cfg(feature = "sql-sqlite")]
     #[test]
     fn sql_read_query_chunks_with_index_col_missing_column_errors() {
         let conn = make_sql_test_conn();
@@ -9764,6 +9810,7 @@ mod tests {
         assert!(matches!(err, IoError::Sql(msg) if msg.contains("index_col")));
     }
 
+    #[cfg(feature = "sql-sqlite")]
     #[test]
     fn sql_read_table_chunks_batches_rows() {
         let conn = make_sql_test_conn();
@@ -9794,6 +9841,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "sql-sqlite")]
     #[test]
     fn sql_read_table_chunks_rejects_zero_chunksize() {
         let conn = make_sql_test_conn();
@@ -9806,6 +9854,7 @@ mod tests {
         assert!(matches!(err, IoError::Sql(msg) if msg.contains("chunksize")));
     }
 
+    #[cfg(feature = "sql-sqlite")]
     #[test]
     fn sql_read_table_chunks_rejects_invalid_table_name() {
         let conn = make_sql_test_conn();
@@ -9816,6 +9865,7 @@ mod tests {
         assert!(matches!(err, IoError::Sql(msg) if msg.contains("invalid table name")));
     }
 
+    #[cfg(feature = "sql-sqlite")]
     #[test]
     fn sql_read_table_chunks_with_index_col_promotes_each_chunk_index() {
         let conn = make_sql_test_conn();
@@ -9847,6 +9897,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "sql-sqlite")]
     #[test]
     fn sql_read_table_with_options_applies_parse_dates_and_coerce_float() {
         let conn = make_sql_test_conn();
@@ -9890,6 +9941,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "sql-sqlite")]
     #[test]
     fn sql_read_table_chunks_with_options_applies_options_before_chunking() {
         let conn = make_sql_test_conn();
@@ -9938,6 +9990,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "sql-sqlite")]
     #[test]
     fn sql_read_table_chunks_with_options_validates_chunksize_and_table_name() {
         let conn = make_sql_test_conn();
@@ -9968,6 +10021,7 @@ mod tests {
         assert!(matches!(invalid, IoError::Sql(msg) if msg.contains("invalid table name")));
     }
 
+    #[cfg(feature = "sql-sqlite")]
     #[test]
     fn sql_read_table_with_options_and_index_col_applies_options_before_indexing() {
         let conn = make_sql_test_conn();
@@ -10010,6 +10064,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "sql-sqlite")]
     #[test]
     fn sql_read_table_with_options_and_index_col_none_keeps_options_and_range_index() {
         let conn = make_sql_test_conn();
@@ -10048,6 +10103,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "sql-sqlite")]
     #[test]
     fn sql_read_table_chunks_with_options_and_index_col_promotes_each_chunk_index() {
         let conn = make_sql_test_conn();
@@ -10103,6 +10159,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "sql-sqlite")]
     #[test]
     fn sql_read_table_chunks_with_options_and_index_col_missing_column_errors() {
         let conn = make_sql_test_conn();
@@ -10132,6 +10189,7 @@ mod tests {
         assert!(matches!(err, IoError::Sql(msg) if msg.contains("index_col")));
     }
 
+    #[cfg(feature = "sql-sqlite")]
     #[test]
     fn sql_read_with_parse_dates_coerces_named_columns() {
         let conn = make_sql_test_conn();
@@ -10170,6 +10228,7 @@ mod tests {
         assert_eq!(frame.column("value").unwrap().values()[1], Scalar::Int64(2));
     }
 
+    #[cfg(feature = "sql-sqlite")]
     #[test]
     fn sql_read_with_parse_dates_missing_column_errors() {
         let conn = make_sql_test_conn();
@@ -10199,6 +10258,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "sql-sqlite")]
     #[test]
     fn sql_read_with_params_binds_positional_placeholders() {
         let frame = make_test_dataframe();
@@ -10231,6 +10291,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "sql-sqlite")]
     #[test]
     fn sql_read_with_params_wrong_arity_errors() {
         let frame = make_test_dataframe();
@@ -10255,6 +10316,7 @@ mod tests {
         assert!(matches!(err, IoError::Sql(msg) if msg.contains("parameter")));
     }
 
+    #[cfg(feature = "sql-sqlite")]
     #[test]
     fn sql_read_coerce_float_promotes_decimal_like_text_columns() {
         let conn = make_sql_test_conn();
@@ -10318,6 +10380,7 @@ mod tests {
         assert!(matches!(fee.values()[1], Scalar::Null(NullKind::NaN)));
     }
 
+    #[cfg(feature = "sql-sqlite")]
     #[test]
     fn sql_read_coerce_float_leaves_non_numeric_text_columns_unchanged() {
         let conn = make_sql_test_conn();
@@ -10359,6 +10422,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "sql-sqlite")]
     #[test]
     fn sql_read_chunks_batches_rows_and_resets_index_per_chunk() {
         let conn = make_sql_test_conn();
@@ -10402,6 +10466,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "sql-sqlite")]
     #[test]
     fn sql_read_chunks_with_options_applies_params_parse_dates_and_coerce_float() {
         let conn = make_sql_test_conn();
@@ -10451,6 +10516,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "sql-sqlite")]
     #[test]
     fn sql_read_chunks_rejects_zero_chunksize() {
         let conn = make_sql_test_conn();
@@ -10461,6 +10527,7 @@ mod tests {
         assert!(matches!(err, IoError::Sql(msg) if msg.contains("chunksize")));
     }
 
+    #[cfg(feature = "sql-sqlite")]
     #[test]
     fn sql_duplicate_column_names_error() {
         let conn = make_sql_test_conn();
@@ -10468,6 +10535,7 @@ mod tests {
         assert!(matches!(err, Err(IoError::DuplicateColumnName(name)) if name == "dup"));
     }
 
+    #[cfg(feature = "sql-sqlite")]
     #[test]
     fn sql_if_exists_fail() {
         let frame = make_test_dataframe();
@@ -10479,6 +10547,7 @@ mod tests {
         assert!(matches!(&err.unwrap_err(), IoError::Sql(msg) if msg.contains("already exists")),);
     }
 
+    #[cfg(feature = "sql-sqlite")]
     #[test]
     fn sql_if_exists_replace() {
         let frame = make_test_dataframe();
@@ -10491,6 +10560,7 @@ mod tests {
         assert_eq!(frame2.index().len(), 3);
     }
 
+    #[cfg(feature = "sql-sqlite")]
     #[test]
     fn sql_if_exists_append() {
         let frame = make_test_dataframe();
@@ -10503,6 +10573,7 @@ mod tests {
         assert_eq!(frame2.index().len(), 6); // 3 + 3
     }
 
+    #[cfg(feature = "sql-sqlite")]
     #[test]
     fn sql_with_nulls() {
         use fp_types::DType;
@@ -10545,6 +10616,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "sql-sqlite")]
     #[test]
     fn sql_bool_roundtrip() {
         use fp_types::DType;
@@ -10586,6 +10658,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "sql-sqlite")]
     #[test]
     fn sql_invalid_table_name_rejected() {
         let conn = make_sql_test_conn();
@@ -10596,6 +10669,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "sql-sqlite")]
     #[test]
     fn sql_empty_table_name_rejected() {
         let conn = make_sql_test_conn();
@@ -10610,6 +10684,7 @@ mod tests {
         assert!(err.is_err());
     }
 
+    #[cfg(feature = "sql-sqlite")]
     #[test]
     fn sql_empty_result() {
         let conn = make_sql_test_conn();
@@ -10620,6 +10695,7 @@ mod tests {
         assert_eq!(frame.column_names().len(), 2);
     }
 
+    #[cfg(feature = "sql-sqlite")]
     #[test]
     fn sql_extension_trait() {
         let frame = make_test_dataframe();
@@ -11529,6 +11605,7 @@ mod tests {
         assert_eq!(frame.column("val").unwrap().values()[0], Scalar::Int64(42));
     }
 
+    #[cfg(feature = "sql-sqlite")]
     #[test]
     fn adversarial_sql_large_batch_insert() {
         // Insert 10K rows in a single write_sql call.
@@ -11546,6 +11623,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "sql-sqlite")]
     #[test]
     fn adversarial_sql_column_name_with_spaces_accepted() {
         // Column names with spaces are valid in SQL (quoted identifiers).
@@ -11569,6 +11647,7 @@ mod tests {
         assert!(back.column("has space").is_some());
     }
 
+    #[cfg(feature = "sql-sqlite")]
     #[test]
     fn adversarial_sql_column_name_with_quotes_accepted() {
         let col_name = "has\"quote";
