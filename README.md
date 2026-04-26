@@ -645,8 +645,14 @@ let transformed = df.applymap(|scalar| { /* transform */ })?;
 // Row-wise with full row access
 let result = df.apply_row(|row_values| { /* produce scalar */ })?;
 
-// Shape-preserving transform (output same shape as input)
-let normed = df.transform("zscore")?;
+// Shape-preserving transform via per-element closure (output same shape as input)
+let doubled = df.transform(|s: &Scalar| match s {
+    Scalar::Int64(v)   => Scalar::Int64(v * 2),
+    Scalar::Float64(v) => Scalar::Float64(v * 2.0),
+    other              => other.clone(),
+})?;
+// Or: a named-aggregation broadcast on GroupBy (per-group reduction broadcast back to row positions)
+let group_means = df.groupby(&["region"])?.transform("mean")?;
 
 // Column assignment with closures (pandas df.assign(new_col=lambda df: ...))
 let df2 = df.assign_fn(vec![
