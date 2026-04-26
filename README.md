@@ -867,24 +867,29 @@ When constructing from multiple Series with different indexes, `from_series` aut
 Beyond the basic join types, the merge system supports pandas' full merge parameter set:
 
 ```rust
+// merge_with_options takes left_on AND right_on (use the same slice when merging
+// on a shared column name) and returns Result<MergedDataFrame, JoinError>.
+// MergedDataFrame has public `index` and `columns` fields; reconstruct a
+// DataFrame via DataFrame::new(merged.index, merged.columns) when needed.
+
 // Merge with validation (like pandas validate='one_to_one')
-let merged = df1.merge_with_options(&df2, &["key"], JoinType::Inner,
-    MergeOptions {
+let merged = df1.merge_with_options(&df2, &["key"], &["key"], JoinType::Inner,
+    MergeExecutionOptions {
         validate_mode: Some(MergeValidateMode::OneToOne),
         ..Default::default()
     })?;
 
 // Merge with indicator column (like pandas indicator=True)
 // Adds a column showing "left_only", "right_only", or "both"
-let merged = df1.merge_with_options(&df2, &["key"], JoinType::Outer,
-    MergeOptions {
+let merged = df1.merge_with_options(&df2, &["key"], &["key"], JoinType::Outer,
+    MergeExecutionOptions {
         indicator_name: Some("_merge".to_owned()),
         ..Default::default()
     })?;
 
 // Merge with custom suffixes for overlapping columns
-let merged = df1.merge_with_options(&df2, &["key"], JoinType::Inner,
-    MergeOptions {
+let merged = df1.merge_with_options(&df2, &["key"], &["key"], JoinType::Inner,
+    MergeExecutionOptions {
         suffixes: Some([Some("_left".to_owned()), Some("_right".to_owned())]),
         ..Default::default()
     })?;
