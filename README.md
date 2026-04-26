@@ -126,7 +126,7 @@ frankenpandas/
 │   ├── fp-expr/          # Expression parser, eval()/query()
 │   ├── fp-groupby/       # GroupBy with 3 execution paths
 │   ├── fp-join/          # Inner/Left/Right/Outer/Cross/Asof joins
-│   ├── fp-io/            # 7 IO formats, 95 tests
+│   ├── fp-io/            # 7 IO formats (CSV/JSON/JSONL/Parquet/Excel/Feather/SQL), 429 tests
 │   ├── fp-conformance/   # Differential testing against pandas oracle
 │   ├── fp-runtime/       # Strict/Hardened policy, EvidenceLedger
 │   └── fp-frankentui/    # Terminal UI dashboard (experimental)
@@ -841,16 +841,21 @@ let merged = df1.merge_with_options(&df2, &["key"], JoinType::Inner,
 
 ## Testing
 
-**1,500+ tests** across the workspace:
+**3,200+ tests** across the workspace:
 
 | Category | Count | What It Covers |
 |----------|-------|----------------|
-| fp-frame unit tests | 1,016 | DataFrame, Series, Categorical, MultiIndex integration |
-| fp-io tests | 96 | 7 IO formats, adversarial inputs, round-trip correctness |
-| fp-index tests | 119 | Index alignment, MultiIndex, duplicate detection |
-| fp-join tests | 58 | Inner/Left/Right/Outer/Cross/Asof joins, merge_asof edge cases |
-| fp-expr tests | 45 | Expression parsing, eval/query, @local variables |
-| fp-conformance tests | 117 | Differential conformance against pandas oracle |
+| fp-frame unit tests | 1,433 | DataFrame, Series, Categorical, MultiIndex integration |
+| fp-io tests | 429 | 7 IO formats, adversarial inputs, round-trip correctness, full SQL trait surface (introspection / chunking / per-column dtype overrides) |
+| fp-columnar tests | 281 | Column / ColumnData / ValidityMask / arithmetic / comparison / sparse encoding |
+| fp-index tests | 199 | Index alignment, MultiIndex, duplicate detection |
+| fp-types tests | 155 | DType / Scalar / Timedelta / Timestamp / nan-aware aggregations |
+| fp-join tests | 70 | Inner/Left/Right/Outer/Cross/Asof joins, merge_asof edge cases |
+| fp-groupby tests | 65 | Per-aggregation kernels (sum / mean / std / median / nunique / ...), HyperLogLog approximate counting |
+| fp-expr tests | 52 | Expression parsing, eval/query, @local variables, MaterializedView caching |
+| fp-runtime tests | 30 | RuntimePolicy, EvidenceLedger, ConformalGuard, RaptorQ envelopes |
+| fp-frankentui tests | 22 | TUI snapshot model, E2E scenario harness |
+| fp-conformance tests | 557 | Differential conformance against pandas oracle (live + fixture replay) |
 | Property-based (proptest) | 75 | DType coercion, CSV/JSON/SQL/Excel/Feather round-trip, ValidityMask algebra, DataFrame arithmetic invariants |
 | End-to-end pipeline | 11 | Full workflow: CSV read → query → groupby → merge → sort → export |
 | Performance baselines | 13 | Join/filter/arithmetic latency measurement |
