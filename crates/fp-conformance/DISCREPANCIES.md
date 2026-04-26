@@ -77,6 +77,14 @@
 - **Tests affected:** `dataframe_groupby_apply`, `dataframe_groupby_apply_scalar_returns_series_indexed_by_keys`, `dataframe_groupby_apply_series_unions_sparse_result_columns`, `dataframe_groupby_apply_series_stacked_preserves_variable_labels`.
 - **Review date:** 2026-04-25
 
+### DISC-012: Datetime-with-timezone format string differs from pandas (ISO 8601 vs space-separator + numeric offset)
+- **Reference:** Pandas formats tz-aware timestamps as `YYYY-MM-DD HH:MM:SS±HH:MM` with a space between date and time and an explicit numeric offset (e.g. `2024-01-15 10:30:00+00:00`).
+- **Our impl:** fp-frame's datetime formatter currently emits ISO 8601 with a `T` separator and `Z` for UTC (e.g. `2024-01-15T10:30:00Z`). Both forms encode the same instant; only the surface representation differs.
+- **Impact:** Conformance packet `FP-P2D-429` (`csv_read_frame_parse_dates_mixed_timezone_strict`) fails because the string compare is byte-exact: `actual=Utf8("2024-01-15T10:30:00Z"), expected=Utf8("2024-01-15 10:30:00+00:00")`. Users round-tripping CSV/JSON datetime strings will see the same divergence in any byte-exact comparison.
+- **Resolution:** ACCEPTED for now — the fix is mechanical (swap format string in fp-frame's tz-aware datetime serializer) but it's a hot-path change that warrants its own bead and should ride alongside any larger datetime / parse_dates work. Tracked as a future fp-frame slice. Per br-frankenpandas-xp63 (fd90.77).
+- **Tests affected:** `packet_filter_runs_csv_read_frame_parse_dates_mixed_timezone_packet`.
+- **Review date:** 2026-04-26
+
 ### DISC-011: Int64 columns receiving null values promote to Float64 (no nullable Int64 extension dtype)
 - **Reference:** Pandas (since v0.24) has a nullable `Int64` extension dtype (capital I) that preserves the integer encoding via a separate validity mask. When a non-nullable `int64` column receives a null (e.g. via index alignment introducing rows with no source data, or via `concat(axis=1)` aligning over a non-matching index), pandas can either preserve `Int64` (extension) or promote to `float64` depending on dtype. The conformance oracle uses extension `Int64` where the column was originally `int64`.
 - **Our impl:** No nullable extension Int64 dtype yet. Int64 columns that gain null values are promoted to `Float64` with `NaN`. Downstream IO (JSON, CSV) then serializes the integer values with a trailing `.0` (`1.0` rather than `1`).
