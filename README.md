@@ -488,7 +488,7 @@ let row = df.xs("2024-01-15")?;
 
 ### DataFrame Output Formats
 
-17 output methods for different consumption contexts:
+12 inline output methods for different consumption contexts (plus 11 file / bytes writers via the [`DataFrameIoExt`](crates/fp-io/src/lib.rs) extension trait — `to_parquet`, `to_parquet_bytes`, `to_csv_file`, `to_json_file`, `to_excel_file`, `to_excel_bytes`, `to_jsonl_file`, `to_feather_file`, `to_feather_bytes`, `to_sql`, `to_sql_with_options`):
 
 | Method | pandas Equivalent | Format |
 |--------|-------------------|--------|
