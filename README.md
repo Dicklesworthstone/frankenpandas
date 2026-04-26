@@ -1614,17 +1614,18 @@ let unique_idx = index.drop_duplicates(DuplicateKeep::First)?;
 Deterministic sampling with seed control:
 
 ```rust
-// Sample n rows
-let sampled = df.sample(100, None, false, Some(42))?;  // n=100, seed=42
+// Sample n rows (n is Option<usize>; use None when supplying frac instead)
+let sampled = df.sample(Some(100), None, false, Some(42))?;  // n=100, seed=42
 
-// Sample fraction
-let sampled = df.sample(0, Some(0.1), false, Some(42))?;  // 10% sample
+// Sample fraction (n=None, frac=Some(0.1))
+let sampled = df.sample(None, Some(0.1), false, Some(42))?;  // 10% sample
 
 // Sample with replacement (bootstrap)
-let bootstrap = df.sample(1000, None, true, Some(42))?;
+let bootstrap = df.sample(Some(1000), None, true, Some(42))?;
 
-// Weighted sampling
-let weighted = df.sample_weights(100, &weights_series, false, Some(42))?;
+// Weighted sampling — `weights` is &[f64], not a Series. Extract values first.
+let weights: Vec<f64> = (0..df.len()).map(|i| compute_weight(i)).collect();
+let weighted = df.sample_weights(100, &weights, false, Some(42))?;
 ```
 
 Uses a deterministic LCG (Linear Congruential Generator) with Fisher-Yates shuffle for reproducible results across runs. Matching seed → identical sample, regardless of platform.
