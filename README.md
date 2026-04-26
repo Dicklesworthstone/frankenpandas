@@ -145,7 +145,7 @@ frankenpandas/
 | **Excel** | `read_excel_bytes` | `write_excel_bytes` | Yes | Yes | sheet_name, has_headers, index_col, skip_rows; .xlsx/.xls/.xlsb/.ods |
 | **Feather** | `read_feather_bytes` | `write_feather_bytes` | Yes | Yes | Arrow IPC file format (random-access footer) |
 | **Arrow IPC stream** | `read_ipc_stream_bytes` | `write_ipc_stream_bytes` | Yes | Yes | Streaming wire format (forward-only; pipes + zero-copy interchange) |
-| **SQL** | `read_sql` | `write_sql` | N/A | `SqlConnection` trait; SQLite backend by default | query or table, SqlIfExists (Fail/Replace/Append), transaction-wrapped |
+| **SQL** | `read_sql` / `read_sql_table` / `read_sql_chunks` | `write_sql` | N/A | `SqlConnection` trait; SQLite backend by default | `SqlReadOptions` (params, parse_dates, coerce_float, dtype, schema, columns, index_col), `SqlWriteOptions` (if_exists, index, index_label, schema, dtype, method, chunksize), `SqlInspector` for `SQLAlchemy.Inspector`-shaped introspection (tables / views / schemas / columns / indexes / FKs / UCs / reflect_table / reflect_all_tables) |
 
 All formats accessible through `DataFrameIoExt` trait methods on DataFrame.
 
@@ -1380,7 +1380,7 @@ Every parity report gets a **RaptorQ repair-symbol sidecar** for bit-rot detecti
 | No native Datetime dtype | Datetimes stored as ISO 8601 Utf8 strings | Use `to_datetime()` for normalization |
 | Categorical metadata not propagated through arithmetic | By design (matches pandas) | Use `.cat().to_values()` to materialize |
 | No HDF5, Clipboard, or HTML IO | System-library dependencies | Use Feather (faster) or Parquet instead |
-| SQL IO has one built-in backend | `read_sql` / `write_sql` are generic over `SqlConnection`, and `rusqlite::Connection` implements it behind the default `sql-sqlite` feature. PostgreSQL/MySQL/MS SQL/Oracle concrete adapters, chunksize streaming, and `coerce_float` are not built in yet. | Use SQLite via `rusqlite::Connection::open[_in_memory]`, or implement `SqlConnection` for another backend while native adapters land |
+| SQL IO has one built-in backend | `read_sql` / `write_sql` are generic over `SqlConnection`, and `rusqlite::Connection` implements it behind the default `sql-sqlite` feature. The trait surface is feature-complete (introspection via `SqlInspector` + `reflect_table` / `reflect_all_tables`, `SqlReadOptions` / `SqlWriteOptions` matching pandas keyword args including `chunksize`, `coerce_float`, `dtype`, `parse_dates`, `index_col`, `columns`, `schema`, `method`). Concrete PostgreSQL/MySQL/MS SQL/Oracle adapters are not yet bound — placeholder feature flags `sql-postgresql` / `sql-mysql` exist on fp-io for the future Phase 2 backend integrations. | Use SQLite via `rusqlite::Connection::open[_in_memory]`, or implement `SqlConnection` for another backend while native adapters land |
 | Single-threaded execution | No parallel execution yet | Profile-proven fast paths compensate |
 | No plotting | Requires graphics library | Export to pandas/matplotlib for visualization |
 
