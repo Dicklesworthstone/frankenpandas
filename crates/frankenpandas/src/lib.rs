@@ -225,9 +225,14 @@ pub mod prelude {
         // SQL contracts (covers the README Quick Start round-trip)
         SqlConnection,
         SqlIfExists,
-        // Module-level functions
+        // Module-level functions (concat family + merge_ordered)
         concat_dataframes,
+        concat_dataframes_with_axis,
+        concat_dataframes_with_axis_join,
+        concat_dataframes_with_ignore_index,
+        concat_dataframes_with_keys,
         concat_series,
+        concat_series_with_ignore_index,
         merge_ordered,
         // IO — readers (in-memory + path)
         read_csv,
