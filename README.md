@@ -519,8 +519,8 @@ let ct_norm = DataFrame::crosstab_normalize(&gender, &dept, "all")?; // "all" / 
 // One-hot encoding
 let dummies = df.get_dummies(&["color", "size"])?;
 
-// Cross-section selection
-let row = df.xs("2024-01-15")?;
+// Cross-section selection (xs takes &IndexLabel; From<&str> impl coerces literal)
+let row = df.xs(&"2024-01-15".into())?;
 ```
 
 ### DataFrame Output Formats
