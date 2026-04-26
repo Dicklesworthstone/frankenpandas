@@ -747,3 +747,47 @@ fn readme_type_coercion_compiles_and_runs() -> Result<(), Box<dyn std::error::Er
     assert_eq!(numeric.len(), 3);
     Ok(())
 }
+
+/// README DataFrame Introspection (lines 1145-1167).
+///
+/// Imports prelude only. Locks in fd90.175's dtypes()? Result-return
+/// fix and exercises the broader introspection API.
+#[test]
+fn readme_dataframe_introspection_compiles_and_runs() -> Result<(), Box<dyn std::error::Error>> {
+    let df = read_csv_str("a,b\n1,2\n3,4\n5,6")?;
+
+    // Shape — (nrows, ncols).
+    let shape = df.shape();
+    assert_eq!(shape, (3, 2));
+
+    // dtypes — Series (fd90.175 fix; was wrongly documented as Vec<(String, DType)>).
+    let dtypes = df.dtypes()?;
+    assert_eq!(dtypes.len(), 2); // a + b columns
+
+    // info — string summary.
+    let info = df.info();
+    assert!(info.contains("a"));
+
+    // memory_usage — Series of per-column byte estimates.
+    let mem = df.memory_usage()?;
+    assert!(mem.len() >= 2);
+
+    // ndim — always 2 for DataFrame.
+    assert_eq!(df.ndim(), 2);
+
+    // axes — (Vec<IndexLabel>, Vec<String>).
+    let (idx, cols) = df.axes();
+    assert_eq!(idx.len(), 3);
+    assert_eq!(cols.len(), 2);
+
+    // is_empty — false for non-empty DataFrame.
+    assert!(!df.is_empty());
+
+    // equals — deep comparison.
+    let df_clone = df.clone();
+    assert!(df.equals(&df_clone));
+
+    // compare — element-wise diff (returns DataFrame).
+    let _ = df.compare(&df_clone)?;
+    Ok(())
+}
