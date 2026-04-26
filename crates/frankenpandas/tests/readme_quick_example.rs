@@ -976,6 +976,37 @@ fn readme_dataframe_introspection_compiles_and_runs() -> Result<(), Box<dyn std:
 
     // compare — element-wise diff (returns DataFrame).
     let _ = df.compare(&df_clone)?;
+
+    // fd90.214: squeeze / iat / at / lookup (README lines 1168-1178).
+
+    // DataFrame.squeeze(axis) — single-column DataFrame → Series.
+    let single_col = read_csv_str("only\n1\n2\n3")?;
+    let _: Result<Series, _> = single_col.squeeze(1);
+
+    // Series.iat(pos) and Series.at(&label) for scalar access.
+    let labels: Vec<IndexLabel> = vec!["a".into(), "b".into(), "c".into()];
+    let s = Series::from_values(
+        "v",
+        labels,
+        vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+    )?;
+    let v0 = s.iat(0)?;
+    assert_eq!(v0, Scalar::Int64(10));
+    let vb = s.at(&"b".into())?;
+    assert_eq!(vb, Scalar::Int64(20));
+
+    // Series.squeeze — Result<Scalar, Box<Series>>; one_cell collapses.
+    let one_cell = Series::from_values("v", vec![IndexLabel::Int64(0)], vec![Scalar::Int64(42)])?;
+    let scalar = one_cell.squeeze();
+    assert!(matches!(scalar, Ok(Scalar::Int64(42))));
+
+    // DataFrame.lookup(&row_labels, &col_names) — Vec<Scalar> at the
+    // (row, col) intersections.
+    let lookup_vals = df.lookup(
+        &[IndexLabel::Int64(0), IndexLabel::Int64(1)],
+        &["a", "b"],
+    )?;
+    assert_eq!(lookup_vals.len(), 2);
     Ok(())
 }
 
