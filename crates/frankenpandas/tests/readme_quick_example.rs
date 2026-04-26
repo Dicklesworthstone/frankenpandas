@@ -1239,3 +1239,93 @@ fn readme_advanced_selection_compiles_and_runs() -> Result<(), Box<dyn std::erro
     assert!(regex_match.column_names().iter().any(|n| n.as_str() == "revenue"));
     Ok(())
 }
+
+/// README "Column Manipulation" section (lines 1287-1311).
+///
+/// Locks in 6 column-management APIs that previously had no integration coverage:
+/// rename_with (closure renaming), add_prefix, add_suffix, assign_column
+/// (value vector), assign_fn (closure form), and select_columns (reorder).
+///
+/// Tracks fd90.186 (br-frankenpandas-ein1y).
+#[test]
+fn readme_column_manipulation_compiles_and_runs() -> Result<(), Box<dyn std::error::Error>> {
+    let df = read_csv_str("revenue,cost,units\n1000,400,10\n2000,800,15\n1500,600,12")?;
+
+    // rename_with — closure-driven column renaming.
+    let renamed = df.rename_with(|name| format!("col_{name}"))?;
+    assert!(
+        renamed
+            .column_names()
+            .iter()
+            .all(|n| n.as_str().starts_with("col_"))
+    );
+
+    // add_prefix / add_suffix — bulk renaming.
+    let prefixed = df.add_prefix("input_")?;
+    assert!(
+        prefixed
+            .column_names()
+            .iter()
+            .all(|n| n.as_str().starts_with("input_"))
+    );
+    let suffixed = df.add_suffix("_raw")?;
+    assert!(
+        suffixed
+            .column_names()
+            .iter()
+            .all(|n| n.as_str().ends_with("_raw"))
+    );
+
+    // assign_column — append a computed column from a Vec<Scalar>.
+    let computed: Vec<Scalar> = vec![
+        Scalar::Float64(2.5),
+        Scalar::Float64(2.5),
+        Scalar::Float64(2.5),
+    ];
+    let with_computed = df.assign_column("computed", computed)?;
+    assert!(
+        with_computed
+            .column_names()
+            .iter()
+            .any(|n| n.as_str() == "computed")
+    );
+
+    // assign_fn — closure that sees current DataFrame state.
+    // Mirrors the README's "ratio = revenue / cost" pattern.
+    use frankenpandas::FrameError;
+    let with_ratio = df.assign_fn(vec![(
+        "ratio",
+        Box::new(|d: &DataFrame| -> Result<Column, FrameError> {
+            let rev = d.column("revenue").expect("revenue column");
+            let cost = d.column("cost").expect("cost column");
+            let values: Vec<Scalar> = rev
+                .values()
+                .iter()
+                .zip(cost.values())
+                .map(|(r, c)| match (r, c) {
+                    (Scalar::Int64(a), Scalar::Int64(b)) => {
+                        Scalar::Float64(*a as f64 / *b as f64)
+                    }
+                    _ => Scalar::Null(NullKind::NaN),
+                })
+                .collect();
+            Column::from_values(values).map_err(FrameError::from)
+        }) as Box<dyn Fn(&DataFrame) -> Result<Column, FrameError>>,
+    )])?;
+    assert!(
+        with_ratio
+            .column_names()
+            .iter()
+            .any(|n| n.as_str() == "ratio")
+    );
+
+    // select_columns — reorder + project.
+    let reordered = df.select_columns(&["units", "revenue"])?;
+    let names: Vec<&str> = reordered
+        .column_names()
+        .iter()
+        .map(|n| n.as_str())
+        .collect();
+    assert_eq!(names, vec!["units", "revenue"]);
+    Ok(())
+}
