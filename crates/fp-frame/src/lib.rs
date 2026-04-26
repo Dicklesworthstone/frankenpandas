@@ -18630,53 +18630,16 @@ impl DataFrame {
         Self::new_with_column_order(self.index.clone(), new_columns, self.column_order.clone())
     }
 
-    /// Replace values where `cond` is False with corresponding values from
-    /// `other` DataFrame.
+    /// Symmetry alias for `where_cond_df` (br-frankenpandas-df9v7 /
+    /// fd90.138, refactored in br-frankenpandas-a2sck / fd90.139).
     ///
-    /// Matches `df.where(cond, other=df)`. Inverse of `mask_df_other`: where
-    /// `cond` is True, keep the original value; where False, take from `other`.
-    /// Closes the API asymmetry noted in br-frankenpandas-fjiep / fd90.136 —
-    /// `mask_df_other` already existed but `where_mask_df_other` did not.
+    /// `mask_df_other` already existed but no parallel-named `where_*` was
+    /// reachable from a `mask_df_other` callsite without remembering the
+    /// `where_cond_df` name. This alias makes the symmetry explicit; both
+    /// names dispatch through the same implementation. Prefer `where_cond_df`
+    /// in new code.
     pub fn where_mask_df_other(&self, cond: &Self, other: &Self) -> Result<Self, FrameError> {
-        let cond_plan = align(&self.index, &cond.index, AlignMode::Left);
-        validate_alignment_plan(&cond_plan)?;
-        let other_plan = align(&self.index, &other.index, AlignMode::Left);
-        validate_alignment_plan(&other_plan)?;
-        let mut new_columns = BTreeMap::new();
-
-        for col_name in &self.column_order {
-            let data_col = &self.columns[col_name];
-            let cond_col = cond.columns.get(col_name).ok_or_else(|| {
-                FrameError::CompatibilityRejected(format!(
-                    "where_mask_df_other: condition missing column '{col_name}'"
-                ))
-            })?;
-            let aligned_cond = cond_col.reindex_by_positions(&cond_plan.right_positions)?;
-            let aligned_other = other
-                .columns
-                .get(col_name)
-                .map(|col| col.reindex_by_positions(&other_plan.right_positions))
-                .transpose()?;
-
-            let values: Vec<Scalar> = data_col
-                .values()
-                .iter()
-                .zip(aligned_cond.values())
-                .enumerate()
-                .map(|(i, (val, c))| match c {
-                    Scalar::Bool(true) => val.clone(),
-                    Scalar::Bool(false) => aligned_other
-                        .as_ref()
-                        .and_then(|oc| oc.values().get(i).cloned())
-                        .unwrap_or(Scalar::Null(NullKind::NaN)),
-                    _ => Scalar::Null(NullKind::NaN),
-                })
-                .collect();
-
-            new_columns.insert(col_name.clone(), Column::from_values(values)?);
-        }
-
-        Self::new_with_column_order(self.index.clone(), new_columns, self.column_order.clone())
+        self.where_cond_df(cond, other)
     }
 
     /// Iterate over rows as `(IndexLabel, Vec<(&str, Scalar)>)` pairs.

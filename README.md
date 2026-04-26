@@ -1534,9 +1534,9 @@ let mask = df.query("price > 100")?;
 let filtered = df.filter_rows(&bool_series)?;
 
 // Conditional replacement
-// where_mask_df / mask_df fill with a scalar; *_other variants accept a DataFrame
+// where_mask_df / mask_df fill with a scalar; *_other / where_cond_df accept a DataFrame
 let filled = df.where_mask_df(&cond_df, &Scalar::Float64(0.0))?;
-let filled_with_df = df.where_mask_df_other(&cond_df, &other_df)?;
+let filled_with_df = df.where_cond_df(&cond_df, &other_df)?; // also: df.where_mask_df_other (alias)
 let masked = df.mask_df(&cond_df, &Scalar::Null(NullKind::NaN))?;
 let masked_with_df = df.mask_df_other(&cond_df, &other_df)?;
 
