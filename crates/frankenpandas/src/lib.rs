@@ -58,10 +58,12 @@ pub use fp_frame::{
 pub use fp_io::{
     // CSV
     CsvReadOptions,
+    CsvWriteOptions,
     // Extension trait
     DataFrameIoExt,
     // Excel
     ExcelReadOptions,
+    ExcelWriteOptions,
     // Error type
     IoError,
     // JSON
@@ -138,8 +140,11 @@ pub use fp_io::{
     read_sql_with_options,
     write_csv,
     write_csv_string,
+    write_csv_string_with_options,
     write_excel,
     write_excel_bytes,
+    write_excel_bytes_with_options,
+    write_excel_with_options,
     write_feather,
     write_feather_bytes,
     write_ipc_stream_bytes,
@@ -207,8 +212,10 @@ pub mod prelude {
         Column,
         ConcatJoin,
         CsvReadOptions,
+        CsvWriteOptions,
         DType,
         ExcelReadOptions,
+        ExcelWriteOptions,
         DataFrame,
         DataFrameColumnInput,
         DropNaHow,
@@ -340,8 +347,11 @@ pub mod prelude {
         // IO — writers (in-memory + path + sql; covers all 8 documented formats)
         write_csv,
         write_csv_string,
+        write_csv_string_with_options,
         write_excel,
         write_excel_bytes,
+        write_excel_bytes_with_options,
+        write_excel_with_options,
         write_feather,
         write_feather_bytes,
         write_ipc_stream_bytes,
@@ -574,6 +584,13 @@ mod tests {
         let _ = read_csv_with_options;
         // fd90.215: path-based variant for completeness.
         let _ = read_csv_with_options_path;
+
+        // fd90.216: CSV/Excel write options + write_*_with_options now in prelude.
+        let _: CsvWriteOptions = CsvWriteOptions::default();
+        let _: ExcelWriteOptions = ExcelWriteOptions::default();
+        let _ = write_csv_string_with_options;
+        let _ = write_excel_with_options;
+        let _ = write_excel_bytes_with_options;
 
         // fd90.208: pandas-style top-level null checks + dtype helpers.
         let na_check = vec![Scalar::Int64(1), Scalar::Null(NullKind::NaN)];
