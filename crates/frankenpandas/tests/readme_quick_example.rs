@@ -993,3 +993,76 @@ fn readme_groupby_aggregation_matrix_compiles_and_runs() -> Result<(), Box<dyn s
 
     Ok(())
 }
+
+/// README Apply and Transform (lines 643-673).
+///
+/// Imports prelude only. Locks in fd90.107 (transform closure / GroupBy
+/// string variant), fd90.108 (apply_row name arg), fd90.134 (pipe
+/// FrameError chain), and fd90.180 (assign_fn inline ratio expression).
+#[test]
+fn readme_apply_and_transform_compiles_and_runs() -> Result<(), Box<dyn std::error::Error>> {
+    let df = read_csv_str("region,revenue,cost\nA,200,100\nB,400,200\nA,300,150\nB,600,200")?;
+
+    // applymap — element-wise closure on each Scalar.
+    let _doubled_or_self = df.applymap(|s| match s {
+        Scalar::Int64(v) => Scalar::Int64(v * 2),
+        Scalar::Float64(v) => Scalar::Float64(v * 2.0),
+        other => other.clone(),
+    })?;
+
+    // apply_row — fd90.108: takes (name, closure).
+    let row_total: Series = df.apply_row("row_total", |row_values: &[Scalar]| {
+        let total: f64 = row_values
+            .iter()
+            .filter_map(|s| match s {
+                Scalar::Int64(v) => Some(*v as f64),
+                Scalar::Float64(v) => Some(*v),
+                _ => None,
+            })
+            .sum();
+        Scalar::Float64(total)
+    })?;
+    assert_eq!(row_total.len(), 4);
+
+    // transform — fd90.107: closure variant returns same-shape DataFrame.
+    let _doubled = df.transform(|s: &Scalar| match s {
+        Scalar::Int64(v) => Scalar::Int64(v * 2),
+        Scalar::Float64(v) => Scalar::Float64(v * 2.0),
+        other => other.clone(),
+    })?;
+
+    // GroupBy.transform — fd90.107: string variant ('mean' broadcasts per-group).
+    let group_means = df.groupby(&["region"])?.transform("mean")?;
+    // Result has one row per ORIGINAL row (broadcast back), not per group.
+    assert_eq!(group_means.index().len(), 4);
+
+    // assign_fn — fd90.180: inline ratio = revenue/cost expression.
+    use frankenpandas::FrameError;
+    let df2 = df.assign_fn(vec![(
+        "ratio",
+        Box::new(|df: &DataFrame| -> Result<Column, FrameError> {
+            let rev = df.column("revenue").expect("revenue column");
+            let cost = df.column("cost").expect("cost column");
+            let values: Vec<Scalar> = rev
+                .values()
+                .iter()
+                .zip(cost.values())
+                .map(|(r, c)| match (r, c) {
+                    (Scalar::Int64(a), Scalar::Int64(b)) => {
+                        Scalar::Float64(*a as f64 / *b as f64)
+                    }
+                    _ => Scalar::Null(NullKind::NaN),
+                })
+                .collect();
+            Column::from_values(values).map_err(FrameError::from)
+        }) as Box<dyn Fn(&DataFrame) -> Result<Column, FrameError>>,
+    )])?;
+    assert!(df2.column_names().iter().any(|n| n.as_str() == "ratio"));
+
+    // pipe — fd90.134: closures must return Result<_, FrameError>.
+    let result = df
+        .pipe(|d| d.sort_values("revenue", true))?
+        .pipe(|d| d.head(2))?;
+    assert_eq!(result.index().len(), 2);
+    Ok(())
+}
