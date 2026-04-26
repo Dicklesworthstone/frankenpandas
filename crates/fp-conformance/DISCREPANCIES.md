@@ -77,6 +77,17 @@
 - **Tests affected:** `dataframe_groupby_apply`, `dataframe_groupby_apply_scalar_returns_series_indexed_by_keys`, `dataframe_groupby_apply_series_unions_sparse_result_columns`, `dataframe_groupby_apply_series_stacked_preserves_variable_labels`.
 - **Review date:** 2026-04-25
 
+### DISC-011: Int64 columns receiving null values promote to Float64 (no nullable Int64 extension dtype)
+- **Reference:** Pandas (since v0.24) has a nullable `Int64` extension dtype (capital I) that preserves the integer encoding via a separate validity mask. When a non-nullable `int64` column receives a null (e.g. via index alignment introducing rows with no source data, or via `concat(axis=1)` aligning over a non-matching index), pandas can either preserve `Int64` (extension) or promote to `float64` depending on dtype. The conformance oracle uses extension `Int64` where the column was originally `int64`.
+- **Our impl:** No nullable extension Int64 dtype yet. Int64 columns that gain null values are promoted to `Float64` with `NaN`. Downstream IO (JSON, CSV) then serializes the integer values with a trailing `.0` (`1.0` rather than `1`).
+- **Impact:** Several conformance packets exhibit `actual=Float64(1.0), expected=Int64(1)` mismatches:
+  - `FP-P2D-028` (dataframe_concat_axis1): 5 of 10 cases fail because alignment over a wider index introduces nulls into formerly-Int64 columns.
+  - `FP-P2D-433` (dataframe_to_json_records): JSON output writes `"a":1.0` instead of `"a":1` for integer columns that were promoted via null introduction.
+  - Plus other downstream packets where alignment + nulls hit Int64 columns.
+- **Resolution:** WILL-FIX - implementing nullable extension Int64 is a significant architectural change touching storage (fp-columnar), arithmetic kernels (fp-frame), and serialization (fp-io). Tracked under a future epic, not in scope for the fd90 SQL backend work. Per br-frankenpandas-mywg (fd90.76).
+- **Tests affected:** `packet_filter_runs_dataframe_concat_axis1_packet`, `packet_filter_runs_dataframe_to_json_records_packet`, plus downstream packets that hit the same root cause.
+- **Review date:** 2026-04-26
+
 ## Resolved Divergences
 
 ### DISC-005: Mixed string/numeric constructors now preserve pandas object semantics
