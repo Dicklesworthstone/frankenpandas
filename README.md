@@ -398,11 +398,14 @@ The asymmetric loss matrix penalizes "allow if incompatible" (100.0) far more th
 
 ```
 Series {
-    column: Column<Int64>,  // Stores integer codes (0, 1, 2, ...)
+    name: String,
+    index: Index,
+    column: Column,                  // dtype=Int64; `values` holds the integer codes (0, 1, 2, ...)
     categorical: Some(CategoricalMetadata {
-        categories: Vec<Scalar>,  // ["low", "medium", "high"]
-        ordered: bool,            // Whether categories have total ordering
-    })
+        categories: Vec<Scalar>,     // ["low", "medium", "high"]
+        ordered: bool,               // Whether categories have total ordering
+    }),
+    sparse: None,                    // Optional pandas-style sparse metadata (separate dtype layer)
 }
 ```
 
