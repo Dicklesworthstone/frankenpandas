@@ -248,8 +248,14 @@ pub mod prelude {
         // ("ValidityMask: Bitpacked Null Tracking", lines 261-278) and
         // lists it among types deriving Serialize + Deserialize (line 1567).
         ValidityMask,
-        // SQL contracts (covers the README Quick Start round-trip)
+        // SQL contracts (covers the README Quick Start round-trip).
+        // fd90.206: also expose the option/inspector/chunked-read surface
+        // documented in the IO Format Support table at line 148.
         SqlConnection,
+        SqlInspector,
+        SqlReadOptions,
+        SqlWriteOptions,
+        read_sql_chunks,
         SqlIfExists,
         // Module-level functions (concat + join/merge family)
         concat_dataframes,
@@ -458,10 +464,17 @@ mod tests {
         let _: ConcatJoin = ConcatJoin::Inner;
         let _: DropNaHow = DropNaHow::Any;
 
-        // SQL surface (fd90.121).
+        // SQL surface (fd90.121, extended fd90.206).
         let _: SqlIfExists = SqlIfExists::Fail;
         // SqlConnection is a trait — name-check only.
         fn _takes_sql<C: SqlConnection>(_: &C) {}
+        // fd90.206: SqlReadOptions / SqlWriteOptions / SqlInspector + read_sql_chunks.
+        let _: SqlReadOptions = SqlReadOptions::default();
+        // SqlWriteOptions has no Default impl — type-check via fn pointer.
+        let _is_write_opts: fn(SqlWriteOptions) -> _ = |x| x;
+        // SqlInspector is a struct; type-check via fn-pointer signature.
+        let _is_inspector: fn(&SqlInspector<'_, rusqlite::Connection>) = |_| {};
+        let _ = read_sql_chunks::<rusqlite::Connection>;
 
         // NanOps primitives (fd90.126) — call each through a Vec<Scalar>.
         let v = vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)];
