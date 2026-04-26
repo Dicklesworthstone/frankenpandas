@@ -1,5 +1,64 @@
 #![forbid(unsafe_code)]
 
+//! Foundational value-type abstractions for **frankenpandas** — the
+//! enums, structs, and free functions that every other crate
+//! (fp-columnar, fp-index, fp-frame, fp-io, ...) consumes when
+//! representing scalar data, dtypes, missing values, and time deltas.
+//!
+//! The types here intentionally stay tiny and dependency-light
+//! (`serde`, `thiserror`) so they can sit at the bottom of the
+//! workspace dep graph.
+//!
+//! ## Core value types
+//!
+//! - [`DType`]: the dtype enum — `Null`, `Bool`, `Int64`, `Float64`,
+//!   `Utf8`, `Categorical`, `Timedelta64`, `Sparse`. Drives column /
+//!   series storage decisions across the workspace.
+//! - [`Scalar`]: the per-cell value enum, parameterized by `DType`.
+//!   Each variant holds the actual data (`Int64(i64)`, `Float64(f64)`,
+//!   `Utf8(String)`, ...) plus the `Null(NullKind)` variant for
+//!   missing values.
+//! - [`NullKind`]: distinguishes the three pandas missing-value
+//!   "flavors" — `Null` (Python `None` / SQL NULL), `NaN`
+//!   (floating-point not-a-number), `NaT` (timedelta / datetime
+//!   not-a-time). `Scalar::Null(...)` carries the kind so downstream
+//!   code can preserve pandas semantics.
+//! - [`SparseDType`]: descriptor for sparse-encoded dtypes (paired
+//!   value dtype + fill value).
+//!
+//! ## Time / duration types
+//!
+//! - [`Timedelta`]: nanosecond-precision duration with arithmetic
+//!   helpers ([`Timedelta::add`], [`Timedelta::sub`],
+//!   [`Timedelta::mul_scalar`], [`Timedelta::div_scalar`],
+//!   [`Timedelta::div_timedelta`]) that propagate `NaT` per pandas
+//!   semantics. [`TimedeltaComponents`] breaks a timedelta into
+//!   days/hours/minutes/seconds/nanos for display.
+//! - [`Timestamp`]: nanosecond-precision wall-clock timestamp with
+//!   optional timezone. Includes floor / ceil / round helpers and
+//!   `NaT` propagation.
+//!
+//! ## Dtype inference + casting
+//!
+//! - [`infer_dtype`]: derive a [`DType`] from a slice of scalars
+//!   (used during DataFrame construction).
+//! - [`common_dtype`]: pandas-style dtype promotion for binary ops.
+//! - [`cast_scalar`] / [`cast_scalar_owned`]: convert a scalar to a
+//!   target dtype with explicit error reporting on impossible casts.
+//!
+//! ## Missing-value helpers
+//!
+//! Free fns matching `pd.isna` / `pd.notna` / `pd.fillna` / `pd.dropna`
+//! plus the `nan*` aggregations ([`nansum`], [`nanmean`], [`nancount`],
+//! [`nanmin`], [`nanmax`], [`nanmedian`], [`nanvar`], [`nanstd`])
+//! that mirror pandas' missing-aware reductions.
+//!
+//! ## Error reporting
+//!
+//! Errors are explicit enums via `thiserror`: [`TypeError`] for
+//! dtype-related failures (incompatible-cast, no-common-dtype) and
+//! [`TimedeltaError`] for parse failures.
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
