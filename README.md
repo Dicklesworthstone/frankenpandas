@@ -111,7 +111,7 @@ AACE is a core identity constraint, not a best-effort optimization. pandas' alig
   └────────────┘      └───────────────┘
 ```
 
-**12 workspace crates**, 140,000+ lines of Rust (non-test), 1,600+ public functions.
+The diagram above shows the 10 runtime/data-flow crates. Two auxiliary crates — `fp-conformance` (differential testing harness against the pandas oracle) and `fp-frankentui` (experimental terminal UI dashboard) — live alongside them and bring the workspace total to **12 crates**, 140,000+ lines of Rust (non-test), 1,600+ public functions.
 
 ## Workspace Structure
 
