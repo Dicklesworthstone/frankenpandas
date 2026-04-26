@@ -1524,8 +1524,8 @@ let last = df.iloc(&[-1])?;                // Last row (negative indexing resolv
 let slice = df.head(10)?;                  // First 10 rows
 let tail = df.tail(5)?;                    // Last 5 (supports negative n)
 
-// Column selection
-let col = df.column("price")?;             // Single column as &Column
+// Column selection — column() returns Option<&Column>; use .expect/.ok_or for ?
+let col = df.column("price").expect("price column exists"); // &Column
 let subset = df.select_columns(&["price", "volume"])?;
 let numeric = df.select_dtypes(&["int64", "float64"], &[])?;
 
