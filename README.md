@@ -972,7 +972,7 @@ let clean = df.dropna_with_options(DropNaHow::All, None)?;
 let clean = df.dropna_with_options(DropNaHow::Any, Some(&["price".into(), "volume".into()]))?;
 
 // Drop rows with fewer than N non-null values (thresh)
-let clean = df.dropna_with_thresh(3)?;
+let clean = df.dropna_with_threshold(3)?;
 
 // Drop COLUMNS with nulls (axis=1)
 let clean = df.dropna_columns()?;
