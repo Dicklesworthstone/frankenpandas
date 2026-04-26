@@ -1480,9 +1480,9 @@ A: The core DataFrame, IO, and GroupBy/Join operations are solid and well-tested
 Full pandas-style selection API:
 
 ```rust
-// Label-based (like df.loc[])
-let row = df.loc("row_label")?;           // Single row by label
-let subset = df.loc_rows(&["a", "b"])?;   // Multiple rows
+// Label-based (like df.loc[]); takes a slice of labels for both single and multi-row selection
+let row = df.loc(&["row_label".into()])?;       // Single row by label
+let subset = df.loc(&["a".into(), "b".into()])?; // Multiple rows
 
 // Position-based (like df.iloc[])
 let row = df.iloc(0)?;                     // First row
