@@ -169,9 +169,9 @@ pub use fp_groupby::GroupByError;
 // ── Join/merge ──────────────────────────────────────────────────────────
 
 pub use fp_join::{
-    AsofDirection, DataFrameMergeExt, JoinError, JoinType, MergedDataFrame,
-    MergeExecutionOptions, MergeValidateMode, join_series, merge_asof, merge_dataframes_on,
-    merge_ordered,
+    AsofDirection, DataFrameMergeExt, JoinError, JoinExecutionOptions, JoinType,
+    MergeAsofOptions, MergeExecutionOptions, MergeValidateMode, MergedDataFrame, join_series,
+    merge_asof, merge_asof_with_options, merge_dataframes_on, merge_ordered,
 };
 
 // ── Runtime policy ──────────────────────────────────────────────────────
@@ -240,8 +240,10 @@ pub mod prelude {
         // Join (types + functions, matches README Recipes + Merge: Advanced Options)
         AsofDirection,
         JoinError,
+        JoinExecutionOptions,
         JoinType,
         JsonOrient,
+        MergeAsofOptions,
         MergeExecutionOptions,
         MergeValidateMode,
         MergedDataFrame,
@@ -279,6 +281,7 @@ pub mod prelude {
         concat_series_with_ignore_index,
         join_series,
         merge_asof,
+        merge_asof_with_options,
         merge_dataframes_on,
         merge_ordered,
         // IO — readers (in-memory + path; covers all 8 documented formats)
@@ -591,6 +594,11 @@ mod tests {
         let _ = write_csv_string_with_options;
         let _ = write_excel_with_options;
         let _ = write_excel_bytes_with_options;
+
+        // fd90.217: merge_asof options + JoinExecutionOptions in prelude.
+        let _: MergeAsofOptions = MergeAsofOptions::default();
+        let _: JoinExecutionOptions = JoinExecutionOptions::default();
+        let _ = merge_asof_with_options;
 
         // fd90.208: pandas-style top-level null checks + dtype helpers.
         let na_check = vec![Scalar::Int64(1), Scalar::Null(NullKind::NaN)];
