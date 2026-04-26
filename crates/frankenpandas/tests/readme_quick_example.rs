@@ -221,6 +221,43 @@ fn readme_categorical_analysis_compiles_and_runs() -> Result<(), Box<dyn std::er
     // Materialize back to a flat Series of label strings.
     let values = renamed.cat().expect("renamed is still categorical").to_values()?;
     assert_eq!(values.len(), 4);
+
+    // fd90.195: exercise the remaining .cat() methods documented in the
+    // README at line 422 (add_categories, remove_unused_categories,
+    // set_categories, as_ordered, as_unordered).
+
+    // add_categories — extend the category set.
+    let extended = cat.add_categories(vec![Scalar::Utf8("neutral".into())])?;
+    let ext_cat = extended.cat().expect("extended is categorical");
+    assert_eq!(ext_cat.categories().len(), 4);
+
+    // remove_unused_categories — drop "neutral" since it has no observations.
+    let pruned = ext_cat.remove_unused_categories()?;
+    assert_eq!(
+        pruned
+            .cat()
+            .expect("pruned is categorical")
+            .categories()
+            .len(),
+        3
+    );
+
+    // set_categories — replace the category set entirely.
+    let reset = cat.set_categories(vec![
+        Scalar::Utf8("low".into()),
+        Scalar::Utf8("mid".into()),
+        Scalar::Utf8("high".into()),
+        Scalar::Utf8("excellent".into()),
+        Scalar::Utf8("good".into()),
+        Scalar::Utf8("poor".into()),
+    ])?;
+    assert!(reset.cat().is_some());
+
+    // as_ordered / as_unordered — toggle the ordered flag.
+    let ordered = cat.as_ordered();
+    assert!(ordered.cat().expect("still categorical").ordered());
+    let unordered = cat.as_unordered();
+    assert!(!unordered.cat().expect("still categorical").ordered());
     Ok(())
 }
 
