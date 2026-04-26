@@ -1066,9 +1066,15 @@ let fixed = series.str().replace_regex(r"\d{3}-\d{4}", "***-****")?;
 let mapped = series.map_with_na_action(&mapping, true)?;  // na_action=ignore
 
 // Series: conditional assignment (Series-to-Scalar comparisons via ge_scalar)
+// case_when expects (condition_series, value_series) pairs; build the value
+// Series with a constant-value Vec<Scalar> via Series::from_values:
+let n = scores.len();
+let labels: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
+let value_a = Series::from_values("grade", labels.clone(), vec![Scalar::Utf8("A".into()); n])?;
+let value_b = Series::from_values("grade", labels,         vec![Scalar::Utf8("B".into()); n])?;
 let graded = scores.case_when(&[
-    (scores.ge_scalar(&Scalar::Int64(90))?, Series::constant("A", n)?),
-    (scores.ge_scalar(&Scalar::Int64(80))?, Series::constant("B", n)?),
+    (scores.ge_scalar(&Scalar::Int64(90))?, value_a),
+    (scores.ge_scalar(&Scalar::Int64(80))?, value_b),
 ])?;
 ```
 
