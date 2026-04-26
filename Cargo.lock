@@ -1002,11 +1002,13 @@ dependencies = [
  "fp-columnar",
  "fp-expr",
  "fp-frame",
+ "fp-groupby",
  "fp-index",
  "fp-io",
  "fp-join",
  "fp-runtime",
  "fp-types",
+ "rusqlite",
 ]
 
 [[package]]
