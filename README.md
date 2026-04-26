@@ -768,20 +768,35 @@ The `ValidityMask` makes null checking O(1) per element (single bit test) and O(
 
 ## NanOps: Null-Aware Aggregation Library
 
-The `fp-types` crate provides 10 null-skipping aggregation primitives that underpin all statistical operations:
+The `fp-types` crate provides 19 null-skipping aggregation primitives plus 4 cumulative-transform helpers that underpin all statistical operations:
 
 ```rust
-// All skip Null/NaN values automatically:
-nansum(&values)       // → Scalar::Float64 (sum of non-missing)
-nanmean(&values)      // → Scalar::Float64 (mean of non-missing)
-nancount(&values)     // → Scalar::Int64 (count of non-missing)
-nanmin(&values)       // → same type as input minimum
-nanmax(&values)       // → same type as input maximum
-nanmedian(&values)    // → Scalar::Float64 (middle value)
-nanvar(&values, ddof) // → Scalar::Float64 (sample variance, ddof=1 default)
-nanstd(&values, ddof) // → Scalar::Float64 (sample std dev)
-nanprod(&values)      // → Scalar::Float64 (product of non-missing)
-nannunique(&values)   // → Scalar::Int64 (count of unique non-missing)
+// Scalar reductions (all skip Null/NaN automatically):
+nansum(&values)         // → Scalar::Float64 (sum of non-missing)
+nanmean(&values)        // → Scalar::Float64 (mean of non-missing)
+nancount(&values)       // → Scalar::Int64 (count of non-missing)
+nanmin(&values)         // → same type as input minimum
+nanmax(&values)         // → same type as input maximum
+nanmedian(&values)      // → Scalar::Float64 (middle value)
+nanvar(&values, ddof)   // → Scalar::Float64 (sample variance, ddof=1 default)
+nanstd(&values, ddof)   // → Scalar::Float64 (sample std dev)
+nansem(&values, ddof)   // → Scalar::Float64 (standard error of mean)
+nanprod(&values)        // → Scalar::Float64 (product of non-missing)
+nanptp(&values)         // → same type as input range (max - min)
+nanskew(&values)        // → Scalar::Float64 (Fisher's skewness)
+nankurt(&values)        // → Scalar::Float64 (excess kurtosis)
+nanquantile(&values, q) // → Scalar::Float64 (linear-interp quantile)
+nanargmax(&values)      // → Option<usize> (position of maximum)
+nanargmin(&values)      // → Option<usize> (position of minimum)
+nannunique(&values)     // → Scalar::Int64 (count of unique non-missing)
+nanany(&values)         // → Scalar::Bool (true if any non-missing truthy)
+nanall(&values)         // → Scalar::Bool (true if every non-missing is truthy)
+
+// Cumulative transforms (return Vec<Scalar> — propagate nulls in place):
+nancumsum(&values)      // → cumulative sum (Float64)
+nancumprod(&values)     // → cumulative product (Float64)
+nancummax(&values)      // → running maximum (input dtype)
+nancummin(&values)      // → running minimum (input dtype)
 ```
 
 These are the building blocks for `Series.sum()`, `DataFrame.mean()`, `GroupBy.std()`, `describe()`, and every other statistical method. The "skip nulls by default" behavior matches pandas' `skipna=True` default.
