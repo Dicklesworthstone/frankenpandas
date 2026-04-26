@@ -501,3 +501,70 @@ fn readme_sorting_compiles_and_runs() -> Result<(), Box<dyn std::error::Error>> 
     assert_eq!(idx_desc.index().len(), 4);
     Ok(())
 }
+
+/// README Pivot Tables: Full Options (lines 1232-1249).
+///
+/// Imports prelude only. Locks in fd90.114's signature fixes for
+/// pivot_table_with_margins / pivot_table_with_margins_name (which
+/// require an explicit margins:bool arg). Verifies all six variants:
+/// - df.pivot_table(values, index, columns, aggfunc)?
+/// - df.pivot_table_multi_values(&[values...], index, columns, aggfunc)?
+/// - df.pivot_table_with_margins(..., margins: bool)?
+/// - df.pivot_table_with_margins_name(..., margins: bool, label)?
+/// - df.pivot_table_fill(..., fill_value: f64)?
+/// - df.pivot_table_multi_agg(values, index, columns, &[fns...])?
+#[test]
+fn readme_pivot_tables_compiles_and_runs() -> Result<(), Box<dyn std::error::Error>> {
+    // Small wide DataFrame: revenue + quantity by region × product.
+    let df = read_csv_str(
+        "region,product,revenue,quantity\n\
+         east,widget,100,5\n\
+         east,gadget,200,10\n\
+         west,widget,150,7\n\
+         west,gadget,250,12",
+    )?;
+    assert_eq!(df.index().len(), 4);
+
+    // Basic pivot table.
+    let pt = df.pivot_table("revenue", "region", "product", "sum")?;
+    assert_eq!(pt.index().len(), 2); // east + west rows
+
+    // Multiple values columns.
+    let pt = df.pivot_table_multi_values(
+        &["revenue", "quantity"],
+        "region",
+        "product",
+        "sum",
+    )?;
+    assert_eq!(pt.index().len(), 2);
+
+    // With margins (subtotals row/col); margins=true.
+    let pt = df.pivot_table_with_margins("revenue", "region", "product", "sum", true)?;
+    // 2 region rows + 1 margin "All" row.
+    assert_eq!(pt.index().len(), 3);
+
+    // Custom margins label.
+    let pt = df.pivot_table_with_margins_name(
+        "revenue",
+        "region",
+        "product",
+        "sum",
+        true,
+        "Grand Total",
+    )?;
+    assert_eq!(pt.index().len(), 3);
+
+    // Fill NaN in pivot output.
+    let pt = df.pivot_table_fill("revenue", "region", "product", "sum", 0.0)?;
+    assert_eq!(pt.index().len(), 2);
+
+    // Multiple aggregation functions — emits {col}_{fn} columns.
+    let pt = df.pivot_table_multi_agg(
+        "revenue",
+        "region",
+        "product",
+        &["sum", "mean", "count"],
+    )?;
+    assert_eq!(pt.index().len(), 2);
+    Ok(())
+}
