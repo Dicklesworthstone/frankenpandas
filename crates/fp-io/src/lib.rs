@@ -3603,6 +3603,50 @@ pub struct SqlReflectedTable {
     pub comment: Option<String>,
 }
 
+impl SqlReflectedTable {
+    /// Look up a column by name. Mirrors `SqlTableSchema::column`.
+    ///
+    /// Per br-frankenpandas-63ac (fd90.51).
+    #[must_use]
+    pub fn column(&self, name: &str) -> Option<&SqlColumnSchema> {
+        self.columns.iter().find(|c| c.name == name)
+    }
+
+    /// Look up an index by name.
+    ///
+    /// Per br-frankenpandas-63ac (fd90.51).
+    #[must_use]
+    pub fn index(&self, name: &str) -> Option<&SqlIndexSchema> {
+        self.indexes.iter().find(|i| i.name == name)
+    }
+
+    /// Look up a unique constraint by name (backend-generated names
+    /// like `sqlite_autoindex_*` count too — match what
+    /// `list_unique_constraints` surfaced).
+    ///
+    /// Per br-frankenpandas-63ac (fd90.51).
+    #[must_use]
+    pub fn unique_constraint(&self, name: &str) -> Option<&SqlUniqueConstraintSchema> {
+        self.unique_constraints.iter().find(|u| u.name == name)
+    }
+
+    /// Find every foreign key whose `columns` slice contains `column_name`.
+    ///
+    /// A given column may participate in multiple FK constraints (e.g.
+    /// the same column referenced by separate FKs to different parents
+    /// — rare but valid SQL). Returns the matching FKs in their
+    /// declaration order from PRAGMA foreign_key_list.
+    ///
+    /// Per br-frankenpandas-63ac (fd90.51).
+    #[must_use]
+    pub fn foreign_keys_for_column(&self, column_name: &str) -> Vec<&SqlForeignKeySchema> {
+        self.foreign_keys
+            .iter()
+            .filter(|fk| fk.columns.iter().any(|c| c == column_name))
+            .collect()
+    }
+}
+
 /// Backend-neutral SQL foreign-key constraint metadata.
 ///
 /// Per br-frankenpandas-uht8 (fd90.29). Aligns with
@@ -17047,6 +17091,132 @@ mod tests {
         };
         assert_eq!(bundle.table_name, "t");
         assert!(bundle.columns.is_empty());
+    }
+
+    // ── SqlReflectedTable accessor methods (br-63ac / fd90.51) ────────────
+
+    #[test]
+    fn sql_reflected_table_accessors_find_named_entries() {
+        let bundle = SqlReflectedTable {
+            table_name: "orders".to_owned(),
+            columns: vec![
+                SqlColumnSchema {
+                    name: "id".to_owned(),
+                    declared_type: Some("INTEGER".to_owned()),
+                    nullable: false,
+                    default_value: None,
+                    primary_key_ordinal: Some(0),
+                    comment: None,
+                    autoincrement: true,
+                },
+                SqlColumnSchema {
+                    name: "user_id".to_owned(),
+                    declared_type: Some("INTEGER".to_owned()),
+                    nullable: false,
+                    default_value: None,
+                    primary_key_ordinal: None,
+                    comment: None,
+                    autoincrement: false,
+                },
+            ],
+            primary_key_columns: vec!["id".to_owned()],
+            indexes: vec![SqlIndexSchema {
+                name: "idx_orders_user".to_owned(),
+                columns: vec!["user_id".to_owned()],
+                unique: false,
+            }],
+            foreign_keys: vec![SqlForeignKeySchema {
+                constraint_name: None,
+                columns: vec!["user_id".to_owned()],
+                referenced_table: "users".to_owned(),
+                referenced_columns: vec!["id".to_owned()],
+            }],
+            unique_constraints: vec![SqlUniqueConstraintSchema {
+                name: "uq_orders_id".to_owned(),
+                columns: vec!["id".to_owned()],
+            }],
+            comment: Some("Customer orders".to_owned()),
+        };
+
+        // column(name): present + missing.
+        let id = bundle.column("id").expect("id column");
+        assert_eq!(id.declared_type.as_deref(), Some("INTEGER"));
+        assert!(id.autoincrement);
+        assert!(bundle.column("missing").is_none());
+
+        // index(name): present + missing.
+        let idx = bundle.index("idx_orders_user").expect("idx");
+        assert_eq!(idx.columns, vec!["user_id"]);
+        assert!(bundle.index("idx_does_not_exist").is_none());
+
+        // unique_constraint(name).
+        let uq = bundle.unique_constraint("uq_orders_id").expect("uq");
+        assert_eq!(uq.columns, vec!["id"]);
+        assert!(bundle.unique_constraint("uq_missing").is_none());
+
+        // foreign_keys_for_column(col): matches the FK touching user_id.
+        let fks = bundle.foreign_keys_for_column("user_id");
+        assert_eq!(fks.len(), 1);
+        assert_eq!(fks[0].referenced_table, "users");
+        // Column not part of any FK -> empty.
+        assert!(bundle.foreign_keys_for_column("id").is_empty());
+        assert!(bundle.foreign_keys_for_column("nonexistent").is_empty());
+    }
+
+    #[test]
+    fn sql_reflected_table_foreign_keys_for_column_handles_composite_fks() {
+        let bundle = SqlReflectedTable {
+            table_name: "rolling_fact".to_owned(),
+            columns: vec![],
+            primary_key_columns: vec![],
+            indexes: vec![],
+            foreign_keys: vec![SqlForeignKeySchema {
+                constraint_name: None,
+                columns: vec!["fyear".to_owned(), "fmonth".to_owned()],
+                referenced_table: "rolling".to_owned(),
+                referenced_columns: vec!["year".to_owned(), "month".to_owned()],
+            }],
+            unique_constraints: vec![],
+            comment: None,
+        };
+        // Composite FK touches both fyear and fmonth — both should
+        // surface the same FK.
+        assert_eq!(bundle.foreign_keys_for_column("fyear").len(), 1);
+        assert_eq!(bundle.foreign_keys_for_column("fmonth").len(), 1);
+        assert!(bundle.foreign_keys_for_column("year").is_empty()); // referenced col, not from col
+    }
+
+    #[test]
+    fn sql_reflected_table_foreign_keys_for_column_returns_multiple_when_relevant() {
+        // Rare but valid: one column participates in two FKs (e.g.
+        // same column referenced by separate FKs to two parents).
+        let bundle = SqlReflectedTable {
+            table_name: "audit".to_owned(),
+            columns: vec![],
+            primary_key_columns: vec![],
+            indexes: vec![],
+            foreign_keys: vec![
+                SqlForeignKeySchema {
+                    constraint_name: Some("fk_audit_a".to_owned()),
+                    columns: vec!["entity_id".to_owned()],
+                    referenced_table: "users".to_owned(),
+                    referenced_columns: vec!["id".to_owned()],
+                },
+                SqlForeignKeySchema {
+                    constraint_name: Some("fk_audit_b".to_owned()),
+                    columns: vec!["entity_id".to_owned()],
+                    referenced_table: "products".to_owned(),
+                    referenced_columns: vec!["id".to_owned()],
+                },
+            ],
+            unique_constraints: vec![],
+            comment: None,
+        };
+        let fks = bundle.foreign_keys_for_column("entity_id");
+        assert_eq!(fks.len(), 2);
+        // Order preserved.
+        assert_eq!(fks[0].constraint_name.as_deref(), Some("fk_audit_a"));
+        assert_eq!(fks[1].constraint_name.as_deref(), Some("fk_audit_b"));
     }
 
     #[test]
