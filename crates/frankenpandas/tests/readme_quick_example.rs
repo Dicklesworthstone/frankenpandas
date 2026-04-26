@@ -1915,3 +1915,100 @@ fn readme_reshaping_compiles_and_runs() -> Result<(), Box<dyn std::error::Error>
     assert_eq!(row.index().len(), 1);
     Ok(())
 }
+
+/// README "String Accessor" section (lines 439-453).
+///
+/// Locks in one representative method per documented category of the
+/// .str() accessor surface. The accessor itself was previously only
+/// exercised by replace_regex in readme_conditional_logic.
+///
+/// Coverage by category:
+/// - Case: lower, upper, capitalize, title
+/// - Whitespace: strip, lstrip, rstrip
+/// - Search: contains, startswith, endswith
+/// - Transform: slice, repeat, pad, zfill, center
+/// - Split/Join: split_get, split_count, join
+/// - Predicates: isdigit, isalpha
+/// - Regex: contains_regex, extract, count_matches, findall, fullmatch
+/// - Prefix/Suffix: removeprefix, removesuffix
+/// - Other: len, get
+///
+/// Tracks fd90.194 (br-frankenpandas-8i9lh).
+#[test]
+fn readme_string_accessor_compiles_and_runs() -> Result<(), Box<dyn std::error::Error>> {
+    let labels: Vec<IndexLabel> = (0..4i64).map(IndexLabel::Int64).collect();
+    let s = Series::from_values(
+        "name",
+        labels.clone(),
+        vec![
+            "  Hello  ".into(),
+            "world".into(),
+            "Foo Bar".into(),
+            "abc123".into(),
+        ],
+    )?;
+    let n = s.len();
+
+    // Case operations.
+    let _ = s.str().lower()?;
+    let _ = s.str().upper()?;
+    let _ = s.str().capitalize()?;
+    let _ = s.str().title()?;
+
+    // Whitespace.
+    let stripped = s.str().strip()?;
+    assert_eq!(stripped.len(), n);
+    let _ = s.str().lstrip()?;
+    let _ = s.str().rstrip()?;
+
+    // Search predicates (return Bool Series).
+    let _ = s.str().contains("Foo")?;
+    let _ = s.str().startswith("a")?;
+    let _ = s.str().endswith("o")?;
+
+    // Transform.
+    let _ = s.str().slice(0, Some(3))?;
+    let _ = s.str().repeat(2)?;
+    let _ = s.str().pad(10, "right", ' ')?;
+    let _ = s.str().zfill(8)?;
+    let _ = s.str().center(8, '*')?;
+
+    // Split/Join.
+    let csv_labels: Vec<IndexLabel> = (0..3i64).map(IndexLabel::Int64).collect();
+    let csv = Series::from_values(
+        "csv",
+        csv_labels,
+        vec!["a,b,c".into(), "d,e".into(), "f".into()],
+    )?;
+    let _ = csv.str().split_get(",", 0)?;
+    let counts = csv.str().split_count(",")?;
+    assert_eq!(counts.len(), 3);
+    let _ = s.str().join("name", "-")?;
+
+    // Predicates (return Bool Series).
+    let _ = s.str().isdigit()?;
+    let _ = s.str().isalpha()?;
+
+    // Regex.
+    let _ = s.str().contains_regex(r"\d+")?;
+    let _ = s.str().extract(r"(\w+)")?;
+    let _ = s.str().count_matches(r"\w+")?;
+    let _ = s.str().findall(r"\w+", "|")?;
+    let _ = s.str().fullmatch(r"\w+")?;
+
+    // Prefix/Suffix.
+    let prefixed_labels: Vec<IndexLabel> = (0..2i64).map(IndexLabel::Int64).collect();
+    let pref = Series::from_values(
+        "pref",
+        prefixed_labels,
+        vec!["pre_one".into(), "pre_two".into()],
+    )?;
+    let _ = pref.str().removeprefix("pre_")?;
+    let _ = pref.str().removesuffix("two")?;
+
+    // Other.
+    let lens = s.str().len()?;
+    assert_eq!(lens.len(), n);
+    let _ = s.str().get(0)?;
+    Ok(())
+}
