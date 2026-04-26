@@ -801,7 +801,7 @@ Every crate has its own typed error enum, all implementing `std::error::Error` +
 | `ExprError` | fp-expr | `ParseError(String)`, `UnknownColumn(String)`, `UnknownLocal(String)` |
 | `JoinError` | fp-join | wraps `FrameError` + join-specific failures |
 | `GroupByError` | fp-groupby | wraps `FrameError` + aggregation failures |
-| `IoError` | fp-io | `MissingHeaders`, `MissingIndexColumn`, `Csv(...)`, `Json(...)`, `Parquet(...)`, `Excel(...)`, `Arrow(...)`, `Sql(...)` |
+| `IoError` | fp-io | `MissingHeaders`, `MissingIndexColumn(...)`, `Csv(...)`, `Json(...)`, `Parquet(...)`, `Excel(...)`, `Arrow(...)`, `Sql(...)` |
 
 All error types are re-exported through the `frankenpandas` facade crate, so users can pattern-match without importing internal crates:
 
