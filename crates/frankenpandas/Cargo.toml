@@ -1,6 +1,6 @@
 [package]
 name = "frankenpandas"
-description = "Clean-room Rust reimplementation of the pandas API — DataFrame, Series, GroupBy, Rolling, Resample, MultiIndex, 7 IO formats. Zero unsafe."
+description = "Clean-room Rust reimplementation of the pandas API — DataFrame, Series, GroupBy, Rolling, Resample, MultiIndex, 8 IO formats. Zero unsafe."
 version.workspace = true
 edition.workspace = true
 license-file.workspace = true
