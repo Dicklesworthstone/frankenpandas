@@ -510,9 +510,11 @@ let melted = df.melt(&["id"], &["q1", "q2", "q3"], "quarter", "sales")?;
 let stacked = df.stack()?;
 let unstacked = stacked.unstack()?;
 
-// Contingency tables
-let ct = df.crosstab("gender", "department")?;
-let ct_norm = df.crosstab_normalize("gender", "department", "all")?;
+// Contingency tables — associated fns taking two Series (not column names)
+let gender = Series::new("gender", df.index().clone(), df.column("gender").unwrap().clone())?;
+let dept   = Series::new("department", df.index().clone(), df.column("department").unwrap().clone())?;
+let ct      = DataFrame::crosstab(&gender, &dept)?;
+let ct_norm = DataFrame::crosstab_normalize(&gender, &dept, "all")?; // "all" / "index" / "columns"
 
 // One-hot encoding
 let dummies = df.get_dummies(&["color", "size"])?;
