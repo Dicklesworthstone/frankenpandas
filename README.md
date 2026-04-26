@@ -1065,10 +1065,10 @@ let fixed = series.str().replace_regex(r"\d{3}-\d{4}", "***-****")?;
 // Series: map with replacement dictionary
 let mapped = series.map_with_na_action(&mapping, true)?;  // na_action=ignore
 
-// Series: conditional assignment
+// Series: conditional assignment (Series-to-Scalar comparisons via ge_scalar)
 let graded = scores.case_when(&[
-    (scores.ge(&Scalar::Int64(90))?, Series::constant("A", n)?),
-    (scores.ge(&Scalar::Int64(80))?, Series::constant("B", n)?),
+    (scores.ge_scalar(&Scalar::Int64(90))?, Series::constant("A", n)?),
+    (scores.ge_scalar(&Scalar::Int64(80))?, Series::constant("B", n)?),
 ])?;
 ```
 
