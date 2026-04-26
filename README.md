@@ -111,7 +111,7 @@ AACE is a core identity constraint, not a best-effort optimization. pandas' alig
   └────────────┘      └───────────────┘
 ```
 
-**12 workspace crates**, 84,000+ lines of Rust, 788 public functions.
+**12 workspace crates**, 140,000+ lines of Rust (non-test), 1,600+ public functions.
 
 ## Workspace Structure
 
