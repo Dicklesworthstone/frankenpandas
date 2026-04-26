@@ -256,8 +256,14 @@ pub mod prelude {
         read_parquet_bytes,
         read_sql,
         read_sql_table,
-        // IO — datetime helpers
+        // IO — datetime/numeric helpers (full module-level fn surface)
+        cut,
+        qcut,
+        timedelta_total_seconds,
         to_datetime,
+        to_datetime_with_format,
+        to_datetime_with_options,
+        to_datetime_with_unit,
         to_numeric,
         to_timedelta,
         // NanOps — null-skipping aggregation primitives (matches README NanOps section)
