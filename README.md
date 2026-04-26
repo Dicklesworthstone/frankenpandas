@@ -1532,7 +1532,7 @@ let masked = df.mask_df(&cond_df, &other_df)?;
 let reindexed = df.set_index("date", true)?;  // Column → index
 let reset = df.reset_index(false)?;            // Index → column
 let sorted = df.sort_index(true)?;             // Sort by index
-let deduped = df.drop_duplicates()?;           // Remove duplicate rows
+let deduped = df.drop_duplicates(None, DuplicateKeep::First, false)?; // (subset, keep, ignore_index)
 ```
 
 ## Serialization and Interoperability
@@ -1596,10 +1596,10 @@ Pandas-compatible `keep` parameter for duplicate detection:
 
 ```rust
 // Mark duplicates (like df.duplicated(keep='first'))
-let mask = df.duplicated()?;  // First occurrence = false, subsequent = true
+let mask = df.duplicated(None, DuplicateKeep::First)?; // (subset, keep) — first occurrence = false, subsequent = true
 
 // Drop duplicates
-let unique = df.drop_duplicates()?;
+let unique = df.drop_duplicates(None, DuplicateKeep::First, false)?; // (subset, keep, ignore_index)
 
 // Series-level with keep parameter
 let deduped = series.drop_duplicates()?;
