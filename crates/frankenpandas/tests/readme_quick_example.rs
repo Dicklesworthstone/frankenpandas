@@ -1445,3 +1445,80 @@ fn readme_module_level_functions_compiles_and_runs() -> Result<(), Box<dyn std::
     assert_eq!(qbinned.len(), 6);
     Ok(())
 }
+
+/// README "DataFrame Output Formats" table (lines 530-543).
+///
+/// Locks in 11 inline output methods on DataFrame that previously had
+/// no integration coverage:
+/// - to_csv, to_json (multiple orients)
+/// - to_string_table, to_string_truncated
+/// - to_html, to_latex, to_markdown
+/// - to_dict, to_series_dict, to_records, to_numpy_2d
+///
+/// Each call asserted to return a non-empty result; correctness is
+/// covered by per-method unit tests in fp-frame.
+///
+/// Tracks fd90.189 (br-frankenpandas-f6vzb).
+#[test]
+fn readme_dataframe_output_formats_compiles_and_runs() -> Result<(), Box<dyn std::error::Error>> {
+    let df = read_csv_str("ticker,price,volume\nAAPL,150,1000\nGOOGL,2800,500\nMSFT,300,800")?;
+
+    // to_csv with comma sep, no index.
+    let csv = df.to_csv(',', false);
+    assert!(csv.contains("ticker"));
+    assert!(csv.contains("AAPL"));
+
+    // to_json across multiple orients.
+    let json_records = df.to_json("records")?;
+    assert!(json_records.contains("AAPL"));
+    let json_columns = df.to_json("columns")?;
+    assert!(json_columns.contains("ticker"));
+
+    // to_string_table — aligned ASCII output.
+    let table = df.to_string_table(true);
+    assert!(table.contains("AAPL"));
+
+    // to_string_truncated — head/tail with "..." between when over max_rows.
+    let big = read_csv_str(
+        "v\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10",
+    )?;
+    let truncated = big.to_string_truncated(true, Some(4), None);
+    assert!(!truncated.is_empty());
+
+    // to_html — basic HTML table emit.
+    let html = df.to_html(true);
+    assert!(html.contains("<table"));
+    assert!(html.contains("AAPL"));
+
+    // to_latex — LaTeX tabular output.
+    let latex = df.to_latex(true);
+    assert!(latex.contains("\\begin{tabular}"));
+
+    // to_markdown — github-flavored pipe table.
+    let md = df.to_markdown(true, None)?;
+    assert!(md.contains("|"));
+    assert!(md.contains("AAPL"));
+
+    // to_dict across the documented orients.
+    let _dict = df.to_dict("dict")?;
+    let _list = df.to_dict("list")?;
+    let _records = df.to_dict("records")?;
+    let _split = df.to_dict("split")?;
+
+    // to_series_dict — BTreeMap<String, Series>.
+    let series_dict = df.to_series_dict();
+    assert!(series_dict.contains_key("ticker"));
+
+    // to_records — Vec<Vec<Scalar>>; each row prepends the index label,
+    // so length is column_count + 1.
+    let records = df.to_records();
+    assert_eq!(records.len(), 3);
+    assert_eq!(records[0].len(), 4);
+
+    // to_numpy_2d — Vec<Vec<f64>>; non-numeric columns coerce as best-effort.
+    let numeric_df = read_csv_str("a,b\n1.0,2.0\n3.0,4.0\n5.0,6.0")?;
+    let mat = numeric_df.to_numpy_2d();
+    assert_eq!(mat.len(), 3);
+    assert_eq!(mat[0].len(), 2);
+    Ok(())
+}
