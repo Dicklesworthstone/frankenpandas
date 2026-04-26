@@ -1302,6 +1302,7 @@ let reordered = df.select_columns(&["id", "name", "value"])?;
 
 ```rust
 use frankenpandas::prelude::*;
+use std::path::Path; // path-based IO writers take &Path
 
 // Load trade data
 let trades = read_csv_str(

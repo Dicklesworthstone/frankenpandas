@@ -199,11 +199,16 @@ pub mod prelude {
         concat_dataframes,
         concat_series,
         merge_ordered,
-        // IO — readers
+        // IO — readers (in-memory + path)
+        read_csv,
         read_csv_str,
+        read_feather,
         read_feather_bytes,
+        read_json,
         read_json_str,
+        read_jsonl,
         read_jsonl_str,
+        read_parquet,
         read_parquet_bytes,
         read_sql,
         read_sql_table,
@@ -211,11 +216,16 @@ pub mod prelude {
         to_datetime,
         to_numeric,
         to_timedelta,
-        // IO — writers (string + bytes + sql, matching README documented surface)
+        // IO — writers (in-memory + path + sql, matching README documented surface)
+        write_csv,
         write_csv_string,
+        write_feather,
         write_feather_bytes,
+        write_json,
         write_json_string,
+        write_jsonl,
         write_jsonl_string,
+        write_parquet,
         write_parquet_bytes,
         write_sql,
     };
