@@ -867,6 +867,25 @@ fn readme_missing_data_handling_compiles_and_runs() -> Result<(), Box<dyn std::e
     // fd90.104 rename: dropna_with_thresh → dropna_with_threshold (with subset arg).
     let _ = df.dropna_with_threshold(2, None)?;
     let _ = df.dropna_columns()?;
+
+    // fd90.213: Missing-data extras documented in README lines 963-988.
+
+    // first_valid_index / last_valid_index (Series + DataFrame).
+    let _ = series.first_valid_index();
+    let _ = series.last_valid_index();
+    let _ = df.first_valid_index();
+    let _ = df.last_valid_index();
+
+    // df.fillna_method("ffill"|"bfill").
+    let _ = df.fillna_method("ffill")?;
+    let _ = df.fillna_method("bfill")?;
+
+    // df.combine_first(&other) — fill nulls in left from right.
+    let other = read_csv_str("a,b,c\n10,10,10\n20,20,20\n30,30,30\n40,40,40\n50,50,50")?;
+    let _ = df.combine_first(&other)?;
+
+    // df.update(&other) — non-null values in `other` overwrite df.
+    let _ = df.update(&other)?;
     Ok(())
 }
 
