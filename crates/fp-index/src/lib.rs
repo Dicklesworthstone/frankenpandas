@@ -1,5 +1,77 @@
 #![forbid(unsafe_code)]
 
+//! Row-label / index machinery for **frankenpandas** — every
+//! `DataFrame` and `Series` in fp-frame carries an [`Index`] that
+//! pairs labels with positional row indices, plus the alignment
+//! algebra that pandas users expect from `Series + Series` and
+//! `DataFrame.align()`.
+//!
+//! ## Core types
+//!
+//! - [`Index`]: the canonical row-label container. Internally a
+//!   typed `Vec<IndexLabel>` plus an O(1) label-lookup hashmap
+//!   built lazily on first use. Pandas `Index` shape: monotonic
+//!   probes, duplicate handling, range-style construction
+//!   (`Index::from_range(0..N)`), name metadata.
+//! - [`IndexLabel`]: typed label enum — `Int64(i64)`, `Float64(f64)`,
+//!   `Utf8(String)`, `Bool(bool)`, `Datetime64(i64)`,
+//!   `Timedelta64(i64)`. Lets one `Index` carry mixed-type labels
+//!   without erasing to strings.
+//! - [`MultiIndex`]: hierarchical multi-level index for
+//!   pandas-style row MultiIndex DataFrames. Each level is itself
+//!   a `Vec<IndexLabel>` plus an integer codes array.
+//! - [`MultiIndexOrIndex`]: sum-type for code paths that accept
+//!   either flat `Index` or `MultiIndex`.
+//! - [`DuplicateKeep`]: enum controlling `keep='first' | 'last'
+//!   | False` semantics in `Index.duplicated` /
+//!   `Index.drop_duplicates` etc.
+//!
+//! ## Alignment algebra
+//!
+//! Binary ops between two pandas-shaped frames need to align rows
+//! by label. The aligner builds an [`AlignmentPlan`] (or
+//! [`MultiAlignmentPlan`] for N-way joins) that the caller then
+//! applies to each side's value buffers:
+//!
+//! - [`align`] dispatches on [`AlignMode`] (`Left`, `Right`,
+//!   `Inner`, `Outer`).
+//! - [`align_inner`], [`align_left`], [`align_union`]: direct
+//!   single-mode entry points.
+//! - [`leapfrog_union`] / [`leapfrog_intersection`]: N-way row
+//!   alignment via a leapfrog merge over already-sorted indexes
+//!   (used by [`multi_way_align`]).
+//! - [`validate_alignment_plan`]: sanity check (lengths match,
+//!   indices in bounds).
+//!
+//! ## Date / time helpers
+//!
+//! Pandas `pd.date_range` / `pd.timedelta_range` analogs:
+//!
+//! - [`timedelta_range`]: pandas-style timedelta range builder.
+//! - [`apply_date_offset`] / [`apply_date_offset_to_nanos`]:
+//!   evaluate a [`DateOffset`] against an anchor timestamp.
+//! - [`infer_freq`] / [`infer_freq_from_timestamps`] /
+//!   [`infer_freq_from_nanos`]: pandas-style frequency inference
+//!   from a sample of timestamps.
+//! - [`format_datetime_ns`]: render a nanosecond-since-epoch i64
+//!   as the canonical `YYYY-MM-DD HH:MM:SS[.f]` string used in
+//!   IndexLabel display and IO formatters.
+//!
+//! ## Error reporting
+//!
+//! - [`IndexError`]: structural / lookup failures (not-monotonic,
+//!   not-unique, missing-label, validation-mismatch).
+//! - [`TimedeltaRangeError`] / [`DateRangeError`]: range builder
+//!   parse / step / overflow errors.
+//!
+//! ## Relationship to other crates
+//!
+//! - **fp-types** supplies [`Scalar`] / [`Timedelta`] /
+//!   `format_datetime_ns` primitives.
+//! - **fp-frame** stores an `Index` per DataFrame / Series and uses
+//!   the alignment algebra here for binary ops.
+//! - **fp-join** consumes alignment plans for merge-style joins.
+
 use std::{collections::HashMap, fmt, sync::OnceLock};
 
 use fp_types::{Scalar, Timedelta};
