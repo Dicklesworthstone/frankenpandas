@@ -1336,10 +1336,14 @@ write_jsonl(&vwap, Path::new("daily_vwap.jsonl"))?;
 ### Merge-Asof for Time Series Alignment
 
 ```rust
-// Join trades with quotes at the nearest preceding timestamp
-let result = merge_asof(
+// Join trades with quotes at the nearest preceding timestamp.
+// merge_asof returns Result<MergedDataFrame, JoinError>; MergedDataFrame has
+// public `index` + `columns` fields. Convert to a DataFrame with
+// DataFrame::new(merged.index, merged.columns) to call DataFrame methods on it.
+let merged = merge_asof(
     &trades, &quotes, "timestamp", AsofDirection::Backward
 )?;
+let result = DataFrame::new(merged.index, merged.columns)?;
 // Each trade row now has the most recent quote as of that trade time
 ```
 
