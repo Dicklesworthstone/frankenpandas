@@ -344,6 +344,9 @@ pub mod prelude {
         write_jsonl_string,
         write_parquet,
         write_parquet_bytes,
+        // fd90.209: write_sql_with_options pairs with SqlWriteOptions
+        // (which is in the prelude as of fd90.206).
+        write_sql_with_options,
         write_sql,
     };
 }
@@ -486,6 +489,8 @@ mod tests {
         // SqlInspector is a struct; type-check via fn-pointer signature.
         let _is_inspector: fn(&SqlInspector<'_, rusqlite::Connection>) = |_| {};
         let _ = read_sql_chunks::<rusqlite::Connection>;
+        // fd90.209: write_sql_with_options pairs with SqlWriteOptions.
+        let _ = write_sql_with_options::<rusqlite::Connection>;
 
         // NanOps primitives (fd90.126) — call each through a Vec<Scalar>.
         let v = vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)];
