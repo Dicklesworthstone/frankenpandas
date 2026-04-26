@@ -8888,6 +8888,22 @@ impl DataFrameResample<'_> {
         self.apply_resample(|s, freq| s.resample(freq).prod())
     }
 
+    /// Resample first across all numeric columns.
+    ///
+    /// Matches `df.resample(freq).first()`. README line 494 lists `first`
+    /// in the Resample row; fd90.200 brings the DataFrameResample direct-
+    /// method surface up to parity with Series Resample.
+    pub fn first(&self) -> Result<DataFrame, FrameError> {
+        self.apply_resample(|s, freq| s.resample(freq).first())
+    }
+
+    /// Resample last across all numeric columns.
+    ///
+    /// Matches `df.resample(freq).last()`. fd90.200 sibling of `first`.
+    pub fn last(&self) -> Result<DataFrame, FrameError> {
+        self.apply_resample(|s, freq| s.resample(freq).last())
+    }
+
     /// Aggregate with multiple functions, producing prefixed column names.
     ///
     /// Matches `df.resample(freq).agg(['sum', 'mean'])`. Each numeric column

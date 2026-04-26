@@ -580,8 +580,8 @@ fn readme_window_operations_compiles_and_runs() -> Result<(), Box<dyn std::error
     let _ = drs.count()?;
     let _ = drs.min()?;
     let _ = drs.max()?;
-    // first/last on DataFrameResample are README-documented but not yet
-    // implemented (parity asymmetry with Series Resample). Tracked separately.
+    let _ = drs.first()?; // fd90.200 parity with Series Resample
+    let _ = drs.last()?;
     Ok(())
 }
 
