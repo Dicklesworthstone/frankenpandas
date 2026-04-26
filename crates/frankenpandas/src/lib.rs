@@ -287,6 +287,8 @@ pub mod prelude {
         read_parquet_bytes,
         read_sql,
         read_sql_table,
+        // fd90.210: read_sql_with_options pairs with SqlReadOptions.
+        read_sql_with_options,
         // IO — datetime/numeric helpers (full module-level fn surface)
         cut,
         qcut,
@@ -491,6 +493,8 @@ mod tests {
         let _ = read_sql_chunks::<rusqlite::Connection>;
         // fd90.209: write_sql_with_options pairs with SqlWriteOptions.
         let _ = write_sql_with_options::<rusqlite::Connection>;
+        // fd90.210: read_sql_with_options pairs with SqlReadOptions.
+        let _ = read_sql_with_options::<rusqlite::Connection>;
 
         // NanOps primitives (fd90.126) — call each through a Vec<Scalar>.
         let v = vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)];
