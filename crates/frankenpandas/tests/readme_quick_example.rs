@@ -791,3 +791,63 @@ fn readme_dataframe_introspection_compiles_and_runs() -> Result<(), Box<dyn std:
     let _ = df.compare(&df_clone)?;
     Ok(())
 }
+
+/// README SeriesGroupBy (lines 1177-1190).
+///
+/// Imports prelude only. Locks in fd90.135's method-list correction
+/// (removed phantom sem/skew/kurtosis/value_counts; the actual
+/// SeriesGroupBy surface is the 15 methods this test exercises).
+#[test]
+fn readme_series_groupby_compiles_and_runs() -> Result<(), Box<dyn std::error::Error>> {
+    let labels: Vec<IndexLabel> = (0..6i64).map(IndexLabel::Int64).collect();
+
+    // Revenue series: 6 numeric values.
+    let revenue = Series::from_values(
+        "revenue",
+        labels.clone(),
+        vec![
+            Scalar::Float64(100.0),
+            Scalar::Float64(200.0),
+            Scalar::Float64(150.0),
+            Scalar::Float64(250.0),
+            Scalar::Float64(300.0),
+            Scalar::Float64(400.0),
+        ],
+    )?;
+
+    // Region series: 2 unique groups (A, B) of 3 elements each.
+    let region = Series::from_values(
+        "region",
+        labels,
+        vec![
+            Scalar::Utf8("A".into()),
+            Scalar::Utf8("A".into()),
+            Scalar::Utf8("A".into()),
+            Scalar::Utf8("B".into()),
+            Scalar::Utf8("B".into()),
+            Scalar::Utf8("B".into()),
+        ],
+    )?;
+
+    let by_region = revenue.groupby(&region)?;
+
+    // Per-group aggregates.
+    let sums = by_region.sum()?;
+    assert_eq!(sums.len(), 2); // A, B
+    let _ = by_region.mean()?;
+    let _ = by_region.std()?;
+    let _ = by_region.median()?;
+    let _ = by_region.prod()?;
+    let _ = by_region.count()?;
+    let _ = by_region.min()?;
+    let _ = by_region.max()?;
+    let _ = by_region.var()?;
+    let _ = by_region.first()?;
+    let _ = by_region.last()?;
+    let _ = by_region.size()?;
+
+    // Multi-aggregation returns a DataFrame.
+    let multi = by_region.agg(&["sum", "mean", "count"])?;
+    assert_eq!(multi.index().len(), 2);
+    Ok(())
+}
