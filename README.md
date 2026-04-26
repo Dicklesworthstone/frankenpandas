@@ -689,7 +689,7 @@ Performance baselines tracked for join (inner/left/right/outer), filter (boolean
 
 ## Optimization Catalog
 
-FrankenPandas applies 14 named optimization techniques (AG-01 through AG-15) drawn from the alien-graveyard systems-pattern library. Each is independently toggled and proven via isomorphism tests:
+FrankenPandas applies 15 named optimization techniques (AG-01 through AG-15) drawn from the alien-graveyard systems-pattern library. Each is independently toggled and proven via isomorphism tests; the table below highlights 10 of the 15 (the remaining AG-01, AG-04, AG-09, AG-12, AG-15 are documented in their respective module headers under `crates/`):
 
 | ID | Technique | Where Applied | What It Does |
 |----|-----------|---------------|--------------|
