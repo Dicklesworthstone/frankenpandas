@@ -291,3 +291,38 @@ fn readme_financial_data_pipeline_compiles_and_runs() -> Result<(), Box<dyn std:
     fs::remove_file(&out_path).ok();
     Ok(())
 }
+
+/// README Merge-Asof for Time Series Alignment (lines 1336-1348).
+///
+/// Imports prelude only. Verifies the recipe's documented chain:
+/// - merge_asof(&left, &right, on, direction) returning Result<MergedDataFrame, JoinError>
+/// - AsofDirection::Backward variant (nearest preceding match)
+/// - MergedDataFrame public `index` + `columns` field access
+/// - DataFrame::new(index, columns) reconstruction
+#[test]
+fn readme_merge_asof_compiles_and_runs() -> Result<(), Box<dyn std::error::Error>> {
+    // trades: 3 transactions at timestamps 10, 20, 30.
+    let trades = read_csv_str("timestamp,trade_price\n10,100\n20,200\n30,300")?;
+    // quotes: 4 quotes at timestamps 5, 15, 25, 35 — none match exactly.
+    let quotes = read_csv_str("timestamp,quote\n5,99\n15,150\n25,250\n35,350")?;
+
+    let merged = merge_asof(
+        &trades,
+        &quotes,
+        "timestamp",
+        AsofDirection::Backward,
+    )?;
+
+    // MergedDataFrame has public index + columns fields. Reconstruct a
+    // DataFrame to call methods on it (per fd90.137 docs note).
+    let result = DataFrame::new(merged.index, merged.columns)?;
+
+    // Backward asof = take the LAST quote at or before each trade timestamp.
+    //   trade 10 → quote at 5 (=99)    nearest preceding
+    //   trade 20 → quote at 15 (=150)
+    //   trade 30 → quote at 25 (=250)
+    assert_eq!(result.index().len(), 3);
+    assert!(result.column_names().iter().any(|n| n.as_str() == "trade_price"));
+    assert!(result.column_names().iter().any(|n| n.as_str() == "quote"));
+    Ok(())
+}
