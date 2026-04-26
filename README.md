@@ -33,7 +33,7 @@
 | Column MultiIndex | Yes | No | Yes (foundation) |
 | Row MultiIndex | Yes | No | Yes (DataFrame/groupby/indexing/reshape/IO integration) |
 | Categorical dtype | Yes | Yes | Yes (metadata layer) |
-| 7 IO formats (CSV/JSON/JSONL/Parquet/Excel/SQL/Feather) | Yes (SQL: any SQLAlchemy engine) | Partial | Yes (SQL: generic `SqlConnection`, SQLite default backend; PostgreSQL/MySQL planned) |
+| 8 IO formats (CSV/JSON/JSONL/Parquet/Excel/SQL/Feather/IPC) | Yes (SQL: any SQLAlchemy engine) | Partial | Yes (SQL: generic `SqlConnection`, SQLite default backend; PostgreSQL/MySQL planned) |
 | Conformance testing against pandas oracle | - | - | Yes (430+ packet suites, 1249 fixtures, all green) |
 
 ## Quick Example
@@ -90,12 +90,12 @@ AACE is a core identity constraint, not a best-effort optimization. pandas' alig
        ▼                      ▼                      ▼
   ┌──────────┐      ┌────────────────┐      ┌──────────────┐
   │ fp-expr   │      │   fp-frame     │      │    fp-io     │
-  │ eval()    │      │ DataFrame      │      │  7 formats   │
+  │ eval()    │      │ DataFrame      │      │  8 formats   │
   │ query()   │      │ Series         │      │  CSV/JSON/   │
   └─────┬─────┘      │ Categorical    │      │  JSONL/      │
         │            │ MultiIndex     │      │  Parquet/    │
         ▼            └───────┬────────┘      │  Excel/SQL/  │
-  ┌──────────┐               │               │  Feather     │
+  ┌──────────┐               │               │  Feather/IPC │
   │fp-runtime│        ┌──────┼──────┐        └──────────────┘
   │ Policy   │        ▼      ▼      ▼
   │ Ledger   │   fp-index fp-groupby fp-join
@@ -126,7 +126,7 @@ frankenpandas/
 │   ├── fp-expr/          # Expression parser, eval()/query()
 │   ├── fp-groupby/       # GroupBy with 3 execution paths
 │   ├── fp-join/          # Inner/Left/Right/Outer/Cross/Asof joins
-│   ├── fp-io/            # 7 IO formats (CSV/JSON/JSONL/Parquet/Excel/Feather/SQL), 429 tests
+│   ├── fp-io/            # 8 IO formats (CSV/JSON/JSONL/Parquet/Excel/Feather/IPC/SQL), 429 tests
 │   ├── fp-conformance/   # Differential testing against pandas oracle
 │   ├── fp-runtime/       # Strict/Hardened policy, EvidenceLedger
 │   └── fp-frankentui/    # Terminal UI dashboard (experimental)
@@ -869,7 +869,7 @@ let merged = df1.merge_with_options(&df2, &["key"], JoinType::Inner,
 | Category | Count | What It Covers |
 |----------|-------|----------------|
 | fp-frame unit tests | 1,433 | DataFrame, Series, Categorical, MultiIndex integration |
-| fp-io tests | 429 | 7 IO formats, adversarial inputs, round-trip correctness, full SQL trait surface (introspection / chunking / per-column dtype overrides) |
+| fp-io tests | 429 | 8 IO formats, adversarial inputs, round-trip correctness, full SQL trait surface (introspection / chunking / per-column dtype overrides) |
 | fp-columnar tests | 281 | Column / ColumnData / ValidityMask / arithmetic / comparison / sparse encoding |
 | fp-index tests | 199 | Index alignment, MultiIndex, duplicate detection |
 | fp-types tests | 155 | DType / Scalar / Timedelta / Timestamp / nan-aware aggregations |
