@@ -668,6 +668,7 @@ Five optimization rounds with formal evidence:
 
 | Round | Optimization | Speedup |
 |-------|-------------|---------|
+| Round 1 | Remove duplicate `run_fixture_operation` invocation inside `run_fixture` | Eliminates redundant per-fixture work |
 | Round 2 | `align_union` borrowed-key HashMap | Eliminates index clones |
 | Round 3 | GroupBy identity-alignment fast path | Skips reindex when indexes match |
 | Round 4 | Dense Int64 aggregation path | O(1) array access, no HashMap |
