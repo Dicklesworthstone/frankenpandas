@@ -394,19 +394,16 @@ mod tests {
         assert_eq!(dt.len(), 1);
     }
 
-    /// Compile-time guard for the prelude expansion (fd90.121–fd90.144).
+    /// Compile-time guard for the prelude expansion (fd90.121–fd90.203).
     ///
     /// Each let-binding through a prelude item ensures that name remains
     /// reachable from `frankenpandas::prelude::*`. If anyone removes one
-    /// of these from the prelude, this test refuses to compile. Error
-    /// types `TypeError` / `GroupByError` are re-exported at the
-    /// top-level facade (not in prelude — same pattern as other crate
-    /// errors), so they're imported via `crate::` here.
+    /// of these from the prelude, this test refuses to compile.
     ///
-    /// Tracks br-frankenpandas-6nexq / fd90.155.
+    /// Tracks br-frankenpandas-6nexq / fd90.155 (initial); extended in
+    /// fd90.204 (br-frankenpandas-cj8ys) for fd90.182–fd90.203.
     #[test]
     fn prelude_completeness_compile_guard() {
-        use crate::{GroupByError, TypeError};
         // Enums + structs from the join family (fd90.127, fd90.143).
         let _: AsofDirection = AsofDirection::Backward;
         let _: JoinType = JoinType::Inner;
@@ -415,12 +412,36 @@ mod tests {
         let _is_join_err: fn(JoinError) -> _ = |e| e; // type-check only
         let _is_merged_df: fn(MergedDataFrame) -> _ = |x| x;
 
-        // GroupByError + TypeError (fd90.129).
+        // All 8 error types from the README's Error Architecture section
+        // (fd90.202 added 7 of these to the prelude; JoinError was already
+        // present, GroupByError + TypeError were also already in the
+        // prelude despite the prior comment).
+        let _is_col_err: fn(ColumnError) -> _ = |e| e;
+        let _is_expr_err: fn(ExprError) -> _ = |e| e;
+        let _is_frame_err: fn(FrameError) -> _ = |e| e;
         let _is_group_err: fn(GroupByError) -> _ = |e| e;
+        let _is_index_err: fn(IndexError) -> _ = |e| e;
+        let _is_io_err: fn(IoError) -> _ = |e| e;
         let _: TypeError = TypeError::IncompatibleDtypes {
             left: DType::Int64,
             right: DType::Utf8,
         };
+
+        // fd90.182: From<bool/i64/f64/&str/String> for Scalar.
+        let _: Scalar = true.into();
+        let _: Scalar = 42i64.into();
+        let _: Scalar = 3.14f64.into();
+        let _: Scalar = "hi".into();
+        let _: Scalar = String::from("hello").into();
+
+        // fd90.192: DataFrameColumnInput in prelude.
+        let _: DataFrameColumnInput = DataFrameColumnInput::Scalar(Scalar::Int64(0));
+
+        // fd90.201: MultiIndexOrIndex in prelude.
+        let _is_mi_or_idx: fn(MultiIndexOrIndex) -> _ = |x| x;
+
+        // fd90.203: ValidityMask in prelude.
+        let _: ValidityMask = ValidityMask::all_valid(0);
 
         // Index-side enums (fd90.128).
         let _: DuplicateKeep = DuplicateKeep::First;
