@@ -278,6 +278,8 @@ pub mod prelude {
         // fd90.206: also expose the option/inspector/chunked-read surface
         // documented in the IO Format Support table at line 148.
         SqlConnection,
+        // fd90.220: SqlInsertMethod is the type of SqlWriteOptions.method.
+        SqlInsertMethod,
         SqlInspector,
         SqlReadOptions,
         SqlWriteOptions,
@@ -527,6 +529,8 @@ mod tests {
         let _ = write_sql_with_options::<rusqlite::Connection>;
         // fd90.210: read_sql_with_options pairs with SqlReadOptions.
         let _ = read_sql_with_options::<rusqlite::Connection>;
+        // fd90.220: SqlInsertMethod is the type of SqlWriteOptions.method.
+        let _is_insert_method: fn(SqlInsertMethod) -> _ = |m| m;
 
         // fd90.211: ToDatetimeOptions + ToDatetimeOrigin in prelude.
         let _: ToDatetimeOptions<'_> = ToDatetimeOptions::default();
