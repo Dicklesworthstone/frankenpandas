@@ -642,8 +642,11 @@ Multiple ways to apply custom logic:
 // Element-wise on each column
 let transformed = df.applymap(|scalar| { /* transform */ })?;
 
-// Row-wise with full row access
-let result = df.apply_row(|row_values| { /* produce scalar */ })?;
+// Row-wise with full row access (returns Series; first arg is the result column name)
+let result: Series = df.apply_row("row_total", |row_values: &[Scalar]| {
+    /* produce scalar from row_values */
+    row_values[0].clone()
+})?;
 
 // Shape-preserving transform via per-element closure (output same shape as input)
 let doubled = df.transform(|s: &Scalar| match s {
