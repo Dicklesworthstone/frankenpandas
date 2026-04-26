@@ -1094,7 +1094,7 @@ let pcts = series.value_counts_with_options(true, true, false, true)?;
 
 // Membership testing
 let mask = series.isin(&[Scalar::Utf8("A".into()), Scalar::Utf8("B".into())])?;
-let in_range = series.between(&Scalar::Int64(10), &Scalar::Int64(20))?;
+let in_range = series.between(&Scalar::Int64(10), &Scalar::Int64(20), "both")?; // "both" / "neither" / "left" / "right"
 
 // Index-based position lookup
 let pos = series.searchsorted(&Scalar::Float64(42.0), "left")?;
