@@ -297,6 +297,15 @@ pub mod prelude {
         to_datetime_with_unit,
         to_numeric,
         to_timedelta,
+        // fd90.208: pandas-style top-level null checks + dtype helpers.
+        // The README documents these as user-facing (lines 359, 771, 957, 1031).
+        cast_scalar,
+        common_dtype,
+        infer_dtype,
+        isna,
+        isnull,
+        notna,
+        notnull,
         // NanOps — null-skipping aggregation primitives (matches README NanOps section)
         nanall,
         nanany,
@@ -545,6 +554,16 @@ mod tests {
         // fd90.207: Excel options + read_csv_with_options now in prelude.
         let _ = ExcelReadOptions::default();
         let _ = read_csv_with_options;
+
+        // fd90.208: pandas-style top-level null checks + dtype helpers.
+        let na_check = vec![Scalar::Int64(1), Scalar::Null(NullKind::NaN)];
+        let _ = isna(&na_check);
+        let _ = isnull(&na_check);
+        let _ = notna(&na_check);
+        let _ = notnull(&na_check);
+        let _ = infer_dtype(&na_check);
+        let _ = common_dtype(DType::Int64, DType::Float64);
+        let _ = cast_scalar;
 
         // Module-level helpers (fd90.144) — name-check.
         let _ = cut;
