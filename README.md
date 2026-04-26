@@ -667,8 +667,12 @@ let df2 = df.assign_fn(vec![
     })),
 ])?;
 
-// Pipe for method chaining
-let result = df.pipe(|d| d.query("x > 0"))?.pipe(|d| d.sort_values("x", true))?;
+// Pipe for method chaining (closures must return Result<_, FrameError>)
+let result = df
+    .pipe(|d| d.sort_values("x", true))?
+    .pipe(|d| d.head(10))?;
+// For chains involving query()/eval() (which return ExprError), call them outside pipe
+// or use .map_err(|e| FrameError::CompatibilityRejected(e.to_string())) inside.
 ```
 
 ### Module-Level Functions
