@@ -29,13 +29,13 @@ pub use fp_types::{
 pub use fp_columnar::{ArithmeticOp, Column, ColumnError, ComparisonOp, ValidityMask};
 
 pub use fp_index::{
-    AlignMode, AlignmentPlan, Index, IndexError, IndexLabel, MultiAlignmentPlan, MultiIndex,
-    MultiIndexOrIndex,
+    AlignMode, AlignmentPlan, DuplicateKeep, Index, IndexError, IndexLabel, MultiAlignmentPlan,
+    MultiIndex, MultiIndexOrIndex,
 };
 
 pub use fp_frame::{
-    CategoricalAccessor, CategoricalMetadata, DataFrame, FrameError, Series,
-    SeriesResetIndexResult, ToDatetimeOptions, ToDatetimeOrigin,
+    CategoricalAccessor, CategoricalMetadata, ConcatJoin, DataFrame, DropNaHow, FrameError,
+    Series, SeriesResetIndexResult, ToDatetimeOptions, ToDatetimeOrigin,
 };
 
 // ── Module-level functions (like pd.concat, pd.to_datetime, etc.) ────
@@ -180,9 +180,12 @@ pub mod prelude {
     pub use crate::{
         // Core types
         Column,
+        ConcatJoin,
         CsvReadOptions,
         DType,
         DataFrame,
+        DropNaHow,
+        DuplicateKeep,
         // Traits
         DataFrameExprExt,
         DataFrameIoExt,
