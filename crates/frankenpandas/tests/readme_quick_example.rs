@@ -1063,3 +1063,79 @@ fn readme_apply_and_transform_compiles_and_runs() -> Result<(), Box<dyn std::err
     assert_eq!(result.index().len(), 2);
     Ok(())
 }
+
+/// README "Replacement" section (lines 1077-1102).
+///
+/// Locks in the four replacement APIs documented in the README:
+/// - DataFrame.replace(&[(from, to)]) for sentinel cleanup
+/// - StringAccessor.replace_regex for regex patterns
+/// - Series.map_with_na_action for dictionary-style mapping
+/// - Series.case_when for conditional grade assignment
+///
+/// Tracks fd90.184 (br-frankenpandas-y01i5). The case_when block was
+/// just simplified in fd90.183 to use the new From<&str> for Scalar
+/// ergonomics — having a regression test prevents future signature drift.
+#[test]
+fn readme_conditional_logic_compiles_and_runs() -> Result<(), Box<dyn std::error::Error>> {
+    // df.replace — sentinel-to-NaN cleanup.
+    let df = read_csv_str("a,b\n10,1\n-999,2\n30,3")?;
+    let cleaned = df.replace(&[(Scalar::Int64(-999), Scalar::Null(NullKind::NaN))])?;
+    assert_eq!(cleaned.index().len(), 3);
+
+    // Series.str().replace_regex — single regex substitution on string Series.
+    let phones_labels: Vec<IndexLabel> = (0..3i64).map(IndexLabel::Int64).collect();
+    let phones = Series::from_values(
+        "phone",
+        phones_labels,
+        vec![
+            "555-1234".into(),
+            "555-9876".into(),
+            "555-0000".into(),
+        ],
+    )?;
+    let masked = phones.str().replace_regex(r"\d{3}-\d{4}", "***-****")?;
+    assert_eq!(masked.len(), 3);
+
+    // Series.map_with_na_action — dictionary-style mapping with NaN passthrough.
+    let codes_labels: Vec<IndexLabel> = (0..3i64).map(IndexLabel::Int64).collect();
+    let codes = Series::from_values(
+        "code",
+        codes_labels,
+        vec![
+            Scalar::Int64(1),
+            Scalar::Int64(2),
+            Scalar::Int64(3),
+        ],
+    )?;
+    let mapping = vec![
+        (Scalar::Int64(1), "low".into()),
+        (Scalar::Int64(2), "mid".into()),
+        (Scalar::Int64(3), "high".into()),
+    ];
+    let mapped = codes.map_with_na_action(&mapping, true)?;
+    assert_eq!(mapped.len(), 3);
+
+    // Series.case_when — conditional grade assignment via .ge_scalar conditions.
+    // Mirrors README lines 1091-1101 exactly (fd90.183 ergonomics).
+    let scores_labels: Vec<IndexLabel> = (0..4i64).map(IndexLabel::Int64).collect();
+    let scores = Series::from_values(
+        "score",
+        scores_labels,
+        vec![
+            Scalar::Int64(95),
+            Scalar::Int64(85),
+            Scalar::Int64(70),
+            Scalar::Int64(92),
+        ],
+    )?;
+    let n = scores.len();
+    let labels: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
+    let value_a = Series::from_values("grade", labels.clone(), vec!["A".into(); n])?;
+    let value_b = Series::from_values("grade", labels, vec!["B".into(); n])?;
+    let graded = scores.case_when(&[
+        (scores.ge_scalar(&Scalar::Int64(90))?, value_a),
+        (scores.ge_scalar(&Scalar::Int64(80))?, value_b),
+    ])?;
+    assert_eq!(graded.len(), 4);
+    Ok(())
+}
