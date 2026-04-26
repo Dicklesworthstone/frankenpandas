@@ -662,8 +662,16 @@ let group_means = df.groupby(&["region"])?.transform("mean")?;
 // Column assignment with closures (pandas df.assign(new_col=lambda df: ...))
 let df2 = df.assign_fn(vec![
     ("ratio", Box::new(|df| {
-        // Compute new column from existing DataFrame
-        Ok(compute_ratio_column(df))
+        // Compute new column from existing columns; here: revenue / cost
+        let rev = df.column("revenue").expect("revenue column");
+        let cost = df.column("cost").expect("cost column");
+        let values: Vec<Scalar> = rev.values().iter().zip(cost.values()).map(|(r, c)| {
+            match (r, c) {
+                (Scalar::Float64(a), Scalar::Float64(b)) => Scalar::Float64(a / b),
+                _ => Scalar::Null(NullKind::NaN),
+            }
+        }).collect();
+        Column::from_values(values).map_err(FrameError::from)
     })),
 ])?;
 
