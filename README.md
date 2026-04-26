@@ -1446,7 +1446,7 @@ The conformance system is a differential testing framework that verifies Franken
     └────────────────┘   └────────────────┘
 ```
 
-**Packet families** cover: series alignment (FP-P2C-001–003), join semantics (FP-P2C-004), groupby aggregates (FP-P2C-005, 011), concat (FP-P2C-006), null/NaN ops (FP-P2C-007), CSV round-trip (FP-P2C-008), dtype invariants (FP-P2C-009), filter/selection (FP-P2C-010), plus 30+ DataFrame-level packets (FP-P2D-014 through FP-P2D-055) covering merge, concat axis options, head/tail, loc/iloc, sort, constructor variants, and more.
+**Packet families** cover: series alignment (FP-P2C-001–003), join semantics (FP-P2C-004), groupby aggregates (FP-P2C-005, 011), concat (FP-P2C-006), null/NaN ops (FP-P2C-007), CSV round-trip (FP-P2C-008), dtype invariants (FP-P2C-009), filter/selection (FP-P2C-010), plus 400+ DataFrame-level packets (FP-P2D-014 through FP-P2D-433+) covering merge, concat axis options, head/tail, loc/iloc, sort, constructor variants, and more.
 
 Every parity report gets a **RaptorQ repair-symbol sidecar** for bit-rot detection. The drift history ledger (`artifacts/phase2c/drift_history.jsonl`) tracks parity trends over time.
 
