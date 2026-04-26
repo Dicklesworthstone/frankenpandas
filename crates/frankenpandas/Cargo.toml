@@ -16,10 +16,22 @@ fp-columnar = { path = "../fp-columnar" }
 fp-expr = { path = "../fp-expr" }
 fp-frame = { path = "../fp-frame" }
 fp-index = { path = "../fp-index" }
-fp-io = { path = "../fp-io" }
+fp-io = { path = "../fp-io", default-features = false }
 fp-join = { path = "../fp-join" }
 fp-runtime = { path = "../fp-runtime" }
 fp-types = { path = "../fp-types" }
+
+# Per br-frankenpandas-l6nr (fd90.58): forward fp-io's SQL backend
+# features so umbrella users can opt out of rusqlite via
+# `default-features = false` and pick a backend explicitly. Default
+# matches fp-io: sql-sqlite on. The sql-postgresql / sql-mysql
+# features are placeholders today (fp-io exposes them but doesn't
+# bind concrete backends yet — that's fd90 Phase 2).
+[features]
+default = ["sql-sqlite"]
+sql-sqlite = ["fp-io/sql-sqlite"]
+sql-postgresql = ["fp-io/sql-postgresql"]
+sql-mysql = ["fp-io/sql-mysql"]
 
 [package.metadata.docs.rs]
 all-features = true
