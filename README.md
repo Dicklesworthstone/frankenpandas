@@ -147,7 +147,7 @@ frankenpandas/
 | **Arrow IPC stream** | `read_ipc_stream_bytes` | `write_ipc_stream_bytes` | Yes | Yes | Streaming wire format (forward-only; pipes + zero-copy interchange) |
 | **SQL** | `read_sql` / `read_sql_table` / `read_sql_chunks` | `write_sql` | N/A | `SqlConnection` trait; SQLite backend by default | `SqlReadOptions` (params, parse_dates, coerce_float, dtype, schema, columns, index_col), `SqlWriteOptions` (if_exists, index, index_label, schema, dtype, method, chunksize), `SqlInspector` for `SQLAlchemy.Inspector`-shaped introspection (tables / views / schemas / columns / indexes / FKs / UCs / reflect_table / reflect_all_tables) |
 
-All formats accessible through `DataFrameIoExt` trait methods on DataFrame.
+CSV, JSON, JSONL, Parquet, Excel, Feather, and SQL are accessible through `DataFrameIoExt` trait methods on `DataFrame` (e.g. `df.to_parquet(path)?`, `df.to_sql(&conn, "table", &opts)?`). The Arrow IPC stream format is reachable through the standalone `read_ipc_stream_bytes` / `write_ipc_stream_bytes` functions — no extension method is exposed for it on `DataFrameIoExt`.
 
 ## Installation
 
