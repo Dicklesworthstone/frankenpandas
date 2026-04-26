@@ -1522,3 +1522,86 @@ fn readme_dataframe_output_formats_compiles_and_runs() -> Result<(), Box<dyn std
     assert_eq!(mat[0].len(), 2);
     Ok(())
 }
+
+/// README "Describe" + "Correlation and Covariance" sections (lines 607-637).
+///
+/// Locks in the statistical-summary APIs that previously had no
+/// integration coverage:
+///
+/// DataFrame: describe, describe_with_percentiles, describe_dtypes,
+/// corr, corr_method (spearman/kendall), cov, corrwith.
+///
+/// Series-level: corr (Series-to-Series), cov_with, autocorr.
+///
+/// Tracks fd90.190 (br-frankenpandas-gdbwk).
+#[test]
+fn readme_describe_and_correlation_compiles_and_runs() -> Result<(), Box<dyn std::error::Error>> {
+    // Numeric DataFrame for describe + correlation matrices.
+    let df = read_csv_str(
+        "price,volume,revenue\n140.3,500,1500\n141.4,575,1600\n185.8,850,2400\n\
+         186.3,1075,2750\n187.3,1200,3000",
+    )?;
+
+    // describe — default 8-row summary (count, mean, std, min, 25%, 50%, 75%, max).
+    let summary = df.describe()?;
+    assert_eq!(summary.index().len(), 8);
+
+    // describe_with_percentiles — custom quantile rows.
+    let summary_p = df.describe_with_percentiles(&[0.1, 0.5, 0.9])?;
+    assert!(summary_p.index().len() >= 3);
+
+    // describe_dtypes — numeric-only filter via "number" alias.
+    let mixed = read_csv_str("price,ticker\n100,AAPL\n200,GOOGL\n300,MSFT")?;
+    let _num_only = mixed.describe_dtypes(&["number"], &[])?;
+
+    // corr — Pearson by default, returns NxN matrix.
+    let pearson = df.corr()?;
+    assert_eq!(pearson.column_names().len(), 3);
+    assert_eq!(pearson.index().len(), 3);
+
+    // corr_method — Spearman + Kendall variants.
+    let spearman = df.corr_method("spearman")?;
+    assert_eq!(spearman.column_names().len(), 3);
+    let kendall = df.corr_method("kendall")?;
+    assert_eq!(kendall.column_names().len(), 3);
+
+    // cov — covariance matrix (NxN).
+    let cov_mat = df.cov()?;
+    assert_eq!(cov_mat.column_names().len(), 3);
+
+    // corrwith — column-wise correlation against another DataFrame.
+    let other = df.clone();
+    let corr_w = df.corrwith(&other)?;
+    assert!(corr_w.len() >= 3);
+
+    // Series-level corr / cov_with / autocorr.
+    let s_labels: Vec<IndexLabel> = (0..5i64).map(IndexLabel::Int64).collect();
+    let s_a = Series::from_values(
+        "a",
+        s_labels.clone(),
+        vec![
+            Scalar::Float64(1.0),
+            Scalar::Float64(2.0),
+            Scalar::Float64(3.0),
+            Scalar::Float64(4.0),
+            Scalar::Float64(5.0),
+        ],
+    )?;
+    let s_b = Series::from_values(
+        "b",
+        s_labels,
+        vec![
+            Scalar::Float64(2.0),
+            Scalar::Float64(4.0),
+            Scalar::Float64(6.0),
+            Scalar::Float64(8.0),
+            Scalar::Float64(10.0),
+        ],
+    )?;
+    let pearson_ab = s_a.corr(&s_b)?;
+    assert!((pearson_ab - 1.0).abs() < 1e-9);
+    let cov_ab = s_a.cov_with(&s_b)?;
+    assert!(cov_ab > 0.0);
+    let _ac1 = s_a.autocorr(1)?;
+    Ok(())
+}
