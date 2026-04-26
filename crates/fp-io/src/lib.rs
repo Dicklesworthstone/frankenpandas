@@ -432,7 +432,7 @@ fn scalar_to_csv_with_na(scalar: &Scalar, na_rep: &str) -> String {
 }
 
 /// Default NA values recognized by pandas read_csv.
-/// See: https://pandas.pydata.org/docs/reference/api/pandas.read_csv.html
+/// See: <https://pandas.pydata.org/docs/reference/api/pandas.read_csv.html>
 const PANDAS_DEFAULT_NA_VALUES: &[&str] = &[
     "", "#N/A", "#N/A N/A", "#NA", "-1.#IND", "-1.#QNAN", "-NaN", "-nan", "1.#IND", "1.#QNAN",
     "<NA>", "N/A", "NA", "NULL", "NaN", "None", "n/a", "nan", "null",
