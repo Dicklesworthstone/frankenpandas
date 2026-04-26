@@ -851,3 +851,74 @@ fn readme_series_groupby_compiles_and_runs() -> Result<(), Box<dyn std::error::E
     assert_eq!(multi.index().len(), 2);
     Ok(())
 }
+
+/// README Time-Series Operations (lines 1256-1276).
+///
+/// Imports prelude only. Exercises:
+/// - df.at_time(time_str)? / df.between_time(start, end)?
+/// - series.dt() — DatetimeAccessor with year/month/.../strftime
+/// - series.dt().tz_localize(Some(tz))? / tz_convert(Some(tz))?
+#[test]
+fn readme_time_series_operations_compiles_and_runs() -> Result<(), Box<dyn std::error::Error>> {
+    // DataFrame with datetime ISO-string index labels for at_time / between_time.
+    let labels: Vec<IndexLabel> = vec![
+        IndexLabel::Utf8("2024-01-15T08:00:00".into()),
+        IndexLabel::Utf8("2024-01-15T10:00:00".into()),
+        IndexLabel::Utf8("2024-01-15T12:00:00".into()),
+        IndexLabel::Utf8("2024-01-15T14:00:00".into()),
+    ];
+    let val_series = Series::from_values(
+        "v",
+        labels.clone(),
+        vec![
+            Scalar::Int64(1),
+            Scalar::Int64(2),
+            Scalar::Int64(3),
+            Scalar::Int64(4),
+        ],
+    )?;
+    let df = DataFrame::new(
+        Index::new(labels.clone()),
+        std::collections::BTreeMap::from([
+            ("v".to_owned(), val_series.column().clone()),
+        ]),
+    )?;
+
+    // at_time / between_time — string-typed time matchers.
+    let _ = df.at_time("12:00:00")?;
+    let _ = df.between_time("09:00:00", "12:00:00")?;
+
+    // Datetime component extraction via .dt() accessor.
+    let date_series = Series::from_values(
+        "d",
+        (0..3i64).map(IndexLabel::Int64).collect(),
+        vec![
+            Scalar::Utf8("2024-01-15T12:30:00".into()),
+            Scalar::Utf8("2024-02-29T08:00:00".into()),
+            Scalar::Utf8("2024-12-31T23:59:59".into()),
+        ],
+    )?;
+    let dt = date_series.dt();
+    let _ = dt.year()?;
+    let _ = dt.month()?;
+    let _ = dt.day()?;
+    let _ = dt.hour()?;
+    let _ = dt.minute()?;
+    let _ = dt.second()?;
+    let _ = dt.dayofweek()?;
+    let _ = dt.dayofyear()?;
+    let _ = dt.quarter()?;
+    let _ = dt.weekofyear()?;
+    let _ = dt.is_month_start()?;
+    let _ = dt.is_month_end()?;
+    let _ = dt.is_quarter_start()?;
+    let _ = dt.is_quarter_end()?;
+    let _ = dt.strftime("%Y-%m-%d %H:%M")?;
+
+    // Timezone operations — tz arg is Option<&str>.
+    let _ = date_series.dt().tz_localize(Some("America/New_York"))?;
+    // tz_convert needs an already-localized series; use the localized output above.
+    let localized = date_series.dt().tz_localize(Some("America/New_York"))?;
+    let _ = localized.dt().tz_convert(Some("UTC"))?;
+    Ok(())
+}
