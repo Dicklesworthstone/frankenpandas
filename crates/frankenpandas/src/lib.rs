@@ -378,4 +378,119 @@ mod tests {
         let dt = to_datetime(&s).unwrap();
         assert_eq!(dt.len(), 1);
     }
+
+    /// Compile-time guard for the prelude expansion (fd90.121–fd90.144).
+    ///
+    /// Each let-binding through a prelude item ensures that name remains
+    /// reachable from `frankenpandas::prelude::*`. If anyone removes one
+    /// of these from the prelude, this test refuses to compile. Error
+    /// types `TypeError` / `GroupByError` are re-exported at the
+    /// top-level facade (not in prelude — same pattern as other crate
+    /// errors), so they're imported via `crate::` here.
+    ///
+    /// Tracks br-frankenpandas-6nexq / fd90.155.
+    #[test]
+    fn prelude_completeness_compile_guard() {
+        use crate::{GroupByError, TypeError};
+        // Enums + structs from the join family (fd90.127, fd90.143).
+        let _: AsofDirection = AsofDirection::Backward;
+        let _: JoinType = JoinType::Inner;
+        let _: MergeValidateMode = MergeValidateMode::OneToOne;
+        let _: MergeExecutionOptions = MergeExecutionOptions::default();
+        let _is_join_err: fn(JoinError) -> _ = |e| e; // type-check only
+        let _is_merged_df: fn(MergedDataFrame) -> _ = |x| x;
+
+        // GroupByError + TypeError (fd90.129).
+        let _is_group_err: fn(GroupByError) -> _ = |e| e;
+        let _: TypeError = TypeError::IncompatibleDtypes {
+            left: DType::Int64,
+            right: DType::Utf8,
+        };
+
+        // Index-side enums (fd90.128).
+        let _: DuplicateKeep = DuplicateKeep::First;
+        let _: ConcatJoin = ConcatJoin::Inner;
+        let _: DropNaHow = DropNaHow::Any;
+
+        // SQL surface (fd90.121).
+        let _: SqlIfExists = SqlIfExists::Fail;
+        // SqlConnection is a trait — name-check only.
+        fn _takes_sql<C: SqlConnection>(_: &C) {}
+
+        // NanOps primitives (fd90.126) — call each through a Vec<Scalar>.
+        let v = vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)];
+        let _ = nansum(&v);
+        let _ = nanmean(&v);
+        let _ = nancount(&v);
+        let _ = nanmin(&v);
+        let _ = nanmax(&v);
+        let _ = nanmedian(&v);
+        let _ = nanvar(&v, 1);
+        let _ = nanstd(&v, 1);
+        let _ = nansem(&v, 1);
+        let _ = nanprod(&v);
+        let _ = nanptp(&v);
+        let _ = nanskew(&v);
+        let _ = nankurt(&v);
+        let _ = nanquantile(&v, 0.5);
+        let _ = nanargmax(&v);
+        let _ = nanargmin(&v);
+        let _ = nannunique(&v);
+        let _ = nanany(&v);
+        let _ = nanall(&v);
+        let _ = nancumsum(&v);
+        let _ = nancumprod(&v);
+        let _ = nancummax(&v);
+        let _ = nancummin(&v);
+
+        // Concat family additions (fd90.141) — runtime-call subset, name-check rest.
+        let df = read_csv_str("a\n1\n2").unwrap();
+        let _ = concat_dataframes(&[&df, &df]).unwrap();
+        let _ = concat_dataframes_with_axis(&[&df, &df], 0).unwrap();
+        let _ = concat_dataframes_with_axis_join(&[&df, &df], 0, ConcatJoin::Outer).unwrap();
+        let _ = concat_dataframes_with_ignore_index(&[&df, &df], false).unwrap();
+        let _ = concat_dataframes_with_keys(&[&df, &df], &["a", "b"]).unwrap();
+        // Name-check the remaining concat helper (pulled in for symmetry by fd90.141).
+        let _name_check_concat_series_with_ignore_index = concat_series_with_ignore_index;
+
+        // IO format coverage (fd90.125, fd90.142) — name-check that all 8 readers
+        // and writers are reachable from the prelude. We use `let _ = name;` to bind
+        // the function item to a value; the type is inferred and we don't need to
+        // annotate the exact signature (which varies per IO format).
+        let _ = read_csv;
+        let _ = read_excel;
+        let _ = read_excel_bytes;
+        let _ = read_feather;
+        let _ = read_feather_bytes;
+        let _ = read_ipc_stream_bytes;
+        let _ = read_json;
+        let _ = read_jsonl;
+        let _ = read_parquet;
+        let _ = read_parquet_bytes;
+        let _ = write_csv;
+        let _ = write_excel;
+        let _ = write_excel_bytes;
+        let _ = write_feather;
+        let _ = write_feather_bytes;
+        let _ = write_ipc_stream_bytes;
+        let _ = write_json;
+        let _ = write_jsonl;
+        let _ = write_parquet;
+        let _ = write_parquet_bytes;
+        // write_sql is generic over C: SqlConnection — exercised in the
+        // rusqlite_reexport_quickstart_compiles test; bare let-binding
+        // can't infer C without a concrete type, so skip here.
+
+        // Module-level helpers (fd90.144) — name-check.
+        let _ = cut;
+        let _ = qcut;
+        let _ = timedelta_total_seconds;
+        let _ = to_datetime_with_format;
+        let _ = to_datetime_with_options;
+        let _ = to_datetime_with_unit;
+        let _ = merge_asof;
+        let _ = merge_dataframes_on;
+        let _ = merge_ordered;
+        let _ = join_series;
+    }
 }
