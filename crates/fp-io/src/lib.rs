@@ -4764,13 +4764,24 @@ fn quote_sql_ident(name: &str) -> Result<String, IoError> {
     Ok(format!("\"{}\"", escape_sql_ident(name)?))
 }
 
-fn validate_sql_table_name(table_name: &str) -> Result<(), IoError> {
-    if table_name.is_empty() || !table_name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+/// Per br-frankenpandas-4l7a (fd90.55): shared identifier-shape
+/// validator used by `validate_sql_table_name` and
+/// `validate_sql_column_name`. `kind` is the user-facing label
+/// inserted into the error message ("table", "column", ...). The
+/// rule is the same for both: non-empty, ASCII-alphanumeric or
+/// underscore only — defense in depth alongside `quote_identifier`
+/// (which handles embedded quotes but doesn't reject other shapes).
+fn validate_sql_ident(name: &str, kind: &str) -> Result<(), IoError> {
+    if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
         return Err(IoError::Sql(format!(
-            "invalid table name: '{table_name}' (must be non-empty, only alphanumeric and underscore allowed)"
+            "invalid {kind} name: '{name}' (must be non-empty, only alphanumeric and underscore allowed)"
         )));
     }
     Ok(())
+}
+
+fn validate_sql_table_name(table_name: &str) -> Result<(), IoError> {
+    validate_sql_ident(table_name, "table")
 }
 
 /// Validate `name` against the backend's identifier-length cap.
@@ -4833,12 +4844,7 @@ fn sql_select_all_query_in_schema<C: SqlConnection>(
 }
 
 fn validate_sql_column_name(column_name: &str) -> Result<(), IoError> {
-    if column_name.is_empty() || !column_name.chars().all(|c| c.is_alphanumeric() || c == '_') {
-        return Err(IoError::Sql(format!(
-            "invalid column name: '{column_name}' (must be non-empty, only alphanumeric and underscore allowed)"
-        )));
-    }
-    Ok(())
+    validate_sql_ident(column_name, "column")
 }
 
 fn sql_select_columns_query<C: SqlConnection>(
