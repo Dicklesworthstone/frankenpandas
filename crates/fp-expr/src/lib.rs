@@ -1,5 +1,80 @@
 #![forbid(unsafe_code)]
 
+//! Expression engine for **frankenpandas** — implements pandas
+//! `DataFrame.eval()` / `DataFrame.query()` semantics for Rust
+//! callers and provides the underlying [`Expr`] AST + parser /
+//! evaluator that the rest of the workspace can build on.
+//!
+//! ## Why
+//!
+//! Pandas users write things like:
+//! ```python
+//! df.query("price > 100 and category == 'A'")
+//! df.eval("margin = revenue - cost")
+//! ```
+//!
+//! This crate gives Rust callers the equivalent: `df.query(...)`,
+//! `df.eval(...)`, with a parsed [`Expr`] AST you can build
+//! programmatically or via the string parser.
+//!
+//! ## Public surface
+//!
+//! - [`Expr`]: the expression AST. Built either by hand
+//!   ([`Expr::Series`], [`Expr::Add`], [`Expr::Sub`],
+//!   [`Expr::Local`], etc.) or by parsing a pandas-style string
+//!   with [`parse_expr`].
+//! - [`SeriesRef`]: a typed column-name reference. Used by `Expr`
+//!   variants and by callers building expressions programmatically.
+//! - [`EvalContext`]: the evaluation environment — bindings for
+//!   local variables (the `@local_var` syntax in pandas eval) plus
+//!   the [`RuntimePolicy`] / [`EvidenceLedger`] from fp-runtime
+//!   for decision recording.
+//! - [`ExprError`]: failure modes (parse error, unknown column,
+//!   type mismatch, division by zero, ...).
+//!
+//! ## Evaluation entry points
+//!
+//! Direct AST eval:
+//! - [`evaluate`]: evaluate an [`Expr`] against a Series-like input.
+//! - [`evaluate_on_dataframe`]: bind columns from a DataFrame as
+//!   identifiers and evaluate.
+//! - [`evaluate_on_dataframe_with_locals`]: same, plus an external
+//!   `@local` binding map.
+//! - [`filter_dataframe_on_expr`] /
+//!   [`filter_dataframe_on_expr_with_locals`]: shortcut for
+//!   `df[df.eval(expr)]` — the boolean-mask filter pattern.
+//!
+//! String entry points (parse-then-eval):
+//! - [`eval_str`] / [`eval_str_with_locals`]: pandas
+//!   `df.eval(string)` — returns a new Series / DataFrame column.
+//! - [`query_str`] / [`query_str_with_locals`]: pandas
+//!   `df.query(string)` — returns the row-filtered DataFrame.
+//! - [`parse_expr`]: the standalone parser if you only want the
+//!   AST.
+//!
+//! ## DataFrame extension trait
+//!
+//! [`DataFrameExprExt`] adds `df.eval(expr)` / `df.query(expr)`
+//! method-style entry points on `DataFrame` so users can call them
+//! fluently after `use fp_expr::DataFrameExprExt;`.
+//!
+//! ## Incremental views
+//!
+//! [`MaterializedView`] + [`Delta`]: the foundation for incremental
+//! `eval`-derived columns. A `MaterializedView` caches the last
+//! result and the input fingerprint; on next call, only re-evaluates
+//! when inputs change. `Delta` records what changed for downstream
+//! consumers.
+//!
+//! ## Cross-crate relationships
+//!
+//! - **fp-types** (`Scalar`), **fp-columnar** (`ComparisonOp`),
+//!   **fp-index** (`Index`), **fp-frame** (`Series`, `DataFrame`,
+//!   `FrameError`) are all consumed.
+//! - **fp-runtime** (`RuntimePolicy`, `EvidenceLedger`) provides
+//!   the optional decision-policy hook threaded through
+//!   `EvalContext`.
+
 use std::collections::BTreeMap;
 
 use fp_columnar::ComparisonOp;
