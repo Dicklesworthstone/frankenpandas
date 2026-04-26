@@ -1,6 +1,86 @@
 #![forbid(unsafe_code)]
 #![warn(rustdoc::broken_intra_doc_links)]
 
+//! DataFrame / Series core for **frankenpandas** — the user-facing
+//! analytics surface, mirroring pandas' DataFrame and Series APIs
+//! plus their groupby / window / resample / accessor families.
+//!
+//! This is the largest workspace crate. It glues together:
+//! - **fp-types**: scalar values, dtypes, `nan*` reductions
+//! - **fp-columnar**: per-column storage ([`Column`])
+//! - **fp-index**: row labels and binary-op alignment
+//! - **fp-runtime**: optional decision-recording policy
+//!
+//! Most callers reach the contents of this crate via the
+//! `frankenpandas` umbrella prelude (`use frankenpandas::prelude::*`)
+//! or via direct imports (`use fp_frame::DataFrame`).
+//!
+//! ## Core data structures
+//!
+//! - [`DataFrame`]: columnar table with a row [`Index`] and an
+//!   ordered column map. Constructors mirror pandas:
+//!   `from_dict`, `from_series`, `from_columns`, `from_records`.
+//!   Operations cover selection, mutation, reindexing, grouping,
+//!   window-functions, joins, IO round-trips (via fp-io).
+//! - [`Series`]: single-column labeled vector. Built-in arithmetic,
+//!   reductions, and accessor families (string / datetime /
+//!   categorical / sparse).
+//! - [`FrameError`]: failure modes (column-not-found, length
+//!   mismatch, dtype mismatch, alignment error, ...).
+//!
+//! ## GroupBy and window operations
+//!
+//! - [`SeriesGroupBy`] (and the corresponding DataFrame-side
+//!   wrappers): pandas `.groupby()` semantics including aggregation,
+//!   transformation, filtering, and `apply`.
+//! - [`Rolling`] / [`Expanding`] / [`Ewm`]: window-function
+//!   builders for Series (rolling, expanding, exponentially-weighted
+//!   moving stats).
+//! - [`DataFrameRolling`] / [`DataFrameExpanding`] /
+//!   [`DataFrameEwm`]: column-wise variants for DataFrame inputs.
+//! - [`Resample`] / [`DataFrameResample`]: pandas
+//!   `.resample(freq)` for time-indexed Series / DataFrames.
+//!
+//! ## Accessors
+//!
+//! Mirror pandas `.str` / `.dt` / `.cat` / `.sparse` namespaces:
+//!
+//! - [`StringAccessor`]: vectorized string ops on Utf8 Series.
+//! - [`DatetimeAccessor`]: per-element datetime field extraction.
+//!   See also [`TzLocalizeOptions`] / [`TzAmbiguousPolicy`] /
+//!   [`TzNonexistentPolicy`] for tz-aware localization.
+//! - [`CategoricalAccessor`] + [`CategoricalMetadata`]: ordered
+//!   / unordered categorical type machinery.
+//! - [`SparseAccessor`]: paired with fp-columnar's `SparseColumn`.
+//!
+//! ## Type coercion (pandas `pd.to_*` analogs)
+//!
+//! - [`to_numeric`]: best-effort string -> Int64/Float64 with
+//!   `errors='raise'|'coerce'` semantics.
+//! - [`to_datetime`] / [`to_datetime_with_format`] /
+//!   [`to_datetime_with_unit`] / [`to_datetime_with_options`]:
+//!   parse a Series of dates with explicit format / unit / origin
+//!   ([`ToDatetimeOrigin`]) controls. Options bundle:
+//!   [`ToDatetimeOptions`].
+//! - [`to_timedelta`] / [`to_timedelta_with_unit`]: parse
+//!   ISO-8601 / pandas-shorthand durations.
+//!   [`ToTimedeltaOptions`] / [`ToTimedeltaErrors`] for tunables.
+//!
+//! ## Frame combination
+//!
+//! `concat_dataframes`, `concat_series`, `concat_dataframes_with_*`
+//! variants mirror `pd.concat(..., axis=, join=, ignore_index=,
+//! keys=)`. Merge / join helpers live in the sibling **fp-join**
+//! crate (`merge_dataframes_on`, `merge_asof`, `merge_ordered`,
+//! `join_series`).
+//!
+//! ## SQL IO
+//!
+//! Read / write IO for DataFrames lives in **fp-io**, which exposes
+//! the [`DataFrameIoExt`](https://docs.rs/fp-io/latest/fp_io/trait.DataFrameIoExt.html)
+//! extension trait so users can call `df.to_parquet(path)`,
+//! `df.to_sql(conn, ..)`, etc. directly on values from this crate.
+
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
