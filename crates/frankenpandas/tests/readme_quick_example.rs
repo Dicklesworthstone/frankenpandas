@@ -568,3 +568,47 @@ fn readme_pivot_tables_compiles_and_runs() -> Result<(), Box<dyn std::error::Err
     assert_eq!(pt.index().len(), 2);
     Ok(())
 }
+
+/// README Concat: Full Options (lines 1210-1228).
+///
+/// Imports prelude only. Locks in fd90.141's prelude expansion of
+/// the 5 concat variants. Verifies:
+/// - concat_dataframes(&[&df, &df])?                     — axis-0 stack
+/// - concat_dataframes_with_axis(&[&df, &df], 1)?        — axis-1 outer
+/// - concat_dataframes_with_axis_join(..., 1, Inner)?    — axis-1 inner
+/// - concat_dataframes_with_axis_join(..., 0, Inner)?    — axis-0 inner
+/// - concat_dataframes_with_keys(..., &['train','test'])? — hierarchical labels
+/// - concat_dataframes_with_ignore_index(..., false)?    — reindex 0..n
+#[test]
+fn readme_concat_full_options_compiles_and_runs() -> Result<(), Box<dyn std::error::Error>> {
+    // Same columns for axis=0 stack/inner. Different columns for axis=1.
+    let df1 = read_csv_str("a,b\n1,10\n2,20")?;
+    let df2 = read_csv_str("a,b\n3,30\n4,40")?;
+    let df3 = read_csv_str("c,d\n100,1000\n200,2000")?;
+
+    // Axis 0 (default — stack rows on shared columns).
+    let stacked = concat_dataframes(&[&df1, &df2])?;
+    assert_eq!(stacked.index().len(), 4);
+
+    // Axis 1 (columns side-by-side, outer join on index) — needs disjoint columns.
+    let wide = concat_dataframes_with_axis(&[&df1, &df3], 1)?;
+    // Same 2-row index in both → 2 rows wide.
+    assert_eq!(wide.index().len(), 2);
+
+    // Axis 1 with inner join (only shared index labels).
+    let inner = concat_dataframes_with_axis_join(&[&df1, &df3], 1, ConcatJoin::Inner)?;
+    assert_eq!(inner.index().len(), 2);
+
+    // Axis 0 with inner join (only shared columns) — df1+df2 share a,b.
+    let shared = concat_dataframes_with_axis_join(&[&df1, &df2], 0, ConcatJoin::Inner)?;
+    assert_eq!(shared.index().len(), 4);
+
+    // With hierarchical keys.
+    let labeled = concat_dataframes_with_keys(&[&df1, &df2], &["train", "test"])?;
+    assert_eq!(labeled.index().len(), 4);
+
+    // Ignore original indexes (reindex to 0..n).
+    let clean = concat_dataframes_with_ignore_index(&[&df1, &df2], true)?;
+    assert_eq!(clean.index().len(), 4);
+    Ok(())
+}
