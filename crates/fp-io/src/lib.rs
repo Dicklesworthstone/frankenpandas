@@ -1,5 +1,85 @@
 #![forbid(unsafe_code)]
 
+//! IO layer for **frankenpandas**: round-trips between `DataFrame` and the
+//! seven supported on-disk / wire formats — CSV, JSON, JSONL, Parquet, Excel
+//! (XLSX), Feather (Arrow IPC v2), and SQL.
+//!
+//! ## Format readers / writers
+//!
+//! - **CSV**: [`read_csv`], [`read_csv_with_options`], [`write_csv`],
+//!   [`write_csv_string`]
+//! - **JSON / JSONL**: [`read_json`], [`read_jsonl`], [`write_json`],
+//!   [`write_jsonl`]
+//! - **Parquet**: [`read_parquet`], [`write_parquet`]
+//! - **Excel**: [`read_excel`], [`write_excel`]
+//! - **Feather / Arrow IPC**: [`read_feather`], [`write_feather`],
+//!   [`read_ipc_stream_bytes`], [`write_ipc_stream_bytes`]
+//! - **SQL**: [`read_sql`], [`read_sql_table`], [`write_sql`],
+//!   [`write_sql_with_options`], plus the chunked variants
+//!   ([`read_sql_chunks`], [`SqlChunkIterator`]).
+//!
+//! Each format has a per-call options struct ([`CsvReadOptions`],
+//! [`ExcelReadOptions`], [`SqlReadOptions`], [`SqlWriteOptions`], ...) so
+//! pandas-shaped keyword arguments thread cleanly through the Rust API.
+//! The [`DataFrameIoExt`] extension trait adds `df.to_csv(path)` /
+//! `df.to_parquet(path)` / etc. methods on `DataFrame` for ergonomic
+//! method-chain use.
+//!
+//! ## SQL backend abstraction
+//!
+//! SQL IO is built around the [`SqlConnection`] trait — a backend-neutral
+//! contract that mirrors the supported subset of pandas /
+//! `SQLAlchemy.Inspector`. Concrete backends (today: rusqlite via the
+//! `sql-sqlite` feature) implement the trait and inherit:
+//!
+//! - **Mutation primitives**: [`SqlConnection::query`],
+//!   [`SqlConnection::execute_batch`], [`SqlConnection::insert_rows`],
+//!   [`SqlConnection::truncate_table`], [`SqlConnection::with_transaction`].
+//! - **Capability probes**: [`SqlConnection::dialect_name`],
+//!   [`SqlConnection::server_version`], [`SqlConnection::max_param_count`],
+//!   [`SqlConnection::max_identifier_length`],
+//!   [`SqlConnection::supports_returning`],
+//!   [`SqlConnection::supports_schemas`].
+//! - **Identifier / parameter shape hooks**:
+//!   [`SqlConnection::quote_identifier`],
+//!   [`SqlConnection::parameter_marker`].
+//! - **Introspection** (matching `SQLAlchemy.Inspector` shape):
+//!   [`SqlConnection::list_tables`], [`SqlConnection::list_views`],
+//!   [`SqlConnection::list_schemas`], [`SqlConnection::table_schema`],
+//!   [`SqlConnection::list_indexes`], [`SqlConnection::list_foreign_keys`],
+//!   [`SqlConnection::list_unique_constraints`],
+//!   [`SqlConnection::primary_key_columns`],
+//!   [`SqlConnection::table_comment`].
+//!
+//! The [`SqlInspector`] facade wraps a `&C: SqlConnection` and exposes the
+//! whole introspection API as methods on a single bundle:
+//!
+//! ```ignore
+//! let inspector = SqlInspector::new(&conn);
+//! let bundle = inspector
+//!     .reflect_table("users", None)?
+//!     .expect("table exists");
+//! for col in &bundle.columns {
+//!     println!("{}: {:?}", col.name, col.declared_type);
+//! }
+//! ```
+//!
+//! [`SqlReflectedTable`] is the bundled metadata returned by
+//! [`SqlInspector::reflect_table`] / [`SqlInspector::reflect_all_tables`] /
+//! [`SqlInspector::reflect_all_views`] — columns, primary key, indexes,
+//! foreign keys, unique constraints, and table-level comment, with
+//! per-column lookup helpers.
+//!
+//! ## Cargo features
+//!
+//! - `sql-sqlite` (**default**): bind [`SqlConnection`] for
+//!   `rusqlite::Connection`.
+//! - `sql-postgresql`, `sql-mysql`: placeholder feature flags for the fd90
+//!   Phase 2 backend integrations (no concrete bindings yet).
+//!
+//! Use `default-features = false` to drop the rusqlite dep when only the
+//! non-SQL formats are needed.
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
