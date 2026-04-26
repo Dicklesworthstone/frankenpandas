@@ -612,3 +612,44 @@ fn readme_concat_full_options_compiles_and_runs() -> Result<(), Box<dyn std::err
     assert_eq!(clean.index().len(), 4);
     Ok(())
 }
+
+/// README Element-Wise Operations (lines 1027-1054).
+///
+/// Imports prelude only. Locks in fd90.123's pct_change(1) signature fix
+/// plus the broader scalar / df-to-df / cumulative API. Verifies that
+/// the documented chain compiles and runs end-to-end.
+#[test]
+fn readme_element_wise_operations_compiles_and_runs() -> Result<(), Box<dyn std::error::Error>> {
+    let df = read_csv_str("a,b\n10,1\n20,2\n30,3\n40,4")?;
+
+    // Scalar arithmetic.
+    let _ = df.mul_scalar(2.0)?;
+    let _ = df.add_scalar(100.0)?;
+    let _ = df.div_scalar(2.0)?;
+    let _ = df.pow_scalar(2.0)?;
+    let _ = df.mod_scalar(10.0)?;
+    let _ = df.floordiv_scalar(3.0)?;
+
+    // DataFrame-to-DataFrame (aligned).
+    let df2 = read_csv_str("a,b\n5,1\n10,2\n15,3\n20,4")?;
+    let _ = df.sub_df(&df2)?;
+    let _ = df.div_df(&df2)?;
+    let _ = df.mul_df(&df2)?;
+
+    // With fill value.
+    let _ = df.add_df_fill(&df2, 0.0)?;
+
+    // Cumulative ops.
+    let csum = df.cumsum()?;
+    assert_eq!(csum.index().len(), 4);
+    let _ = df.cumprod()?;
+    let _ = df.cummax()?;
+    let _ = df.cummin()?;
+
+    // Sequential ops.
+    let _ = df.diff(1)?;
+    let _ = df.shift(1)?;
+    let pct = df.pct_change(1)?; // fd90.123 fix — periods is required arg
+    assert_eq!(pct.index().len(), 4);
+    Ok(())
+}
