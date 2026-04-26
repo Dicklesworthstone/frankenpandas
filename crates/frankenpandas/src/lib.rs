@@ -36,6 +36,8 @@ pub use fp_index::{
 pub use fp_frame::{
     CategoricalAccessor, CategoricalMetadata, ConcatJoin, DataFrame, DataFrameColumnInput,
     DropNaHow, FrameError, Series, SeriesResetIndexResult, ToDatetimeOptions, ToDatetimeOrigin,
+    ToTimedeltaErrors, ToTimedeltaOptions, TzAmbiguousPolicy, TzLocalizeOptions,
+    TzNonexistentPolicy,
 };
 
 // ── Module-level functions (like pd.concat, pd.to_datetime, etc.) ────
@@ -48,7 +50,9 @@ pub use fp_frame::{
 
 pub use fp_frame::to_numeric;
 pub use fp_frame::{cut, qcut};
-pub use fp_frame::{timedelta_total_seconds, to_timedelta};
+pub use fp_frame::{
+    timedelta_total_seconds, to_timedelta, to_timedelta_with_options, to_timedelta_with_unit,
+};
 pub use fp_frame::{
     to_datetime, to_datetime_with_format, to_datetime_with_options, to_datetime_with_unit,
 };
@@ -258,6 +262,12 @@ pub mod prelude {
         // to_datetime_with_options function (already in the prelude).
         ToDatetimeOptions,
         ToDatetimeOrigin,
+        // fd90.218: timedelta + tz option surfaces.
+        ToTimedeltaErrors,
+        ToTimedeltaOptions,
+        TzAmbiguousPolicy,
+        TzLocalizeOptions,
+        TzNonexistentPolicy,
         // Per-cell null tracking — README has a dedicated subsection
         // ("ValidityMask: Bitpacked Null Tracking", lines 261-278) and
         // lists it among types deriving Serialize + Deserialize (line 1567).
@@ -309,6 +319,8 @@ pub mod prelude {
         qcut,
         timedelta_total_seconds,
         to_datetime,
+        to_timedelta_with_options,
+        to_timedelta_with_unit,
         to_datetime_with_format,
         to_datetime_with_options,
         to_datetime_with_unit,
@@ -517,6 +529,15 @@ mod tests {
         // fd90.211: ToDatetimeOptions + ToDatetimeOrigin in prelude.
         let _: ToDatetimeOptions<'_> = ToDatetimeOptions::default();
         let _: ToDatetimeOrigin<'_> = ToDatetimeOrigin::Int(0);
+
+        // fd90.218: timedelta + tz option surfaces.
+        let _: ToTimedeltaOptions<'_> = ToTimedeltaOptions::default();
+        let _is_td_err: fn(ToTimedeltaErrors) -> _ = |e| e;
+        let _: TzLocalizeOptions = TzLocalizeOptions::default();
+        let _is_tz_amb: fn(TzAmbiguousPolicy) -> _ = |p| p;
+        let _is_tz_nx: fn(TzNonexistentPolicy) -> _ = |p| p;
+        let _ = to_timedelta_with_options;
+        let _ = to_timedelta_with_unit;
 
         // NanOps primitives (fd90.126) — call each through a Vec<Scalar>.
         let v = vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)];
