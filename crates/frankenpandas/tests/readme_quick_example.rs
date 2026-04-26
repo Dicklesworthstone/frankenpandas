@@ -922,3 +922,70 @@ fn readme_time_series_operations_compiles_and_runs() -> Result<(), Box<dyn std::
     let _ = localized.dt().tz_convert(Some("UTC"))?;
     Ok(())
 }
+
+/// README GroupBy: Complete Aggregation Matrix (lines 545-566).
+///
+/// Imports prelude only. Exercises the full DataFrameGroupBy surface:
+/// 14 named aggs via string dispatch, several direct method calls,
+/// group-level transforms (cumsum/cumcount/etc), and multi-fn agg.
+#[test]
+fn readme_groupby_aggregation_matrix_compiles_and_runs() -> Result<(), Box<dyn std::error::Error>> {
+    // 6-row DataFrame with 2 groups (a=1: rows 0,1,2; a=2: rows 3,4,5).
+    let df = read_csv_str("a,b\n1,10\n1,20\n1,30\n2,40\n2,50\n2,60")?;
+    let gb = df.groupby(&["a"])?;
+
+    // Direct method calls — Returns DataFrame indexed by group keys.
+    let _ = gb.sum()?;
+    let _ = gb.mean()?;
+    let _ = gb.count()?;
+    let _ = gb.min()?;
+    let _ = gb.max()?;
+    let _ = gb.std()?;
+    let _ = gb.var()?;
+    let _ = gb.median()?;
+    let _ = gb.first()?;
+    let _ = gb.last()?;
+    let _ = gb.prod()?;
+    let _ = gb.size()?;
+    let _ = gb.nunique()?;
+    let _ = gb.idxmin()?;
+    let _ = gb.idxmax()?;
+    let _ = gb.all()?;
+    let _ = gb.any()?;
+
+    // String-dispatch agg — exercise via agg_list which takes a flat &[&str].
+    // (DataFrameGroupBy has multiple agg() overloads — the HashMap variant
+    // wins method resolution for slice literals, so use agg_list for the
+    // 'apply this fn to all cols' shape.)
+    for fn_name in [
+        "sum", "mean", "count", "min", "max", "std", "var", "median", "first",
+        "last", "prod", "sem", "skew", "kurt", "kurtosis",
+    ] {
+        let _ = gb.agg_list(&[fn_name])?;
+    }
+
+    // Multi-fn agg via agg_list — returns a DataFrame with rows for each fn.
+    let _ = gb.agg_list(&["sum", "mean", "count"])?;
+
+    // agg_named — explicit (out_col, src_col, fn).
+    let named = gb.agg_named(&[
+        ("total_b", "b", "sum"),
+        ("avg_b", "b", "mean"),
+    ])?;
+    assert_eq!(named.index().len(), 2);
+
+    // Group-level transforms / ops (line 566).
+    let _ = gb.cumsum()?;
+    let _ = gb.cumprod()?;
+    let _ = gb.cummax()?;
+    let _ = gb.cummin()?;
+    let _ = gb.shift(1)?;
+    let _ = gb.diff(1)?;
+    let _ = gb.head(2)?;
+    let _ = gb.tail(2)?;
+    let _ = gb.cumcount()?;
+    let _ = gb.ngroup()?;
+    let _ = gb.describe()?;
+
+    Ok(())
+}
