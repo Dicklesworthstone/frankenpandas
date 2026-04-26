@@ -34,7 +34,7 @@
 | Row MultiIndex | Yes | No | Yes (DataFrame/groupby/indexing/reshape/IO integration) |
 | Categorical dtype | Yes | Yes | Yes (metadata layer) |
 | 8 IO formats (CSV/JSON/JSONL/Parquet/Excel/SQL/Feather/IPC) | Yes (SQL: any SQLAlchemy engine) | Partial | Yes (SQL: generic `SqlConnection`, SQLite default backend; PostgreSQL/MySQL planned) |
-| Conformance testing against pandas oracle | - | - | Yes (430+ packet suites, 1249 fixtures, all green) |
+| Conformance testing against pandas oracle | - | - | Yes (430+ packet suites, 1250 fixtures; 557 lib packets passing, 5 known divergences tracked in DISCREPANCIES.md DISC-011 through DISC-014) |
 
 ## Quick Example
 
@@ -889,7 +889,7 @@ let merged = df1.merge_with_options(&df2, &["key"], JoinType::Inner,
 ./scripts/phase2c_gate_check.sh
 ```
 
-Regenerates conformance packet artifacts and fails closed if any parity report or gate is not green. 430+ packet suites spanning 1249 fixtures cover alignment, join, groupby, concat, filter, CSV, dtype, null semantics, resample, rolling, groupby rolling/resample, datetime accessors, string accessors, and more. The vast majority pass under `cargo test -p fp-conformance` (557+ passing); a small number of known mismatch packets remain on the backlog (currently 3 packet filter cases on time-zone parse_dates, axis-1 concat, and JSON records orient, plus the FP-P2C-001 series_add packets on union sort + Int64→Float64 promotion). Each is documented with full root-cause analysis in [`crates/fp-conformance/DISCREPANCIES.md`](crates/fp-conformance/DISCREPANCIES.md) (DISC-011 through DISC-014), so users hitting these failures find the explanation and the WILL-FIX status without having to re-derive the divergence.
+Regenerates conformance packet artifacts and fails closed if any parity report or gate is not green. 430+ packet suites spanning 1250 fixtures cover alignment, join, groupby, concat, filter, CSV, dtype, null semantics, resample, rolling, groupby rolling/resample, datetime accessors, string accessors, and more. The vast majority pass under `cargo test -p fp-conformance` (557+ passing); a small number of known mismatch packets remain on the backlog (currently 3 packet filter cases on time-zone parse_dates, axis-1 concat, and JSON records orient, plus the FP-P2C-001 series_add packets on union sort + Int64→Float64 promotion). Each is documented with full root-cause analysis in [`crates/fp-conformance/DISCREPANCIES.md`](crates/fp-conformance/DISCREPANCIES.md) (DISC-011 through DISC-014), so users hitting these failures find the explanation and the WILL-FIX status without having to re-derive the divergence.
 
 ## Missing Data Handling
 
