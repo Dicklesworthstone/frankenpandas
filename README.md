@@ -1007,8 +1007,10 @@ let float_col = int_series.astype(DType::Float64)?;
 // Cast DataFrame column
 let df2 = df.astype_column("price", DType::Float64)?;
 
-// Cast multiple columns at once
-let df2 = df.astype_columns(&[("id", DType::Utf8), ("score", DType::Float64)])?;
+// Cast multiple columns at once (note: to-Utf8 cast is currently unsupported;
+// use astype only for numeric / Bool / Timedelta64 targets — string conversion
+// goes through Display::to_string, not astype)
+let df2 = df.astype_columns(&[("count", DType::Int64), ("score", DType::Float64)])?;
 
 // Auto-infer best dtypes (Utf8 → Int64/Float64 where possible)
 let df2 = df.convert_dtypes()?;
