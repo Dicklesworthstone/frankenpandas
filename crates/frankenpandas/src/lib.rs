@@ -34,8 +34,8 @@ pub use fp_index::{
 };
 
 pub use fp_frame::{
-    CategoricalAccessor, CategoricalMetadata, ConcatJoin, DataFrame, DropNaHow, FrameError,
-    Series, SeriesResetIndexResult, ToDatetimeOptions, ToDatetimeOrigin,
+    CategoricalAccessor, CategoricalMetadata, ConcatJoin, DataFrame, DataFrameColumnInput,
+    DropNaHow, FrameError, Series, SeriesResetIndexResult, ToDatetimeOptions, ToDatetimeOrigin,
 };
 
 // ── Module-level functions (like pd.concat, pd.to_datetime, etc.) ────
@@ -207,6 +207,7 @@ pub mod prelude {
         CsvReadOptions,
         DType,
         DataFrame,
+        DataFrameColumnInput,
         DropNaHow,
         DuplicateKeep,
         // Traits

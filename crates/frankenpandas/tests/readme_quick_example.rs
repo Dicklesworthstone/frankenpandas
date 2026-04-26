@@ -1690,3 +1690,138 @@ fn readme_nanops_compiles_and_runs() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(cmin.len(), values.len());
     Ok(())
 }
+
+/// README "DataFrame Constructors" table (lines 856-873).
+///
+/// Locks in the 11 named constructors that previously had no
+/// integration coverage (DataFrame::new is implicitly used elsewhere):
+///
+/// - from_dict / from_dict_with_index / from_dict_mixed
+/// - from_series (N-way alignment)
+/// - from_records / from_tuples / from_tuples_with_index
+/// - from_csv (inline string)
+/// - from_dict_index / from_dict_index_columns (orient=index)
+/// - new_with_row_multiindex (logical row MultiIndex metadata)
+///
+/// fd90.192 also exposes DataFrameColumnInput in the prelude — required
+/// for from_dict_mixed user code to compile without depending on
+/// fp_frame directly.
+///
+/// Tracks fd90.192 (br-frankenpandas-fzj18).
+#[test]
+fn readme_dataframe_constructors_compiles_and_runs() -> Result<(), Box<dyn std::error::Error>> {
+    // from_dict — column-oriented, with explicit column_order.
+    let df = DataFrame::from_dict(
+        &["a", "b"],
+        vec![
+            ("a", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+            ("b", vec![Scalar::Int64(3), Scalar::Int64(4)]),
+        ],
+    )?;
+    assert_eq!(df.column_names().len(), 2);
+    assert_eq!(df.index().len(), 2);
+
+    // from_dict_with_index — explicit row-index labels.
+    let labels: Vec<IndexLabel> = vec!["x".into(), "y".into()];
+    let df_idx = DataFrame::from_dict_with_index(
+        vec![("a", vec![Scalar::Int64(10), Scalar::Int64(20)])],
+        labels,
+    )?;
+    assert_eq!(df_idx.index().len(), 2);
+
+    // from_dict_mixed — broadcast scalar columns alongside vector ones.
+    let df_mixed = DataFrame::from_dict_mixed(
+        &["a", "b"],
+        vec![
+            ("a", DataFrameColumnInput::Values(vec![Scalar::Int64(1), Scalar::Int64(2)])),
+            ("b", DataFrameColumnInput::Scalar(Scalar::Utf8("const".to_owned()))),
+        ],
+    )?;
+    assert_eq!(df_mixed.column_names().len(), 2);
+    assert_eq!(df_mixed.index().len(), 2);
+
+    // from_series — N-way alignment.
+    let s1 = Series::from_values(
+        "a",
+        vec![IndexLabel::Int64(0), IndexLabel::Int64(1)],
+        vec![Scalar::Int64(1), Scalar::Int64(2)],
+    )?;
+    let s2 = Series::from_values(
+        "b",
+        vec![IndexLabel::Int64(0), IndexLabel::Int64(1)],
+        vec![Scalar::Int64(3), Scalar::Int64(4)],
+    )?;
+    let df_series = DataFrame::from_series(vec![s1, s2])?;
+    assert_eq!(df_series.column_names().len(), 2);
+
+    // from_records — row-oriented vec of vecs with column_order + index_labels.
+    let columns = vec!["a".to_string(), "b".to_string()];
+    let df_recs = DataFrame::from_records(
+        vec![
+            vec![Scalar::Int64(1), Scalar::Int64(2)],
+            vec![Scalar::Int64(3), Scalar::Int64(4)],
+        ],
+        Some(&columns),
+        Some(vec![IndexLabel::Int64(0), IndexLabel::Int64(1)]),
+    )?;
+    assert_eq!(df_recs.index().len(), 2);
+
+    // from_tuples — same shape but auto-generated 0..n index.
+    let df_tup = DataFrame::from_tuples(
+        vec![
+            vec![Scalar::Int64(1), Scalar::Int64(2)],
+            vec![Scalar::Int64(3), Scalar::Int64(4)],
+        ],
+        &["a", "b"],
+    )?;
+    assert_eq!(df_tup.index().len(), 2);
+
+    // from_tuples_with_index — explicit row labels.
+    let df_tup_idx = DataFrame::from_tuples_with_index(
+        vec![
+            vec![Scalar::Int64(1), Scalar::Int64(2)],
+            vec![Scalar::Int64(3), Scalar::Int64(4)],
+        ],
+        &["a", "b"],
+        vec!["x".into(), "y".into()],
+    )?;
+    assert_eq!(df_tup_idx.index().len(), 2);
+
+    // from_csv — inline CSV parsing.
+    let df_csv = DataFrame::from_csv("a,b\n1,2\n3,4", ',')?;
+    assert_eq!(df_csv.column_names().len(), 2);
+    assert_eq!(df_csv.index().len(), 2);
+
+    // from_dict_index — row-keyed (each entry is a row).
+    let df_di = DataFrame::from_dict_index(vec![
+        ("row1", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+        ("row2", vec![Scalar::Int64(3), Scalar::Int64(4)]),
+    ])?;
+    assert_eq!(df_di.index().len(), 2);
+
+    // from_dict_index_columns — same with explicit column names.
+    let df_dic = DataFrame::from_dict_index_columns(
+        vec![
+            ("row1", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+            ("row2", vec![Scalar::Int64(3), Scalar::Int64(4)]),
+        ],
+        &["a", "b"],
+    )?;
+    assert_eq!(df_dic.column_names().len(), 2);
+    assert_eq!(df_dic.index().len(), 2);
+
+    // new_with_row_multiindex — logical row MultiIndex on top of flat storage.
+    let mi = MultiIndex::from_tuples(vec![
+        vec![IndexLabel::Utf8("g1".to_owned()), IndexLabel::Int64(1)],
+        vec![IndexLabel::Utf8("g1".to_owned()), IndexLabel::Int64(2)],
+    ])?;
+    let mut col_map: std::collections::BTreeMap<String, Column> = std::collections::BTreeMap::new();
+    col_map.insert(
+        "value".to_owned(),
+        Column::from_values(vec![Scalar::Int64(10), Scalar::Int64(20)])?,
+    );
+    let storage_index = Index::new(vec![IndexLabel::Int64(0), IndexLabel::Int64(1)]);
+    let df_mi = DataFrame::new_with_row_multiindex(storage_index, mi, col_map)?;
+    assert_eq!(df_mi.index().len(), 2);
+    Ok(())
+}
