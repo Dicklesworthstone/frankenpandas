@@ -142,6 +142,45 @@ impl std::fmt::Display for Scalar {
     }
 }
 
+// Ergonomic From impls (br-frankenpandas-esjjy / fd90.182). Mirrors
+// IndexLabel's From<i64>/From<&str>/From<String> so users can write
+//   let v: Vec<Scalar> = vec![1i64.into(), 2.0.into(), "three".into()];
+// instead of the explicit Scalar::Int64(...)/Scalar::Float64(...) form.
+//
+// i64 maps to Int64 (more common than Timedelta64 in pandas-style code).
+// Users wanting Timedelta64 should construct it explicitly with
+// Scalar::Timedelta64(nanos) or via Timedelta::parse / to_timedelta.
+
+impl From<bool> for Scalar {
+    fn from(value: bool) -> Self {
+        Self::Bool(value)
+    }
+}
+
+impl From<i64> for Scalar {
+    fn from(value: i64) -> Self {
+        Self::Int64(value)
+    }
+}
+
+impl From<f64> for Scalar {
+    fn from(value: f64) -> Self {
+        Self::Float64(value)
+    }
+}
+
+impl From<&str> for Scalar {
+    fn from(value: &str) -> Self {
+        Self::Utf8(value.to_owned())
+    }
+}
+
+impl From<String> for Scalar {
+    fn from(value: String) -> Self {
+        Self::Utf8(value)
+    }
+}
+
 impl Scalar {
     #[must_use]
     pub fn dtype(&self) -> DType {
@@ -1973,6 +2012,29 @@ pub fn period_range(start: Period, periods: usize) -> Vec<Period> {
 #[cfg(test)]
 mod tests {
     use super::{DType, NullKind, Scalar, SparseDType, cast_scalar, common_dtype, infer_dtype};
+
+    /// br-frankenpandas-esjjy / fd90.182: ergonomic From impls for Scalar.
+    #[test]
+    fn scalar_from_primitive_types() {
+        // Each primitive maps to its canonical Scalar variant.
+        assert_eq!(Scalar::from(true), Scalar::Bool(true));
+        assert_eq!(Scalar::from(42i64), Scalar::Int64(42));
+        assert_eq!(Scalar::from(3.14f64), Scalar::Float64(3.14));
+        assert_eq!(Scalar::from("hi"), Scalar::Utf8("hi".to_owned()));
+        assert_eq!(
+            Scalar::from(String::from("world")),
+            Scalar::Utf8("world".to_owned())
+        );
+
+        // .into() works in mixed-type Vec<Scalar> contexts (the README's
+        // case_when example pattern, and what fd90.181 needed for apply_row
+        // closures).
+        let mixed: Vec<Scalar> = vec![1i64.into(), 2.0f64.into(), "three".into()];
+        assert_eq!(mixed.len(), 3);
+        assert_eq!(mixed[0], Scalar::Int64(1));
+        assert_eq!(mixed[1], Scalar::Float64(2.0));
+        assert_eq!(mixed[2], Scalar::Utf8("three".to_owned()));
+    }
 
     #[test]
     fn dtype_inference_coerces_numeric_values() {
