@@ -57,11 +57,8 @@ fn readme_quick_start_round_trip_through_sqlite() -> Result<(), Box<dyn std::err
     let by_ticker = expensive.groupby(&["ticker"])?.sum()?;
 
     // Series construction via prelude — exercises Series + IndexLabel + Scalar.
-    let dates = Series::from_values(
-        "d",
-        vec![0i64.into()],
-        vec![Scalar::Utf8("2024-01-15".into())],
-    )?;
+    // Uses the From<&str> for Scalar ergonomics (fd90.182) — mirrors README Quick Start.
+    let dates = Series::from_values("d", vec![0i64.into()], vec!["2024-01-15".into()])?;
     let _parsed = to_datetime(&dates)?;
 
     // Format exports.

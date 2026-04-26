@@ -219,7 +219,7 @@ let expensive = df.query("price > 150")?;
 let by_ticker = expensive.groupby(&["ticker"])?.sum()?;
 
 // 4. Convert dates
-let dates = Series::from_values("d", vec![0i64.into()], vec![Scalar::Utf8("2024-01-15".into())])?;
+let dates = Series::from_values("d", vec![0i64.into()], vec!["2024-01-15".into()])?;
 let parsed = to_datetime(&dates)?;
 
 // 5. Export to multiple formats
@@ -1093,8 +1093,8 @@ let mapped = series.map_with_na_action(&mapping, true)?;  // na_action=ignore
 // Series with a constant-value Vec<Scalar> via Series::from_values:
 let n = scores.len();
 let labels: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
-let value_a = Series::from_values("grade", labels.clone(), vec![Scalar::Utf8("A".into()); n])?;
-let value_b = Series::from_values("grade", labels,         vec![Scalar::Utf8("B".into()); n])?;
+let value_a = Series::from_values("grade", labels.clone(), vec!["A".into(); n])?;
+let value_b = Series::from_values("grade", labels,         vec!["B".into(); n])?;
 let graded = scores.case_when(&[
     (scores.ge_scalar(&Scalar::Int64(90))?, value_a),
     (scores.ge_scalar(&Scalar::Int64(80))?, value_b),
