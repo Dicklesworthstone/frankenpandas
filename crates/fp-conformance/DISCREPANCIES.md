@@ -77,6 +77,22 @@
 - **Tests affected:** `dataframe_groupby_apply`, `dataframe_groupby_apply_scalar_returns_series_indexed_by_keys`, `dataframe_groupby_apply_series_unions_sparse_result_columns`, `dataframe_groupby_apply_series_stacked_preserves_variable_labels`.
 - **Review date:** 2026-04-25
 
+### DISC-013: Series + Series union alignment does not sort the result index
+- **Reference:** Pandas `Series.add(other)` (and `series + other` operator) on differently-indexed Series performs an outer-join alignment that returns a sorted result index by default.
+- **Our impl:** fp-frame's series-add union alignment preserves discovery order (left labels first, then right-only labels appended) rather than sorting. So `Series([1,2], index=[1,3]) + Series([10,20], index=[1,2])` yields a result indexed `[1, 3, 2]` while pandas yields `[1, 2, 3]`.
+- **Impact:** Conformance packet `FP-P2C-001 series_add_alignment_union_strict` fails with `index mismatch: actual=[Int64(1), Int64(3), Int64(2)], expected=[Int64(1), Int64(2), Int64(3)]`. Downstream test `live_oracle_unavailable_falls_back_to_fixture_when_enabled` re-surfaces this via the FP-P2C-001 fallback fixture. Same mismatch will appear on any `+` / `-` / `*` / `/` between Series with non-matching indexes where the union order would differ.
+- **Resolution:** WILL-FIX - implementing sorted union alignment in fp-index's `align_union` (and the SeriesArithmetic dispatcher in fp-frame) is a non-trivial behavior change that could affect any downstream code relying on discovery-order alignment. Tracked as a future fp-index/fp-frame coordinated slice. Per br-frankenpandas-9seu (fd90.81).
+- **Tests affected:** `packet_filter_runs::FP-P2C-001/series_add_alignment_union_strict`, `live_oracle_harness_availability::live_oracle_unavailable_falls_back_to_fixture_when_enabled` (the latter wraps the former via the fallback report).
+- **Review date:** 2026-04-26
+
+### DISC-014: Series + Series duplicate-label arithmetic doesn't promote Int64 to Float64
+- **Reference:** Pandas `Series + Series` with duplicate labels on either side performs cross-product alignment that can introduce NaN for the pairings with no match. Pandas promotes the result to `Float64` to accommodate the NaN even when both sources are pure `Int64` and the actual numeric result fits in `Int64`.
+- **Our impl:** Our cross-product alignment preserves `Int64` when no NaN is actually generated (the duplicate-label paired values all match). This is the inverse of DISC-011: there pandas keeps Int64 (extension dtype) where we promote to Float64; here pandas promotes to Float64 where we keep Int64. Both stem from the absence of a nullable extension Int64 dtype on our side.
+- **Impact:** Conformance packet `FP-P2C-001 series_add_duplicate_labels_hardened` fails with `value mismatch at idx=0: actual=Int64(4), expected=Float64(4.0)`. Downstream test `live_oracle_unavailable_falls_back_to_fixture_when_enabled` re-surfaces this via the FP-P2C-001 fallback fixture.
+- **Resolution:** WILL-FIX - aligned with the DISC-011 nullable-extension-Int64 epic. The fix is "always promote to Float64 when duplicate-label alignment can introduce NaN, regardless of whether the specific input avoids it" — that's how pandas does it pre-extension-dtype too. Per br-frankenpandas-9seu (fd90.81).
+- **Tests affected:** `packet_filter_runs::FP-P2C-001/series_add_duplicate_labels_hardened`, `live_oracle_harness_availability::live_oracle_unavailable_falls_back_to_fixture_when_enabled`.
+- **Review date:** 2026-04-26
+
 ### DISC-012: Mixed naive / tz-aware CSV parse_dates bails out and returns raw input strings
 - **Reference:** Pandas handles a CSV column with mixed naive + tz-aware datetime strings by parsing each row independently (the naive rows produce `Timestamp` without tz; the aware rows produce `Timestamp` with tz). When converted to strings, both forms are reformatted into pandas' canonical `YYYY-MM-DD HH:MM:SS[±HH:MM]` shape.
 - **Our impl:** fp-frame's `to_datetime_with_options(infer_mixed_timezone=true)` infers ONE tz pattern (Naive or Aware) from the FIRST non-null row. Rows that don't match that pattern are coerced to `NaT`. fp-io's `parse_csv_datetime_column` then sees the partial-parse failure and returns `None`, leaving the entire column as the raw input strings. So the second row in a mixed-tz column keeps its original `2024-01-15T10:30:00Z` form even though our `format_aware_datetime` would have rendered it correctly as `2024-01-15 10:30:00+00:00`.
