@@ -416,3 +416,37 @@ fn readme_duplicate_handling_compiles_and_runs() -> Result<(), Box<dyn std::erro
     assert_eq!(unique_idx.len(), 3); // 1, 2, 3 (drop second 1)
     Ok(())
 }
+
+/// README Window Operations (lines 474-487).
+///
+/// Imports prelude only. Verifies the rolling / expanding / ewm chains.
+/// Resample is skipped here because it requires a datetime-like index;
+/// the rest of the chain compiles and runs against a numeric Series.
+/// - series.rolling(window, min_periods).mean()? on a 100-element series
+/// - series.rolling(window, Some(min_periods)).std()? with min_periods
+/// - series.expanding(min_periods).max()? cumulative
+/// - series.ewm(span, alpha).mean()? exponentially weighted
+#[test]
+fn readme_window_operations_compiles_and_runs() -> Result<(), Box<dyn std::error::Error>> {
+    // Build a 100-element numeric Series via Series::from_values.
+    let labels: Vec<IndexLabel> = (0..100i64).map(IndexLabel::Int64).collect();
+    let values: Vec<Scalar> = (0..100i64).map(|v| Scalar::Float64(v as f64)).collect();
+    let series = Series::from_values("x", labels, values)?;
+
+    // Rolling window — 30-element moving average, no min_periods constraint.
+    let ma_30 = series.rolling(30, None).mean()?;
+    assert_eq!(ma_30.len(), 100);
+
+    // Rolling window with min_periods.
+    let vol = series.rolling(20, Some(5)).std()?;
+    assert_eq!(vol.len(), 100);
+
+    // Expanding window — running maximum.
+    let cum_max = series.expanding(None).max()?;
+    assert_eq!(cum_max.len(), 100);
+
+    // Exponentially weighted moving average.
+    let ewma = series.ewm(Some(20.0), None).mean()?;
+    assert_eq!(ewma.len(), 100);
+    Ok(())
+}
