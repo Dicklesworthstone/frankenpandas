@@ -4261,10 +4261,14 @@ impl SqlConnection for rusqlite::Connection {
         // SQLite's internal `sqlite_*` book-keeping tables to match
         // pandas' SQLAlchemy dialect, which never surfaces them as
         // user tables.
+        // Per fd90.50: ESCAPE '\' makes the `_` in 'sqlite\_%' a literal
+        // underscore instead of a SQL LIKE single-char wildcard. Without
+        // the escape, a user table named e.g. `sqliteX` would be
+        // incorrectly excluded because the `_` matches any single char.
         let mut stmt = self
             .prepare(
-                "SELECT name FROM sqlite_master \
-                 WHERE type='table' AND name NOT LIKE 'sqlite_%' \
+                r"SELECT name FROM sqlite_master
+                 WHERE type='table' AND name NOT LIKE 'sqlite\_%' ESCAPE '\'
                  ORDER BY name",
             )
             .map_err(|e| IoError::Sql(format!("list_tables prepare failed: {e}")))?;
@@ -4279,10 +4283,12 @@ impl SqlConnection for rusqlite::Connection {
     fn list_views(&self, _schema: Option<&str>) -> Result<Vec<String>, IoError> {
         // Same single-namespace policy as list_tables; type='view'
         // distinguishes the two buckets in sqlite_master.
+        // Per fd90.50: same ESCAPE '\' fix as list_tables to treat
+        // the underscore in 'sqlite_' as a literal.
         let mut stmt = self
             .prepare(
-                "SELECT name FROM sqlite_master \
-                 WHERE type='view' AND name NOT LIKE 'sqlite_%' \
+                r"SELECT name FROM sqlite_master
+                 WHERE type='view' AND name NOT LIKE 'sqlite\_%' ESCAPE '\'
                  ORDER BY name",
             )
             .map_err(|e| IoError::Sql(format!("list_views prepare failed: {e}")))?;
@@ -13232,6 +13238,53 @@ mod tests {
         let tables = list_sql_tables(&conn, None).unwrap();
         assert_eq!(tables, vec!["seq_demo"]);
         assert!(!tables.iter().any(|name| name.starts_with("sqlite_")));
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn list_sql_tables_keeps_user_tables_with_sqlite_prefix_no_underscore() {
+        // Per fd90.50: a user table named like 'sqliteX' (no underscore
+        // between 'sqlite' and the rest) was being incorrectly excluded
+        // by the buggy `NOT LIKE 'sqlite_%'` filter (where `_` is a
+        // single-char wildcard). After the ESCAPE '\' fix the
+        // underscore is treated literally, so only names starting with
+        // the literal substring 'sqlite_' are excluded.
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE TABLE sqliteX (x INTEGER);",
+        )
+        .unwrap();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE TABLE sqliteY (y TEXT);",
+        )
+        .unwrap();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE TABLE sqlite1234 (z REAL);",
+        )
+        .unwrap();
+        let tables = list_sql_tables(&conn, None).unwrap();
+        assert_eq!(tables, vec!["sqlite1234", "sqliteX", "sqliteY"]);
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn list_sql_views_keeps_user_views_with_sqlite_prefix_no_underscore() {
+        // Companion to the list_tables case (fd90.50): same escape fix
+        // applies to list_views.
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(&conn, "CREATE TABLE base (x INTEGER);").unwrap();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE VIEW sqliteX_view AS SELECT x FROM base;",
+        )
+        .unwrap();
+        let views = list_sql_views(&conn, None).unwrap();
+        // sqliteX_view: 'sqliteX' (no underscore after 'sqlite') so the
+        // literal-underscore filter accepts it.
+        assert_eq!(views, vec!["sqliteX_view"]);
     }
 
     #[cfg(feature = "sql-sqlite")]
