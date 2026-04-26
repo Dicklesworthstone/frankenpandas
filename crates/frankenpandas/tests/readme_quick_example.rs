@@ -883,6 +883,13 @@ fn readme_series_groupby_compiles_and_runs() -> Result<(), Box<dyn std::error::E
     // Multi-aggregation returns a DataFrame.
     let multi = by_region.agg(&["sum", "mean", "count"])?;
     assert_eq!(multi.index().len(), 2);
+
+    // fd90.198: rank + rank_with_pct (the last 2 of the 15 SeriesGroupBy
+    // methods enumerated at README line 1200).
+    let ranks = by_region.rank("average", true, "keep")?;
+    assert_eq!(ranks.len(), 6); // 1 rank per input row, not per group
+    let pct_ranks = by_region.rank_with_pct("average", true, "keep", true)?;
+    assert_eq!(pct_ranks.len(), 6);
     Ok(())
 }
 
