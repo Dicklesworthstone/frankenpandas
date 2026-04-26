@@ -1230,11 +1230,11 @@ let pt = df.pivot_table("revenue", "region", "product", "sum")?;
 // Multiple values columns
 let pt = df.pivot_table_multi_values(&["revenue", "quantity"], "region", "product", "sum")?;
 
-// With margins (subtotals row/column)
-let pt = df.pivot_table_with_margins("revenue", "region", "product", "sum")?;
+// With margins (subtotals row/column); pass margins=true to actually emit them
+let pt = df.pivot_table_with_margins("revenue", "region", "product", "sum", true)?;
 
-// Custom margins label
-let pt = df.pivot_table_with_margins_name("revenue", "region", "product", "sum", "Grand Total")?;
+// Custom margins label (margins: true enables subtotal row/col; pass the label as last arg)
+let pt = df.pivot_table_with_margins_name("revenue", "region", "product", "sum", true, "Grand Total")?;
 
 // Fill NaN in pivot output
 let pt = df.pivot_table_fill("revenue", "region", "product", "sum", 0.0)?;
