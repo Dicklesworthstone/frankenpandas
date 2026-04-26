@@ -1605,3 +1605,88 @@ fn readme_describe_and_correlation_compiles_and_runs() -> Result<(), Box<dyn std
     let _ac1 = s_a.autocorr(1)?;
     Ok(())
 }
+
+/// README "NanOps" section (lines 792-823).
+///
+/// Locks in the 19 null-skipping scalar reductions plus 4 cumulative
+/// transforms re-exported from frankenpandas::prelude (lib.rs:23-27).
+///
+/// Each function exercised on a Vec<Scalar> with a deliberate NaN to
+/// confirm null-skipping behavior matches the README's claims about
+/// return type and skipna=True semantics.
+///
+/// Tracks fd90.191 (br-frankenpandas-1r7zz).
+#[test]
+fn readme_nanops_compiles_and_runs() -> Result<(), Box<dyn std::error::Error>> {
+    // Mixed numeric values with one NaN to verify null-skipping.
+    let values = vec![
+        Scalar::Float64(1.0),
+        Scalar::Float64(2.0),
+        Scalar::Null(NullKind::NaN),
+        Scalar::Float64(4.0),
+        Scalar::Float64(5.0),
+    ];
+
+    // Scalar reductions — Float64 outputs.
+    let sum = nansum(&values);
+    assert!(matches!(sum, Scalar::Float64(_)));
+    let mean = nanmean(&values);
+    assert!(matches!(mean, Scalar::Float64(_)));
+    let median = nanmedian(&values);
+    assert!(matches!(median, Scalar::Float64(_)));
+    let var = nanvar(&values, 1);
+    assert!(matches!(var, Scalar::Float64(_)));
+    let std = nanstd(&values, 1);
+    assert!(matches!(std, Scalar::Float64(_)));
+    let sem = nansem(&values, 1);
+    assert!(matches!(sem, Scalar::Float64(_)));
+    let prod = nanprod(&values);
+    assert!(matches!(prod, Scalar::Float64(_)));
+    let skew = nanskew(&values);
+    assert!(matches!(skew, Scalar::Float64(_)));
+    let kurt = nankurt(&values);
+    assert!(matches!(kurt, Scalar::Float64(_)));
+    let q50 = nanquantile(&values, 0.5);
+    assert!(matches!(q50, Scalar::Float64(_)));
+
+    // count → Int64 (count of non-missing).
+    assert_eq!(nancount(&values), Scalar::Int64(4));
+
+    // min / max / ptp — preserve input dtype.
+    let min = nanmin(&values);
+    assert!(matches!(min, Scalar::Float64(_)));
+    let max = nanmax(&values);
+    assert!(matches!(max, Scalar::Float64(_)));
+    let ptp = nanptp(&values);
+    assert!(matches!(ptp, Scalar::Float64(_)));
+
+    // argmax / argmin — Option<usize>.
+    let argmax = nanargmax(&values);
+    assert!(argmax.is_some());
+    let argmin = nanargmin(&values);
+    assert!(argmin.is_some());
+
+    // nunique → Int64 (4 unique non-missing values).
+    assert_eq!(nannunique(&values), Scalar::Int64(4));
+
+    // any / all → Bool.
+    let bool_values = vec![
+        Scalar::Bool(true),
+        Scalar::Bool(false),
+        Scalar::Null(NullKind::NaN),
+        Scalar::Bool(true),
+    ];
+    assert_eq!(nanany(&bool_values), Scalar::Bool(true));
+    assert_eq!(nanall(&bool_values), Scalar::Bool(false));
+
+    // Cumulative transforms — return Vec<Scalar> with same length.
+    let csum = nancumsum(&values);
+    assert_eq!(csum.len(), values.len());
+    let cprod = nancumprod(&values);
+    assert_eq!(cprod.len(), values.len());
+    let cmax = nancummax(&values);
+    assert_eq!(cmax.len(), values.len());
+    let cmin = nancummin(&values);
+    assert_eq!(cmin.len(), values.len());
+    Ok(())
+}
