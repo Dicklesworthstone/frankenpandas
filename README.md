@@ -1507,11 +1507,11 @@ Full pandas-style selection API:
 let row = df.loc(&["row_label".into()])?;       // Single row by label
 let subset = df.loc(&["a".into(), "b".into()])?; // Multiple rows
 
-// Position-based (like df.iloc[])
-let row = df.iloc(0)?;                     // First row
-let last = df.iloc(-1)?;                   // Last row (negative indexing)
-let slice = df.head(10);                   // First 10 rows
-let tail = df.tail(5);                     // Last 5 (supports negative n)
+// Position-based (like df.iloc[]); takes a slice of i64 positions
+let row = df.iloc(&[0])?;                  // First row
+let last = df.iloc(&[-1])?;                // Last row (negative indexing resolves from end)
+let slice = df.head(10)?;                  // First 10 rows
+let tail = df.tail(5)?;                    // Last 5 (supports negative n)
 
 // Column selection
 let col = df.column("price")?;             // Single column as &Column
