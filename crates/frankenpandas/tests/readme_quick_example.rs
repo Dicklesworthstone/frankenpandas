@@ -1139,3 +1139,103 @@ fn readme_conditional_logic_compiles_and_runs() -> Result<(), Box<dyn std::error
     assert_eq!(graded.len(), 4);
     Ok(())
 }
+
+/// README "Advanced Selection Methods" section (lines 1106-1138).
+///
+/// Locks in ~10 selection APIs that previously had no integration coverage:
+/// - DataFrame: nlargest / nsmallest / nlargest_keep / select_dtypes / filter_labels
+/// - Series: idxmin / idxmax / value_counts / value_counts_with_options
+///   / isin / between / searchsorted / factorize
+///
+/// Tracks fd90.185 (br-frankenpandas-q208a). Mirrors README lines 1106-1138.
+#[test]
+fn readme_advanced_selection_compiles_and_runs() -> Result<(), Box<dyn std::error::Error>> {
+    // Top-N / Bottom-N row selection on numeric columns.
+    let df = read_csv_str(
+        "ticker,price,volume,revenue\nAAPL,150,1000,1500\nGOOGL,2800,500,2750\n\
+         MSFT,300,800,2400\nAMZN,3200,200,1280\nTSLA,800,1500,2400",
+    )?;
+    let top5 = df.nlargest(5, "revenue")?;
+    assert_eq!(top5.index().len(), 5);
+    let bot3 = df.nsmallest(3, "price")?;
+    assert_eq!(bot3.index().len(), 3);
+    let top_keep = df.nlargest_keep(5, "revenue", "all")?;
+    assert!(top_keep.index().len() >= 5);
+
+    // Series.idxmin / idxmax — scalar IndexLabel return.
+    let labels: Vec<IndexLabel> = (0..5i64).map(IndexLabel::Int64).collect();
+    let temps = Series::from_values(
+        "temp",
+        labels.clone(),
+        vec![
+            Scalar::Float64(72.0),
+            Scalar::Float64(80.0),
+            Scalar::Float64(65.0),
+            Scalar::Float64(85.0),
+            Scalar::Float64(78.0),
+        ],
+    )?;
+    let _coldest = temps.idxmin()?;
+    let _hottest = temps.idxmax()?;
+
+    // value_counts on a categorical-shaped Series.
+    let cat_labels: Vec<IndexLabel> = (0..6i64).map(IndexLabel::Int64).collect();
+    let grades = Series::from_values(
+        "grade",
+        cat_labels,
+        vec![
+            "A".into(),
+            "B".into(),
+            "A".into(),
+            "C".into(),
+            "B".into(),
+            "A".into(),
+        ],
+    )?;
+    let counts = grades.value_counts()?;
+    assert!(counts.len() >= 1);
+    let pcts = grades.value_counts_with_options(true, true, false, true)?;
+    assert!(pcts.len() >= 1);
+
+    // isin — fd90.182 ergonomics: &[&str] inferred to Vec<Scalar> via .into().
+    let test_set: Vec<Scalar> = vec!["A".into(), "B".into()];
+    let _mask = grades.isin(&test_set)?;
+
+    // between on numeric Series.
+    let in_range = temps.between(&Scalar::Float64(70.0), &Scalar::Float64(80.0), "both")?;
+    assert_eq!(in_range.len(), 5);
+
+    // searchsorted returns a usize position.
+    let sorted_labels: Vec<IndexLabel> = (0..5i64).map(IndexLabel::Int64).collect();
+    let sorted_values = Series::from_values(
+        "sorted",
+        sorted_labels,
+        vec![
+            Scalar::Float64(10.0),
+            Scalar::Float64(20.0),
+            Scalar::Float64(30.0),
+            Scalar::Float64(40.0),
+            Scalar::Float64(50.0),
+        ],
+    )?;
+    let pos = sorted_values.searchsorted(&Scalar::Float64(25.0), "left")?;
+    assert_eq!(pos, 2);
+
+    // factorize returns (codes, uniques) tuple.
+    let (codes, uniques) = grades.factorize()?;
+    assert_eq!(codes.len(), 6);
+    assert!(uniques.len() >= 1);
+
+    // select_dtypes — include and exclude paths.
+    let numeric_only = df.select_dtypes(&[DType::Int64, DType::Float64], &[])?;
+    assert!(numeric_only.column_names().len() >= 1);
+    let non_numeric = df.select_dtypes(&[], &[DType::Int64, DType::Float64])?;
+    assert!(non_numeric.column_names().iter().any(|n| n.as_str() == "ticker"));
+
+    // filter_labels — items + regex variants on axis=1.
+    let subset = df.filter_labels(Some(&["price", "volume"]), None, None, 1)?;
+    assert_eq!(subset.column_names().len(), 2);
+    let regex_match = df.filter_labels(None, None, Some("^rev"), 1)?;
+    assert!(regex_match.column_names().iter().any(|n| n.as_str() == "revenue"));
+    Ok(())
+}
