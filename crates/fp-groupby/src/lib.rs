@@ -1,5 +1,66 @@
 #![forbid(unsafe_code)]
 
+//! Standalone groupby aggregation engine for **frankenpandas** —
+//! the per-aggregation kernels that power `Series.groupby(...).sum()`
+//! / `.mean()` / `.std()` / etc. on top of fp-frame's groupby
+//! façade.
+//!
+//! ## Why a separate crate
+//!
+//! fp-frame's `SeriesGroupBy` / DataFrame groupby wrappers expose
+//! the user-facing API. The actual hash-build, group-key materialise,
+//! per-key reduction, and bumpalo-backed intermediate arena live
+//! here — separated so per-agg kernels can be tested, fuzzed, and
+//! optimized in isolation without the full fp-frame surface in
+//! scope.
+//!
+//! ## Aggregation kernels (pandas `.groupby(...).<agg>()`)
+//!
+//! - **Sum-family**: [`groupby_sum`] / [`groupby_sum_with_options`],
+//!   [`groupby_prod`].
+//! - **Central tendency**: [`groupby_mean`], [`groupby_median`].
+//! - **Variability**: [`groupby_std`], [`groupby_var`].
+//! - **Extremes**: [`groupby_min`], [`groupby_max`],
+//!   [`groupby_first`], [`groupby_last`].
+//! - **Counting**: [`groupby_count`], [`groupby_size`],
+//!   [`groupby_nunique`].
+//! - **Dispatcher**: [`groupby_agg`] takes an [`AggFunc`] enum tag
+//!   and dispatches to the matching kernel — useful for callers
+//!   that want a uniform entry point (e.g. `df.groupby(k).agg(['sum',
+//!   'mean'])` style multi-agg).
+//!
+//! ## Tunables
+//!
+//! - [`GroupByOptions`]: per-call shape options (sort group keys,
+//!   skipna policy, observed-categorical, ...).
+//! - [`GroupByExecutionOptions`]: lower-level execution knobs
+//!   (bumpalo arena reuse hints, hash-build seed, ...).
+//!
+//! ## Approximate primitives
+//!
+//! - [`HyperLogLog`]: cardinality-estimation sketch. Used internally
+//!   by [`groupby_nunique`] when the underlying group has a large
+//!   number of unique values; exposed publicly for callers building
+//!   their own approximate aggregations.
+//!
+//! ## Error reporting
+//!
+//! [`GroupByError`] enumerates failure modes (key column dtype
+//! mismatch, length mismatch, alignment-plan violation, ...).
+//!
+//! ## Cross-crate relationships
+//!
+//! - **fp-columnar** ([`Column`], [`ColumnError`]) for column ops.
+//! - **fp-frame** ([`FrameError`], [`Series`]) for the wrapper
+//!   types that expose this crate's kernels via `.groupby()`.
+//! - **fp-index** ([`Index`], [`IndexError`], [`IndexLabel`],
+//!   [`align_union`], [`validate_alignment_plan`]) for the
+//!   group-key index alignment.
+//! - **fp-runtime** ([`EvidenceLedger`], [`RuntimePolicy`]) for
+//!   optional decision recording.
+//! - **fp-types** ([`Scalar`], [`NullKind`], [`Timedelta`]) for
+//!   the underlying value machinery.
+
 use std::{cmp::Ordering, collections::HashMap, mem::size_of};
 
 use bumpalo::{Bump, collections::Vec as BumpVec};
