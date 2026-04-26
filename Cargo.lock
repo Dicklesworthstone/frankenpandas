@@ -1009,6 +1009,7 @@ dependencies = [
  "fp-runtime",
  "fp-types",
  "rusqlite",
+ "serde_json",
 ]
 
 [[package]]

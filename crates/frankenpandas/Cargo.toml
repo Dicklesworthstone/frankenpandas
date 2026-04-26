@@ -48,6 +48,11 @@ sql-mysql = ["fp-io/sql-mysql"]
 tracing = ["fp-frame/tracing"]
 asupersync = ["fp-runtime/asupersync"]
 
+[dev-dependencies]
+# fd90.196: serde_json round-trip integration test for the README's
+# "Serialization and Interoperability" claim.
+serde_json = { workspace = true }
+
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]

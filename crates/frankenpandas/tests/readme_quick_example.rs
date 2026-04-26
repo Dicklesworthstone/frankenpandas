@@ -2049,3 +2049,56 @@ fn readme_string_accessor_compiles_and_runs() -> Result<(), Box<dyn std::error::
     let _ = s.str().get(0)?;
     Ok(())
 }
+
+/// README "Serialization and Interoperability" section (lines 1560-1580).
+///
+/// Locks in the claim that all core types round-trip through serde_json
+/// "perfectly". Verifies:
+/// - Scalar variants (Bool/Int64/Float64/Utf8/Null) round-trip identically
+/// - The Scalar enum produces the documented {"kind":..., "value":...}
+///   tagged form (not bare values)
+/// - IndexLabel round-trip
+/// - DataFrame round-trip — exercises Index + Column + ValidityMask
+///   serialization paths
+///
+/// Tracks fd90.196 (br-frankenpandas-1d1gm).
+#[test]
+fn readme_serialization_compiles_and_runs() -> Result<(), Box<dyn std::error::Error>> {
+    // Scalar variants — document the tagged-enum shape.
+    let cases = vec![
+        Scalar::Bool(true),
+        Scalar::Int64(42),
+        Scalar::Float64(3.14),
+        Scalar::Utf8("hello".to_owned()),
+        Scalar::Null(NullKind::NaN),
+    ];
+    for original in &cases {
+        let json = serde_json::to_string(original)?;
+        // Verify tagged representation: every JSON object should contain "kind".
+        assert!(
+            json.contains("\"kind\""),
+            "Scalar JSON missing 'kind' tag: {json}"
+        );
+        let restored: Scalar = serde_json::from_str(&json)?;
+        assert_eq!(*original, restored, "Scalar round-trip diverged: {json}");
+    }
+
+    // IndexLabel round-trip.
+    let labels = vec![
+        IndexLabel::Int64(7),
+        IndexLabel::Utf8("row1".to_owned()),
+    ];
+    for original in &labels {
+        let json = serde_json::to_string(original)?;
+        let restored: IndexLabel = serde_json::from_str(&json)?;
+        assert_eq!(*original, restored);
+    }
+
+    // DataFrame round-trip — exercises Index + Column + ValidityMask serde paths.
+    let df = read_csv_str("a,b\n1,4\n2,5\n3,6")?;
+    let json = serde_json::to_string(&df)?;
+    let restored: DataFrame = serde_json::from_str(&json)?;
+    assert_eq!(df.column_names(), restored.column_names());
+    assert_eq!(df.index().len(), restored.index().len());
+    Ok(())
+}

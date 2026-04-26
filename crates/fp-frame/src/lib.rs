@@ -14733,7 +14733,13 @@ pub struct DataFrame {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     row_multiindex: Option<fp_index::MultiIndex>,
     columns: BTreeMap<String, Column>,
-    #[serde(skip)]
+    // fd90.196: column_order is the user-visible insertion order. The
+    // previous `#[serde(skip)]` silently dropped it on round-trip,
+    // contradicting the README's "Round-trips perfectly" claim. Now
+    // serialized normally with `default` for backwards-compat with any
+    // pre-fd90.196 blobs (they'll deserialize with an empty Vec, which
+    // matches the prior behavior).
+    #[serde(default)]
     column_order: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     column_multiindex: Option<fp_index::MultiIndex>,
