@@ -1144,7 +1144,7 @@ let renamed = df.add_suffix("_v2")?;                             // Suffix all c
 
 ```rust
 let shape = df.shape();              // (nrows, ncols)
-let dtypes = df.dtypes();            // Vec<(column_name, DType)>
+let dtypes = df.dtypes()?;           // Series indexed by column name; values are DType strings
 let info = df.info();                // String summary (like df.info() in pandas)
 let mem = df.memory_usage()?;        // Per-column byte estimates as Series
 let ndim = df.ndim();                // Always 2 for DataFrame
