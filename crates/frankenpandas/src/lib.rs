@@ -242,6 +242,10 @@ pub mod prelude {
         Scalar,
         Series,
         SeriesResetIndexResult,
+        // Per-cell null tracking — README has a dedicated subsection
+        // ("ValidityMask: Bitpacked Null Tracking", lines 261-278) and
+        // lists it among types deriving Serialize + Deserialize (line 1567).
+        ValidityMask,
         // SQL contracts (covers the README Quick Start round-trip)
         SqlConnection,
         SqlIfExists,

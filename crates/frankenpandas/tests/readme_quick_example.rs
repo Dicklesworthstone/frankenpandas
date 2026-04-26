@@ -2276,5 +2276,17 @@ fn readme_serialization_compiles_and_runs() -> Result<(), Box<dyn std::error::Er
     let restored: DataFrame = serde_json::from_str(&json)?;
     assert_eq!(df.column_names(), restored.column_names());
     assert_eq!(df.index().len(), restored.index().len());
+
+    // fd90.203: ValidityMask round-trip via the prelude. README line 1578
+    // claims "ValidityMask serializes as a Vec<bool> for JSON compatibility
+    // but uses bitpacked Vec<u64> in memory."
+    let mask = ValidityMask::from_values(&[
+        Scalar::Int64(1),
+        Scalar::Null(NullKind::NaN),
+        Scalar::Int64(3),
+    ]);
+    let mask_json = serde_json::to_string(&mask)?;
+    let mask_back: ValidityMask = serde_json::from_str(&mask_json)?;
+    assert_eq!(mask, mask_back);
     Ok(())
 }
