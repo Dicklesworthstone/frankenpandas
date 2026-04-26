@@ -61,6 +61,7 @@ pub use fp_frame::{
 
 pub use fp_io::{
     // CSV
+    CsvOnBadLines,
     CsvReadOptions,
     CsvWriteOptions,
     // Extension trait
@@ -215,6 +216,7 @@ pub mod prelude {
         CategoricalMetadata,
         Column,
         ConcatJoin,
+        CsvOnBadLines,
         CsvReadOptions,
         CsvWriteOptions,
         DType,
@@ -608,6 +610,8 @@ mod tests {
         let _ = read_csv_with_options;
         // fd90.215: path-based variant for completeness.
         let _ = read_csv_with_options_path;
+        // fd90.219: CsvOnBadLines enum (field type for CsvReadOptions.on_bad_lines).
+        let _is_bad_lines: fn(CsvOnBadLines) -> _ = |x| x;
 
         // fd90.216: CSV/Excel write options + write_*_with_options now in prelude.
         let _: CsvWriteOptions = CsvWriteOptions::default();
