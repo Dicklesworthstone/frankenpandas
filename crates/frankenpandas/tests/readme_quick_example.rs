@@ -1223,7 +1223,7 @@ fn readme_apply_and_transform_compiles_and_runs() -> Result<(), Box<dyn std::err
     assert_eq!(group_means.index().len(), 4);
 
     // assign_fn — fd90.180: inline ratio = revenue/cost expression.
-    use frankenpandas::FrameError;
+    // FrameError is in the prelude (fd90.202) so no extra import needed.
     let df2 = df.assign_fn(vec![(
         "ratio",
         Box::new(|df: &DataFrame| -> Result<Column, FrameError> {
@@ -1481,7 +1481,7 @@ fn readme_column_manipulation_compiles_and_runs() -> Result<(), Box<dyn std::err
 
     // assign_fn — closure that sees current DataFrame state.
     // Mirrors the README's "ratio = revenue / cost" pattern.
-    use frankenpandas::FrameError;
+    // FrameError is in the prelude (fd90.202) so no extra import needed.
     let with_ratio = df.assign_fn(vec![(
         "ratio",
         Box::new(|d: &DataFrame| -> Result<Column, FrameError> {
@@ -2199,6 +2199,30 @@ fn readme_string_accessor_compiles_and_runs() -> Result<(), Box<dyn std::error::
     let lens = s.str().len()?;
     assert_eq!(lens.len(), n);
     let _ = s.str().get(0)?;
+    Ok(())
+}
+
+/// README "Error Architecture" section (lines 829-853).
+///
+/// Locks in fd90.202: the 8 error types listed in the README's Error
+/// Architecture table can all be referenced from the prelude (matching
+/// the README's claim that "All error types are re-exported through the
+/// frankenpandas facade crate"). Before fd90.202, only JoinError was in
+/// the prelude — the rest required a top-level `use frankenpandas::…`
+/// import even after `use frankenpandas::prelude::*`.
+///
+/// Compile-only test — references each error type as a function
+/// signature so the compiler resolves the path. Runtime is a no-op.
+#[test]
+fn readme_error_architecture_compiles_and_runs() -> Result<(), Box<dyn std::error::Error>> {
+    let _: fn(TypeError) -> _ = |e| e;
+    let _: fn(ColumnError) -> _ = |e| e;
+    let _: fn(IndexError) -> _ = |e| e;
+    let _: fn(FrameError) -> _ = |e| e;
+    let _: fn(ExprError) -> _ = |e| e;
+    let _: fn(JoinError) -> _ = |e| e;
+    let _: fn(GroupByError) -> _ = |e| e;
+    let _: fn(IoError) -> _ = |e| e;
     Ok(())
 }
 

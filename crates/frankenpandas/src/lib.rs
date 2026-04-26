@@ -218,6 +218,15 @@ pub mod prelude {
         EvidenceLedger,
         Index,
         IndexLabel,
+        // Error types (matches README "Error Architecture" section lines 829-853 —
+        // all 8 typed error enums exposed for pattern matching).
+        ColumnError,
+        ExprError,
+        FrameError,
+        GroupByError,
+        IndexError,
+        IoError,
+        TypeError,
         // Join (types + functions, matches README Recipes + Merge: Advanced Options)
         AsofDirection,
         JoinError,
