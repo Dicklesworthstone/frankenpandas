@@ -167,9 +167,31 @@ fp-io = { path = "crates/fp-io" }
 fp-types = { path = "crates/fp-types" }
 ```
 
-`fp-io` enables `sql-sqlite` by default. Disable default features to build
-without the SQLite dependency; implement `SqlConnection` for another backend to
-route the same `read_sql` / `write_sql` APIs through that connection type.
+### Cargo features
+
+The `frankenpandas` umbrella forwards inner-crate feature flags so callers can opt in/out without depending on inner crates directly:
+
+| Feature | Default | Forwards to | What it gates |
+|---------|---------|-------------|---------------|
+| `sql-sqlite` | **on** | `fp-io/sql-sqlite` | rusqlite-backed `SqlConnection` impl. Drop this to build without the SQLite dep. |
+| `sql-postgresql` | off | `fp-io/sql-postgresql` | Placeholder for the Phase 2 PostgreSQL adapter (no concrete bindings yet). |
+| `sql-mysql` | off | `fp-io/sql-mysql` | Placeholder for the Phase 2 MySQL adapter. |
+| `tracing` | off | `fp-frame/tracing` | Emits `tracing` spans on hot paths (groupby, rolling, resample, IO). |
+| `asupersync` | off | `fp-runtime/asupersync` | Pulls in the optional `asupersync` runtime integration submodule. |
+
+```toml
+# Default — includes sql-sqlite
+[dependencies]
+frankenpandas = { path = "crates/frankenpandas" }
+
+# No SQL deps — drop rusqlite + the sql-sqlite SqlConnection impl
+frankenpandas = { path = "crates/frankenpandas", default-features = false }
+
+# SQL + tracing spans
+frankenpandas = { path = "crates/frankenpandas", features = ["tracing"] }
+```
+
+When `sql-sqlite` is disabled, `read_sql` / `write_sql` and the `SqlConnection` trait remain available — just implement the trait for your own connection type to route the same APIs through it.
 
 ### Build from Source
 
