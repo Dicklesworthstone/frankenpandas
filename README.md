@@ -1046,7 +1046,7 @@ let pct   = df.pct_change()?;  // Percentage change
 ### Clipping and Rounding
 
 ```rust
-let clipped = df.clip(0.0, 100.0)?;    // Clip to [0, 100]
+let clipped = df.clip(Some(0.0), Some(100.0))?; // Clip to [0, 100]; pass None to skip a bound
 let lower   = df.clip_lower(0.0)?;     // Floor at 0
 let upper   = df.clip_upper(100.0)?;   // Cap at 100
 let rounded = df.round(2)?;            // Round to 2 decimal places
@@ -1056,8 +1056,10 @@ let absolute = df.abs()?;              // Absolute value
 ### Replacement
 
 ```rust
-// Replace specific values
-let cleaned = df.replace(&Scalar::Int64(-999), &Scalar::Null(NullKind::NaN))?;
+// Replace specific values; replace takes a slice of (from, to) pairs
+let cleaned = df.replace(&[
+    (Scalar::Int64(-999), Scalar::Null(NullKind::NaN)),
+])?;
 
 // Series: regex replace
 let fixed = series.str().replace_regex(r"\d{3}-\d{4}", "***-****")?;
