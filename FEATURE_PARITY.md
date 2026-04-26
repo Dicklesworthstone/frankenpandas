@@ -48,7 +48,17 @@
 | Expression evaluation | in_progress | `fp-expr` provides `eval_str()`/`query_str()` for expression parsing and evaluation; `DataFrameExprExt` extension trait adds `df.eval(expr)`/`df.query(expr)` convenience methods on DataFrame; supports arithmetic (`+`/`-`/`*`/`/`), comparison (`>`/`<`/`==`/`!=`/`>=`/`<=`), logical (`and`/`or`/`not`), column references, and scalar literals |
 | Storage/dtype invariants | in_progress | `FP-P2C-009` suite green for dtype invariant checks; `fp-frame` now exposes `Series::astype` plus DataFrame single- and multi-column coercion via `astype_column` and mapping-based `astype_columns`; broader dtype coercion/storage matrix pending |
 
-## Phase-2C Packet Evidence (Current)
+## Phase-2C Packet Evidence (Foundational subset)
+
+> **Note:** The table below shows the FOUNDATIONAL subset of packet suites
+> (the originally enumerated parity-green checkpoints from Phase 2C/2D
+> ramp-up). The live packet ledger has expanded substantially since:
+> as of this commit, **430 distinct packet suites** exist across
+> `crates/fp-conformance/fixtures/packets/` (11 FP-P2C + 419 FP-P2D,
+> ranging FP-P2D-014 through FP-P2D-433+). For the full real-time view,
+> see `artifacts/phase2c/drift_history.jsonl` and the per-packet
+> directories under `artifacts/phase2c/`. The README's Testing section
+> tracks the running pass/fail count.
 
 | Packet | Result | Evidence |
 |---|---|---|
