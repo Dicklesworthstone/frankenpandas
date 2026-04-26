@@ -1,5 +1,82 @@
 #![forbid(unsafe_code)]
 
+//! Conformance harness for **frankenpandas** — mechanically verifies
+//! that frankenpandas matches pandas behavior across the supported
+//! API surface, by running parallel computations and diffing
+//! results.
+//!
+//! ## Architecture
+//!
+//! Conformance verification uses two complementary modes:
+//!
+//! - **Live oracle**: spawn a Python subprocess running real
+//!   `pandas`, feed it the same inputs as frankenpandas, then
+//!   diff the outputs. Picks up version drift and the "everything
+//!   pandas exposes" surface area without authors having to encode
+//!   each contract by hand.
+//! - **Fixture replay**: load packet fixtures (DataFrame / Series
+//!   inputs + expected outputs captured from a known-good
+//!   reference run) and compare frankenpandas's output to the
+//!   captured expectation. Fast, deterministic, runs in CI without
+//!   needing a Python install.
+//!
+//! [`OracleMode`] selects between the two; the harness falls back
+//! to fixture mode when the live oracle isn't reachable so the
+//! CI build still produces a green/red signal.
+//!
+//! ## Top-level entry points
+//!
+//! - [`HarnessConfig`]: harness setup — fixture-dir paths, oracle
+//!   mode, suite-level options.
+//! - [`run_smoke`]: smoke-test entry point. Runs the
+//!   smallest-possible packet set against both modes and emits a
+//!   [`HarnessReport`].
+//! - [`HarnessReport`]: aggregated suite verdict with per-case
+//!   [`CaseResult`] entries.
+//! - [`SuiteOptions`]: per-suite knobs (parallelism, timeout,
+//!   continue-on-fail vs fail-fast).
+//!
+//! ## Fixture format
+//!
+//! Packet fixtures encode "operation X on inputs Y produces output
+//! Z" in a shape both modes can consume:
+//!
+//! - [`PacketFixture`]: top-level fixture record. Tagged with
+//!   provenance ([`FixtureProvenance`]), references its inputs
+//!   ([`FixtureDataFrame`] / [`FixtureSeries`]), the
+//!   [`FixtureOperation`] to apply, and the expected outputs
+//!   ([`FixtureExpectedDataFrame`] / [`FixtureExpectedSeries`] /
+//!   [`FixtureExpectedAlignment`] / [`FixtureExpectedJoin`]).
+//! - [`FixtureCategoricalColumn`] / [`FixtureMultiIndex`]:
+//!   typed sub-fixtures for the harder-to-encode inputs.
+//! - [`FixtureColumnAssignment`] / [`FixtureColumnRename`]:
+//!   structured operation payloads for the assign / rename
+//!   variants of [`FixtureOperation`].
+//! - [`FixtureJoinType`]: enum tag for join-style operations.
+//! - [`FixtureOracleSource`]: where the expected output came
+//!   from (live oracle capture vs author-curated golden file).
+//!
+//! ## Case verdicts
+//!
+//! Per-case results carry rich diagnostic detail so failures map
+//! cleanly back to the offending input shape:
+//!
+//! - [`CaseResult`]: one operation's verdict.
+//! - [`CaseStatus`]: pass / fail / xfail / skip.
+//! - [`DriftLevel`]: how big the divergence was (within-tolerance,
+//!   numeric drift, structural mismatch).
+//! - [`ComparisonCategory`]: what the diff bucket was (dtype /
+//!   value / index / column-order / metadata).
+//! - [`RequirementLevel`]: MUST / SHOULD / MAY tagging for the
+//!   coverage matrix output (matches the
+//!   testing-conformance-harnesses skill's classification).
+//!
+//! ## Cross-crate relationships
+//!
+//! Built on top of fp-frame, fp-io, fp-join, fp-groupby, fp-expr.
+//! Forwards the `asupersync` cargo feature down to fp-runtime.
+//! Test-only — no production callers should depend on this crate.
+
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::io::Write;
@@ -6167,7 +6244,7 @@ pub fn fuzz_read_sql_bytes(input: &[u8]) -> Result<(), String> {
 /// Structure-aware fuzz entrypoint for `DataFrame::from_dict(...)`.
 ///
 /// Per br-frankenpandas-d7lt. The input is projected into a small
-/// name→Vec<Scalar> dict; on Ok, the resulting frame's row count must
+/// `name → Vec<Scalar>` dict; on Ok, the resulting frame's row count must
 /// equal the inferred row count and every column name must be present.
 pub fn fuzz_dataframe_from_dict_bytes(input: &[u8]) -> Result<(), String> {
     if input.len() < 2 || input.len() > 64 * 1024 {
@@ -6245,7 +6322,7 @@ pub fn fuzz_dataframe_from_records_bytes(input: &[u8]) -> Result<(), String> {
 
 /// Structure-aware fuzz entrypoint for `DataFrame::from_series(...)`.
 ///
-/// Per br-frankenpandas-d7lt. Builds a Vec<Series> with a shared Index
+/// Per br-frankenpandas-d7lt. Builds a `Vec<Series>` with a shared `Index`
 /// (aligned AACE path); on Ok, the resulting frame's column count
 /// equals the input series count.
 pub fn fuzz_dataframe_from_series_bytes(input: &[u8]) -> Result<(), String> {
