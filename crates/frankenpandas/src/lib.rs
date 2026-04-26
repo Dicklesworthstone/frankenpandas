@@ -245,6 +245,10 @@ pub mod prelude {
         Scalar,
         Series,
         SeriesResetIndexResult,
+        // fd90.211: ToDatetimeOptions + ToDatetimeOrigin pair with the
+        // to_datetime_with_options function (already in the prelude).
+        ToDatetimeOptions,
+        ToDatetimeOrigin,
         // Per-cell null tracking — README has a dedicated subsection
         // ("ValidityMask: Bitpacked Null Tracking", lines 261-278) and
         // lists it among types deriving Serialize + Deserialize (line 1567).
@@ -495,6 +499,10 @@ mod tests {
         let _ = write_sql_with_options::<rusqlite::Connection>;
         // fd90.210: read_sql_with_options pairs with SqlReadOptions.
         let _ = read_sql_with_options::<rusqlite::Connection>;
+
+        // fd90.211: ToDatetimeOptions + ToDatetimeOrigin in prelude.
+        let _: ToDatetimeOptions<'_> = ToDatetimeOptions::default();
+        let _: ToDatetimeOrigin<'_> = ToDatetimeOrigin::Int(0);
 
         // NanOps primitives (fd90.126) — call each through a Vec<Scalar>.
         let v = vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)];
