@@ -365,3 +365,54 @@ fn readme_random_sampling_compiles_and_runs() -> Result<(), Box<dyn std::error::
     assert_eq!(again.index().len(), 10);
     Ok(())
 }
+
+/// README Duplicate Handling (lines 1609-1622).
+///
+/// Imports prelude only. Verifies the fd90.116 + fd90.122 signature
+/// fixes survive end-to-end:
+/// - df.duplicated(None, DuplicateKeep::First) returns a boolean Series
+/// - df.drop_duplicates(None, DuplicateKeep::First, false) keeps first occurrences
+/// - series.drop_duplicates() (no-arg variant on Series)
+/// - index.has_duplicates() returns bool directly (no Result, no ?)
+/// - index.drop_duplicates_keep(DuplicateKeep::First) returns Index (no Result)
+#[test]
+fn readme_duplicate_handling_compiles_and_runs() -> Result<(), Box<dyn std::error::Error>> {
+    // 5 rows where rows 0+2 are dup (a=1) and rows 1+3 are dup (a=2). Row 4 is unique (a=3).
+    let df = read_csv_str("a\n1\n2\n1\n2\n3")?;
+    assert_eq!(df.index().len(), 5);
+
+    // Mark duplicates (DataFrame variant requires subset + keep).
+    let mask = df.duplicated(None, DuplicateKeep::First)?;
+    assert_eq!(mask.len(), 5);
+    // mask[0] = false (first 1), mask[1] = false (first 2),
+    // mask[2] = true (dup 1), mask[3] = true (dup 2), mask[4] = false (first 3).
+
+    // Drop duplicates (DataFrame variant requires subset + keep + ignore_index).
+    let unique = df.drop_duplicates(None, DuplicateKeep::First, false)?;
+    // After dedup: 1, 2, 3 → 3 unique rows.
+    assert_eq!(unique.index().len(), 3);
+
+    // Series-level (no-arg).
+    let series = read_csv_str("v\n10\n20\n10\n30\n20")?
+        .column("v")
+        .expect("v column exists")
+        .clone();
+    let series = Series::new("v", read_csv_str("v\n10\n20\n10\n30\n20")?.index().clone(), series)?;
+    let deduped = series.drop_duplicates()?;
+    assert_eq!(deduped.len(), 3); // 10, 20, 30
+
+    // Index-level (no Result on either method). Construct an Index with
+    // explicit duplicate labels — read_csv_str produces unique Int64 row
+    // indices by default, so we hand-build one here.
+    let dup_index = Index::new(vec![
+        IndexLabel::Int64(1),
+        IndexLabel::Int64(2),
+        IndexLabel::Int64(1), // duplicate of position 0
+        IndexLabel::Int64(3),
+    ]);
+    let has_dups = dup_index.has_duplicates();
+    assert!(has_dups);
+    let unique_idx = dup_index.drop_duplicates_keep(DuplicateKeep::First);
+    assert_eq!(unique_idx.len(), 3); // 1, 2, 3 (drop second 1)
+    Ok(())
+}
