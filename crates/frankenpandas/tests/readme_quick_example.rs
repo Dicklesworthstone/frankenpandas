@@ -1825,3 +1825,93 @@ fn readme_dataframe_constructors_compiles_and_runs() -> Result<(), Box<dyn std::
     assert_eq!(df_mi.index().len(), 2);
     Ok(())
 }
+
+/// README "Reshaping" section (lines 498-524).
+///
+/// Locks in 7 reshaping APIs that previously had no integration coverage
+/// (pivot_table is already exercised by readme_pivot_tables):
+///
+/// - DataFrame.melt (wide → long)
+/// - DataFrame.stack / unstack (column index ↔ row index round-trip)
+/// - DataFrame.crosstab + crosstab_normalize (contingency tables)
+/// - DataFrame.get_dummies (one-hot encoding)
+/// - DataFrame.xs (cross-section by IndexLabel)
+///
+/// Tracks fd90.193 (br-frankenpandas-tc3g2).
+#[test]
+fn readme_reshaping_compiles_and_runs() -> Result<(), Box<dyn std::error::Error>> {
+    // melt — wide → long with id_vars + value_vars.
+    let wide = read_csv_str("id,q1,q2,q3\n1,10,20,30\n2,40,50,60")?;
+    let melted = wide.melt(&["id"], &["q1", "q2", "q3"], Some("quarter"), Some("sales"))?;
+    assert!(
+        melted
+            .column_names()
+            .iter()
+            .any(|n| n.as_str() == "quarter")
+    );
+    assert!(
+        melted
+            .column_names()
+            .iter()
+            .any(|n| n.as_str() == "sales")
+    );
+
+    // stack / unstack — round-trip exercise on a numeric DataFrame.
+    let df = read_csv_str("a,b\n1,2\n3,4")?;
+    let stacked = df.stack()?;
+    assert!(stacked.index().len() >= 2);
+    let _unstacked = stacked.unstack()?;
+
+    // crosstab — contingency table from two categorical Series.
+    let labels: Vec<IndexLabel> = (0..6i64).map(IndexLabel::Int64).collect();
+    let gender = Series::from_values(
+        "gender",
+        labels.clone(),
+        vec![
+            "M".into(),
+            "F".into(),
+            "M".into(),
+            "F".into(),
+            "M".into(),
+            "F".into(),
+        ],
+    )?;
+    let dept = Series::from_values(
+        "department",
+        labels,
+        vec![
+            "eng".into(),
+            "eng".into(),
+            "sales".into(),
+            "sales".into(),
+            "ops".into(),
+            "ops".into(),
+        ],
+    )?;
+    let ct = DataFrame::crosstab(&gender, &dept)?;
+    assert_eq!(ct.column_names().len(), 3); // 3 unique departments
+    assert_eq!(ct.index().len(), 2); // 2 unique genders
+
+    // crosstab_normalize — divide by grand total.
+    let ct_norm = DataFrame::crosstab_normalize(&gender, &dept, "all")?;
+    assert_eq!(ct_norm.column_names().len(), 3);
+
+    // get_dummies — one-hot encoding on string-typed columns.
+    let cat_df = read_csv_str("color,size,price\nred,S,10\nblue,M,20\nred,L,30")?;
+    let dummies = cat_df.get_dummies(&["color", "size"])?;
+    // Each unique category becomes a dummy column; "price" is preserved.
+    assert!(
+        dummies
+            .column_names()
+            .iter()
+            .any(|n| n.as_str() == "price")
+    );
+    assert!(dummies.column_names().len() > 1);
+
+    // xs — cross-section by IndexLabel (uses From<&str> for IndexLabel).
+    let dated_df = read_csv_str("date,price\n2024-01-15,100\n2024-01-16,105\n2024-01-17,110")?
+        .set_index("date", true)?;
+    let row = dated_df.xs(&"2024-01-15".into())?;
+    assert_eq!(row.index().len(), 1);
+    Ok(())
+}
