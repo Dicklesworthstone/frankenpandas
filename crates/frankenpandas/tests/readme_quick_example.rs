@@ -1177,6 +1177,42 @@ fn readme_groupby_aggregation_matrix_compiles_and_runs() -> Result<(), Box<dyn s
     assert!(!piped.column_names().is_empty());
     let _ = gb.ohlc()?;
 
+    // fd90.212: GroupBy.rolling(window) — README line 496 ("GroupBy also
+    // supports rolling() and resample() for within-group window operations").
+    // GroupByRolling has 7 methods: sum/mean/min/max/std/count/var.
+    let gbr = gb.rolling(2);
+    let _ = gbr.sum()?;
+    let _ = gbr.mean()?;
+    let _ = gbr.min()?;
+    let _ = gbr.max()?;
+    let _ = gbr.std()?;
+    let _ = gbr.count()?;
+    let _ = gbr.var()?;
+
+    // GroupBy.resample("M") — needs a datetime-indexed grouping DataFrame.
+    let dt_df = DataFrame::from_dict_with_index(
+        vec![
+            ("k", vec![Scalar::Utf8("a".into()), Scalar::Utf8("a".into()), Scalar::Utf8("b".into()), Scalar::Utf8("b".into())]),
+            ("v", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0)]),
+        ],
+        vec![
+            "2024-01-15".into(),
+            "2024-01-20".into(),
+            "2024-02-10".into(),
+            "2024-02-25".into(),
+        ],
+    )?;
+    let dt_gb = dt_df.groupby(&["k"])?;
+    let dt_gbr = dt_gb.resample("M");
+    // GroupByResample has 7 methods: sum/mean/count/min/max/first/last.
+    let _ = dt_gbr.sum()?;
+    let _ = dt_gbr.mean()?;
+    let _ = dt_gbr.count()?;
+    let _ = dt_gbr.min()?;
+    let _ = dt_gbr.max()?;
+    let _ = dt_gbr.first()?;
+    let _ = dt_gbr.last()?;
+
     Ok(())
 }
 
