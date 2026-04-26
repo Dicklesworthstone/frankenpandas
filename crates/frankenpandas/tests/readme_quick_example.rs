@@ -701,3 +701,49 @@ fn readme_missing_data_handling_compiles_and_runs() -> Result<(), Box<dyn std::e
     let _ = df.dropna_columns()?;
     Ok(())
 }
+
+/// README Type Coercion and Conversion (lines 1003-1019).
+///
+/// Imports prelude only. Verifies:
+/// - series.astype(DType)
+/// - df.astype_column(name, DType)
+/// - df.astype_columns(&[(name, DType)])
+/// - df.convert_dtypes()
+/// - df.infer_objects()
+/// - to_numeric(&series) module-level fn
+#[test]
+fn readme_type_coercion_compiles_and_runs() -> Result<(), Box<dyn std::error::Error>> {
+    // Int64 series → cast to Float64.
+    let labels: Vec<IndexLabel> = (0..3i64).map(IndexLabel::Int64).collect();
+    let int_series = Series::from_values(
+        "n",
+        labels.clone(),
+        vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+    )?;
+    let float_col = int_series.astype(DType::Float64)?;
+    assert_eq!(float_col.len(), 3);
+
+    // DataFrame with int columns we'll cast.
+    let df = read_csv_str("price,score\n100,1\n200,2\n300,3")?;
+    let _ = df.astype_column("price", DType::Float64)?;
+    // Multiple-column cast — both targets need to be reachable from Int64.
+    let _ = df.astype_columns(&[("price", DType::Float64), ("score", DType::Float64)])?;
+
+    // Auto-infer.
+    let _ = df.convert_dtypes()?;
+    let _ = df.infer_objects()?;
+
+    // Coerce to numeric — Utf8 strings parsed; non-parseable → NaN.
+    let str_series = Series::from_values(
+        "s",
+        labels,
+        vec![
+            Scalar::Utf8("1.5".into()),
+            Scalar::Utf8("not_a_number".into()),
+            Scalar::Utf8("3.0".into()),
+        ],
+    )?;
+    let numeric = to_numeric(&str_series)?;
+    assert_eq!(numeric.len(), 3);
+    Ok(())
+}
