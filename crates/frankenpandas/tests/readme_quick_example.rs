@@ -653,3 +653,51 @@ fn readme_element_wise_operations_compiles_and_runs() -> Result<(), Box<dyn std:
     assert_eq!(pct.index().len(), 4);
     Ok(())
 }
+
+/// README Missing Data Handling (lines 944-994).
+///
+/// Imports prelude only. Locks in fd90.104's dropna_with_threshold
+/// rename and exercises the broader detection / filling / dropping API.
+#[test]
+fn readme_missing_data_handling_compiles_and_runs() -> Result<(), Box<dyn std::error::Error>> {
+    // Series with NaN values to exercise detection/filling.
+    let labels: Vec<IndexLabel> = (0..5i64).map(IndexLabel::Int64).collect();
+    let values = vec![
+        Scalar::Float64(1.0),
+        Scalar::Null(NullKind::NaN),
+        Scalar::Float64(3.0),
+        Scalar::Null(NullKind::NaN),
+        Scalar::Float64(5.0),
+    ];
+    let series = Series::from_values("v", labels, values)?;
+
+    // Detection.
+    let nulls = series.isna()?;
+    assert_eq!(nulls.len(), 5);
+    let valid = series.notna()?;
+    assert_eq!(valid.len(), 5);
+    let count = series.count();
+    assert_eq!(count, 3); // 3 non-NaN values
+    let has = series.hasnans();
+    assert!(has);
+
+    // Filling.
+    let _filled = series.fillna(&Scalar::Float64(0.0))?;
+    let _ff_unlim = series.ffill(None)?;
+    let _ff_lim = series.ffill(Some(3))?;
+    let _bf = series.bfill(Some(2))?;
+    let _interp = series.interpolate()?;
+
+    // DataFrame-level dropping.
+    let df = read_csv_str("a,b,c\n1,1,1\n2,,2\n3,3,\n,,4\n5,5,5")?;
+    let _ = df.dropna()?;
+    let _ = df.dropna_with_options(DropNaHow::All, None)?;
+    let _ = df.dropna_with_options(
+        DropNaHow::Any,
+        Some(&["a".into(), "b".into()]),
+    )?;
+    // fd90.104 rename: dropna_with_thresh → dropna_with_threshold (with subset arg).
+    let _ = df.dropna_with_threshold(2, None)?;
+    let _ = df.dropna_columns()?;
+    Ok(())
+}
