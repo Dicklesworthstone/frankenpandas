@@ -192,21 +192,32 @@ pub mod prelude {
         Scalar,
         Series,
         SeriesResetIndexResult,
+        // SQL contracts (covers the README Quick Start round-trip)
+        SqlConnection,
+        SqlIfExists,
         // Module-level functions
         concat_dataframes,
         concat_series,
         merge_ordered,
-        // IO
+        // IO — readers
         read_csv_str,
         read_feather_bytes,
         read_json_str,
         read_jsonl_str,
         read_parquet_bytes,
+        read_sql,
+        read_sql_table,
+        // IO — datetime helpers
         to_datetime,
         to_numeric,
         to_timedelta,
+        // IO — writers (string + bytes + sql, matching README documented surface)
+        write_csv_string,
         write_feather_bytes,
+        write_json_string,
+        write_jsonl_string,
         write_parquet_bytes,
+        write_sql,
     };
 }
 
