@@ -19,6 +19,13 @@
 pub use fp_types::{DType, NullKind, Scalar};
 pub use fp_types::{cast_scalar, common_dtype, infer_dtype, isna, isnull, notna, notnull};
 
+// NanOps: null-skipping aggregation primitives (matches README's NanOps section).
+pub use fp_types::{
+    nanall, nanany, nanargmax, nanargmin, nancount, nancummax, nancummin, nancumprod, nancumsum,
+    nankurt, nanmax, nanmean, nanmedian, nanmin, nannunique, nanprod, nanptp, nanquantile, nansem,
+    nanskew, nanstd, nansum, nanvar,
+};
+
 pub use fp_columnar::{ArithmeticOp, Column, ColumnError, ComparisonOp, ValidityMask};
 
 pub use fp_index::{
@@ -216,6 +223,30 @@ pub mod prelude {
         to_datetime,
         to_numeric,
         to_timedelta,
+        // NanOps — null-skipping aggregation primitives (matches README NanOps section)
+        nanall,
+        nanany,
+        nanargmax,
+        nanargmin,
+        nancount,
+        nancummax,
+        nancummin,
+        nancumprod,
+        nancumsum,
+        nankurt,
+        nanmax,
+        nanmean,
+        nanmedian,
+        nanmin,
+        nannunique,
+        nanprod,
+        nanptp,
+        nanquantile,
+        nansem,
+        nanskew,
+        nanstd,
+        nansum,
+        nanvar,
         // IO — writers (in-memory + path + sql, matching README documented surface)
         write_csv,
         write_csv_string,
