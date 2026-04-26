@@ -3912,9 +3912,12 @@ pub trait SqlConnection {
     /// `table_exists(table)` and ignores the schema argument — matches
     /// single-namespace embedded backends like SQLite. Multi-schema
     /// backends (PostgreSQL, MySQL, MSSQL) override to scope the check
-    /// to the requested schema (or `default_schema()` when `schema` is
-    /// `None`), so write_sql's `Fail` branch correctly distinguishes
-    /// `analytics.users` from `audit.users`.
+    /// to the requested schema, so write_sql's `Fail` branch correctly
+    /// distinguishes `analytics.users` from `audit.users`. The schema
+    /// arg passes through unchanged — backends MAY consult
+    /// `default_schema()` for their own fallback logic when `schema`
+    /// is `None` (per fd90.57: this fallback is NOT applied by the
+    /// default impl or the SQLite override).
     fn table_exists_in_schema(
         &self,
         table_name: &str,
@@ -5459,7 +5462,10 @@ pub fn read_sql_table<C: SqlConnection>(conn: &C, table_name: &str) -> Result<Da
 /// reports `supports_schemas() == false` (SQLite), `schema` is ignored
 /// and all tables in the single namespace are returned. When the
 /// backend supports schemas (PostgreSQL, MySQL, MSSQL), `Some(s)`
-/// scopes the listing; `None` falls back to `default_schema()`.
+/// scopes the listing. `None` passes through to the backend
+/// unchanged — backends MAY consult `default_schema()` for their own
+/// fallback logic if desired (per fd90.57: this wrapper does NOT
+/// apply the fallback automatically).
 ///
 /// Per br-frankenpandas-vhq2 (fd90.20).
 pub fn list_sql_tables<C: SqlConnection>(
