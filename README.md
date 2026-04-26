@@ -1604,7 +1604,7 @@ let deduped = series.drop_duplicates()?;
 
 // Index-level
 let has_dups = index.has_duplicates();  // O(1) after first call (OnceLock)
-let unique_idx = index.drop_duplicates(DuplicateKeep::First)?;
+let unique_idx = index.drop_duplicates_keep(DuplicateKeep::First); // returns Index, not Result
 ```
 
 `DuplicateKeep` enum: `First` (keep first occurrence), `Last` (keep last), `None` (mark all duplicates).
