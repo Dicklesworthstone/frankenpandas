@@ -1530,8 +1530,11 @@ let mask = df.query("price > 100")?;
 let filtered = df.filter_rows(&bool_series)?;
 
 // Conditional replacement
-let filled = df.where_mask_df(&cond_df, &other_df)?;
-let masked = df.mask_df(&cond_df, &other_df)?;
+// where_mask_df fills with a scalar where cond is FALSE (no DataFrame-other variant today)
+let filled = df.where_mask_df(&cond_df, &Scalar::Float64(0.0))?;
+// mask_df fills with a scalar where cond is TRUE; mask_df_other accepts a DataFrame
+let masked = df.mask_df(&cond_df, &Scalar::Null(NullKind::NaN))?;
+let masked_with_df = df.mask_df_other(&cond_df, &other_df)?;
 
 // Index operations
 let reindexed = df.set_index("date", true)?;  // Column → index
