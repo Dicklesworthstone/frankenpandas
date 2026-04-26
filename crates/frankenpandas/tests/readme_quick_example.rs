@@ -482,6 +482,106 @@ fn readme_window_operations_compiles_and_runs() -> Result<(), Box<dyn std::error
     // Exponentially weighted moving average.
     let ewma = series.ewm(Some(20.0), None).mean()?;
     assert_eq!(ewma.len(), 100);
+
+    // fd90.199: Cover the rest of the Window Operations matrix
+    // documented at README lines 489-496.
+
+    // ── Series Rolling — full method set. Note: .apply takes Fn(&[f64]) -> f64.
+    let r = series.rolling(10, None);
+    let _ = r.sum()?;
+    let _ = r.min()?;
+    let _ = r.max()?;
+    let _ = r.var()?;
+    let _ = r.count()?;
+    let _ = r.median()?;
+    let _ = r.quantile(0.5)?;
+    let _ = r.apply(|vals: &[f64]| vals.iter().copied().sum::<f64>() / vals.len() as f64)?;
+
+    // ── Series Expanding — full method set. Same f64 closure shape.
+    let e = series.expanding(None);
+    let _ = e.sum()?;
+    let _ = e.mean()?;
+    let _ = e.min()?;
+    let _ = e.std()?;
+    let _ = e.var()?;
+    let _ = e.median()?;
+    let _ = e.apply(|vals: &[f64]| vals.iter().copied().sum::<f64>())?;
+
+    // ── Series EWM — std + var (mean already covered above).
+    let ew = series.ewm(Some(20.0), None);
+    let _ = ew.std()?;
+    let _ = ew.var()?;
+
+    // ── Series Resample — needs datetime-indexed Series.
+    let date_labels: Vec<IndexLabel> = vec![
+        "2024-01-05".into(),
+        "2024-01-15".into(),
+        "2024-02-10".into(),
+        "2024-02-25".into(),
+    ];
+    let dt_series = Series::from_values(
+        "sales",
+        date_labels,
+        vec![
+            Scalar::Float64(100.0),
+            Scalar::Float64(200.0),
+            Scalar::Float64(300.0),
+            Scalar::Float64(400.0),
+        ],
+    )?;
+    let monthly = dt_series.resample("M");
+    let _ = monthly.sum()?;
+    let _ = monthly.mean()?;
+    let _ = monthly.count()?;
+    let _ = monthly.min()?;
+    let _ = monthly.max()?;
+    let _ = monthly.first()?;
+    let _ = monthly.last()?;
+
+    // ── DataFrame versions.
+    let df = read_csv_str("a,b\n1,10\n2,20\n3,30\n4,40\n5,50\n6,60\n7,70\n8,80\n9,90\n10,100")?;
+    let dr = df.rolling(3, None);
+    let _ = dr.sum()?;
+    let _ = dr.mean()?;
+    let _ = dr.min()?;
+    let _ = dr.max()?;
+    let _ = dr.std()?;
+    let _ = dr.var()?;
+    let _ = dr.count()?;
+    let _ = dr.median()?;
+    let _ = dr.quantile(0.5)?;
+
+    let de = df.expanding(None);
+    let _ = de.sum()?;
+    let _ = de.mean()?;
+    let _ = de.min()?;
+    let _ = de.max()?;
+    let _ = de.std()?;
+    let _ = de.var()?;
+    let _ = de.median()?;
+
+    let dew = df.ewm(Some(5.0), None);
+    let _ = dew.mean()?;
+    let _ = dew.std()?;
+    let _ = dew.var()?;
+
+    // ── DataFrame Resample — needs datetime-string row index.
+    let dt_df = DataFrame::from_dict_with_index(
+        vec![("sales", vec![
+            Scalar::Float64(100.0),
+            Scalar::Float64(200.0),
+            Scalar::Float64(300.0),
+        ])],
+        vec!["2024-01-15".into(), "2024-01-20".into(), "2024-02-10".into()],
+    )?;
+    let drs = dt_df.resample("M");
+    let _ = drs.sum()?;
+    let _ = drs.mean()?;
+    let _ = drs.count()?;
+    let _ = drs.min()?;
+    let _ = drs.max()?;
+    // first/last on DataFrameResample are README-documented but not yet
+    // implemented (parity asymmetry with Series Resample). Tracked separately.
     Ok(())
 }
 
