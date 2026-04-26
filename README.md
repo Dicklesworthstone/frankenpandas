@@ -301,7 +301,7 @@ Step 4: Log
    Bayesian posterior, expected losses.
 ```
 
-The alignment planner uses **adaptive lookup** (AG-13): it detects whether the index is sorted (via a lazily-computed `std::sync::OnceLock<SortOrder>`) and switches between O(log n) binary search for sorted indexes and O(n) HashMap lookup for unsorted ones.
+Single-label `Index::position()` lookups use **adaptive search** (AG-13): each `Index` lazily detects its own sort order in a `std::sync::OnceLock<SortOrder>`, then dispatches to O(log n) binary search for sorted Int64/Utf8 labels and an O(n) linear scan for unsorted labels. The alignment planner itself (`align_union`) always builds borrowed-key HashMaps (AG-02) for the union construction regardless of sort order — the adaptive switch is on the lookup side, not the planner side.
 
 For multi-way alignment (e.g., `DataFrame.from_series([s1, s2, s3])`), a leapfrog triejoin variant (AG-05) computes the N-way union in a single O(n log n) pass instead of iterative pairwise merges.
 
