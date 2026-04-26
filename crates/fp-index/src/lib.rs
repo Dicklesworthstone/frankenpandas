@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![warn(rustdoc::broken_intra_doc_links)]
 
 //! Row-label / index machinery for **frankenpandas** — every
 //! `DataFrame` and `Series` in fp-frame carries an [`Index`] that

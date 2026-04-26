@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![warn(rustdoc::broken_intra_doc_links)]
 
 //! FrankenTUI — terminal-UI snapshot model + E2E scenario harness
 //! for interactive `fp-frame` / `frankenpandas` workflows.

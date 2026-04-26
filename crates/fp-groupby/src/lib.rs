@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![warn(rustdoc::broken_intra_doc_links)]
 
 //! Standalone groupby aggregation engine for **frankenpandas** —
 //! the per-aggregation kernels that power `Series.groupby(...).sum()`

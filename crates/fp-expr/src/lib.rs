@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![warn(rustdoc::broken_intra_doc_links)]
 
 //! Expression engine for **frankenpandas** — implements pandas
 //! `DataFrame.eval()` / `DataFrame.query()` semantics for Rust

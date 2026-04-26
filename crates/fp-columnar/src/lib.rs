@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![warn(rustdoc::broken_intra_doc_links)]
 
 //! Columnar storage layer for **frankenpandas** — provides the
 //! [`Column`] container that backs every `DataFrame` column and

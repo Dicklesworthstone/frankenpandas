@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![warn(rustdoc::broken_intra_doc_links)]
 
 //! Runtime policy + decision-recording layer for **frankenpandas**.
 //!

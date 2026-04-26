@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![warn(rustdoc::broken_intra_doc_links)]
 
 //! Merge / join engine for **frankenpandas** — implements
 //! pandas-shape `pd.merge` / `pd.merge_ordered` / `pd.merge_asof`

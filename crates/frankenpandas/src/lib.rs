@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![warn(rustdoc::broken_intra_doc_links)]
 
 //! FrankenPandas — Clean-room Rust reimplementation of the pandas API.
 //!

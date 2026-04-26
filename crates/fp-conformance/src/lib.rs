@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![warn(rustdoc::broken_intra_doc_links)]
 
 //! Conformance harness for **frankenpandas** — mechanically verifies
 //! that frankenpandas matches pandas behavior across the supported

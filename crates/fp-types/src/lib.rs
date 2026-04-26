@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![warn(rustdoc::broken_intra_doc_links)]
 
 //! Foundational value-type abstractions for **frankenpandas** — the
 //! enums, structs, and free functions that every other crate
