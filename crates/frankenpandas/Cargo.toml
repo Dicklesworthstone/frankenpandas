@@ -15,6 +15,7 @@ categories.workspace = true
 fp-columnar = { path = "../fp-columnar" }
 fp-expr = { path = "../fp-expr" }
 fp-frame = { path = "../fp-frame" }
+fp-groupby = { path = "../fp-groupby" }
 fp-index = { path = "../fp-index" }
 fp-io = { path = "../fp-io", default-features = false }
 fp-join = { path = "../fp-join" }

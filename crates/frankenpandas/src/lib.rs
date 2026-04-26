@@ -16,7 +16,7 @@
 
 // ── Core types ──────────────────────────────────────────────────────────
 
-pub use fp_types::{DType, NullKind, Scalar};
+pub use fp_types::{DType, NullKind, Scalar, TypeError};
 pub use fp_types::{cast_scalar, common_dtype, infer_dtype, isna, isnull, notna, notnull};
 
 // NanOps: null-skipping aggregation primitives (matches README's NanOps section).
@@ -156,6 +156,10 @@ pub use fp_io::{
 // ── Expression engine ───────────────────────────────────────────────────
 
 pub use fp_expr::{DataFrameExprExt, ExprError};
+
+// ── GroupBy errors ──────────────────────────────────────────────────────
+
+pub use fp_groupby::GroupByError;
 
 // ── Join/merge ──────────────────────────────────────────────────────────
 
