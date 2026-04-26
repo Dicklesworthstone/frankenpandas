@@ -394,7 +394,7 @@ The asymmetric loss matrix penalizes "allow if incompatible" (100.0) far more th
 
 ### Categorical Data
 
-Rather than adding a `DType::Categorical` variant (which would require changing 52+ match arms across 4 crates), categoricals are implemented as a metadata layer on Series:
+`DType::Categorical` is a reportable dtype identity, but the physical storage is an `Int64` code column with a parallel `CategoricalMetadata` record. This dual-layer design preserves dtype reporting parity with pandas while avoiding per-element `Scalar::Categorical(...)` allocations on every match arm across the workspace:
 
 ```
 Series {
