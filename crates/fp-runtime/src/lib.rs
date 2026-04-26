@@ -1,5 +1,67 @@
 #![forbid(unsafe_code)]
 
+//! Runtime policy + decision-recording layer for **frankenpandas**.
+//!
+//! Pandas operations frequently hit "do we accept this input or fail
+//! closed?" decisions: a dtype that doesn't quite match, a frequency
+//! that's almost-but-not-quite regular, an alignment that produces
+//! NaNs the user maybe didn't expect. fp-runtime gives the rest of
+//! the workspace a single place to record those decisions, score
+//! their compatibility, and persist a verifiable evidence trail so
+//! pipelines can audit "why did the IO layer / groupby / merge make
+//! this choice on this input?" after the fact.
+//!
+//! ## Decision recording
+//!
+//! - [`RuntimePolicy`]: the active policy bundle — mode, fail-closed
+//!   flags, decision thresholds. Constructed once per pipeline and
+//!   threaded through hot-path code.
+//! - [`RuntimeMode`]: the top-level mode (Permissive / Hardened /
+//!   Strict) controlling how aggressively the policy fails on
+//!   ambiguity.
+//! - [`EvidenceLedger`]: append-only log of [`DecisionRecord`]
+//!   entries. Thread it through long-running pipelines to capture
+//!   every decision made; serialize at the end for audit.
+//! - [`DecisionRecord`]: one decision's structured trail —
+//!   [`DecisionAction`] taken, the [`DecisionMetrics`] /
+//!   [`LossMatrix`] / [`EvidenceTerm`] inputs, any
+//!   [`CompatibilityIssue`] entries surfaced.
+//! - [`GalaxyBrainCard`]: human-readable summary of one decision
+//!   suitable for surfacing in IDE plugins or CI logs.
+//! - [`decision_to_card`]: convert a [`DecisionRecord`] to a card.
+//!
+//! ## Conformal prediction guards
+//!
+//! - [`ConformalGuard`]: rolling-window nonconformity calibration
+//!   used to gate uncertain decisions inside hot-path code (e.g.
+//!   "this dtype inference is too unsure — fail closed").
+//! - [`ConformalPredictionSet`]: the calibrated prediction set
+//!   (inclusion / exclusion of candidate labels) the guard
+//!   produces.
+//!
+//! ## RaptorQ envelopes
+//!
+//! - [`RaptorQEnvelope`] / [`RaptorQMetadata`] / [`ScrubStatus`] /
+//!   [`DecodeProof`]: forward-error-correction envelope types used
+//!   for verifying / scrubbing on-disk artifacts that the runtime
+//!   policy needs to trust.
+//!
+//! ## Error reporting
+//!
+//! - [`RuntimeError`]: structural errors in policy construction or
+//!   ledger serialization.
+//! - [`IssueKind`]: enum tagging the category of a
+//!   [`CompatibilityIssue`].
+//!
+//! ## Cargo features
+//!
+//! - `asupersync` (off by default): enables the `asupersync`
+//!   submodule and the `outcome_to_action` helper for converting
+//!   an `asupersync::Outcome` into a [`DecisionAction`]. Pulls in
+//!   the `asupersync` crate as an optional dep. (Items are gated
+//!   behind the feature so they don't appear in the default
+//!   docs.rs render.)
+
 use std::borrow::Cow;
 use std::time::{SystemTime, UNIX_EPOCH};
 
