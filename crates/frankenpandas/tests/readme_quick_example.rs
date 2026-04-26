@@ -1329,3 +1329,56 @@ fn readme_column_manipulation_compiles_and_runs() -> Result<(), Box<dyn std::err
     assert_eq!(names, vec!["units", "revenue"]);
     Ok(())
 }
+
+/// README "Selection and Indexing" section (lines 1522-1558).
+///
+/// Locks in the conditional-replacement and index-management APIs that
+/// were uncovered by previous integration tests:
+/// - DataFrame.where_mask_df / where_cond_df / mask_df / mask_df_other
+/// - DataFrame.set_index / reset_index
+/// - DataFrame.select_dtypes_by_name (string-name variant)
+///
+/// Tracks fd90.187 (br-frankenpandas-sy8p4).
+#[test]
+fn readme_selection_and_indexing_compiles_and_runs() -> Result<(), Box<dyn std::error::Error>> {
+    // Base DataFrame and a same-shape Bool cond DataFrame for where/mask families.
+    let df = read_csv_str("a,b\n10,1\n20,2\n30,3\n40,4")?;
+    let cond_df = read_csv_str("a,b\ntrue,false\ntrue,true\nfalse,true\ntrue,false")?;
+    let other_df = read_csv_str("a,b\n100,200\n100,200\n100,200\n100,200")?;
+
+    // where_mask_df — keep where cond is true, fill rest with scalar.
+    let filled = df.where_mask_df(&cond_df, &Scalar::Float64(0.0))?;
+    assert_eq!(filled.index().len(), 4);
+
+    // where_cond_df — keep where cond is true, fill rest from other DataFrame.
+    let filled_other = df.where_cond_df(&cond_df, &other_df)?;
+    assert_eq!(filled_other.index().len(), 4);
+
+    // mask_df — inverse: replace where cond is true with scalar.
+    let masked = df.mask_df(&cond_df, &Scalar::Null(NullKind::NaN))?;
+    assert_eq!(masked.index().len(), 4);
+
+    // mask_df_other — inverse with DataFrame replacement.
+    let masked_other = df.mask_df_other(&cond_df, &other_df)?;
+    assert_eq!(masked_other.index().len(), 4);
+
+    // set_index — promote a column to the index (drop=true removes from data).
+    let dated = read_csv_str("date,price\n2024-01-01,100\n2024-01-02,105\n2024-01-03,110")?;
+    let indexed = dated.set_index("date", true)?;
+    assert!(
+        !indexed
+            .column_names()
+            .iter()
+            .any(|n| n.as_str() == "date")
+    );
+    assert_eq!(indexed.index().len(), 3);
+
+    // reset_index — index → column (drop=false keeps it as a regular column).
+    let reset = indexed.reset_index(false)?;
+    assert_eq!(reset.index().len(), 3);
+
+    // select_dtypes_by_name — string-form of dtype filtering.
+    let numeric_only = df.select_dtypes_by_name(&["int64", "float64"], &[])?;
+    assert!(numeric_only.column_names().len() >= 1);
+    Ok(())
+}
