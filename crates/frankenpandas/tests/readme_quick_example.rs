@@ -326,3 +326,42 @@ fn readme_merge_asof_compiles_and_runs() -> Result<(), Box<dyn std::error::Error
     assert!(result.column_names().iter().any(|n| n.as_str() == "quote"));
     Ok(())
 }
+
+/// README Random Sampling (lines 1630-1643).
+///
+/// Imports prelude only. Verifies the fd90.115 signature fixes
+/// (Option<usize>/Option<f64> for sample, &[f64] for sample_weights)
+/// and the fd90.162 inline-weight expression survive end-to-end.
+#[test]
+fn readme_random_sampling_compiles_and_runs() -> Result<(), Box<dyn std::error::Error>> {
+    // 100-row test DataFrame.
+    let mut csv = String::from("val\n");
+    for i in 0..100 {
+        csv.push_str(&format!("{}\n", i));
+    }
+    let df = read_csv_str(&csv)?;
+    assert_eq!(df.index().len(), 100);
+
+    // Sample n rows.
+    let sampled = df.sample(Some(10), None, false, Some(42))?;
+    assert_eq!(sampled.index().len(), 10);
+
+    // Sample fraction.
+    let frac = df.sample(None, Some(0.2), false, Some(42))?;
+    assert_eq!(frac.index().len(), 20);
+
+    // Sample with replacement (bootstrap).
+    let bootstrap = df.sample(Some(50), None, true, Some(42))?;
+    assert_eq!(bootstrap.index().len(), 50);
+
+    // Weighted sampling — `weights` is &[f64] (per fd90.115 fix), inline
+    // expression (per fd90.162 fix).
+    let weights: Vec<f64> = (0..df.len()).map(|i| (i + 1) as f64).collect();
+    let weighted = df.sample_weights(15, &weights, false, Some(42))?;
+    assert_eq!(weighted.index().len(), 15);
+
+    // Determinism: same seed → same rows.
+    let again = df.sample(Some(10), None, false, Some(42))?;
+    assert_eq!(again.index().len(), 10);
+    Ok(())
+}
