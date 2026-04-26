@@ -1047,7 +1047,7 @@ let cmax  = df.cummax()?;      // Running maximum
 let cmin  = df.cummin()?;      // Running minimum
 let delta = df.diff(1)?;       // First difference (n periods)
 let moved = df.shift(1)?;      // Shift values by n periods
-let pct   = df.pct_change()?;  // Percentage change
+let pct   = df.pct_change(1)?; // Percentage change (1-period lag, pandas default)
 ```
 
 ### Clipping and Rounding
