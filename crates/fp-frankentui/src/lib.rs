@@ -1,5 +1,76 @@
 #![forbid(unsafe_code)]
 
+//! FrankenTUI — terminal-UI snapshot model + E2E scenario harness
+//! for interactive `fp-frame` / `frankenpandas` workflows.
+//!
+//! The TUI itself (rendering, key handling, event loop) lives in a
+//! separate consumer; this crate provides the **value-type
+//! snapshots** the TUI binds onto and the **E2E scenario harness**
+//! that exercises the snapshot pipeline end-to-end against
+//! fp-conformance fixtures.
+//!
+//! ## Snapshot families
+//!
+//! Each family is a serializable struct the TUI reads to render
+//! one screen / panel. Snapshots are produced by background work
+//! (conformance harness runs, decision-ledger ticks, policy
+//! audits) and consumed by the TUI's render loop.
+//!
+//! - **Conformance dashboards**:
+//!   [`ConformanceDashboardSnapshot`] — top-level pass/fail with
+//!   per-suite drilldown. [`PacketSnapshot`] +
+//!   [`PacketTrendSnapshot`] for individual packet replay state
+//!   and historical drift. [`DriftHistorySnapshot`] tracks
+//!   numeric drift over time so authors can see when a kernel
+//!   started slipping.
+//!
+//! - **Decision dashboards**:
+//!   [`DecisionDashboardSnapshot`] / [`DecisionCardSnapshot`] —
+//!   bridges fp-runtime's decision recording into a TUI view of
+//!   "what choices did the runtime make this hour". Backed by
+//!   [`PolicySnapshot`] for the active runtime policy.
+//!
+//! - **Conformal guard state**: [`ConformalSnapshot`] surfaces
+//!   the fp-runtime conformal guard's calibration window and
+//!   prediction set health.
+//!
+//! - **Final evidence packs**: [`FinalEvidencePackSnapshot`] +
+//!   [`FinalEvidencePacketSnapshot`] for the bundled-evidence
+//!   summary at the end of a long-running pipeline.
+//!
+//! - **Differential validation**:
+//!   [`DifferentialValidationSnapshot`] +
+//!   [`DifferentialValidationSummary`] +
+//!   [`DifferentialValidationLogEntry`] for parallel-implementation
+//!   comparison runs (e.g. comparing two frankenpandas builds, or
+//!   frankenpandas vs pandas).
+//!
+//! - **Artifact issues**: [`ArtifactIssue`] / [`ArtifactIssueKind`]
+//!   for problems detected in on-disk artifacts that the TUI
+//!   should surface to the operator.
+//!
+//! ## E2E scenario harness
+//!
+//! - [`FrankentuiE2eScenario`]: one end-to-end test scenario
+//!   declaration. Tagged with [`FrankentuiE2eScenarioKind`].
+//! - [`FrankentuiE2eReplayBundleEntry`]: an item in the replay
+//!   bundle a scenario needs to seed before exercising the
+//!   snapshot pipeline.
+//! - [`FrankentuiE2eScenarioReport`]: the verdict of running one
+//!   scenario.
+//!
+//! ## Error reporting
+//!
+//! [`FtuiError`] enumerates structural failures (missing snapshot
+//! file, malformed entry, replay-bundle integrity mismatch).
+//!
+//! ## Cross-crate relationships
+//!
+//! Built on top of fp-conformance (re-uses its `CaseStatus` /
+//! `DriftLevel` / `FixtureOracleSource` types) and fp-runtime
+//! (decision policy + conformal guard primitives that snapshot
+//! into the `Decision*` / `ConformalSnapshot` families).
+
 use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
