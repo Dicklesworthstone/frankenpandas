@@ -122,7 +122,7 @@ frankenpandas/
 │   ├── fp-types/         # Scalar, DType, NullKind, coercion rules
 │   ├── fp-columnar/      # Column, ValidityMask, vectorized kernels
 │   ├── fp-index/         # Index, MultiIndex, alignment planning
-│   ├── fp-frame/         # DataFrame, Series, Categorical, 788 methods
+│   ├── fp-frame/         # DataFrame, Series, Categorical, 960+ methods
 │   ├── fp-expr/          # Expression parser, eval()/query()
 │   ├── fp-groupby/       # GroupBy with 3 execution paths
 │   ├── fp-join/          # Inner/Left/Right/Outer/Cross/Asof joins
@@ -866,7 +866,7 @@ let merged = df1.merge_with_options(&df2, &["key"], JoinType::Inner,
 ./scripts/phase2c_gate_check.sh
 ```
 
-Regenerates conformance packet artifacts and fails closed if any parity report or gate is not green. 430+ packet suites spanning 1249 fixtures cover alignment, join, groupby, concat, filter, CSV, dtype, null semantics, resample, rolling, groupby rolling/resample, datetime accessors, string accessors, and more — all currently green under `cargo test -p fp-conformance`.
+Regenerates conformance packet artifacts and fails closed if any parity report or gate is not green. 430+ packet suites spanning 1249 fixtures cover alignment, join, groupby, concat, filter, CSV, dtype, null semantics, resample, rolling, groupby rolling/resample, datetime accessors, string accessors, and more. The vast majority pass under `cargo test -p fp-conformance` (557+ passing); a small number of known mismatch packets remain on the backlog (currently 3 packet filter cases on time-zone parse_dates, axis-1 concat, and JSON records orient — tracked as backlog beads).
 
 ## Missing Data Handling
 
