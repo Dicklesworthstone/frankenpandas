@@ -1637,8 +1637,9 @@ let sampled = df.sample(None, Some(0.1), false, Some(42))?;  // 10% sample
 // Sample with replacement (bootstrap)
 let bootstrap = df.sample(Some(1000), None, true, Some(42))?;
 
-// Weighted sampling — `weights` is &[f64], not a Series. Extract values first.
-let weights: Vec<f64> = (0..df.len()).map(|i| compute_weight(i)).collect();
+// Weighted sampling — `weights` is &[f64], not a Series. Build it inline
+// (here: weight = row position + 1, so later rows are favored).
+let weights: Vec<f64> = (0..df.len()).map(|i| (i + 1) as f64).collect();
 let weighted = df.sample_weights(100, &weights, false, Some(42))?;
 ```
 
