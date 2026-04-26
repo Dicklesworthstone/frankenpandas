@@ -5840,6 +5840,29 @@ impl<'a, C: SqlConnection> SqlInspector<'a, C> {
             comment,
         }))
     }
+
+    /// Reflect every user-visible table in `schema` into a vector of
+    /// bundles, one per table.
+    ///
+    /// Per br-frankenpandas-jmmo (fd90.53). Iterates `tables(schema)`
+    /// then calls `reflect_table` on each. Skips any table that
+    /// `reflect_table` returns `Ok(None)` for — covers the race
+    /// condition where a table existed at list time but not at
+    /// reflect time (e.g. concurrent DROP). Useful for whole-database
+    /// introspection in one call.
+    pub fn reflect_all_tables(
+        &self,
+        schema: Option<&str>,
+    ) -> Result<Vec<SqlReflectedTable>, IoError> {
+        let table_names = self.conn.list_tables(schema)?;
+        let mut bundles = Vec::with_capacity(table_names.len());
+        for name in table_names {
+            if let Some(bundle) = self.reflect_table(&name, schema)? {
+                bundles.push(bundle);
+            }
+        }
+        Ok(bundles)
+    }
 }
 
 /// Derive the primary-key column names from an already-fetched
@@ -17383,6 +17406,179 @@ mod tests {
         assert_eq!(uq_for_x.len(), 2);
         assert_eq!(uq_for_x[0].name, "uq_a");
         assert_eq!(uq_for_x[1].name, "uq_b");
+    }
+
+    // ── SqlInspector::reflect_all_tables (br-jmmo / fd90.53) ─────────────
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn sql_inspector_reflect_all_tables_empty_db() {
+        let conn = make_sql_test_conn();
+        let inspector = SqlInspector::new(&conn);
+        let bundles = inspector.reflect_all_tables(None).unwrap();
+        assert!(bundles.is_empty());
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn sql_inspector_reflect_all_tables_returns_one_bundle_per_table() {
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE TABLE alpha (id INTEGER PRIMARY KEY, name TEXT);",
+        )
+        .unwrap();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE TABLE beta (uid INTEGER, label TEXT);",
+        )
+        .unwrap();
+        let inspector = SqlInspector::new(&conn);
+        let bundles = inspector.reflect_all_tables(None).unwrap();
+        assert_eq!(bundles.len(), 2);
+        // Ordered alphabetically by list_tables.
+        assert_eq!(bundles[0].table_name, "alpha");
+        assert_eq!(bundles[1].table_name, "beta");
+        // Each bundle has full metadata.
+        assert_eq!(
+            bundles[0].columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
+            vec!["id", "name"]
+        );
+        assert_eq!(bundles[0].primary_key_columns, vec!["id"]);
+        assert_eq!(bundles[1].columns.len(), 2);
+        assert!(bundles[1].primary_key_columns.is_empty());
+    }
+
+    #[test]
+    fn sql_inspector_reflect_all_tables_skips_disappearing_tables() {
+        // Race-condition stub: list_tables returns ["a", "b"] but
+        // table_schema returns None for "b" (simulating a concurrent
+        // DROP between list and reflect). reflect_all_tables must
+        // skip "b" without erroring.
+        struct DisappearingTable;
+        impl super::SqlConnection for DisappearingTable {
+            fn query(&self, _q: &str, _p: &[Scalar]) -> Result<SqlQueryResult, IoError> {
+                Ok(SqlQueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                })
+            }
+            fn execute_batch(&self, _sql: &str) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn table_exists(&self, _name: &str) -> Result<bool, IoError> {
+                Ok(false)
+            }
+            fn insert_rows(&self, _sql: &str, _rows: &[Vec<Scalar>]) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn dtype_sql(&self, _dtype: DType) -> &'static str {
+                "TEXT"
+            }
+            fn index_dtype_sql(&self, _index: &Index) -> &'static str {
+                "TEXT"
+            }
+            fn list_tables(&self, _schema: Option<&str>) -> Result<Vec<String>, IoError> {
+                Ok(vec!["a".to_owned(), "b".to_owned()])
+            }
+            fn table_schema(
+                &self,
+                table: &str,
+                _schema: Option<&str>,
+            ) -> Result<Option<SqlTableSchema>, IoError> {
+                if table == "a" {
+                    Ok(Some(SqlTableSchema {
+                        table_name: "a".to_owned(),
+                        columns: vec![SqlColumnSchema {
+                            name: "x".to_owned(),
+                            declared_type: Some("INTEGER".to_owned()),
+                            nullable: true,
+                            default_value: None,
+                            primary_key_ordinal: None,
+                            comment: None,
+                            autoincrement: false,
+                        }],
+                    }))
+                } else {
+                    // b "disappeared" between list and reflect.
+                    Ok(None)
+                }
+            }
+        }
+        let conn = DisappearingTable;
+        let inspector = SqlInspector::new(&conn);
+        let bundles = inspector.reflect_all_tables(None).unwrap();
+        assert_eq!(bundles.len(), 1);
+        assert_eq!(bundles[0].table_name, "a");
+    }
+
+    #[test]
+    fn sql_inspector_reflect_all_tables_routes_schema_arg() {
+        // Multi-schema stub: list_tables returns different sets per
+        // schema; reflect_all_tables must propagate the schema arg.
+        struct MultiSchemaReflect;
+        impl super::SqlConnection for MultiSchemaReflect {
+            fn query(&self, _q: &str, _p: &[Scalar]) -> Result<SqlQueryResult, IoError> {
+                Ok(SqlQueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                })
+            }
+            fn execute_batch(&self, _sql: &str) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn table_exists(&self, _name: &str) -> Result<bool, IoError> {
+                Ok(false)
+            }
+            fn insert_rows(&self, _sql: &str, _rows: &[Vec<Scalar>]) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn dtype_sql(&self, _dtype: DType) -> &'static str {
+                "TEXT"
+            }
+            fn index_dtype_sql(&self, _index: &Index) -> &'static str {
+                "TEXT"
+            }
+            fn supports_schemas(&self) -> bool {
+                true
+            }
+            fn list_tables(&self, schema: Option<&str>) -> Result<Vec<String>, IoError> {
+                Ok(match schema {
+                    Some("analytics") => vec!["events".to_owned()],
+                    _ => vec![],
+                })
+            }
+            fn table_schema(
+                &self,
+                table: &str,
+                schema: Option<&str>,
+            ) -> Result<Option<SqlTableSchema>, IoError> {
+                if table == "events" && schema == Some("analytics") {
+                    Ok(Some(SqlTableSchema {
+                        table_name: "events".to_owned(),
+                        columns: vec![SqlColumnSchema {
+                            name: "ts".to_owned(),
+                            declared_type: Some("TIMESTAMPTZ".to_owned()),
+                            nullable: false,
+                            default_value: None,
+                            primary_key_ordinal: None,
+                            comment: None,
+                            autoincrement: false,
+                        }],
+                    }))
+                } else {
+                    Ok(None)
+                }
+            }
+        }
+        let conn = MultiSchemaReflect;
+        let inspector = SqlInspector::new(&conn);
+        let bundles = inspector.reflect_all_tables(Some("analytics")).unwrap();
+        assert_eq!(bundles.len(), 1);
+        assert_eq!(bundles[0].table_name, "events");
+        assert_eq!(bundles[0].columns[0].declared_type.as_deref(), Some("TIMESTAMPTZ"));
+        // Wrong schema -> empty.
+        assert!(inspector.reflect_all_tables(Some("audit")).unwrap().is_empty());
     }
 
     #[test]
