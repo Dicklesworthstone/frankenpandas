@@ -1527,7 +1527,7 @@ let tail = df.tail(5)?;                    // Last 5 (supports negative n)
 // Column selection — column() returns Option<&Column>; use .expect/.ok_or for ?
 let col = df.column("price").expect("price column exists"); // &Column
 let subset = df.select_columns(&["price", "volume"])?;
-let numeric = df.select_dtypes(&["int64", "float64"], &[])?;
+let numeric = df.select_dtypes_by_name(&["int64", "float64"], &[])?; // string-name variant; select_dtypes(...) takes &[DType] for the enum form
 
 // Boolean masking
 let mask = df.query("price > 100")?;
