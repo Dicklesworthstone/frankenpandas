@@ -241,20 +241,20 @@ FrankenPandas uses a columnar storage model identical to pandas' internal repres
 
 ```
 DataFrame
-├── index: Index (Vec<IndexLabel>)  ← Row labels (Int64 or Utf8)
+├── index: Index (Vec<IndexLabel>)  ← Row labels (Int64/Utf8/Datetime64/Timedelta64)
 ├── columns: BTreeMap<String, Column>  ← Named columns
 └── column_order: Vec<String>  ← Insertion-order preservation
 
 Column
-├── dtype: DType  ← {Null, Bool, Int64, Float64, Utf8}
+├── dtype: DType  ← {Null, Bool, Int64, Float64, Utf8, Categorical, Timedelta64, Sparse}
 ├── values: Vec<Scalar>  ← Typed values
 └── validity: ValidityMask  ← Bitpacked null bitmap
 
-Scalar = Null(NullKind) | Bool(bool) | Int64(i64) | Float64(f64) | Utf8(String)
+Scalar = Null(NullKind) | Bool(bool) | Int64(i64) | Float64(f64) | Utf8(String) | Timedelta64(i64)
 NullKind = Null | NaN | NaT  ← Three-way null semantics matching pandas
 ```
 
-Every `Scalar` knows its own type, and every `Column` enforces type homogeneity through `DType`. The type promotion hierarchy follows pandas exactly: `Null < Bool < Int64 < Float64` (with Utf8 incompatible with numerics).
+Every `Scalar` knows its own type, and every `Column` enforces type homogeneity through `DType`. The type promotion hierarchy follows pandas exactly: `Null < Bool < Int64 < Float64` (with Utf8 incompatible with numerics). `Categorical`, `Timedelta64`, and `Sparse` are extension dtypes layered on top of the core numeric/string buckets.
 
 ### ValidityMask: Bitpacked Null Tracking
 
