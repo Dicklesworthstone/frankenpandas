@@ -208,6 +208,7 @@ pub mod prelude {
         ConcatJoin,
         CsvReadOptions,
         DType,
+        ExcelReadOptions,
         DataFrame,
         DataFrameColumnInput,
         DropNaHow,
@@ -272,6 +273,7 @@ pub mod prelude {
         // IO — readers (in-memory + path; covers all 8 documented formats)
         read_csv,
         read_csv_str,
+        read_csv_with_options,
         read_excel,
         read_excel_bytes,
         read_feather,
@@ -539,6 +541,10 @@ mod tests {
         // write_sql is generic over C: SqlConnection — exercised in the
         // rusqlite_reexport_quickstart_compiles test; bare let-binding
         // can't infer C without a concrete type, so skip here.
+
+        // fd90.207: Excel options + read_csv_with_options now in prelude.
+        let _ = ExcelReadOptions::default();
+        let _ = read_csv_with_options;
 
         // Module-level helpers (fd90.144) — name-check.
         let _ = cut;
