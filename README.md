@@ -1128,8 +1128,9 @@ let same = df1.equals(&df2);         // true if identical structure and values
 let changes = df1.compare(&df2)?;    // Shows only positions that differ
 
 // Squeeze single-column/single-row DataFrames
-let series = single_col_df.squeeze(1)?;   // DataFrame → Series
-let scalar = single_cell_df.squeeze(0)?;  // DataFrame → Scalar
+let series = single_col_df.squeeze(1)?;             // DataFrame → Series (axis=1 collapses columns)
+let one_row = single_cell_df.squeeze(0)?;           // DataFrame → Series (axis=0 collapses rows)
+let scalar  = one_row.squeeze().unwrap_or_else(|s| panic!("not single-cell: {:?}", s)); // Series → Scalar (Result<Scalar, Box<Series>>)
 
 // Scalar access
 let val = series.iat(0)?;           // By position (like .iat[0])
