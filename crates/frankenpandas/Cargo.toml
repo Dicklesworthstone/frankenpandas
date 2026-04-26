@@ -21,17 +21,26 @@ fp-join = { path = "../fp-join" }
 fp-runtime = { path = "../fp-runtime" }
 fp-types = { path = "../fp-types" }
 
-# Per br-frankenpandas-l6nr (fd90.58): forward fp-io's SQL backend
-# features so umbrella users can opt out of rusqlite via
-# `default-features = false` and pick a backend explicitly. Default
-# matches fp-io: sql-sqlite on. The sql-postgresql / sql-mysql
-# features are placeholders today (fp-io exposes them but doesn't
-# bind concrete backends yet — that's fd90 Phase 2).
+# Per br-frankenpandas-l6nr (fd90.58) and br-frankenpandas-ii9u
+# (fd90.59): forward inner-crate feature flags so umbrella users
+# can opt in/out without depending on inner crates directly.
+#
+# - SQL: forward fp-io's backend selection. Default is sql-sqlite
+#   (matches fp-io). sql-postgresql / sql-mysql are placeholders
+#   today (fp-io exposes them but doesn't bind concrete backends
+#   yet — that's fd90 Phase 2).
+# - tracing: forward fp-frame's optional `tracing` spans on hot
+#   paths (groupby, rolling, resample, IO). Off by default so users
+#   without a tracing subscriber pay no dependency cost.
+# - asupersync: forward fp-runtime's optional asupersync runtime
+#   integration. Off by default.
 [features]
 default = ["sql-sqlite"]
 sql-sqlite = ["fp-io/sql-sqlite"]
 sql-postgresql = ["fp-io/sql-postgresql"]
 sql-mysql = ["fp-io/sql-mysql"]
+tracing = ["fp-frame/tracing"]
+asupersync = ["fp-runtime/asupersync"]
 
 [package.metadata.docs.rs]
 all-features = true
