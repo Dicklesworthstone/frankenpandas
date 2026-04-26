@@ -310,19 +310,27 @@ For multi-way alignment (e.g., `DataFrame.from_series([s1, s2, s3])`), a leapfro
 The GroupBy engine automatically selects the fastest execution path based on key cardinality and memory budget:
 
 ```
-                       ┌───────────────────────┐
+                       ┌────────────────────────┐
                        │  All keys Int64 AND    │
                        │  key range ≤ 65,536?   │
                        └───────────┬────────────┘
                           Yes      │       No
-                    ┌──────────────┘       └──────────┐
-                    ▼                                  ▼
-          ┌──────────────────┐             ┌──────────────────┐
-          │ Dense Int64 Path  │             │ HashMap Generic   │
-          │ O(1) array index  │             │ Path (fallback)   │
-          │ Pre-alloc by key  │             │ (source_idx, sum) │
-          │ range: max-min    │             │ pairs, no clone   │
-          └──────────────────┘             └──────────────────┘
+                    ┌──────────────┘       └──────────────┐
+                    ▼                                      ▼
+          ┌────────────────────┐         ┌──────────────────────────┐
+          │ Dense Int64 Path   │         │  Estimated working set   │
+          │ O(1) array index   │         │  fits arena budget       │
+          │ Pre-alloc by key   │         │  (default 256 MB)?       │
+          │ range: max-min     │         └────────────┬─────────────┘
+          └────────────────────┘             Yes      │      No
+                                       ┌──────────────┘      └──────────────┐
+                                       ▼                                     ▼
+                            ┌────────────────────┐           ┌──────────────────────┐
+                            │ Arena-backed Path  │           │ HashMap Generic Path │
+                            │ Bumpalo bump alloc │           │ (source_idx, sum)    │
+                            │ single malloc      │           │ pairs, no key clone  │
+                            │ bulk dealloc       │           │ (AG-08)              │
+                            └────────────────────┘           └──────────────────────┘
 ```
 
 **Path 1, Dense Int64:** When all group keys are integers spanning ≤ 65,536 values, pre-allocates a dense array indexed directly by `key - min_key`. O(1) per-element grouping with zero hash overhead. Used for common patterns like grouping by year, month, category ID.
