@@ -1382,3 +1382,66 @@ fn readme_selection_and_indexing_compiles_and_runs() -> Result<(), Box<dyn std::
     assert!(numeric_only.column_names().len() >= 1);
     Ok(())
 }
+
+/// README "Module-Level Functions" table (lines 686-699).
+///
+/// Locks in the 5 module-level functions that previously had no
+/// integration coverage (to_datetime and concat_dataframes are
+/// already exercised by readme_quick_example_compiles_and_runs and
+/// readme_concat_full_options respectively):
+///
+/// - to_numeric (string → numeric, NaN for failures)
+/// - to_timedelta (string/numeric → Timedelta64)
+/// - timedelta_total_seconds (Timedelta64 → Float64 seconds)
+/// - cut (equal-width binning)
+/// - qcut (quantile-based binning)
+///
+/// Tracks fd90.188 (br-frankenpandas-g1sox).
+#[test]
+fn readme_module_level_functions_compiles_and_runs() -> Result<(), Box<dyn std::error::Error>> {
+    // to_numeric — coerce string-typed Series to numeric.
+    let str_labels: Vec<IndexLabel> = (0..3i64).map(IndexLabel::Int64).collect();
+    let str_series = Series::from_values(
+        "vals",
+        str_labels,
+        vec!["1.5".into(), "2.0".into(), "3.5".into()],
+    )?;
+    let numeric = to_numeric(&str_series)?;
+    assert_eq!(numeric.len(), 3);
+
+    // to_timedelta — parse duration strings.
+    let dur_labels: Vec<IndexLabel> = (0..3i64).map(IndexLabel::Int64).collect();
+    let dur_series = Series::from_values(
+        "duration",
+        dur_labels,
+        vec!["1 day".into(), "2 hours".into(), "30 minutes".into()],
+    )?;
+    let timedeltas = to_timedelta(&dur_series)?;
+    assert_eq!(timedeltas.len(), 3);
+
+    // timedelta_total_seconds — Timedelta64 → Float64 seconds.
+    let secs = timedelta_total_seconds(&timedeltas)?;
+    assert_eq!(secs.len(), 3);
+
+    // cut — equal-width binning.
+    let bin_labels: Vec<IndexLabel> = (0..6i64).map(IndexLabel::Int64).collect();
+    let values_for_cut = Series::from_values(
+        "v",
+        bin_labels,
+        vec![
+            Scalar::Float64(1.0),
+            Scalar::Float64(2.5),
+            Scalar::Float64(4.0),
+            Scalar::Float64(5.5),
+            Scalar::Float64(7.0),
+            Scalar::Float64(9.0),
+        ],
+    )?;
+    let binned = cut(&values_for_cut, 3)?;
+    assert_eq!(binned.len(), 6);
+
+    // qcut — quantile-based binning.
+    let qbinned = qcut(&values_for_cut, 3)?;
+    assert_eq!(qbinned.len(), 6);
+    Ok(())
+}
