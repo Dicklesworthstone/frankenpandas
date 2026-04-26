@@ -1,5 +1,66 @@
 #![forbid(unsafe_code)]
 
+//! Merge / join engine for **frankenpandas** — implements
+//! pandas-shape `pd.merge` / `pd.merge_ordered` / `pd.merge_asof`
+//! / `Series.join` for DataFrame and Series operands.
+//!
+//! ## Why a separate crate
+//!
+//! Joins have substantial machinery — hash-build phases, asof
+//! search, validate-mode integrity checks, bumpalo-backed
+//! intermediate buffers — that doesn't belong inside fp-frame's
+//! row/column primitives. fp-join layers on top of fp-columnar /
+//! fp-index / fp-frame and exposes a merge surface matching the
+//! pandas API shape.
+//!
+//! ## Top-level entry points
+//!
+//! - [`join_series`] / [`join_series_with_options`]: pandas
+//!   `Series.join(other, how=...)`. Returns a [`JoinedSeries`].
+//! - [`merge_dataframes`]: index-on-index merge (pandas
+//!   `df.merge(other, left_index=True, right_index=True)`).
+//! - [`merge_dataframes_on`] / [`merge_dataframes_on_with`] /
+//!   [`merge_dataframes_on_with_options`]: column-key merge
+//!   (`pd.merge(left, right, on=...)`). Returns a
+//!   [`MergedDataFrame`].
+//! - [`merge_ordered`]: pandas `pd.merge_ordered(left, right,
+//!   on=...)` — preserves ordering for time-series merges.
+//! - [`merge_asof`] / [`merge_asof_with_options`]: pandas
+//!   `pd.merge_asof(left, right, on=..., direction=...)` for
+//!   nearest-key time-aware merges. [`AsofDirection`] /
+//!   [`MergeAsofOptions`] tune the search.
+//!
+//! ## DataFrame extension trait
+//!
+//! [`DataFrameMergeExt`] adds `df.merge(...)` / `df.join(...)`
+//! method-style entry points so callers get fluent chaining
+//! after `use fp_join::DataFrameMergeExt;`.
+//!
+//! ## Tunables
+//!
+//! - [`JoinType`]: `Inner` / `Left` / `Right` / `Outer` /
+//!   `Cross`.
+//! - [`MergeValidateMode`]: pandas `validate='one_to_one' |
+//!   'one_to_many' | 'many_to_one' | 'many_to_many'` integrity
+//!   check before producing the result.
+//! - [`JoinExecutionOptions`] / [`MergeExecutionOptions`]:
+//!   per-call knobs (suffixes for overlapping columns, indicator
+//!   column, sort policy, ...).
+//!
+//! ## Error reporting
+//!
+//! [`JoinError`] enumerates the failure modes (key column
+//! mismatch, validate-mode violation, dtype mismatch on key
+//! column, ...).
+//!
+//! ## Cross-crate relationships
+//!
+//! - **fp-columnar** ([`Column`], [`ColumnError`]) for column
+//!   storage operations.
+//! - **fp-frame** for the `DataFrame` / `Series` value types.
+//! - **fp-index** for row alignment plans + label types.
+//! - **fp-types** for the underlying scalar machinery.
+
 use std::{
     cmp::Ordering,
     collections::{HashMap, HashSet},
