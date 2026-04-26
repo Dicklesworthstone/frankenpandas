@@ -109,8 +109,6 @@ use unicode_casefold::UnicodeCaseFold;
 pub enum FrameError {
     #[error("index length ({index_len}) does not match column length ({column_len})")]
     LengthMismatch { index_len: usize, column_len: usize },
-    #[error("duplicate index labels are unsupported in strict mode for MVP slice")]
-    DuplicateIndexUnsupported,
     #[error("compatibility gate rejected operation: {0}")]
     CompatibilityRejected(String),
     #[error(transparent)]
