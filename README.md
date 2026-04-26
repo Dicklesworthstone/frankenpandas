@@ -241,9 +241,11 @@ FrankenPandas uses a columnar storage model identical to pandas' internal repres
 
 ```
 DataFrame
-├── index: Index (Vec<IndexLabel>)  ← Row labels (Int64/Utf8/Datetime64/Timedelta64)
-├── columns: BTreeMap<String, Column>  ← Named columns
-└── column_order: Vec<String>  ← Insertion-order preservation
+├── index: Index (Vec<IndexLabel>)        ← Row labels (Int64/Utf8/Datetime64/Timedelta64)
+├── row_multiindex: Option<MultiIndex>    ← Optional hierarchical row index (set by set_index_multi)
+├── columns: BTreeMap<String, Column>     ← Named columns
+├── column_order: Vec<String>             ← Insertion-order preservation
+└── column_multiindex: Option<MultiIndex> ← Optional hierarchical column header
 
 Column
 ├── dtype: DType  ← {Null, Bool, Int64, Float64, Utf8, Categorical, Timedelta64, Sparse}
