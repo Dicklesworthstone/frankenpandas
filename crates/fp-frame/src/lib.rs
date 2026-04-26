@@ -18630,6 +18630,55 @@ impl DataFrame {
         Self::new_with_column_order(self.index.clone(), new_columns, self.column_order.clone())
     }
 
+    /// Replace values where `cond` is False with corresponding values from
+    /// `other` DataFrame.
+    ///
+    /// Matches `df.where(cond, other=df)`. Inverse of `mask_df_other`: where
+    /// `cond` is True, keep the original value; where False, take from `other`.
+    /// Closes the API asymmetry noted in br-frankenpandas-fjiep / fd90.136 —
+    /// `mask_df_other` already existed but `where_mask_df_other` did not.
+    pub fn where_mask_df_other(&self, cond: &Self, other: &Self) -> Result<Self, FrameError> {
+        let cond_plan = align(&self.index, &cond.index, AlignMode::Left);
+        validate_alignment_plan(&cond_plan)?;
+        let other_plan = align(&self.index, &other.index, AlignMode::Left);
+        validate_alignment_plan(&other_plan)?;
+        let mut new_columns = BTreeMap::new();
+
+        for col_name in &self.column_order {
+            let data_col = &self.columns[col_name];
+            let cond_col = cond.columns.get(col_name).ok_or_else(|| {
+                FrameError::CompatibilityRejected(format!(
+                    "where_mask_df_other: condition missing column '{col_name}'"
+                ))
+            })?;
+            let aligned_cond = cond_col.reindex_by_positions(&cond_plan.right_positions)?;
+            let aligned_other = other
+                .columns
+                .get(col_name)
+                .map(|col| col.reindex_by_positions(&other_plan.right_positions))
+                .transpose()?;
+
+            let values: Vec<Scalar> = data_col
+                .values()
+                .iter()
+                .zip(aligned_cond.values())
+                .enumerate()
+                .map(|(i, (val, c))| match c {
+                    Scalar::Bool(true) => val.clone(),
+                    Scalar::Bool(false) => aligned_other
+                        .as_ref()
+                        .and_then(|oc| oc.values().get(i).cloned())
+                        .unwrap_or(Scalar::Null(NullKind::NaN)),
+                    _ => Scalar::Null(NullKind::NaN),
+                })
+                .collect();
+
+            new_columns.insert(col_name.clone(), Column::from_values(values)?);
+        }
+
+        Self::new_with_column_order(self.index.clone(), new_columns, self.column_order.clone())
+    }
+
     /// Iterate over rows as `(IndexLabel, Vec<(&str, Scalar)>)` pairs.
     ///
     /// Matches `df.iterrows()`. Returns an iterator over (index_label, row_data)
@@ -55693,6 +55742,47 @@ mod tests {
         assert_eq!(result.columns["a"].values()[0], Scalar::Int64(0)); // true -> replace
         assert_eq!(result.columns["a"].values()[1], Scalar::Int64(2)); // false -> keep
         assert_eq!(result.columns["a"].values()[2], Scalar::Int64(0)); // true -> replace
+    }
+
+    #[test]
+    fn df_where_mask_df_other_with_dataframe_replacement() {
+        // br-frankenpandas-df9v7 / fd90.138: where_mask_df_other mirrors
+        // mask_df_other so users can plug in a DataFrame as the replacement
+        // source for where (was previously scalar-only).
+        let df = DataFrame::from_dict(
+            &["a"],
+            vec![(
+                "a",
+                vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            )],
+        )
+        .unwrap();
+        let cond = DataFrame::from_dict(
+            &["a"],
+            vec![(
+                "a",
+                vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)],
+            )],
+        )
+        .unwrap();
+        let other = DataFrame::from_dict(
+            &["a"],
+            vec![(
+                "a",
+                vec![
+                    Scalar::Int64(100),
+                    Scalar::Int64(200),
+                    Scalar::Int64(300),
+                ],
+            )],
+        )
+        .unwrap();
+        let result = df.where_mask_df_other(&cond, &other).unwrap();
+        // where cond=true   -> keep self
+        // where cond=false  -> take from other (200 at idx 1)
+        assert_eq!(result.columns["a"].values()[0], Scalar::Int64(1));
+        assert_eq!(result.columns["a"].values()[1], Scalar::Int64(200));
+        assert_eq!(result.columns["a"].values()[2], Scalar::Int64(3));
     }
 
     // ── DataFrame.value_counts() ──
