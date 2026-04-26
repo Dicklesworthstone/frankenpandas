@@ -168,6 +168,40 @@ fn readme_multiindex_operations_compiles_and_runs() -> Result<(), Box<dyn std::e
     // Flatten with separator → single Index.
     let flat = mi.to_flat_index("_");
     assert_eq!(flat.len(), 4);
+
+    // fd90.201: cover the rest of the MultiIndex API surface at README line 435.
+
+    // from_arrays — level-major construction.
+    let mi_arrays = MultiIndex::from_arrays(vec![
+        vec!["a".into(), "a".into(), "b".into(), "b".into()],
+        vec![1i64.into(), 2i64.into(), 1i64.into(), 2i64.into()],
+    ])?;
+    assert_eq!(mi_arrays.nlevels(), 2);
+    assert_eq!(mi_arrays.len(), 4);
+
+    // droplevel — returns MultiIndexOrIndex (single-level case collapses to Index).
+    let dropped = mi.droplevel(0)?;
+    match dropped {
+        MultiIndexOrIndex::Index(idx) => assert_eq!(idx.len(), 4),
+        MultiIndexOrIndex::Multi(m) => assert_eq!(m.len(), 4),
+    }
+
+    // swaplevel — exchange two level positions.
+    let swapped = mi.swaplevel(0, 1)?;
+    assert_eq!(swapped.nlevels(), 2);
+    assert_eq!(swapped.len(), 4);
+
+    // reorder_levels — explicit level permutation.
+    let reordered = mi.reorder_levels(&[1, 0])?;
+    assert_eq!(reordered.nlevels(), 2);
+
+    // DataFrame integration: set_index_multi + to_multi_index.
+    let df = read_csv_str("region,year,value\neast,2023,100\neast,2024,150\nwest,2023,90")?;
+    let df_mi = df.set_index_multi(&["region", "year"], true, "_")?;
+    assert_eq!(df_mi.index().len(), 3);
+    let extracted = df.to_multi_index(&["region", "year"])?;
+    assert_eq!(extracted.nlevels(), 2);
+    assert_eq!(extracted.len(), 3);
     Ok(())
 }
 

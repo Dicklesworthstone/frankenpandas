@@ -227,6 +227,7 @@ pub mod prelude {
         MergeValidateMode,
         MergedDataFrame,
         MultiIndex,
+        MultiIndexOrIndex,
         NullKind,
         RuntimePolicy,
         Scalar,
