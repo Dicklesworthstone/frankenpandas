@@ -278,6 +278,7 @@ pub mod prelude {
         read_csv,
         read_csv_str,
         read_csv_with_options,
+        read_csv_with_options_path,
         read_excel,
         read_excel_bytes,
         read_feather,
@@ -571,6 +572,8 @@ mod tests {
         // fd90.207: Excel options + read_csv_with_options now in prelude.
         let _ = ExcelReadOptions::default();
         let _ = read_csv_with_options;
+        // fd90.215: path-based variant for completeness.
+        let _ = read_csv_with_options_path;
 
         // fd90.208: pandas-style top-level null checks + dtype helpers.
         let na_check = vec![Scalar::Int64(1), Scalar::Null(NullKind::NaN)];
