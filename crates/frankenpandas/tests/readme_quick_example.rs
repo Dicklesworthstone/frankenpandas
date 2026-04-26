@@ -173,3 +173,56 @@ fn readme_multiindex_operations_compiles_and_runs() -> Result<(), Box<dyn std::e
     assert_eq!(flat.len(), 4);
     Ok(())
 }
+
+/// README Categorical Analysis (lines 1350-1379).
+///
+/// Imports prelude only. Verifies the categorical chain:
+/// - Series::from_categorical(name, Vec<Scalar>, ordered: bool)
+/// - .cat() returning Option<CategoricalAccessor>
+/// - cat.categories() / cat.codes()?.values() introspection
+/// - cat.rename_categories(Vec<Scalar>) returning Result<Series>
+/// - renamed.cat().unwrap().to_values()? — round-trip back to value series
+#[test]
+fn readme_categorical_analysis_compiles_and_runs() -> Result<(), Box<dyn std::error::Error>> {
+    // Create categorical with explicit ordering.
+    let ratings = Series::from_categorical(
+        "satisfaction",
+        vec![
+            Scalar::Utf8("good".into()),
+            Scalar::Utf8("poor".into()),
+            Scalar::Utf8("excellent".into()),
+            Scalar::Utf8("good".into()),
+        ],
+        true, // ordered
+    )?;
+
+    // Access category operations.
+    let cat = ratings.cat().expect("ratings is categorical");
+    let categories = cat.categories();
+    // First-seen order: good (idx 0), poor (idx 1), excellent (idx 2).
+    assert_eq!(categories.len(), 3);
+    assert_eq!(categories[0], Scalar::Utf8("good".into()));
+    assert_eq!(categories[1], Scalar::Utf8("poor".into()));
+    assert_eq!(categories[2], Scalar::Utf8("excellent".into()));
+
+    // Codes: [0, 1, 2, 0] — last value is "good" again so reuses code 0.
+    let codes = cat.codes()?;
+    let code_values = codes.values();
+    assert_eq!(code_values.len(), 4);
+    assert_eq!(code_values[0], Scalar::Int64(0));
+    assert_eq!(code_values[1], Scalar::Int64(1));
+    assert_eq!(code_values[2], Scalar::Int64(2));
+    assert_eq!(code_values[3], Scalar::Int64(0));
+
+    // Rename categories — codes stay the same but labels change.
+    let renamed = cat.rename_categories(vec![
+        Scalar::Utf8("Good".into()),
+        Scalar::Utf8("Poor".into()),
+        Scalar::Utf8("Excellent".into()),
+    ])?;
+
+    // Materialize back to a flat Series of label strings.
+    let values = renamed.cat().expect("renamed is still categorical").to_values()?;
+    assert_eq!(values.len(), 4);
+    Ok(())
+}
