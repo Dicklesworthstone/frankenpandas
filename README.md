@@ -827,7 +827,7 @@ Every crate has its own typed error enum, all implementing `std::error::Error` +
 | `TypeError` | fp-types | `IncompatibleDtypes { left, right }` |
 | `ColumnError` | fp-columnar | `LengthMismatch { left, right }`, `DTypeMismatch { left, right }`, `InvalidMaskType { dtype }`, `InvalidSorter { len, reason }` |
 | `IndexError` | fp-index | `OutOfBounds { position, length }`, `LengthMismatch { expected, actual, context }`, `InvalidAlignmentVectors` |
-| `FrameError` | fp-frame | `LengthMismatch { index_len, column_len }`, `DuplicateIndexUnsupported`, `CompatibilityRejected(String)` |
+| `FrameError` | fp-frame | `LengthMismatch { index_len, column_len }`, `CompatibilityRejected(String)`, `Column(ColumnError)`, `Index(IndexError)` (transparent wrappers via `#[from]`) |
 | `ExprError` | fp-expr | `ParseError(String)`, `UnknownSeries(String)`, `UnknownLocal(String)` |
 | `JoinError` | fp-join | `Frame(FrameError)`, `Column(ColumnError)` (transparent wrappers — no join-specific variants today) |
 | `GroupByError` | fp-groupby | `Frame(FrameError)`, `Index(IndexError)`, `Column(ColumnError)` (transparent wrappers — no aggregation-specific variants today) |
