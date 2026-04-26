@@ -825,8 +825,8 @@ Every crate has its own typed error enum, all implementing `std::error::Error` +
 | `IndexError` | fp-index | `OutOfBounds { position, length }`, `LengthMismatch { expected, actual, context }`, `InvalidAlignmentVectors` |
 | `FrameError` | fp-frame | `LengthMismatch { index_len, column_len }`, `DuplicateIndexUnsupported`, `CompatibilityRejected(String)` |
 | `ExprError` | fp-expr | `ParseError(String)`, `UnknownSeries(String)`, `UnknownLocal(String)` |
-| `JoinError` | fp-join | wraps `FrameError` + join-specific failures |
-| `GroupByError` | fp-groupby | wraps `FrameError` + aggregation failures |
+| `JoinError` | fp-join | `Frame(FrameError)`, `Column(ColumnError)` (transparent wrappers — no join-specific variants today) |
+| `GroupByError` | fp-groupby | `Frame(FrameError)`, `Index(IndexError)`, `Column(ColumnError)` (transparent wrappers — no aggregation-specific variants today) |
 | `IoError` | fp-io | `MissingHeaders`, `MissingIndexColumn(...)`, `Csv(...)`, `Json(...)`, `Parquet(...)`, `Excel(...)`, `Arrow(...)`, `Sql(...)` |
 
 All error types are re-exported through the `frankenpandas` facade crate, so users can pattern-match without importing internal crates:
