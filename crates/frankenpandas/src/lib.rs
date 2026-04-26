@@ -211,11 +211,14 @@ pub mod prelude {
         EvidenceLedger,
         Index,
         IndexLabel,
-        // Join
+        // Join (types + functions, matches README Recipes + Merge: Advanced Options)
+        AsofDirection,
+        JoinError,
         JoinType,
         JsonOrient,
         MergeExecutionOptions,
         MergeValidateMode,
+        MergedDataFrame,
         MultiIndex,
         NullKind,
         RuntimePolicy,
@@ -225,7 +228,7 @@ pub mod prelude {
         // SQL contracts (covers the README Quick Start round-trip)
         SqlConnection,
         SqlIfExists,
-        // Module-level functions (concat family + merge_ordered)
+        // Module-level functions (concat + join/merge family)
         concat_dataframes,
         concat_dataframes_with_axis,
         concat_dataframes_with_axis_join,
@@ -233,6 +236,9 @@ pub mod prelude {
         concat_dataframes_with_keys,
         concat_series,
         concat_series_with_ignore_index,
+        join_series,
+        merge_asof,
+        merge_dataframes_on,
         merge_ordered,
         // IO — readers (in-memory + path; covers all 8 documented formats)
         read_csv,
