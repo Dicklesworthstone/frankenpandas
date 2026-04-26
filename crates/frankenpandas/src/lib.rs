@@ -234,11 +234,14 @@ pub mod prelude {
         concat_series,
         concat_series_with_ignore_index,
         merge_ordered,
-        // IO — readers (in-memory + path)
+        // IO — readers (in-memory + path; covers all 8 documented formats)
         read_csv,
         read_csv_str,
+        read_excel,
+        read_excel_bytes,
         read_feather,
         read_feather_bytes,
+        read_ipc_stream_bytes,
         read_json,
         read_json_str,
         read_jsonl,
@@ -275,11 +278,14 @@ pub mod prelude {
         nanstd,
         nansum,
         nanvar,
-        // IO — writers (in-memory + path + sql, matching README documented surface)
+        // IO — writers (in-memory + path + sql; covers all 8 documented formats)
         write_csv,
         write_csv_string,
+        write_excel,
+        write_excel_bytes,
         write_feather,
         write_feather_bytes,
+        write_ipc_stream_bytes,
         write_json,
         write_json_string,
         write_jsonl,
