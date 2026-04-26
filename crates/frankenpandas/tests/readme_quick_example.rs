@@ -2288,5 +2288,73 @@ fn readme_serialization_compiles_and_runs() -> Result<(), Box<dyn std::error::Er
     let mask_json = serde_json::to_string(&mask)?;
     let mask_back: ValidityMask = serde_json::from_str(&mask_json)?;
     assert_eq!(mask, mask_back);
+
+    // fd90.205: round-trip the remaining 7 types from the README's
+    // Serialization list at line 1567:
+    // DType, NullKind, Index, MultiIndex, Series, CategoricalMetadata, Column.
+
+    // DType — every variant must round-trip.
+    for dt in [DType::Bool, DType::Int64, DType::Float64, DType::Utf8] {
+        let json = serde_json::to_string(&dt)?;
+        let back: DType = serde_json::from_str(&json)?;
+        assert_eq!(dt, back);
+    }
+
+    // NullKind.
+    for nk in [NullKind::NaN, NullKind::Null] {
+        let json = serde_json::to_string(&nk)?;
+        let back: NullKind = serde_json::from_str(&json)?;
+        assert_eq!(nk, back);
+    }
+
+    // Index round-trip.
+    let idx = Index::new(vec![IndexLabel::Int64(7), IndexLabel::Utf8("row".to_owned())]);
+    let idx_json = serde_json::to_string(&idx)?;
+    let idx_back: Index = serde_json::from_str(&idx_json)?;
+    assert_eq!(idx.len(), idx_back.len());
+
+    // MultiIndex round-trip.
+    let mi = MultiIndex::from_product(vec![
+        vec!["a".into(), "b".into()],
+        vec![1i64.into(), 2i64.into()],
+    ])?;
+    let mi_json = serde_json::to_string(&mi)?;
+    let mi_back: MultiIndex = serde_json::from_str(&mi_json)?;
+    assert_eq!(mi.nlevels(), mi_back.nlevels());
+    assert_eq!(mi.len(), mi_back.len());
+
+    // Series round-trip.
+    let s = Series::from_values(
+        "v",
+        vec![IndexLabel::Int64(0), IndexLabel::Int64(1)],
+        vec![Scalar::Int64(10), Scalar::Int64(20)],
+    )?;
+    let s_json = serde_json::to_string(&s)?;
+    let s_back: Series = serde_json::from_str(&s_json)?;
+    assert_eq!(s.len(), s_back.len());
+
+    // CategoricalMetadata round-trip — preserves categories + ordered flag.
+    let cat_series = Series::from_categorical(
+        "rating",
+        vec![
+            Scalar::Utf8("good".into()),
+            Scalar::Utf8("bad".into()),
+            Scalar::Utf8("good".into()),
+        ],
+        true,
+    )?;
+    // The CategoricalMetadata is embedded in the Series; round-trip the
+    // whole Series and inspect the metadata on the other side.
+    let cs_json = serde_json::to_string(&cat_series)?;
+    let cs_back: Series = serde_json::from_str(&cs_json)?;
+    let meta_back = cs_back.cat().expect("cat metadata preserved");
+    assert_eq!(meta_back.categories().len(), 2);
+    assert!(meta_back.ordered());
+
+    // Column round-trip.
+    let col = Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2)])?;
+    let col_json = serde_json::to_string(&col)?;
+    let col_back: Column = serde_json::from_str(&col_json)?;
+    assert_eq!(col.len(), col_back.len());
     Ok(())
 }

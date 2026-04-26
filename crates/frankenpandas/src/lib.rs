@@ -202,6 +202,8 @@ pub use rusqlite;
 pub mod prelude {
     pub use crate::{
         // Core types
+        CategoricalAccessor,
+        CategoricalMetadata,
         Column,
         ConcatJoin,
         CsvReadOptions,
@@ -442,6 +444,14 @@ mod tests {
 
         // fd90.203: ValidityMask in prelude.
         let _: ValidityMask = ValidityMask::all_valid(0);
+
+        // fd90.205: CategoricalMetadata in prelude.
+        let _: CategoricalMetadata = CategoricalMetadata {
+            categories: vec![Scalar::Utf8("a".into())],
+            ordered: false,
+        };
+        // CategoricalAccessor is borrowed-from-Series; just type-check name resolution.
+        let _name_check_cat_accessor: fn(&CategoricalAccessor<'_>) = |_| {};
 
         // Index-side enums (fd90.128).
         let _: DuplicateKeep = DuplicateKeep::First;
