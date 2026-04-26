@@ -1025,6 +1025,17 @@ fn readme_groupby_aggregation_matrix_compiles_and_runs() -> Result<(), Box<dyn s
     let _ = gb.ngroup()?;
     let _ = gb.describe()?;
 
+    // fd90.197: cover the remaining 7 group-level ops listed at line 566.
+    let _ = gb.rank("average", true, "keep")?;
+    let _ = gb.nth(0)?;
+    let _ = gb.pct_change(1)?;
+    let _ = gb.value_counts()?;
+    let group_one = gb.get_group("1")?; // groups by column 'a': keys are 1 and 2
+    assert!(group_one.index().len() >= 1);
+    let piped = gb.pipe(|g| g.sum())?;
+    assert!(!piped.column_names().is_empty());
+    let _ = gb.ohlc()?;
+
     Ok(())
 }
 
