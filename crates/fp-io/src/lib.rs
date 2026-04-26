@@ -5863,6 +5863,31 @@ impl<'a, C: SqlConnection> SqlInspector<'a, C> {
         }
         Ok(bundles)
     }
+
+    /// Reflect every user-visible view in `schema` into a vector of
+    /// bundles, one per view.
+    ///
+    /// Per br-frankenpandas-zuqt (fd90.54). View-side parity with
+    /// `reflect_all_tables`: iterates `views(schema)` then calls
+    /// `reflect_table` on each (PRAGMA table_info works on views too,
+    /// returning the view's column shape). PK/FK/UC/index lists in
+    /// the bundle will typically be empty for views since views don't
+    /// carry constraints — only the column metadata + comment are
+    /// meaningful. Same disappearing-entity skip semantics as
+    /// `reflect_all_tables`.
+    pub fn reflect_all_views(
+        &self,
+        schema: Option<&str>,
+    ) -> Result<Vec<SqlReflectedTable>, IoError> {
+        let view_names = self.conn.list_views(schema)?;
+        let mut bundles = Vec::with_capacity(view_names.len());
+        for name in view_names {
+            if let Some(bundle) = self.reflect_table(&name, schema)? {
+                bundles.push(bundle);
+            }
+        }
+        Ok(bundles)
+    }
 }
 
 /// Derive the primary-key column names from an already-fetched
@@ -17579,6 +17604,128 @@ mod tests {
         assert_eq!(bundles[0].columns[0].declared_type.as_deref(), Some("TIMESTAMPTZ"));
         // Wrong schema -> empty.
         assert!(inspector.reflect_all_tables(Some("audit")).unwrap().is_empty());
+    }
+
+    // ── SqlInspector::reflect_all_views (br-zuqt / fd90.54) ──────────────
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn sql_inspector_reflect_all_views_empty_db() {
+        let conn = make_sql_test_conn();
+        let inspector = SqlInspector::new(&conn);
+        let bundles = inspector.reflect_all_views(None).unwrap();
+        assert!(bundles.is_empty());
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn sql_inspector_reflect_all_views_returns_one_bundle_per_view() {
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE TABLE base (id INTEGER, label TEXT);",
+        )
+        .unwrap();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE VIEW alpha_view AS SELECT id FROM base;",
+        )
+        .unwrap();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE VIEW zebra_view AS SELECT label FROM base;",
+        )
+        .unwrap();
+        let inspector = SqlInspector::new(&conn);
+        let bundles = inspector.reflect_all_views(None).unwrap();
+        // Tables ARE NOT included — only views.
+        assert_eq!(bundles.len(), 2);
+        assert_eq!(bundles[0].table_name, "alpha_view");
+        assert_eq!(bundles[1].table_name, "zebra_view");
+        // Each view's columns are surfaced via PRAGMA table_info.
+        assert_eq!(
+            bundles[0].columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
+            vec!["id"]
+        );
+        assert_eq!(
+            bundles[1].columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
+            vec!["label"]
+        );
+        // Views don't carry constraints — PK/FK/UC/index lists are empty.
+        for bundle in &bundles {
+            assert!(bundle.primary_key_columns.is_empty());
+            assert!(bundle.indexes.is_empty());
+            assert!(bundle.foreign_keys.is_empty());
+            assert!(bundle.unique_constraints.is_empty());
+        }
+    }
+
+    #[test]
+    fn sql_inspector_reflect_all_views_routes_schema_arg() {
+        // Multi-schema stub: list_views returns different sets per schema.
+        struct MultiSchemaViewReflect;
+        impl super::SqlConnection for MultiSchemaViewReflect {
+            fn query(&self, _q: &str, _p: &[Scalar]) -> Result<SqlQueryResult, IoError> {
+                Ok(SqlQueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                })
+            }
+            fn execute_batch(&self, _sql: &str) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn table_exists(&self, _name: &str) -> Result<bool, IoError> {
+                Ok(false)
+            }
+            fn insert_rows(&self, _sql: &str, _rows: &[Vec<Scalar>]) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn dtype_sql(&self, _dtype: DType) -> &'static str {
+                "TEXT"
+            }
+            fn index_dtype_sql(&self, _index: &Index) -> &'static str {
+                "TEXT"
+            }
+            fn supports_schemas(&self) -> bool {
+                true
+            }
+            fn list_views(&self, schema: Option<&str>) -> Result<Vec<String>, IoError> {
+                Ok(match schema {
+                    Some("reporting") => vec!["weekly_summary".to_owned()],
+                    _ => vec![],
+                })
+            }
+            fn table_schema(
+                &self,
+                table: &str,
+                schema: Option<&str>,
+            ) -> Result<Option<SqlTableSchema>, IoError> {
+                if table == "weekly_summary" && schema == Some("reporting") {
+                    Ok(Some(SqlTableSchema {
+                        table_name: "weekly_summary".to_owned(),
+                        columns: vec![SqlColumnSchema {
+                            name: "week".to_owned(),
+                            declared_type: Some("DATE".to_owned()),
+                            nullable: true,
+                            default_value: None,
+                            primary_key_ordinal: None,
+                            comment: None,
+                            autoincrement: false,
+                        }],
+                    }))
+                } else {
+                    Ok(None)
+                }
+            }
+        }
+        let conn = MultiSchemaViewReflect;
+        let inspector = SqlInspector::new(&conn);
+        let bundles = inspector.reflect_all_views(Some("reporting")).unwrap();
+        assert_eq!(bundles.len(), 1);
+        assert_eq!(bundles[0].table_name, "weekly_summary");
+        assert_eq!(bundles[0].columns[0].declared_type.as_deref(), Some("DATE"));
+        // Wrong schema -> empty.
+        assert!(inspector.reflect_all_views(Some("audit")).unwrap().is_empty());
     }
 
     #[test]
