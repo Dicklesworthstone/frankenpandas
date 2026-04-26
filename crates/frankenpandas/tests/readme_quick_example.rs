@@ -226,3 +226,68 @@ fn readme_categorical_analysis_compiles_and_runs() -> Result<(), Box<dyn std::er
     assert_eq!(values.len(), 4);
     Ok(())
 }
+
+/// README Financial Data Pipeline (lines 1305-1333).
+///
+/// Imports prelude only (plus std::env / std::path). Verifies the
+/// multi-stage analysis chain from the recipe:
+/// - read_csv_str with multi-line input + line continuation
+/// - Series::new(name, Index, Column) constructor with cloned column
+/// - df.column(name).unwrap().clone() to extract a Column
+/// - to_datetime on a Utf8 series of ISO dates
+/// - df.groupby(&[col])?.agg_named(&[(out, src, fn), ...])? multi-aggregation
+/// - write_jsonl to a path-based output (uses a tempdir so the test cleans up)
+#[test]
+fn readme_financial_data_pipeline_compiles_and_runs() -> Result<(), Box<dyn std::error::Error>> {
+    use std::env;
+    use std::fs;
+
+    let trades = read_csv_str(
+        "date,ticker,price,volume\n\
+         2024-01-15,AAPL,185.50,1000\n\
+         2024-01-15,GOOG,140.25,500\n\
+         2024-01-16,AAPL,186.00,1200\n\
+         2024-01-16,GOOG,141.00,800",
+    )?;
+    assert_eq!(trades.index().len(), 4);
+
+    // Parse dates.
+    let date_series = Series::new(
+        "date",
+        trades.index().clone(),
+        trades.column("date").expect("date column exists").clone(),
+    )?;
+    let parsed_dates = to_datetime(&date_series)?;
+    assert_eq!(parsed_dates.len(), 4);
+
+    // Daily VWAP per ticker — multi-aggregation.
+    let vwap = trades.groupby(&["ticker"])?.agg_named(&[
+        ("total_value", "price", "sum"),
+        ("total_vol", "volume", "sum"),
+        ("trade_count", "volume", "count"),
+    ])?;
+    // 2 unique tickers (AAPL, GOOG).
+    assert_eq!(vwap.index().len(), 2);
+    // Three named output columns plus the ticker key.
+    assert!(vwap.column_names().iter().any(|n| n.as_str() == "total_value"));
+    assert!(vwap.column_names().iter().any(|n| n.as_str() == "total_vol"));
+    assert!(vwap.column_names().iter().any(|n| n.as_str() == "trade_count"));
+
+    // Export for downstream consumption — use a tempdir so the test cleans up.
+    let mut out_path = env::temp_dir();
+    out_path.push(format!(
+        "frankenpandas_fd90_160_{}.jsonl",
+        std::process::id()
+    ));
+    write_jsonl(&vwap, &out_path)?;
+    let written = fs::read_to_string(&out_path)?;
+    // Two ticker groups → two JSONL lines (line-delimited JSON; ticker is
+    // the index after groupby, so the JSON body contains the agg columns
+    // not the ticker label itself — verify by counting newlines).
+    let line_count = written.lines().count();
+    assert_eq!(line_count, 2, "expected one JSONL line per ticker group");
+    assert!(written.contains("total_value"));
+    assert!(written.contains("trade_count"));
+    fs::remove_file(&out_path).ok();
+    Ok(())
+}
