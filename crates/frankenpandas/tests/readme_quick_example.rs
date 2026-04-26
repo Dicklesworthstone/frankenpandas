@@ -953,16 +953,20 @@ fn readme_groupby_aggregation_matrix_compiles_and_runs() -> Result<(), Box<dyn s
     let _ = gb.all()?;
     let _ = gb.any()?;
 
-    // String-dispatch agg — exercise via agg_list which takes a flat &[&str].
-    // (DataFrameGroupBy has multiple agg() overloads — the HashMap variant
-    // wins method resolution for slice literals, so use agg_list for the
-    // 'apply this fn to all cols' shape.)
+    // String-dispatch via agg_list — supports the 12 aggs shared with the
+    // value-broadcast path (sum/mean/count/min/max/std/var/median/first/
+    // last/nunique/prod). The remaining 3 names from the README's 14-row
+    // table (sem/skew/kurt|kurtosis) are exposed via direct method calls
+    // (.sem(), .skew(), .kurt(), .kurtosis()).
     for fn_name in [
         "sum", "mean", "count", "min", "max", "std", "var", "median", "first",
-        "last", "prod", "sem", "skew", "kurt", "kurtosis",
+        "last", "nunique", "prod",
     ] {
         let _ = gb.agg_list(&[fn_name])?;
     }
+    let _ = gb.sem()?;
+    let _ = gb.skew()?;
+    let _ = gb.kurtosis()?; // 'kurt' alias is via agg() string dispatch only
 
     // Multi-fn agg via agg_list — returns a DataFrame with rows for each fn.
     let _ = gb.agg_list(&["sum", "mean", "count"])?;
