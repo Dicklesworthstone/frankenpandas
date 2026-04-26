@@ -1530,11 +1530,11 @@ Beyond unit tests, FrankenPandas employs two advanced testing strategies:
 
 ### Adversarial Input Tests
 
-15 tests targeting parser edge cases:
+16 tests targeting parser edge cases:
 
-- **CSV:** 200K-character field, 1000 columns, embedded newlines in quotes, multi-byte UTF-8 (Japanese, Cyrillic, emoji), header-only files, no trailing newline
-- **JSON:** Deeply nested objects, `i64::MAX`/`i64::MIN` boundary values, near-`f64::MAX` floats, empty arrays/objects
-- **SQL:** 10,000-row batch insert, column names with spaces (quoted identifier handling), SQL injection rejection (Bobby Tables pattern)
+- **CSV:** 200K-character field, 1000 columns, embedded newlines in quotes, multi-byte UTF-8 (Japanese, Cyrillic, emoji), header-only files, no trailing newline, empty rows
+- **JSON:** Deeply nested objects, `i64::MAX`/`i64::MIN` boundary values, near-`f64::MAX` floats, empty `Records` arrays, empty `Columns` objects
+- **SQL:** 10,000-row batch insert, column names with spaces (quoted identifier handling), column names with embedded double-quotes, SQL injection rejection (Bobby Tables pattern)
 
 ## Duplicate Handling
 
