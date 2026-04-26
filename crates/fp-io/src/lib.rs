@@ -3645,6 +3645,40 @@ impl SqlReflectedTable {
             .filter(|fk| fk.columns.iter().any(|c| c == column_name))
             .collect()
     }
+
+    /// Find every index whose `columns` slice contains `column_name`.
+    ///
+    /// Matches multi-column indexes where the column appears at any
+    /// position (first, middle, last) — useful for answering "is this
+    /// column indexed" rather than the more restrictive "is this
+    /// column the leading entry of an index" question.
+    ///
+    /// Per br-frankenpandas-37uy (fd90.52).
+    #[must_use]
+    pub fn indexes_for_column(&self, column_name: &str) -> Vec<&SqlIndexSchema> {
+        self.indexes
+            .iter()
+            .filter(|i| i.columns.iter().any(|c| c == column_name))
+            .collect()
+    }
+
+    /// Find every UNIQUE constraint whose `columns` slice contains
+    /// `column_name`.
+    ///
+    /// Same any-position match semantics as `indexes_for_column` and
+    /// `foreign_keys_for_column`.
+    ///
+    /// Per br-frankenpandas-37uy (fd90.52).
+    #[must_use]
+    pub fn unique_constraints_for_column(
+        &self,
+        column_name: &str,
+    ) -> Vec<&SqlUniqueConstraintSchema> {
+        self.unique_constraints
+            .iter()
+            .filter(|u| u.columns.iter().any(|c| c == column_name))
+            .collect()
+    }
 }
 
 /// Backend-neutral SQL foreign-key constraint metadata.
@@ -17217,6 +17251,138 @@ mod tests {
         // Order preserved.
         assert_eq!(fks[0].constraint_name.as_deref(), Some("fk_audit_a"));
         assert_eq!(fks[1].constraint_name.as_deref(), Some("fk_audit_b"));
+    }
+
+    // ── indexes_for_column / unique_constraints_for_column (br-37uy / fd90.52) ─
+
+    #[test]
+    fn sql_reflected_table_indexes_for_column_matches_any_position() {
+        let bundle = SqlReflectedTable {
+            table_name: "rolling".to_owned(),
+            columns: vec![],
+            primary_key_columns: vec![],
+            indexes: vec![
+                SqlIndexSchema {
+                    name: "idx_rolling_year".to_owned(),
+                    columns: vec!["year".to_owned()],
+                    unique: false,
+                },
+                SqlIndexSchema {
+                    name: "idx_rolling_y_m_c".to_owned(),
+                    columns: vec![
+                        "year".to_owned(),
+                        "month".to_owned(),
+                        "code".to_owned(),
+                    ],
+                    unique: false,
+                },
+            ],
+            foreign_keys: vec![],
+            unique_constraints: vec![],
+            comment: None,
+        };
+
+        // 'year' appears in both indexes (first in idx_year, first in
+        // composite). Returns both.
+        let year_idxs = bundle.indexes_for_column("year");
+        assert_eq!(year_idxs.len(), 2);
+
+        // 'month' only appears in the composite index, in middle position.
+        let month_idxs = bundle.indexes_for_column("month");
+        assert_eq!(month_idxs.len(), 1);
+        assert_eq!(month_idxs[0].name, "idx_rolling_y_m_c");
+
+        // 'code' appears only in the composite, last position.
+        let code_idxs = bundle.indexes_for_column("code");
+        assert_eq!(code_idxs.len(), 1);
+
+        // Column not in any index.
+        assert!(bundle.indexes_for_column("nonexistent").is_empty());
+    }
+
+    #[test]
+    fn sql_reflected_table_unique_constraints_for_column_matches_any_position() {
+        let bundle = SqlReflectedTable {
+            table_name: "events".to_owned(),
+            columns: vec![],
+            primary_key_columns: vec![],
+            indexes: vec![],
+            foreign_keys: vec![],
+            unique_constraints: vec![
+                SqlUniqueConstraintSchema {
+                    name: "uq_events_email".to_owned(),
+                    columns: vec!["email".to_owned()],
+                },
+                SqlUniqueConstraintSchema {
+                    name: "uq_events_user_event_ts".to_owned(),
+                    columns: vec![
+                        "user_id".to_owned(),
+                        "event_id".to_owned(),
+                        "ts".to_owned(),
+                    ],
+                },
+            ],
+            comment: None,
+        };
+
+        let email_uqs = bundle.unique_constraints_for_column("email");
+        assert_eq!(email_uqs.len(), 1);
+        assert_eq!(email_uqs[0].name, "uq_events_email");
+
+        // 'event_id' middle position in composite.
+        let event_uqs = bundle.unique_constraints_for_column("event_id");
+        assert_eq!(event_uqs.len(), 1);
+        assert_eq!(event_uqs[0].columns, vec!["user_id", "event_id", "ts"]);
+
+        // 'ts' last position in composite.
+        let ts_uqs = bundle.unique_constraints_for_column("ts");
+        assert_eq!(ts_uqs.len(), 1);
+
+        assert!(bundle.unique_constraints_for_column("nonexistent").is_empty());
+    }
+
+    #[test]
+    fn sql_reflected_table_for_column_accessors_return_multiple() {
+        // A column can appear in multiple indexes / unique constraints.
+        let bundle = SqlReflectedTable {
+            table_name: "wide".to_owned(),
+            columns: vec![],
+            primary_key_columns: vec![],
+            indexes: vec![
+                SqlIndexSchema {
+                    name: "idx_a".to_owned(),
+                    columns: vec!["x".to_owned()],
+                    unique: false,
+                },
+                SqlIndexSchema {
+                    name: "idx_b".to_owned(),
+                    columns: vec!["x".to_owned(), "y".to_owned()],
+                    unique: true,
+                },
+            ],
+            foreign_keys: vec![],
+            unique_constraints: vec![
+                SqlUniqueConstraintSchema {
+                    name: "uq_a".to_owned(),
+                    columns: vec!["x".to_owned()],
+                },
+                SqlUniqueConstraintSchema {
+                    name: "uq_b".to_owned(),
+                    columns: vec!["x".to_owned(), "z".to_owned()],
+                },
+            ],
+            comment: None,
+        };
+
+        let idx_for_x = bundle.indexes_for_column("x");
+        assert_eq!(idx_for_x.len(), 2);
+        assert_eq!(idx_for_x[0].name, "idx_a");
+        assert_eq!(idx_for_x[1].name, "idx_b");
+
+        let uq_for_x = bundle.unique_constraints_for_column("x");
+        assert_eq!(uq_for_x.len(), 2);
+        assert_eq!(uq_for_x[0].name, "uq_a");
+        assert_eq!(uq_for_x[1].name, "uq_b");
     }
 
     #[test]
