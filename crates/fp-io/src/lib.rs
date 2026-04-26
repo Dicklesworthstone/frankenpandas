@@ -4110,7 +4110,7 @@ pub trait SqlConnection {
         validate_sql_table_name(table_name)?;
         let qualified = match schema {
             Some(s) if self.supports_schemas() => {
-                validate_sql_table_name(s)?;
+                validate_sql_schema_name(s)?;
                 format!(
                     "{}.{}",
                     self.quote_identifier(s)?,
@@ -4784,6 +4784,14 @@ fn validate_sql_table_name(table_name: &str) -> Result<(), IoError> {
     validate_sql_ident(table_name, "table")
 }
 
+/// Per br-frankenpandas-597l (fd90.56): dedicated schema-name
+/// validator so error messages correctly identify the invalid
+/// identifier as a schema rather than a table. Same alphanumeric+
+/// underscore rule as table/column names.
+fn validate_sql_schema_name(schema: &str) -> Result<(), IoError> {
+    validate_sql_ident(schema, "schema")
+}
+
 /// Validate `name` against the backend's identifier-length cap.
 ///
 /// Per br-frankenpandas-9ynk (fd90.27). When `max` is `Some(n)`, errors
@@ -4831,7 +4839,7 @@ fn sql_select_all_query_in_schema<C: SqlConnection>(
     validate_sql_table_name(table_name)?;
     let qualified = match schema {
         Some(s) if conn.supports_schemas() => {
-            validate_sql_table_name(s)?;
+            validate_sql_schema_name(s)?;
             format!(
                 "{}.{}",
                 conn.quote_identifier(s)?,
@@ -4881,7 +4889,7 @@ fn sql_select_columns_query_in_schema<C: SqlConnection>(
 
     let qualified = match schema {
         Some(s) if conn.supports_schemas() => {
-            validate_sql_table_name(s)?;
+            validate_sql_schema_name(s)?;
             format!(
                 "{}.{}",
                 conn.quote_identifier(s)?,
@@ -4936,7 +4944,7 @@ fn sql_create_table_query_in_schema<C: SqlConnection>(
     validate_sql_table_name(table_name)?;
     let qualified = match schema {
         Some(s) if conn.supports_schemas() => {
-            validate_sql_table_name(s)?;
+            validate_sql_schema_name(s)?;
             format!(
                 "{}.{}",
                 conn.quote_identifier(s)?,
@@ -4974,7 +4982,7 @@ fn sql_insert_rows_query_in_schema<C: SqlConnection>(
     validate_sql_table_name(table_name)?;
     let qualified = match schema {
         Some(s) if conn.supports_schemas() => {
-            validate_sql_table_name(s)?;
+            validate_sql_schema_name(s)?;
             format!(
                 "{}.{}",
                 conn.quote_identifier(s)?,
@@ -5021,7 +5029,7 @@ fn sql_multi_row_insert_query_in_schema<C: SqlConnection>(
     }
     let qualified = match schema {
         Some(s) if conn.supports_schemas() => {
-            validate_sql_table_name(s)?;
+            validate_sql_schema_name(s)?;
             format!(
                 "{}.{}",
                 conn.quote_identifier(s)?,
@@ -5072,7 +5080,7 @@ fn sql_drop_table_query_in_schema<C: SqlConnection>(
     validate_sql_table_name(table_name)?;
     let qualified = match schema {
         Some(s) if conn.supports_schemas() => {
-            validate_sql_table_name(s)?;
+            validate_sql_schema_name(s)?;
             format!(
                 "{}.{}",
                 conn.quote_identifier(s)?,
@@ -12372,7 +12380,9 @@ mod tests {
         let conn = PgLikeValidate;
         let err = super::sql_select_all_query_in_schema(&conn, "users", Some("evil; DROP"))
             .expect_err("malformed schema must reject");
-        assert!(matches!(err, IoError::Sql(msg) if msg.contains("invalid table name")));
+        // Per fd90.56: error message now correctly identifies the
+        // bad identifier as a schema, not a table.
+        assert!(matches!(err, IoError::Sql(msg) if msg.contains("invalid schema name")));
     }
 
     // ── SqlWriteOptions::schema tests (br-frankenpandas-udn6 / fd90.15) ─
@@ -12536,7 +12546,9 @@ mod tests {
             &cols,
         )
         .expect_err("malformed schema must reject");
-        assert!(matches!(err, IoError::Sql(msg) if msg.contains("invalid table name")));
+        // Per fd90.56: schema validation error now says invalid
+        // schema name (not invalid table name).
+        assert!(matches!(err, IoError::Sql(msg) if msg.contains("invalid schema name")));
     }
 
     // ── DROP TABLE schema-qualification (br-frankenpandas-hxob / fd90.16) ─
