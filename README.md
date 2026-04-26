@@ -301,7 +301,7 @@ Step 4: Log
    Bayesian posterior, expected losses.
 ```
 
-The alignment planner uses **adaptive lookup** (AG-13): it detects whether the index is sorted (via a lazily-computed `OnceCell<SortOrder>`) and switches between O(log n) binary search for sorted indexes and O(n) HashMap lookup for unsorted ones.
+The alignment planner uses **adaptive lookup** (AG-13): it detects whether the index is sorted (via a lazily-computed `std::sync::OnceLock<SortOrder>`) and switches between O(log n) binary search for sorted indexes and O(n) HashMap lookup for unsorted ones.
 
 For multi-way alignment (e.g., `DataFrame.from_series([s1, s2, s3])`), a leapfrog triejoin variant (AG-05) computes the N-way union in a single O(n log n) pass instead of iterative pairwise merges.
 
@@ -685,7 +685,7 @@ Five optimization rounds with formal evidence:
 | Round 2 | `align_union` borrowed-key HashMap | Eliminates index clones |
 | Round 3 | GroupBy identity-alignment fast path | Skips reindex when indexes match |
 | Round 4 | Dense Int64 aggregation path | O(1) array access, no HashMap |
-| Round 5 | `has_duplicates` OnceCell memoization | **87% faster** on groupby benchmark |
+| Round 5 | `has_duplicates` OnceLock memoization | **87% faster** on groupby benchmark |
 
 ### Measured Baselines (10K rows, debug profile)
 
@@ -713,8 +713,8 @@ FrankenPandas applies 15 named optimization techniques (AG-01 through AG-15) dra
 | AG-07 | Vec-based column accumulation | fp-io CSV parser | Pre-allocates `Vec<Vec<Scalar>>` with capacity hints from input byte count. O(1) amortized per cell vs O(log c) BTreeMap insertion. |
 | AG-08 | Source-index referencing | fp-groupby HashMap path | Stores `(source_row_index, accumulator)` instead of `(Scalar_clone, accumulator)`. Reconstructs group key labels at output time, avoiding per-group Scalar clones. |
 | AG-10 | Typed-array vectorization | fp-columnar binary ops | Dispatches to `&[f64]` / `&[i64]` typed arrays instead of per-element `match Scalar`. Enables LLVM auto-vectorization to SIMD. |
-| AG-11 | Fast-path alignment skip | fp-frame, fp-groupby | When both operands share the same index and have no duplicates, skips the alignment planning phase entirely. O(1) check via `OnceCell` memoization. |
-| AG-13 | Adaptive sort-order lookup | fp-index `position()` | Lazily detects whether an index is sorted ascending (Int64 or Utf8). Uses O(log n) binary search for sorted, O(n) scan for unsorted. Sort order cached in `OnceCell`. |
+| AG-11 | Fast-path alignment skip | fp-frame, fp-groupby | When both operands share the same index and have no duplicates, skips the alignment planning phase entirely. O(1) check via `std::sync::OnceLock` memoization. |
+| AG-13 | Adaptive sort-order lookup | fp-index `position()` | Lazily detects whether an index is sorted ascending (Int64 or Utf8). Uses O(log n) binary search for sorted, O(n) scan for unsorted. Sort order cached in `std::sync::OnceLock`. |
 | AG-14 | Alignment plan validation | fp-index | Debug-mode assertion that position vectors have consistent lengths and valid indices. Catches alignment bugs at the source. |
 
 ## DType System and Coercion Rules
@@ -1565,7 +1565,7 @@ let unique = df.drop_duplicates()?;
 let deduped = series.drop_duplicates()?;
 
 // Index-level
-let has_dups = index.has_duplicates();  // O(1) after first call (OnceCell)
+let has_dups = index.has_duplicates();  // O(1) after first call (OnceLock)
 let unique_idx = index.drop_duplicates(DuplicateKeep::First)?;
 ```
 
