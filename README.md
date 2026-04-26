@@ -1444,7 +1444,7 @@ A: Three distinct null kinds: `NullKind::Null` (generic missing), `NullKind::NaN
 A: Comparable for numeric data. `ValidityMask` uses 1 bit per element (vs pandas' 8-byte nullable dtype). `Column` stores typed arrays (`Vec<f64>`, `Vec<i64>`) instead of object arrays. String data uses `Vec<String>` (heap-allocated per element, same as pandas object dtype). Arena-backed GroupBy/Join operations avoid per-group heap fragmentation.
 
 **Q: Can I use this for production ETL pipelines?**
-A: The core DataFrame, IO, and GroupBy/Join operations are solid and well-tested (1,500+ tests including adversarial inputs and property-based fuzzing). This is pre-1.0 software, so API stability is not yet guaranteed, but the correctness bar is high.
+A: The core DataFrame, IO, and GroupBy/Join operations are solid and well-tested (3,200+ tests including adversarial inputs and property-based fuzzing). This is pre-1.0 software, so API stability is not yet guaranteed, but the correctness bar is high.
 
 ## Selection and Indexing
 
