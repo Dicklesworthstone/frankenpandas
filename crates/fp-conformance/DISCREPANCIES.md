@@ -93,7 +93,7 @@
   - `FP-P2D-433` (dataframe_to_json_records): JSON output writes `"a":1.0` instead of `"a":1` for integer columns that were promoted via null introduction.
   - Plus other downstream packets where alignment + nulls hit Int64 columns.
 - **Resolution:** WILL-FIX - implementing nullable extension Int64 is a significant architectural change touching storage (fp-columnar), arithmetic kernels (fp-frame), and serialization (fp-io). Tracked under a future epic, not in scope for the fd90 SQL backend work. Per br-frankenpandas-mywg (fd90.76).
-- **Tests affected:** `packet_filter_runs_dataframe_concat_axis1_packet`, `packet_filter_runs_dataframe_to_json_records_packet`, plus downstream packets that hit the same root cause.
+- **Tests affected:** `packet_filter_runs_dataframe_concat_axis1_packet`, `packet_filter_runs_dataframe_to_json_records_packet`, `fuzz_json_io_bytes_accepts_records_seed_fixture` (the records seed has `[{"temp":72},{"temp":null}]` — read promotes to Float64, write emits `72.0` instead of `72`, reparse + diff detects the drift), plus other downstream packets that hit the same root cause.
 - **Review date:** 2026-04-26
 
 ## Resolved Divergences
