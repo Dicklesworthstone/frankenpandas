@@ -824,7 +824,7 @@ Every crate has its own typed error enum, all implementing `std::error::Error` +
 | `ColumnError` | fp-columnar | `LengthMismatch { left, right }`, `DTypeMismatch { left, right }`, `InvalidMaskType { dtype }`, `InvalidSorter { len, reason }` |
 | `IndexError` | fp-index | `OutOfBounds { position, length }`, `LengthMismatch { expected, actual, context }`, `InvalidAlignmentVectors` |
 | `FrameError` | fp-frame | `LengthMismatch { index_len, column_len }`, `DuplicateIndexUnsupported`, `CompatibilityRejected(String)` |
-| `ExprError` | fp-expr | `ParseError(String)`, `UnknownColumn(String)`, `UnknownLocal(String)` |
+| `ExprError` | fp-expr | `ParseError(String)`, `UnknownSeries(String)`, `UnknownLocal(String)` |
 | `JoinError` | fp-join | wraps `FrameError` + join-specific failures |
 | `GroupByError` | fp-groupby | wraps `FrameError` + aggregation failures |
 | `IoError` | fp-io | `MissingHeaders`, `MissingIndexColumn(...)`, `Csv(...)`, `Json(...)`, `Parquet(...)`, `Excel(...)`, `Arrow(...)`, `Sql(...)` |
