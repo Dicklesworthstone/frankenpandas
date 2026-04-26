@@ -9,7 +9,7 @@
 
   ![Rust](https://img.shields.io/badge/Rust-2024_edition-orange)
   ![License](https://img.shields.io/badge/license-MIT-blue)
-  ![Tests](https://img.shields.io/badge/tests-1500%2B-brightgreen)
+  ![Tests](https://img.shields.io/badge/tests-3200%2B-brightgreen)
   ![IO Formats](https://img.shields.io/badge/IO_formats-8-purple)
 </div>
 
