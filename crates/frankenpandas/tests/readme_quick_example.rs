@@ -144,3 +144,32 @@ fn readme_expression_driven_analysis_compiles_and_runs() -> Result<(), Box<dyn s
     assert_eq!(above.index().len(), 2);
     Ok(())
 }
+
+/// README MultiIndex Operations (lines 1383-1395).
+///
+/// Imports prelude only. Verifies the standalone MultiIndex API chain:
+/// - MultiIndex::from_product(Vec<Vec<IndexLabel>>) via .into() blanket
+/// - .set_names(Vec<Option<String>>) consumes-self chain
+/// - .get_level_values(usize) returning Result<Index>
+/// - .to_flat_index(&str) returning a flat Index with composite labels
+#[test]
+fn readme_multiindex_operations_compiles_and_runs() -> Result<(), Box<dyn std::error::Error>> {
+    // Cartesian product: 2 regions × 2 years = 4 entries.
+    let mi = MultiIndex::from_product(vec![
+        vec!["east".into(), "west".into()],
+        vec![2023i64.into(), 2024i64.into()],
+    ])?
+    .set_names(vec![Some("region".into()), Some("year".into())]);
+
+    assert_eq!(mi.nlevels(), 2);
+    assert_eq!(mi.len(), 4);
+
+    // Extract level 0 (the regions).
+    let regions = mi.get_level_values(0)?;
+    assert_eq!(regions.len(), 4);
+
+    // Flatten with separator → single Index.
+    let flat = mi.to_flat_index("_");
+    assert_eq!(flat.len(), 4);
+    Ok(())
+}
