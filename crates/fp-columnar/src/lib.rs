@@ -1,5 +1,58 @@
 #![forbid(unsafe_code)]
 
+//! Columnar storage layer for **frankenpandas** — provides the
+//! [`Column`] container that backs every `DataFrame` column and
+//! `Series` value buffer in fp-frame.
+//!
+//! A column is a typed value buffer ([`DType`]) plus a separate
+//! [`ValidityMask`] tracking which cells are missing. This split
+//! mirrors Apache Arrow's storage layout and lets the type system
+//! enforce correctness on the dense-value side while keeping
+//! pandas-style missing-value semantics ([`NullKind::Null`],
+//! [`NullKind::NaN`], [`NullKind::NaT`]) on the validity side.
+//!
+//! ## Public surface
+//!
+//! - [`Column`]: the public columnar container. Built from a
+//!   [`DType`] + a `Vec<Scalar>`. Exposes value access
+//!   ([`Column::value`], [`Column::values`]), reductions
+//!   ([`Column::sum`], [`Column::mean`], [`Column::count`], the
+//!   nan-aware aggregations from fp-types), and typed binary
+//!   operations dispatched through [`ArithmeticOp`] /
+//!   [`ComparisonOp`].
+//! - [`ColumnData`]: the inner enum holding the dense buffer. Most
+//!   callers go through `Column` rather than touching this directly.
+//! - [`SparseColumn`]: opt-in sparse encoding (paired value buffer +
+//!   index-of-non-fill positions). Stored alongside the dense
+//!   `Column` for backwards compat when consumers only need
+//!   [`Column`].
+//! - [`ValidityMask`]: per-cell missing-value bitmap. Stored on
+//!   [`Column`]; exposed for users that want to compose masks
+//!   directly (logical masking, conditional updates, etc.).
+//! - [`ArithmeticOp`] / [`ComparisonOp`]: enum tags for typed
+//!   binary-op dispatch (used by fp-frame's expression engine and
+//!   Series arithmetic).
+//! - [`CrackIndex`]: an internal positional index used by the
+//!   "cracking" optimisation for repeated boolean-mask filters.
+//!
+//! ## Error reporting
+//!
+//! [`ColumnError`] enumerates the failure modes (length mismatch,
+//! dtype mismatch, missing-value-in-required-slot, etc.). All
+//! Column-mutating fns return `Result<_, ColumnError>` so callers
+//! get explicit error categories.
+//!
+//! ## Relationship to other crates
+//!
+//! - **fp-types** supplies the [`DType`] / [`Scalar`] /
+//!   [`NullKind`] / `nan*` reduction primitives this crate composes
+//!   on top of.
+//! - **fp-frame** stores a `Vec<Column>` per `DataFrame` (one column
+//!   per data column) plus a separate `Index` from fp-index for the
+//!   row labels.
+//! - **fp-index** uses [`Column`] internally for some MultiIndex
+//!   level storage.
+
 use fp_types::{
     DType, NullKind, Scalar, SparseDType, Timedelta, TypeError, cast_scalar, cast_scalar_owned,
     common_dtype, infer_dtype, nanall, nanany, nanargmax, nanargmin, nancummax, nancummin,
