@@ -80,3 +80,35 @@ fn readme_quick_start_round_trip_through_sqlite() -> Result<(), Box<dyn std::err
     assert_eq!(back.index().len(), 1);
     Ok(())
 }
+
+/// README Merge: Advanced Options (lines 873-902, fixed in fd90.113).
+///
+/// Imports prelude only. Verifies:
+/// - DataFrameMergeExt trait + merge_with_options method
+/// - MergeExecutionOptions struct + Default impl
+/// - MergeValidateMode::OneToOne variant
+/// - MergedDataFrame return type with public `index` + `columns` fields
+/// - DataFrame::new(index, columns) reconstruction from MergedDataFrame
+#[test]
+fn readme_merge_with_options_compiles_and_runs() -> Result<(), Box<dyn std::error::Error>> {
+    let df1 = read_csv_str("key,a\n1,10\n2,20\n3,30")?;
+    let df2 = read_csv_str("key,b\n1,100\n2,200\n3,300")?;
+
+    let merged = df1.merge_with_options(
+        &df2,
+        &["key"],
+        &["key"],
+        JoinType::Inner,
+        MergeExecutionOptions {
+            validate_mode: Some(MergeValidateMode::OneToOne),
+            ..Default::default()
+        },
+    )?;
+
+    // Reconstruct a usable DataFrame from MergedDataFrame's public fields.
+    let result = DataFrame::new(merged.index, merged.columns)?;
+
+    // Inner join on key — all 3 rows match.
+    assert_eq!(result.index().len(), 3);
+    Ok(())
+}
