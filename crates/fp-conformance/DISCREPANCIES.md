@@ -77,11 +77,11 @@
 - **Tests affected:** `dataframe_groupby_apply`, `dataframe_groupby_apply_scalar_returns_series_indexed_by_keys`, `dataframe_groupby_apply_series_unions_sparse_result_columns`, `dataframe_groupby_apply_series_stacked_preserves_variable_labels`.
 - **Review date:** 2026-04-25
 
-### DISC-012: Datetime-with-timezone format string differs from pandas (ISO 8601 vs space-separator + numeric offset)
-- **Reference:** Pandas formats tz-aware timestamps as `YYYY-MM-DD HH:MM:SS±HH:MM` with a space between date and time and an explicit numeric offset (e.g. `2024-01-15 10:30:00+00:00`).
-- **Our impl:** fp-frame's datetime formatter currently emits ISO 8601 with a `T` separator and `Z` for UTC (e.g. `2024-01-15T10:30:00Z`). Both forms encode the same instant; only the surface representation differs.
-- **Impact:** Conformance packet `FP-P2D-429` (`csv_read_frame_parse_dates_mixed_timezone_strict`) fails because the string compare is byte-exact: `actual=Utf8("2024-01-15T10:30:00Z"), expected=Utf8("2024-01-15 10:30:00+00:00")`. Users round-tripping CSV/JSON datetime strings will see the same divergence in any byte-exact comparison.
-- **Resolution:** ACCEPTED for now — the fix is mechanical (swap format string in fp-frame's tz-aware datetime serializer) but it's a hot-path change that warrants its own bead and should ride alongside any larger datetime / parse_dates work. Tracked as a future fp-frame slice. Per br-frankenpandas-xp63 (fd90.77).
+### DISC-012: Mixed naive / tz-aware CSV parse_dates bails out and returns raw input strings
+- **Reference:** Pandas handles a CSV column with mixed naive + tz-aware datetime strings by parsing each row independently (the naive rows produce `Timestamp` without tz; the aware rows produce `Timestamp` with tz). When converted to strings, both forms are reformatted into pandas' canonical `YYYY-MM-DD HH:MM:SS[±HH:MM]` shape.
+- **Our impl:** fp-frame's `to_datetime_with_options(infer_mixed_timezone=true)` infers ONE tz pattern (Naive or Aware) from the FIRST non-null row. Rows that don't match that pattern are coerced to `NaT`. fp-io's `parse_csv_datetime_column` then sees the partial-parse failure and returns `None`, leaving the entire column as the raw input strings. So the second row in a mixed-tz column keeps its original `2024-01-15T10:30:00Z` form even though our `format_aware_datetime` would have rendered it correctly as `2024-01-15 10:30:00+00:00`.
+- **Impact:** Conformance packet `FP-P2D-429` (`csv_read_frame_parse_dates_mixed_timezone_strict`) fails: `actual=Utf8("2024-01-15T10:30:00Z"), expected=Utf8("2024-01-15 10:30:00+00:00")`. The actual form is the unmodified CSV input; the expected form is what pandas would emit after parsing.
+- **Resolution:** ACCEPTED for now — fix requires `to_datetime_with_options` to parse each row independently when input is mixed (not pick a single inferred pattern), and `parse_csv_datetime_column` to keep partial successes instead of bailing out. Tracked as a future fp-frame slice. Per br-frankenpandas-xp63 (fd90.77) / br-frankenpandas-gsrv (fd90.78).
 - **Tests affected:** `packet_filter_runs_csv_read_frame_parse_dates_mixed_timezone_packet`.
 - **Review date:** 2026-04-26
 
