@@ -173,6 +173,19 @@ pub use fp_join::{
 
 pub use fp_runtime::{EvidenceLedger, RuntimePolicy};
 
+// ── Convenience re-export of the default SQL backend ───────────────────
+//
+// Behind the `sql-sqlite` feature (enabled by default), `rusqlite` is
+// re-exported so the README Quick Start example
+//
+//     let conn = rusqlite::Connection::open_in_memory()?;
+//
+// works without users having to add rusqlite as a direct dependency.
+// Power users implementing their own `SqlConnection` for a different
+// backend can disable `sql-sqlite` and avoid the rusqlite dep entirely.
+#[cfg(feature = "sql-sqlite")]
+pub use rusqlite;
+
 // ── Prelude ─────────────────────────────────────────────────────────────
 
 /// Convenience prelude that imports the most commonly used types and traits.
@@ -314,6 +327,15 @@ mod tests {
             Series::from_values("x", vec![IndexLabel::Int64(1)], vec![Scalar::Int64(2)]).unwrap();
         let combined = concat_series(&[&s1, &s2]).unwrap();
         assert_eq!(combined.len(), 2);
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn rusqlite_reexport_quickstart_compiles() {
+        // README Quick Start uses crate::rusqlite — verify it's actually reachable.
+        let conn = crate::rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE t (id INTEGER); INSERT INTO t VALUES (1);")
+            .unwrap();
     }
 
     #[test]

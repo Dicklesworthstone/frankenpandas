@@ -22,6 +22,11 @@ fp-join = { path = "../fp-join" }
 fp-runtime = { path = "../fp-runtime" }
 fp-types = { path = "../fp-types" }
 
+# Re-exported under the sql-sqlite feature so README Quick Start can call
+# rusqlite::Connection::open_in_memory()? without users adding rusqlite as
+# a direct dep. Matches fp-io's optional gating (br-frankenpandas-r34z9 / fd90.130).
+rusqlite = { workspace = true, optional = true }
+
 # Per br-frankenpandas-l6nr (fd90.58) and br-frankenpandas-ii9u
 # (fd90.59): forward inner-crate feature flags so umbrella users
 # can opt in/out without depending on inner crates directly.
@@ -37,7 +42,7 @@ fp-types = { path = "../fp-types" }
 #   integration. Off by default.
 [features]
 default = ["sql-sqlite"]
-sql-sqlite = ["fp-io/sql-sqlite"]
+sql-sqlite = ["fp-io/sql-sqlite", "dep:rusqlite"]
 sql-postgresql = ["fp-io/sql-postgresql"]
 sql-mysql = ["fp-io/sql-mysql"]
 tracing = ["fp-frame/tracing"]

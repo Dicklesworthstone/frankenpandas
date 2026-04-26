@@ -227,8 +227,8 @@ let csv = write_csv_string(&by_ticker)?;
 let json = write_json_string(&by_ticker, JsonOrient::Records)?;
 let feather = write_feather_bytes(&by_ticker)?;
 
-// 6. SQL round-trip
-let conn = rusqlite::Connection::open_in_memory()?;
+// 6. SQL round-trip — rusqlite is re-exported under the `sql-sqlite` feature
+let conn = frankenpandas::rusqlite::Connection::open_in_memory()?;
 write_sql(&by_ticker, &conn, "results", SqlIfExists::Fail)?;
 let back = read_sql_table(&conn, "results")?;
 ```
