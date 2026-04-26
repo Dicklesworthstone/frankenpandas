@@ -6,12 +6,12 @@
 //! This is the unified public API crate. Import this crate to get access
 //! to all FrankenPandas functionality through a single dependency:
 //!
-//! ```rust,ignore
+//! ```rust
 //! use frankenpandas::prelude::*;
 //!
 //! let df = read_csv_str("name,age\nAlice,30\nBob,25").unwrap();
 //! let filtered = df.query("age > 28").unwrap();
-//! println!("{}", filtered);
+//! assert_eq!(filtered.index().len(), 1); // Only Alice (30) passes the filter
 //! ```
 
 // ── Core types ──────────────────────────────────────────────────────────
@@ -190,8 +190,14 @@ pub use rusqlite;
 
 /// Convenience prelude that imports the most commonly used types and traits.
 ///
-/// ```rust,ignore
+/// ```rust
 /// use frankenpandas::prelude::*;
+///
+/// // Verify that key prelude items are actually reachable from this glob.
+/// let _ = DType::Int64;
+/// let _ = Scalar::Int64(42);
+/// let _ = JsonOrient::Records;
+/// let _ = JoinType::Inner;
 /// ```
 pub mod prelude {
     pub use crate::{
