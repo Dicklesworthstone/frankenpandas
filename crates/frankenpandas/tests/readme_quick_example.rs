@@ -450,3 +450,54 @@ fn readme_window_operations_compiles_and_runs() -> Result<(), Box<dyn std::error
     assert_eq!(ewma.len(), 100);
     Ok(())
 }
+
+/// README Sorting (lines 1194-1206).
+///
+/// Imports prelude only. Verifies:
+/// - df.sort_values(column, ascending: bool)? both directions
+/// - series.sort_values_na(ascending, na_position: &str)? — 'first' / 'last'
+///   for NaN placement
+/// - df.sort_index(ascending: bool)? both directions
+#[test]
+fn readme_sorting_compiles_and_runs() -> Result<(), Box<dyn std::error::Error>> {
+    // 4-row DataFrame with a price column.
+    let df = read_csv_str("price\n50\n10\n40\n20")?;
+
+    // Sort by column values ascending.
+    let asc = df.sort_values("price", true)?;
+    assert_eq!(asc.index().len(), 4);
+    let asc_first = asc.column("price").expect("price col").values()[0].clone();
+    assert_eq!(asc_first, Scalar::Int64(10));
+
+    // Sort by column values descending.
+    let desc = df.sort_values("price", false)?;
+    let desc_first = desc.column("price").expect("price col").values()[0].clone();
+    assert_eq!(desc_first, Scalar::Int64(50));
+
+    // Series with NaN — verify na_position controls where NaN lands.
+    let labels: Vec<IndexLabel> = (0..4i64).map(IndexLabel::Int64).collect();
+    let values = vec![
+        Scalar::Float64(3.0),
+        Scalar::Null(NullKind::NaN),
+        Scalar::Float64(1.0),
+        Scalar::Float64(2.0),
+    ];
+    let series = Series::from_values("v", labels, values)?;
+
+    let na_first = series.sort_values_na(true, "first")?;
+    // First element should be NaN.
+    let first = na_first.values()[0].clone();
+    assert!(first.is_missing(), "expected NaN first, got {:?}", first);
+
+    let na_last = series.sort_values_na(true, "last")?;
+    // Last element should be NaN.
+    let last = na_last.values()[na_last.len() - 1].clone();
+    assert!(last.is_missing(), "expected NaN last, got {:?}", last);
+
+    // Sort by index labels.
+    let idx_asc = df.sort_index(true)?;
+    let idx_desc = df.sort_index(false)?;
+    assert_eq!(idx_asc.index().len(), 4);
+    assert_eq!(idx_desc.index().len(), 4);
+    Ok(())
+}
