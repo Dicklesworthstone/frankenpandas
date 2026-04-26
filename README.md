@@ -1187,7 +1187,7 @@ let prods = by_region.prod()?;
 let multi = by_region.agg(&["sum", "mean", "count"])?;  // Returns DataFrame
 ```
 
-`SeriesGroupBy` supports: `sum`, `mean`, `count`, `min`, `max`, `std`, `var`, `median`, `first`, `last`, `prod`, `sem`, `skew`, `kurtosis`, `agg` (multi-function), and `value_counts`.
+`SeriesGroupBy` supports: `sum`, `mean`, `count`, `min`, `max`, `std`, `var`, `median`, `first`, `last`, `prod`, `size`, `rank`, `rank_with_pct`, and `agg` (multi-function). Higher-order aggregations (`sem`, `skew`, `kurtosis`, `value_counts`) are exposed at the DataFrame-level GroupBy and on `Series` directly — see the GroupBy aggregation matrix above.
 
 ## Sorting
 
