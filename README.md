@@ -916,7 +916,7 @@ let merged = df1.merge_with_options(&df2, &["key"], &["key"], JoinType::Inner,
 
 | Category | Count | What It Covers |
 |----------|-------|----------------|
-| fp-frame unit tests | 1,433 | DataFrame, Series, Categorical, MultiIndex integration |
+| fp-frame unit tests | 1,434 | DataFrame, Series, Categorical, MultiIndex integration |
 | fp-io tests | 429 | 8 IO formats, adversarial inputs, round-trip correctness, full SQL trait surface (introspection / chunking / per-column dtype overrides) |
 | fp-columnar tests | 281 | Column / ColumnData / ValidityMask / arithmetic / comparison / sparse encoding |
 | fp-index tests | 199 | Index alignment, MultiIndex, duplicate detection |
