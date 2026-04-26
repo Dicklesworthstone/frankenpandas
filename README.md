@@ -503,8 +503,8 @@ All major pandas reshaping operations are implemented:
 // Long → Wide
 let pivoted = df.pivot_table("revenue", "region", "product", "sum")?;
 
-// Wide → Long
-let melted = df.melt(&["id"], &["q1", "q2", "q3"], "quarter", "sales")?;
+// Wide → Long (var_name/value_name are Option<&str>; pass None for the pandas defaults "variable"/"value")
+let melted = df.melt(&["id"], &["q1", "q2", "q3"], Some("quarter"), Some("sales"))?;
 
 // Stack/Unstack (with composite key round-trip)
 let stacked = df.stack()?;
