@@ -112,3 +112,35 @@ fn readme_merge_with_options_compiles_and_runs() -> Result<(), Box<dyn std::erro
     assert_eq!(result.index().len(), 3);
     Ok(())
 }
+
+/// README Expression-Driven Analysis (lines 1403-1417).
+///
+/// Imports prelude only (plus std::collections::BTreeMap from std). Verifies:
+/// - df.eval(expr) — DataFrameExprExt trait method returning Series
+/// - df.query(expr) — compound boolean expressions
+/// - df.query_with_locals(expr, &locals) — @local variable references
+/// - BTreeMap<String, Scalar> locals binding contract
+#[test]
+fn readme_expression_driven_analysis_compiles_and_runs() -> Result<(), Box<dyn std::error::Error>> {
+    use std::collections::BTreeMap;
+
+    let df = read_csv_str("revenue,cost,price,rating,value\n200,150,40,4.5,150\n100,80,60,3.5,80\n300,250,30,4.7,200")?;
+
+    // Compute new columns with eval — returns Series.
+    let profit = df.eval("revenue - cost")?;
+    assert_eq!(profit.len(), 3);
+
+    // Filter with compound conditions — returns DataFrame.
+    let hot_deals = df.query("price < 50 and rating > 4.0")?;
+    // price<50 ∧ rating>4.0 → row 0 (40, 4.5) and row 2 (30, 4.7) match. Row 1 (60, 3.5) drops.
+    assert_eq!(hot_deals.index().len(), 2);
+
+    // Use local variables in expressions.
+    let locals = BTreeMap::from([
+        ("threshold".to_owned(), Scalar::Float64(100.0)),
+    ]);
+    let above = df.query_with_locals("value > @threshold", &locals)?;
+    // value>100 → row 0 (150) + row 2 (200). Row 1 (80) drops.
+    assert_eq!(above.index().len(), 2);
+    Ok(())
+}
