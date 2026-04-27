@@ -981,6 +981,42 @@ fn readme_element_wise_operations_compiles_and_runs() -> Result<(), Box<dyn std:
     let _rounded_s = pi_series.round(2)?;
     let _rounded_df = df.round(0)?;
 
+    // fd90.237: clip / where_cond / mask / Series.rename.
+
+    // Series.clip — bound values into [lower, upper].
+    let _clipped_s = bigger.clip(Some(2.0), Some(5.0))?;
+    // DataFrame.clip — same on each numeric column.
+    let _clipped_df = df.clip(Some(0.0), Some(50.0))?;
+
+    // Build a Bool cond Series + DataFrame for where/mask families.
+    let cond_labels: Vec<IndexLabel> = (0..6i64).map(IndexLabel::Int64).collect();
+    let cond_series = Series::from_values(
+        "c",
+        cond_labels,
+        vec![
+            Scalar::Bool(true),
+            Scalar::Bool(false),
+            Scalar::Bool(true),
+            Scalar::Bool(false),
+            Scalar::Bool(true),
+            Scalar::Bool(false),
+        ],
+    )?;
+    // Series.where_cond / mask take Option<&Scalar> for the fill value.
+    let _w = bigger.where_cond(&cond_series, Some(&Scalar::Float64(0.0)))?;
+    let _m = bigger.mask(&cond_series, Some(&Scalar::Float64(-1.0)))?;
+    // None means "fill with NaN" (default).
+    let _w_nan = bigger.where_cond(&cond_series, None)?;
+
+    // DataFrame.where_cond / mask — same shape, on a Bool DataFrame.
+    let cond_df = read_csv_str("a,b\ntrue,false\ntrue,true\nfalse,true\ntrue,false")?;
+    let _ = df.where_cond(&cond_df, Some(&Scalar::Float64(0.0)))?;
+    let _ = df.mask(&cond_df, Some(&Scalar::Null(NullKind::NaN)))?;
+
+    // Series.rename — change the name field.
+    let renamed = bigger.rename("renamed_series")?;
+    assert_eq!(renamed.name(), "renamed_series");
+
     // fd90.232 + fd90.233: DataFrame-level reductions. fd90.233 added
     // pandas-parity bare-name aliases (min/max/std/var/median/prod/
     // skew/kurt/kurtosis/sem) over the existing *_agg methods.
