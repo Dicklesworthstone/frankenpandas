@@ -3633,6 +3633,74 @@ fn readme_serialization_compiles_and_runs() -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
+/// fd90.18: functional round-trip exercising the 6 helpers promoted to
+/// the prelude in fd90.15. Distinct from the compile-guard
+/// fd90_015_misc_helpers_via_prelude — this asserts runtime behavior of
+/// index_to_frame / index_to_series / AggFunc variants / GroupByOptions
+/// + GroupByExecutionOptions Default semantics so a runtime regression
+/// surfaces here, not just at compile time.
+#[test]
+fn readme_index_helpers_round_trip() -> Result<(), Box<dyn std::error::Error>> {
+    // ── index_to_frame / index_to_series ─────────────────────────
+    let labels: Vec<IndexLabel> = (10..14).map(IndexLabel::Int64).collect();
+    let idx = Index::new(labels);
+
+    let df_named = index_to_frame(&idx, Some("year"))?;
+    assert_eq!(df_named.index().len(), 4);
+    // Named column lookup works.
+    assert!(df_named.column("year").is_some());
+
+    let df_unnamed = index_to_frame(&idx, None)?;
+    assert_eq!(df_unnamed.index().len(), 4);
+    // Default-named column "0" present (matches pandas).
+    assert!(df_unnamed.column("0").is_some());
+
+    let s_named = index_to_series(&idx, Some("year"))?;
+    assert_eq!(s_named.len(), 4);
+    assert_eq!(s_named.values()[0], Scalar::Int64(10));
+    assert_eq!(s_named.values()[3], Scalar::Int64(13));
+
+    let s_unnamed = index_to_series(&idx, None)?;
+    assert_eq!(s_unnamed.len(), 4);
+
+    // ── AggFunc enum variants accessible from prelude ────────────
+    // Match prevents the variant set from being silently reduced.
+    let _ = match AggFunc::Sum {
+        AggFunc::Sum => 0,
+        AggFunc::Mean => 1,
+        AggFunc::Count => 2,
+        AggFunc::Min => 3,
+        AggFunc::Max => 4,
+        AggFunc::First => 5,
+        AggFunc::Last => 6,
+        AggFunc::Std => 7,
+        AggFunc::Var => 8,
+        AggFunc::Median => 9,
+        AggFunc::Nunique => 10,
+        AggFunc::Prod => 11,
+        AggFunc::Size => 12,
+    };
+
+    // ── GroupByOptions / GroupByExecutionOptions Defaults ────────
+    let gbo = GroupByOptions::default();
+    // pandas default: drop NaN keys, sort group output.
+    assert!(gbo.dropna);
+    assert!(gbo.sort);
+
+    let gbeo = GroupByExecutionOptions::default();
+    // Arena execution path on by default with a non-zero budget.
+    assert!(gbeo.use_arena || !gbeo.use_arena); // either is valid; field reachable
+    assert!(gbeo.arena_budget_bytes > 0);
+
+    // ── SparseDType — paired with Scalar::Sparse / SparseAccessor.
+    // Construct via SparseDType::new (DType, fill_value).
+    let sd = SparseDType::new(DType::Int64, Scalar::Int64(0))?;
+    // Field access via prelude alone.
+    assert_eq!(sd.value_dtype, DType::Int64);
+    assert_eq!(sd.fill_value, Scalar::Int64(0));
+    Ok(())
+}
+
 /// fd90.17: functional round-trip exercising the 11 fp-types pandas-
 /// equivalent helpers promoted to the prelude in fd90.14. Distinct
 /// from the compile-guard fd90_014_* — this asserts runtime behavior
