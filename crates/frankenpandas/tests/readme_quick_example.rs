@@ -936,6 +936,17 @@ fn readme_element_wise_operations_compiles_and_runs() -> Result<(), Box<dyn std:
     let _ = bigger.nlargest(3)?;
     let _ = bigger.nsmallest(2)?;
 
+    // fd90.232: DataFrame-level reductions (return per-column Series).
+    // Note: only sum/mean/count/nunique/abs exist directly on DataFrame.
+    // The rest (min/max/std/var/median/prod/skew/kurtosis/sem) are
+    // accessible per-column or via describe() — they aren't exposed as
+    // single-call DataFrame methods in fp-frame today.
+    let _ = df.sum()?;
+    let _ = df.mean()?;
+    let _ = df.count()?;
+    let _ = df.nunique()?;
+    let _ = df.abs()?; // element-wise — returns DataFrame
+
     // Column.binary_numeric / binary_comparison — exercise via DataFrame columns.
     let col_a = df.column("a").expect("column a").clone();
     let col_b = df.column("b").expect("column b").clone();
