@@ -489,6 +489,28 @@ fn readme_duplicate_handling_compiles_and_runs() -> Result<(), Box<dyn std::erro
     assert!(has_dups);
     let unique_idx = dup_index.drop_duplicates_keep(DuplicateKeep::First);
     assert_eq!(unique_idx.len(), 3); // 1, 2, 3 (drop second 1)
+
+    // fd90.253: more Index methods.
+    // Build a non-duplicate, sorted Index for clean assertions.
+    let sorted_idx = Index::new(vec![
+        IndexLabel::Int64(10),
+        IndexLabel::Int64(20),
+        IndexLabel::Int64(30),
+    ]);
+    assert!(sorted_idx.is_unique());
+    assert!(sorted_idx.is_sorted());
+    assert!(sorted_idx.is_monotonic_increasing());
+    assert!(!sorted_idx.is_monotonic_decreasing());
+    assert!(sorted_idx.contains(&IndexLabel::Int64(20)));
+    assert_eq!(sorted_idx.get_loc(&IndexLabel::Int64(20)), Some(1));
+    assert_eq!(sorted_idx.position(&IndexLabel::Int64(30)), Some(2));
+    let in_mask = sorted_idx.isin(&[IndexLabel::Int64(10), IndexLabel::Int64(99)]);
+    assert_eq!(in_mask.len(), 3);
+    assert!(in_mask[0]);
+    let uniq_idx = dup_index.unique();
+    assert_eq!(uniq_idx.len(), 3);
+    let dropped_idx = dup_index.drop_duplicates();
+    assert_eq!(dropped_idx.len(), 3);
     Ok(())
 }
 
