@@ -830,6 +830,24 @@ fn readme_concat_full_options_compiles_and_runs() -> Result<(), Box<dyn std::err
     // Ignore original indexes (reindex to 0..n).
     let clean = concat_dataframes_with_ignore_index(&[&df1, &df2], true)?;
     assert_eq!(clean.index().len(), 4);
+
+    // fd90.256: Series-level concat (module-level helpers).
+    let s_labels1: Vec<IndexLabel> = vec![IndexLabel::Int64(0), IndexLabel::Int64(1)];
+    let s_labels2: Vec<IndexLabel> = vec![IndexLabel::Int64(2), IndexLabel::Int64(3)];
+    let s1 = Series::from_values(
+        "x",
+        s_labels1,
+        vec![Scalar::Int64(10), Scalar::Int64(20)],
+    )?;
+    let s2 = Series::from_values(
+        "x",
+        s_labels2,
+        vec![Scalar::Int64(30), Scalar::Int64(40)],
+    )?;
+    let combined = concat_series(&[&s1, &s2])?;
+    assert_eq!(combined.len(), 4);
+    let reindexed = concat_series_with_ignore_index(&[&s1, &s2], true)?;
+    assert_eq!(reindexed.len(), 4);
     Ok(())
 }
 
