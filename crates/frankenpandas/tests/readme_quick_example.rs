@@ -3663,7 +3663,7 @@ fn fd90_015_misc_helpers_via_prelude(
 /// fd90.14: compile guard for fp-types user-facing helpers promoted
 /// to the prelude (paired with Scalar::Datetime64/Timedelta64/Period/
 /// Interval workflows from fd90.263 / fd90.271).
-#[allow(dead_code)]
+#[allow(dead_code, clippy::too_many_arguments)]
 fn fd90_014_fp_types_helpers_via_prelude(
     _interval: Interval,
     _ic: IntervalClosed,
@@ -3685,7 +3685,7 @@ fn fd90_014_fp_types_helpers_via_prelude(
 /// promoted to the prelude. Naming each type via the prelude alone
 /// proves the surface is reachable; pairs with the SqlInspector
 /// coverage in fd90.9 / fd90.10 / fd90.11.
-#[allow(dead_code)]
+#[allow(dead_code, clippy::too_many_arguments)]
 fn fd90_013_sql_schema_types_via_prelude(
     _chunk: SqlChunkIterator,
     _col: SqlColumnSchema,
