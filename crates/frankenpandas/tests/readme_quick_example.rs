@@ -3633,6 +3633,66 @@ fn readme_serialization_compiles_and_runs() -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
+/// fd90.17: functional round-trip exercising the 11 fp-types pandas-
+/// equivalent helpers promoted to the prelude in fd90.14. Distinct
+/// from the compile-guard fd90_014_* — this asserts runtime behavior
+/// of period_range / interval_range_by_periods / interval_range_by_step
+/// plus Period / Timestamp / Timedelta / Interval constructors so a
+/// runtime regression in any of them surfaces here, not just at compile
+/// time.
+#[test]
+fn readme_pandas_helpers_round_trip() -> Result<(), Box<dyn std::error::Error>> {
+    // ── Period + period_range ───────────────────────────────────
+    let q1 = Period::new(216, PeriodFreq::Quarterly);
+    let periods = period_range(q1, 4);
+    assert_eq!(periods.len(), 4);
+    // period_range advances by 1 ordinal per step.
+    assert_eq!(periods[0].ordinal, 216);
+    assert_eq!(periods[3].ordinal, 219);
+    // shift / diff round-trip on Period.
+    assert_eq!(q1.shift(3).ordinal, 219);
+    assert_eq!(q1.shift(3).diff(&q1), Some(3));
+
+    // ── Timestamp ───────────────────────────────────────────────
+    let ts = Timestamp::from_nanos(1_700_000_000_000_000_000);
+    assert_eq!(ts.nanos, 1_700_000_000_000_000_000);
+    assert!(ts.tz.is_none());
+
+    // ── Timedelta::parse + components ───────────────────────────
+    let nanos = Timedelta::parse("01:30:00")?;
+    assert_eq!(nanos, 90 * Timedelta::NANOS_PER_MIN);
+    let comps: TimedeltaComponents = Timedelta::components(nanos);
+    // 1 hour + 30 minutes + 0 seconds.
+    assert_eq!(comps.hours, 1);
+    assert_eq!(comps.minutes, 30);
+    assert_eq!(comps.seconds, 0);
+
+    // Timedelta parse error → TimedeltaError variant accessible from prelude.
+    let err: TimedeltaError = Timedelta::parse("not a duration").unwrap_err();
+    let _ = format!("{err}");
+
+    // ── Interval + IntervalClosed variants + ranges ─────────────
+    let iv = Interval::new(0.0, 10.0, IntervalClosed::Right);
+    assert!(iv.contains(5.0));
+    assert!(iv.contains(10.0));
+    assert!(!iv.contains(0.0)); // left-open
+    assert_eq!(iv.length(), 10.0);
+
+    // interval_range_by_periods: split [0, 10] into 4 equal intervals.
+    let by_periods = interval_range_by_periods(0.0, 10.0, 4, IntervalClosed::Right);
+    assert_eq!(by_periods.len(), 4);
+    assert_eq!(by_periods[0].left, 0.0);
+    assert_eq!(by_periods[0].right, 2.5);
+    assert_eq!(by_periods[3].right, 10.0);
+
+    // interval_range_by_step: walk [0, 10] in steps of 2.5.
+    let by_step = interval_range_by_step(0.0, 10.0, 2.5, IntervalClosed::Left)?;
+    assert_eq!(by_step.len(), 4);
+    assert_eq!(by_step[0].left, 0.0);
+    assert_eq!(by_step[3].right, 10.0);
+    Ok(())
+}
+
 /// fd90.16: compile guard for the final paired-surface promotions
 /// (DateRangeError, TimedeltaRangeError, cast_scalar_owned, the two
 /// read_csv_with_index_cols variants).
