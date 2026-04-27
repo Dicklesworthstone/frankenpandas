@@ -3802,6 +3802,74 @@ fn readme_serialization_compiles_and_runs() -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
+/// fd90.65: Rolling / Expanding / EWM value assertions. Existing
+/// readme_window_operations exercises the matrix but with shape-only
+/// asserts and many `let _ =` patterns. This test pins specific
+/// algebraic outputs on a small input.
+#[test]
+fn readme_window_value_round_trip() -> Result<(), Box<dyn std::error::Error>> {
+    let labels: Vec<IndexLabel> = (0..4i64).map(IndexLabel::Int64).collect();
+    let values: Vec<Scalar> = (1..=4i64).map(|v| Scalar::Float64(v as f64)).collect();
+    let series = Series::from_values("v", labels, values)?;
+
+    fn num(s: &Scalar) -> Option<f64> {
+        match s {
+            Scalar::Int64(v) => Some(*v as f64),
+            Scalar::Float64(v) => Some(*v),
+            _ => None,
+        }
+    }
+
+    // ── rolling(2).sum() ───────────────────────────────────────
+    // window=2 over [1,2,3,4]:
+    // - position 0: only 1 element seen → Null (without min_periods=1)
+    // - position 1: 1+2 = 3
+    // - position 2: 2+3 = 5
+    // - position 3: 3+4 = 7
+    let r_sum = series.rolling(2, None).sum()?;
+    assert_eq!(r_sum.len(), 4);
+    assert_eq!(num(&r_sum.values()[1]), Some(3.0));
+    assert_eq!(num(&r_sum.values()[2]), Some(5.0));
+    assert_eq!(num(&r_sum.values()[3]), Some(7.0));
+
+    // ── rolling(2).mean() ──────────────────────────────────────
+    // Last element: (3+4)/2 = 3.5
+    let r_mean = series.rolling(2, None).mean()?;
+    assert_eq!(num(&r_mean.values()[3]), Some(3.5));
+    assert_eq!(num(&r_mean.values()[1]), Some(1.5));
+
+    // ── rolling(2).min() / max() ───────────────────────────────
+    let r_min = series.rolling(2, None).min()?;
+    assert_eq!(num(&r_min.values()[3]), Some(3.0));
+    let r_max = series.rolling(2, None).max()?;
+    assert_eq!(num(&r_max.values()[3]), Some(4.0));
+
+    // ── expanding window ───────────────────────────────────────
+    // expanding sum: [1, 3, 6, 10] (cumulative sum)
+    let e_sum = series.expanding(None).sum()?;
+    assert_eq!(num(&e_sum.values()[0]), Some(1.0));
+    assert_eq!(num(&e_sum.values()[1]), Some(3.0));
+    assert_eq!(num(&e_sum.values()[2]), Some(6.0));
+    assert_eq!(num(&e_sum.values()[3]), Some(10.0));
+
+    // expanding mean: [1, 1.5, 2, 2.5]
+    let e_mean = series.expanding(None).mean()?;
+    assert_eq!(num(&e_mean.values()[0]), Some(1.0));
+    assert_eq!(num(&e_mean.values()[1]), Some(1.5));
+    assert_eq!(num(&e_mean.values()[3]), Some(2.5));
+
+    // expanding max grows monotonically: [1, 2, 3, 4]
+    let e_max = series.expanding(None).max()?;
+    assert_eq!(num(&e_max.values()[3]), Some(4.0));
+
+    // ── EWM mean ───────────────────────────────────────────────
+    // First EWM value matches first input value (no prior history).
+    let ew_mean = series.ewm(Some(2.0), None).mean()?;
+    assert_eq!(ew_mean.len(), 4);
+    assert_eq!(num(&ew_mean.values()[0]), Some(1.0));
+    Ok(())
+}
+
 /// fd90.64: NanOps numeric value assertions. The existing
 /// readme_nanops test only asserts on Scalar variant (Float64(_))
 /// without pinning the numeric output. A regression in any
