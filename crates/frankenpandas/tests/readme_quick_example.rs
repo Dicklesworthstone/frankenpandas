@@ -4499,6 +4499,24 @@ fn readme_pandas_helpers_round_trip() -> Result<(), Box<dyn std::error::Error>> 
     assert!(!iv.contains(0.0)); // left-open
     assert_eq!(iv.length(), 10.0);
 
+    // fd90.34: cover IntervalClosed::Both and ::Neither.
+    let iv_both = Interval::new(0.0, 10.0, IntervalClosed::Both);
+    assert!(iv_both.contains(0.0)); // left included
+    assert!(iv_both.contains(10.0)); // right included
+    assert!(iv_both.contains(5.0));
+
+    let iv_neither = Interval::new(0.0, 10.0, IntervalClosed::Neither);
+    assert!(!iv_neither.contains(0.0)); // left excluded
+    assert!(!iv_neither.contains(10.0)); // right excluded
+    assert!(iv_neither.contains(5.0)); // interior included
+
+    // fd90.34: cover NullKind::NaT via Scalar::Null serde round-trip.
+    let nat_scalar = Scalar::Null(NullKind::NaT);
+    let nat_json = serde_json::to_string(&nat_scalar)?;
+    let nat_back: Scalar = serde_json::from_str(&nat_json)?;
+    assert_eq!(nat_scalar, nat_back);
+    assert!(matches!(nat_back, Scalar::Null(NullKind::NaT)));
+
     // interval_range_by_periods: split [0, 10] into 4 equal intervals.
     let by_periods = interval_range_by_periods(0.0, 10.0, 4, IntervalClosed::Right);
     assert_eq!(by_periods.len(), 4);
