@@ -312,6 +312,21 @@ fn readme_categorical_analysis_compiles_and_runs() -> Result<(), Box<dyn std::er
     assert!(ordered.cat().expect("still categorical").ordered());
     let unordered = cat.as_unordered();
     assert!(!unordered.cat().expect("still categorical").ordered());
+
+    // fd90.274: Series.from_categorical_codes — explicit codes + categories.
+    let by_codes = Series::from_categorical_codes(
+        "by_codes",
+        vec![0, 1, 2, 0, -1], // -1 = missing
+        vec![
+            Scalar::Utf8("A".into()),
+            Scalar::Utf8("B".into()),
+            Scalar::Utf8("C".into()),
+        ],
+        false,
+    )?;
+    assert_eq!(by_codes.len(), 5);
+    let by_codes_cat = by_codes.cat().expect("constructed categorical");
+    assert_eq!(by_codes_cat.categories().len(), 3);
     Ok(())
 }
 
