@@ -832,6 +832,15 @@ fn readme_element_wise_operations_compiles_and_runs() -> Result<(), Box<dyn std:
     let col_a_series = Series::new("a", df.index().clone(), df.column("a").expect("a").clone())?;
     let _series_mask = col_a_series.compare_scalar(&Scalar::Int64(20), ComparisonOp::Gt)?;
 
+    // fd90.224: Series.{eq,ne,gt,lt,le,ge}_scalar shortcuts — ergonomic
+    // alternative to compare_scalar for the 6 standard relations.
+    let _ = col_a_series.eq_scalar(&Scalar::Int64(10))?;
+    let _ = col_a_series.ne_scalar(&Scalar::Int64(10))?;
+    let _ = col_a_series.gt_scalar(&Scalar::Int64(15))?;
+    let _ = col_a_series.lt_scalar(&Scalar::Int64(35))?;
+    let _ = col_a_series.le_scalar(&Scalar::Int64(20))?;
+    let _ = col_a_series.ge_scalar(&Scalar::Int64(20))?;
+
     // Column.binary_numeric / binary_comparison — exercise via DataFrame columns.
     let col_a = df.column("a").expect("column a").clone();
     let col_b = df.column("b").expect("column b").clone();
