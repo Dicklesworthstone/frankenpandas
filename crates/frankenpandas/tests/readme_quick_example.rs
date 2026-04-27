@@ -680,6 +680,17 @@ fn readme_window_operations_compiles_and_runs() -> Result<(), Box<dyn std::error
     let _ = dr.count()?;
     let _ = dr.median()?;
     let _ = dr.quantile(0.5)?;
+    // fd90.284: rest of DataFrameRolling (corr/cov are pairwise across columns).
+    let _ = dr.corr()?;
+    let _ = dr.cov()?;
+    // corr_with / cov_with — against another Series.
+    let dr_other = Series::from_values(
+        "dr_other",
+        (0..10i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+        (0..10i64).map(|v| Scalar::Float64((v + 1) as f64)).collect::<Vec<_>>(),
+    )?;
+    let _ = dr.corr_with(&dr_other)?;
+    let _ = dr.cov_with(&dr_other)?;
 
     let de = df.expanding(None);
     let _ = de.sum()?;
@@ -689,11 +700,19 @@ fn readme_window_operations_compiles_and_runs() -> Result<(), Box<dyn std::error
     let _ = de.std()?;
     let _ = de.var()?;
     let _ = de.median()?;
+    // fd90.284: rest of DataFrameExpanding (count/quantile/kurt/skew/apply).
+    let _ = de.count()?;
+    let _ = de.quantile(0.5)?;
+    let _ = de.kurt()?;
+    let _ = de.skew()?;
+    let _ = de.apply(|vals: &[f64]| vals.iter().copied().sum::<f64>())?;
 
     let dew = df.ewm(Some(5.0), None);
     let _ = dew.mean()?;
     let _ = dew.std()?;
     let _ = dew.var()?;
+    // fd90.284: DataFrameEwm.sum.
+    let _ = dew.sum()?;
 
     // ── DataFrame Resample — needs datetime-string row index.
     let dt_df = DataFrame::from_dict_with_index(
