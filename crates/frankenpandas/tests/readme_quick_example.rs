@@ -3712,6 +3712,62 @@ fn readme_serialization_compiles_and_runs() -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
+/// fd90.35: IndexLabel variant coverage. IndexLabel has 4 variants
+/// (Int64, Utf8, Timedelta64, Datetime64) but only Int64 was exercised
+/// by integration tests. The 3 typed-temporal variants are core
+/// pandas surface.
+#[test]
+fn readme_index_label_variants_round_trip() -> Result<(), Box<dyn std::error::Error>> {
+    // ── IndexLabel::Utf8 ────────────────────────────────────────
+    let str_labels: Vec<IndexLabel> =
+        vec!["alpha".into(), "beta".into(), "gamma".into()];
+    let s_utf8 = Series::from_values(
+        "tag",
+        str_labels.clone(),
+        vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+    )?;
+    assert_eq!(s_utf8.len(), 3);
+    // Index labels survive as Utf8 variants.
+    assert!(matches!(
+        s_utf8.index().labels()[0],
+        IndexLabel::Utf8(ref s) if s == "alpha"
+    ));
+
+    // ── IndexLabel::Datetime64 ──────────────────────────────────
+    let dt_labels: Vec<IndexLabel> = vec![
+        IndexLabel::Datetime64(1_700_000_000_000_000_000),
+        IndexLabel::Datetime64(1_700_086_400_000_000_000),
+    ];
+    let s_dt = Series::from_values(
+        "ts_value",
+        dt_labels,
+        vec![Scalar::Float64(100.0), Scalar::Float64(200.0)],
+    )?;
+    assert_eq!(s_dt.len(), 2);
+    assert!(matches!(
+        s_dt.index().labels()[0],
+        IndexLabel::Datetime64(_)
+    ));
+
+    // ── IndexLabel::Timedelta64 ─────────────────────────────────
+    let td_labels: Vec<IndexLabel> = vec![
+        IndexLabel::Timedelta64(Timedelta::NANOS_PER_DAY),
+        IndexLabel::Timedelta64(2 * Timedelta::NANOS_PER_DAY),
+        IndexLabel::Timedelta64(3 * Timedelta::NANOS_PER_DAY),
+    ];
+    let s_td = Series::from_values(
+        "lag",
+        td_labels,
+        vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+    )?;
+    assert_eq!(s_td.len(), 3);
+    assert!(matches!(
+        s_td.index().labels()[0],
+        IndexLabel::Timedelta64(_)
+    ));
+    Ok(())
+}
+
 /// fd90.33: AlignMode + DateOffset + date_range/bdate_range functional
 /// coverage. Existing tests only exercised AlignMode::Outer and the
 /// DateOffset::Day variant in name-only form. date_range/bdate_range
