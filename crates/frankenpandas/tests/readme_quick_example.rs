@@ -741,6 +741,29 @@ fn readme_pivot_tables_compiles_and_runs() -> Result<(), Box<dyn std::error::Err
         &["sum", "mean", "count"],
     )?;
     assert_eq!(pt.index().len(), 2);
+
+    // fd90.252: pivot (no aggregation) / pivot_table_with_dropna /
+    // pivot_table_aggfunc_dict.
+    // pivot — long → wide without aggregation. Each (index_col, columns_col)
+    // pair must be unique; the input has 4 rows with 2 regions × 2 products,
+    // each unique → 4 cells (2x2 result).
+    let pt_pivot = df.pivot("region", "product", "revenue")?;
+    assert_eq!(pt_pivot.index().len(), 2);
+
+    // pivot_table_with_dropna — explicit dropna toggle (true is the default
+    // for plain pivot_table).
+    let pt_drop = df.pivot_table_with_dropna(
+        "revenue", "region", "product", "sum", true,
+    )?;
+    assert_eq!(pt_drop.index().len(), 2);
+
+    // pivot_table_aggfunc_dict — per-value aggfunc dispatch.
+    let pt_dict = df.pivot_table_aggfunc_dict(
+        &[("revenue", "sum"), ("quantity", "mean")],
+        "region",
+        "product",
+    )?;
+    assert_eq!(pt_dict.index().len(), 2);
     Ok(())
 }
 
