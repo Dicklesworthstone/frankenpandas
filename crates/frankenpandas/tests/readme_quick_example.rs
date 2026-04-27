@@ -2837,6 +2837,48 @@ fn readme_string_accessor_compiles_and_runs() -> Result<(), Box<dyn std::error::
     Ok(())
 }
 
+/// README "Bayesian Runtime Policy" section (lines 378-403).
+///
+/// Locks in fd90.250: RuntimePolicy + EvidenceLedger flow. fd90.221
+/// exposed the inspection types (DecisionAction, DecisionRecord, etc.);
+/// this test exercises an actual decision call and inspects the
+/// resulting record.
+#[test]
+fn readme_bayesian_runtime_policy_compiles_and_runs() -> Result<(), Box<dyn std::error::Error>> {
+    // Construct both policies — strict (fail-closed) and hardened.
+    let strict = RuntimePolicy::strict();
+    let hardened = RuntimePolicy::hardened(None);
+
+    // Make a decision; ledger captures the trace.
+    let mut ledger = EvidenceLedger::new();
+    let action = strict.decide_unknown_feature(
+        "subject_x",
+        "unrecognized join feature",
+        &mut ledger,
+    );
+    // Strict mode → fail-closed unknown features → Reject.
+    assert!(matches!(action, DecisionAction::Reject));
+
+    // Inspect the recorded decision (README claim: ledger has full trace).
+    let records = ledger.records();
+    assert_eq!(records.len(), 1);
+    let record = &records[0];
+    assert!(matches!(record.mode, RuntimeMode::Strict));
+    assert!(matches!(record.action, DecisionAction::Reject));
+    assert!(matches!(record.issue.kind, IssueKind::UnknownFeature));
+    assert!(!record.evidence.is_empty());
+
+    // Hardened mode allows decision flexibility — decide_join_admission.
+    let mut ledger2 = EvidenceLedger::new();
+    let _join_action = hardened.decide_join_admission(1_000_000, &mut ledger2);
+    assert_eq!(ledger2.records().len(), 1);
+
+    // decision_to_card transforms a record into a printable summary.
+    let card = decision_to_card(record);
+    assert!(!card.title.is_empty());
+    Ok(())
+}
+
 /// README "Error Architecture" section (lines 829-853).
 ///
 /// Locks in fd90.202: the 8 error types listed in the README's Error
