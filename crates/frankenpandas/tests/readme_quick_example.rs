@@ -331,6 +331,38 @@ fn readme_quick_start_round_trip_through_sqlite() -> Result<(), Box<dyn std::err
     let appended_back = read_sql_table(&conn, "appended")?;
     assert_eq!(appended_back.index().len(), 2);
 
+    // fd90.53: SqlColumnSchema declared_type / autoincrement /
+    // default_value field coverage (fd90.37 / fd90.35 / others).
+    // parent.id is INTEGER PRIMARY KEY — SQLite alias for the
+    // auto-increment rowid, so autoincrement should be true and
+    // declared_type should be "INTEGER".
+    let id_col_full = parent_cols.column("id").expect("parent.id present");
+    let declared = id_col_full
+        .declared_type
+        .as_ref()
+        .expect("INTEGER declared");
+    assert!(declared.eq_ignore_ascii_case("integer"));
+    assert!(
+        id_col_full.autoincrement,
+        "INTEGER PRIMARY KEY should be detected as autoincrement"
+    );
+    // No default_value declared on this column.
+    assert!(id_col_full.default_value.is_none());
+    // Comment is None on SQLite (no column-comment storage).
+    assert!(id_col_full.comment.is_none());
+
+    // parent.name is TEXT NOT NULL UNIQUE — declared_type "TEXT",
+    // not autoincrement.
+    let name_col_full = parent_cols
+        .column("name")
+        .expect("parent.name present");
+    let declared_name = name_col_full
+        .declared_type
+        .as_ref()
+        .expect("TEXT declared");
+    assert!(declared_name.eq_ignore_ascii_case("text"));
+    assert!(!name_col_full.autoincrement);
+
     // fd90.50: SqlReflectedTable lookup methods (fd90.51 / fd90.52).
     // Use the existing 'child' bundle from the reflect_table call above
     // and exercise each documented lookup helper.
