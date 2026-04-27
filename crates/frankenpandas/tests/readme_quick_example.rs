@@ -3802,6 +3802,60 @@ fn readme_serialization_compiles_and_runs() -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
+/// fd90.59: Index manipulation methods (insert / delete / take /
+/// repeat / append). Pandas-parity surface for index editing;
+/// uncovered by integration tests.
+#[test]
+fn readme_index_manipulation_methods() -> Result<(), Box<dyn std::error::Error>> {
+    let base = Index::new(vec![
+        IndexLabel::Int64(10),
+        IndexLabel::Int64(20),
+        IndexLabel::Int64(30),
+    ]);
+
+    // ── take: select positions ──────────────────────────────────
+    let taken = base.take(&[0, 2]);
+    assert_eq!(taken.len(), 2);
+    assert_eq!(taken.labels()[0], IndexLabel::Int64(10));
+    assert_eq!(taken.labels()[1], IndexLabel::Int64(30));
+
+    // ── repeat: each element duplicated N times ─────────────────
+    let repeated = base.repeat(2);
+    assert_eq!(repeated.len(), 6);
+    // First two elements should both be 10 (repeated, not interleaved
+    // — pandas semantics).
+    assert_eq!(repeated.labels()[0], IndexLabel::Int64(10));
+    assert_eq!(repeated.labels()[1], IndexLabel::Int64(10));
+
+    // ── insert: add at position ─────────────────────────────────
+    let inserted = base.insert(1, IndexLabel::Int64(15))?;
+    assert_eq!(inserted.len(), 4);
+    assert_eq!(inserted.labels()[0], IndexLabel::Int64(10));
+    assert_eq!(inserted.labels()[1], IndexLabel::Int64(15));
+    assert_eq!(inserted.labels()[2], IndexLabel::Int64(20));
+
+    // ── delete: remove at position ──────────────────────────────
+    let deleted = base.delete(1)?;
+    assert_eq!(deleted.len(), 2);
+    assert_eq!(deleted.labels()[0], IndexLabel::Int64(10));
+    assert_eq!(deleted.labels()[1], IndexLabel::Int64(30));
+
+    // ── append: concat two indexes ──────────────────────────────
+    let other = Index::new(vec![
+        IndexLabel::Int64(40),
+        IndexLabel::Int64(50),
+    ]);
+    let appended = base.append(&other);
+    assert_eq!(appended.len(), 5);
+    assert_eq!(appended.labels()[3], IndexLabel::Int64(40));
+    assert_eq!(appended.labels()[4], IndexLabel::Int64(50));
+
+    // ── Out-of-bounds delete returns Err ────────────────────────
+    let bad_del = base.delete(99);
+    assert!(bad_del.is_err());
+    Ok(())
+}
+
 /// fd90.58: Index set operations (intersection / union_with /
 /// difference / symmetric_difference). Pandas-parity surface for
 /// index-level set algebra; uncovered by integration tests.
