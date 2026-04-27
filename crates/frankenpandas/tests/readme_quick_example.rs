@@ -1069,6 +1069,37 @@ fn readme_element_wise_operations_compiles_and_runs() -> Result<(), Box<dyn std:
     let csv = bigger.to_csv(',', true);
     assert!(!csv.is_empty());
 
+    // fd90.240: Series.loc / iloc / copy / append / empty / to_frame /
+    // sort_index / reset_index_with_name.
+
+    // Series.loc — label-based selection.
+    let _ = bigger.loc(&[IndexLabel::Int64(0), IndexLabel::Int64(2)])?;
+    // Series.iloc — positional selection.
+    let _ = bigger.iloc(&[0, 2, 4])?;
+
+    // Series.copy — deep clone.
+    let copied = bigger.copy();
+    assert_eq!(copied.len(), bigger.len());
+
+    // Series.empty — false for non-empty.
+    assert!(!bigger.empty());
+
+    // Series.append — concat two Series along the row axis.
+    let appended = bigger.append(&s_clone)?;
+    assert_eq!(appended.len(), bigger.len() * 2);
+
+    // Series.to_frame(name) — promote to a 1-column DataFrame.
+    let single = bigger.to_frame(Some("col"))?;
+    assert_eq!(single.column_names().len(), 1);
+
+    // Series.sort_index — both directions.
+    let _ = bigger.sort_index(true)?;
+    let _ = bigger.sort_index(false)?;
+
+    // Series.reset_index_with_name — drop=true returns Series-or-DataFrame
+    // result; just verify it compiles and runs.
+    let _ = bigger.reset_index_with_name(true, None)?;
+
     // fd90.232 + fd90.233: DataFrame-level reductions. fd90.233 added
     // pandas-parity bare-name aliases (min/max/std/var/median/prod/
     // skew/kurt/kurtosis/sem) over the existing *_agg methods.
