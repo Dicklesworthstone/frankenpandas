@@ -75,6 +75,13 @@ fn readme_quick_start_round_trip_through_sqlite() -> Result<(), Box<dyn std::err
     // After groupby(ticker).sum(), only the AAPL group row remains.
     assert_eq!(by_ticker.index().len(), 1);
     assert_eq!(back.index().len(), 1);
+
+    // fd90.288: read_sql_chunks — chunked iteration over the same table.
+    // SqlChunkIterator yields Result<DataFrame, IoError>; collect at
+    // least one chunk and verify shape.
+    let mut chunks = read_sql_chunks(&conn, "SELECT * FROM results", 100)?;
+    let first_chunk = chunks.next().expect("at least one chunk")?;
+    assert_eq!(first_chunk.index().len(), 1);
     Ok(())
 }
 
