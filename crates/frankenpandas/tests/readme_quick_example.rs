@@ -809,8 +809,13 @@ fn readme_element_wise_operations_compiles_and_runs() -> Result<(), Box<dyn std:
     let _ = df.mod_df(&df2)?;
     let _ = df.floordiv_df(&df2)?;
 
-    // With fill value.
+    // With fill value — fd90.227 added the other 5 _df_fill variants.
     let _ = df.add_df_fill(&df2, 0.0)?;
+    let _ = df.sub_df_fill(&df2, 0.0)?;
+    let _ = df.mul_df_fill(&df2, 1.0)?;
+    let _ = df.div_df_fill(&df2, 1.0)?;
+    let _ = df.floordiv_df_fill(&df2, 1.0)?;
+    let _ = df.mod_df_fill(&df2, 1.0)?;
 
     // Cumulative ops.
     let csum = df.cumsum()?;
