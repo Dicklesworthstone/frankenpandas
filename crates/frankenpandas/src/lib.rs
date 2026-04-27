@@ -350,6 +350,11 @@ pub mod prelude {
         read_sql_table,
         // fd90.210: read_sql_with_options pairs with SqlReadOptions.
         read_sql_with_options,
+        // fd90.244: round out the SQL reader surface.
+        read_sql_query,
+        read_sql_query_with_options,
+        read_sql_table_chunks,
+        read_sql_table_with_options,
         // IO — datetime/numeric helpers (full module-level fn surface)
         cut,
         qcut,
@@ -561,6 +566,11 @@ mod tests {
         let _ = write_sql_with_options::<rusqlite::Connection>;
         // fd90.210: read_sql_with_options pairs with SqlReadOptions.
         let _ = read_sql_with_options::<rusqlite::Connection>;
+        // fd90.244: extra SQL reader variants.
+        let _ = read_sql_query::<rusqlite::Connection>;
+        let _ = read_sql_query_with_options::<rusqlite::Connection>;
+        let _ = read_sql_table_chunks::<rusqlite::Connection>;
+        let _ = read_sql_table_with_options::<rusqlite::Connection>;
         // fd90.220: SqlInsertMethod is the type of SqlWriteOptions.method.
         let _is_insert_method: fn(SqlInsertMethod) -> _ = |m| m;
         // fd90.222: ArithmeticOp + ComparisonOp are parameters of Column /
