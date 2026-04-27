@@ -1100,6 +1100,58 @@ fn readme_element_wise_operations_compiles_and_runs() -> Result<(), Box<dyn std:
     // result; just verify it compiles and runs.
     let _ = bigger.reset_index_with_name(true, None)?;
 
+    // fd90.241: Series.combine_first / update / filter / xs / droplevel +
+    // DataFrame.swaplevel / reorder_levels.
+
+    // Build two Series with overlapping but missing-bearing values.
+    let cf_labels: Vec<IndexLabel> = (0..3i64).map(IndexLabel::Int64).collect();
+    let s_with_gaps = Series::from_values(
+        "a",
+        cf_labels.clone(),
+        vec![
+            Scalar::Float64(1.0),
+            Scalar::Null(NullKind::NaN),
+            Scalar::Float64(3.0),
+        ],
+    )?;
+    let s_filler = Series::from_values(
+        "a",
+        cf_labels,
+        vec![
+            Scalar::Float64(10.0),
+            Scalar::Float64(20.0),
+            Scalar::Float64(30.0),
+        ],
+    )?;
+    // combine_first — fill nulls in self from other.
+    let _combined = s_with_gaps.combine_first(&s_filler)?;
+    // update — overwrite self where other is non-null.
+    let _updated = s_with_gaps.update(&s_filler)?;
+
+    // Series.filter — Bool-typed mask of same length.
+    let mask_labels: Vec<IndexLabel> = (0..3i64).map(IndexLabel::Int64).collect();
+    let mask = Series::from_values(
+        "m",
+        mask_labels,
+        vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)],
+    )?;
+    let filtered = s_filler.filter(&mask)?;
+    assert!(filtered.len() <= s_filler.len());
+
+    // Series.xs — cross-section by IndexLabel.
+    let _xs = s_filler.xs(&IndexLabel::Int64(0))?;
+    // Series.droplevel — collapse to a flat 0..n index.
+    let _dl = s_filler.droplevel()?;
+
+    // DataFrame row-axis MultiIndex methods. Build a frame with a row
+    // MultiIndex via set_index_multi.
+    let mi_df = read_csv_str("region,year,value\neast,2023,100\neast,2024,150\nwest,2023,90")?
+        .set_index_multi(&["region", "year"], true, "_")?;
+    // df.swaplevel — exchange the two row levels (no args).
+    let _swapped = mi_df.swaplevel();
+    // df.reorder_levels — permutation by level indices.
+    let _reordered = mi_df.reorder_levels(&[1, 0])?;
+
     // fd90.232 + fd90.233: DataFrame-level reductions. fd90.233 added
     // pandas-parity bare-name aliases (min/max/std/var/median/prod/
     // skew/kurt/kurtosis/sem) over the existing *_agg methods.
