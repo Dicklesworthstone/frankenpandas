@@ -16,8 +16,11 @@
 
 // ── Core types ──────────────────────────────────────────────────────────
 
-pub use fp_types::{DType, NullKind, Scalar, TypeError};
-pub use fp_types::{cast_scalar, common_dtype, infer_dtype, isna, isnull, notna, notnull};
+pub use fp_types::{DType, NullKind, Scalar, SparseDType, TypeError};
+pub use fp_types::{
+    cast_scalar, cast_scalar_owned, common_dtype, count_na, dropna, fill_na, infer_dtype, isna,
+    isnull, notna, notnull,
+};
 
 // NanOps: null-skipping aggregation primitives (matches README's NanOps section).
 pub use fp_types::{
@@ -406,6 +409,10 @@ pub mod prelude {
         // The README documents these as user-facing (lines 359, 771, 957, 1031).
         cast_scalar,
         common_dtype,
+        // fd90.262: Vec<Scalar> helpers matching pandas' top-level surface.
+        count_na,
+        dropna,
+        fill_na,
         // fd90.261: pandas-parity date/timedelta range constructors.
         DateOffset,
         date_range,
@@ -769,6 +776,10 @@ mod tests {
         let _ = infer_dtype(&na_check);
         let _ = common_dtype(DType::Int64, DType::Float64);
         let _ = cast_scalar;
+        // fd90.262: count_na / fill_na / dropna helpers.
+        let _ = count_na(&na_check);
+        let _ = fill_na(&na_check, &Scalar::Int64(0));
+        let _ = dropna(&na_check);
 
         // Module-level helpers (fd90.144) — name-check.
         let _ = cut;
