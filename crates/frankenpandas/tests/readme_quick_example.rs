@@ -3679,6 +3679,57 @@ fn readme_serialization_compiles_and_runs() -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
+/// fd90.30: AsofDirection (Forward / Nearest) + DuplicateKeep
+/// (Last / None) + ConcatJoin::Outer variant coverage. The unmade
+/// variants are core pandas merge / dedup / concat surface and were
+/// uncovered by integration tests.
+#[test]
+fn readme_minor_enum_variants_round_trip() -> Result<(), Box<dyn std::error::Error>> {
+    // ── AsofDirection::Forward / Nearest ─────────────────────────
+    // Trades at t=2,5,8; quotes at t=1,4,7,10.
+    let trades = read_csv_str("ts,price\n2,100\n5,200\n8,300")?;
+    let quotes = read_csv_str("ts,bid\n1,99\n4,199\n7,299\n10,399")?;
+
+    // Forward = nearest succeeding quote for each trade.
+    let forward = merge_asof(&trades, &quotes, "ts", AsofDirection::Forward)?;
+    assert_eq!(forward.index.len(), 3);
+
+    // Nearest = closest quote in either direction.
+    let nearest = merge_asof(&trades, &quotes, "ts", AsofDirection::Nearest)?;
+    assert_eq!(nearest.index.len(), 3);
+
+    // ── DuplicateKeep::Last / None ──────────────────────────────
+    let dup_df = read_csv_str("k,v\n1,a\n2,b\n2,c\n3,d\n3,e\n3,f")?;
+
+    let keep_last = dup_df.drop_duplicates(Some(&["k".to_string()]), DuplicateKeep::Last, false)?;
+    // 3 unique keys, keep last → row count = 3.
+    assert_eq!(keep_last.index().len(), 3);
+    let last_v = keep_last.column("v").unwrap();
+    // For k=3, the last seen value is "f".
+    assert!(last_v
+        .values()
+        .iter()
+        .any(|s| matches!(s, Scalar::Utf8(x) if x == "f")));
+
+    let keep_none = dup_df.drop_duplicates(Some(&["k".to_string()]), DuplicateKeep::None, false)?;
+    // None drops ALL rows that had any duplicate. Only k=1 (single row)
+    // survives.
+    assert_eq!(keep_none.index().len(), 1);
+
+    // ── ConcatJoin::Outer ────────────────────────────────────────
+    // Two frames with disjoint columns — outer join keeps all columns.
+    let a = read_csv_str("x,y\n1,2\n3,4")?;
+    let b = read_csv_str("y,z\n5,6\n7,8")?;
+    let outer = concat_dataframes_with_axis_join(&[&a, &b], 0, ConcatJoin::Outer)?;
+    // Row count = 4 (2 + 2). All 3 columns (x, y, z) present, with
+    // missing cells filled with nulls.
+    assert_eq!(outer.index().len(), 4);
+    assert!(outer.column("x").is_some());
+    assert!(outer.column("y").is_some());
+    assert!(outer.column("z").is_some());
+    Ok(())
+}
+
 /// fd90.29: JoinType + MergeValidateMode variant coverage. Existing
 /// merge tests only exercised JoinType::Inner and
 /// MergeValidateMode::OneToOne. This drives the 4 other JoinType
