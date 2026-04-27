@@ -3802,6 +3802,54 @@ fn readme_serialization_compiles_and_runs() -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
+/// fd90.69: Timestamp arithmetic methods. 6+ documented methods on
+/// Timestamp uncovered by integration tests (add_timedelta,
+/// sub_timedelta, sub_timestamp, floor_to, ceil_to, round_to,
+/// floor_to_unit, ceil_to_unit).
+#[test]
+fn readme_timestamp_arithmetic() -> Result<(), Box<dyn std::error::Error>> {
+    let day = Timedelta::NANOS_PER_DAY;
+    let hour = Timedelta::NANOS_PER_HOUR;
+
+    // Anchor at a clean day boundary so floor/ceil math is predictable.
+    // 19675 * NANOS_PER_DAY is some fixed midnight in 2023.
+    let base = Timestamp::from_nanos(19_675 * day);
+
+    // ── add_timedelta / sub_timedelta ───────────────────────────
+    let plus_day = base.add_timedelta(day);
+    assert_eq!(plus_day.nanos, base.nanos + day);
+    let minus_day = base.sub_timedelta(day);
+    assert_eq!(minus_day.nanos, base.nanos - day);
+
+    // ── sub_timestamp: delta in nanos ───────────────────────────
+    let later = Timestamp::from_nanos(base.nanos + 3 * day);
+    let delta = later.sub_timestamp(&base);
+    assert_eq!(delta, 3 * day);
+
+    // ── floor_to / ceil_to / round_to (unit_nanos = 1 day) ─────
+    let with_extra = Timestamp::from_nanos(base.nanos + 13 * hour); // base + 13h
+    let floored = with_extra.floor_to(day);
+    // floor_to drops sub-day portion → equals base.
+    assert_eq!(floored.nanos, base.nanos);
+    let ceiled = with_extra.ceil_to(day);
+    // ceil_to rounds up to next day boundary.
+    assert_eq!(ceiled.nanos, base.nanos + day);
+    let rounded = with_extra.round_to(day);
+    // 13h > 12h → rounds up to next day.
+    assert_eq!(rounded.nanos, base.nanos + day);
+
+    // 4h after base: round_to(day) goes back to base.
+    let small_after = Timestamp::from_nanos(base.nanos + 4 * hour);
+    assert_eq!(small_after.round_to(day).nanos, base.nanos);
+
+    // ── floor_to_unit / ceil_to_unit string variants ────────────
+    let floor_str = with_extra.floor_to_unit("D");
+    assert_eq!(floor_str.nanos, base.nanos);
+    let ceil_str = with_extra.ceil_to_unit("D");
+    assert_eq!(ceil_str.nanos, base.nanos + day);
+    Ok(())
+}
+
 /// fd90.68: Series cumulative ops + diff/shift/pct_change value
 /// assertions. DataFrame versions were value-asserted in fd90.61
 /// but Series-level versions may use different code paths.
