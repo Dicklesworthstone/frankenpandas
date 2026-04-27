@@ -112,6 +112,89 @@ fn readme_quick_start_round_trip_through_sqlite() -> Result<(), Box<dyn std::err
     // SqlInspector — schema introspection.
     let inspector = SqlInspector::new(&conn);
     let _tables = inspector.tables(None)?;
+
+    // fd90.291: cover the 8 remaining SqlInspector methods documented at
+    // README line 148 ("tables / views / schemas / columns / indexes /
+    // FKs / UCs / reflect_table / reflect_all_tables"). Build a small
+    // inspector-friendly schema with a parent table (PK), child table
+    // (composite FK + UNIQUE), an explicit index, and a view.
+    conn.execute_batch(
+        "CREATE TABLE parent (
+             id   INTEGER PRIMARY KEY,
+             name TEXT NOT NULL UNIQUE
+         );
+         CREATE TABLE child (
+             cid       INTEGER PRIMARY KEY,
+             parent_id INTEGER NOT NULL,
+             code      TEXT NOT NULL,
+             FOREIGN KEY (parent_id) REFERENCES parent(id),
+             UNIQUE (parent_id, code)
+         );
+         CREATE INDEX idx_child_code ON child(code);
+         CREATE VIEW v_child AS SELECT cid, code FROM child;",
+    )?;
+
+    // schemas() — SQLite is a single-namespace backend, default impl
+    // returns an empty Vec (multi-schema backends like PG/MySQL would
+    // populate this). Coverage proves the call dispatches and decodes.
+    let schemas = inspector.schemas()?;
+    assert!(schemas.is_empty(), "sqlite schemas should be empty: {schemas:?}");
+
+    // views() — surfaces the view we just created.
+    let views = inspector.views(None)?;
+    assert!(views.iter().any(|v| v == "v_child"), "views: {views:?}");
+
+    // columns() — returns SqlTableSchema with one entry per declared column.
+    let parent_cols = inspector.columns("parent", None)?.expect("parent exists");
+    assert_eq!(parent_cols.table_name, "parent");
+    assert_eq!(parent_cols.columns.len(), 2);
+    assert!(parent_cols.column("id").is_some());
+    let name_col = parent_cols.column("name").expect("name column");
+    assert!(!name_col.nullable);
+    // Missing table → Ok(None).
+    assert!(inspector.columns("does_not_exist", None)?.is_none());
+
+    // primary_key_columns() — sole PK on parent.id.
+    let pk_parent = inspector.primary_key_columns("parent", None)?;
+    assert_eq!(pk_parent, vec!["id".to_string()]);
+
+    // indexes() — explicit CREATE INDEX surfaces here.
+    let child_indexes = inspector.indexes("child", None)?;
+    assert!(
+        child_indexes.iter().any(|i| i.name == "idx_child_code"
+            && i.columns == vec!["code".to_string()]
+            && !i.unique),
+        "indexes: {child_indexes:?}",
+    );
+
+    // foreign_keys() — composite shape: child.parent_id → parent.id.
+    let child_fks = inspector.foreign_keys("child", None)?;
+    let fk = child_fks
+        .iter()
+        .find(|f| f.referenced_table == "parent")
+        .expect("FK to parent");
+    assert_eq!(fk.columns, vec!["parent_id".to_string()]);
+    assert_eq!(fk.referenced_columns, vec!["id".to_string()]);
+
+    // unique_constraints() — composite UC (parent_id, code) on child.
+    let child_ucs = inspector.unique_constraints("child", None)?;
+    assert!(
+        child_ucs.iter().any(|u| u.columns
+            == vec!["parent_id".to_string(), "code".to_string()]),
+        "ucs: {child_ucs:?}",
+    );
+
+    // reflect_table() — bundle: columns + PK + indexes + FKs + UCs.
+    let reflected = inspector
+        .reflect_table("child", None)?
+        .expect("child exists");
+    assert_eq!(reflected.table_name, "child");
+    assert_eq!(reflected.primary_key_columns, vec!["cid".to_string()]);
+    assert!(!reflected.indexes.is_empty());
+    assert!(!reflected.foreign_keys.is_empty());
+    assert!(!reflected.unique_constraints.is_empty());
+    // Missing table → Ok(None).
+    assert!(inspector.reflect_table("does_not_exist", None)?.is_none());
     Ok(())
 }
 
