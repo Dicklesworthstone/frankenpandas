@@ -331,6 +331,37 @@ fn readme_quick_start_round_trip_through_sqlite() -> Result<(), Box<dyn std::err
     let appended_back = read_sql_table(&conn, "appended")?;
     assert_eq!(appended_back.index().len(), 2);
 
+    // fd90.50: SqlReflectedTable lookup methods (fd90.51 / fd90.52).
+    // Use the existing 'child' bundle from the reflect_table call above
+    // and exercise each documented lookup helper.
+    let child_refl = inspector
+        .reflect_table("child", None)?
+        .expect("child exists");
+    // column(name) — Some for present, None for missing.
+    assert!(child_refl.column("cid").is_some());
+    assert!(child_refl.column("ghost_col").is_none());
+    // index(name) — finds the explicit idx_child_code.
+    assert!(child_refl.index("idx_child_code").is_some());
+    assert!(child_refl.index("ghost_idx").is_none());
+    // unique_constraint(name) — at least one UC name should exist;
+    // SQLite auto-generates names like sqlite_autoindex_*.
+    let any_uc = child_refl.unique_constraints.first().expect("UC present");
+    assert!(child_refl.unique_constraint(&any_uc.name).is_some());
+    // foreign_keys_for_column(name) — child.parent_id participates in
+    // the FK to parent.id.
+    let fks_for_pid = child_refl.foreign_keys_for_column("parent_id");
+    assert!(!fks_for_pid.is_empty());
+    assert_eq!(fks_for_pid[0].referenced_table, "parent");
+    // Column not in any FK → empty.
+    assert!(child_refl.foreign_keys_for_column("cid").is_empty());
+    // indexes_for_column(name) — code is in idx_child_code.
+    let idxes_for_code = child_refl.indexes_for_column("code");
+    assert!(!idxes_for_code.is_empty());
+    // unique_constraints_for_column(name) — parent_id is in the
+    // composite UC (parent_id, code).
+    let ucs_for_pid = child_refl.unique_constraints_for_column("parent_id");
+    assert!(!ucs_for_pid.is_empty());
+
     // fd90.28: SqlInsertMethod::Multi — multi-row INSERT batching.
     let multi_opts = SqlWriteOptions {
         if_exists: SqlIfExists::Replace,
