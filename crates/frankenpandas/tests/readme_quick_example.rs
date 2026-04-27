@@ -3802,6 +3802,70 @@ fn readme_serialization_compiles_and_runs() -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
+/// fd90.67: MultiIndex methods (is_lexsorted / get_tuple / take /
+/// isin / duplicated / has_duplicates / is_unique). Pandas-parity
+/// surface previously uncovered.
+#[test]
+fn readme_multiindex_methods() -> Result<(), Box<dyn std::error::Error>> {
+    // 4-tuple lexsorted MultiIndex.
+    let mi = MultiIndex::from_tuples(vec![
+        vec![IndexLabel::Utf8("east".into()), IndexLabel::Int64(2023)],
+        vec![IndexLabel::Utf8("east".into()), IndexLabel::Int64(2024)],
+        vec![IndexLabel::Utf8("west".into()), IndexLabel::Int64(2023)],
+        vec![IndexLabel::Utf8("west".into()), IndexLabel::Int64(2024)],
+    ])?;
+
+    // ── is_lexsorted on a sorted construction ──────────────────
+    assert!(mi.is_lexsorted());
+
+    // ── get_tuple at a specific position ───────────────────────
+    let tup = mi.get_tuple(2).expect("position 2 exists");
+    assert_eq!(tup[0], &IndexLabel::Utf8("west".into()));
+    assert_eq!(tup[1], &IndexLabel::Int64(2023));
+    // Out-of-bounds position returns None.
+    assert!(mi.get_tuple(99).is_none());
+
+    // ── take: select positions ─────────────────────────────────
+    let taken = mi.take(&[0, 3])?;
+    assert_eq!(taken.len(), 2);
+
+    // ── duplicated / has_duplicates / is_unique ────────────────
+    assert!(!mi.has_duplicates());
+    assert!(mi.is_unique());
+    let dup_mask = mi.duplicated(DuplicateKeep::First);
+    assert_eq!(dup_mask, vec![false, false, false, false]);
+
+    // Build a MultiIndex with explicit duplicates to flip the contract.
+    let dup_mi = MultiIndex::from_tuples(vec![
+        vec![IndexLabel::Utf8("a".into()), IndexLabel::Int64(1)],
+        vec![IndexLabel::Utf8("a".into()), IndexLabel::Int64(1)], // dup
+        vec![IndexLabel::Utf8("a".into()), IndexLabel::Int64(2)],
+    ])?;
+    assert!(dup_mi.has_duplicates());
+    assert!(!dup_mi.is_unique());
+    let dup_mask2 = dup_mi.duplicated(DuplicateKeep::First);
+    assert_eq!(dup_mask2, vec![false, true, false]);
+
+    // ── isin: composite-key membership ─────────────────────────
+    let needles = vec![
+        vec![IndexLabel::Utf8("east".into()), IndexLabel::Int64(2023)],
+        vec![IndexLabel::Utf8("nope".into()), IndexLabel::Int64(2099)],
+    ];
+    let isin_mask = mi.isin(&needles);
+    // isin returns a per-row bool vector — first tuple matches at
+    // position 0 of mi; second tuple is nowhere in mi.
+    assert_eq!(isin_mask.len(), 4);
+    assert!(isin_mask[0]);
+
+    // ── isin_level: per-level membership at level 1 (year) ────
+    let years = vec![IndexLabel::Int64(2024)];
+    let level_mask = mi.isin_level(&years, 1)?;
+    // 2 of 4 rows have year=2024.
+    let count = level_mask.iter().filter(|&&b| b).count();
+    assert_eq!(count, 2);
+    Ok(())
+}
+
 /// fd90.66: Index naming + rename + unique methods. Documented
 /// pandas-parity surface that was not functionally exercised.
 #[test]
