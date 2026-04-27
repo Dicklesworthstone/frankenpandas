@@ -3802,6 +3802,50 @@ fn readme_serialization_compiles_and_runs() -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
+/// fd90.71: Interval inspection methods. mid/is_empty/overlaps/
+/// IntervalClosed::left_closed/right_closed pandas-parity surface
+/// that was uncovered.
+#[test]
+fn readme_interval_inspection_methods() -> Result<(), Box<dyn std::error::Error>> {
+    // ── IntervalClosed::left_closed / right_closed ──────────────
+    assert!(IntervalClosed::Left.left_closed());
+    assert!(!IntervalClosed::Left.right_closed());
+    assert!(IntervalClosed::Right.right_closed());
+    assert!(!IntervalClosed::Right.left_closed());
+    assert!(IntervalClosed::Both.left_closed());
+    assert!(IntervalClosed::Both.right_closed());
+    assert!(!IntervalClosed::Neither.left_closed());
+    assert!(!IntervalClosed::Neither.right_closed());
+
+    // ── Interval.mid ─────────────────────────────────────────────
+    let iv = Interval::new(0.0, 10.0, IntervalClosed::Right);
+    assert_eq!(iv.mid(), 5.0);
+    let iv2 = Interval::new(-3.0, 7.0, IntervalClosed::Right);
+    assert_eq!(iv2.mid(), 2.0);
+
+    // ── Interval.is_empty ───────────────────────────────────────
+    // Coinciding endpoints with NOT-Both → empty.
+    assert!(Interval::new(5.0, 5.0, IntervalClosed::Right).is_empty());
+    assert!(Interval::new(5.0, 5.0, IntervalClosed::Left).is_empty());
+    assert!(Interval::new(5.0, 5.0, IntervalClosed::Neither).is_empty());
+    // Coinciding endpoints with Both → NOT empty (single-point set).
+    assert!(!Interval::new(5.0, 5.0, IntervalClosed::Both).is_empty());
+    // Non-coinciding endpoints → not empty.
+    assert!(!Interval::new(0.0, 5.0, IntervalClosed::Right).is_empty());
+
+    // ── Interval.overlaps ───────────────────────────────────────
+    let a = Interval::new(0.0, 5.0, IntervalClosed::Right);
+    let b = Interval::new(3.0, 8.0, IntervalClosed::Right);
+    let c = Interval::new(10.0, 20.0, IntervalClosed::Right);
+    // a and b share [3, 5] → overlap.
+    assert!(a.overlaps(&b));
+    assert!(b.overlaps(&a));
+    // a and c are fully disjoint.
+    assert!(!a.overlaps(&c));
+    assert!(!c.overlaps(&a));
+    Ok(())
+}
+
 /// fd90.70: Timedelta::from_unit + Period::cmp_same_freq +
 /// TimedeltaComponents field coverage. Three under-tested
 /// pandas-parity methods on Timedelta/Period.
