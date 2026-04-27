@@ -1100,6 +1100,21 @@ fn readme_element_wise_operations_compiles_and_runs() -> Result<(), Box<dyn std:
     let renamed = bigger.rename("renamed_series")?;
     assert_eq!(renamed.name(), "renamed_series");
 
+    // fd90.273: align_on_index / asof / clip_lower / clip_upper.
+    // Series.clip_lower / clip_upper (one-sided clips).
+    let _ = bigger.clip_lower(2.0)?;
+    let _ = bigger.clip_upper(5.0)?;
+    // DataFrame.clip_lower / clip_upper.
+    let _ = df.clip_lower(0.0)?;
+    let _ = df.clip_upper(50.0)?;
+    // Series.asof — last known value at-or-before label.
+    let _ = bigger.asof(&IndexLabel::Int64(3));
+    // DataFrame.asof — Series of last-known values per column at label.
+    let _ = df.asof(&IndexLabel::Int64(2), None)?;
+    // DataFrame.align_on_index — outer/inner/left modes return (Self, Self).
+    let other = read_csv_str("a,b\n100,1000\n200,2000\n300,3000\n400,4000")?;
+    let (_l, _r) = df.align_on_index(&other, AlignMode::Outer)?;
+
     // fd90.238: reindex / truncate / insert across Series + DataFrame.
 
     // Series.reindex — rebuild with a new label set (pads with NaN).

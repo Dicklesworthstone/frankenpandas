@@ -272,6 +272,8 @@ pub use rusqlite;
 pub mod prelude {
     pub use crate::{
         // Core types
+        // fd90.273: AlignMode is the parameter type for df.align_on_index().
+        AlignMode,
         // fd90.222: ArithmeticOp + ComparisonOp are parameter types for
         // Column.binary_numeric, DataFrame.compare_scalar, etc.
         ArithmeticOp,
@@ -660,6 +662,8 @@ mod tests {
         // DataFrame compare_scalar / binary_numeric methods.
         let _: ArithmeticOp = ArithmeticOp::Add;
         let _: ComparisonOp = ComparisonOp::Gt;
+        // fd90.273: AlignMode is the parameter for df.align_on_index().
+        let _: AlignMode = AlignMode::Outer;
 
         // fd90.221: Bayesian runtime inspection types reachable via
         // EvidenceLedger.records() and decision_to_card.
