@@ -3802,6 +3802,45 @@ fn readme_serialization_compiles_and_runs() -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
+/// fd90.57: DataFrame.at(label, col) + .iat(row, col_pos) scalar
+/// access methods. Pandas-parity surface for cell-level reads;
+/// Series-level versions were tested but DataFrame versions were not.
+#[test]
+fn readme_dataframe_at_iat_scalar_access() -> Result<(), Box<dyn std::error::Error>> {
+    let df = read_csv_str(
+        "ticker,price,volume\nAAPL,185.50,1000\nGOOG,140.25,500\nMSFT,420.00,800",
+    )?;
+
+    // ── DataFrame.at(label, column) ─────────────────────────────
+    // Default RangeIndex labels are Int64 0..n.
+    let aapl_price = df.at(&IndexLabel::Int64(0), "price")?;
+    assert_eq!(aapl_price, Scalar::Float64(185.50));
+
+    let msft_volume = df.at(&IndexLabel::Int64(2), "volume")?;
+    assert_eq!(msft_volume, Scalar::Int64(800));
+
+    // ── DataFrame.iat(row_pos, col_pos) ─────────────────────────
+    // Column order from CSV header: ticker(0), price(1), volume(2).
+    let row0_col1 = df.iat(0, 1)?;
+    assert_eq!(row0_col1, Scalar::Float64(185.50));
+
+    let row2_col2 = df.iat(2, 2)?;
+    assert_eq!(row2_col2, Scalar::Int64(800));
+
+    // ── Out-of-bounds row returns Err ───────────────────────────
+    let oob = df.iat(99, 0);
+    assert!(oob.is_err());
+
+    // ── Missing label returns Err ───────────────────────────────
+    let bad_label = df.at(&IndexLabel::Int64(99), "price");
+    assert!(bad_label.is_err());
+
+    // ── Missing column returns Err ──────────────────────────────
+    let bad_col = df.at(&IndexLabel::Int64(0), "ghost_col");
+    assert!(bad_col.is_err());
+    Ok(())
+}
+
 /// fd90.56: Scalar inspection + semantic comparison methods. 9
 /// methods on Scalar (is_missing/is_na/is_null/is_nan/coalesce/
 /// semantic_eq/le/ge/cmp/to_f64) — only is_missing was exercised by
