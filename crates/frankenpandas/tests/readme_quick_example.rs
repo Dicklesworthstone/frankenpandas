@@ -819,6 +819,24 @@ fn readme_element_wise_operations_compiles_and_runs() -> Result<(), Box<dyn std:
     let _ = df.shift(1)?;
     let pct = df.pct_change(1)?; // fd90.123 fix — periods is required arg
     assert_eq!(pct.index().len(), 4);
+
+    // fd90.223: ArithmeticOp / ComparisonOp dispatch (the prelude types
+    // added in fd90.222). The high-level wrappers (mul_scalar/etc.) cover
+    // the common cases; the dispatch enum form is documented surface.
+
+    // DataFrame.compare_scalar_df — Bool DataFrame mask via ComparisonOp.
+    let mask_df = df.compare_scalar_df(&Scalar::Int64(15), ComparisonOp::Ge)?;
+    assert_eq!(mask_df.index().len(), 4);
+
+    // Series.compare_scalar — Bool Series mask via ComparisonOp.
+    let col_a_series = Series::new("a", df.index().clone(), df.column("a").expect("a").clone())?;
+    let _series_mask = col_a_series.compare_scalar(&Scalar::Int64(20), ComparisonOp::Gt)?;
+
+    // Column.binary_numeric / binary_comparison — exercise via DataFrame columns.
+    let col_a = df.column("a").expect("column a").clone();
+    let col_b = df.column("b").expect("column b").clone();
+    let _sum_col = col_a.binary_numeric(&col_b, ArithmeticOp::Add)?;
+    let _gt_col = col_a.binary_comparison(&col_b, ComparisonOp::Gt)?;
     Ok(())
 }
 
