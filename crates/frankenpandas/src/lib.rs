@@ -182,7 +182,7 @@ pub use fp_groupby::GroupByError;
 // ── Join/merge ──────────────────────────────────────────────────────────
 
 pub use fp_join::{
-    AsofDirection, DataFrameMergeExt, JoinError, JoinExecutionOptions, JoinType,
+    AsofDirection, DataFrameMergeExt, JoinError, JoinExecutionOptions, JoinType, JoinedSeries,
     MergeAsofOptions, MergeExecutionOptions, MergeValidateMode, MergedDataFrame, join_series,
     merge_asof, merge_asof_with_options, merge_dataframes_on, merge_ordered,
 };
@@ -272,6 +272,7 @@ pub mod prelude {
         AsofDirection,
         JoinError,
         JoinExecutionOptions,
+        JoinedSeries,
         JoinType,
         JsonOrient,
         MergeAsofOptions,
@@ -693,6 +694,8 @@ mod tests {
         let _: MergeAsofOptions = MergeAsofOptions::default();
         let _: JoinExecutionOptions = JoinExecutionOptions::default();
         let _ = merge_asof_with_options;
+        // fd90.257: JoinedSeries (return type of join_series).
+        let _is_joined_series: fn(JoinedSeries) -> _ = |x| x;
 
         // fd90.208: pandas-style top-level null checks + dtype helpers.
         let na_check = vec![Scalar::Int64(1), Scalar::Null(NullKind::NaN)];

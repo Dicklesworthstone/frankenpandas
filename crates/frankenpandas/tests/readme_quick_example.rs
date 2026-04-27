@@ -107,6 +107,19 @@ fn readme_merge_with_options_compiles_and_runs() -> Result<(), Box<dyn std::erro
 
     // Inner join on key — all 3 rows match.
     assert_eq!(result.index().len(), 3);
+
+    // fd90.257: module-level join_series / merge_dataframes_on / merge_ordered.
+    // join_series — produces a JoinedSeries on overlapping indexes.
+    let s_labels: Vec<IndexLabel> = vec![IndexLabel::Int64(0), IndexLabel::Int64(1)];
+    let s_a = Series::from_values("a", s_labels.clone(), vec![Scalar::Int64(1), Scalar::Int64(2)])?;
+    let s_b = Series::from_values("b", s_labels, vec![Scalar::Int64(10), Scalar::Int64(20)])?;
+    let _joined: JoinedSeries = join_series(&s_a, &s_b, JoinType::Inner)?;
+
+    // merge_dataframes_on — module-level inner-join on shared key.
+    let _merged_on = merge_dataframes_on(&df1, &df2, &["key"], JoinType::Inner)?;
+
+    // merge_ordered — outer join with optional fill_method.
+    let _ordered = merge_ordered(&df1, &df2, &["key"], None)?;
     Ok(())
 }
 
