@@ -925,5 +925,69 @@ mod tests {
         let _ = merge_dataframes_on;
         let _ = merge_ordered;
         let _ = join_series;
+
+        // fd90.10 / fd90.11: SQL inspector free-fn surface promoted to
+        // the prelude alongside SqlInspector itself.
+        let _ = inspect::<rusqlite::Connection>;
+        let _ = list_sql_foreign_keys::<rusqlite::Connection>;
+        let _ = list_sql_indexes::<rusqlite::Connection>;
+        let _ = list_sql_schemas::<rusqlite::Connection>;
+        let _ = list_sql_tables::<rusqlite::Connection>;
+        let _ = list_sql_unique_constraints::<rusqlite::Connection>;
+        let _ = list_sql_views::<rusqlite::Connection>;
+        let _ = sql_max_identifier_length::<rusqlite::Connection>;
+        let _ = sql_primary_key_columns::<rusqlite::Connection>;
+        let _ = sql_server_version::<rusqlite::Connection>;
+        let _ = sql_table_comment::<rusqlite::Connection>;
+        let _ = sql_table_schema::<rusqlite::Connection>;
+        let _ = truncate_sql_table::<rusqlite::Connection>;
+
+        // fd90.12: Series ↔ Arrow interop (paired with the README's
+        // documented Arrow zero-copy claim at line 1580).
+        let _ = series_to_arrow_array;
+        // series_from_arrow_array is generic over `impl Into<String>`;
+        // tests/readme_quick_example.rs::readme_series_arrow_round_trip
+        // exercises it with concrete args.
+
+        // fd90.13: SQL schema/iterator return types — name-check via
+        // fn-pointer signatures (no Default impls).
+        let _is_chunk_iter: fn(SqlChunkIterator) -> _ = |x| x;
+        let _is_col_schema: fn(SqlColumnSchema) -> _ = |x| x;
+        let _is_fk_schema: fn(SqlForeignKeySchema) -> _ = |x| x;
+        let _is_idx_schema: fn(SqlIndexSchema) -> _ = |x| x;
+        let _is_indexed_chunk: fn(SqlIndexedChunkIterator) -> _ = |x| x;
+        let _is_query_result: fn(SqlQueryResult) -> _ = |x| x;
+        let _is_reflected: fn(SqlReflectedTable) -> _ = |x| x;
+        let _is_table_schema: fn(SqlTableSchema) -> _ = |x| x;
+        let _is_uc_schema: fn(SqlUniqueConstraintSchema) -> _ = |x| x;
+
+        // fd90.14: fp-types pandas-equivalent helpers + range fns.
+        let _is_interval: fn(Interval) -> _ = |x| x;
+        let _is_ic: fn(IntervalClosed) -> _ = |x| x;
+        let _is_period: fn(Period) -> _ = |x| x;
+        let _is_pf: fn(PeriodFreq) -> _ = |x| x;
+        let _is_td: fn(Timedelta) -> _ = |x| x;
+        let _is_tdc: fn(TimedeltaComponents) -> _ = |x| x;
+        let _is_tde: fn(TimedeltaError) -> _ = |x| x;
+        let _is_ts: fn(Timestamp) -> _ = |x| x;
+        let _ = period_range;
+        let _ = interval_range_by_periods;
+        let _ = interval_range_by_step;
+
+        // fd90.15: misc helpers (SparseDType / AggFunc / GroupByOptions
+        // family / Index conversion fns).
+        let _is_sd: fn(SparseDType) -> _ = |x| x;
+        let _is_af: fn(AggFunc) -> _ = |x| x;
+        let _is_gbo: fn(GroupByOptions) -> _ = |x| x;
+        let _is_gbeo: fn(GroupByExecutionOptions) -> _ = |x| x;
+        let _ = index_to_frame;
+        let _ = index_to_series;
+
+        // fd90.16: final paired helpers.
+        let _is_dre: fn(DateRangeError) -> _ = |x| x;
+        let _is_tdre: fn(TimedeltaRangeError) -> _ = |x| x;
+        let _ = cast_scalar_owned;
+        let _ = read_csv_with_index_cols;
+        let _ = read_csv_with_index_cols_path;
     }
 }
