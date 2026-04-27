@@ -21,6 +21,13 @@ pub use fp_types::{
     cast_scalar, cast_scalar_owned, common_dtype, count_na, dropna, fill_na, infer_dtype, isna,
     isnull, notna, notnull,
 };
+// fd90.263: pandas-equivalent helper types for Datetime64/Timedelta64/Period/Interval
+// scalar variants. Users typically interact via Scalar::Timedelta64(nanos) etc., but
+// the helper types are needed for richer parsing / manipulation.
+pub use fp_types::{
+    Interval, IntervalClosed, Period, PeriodFreq, Timedelta, TimedeltaComponents, TimedeltaError,
+    Timestamp, period_range,
+};
 
 // NanOps: null-skipping aggregation primitives (matches README's NanOps section).
 pub use fp_types::{
