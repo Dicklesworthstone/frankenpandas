@@ -3712,6 +3712,67 @@ fn readme_serialization_compiles_and_runs() -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
+/// fd90.36: ArithmeticOp + ComparisonOp variant coverage. 10 untested
+/// variants across 2 enums (Add+Gt+Ge previously tested; the 4 + 6
+/// remaining variants exercise core element-wise ops).
+#[test]
+fn readme_arithmetic_comparison_variants_round_trip() -> Result<(), Box<dyn std::error::Error>> {
+    let a = Column::from_values(vec![Scalar::Int64(20), Scalar::Int64(8)])?;
+    let b = Column::from_values(vec![Scalar::Int64(4), Scalar::Int64(2)])?;
+
+    // ── ArithmeticOp variants ────────────────────────────────────
+    // Add already tested elsewhere; verify the 6 remaining ops.
+    let sub = a.binary_numeric(&b, ArithmeticOp::Sub)?;
+    assert_eq!(sub.values()[0], Scalar::Int64(16));
+
+    let mul = a.binary_numeric(&b, ArithmeticOp::Mul)?;
+    assert_eq!(mul.values()[0], Scalar::Int64(80));
+
+    let div = a.binary_numeric(&b, ArithmeticOp::Div)?;
+    // Div may promote to Float64 (truediv semantics like pandas).
+    assert!(matches!(
+        div.values()[0],
+        Scalar::Float64(v) if (v - 5.0).abs() < 1e-9
+    ));
+
+    let modop = a.binary_numeric(&b, ArithmeticOp::Mod)?;
+    // 20 % 4 = 0
+    assert_eq!(modop.values()[0], Scalar::Int64(0));
+
+    let powop = a.binary_numeric(&b, ArithmeticOp::Pow)?;
+    // 20^4 = 160000
+    assert!(
+        matches!(powop.values()[0], Scalar::Int64(160_000))
+            || matches!(powop.values()[0], Scalar::Float64(v) if (v - 160_000.0).abs() < 1.0)
+    );
+
+    let floor = a.binary_numeric(&b, ArithmeticOp::FloorDiv)?;
+    // 20 // 4 = 5
+    assert!(
+        matches!(floor.values()[0], Scalar::Int64(5))
+            || matches!(floor.values()[0], Scalar::Float64(v) if (v - 5.0).abs() < 1e-9)
+    );
+
+    // ── ComparisonOp variants ────────────────────────────────────
+    // Gt + Ge tested elsewhere; verify Lt/Eq/Ne/Le.
+    let lt = a.binary_comparison(&b, ComparisonOp::Lt)?;
+    // 20 < 4 = false
+    assert_eq!(lt.values()[0], Scalar::Bool(false));
+
+    let eq = a.binary_comparison(&a, ComparisonOp::Eq)?;
+    // a == a → true
+    assert_eq!(eq.values()[0], Scalar::Bool(true));
+
+    let ne = a.binary_comparison(&b, ComparisonOp::Ne)?;
+    // 20 != 4 = true
+    assert_eq!(ne.values()[0], Scalar::Bool(true));
+
+    let le = a.binary_comparison(&b, ComparisonOp::Le)?;
+    // 20 <= 4 = false
+    assert_eq!(le.values()[0], Scalar::Bool(false));
+    Ok(())
+}
+
 /// fd90.35: IndexLabel variant coverage. IndexLabel has 4 variants
 /// (Int64, Utf8, Timedelta64, Datetime64) but only Int64 was exercised
 /// by integration tests. The 3 typed-temporal variants are core
