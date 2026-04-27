@@ -3021,6 +3021,31 @@ fn readme_serialization_compiles_and_runs() -> Result<(), Box<dyn std::error::Er
     let mask_back: ValidityMask = serde_json::from_str(&mask_json)?;
     assert_eq!(mask, mask_back);
 
+    // fd90.254: ValidityMask boolean ops + inspection.
+    let m_a = ValidityMask::all_valid(4);
+    let m_b = ValidityMask::all_invalid(4);
+    assert_eq!(m_a.len(), 4);
+    assert!(!m_a.is_empty());
+    assert_eq!(m_a.count_valid(), 4);
+    assert_eq!(m_b.count_invalid(), 4);
+    assert!(m_a.any());
+    assert!(m_a.all());
+    assert!(!m_b.any());
+    assert!(!m_b.all());
+    let _ = m_a.and_mask(&m_b);
+    let _ = m_a.or_mask(&m_b);
+    let _ = m_a.not_mask();
+    let _ = m_a.xor_mask(&m_b);
+    let sliced = m_a.slice(1, 2);
+    assert_eq!(sliced.len(), 2);
+    let cat = m_a.concat(&m_b);
+    assert_eq!(cat.len(), 8);
+    assert_eq!(m_a.first_valid(), Some(0));
+    assert_eq!(m_a.last_valid(), Some(3));
+    assert_eq!(m_b.first_valid(), None);
+    assert!(m_a.get(0)); // bit 0 = valid in all_valid(4)
+    assert!(!m_b.get(0));
+
     // fd90.205: round-trip the remaining 7 types from the README's
     // Serialization list at line 1567:
     // DType, NullKind, Index, MultiIndex, Series, CategoricalMetadata, Column.
