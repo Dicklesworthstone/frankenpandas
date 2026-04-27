@@ -192,6 +192,10 @@ pub use fp_io::{
     write_parquet_bytes,
     write_sql,
     write_sql_with_options,
+    // fd90.264: Series-level Arrow interop (README line 1580 mentions
+    // DataFrame ↔ Arrow RecordBatch; these are the Series counterparts).
+    series_from_arrow_array,
+    series_to_arrow_array,
 };
 
 // ── Expression engine ───────────────────────────────────────────────────
