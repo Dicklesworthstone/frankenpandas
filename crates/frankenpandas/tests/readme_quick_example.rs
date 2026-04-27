@@ -99,6 +99,19 @@ fn readme_quick_start_round_trip_through_sqlite() -> Result<(), Box<dyn std::err
     let _ = read_sql_with_options(&conn, "SELECT * FROM results_v2", &read_opts)?;
     let _ = read_sql_query(&conn, "SELECT * FROM results_v2")?;
     let _ = read_sql_table_with_options(&conn, "results_v2", &read_opts)?;
+
+    // fd90.290: DataFrameIoExt to_* bytes methods (skip path-form for now —
+    // they need tmp dirs).
+    let _bytes_parquet = by_ticker.to_parquet_bytes()?;
+    let _bytes_feather = by_ticker.to_feather_bytes()?;
+    let _bytes_excel = by_ticker.to_excel_bytes()?;
+    // DataFrame.to_sql + to_sql_with_options trait methods.
+    by_ticker.to_sql(&conn, "via_trait", SqlIfExists::Replace)?;
+    by_ticker.to_sql_with_options(&conn, "via_trait_opts", &write_opts)?;
+
+    // SqlInspector — schema introspection.
+    let inspector = SqlInspector::new(&conn);
+    let _tables = inspector.tables(None)?;
     Ok(())
 }
 
