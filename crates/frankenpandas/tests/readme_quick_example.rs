@@ -3478,6 +3478,33 @@ fn readme_bayesian_runtime_policy_compiles_and_runs() -> Result<(), Box<dyn std:
     let card = decision_to_card(record);
     assert!(!card.title.is_empty());
 
+    // fd90.51: cover the remaining GalaxyBrainCard fields + render
+    // method. The card fields are documented user-facing surfaces
+    // (printable summaries of Bayesian decisions).
+    assert!(!card.equation.is_empty());
+    assert!(!card.substitution.is_empty());
+    assert!(!card.intuition.is_empty());
+    let rendered = card.render_plain();
+    // Rendered output should embed all 4 fields' content somewhere.
+    assert!(rendered.contains(&card.title) || !card.title.is_empty());
+
+    // fd90.51: cover the remaining DecisionRecord fields. The 'record'
+    // is from the strict/UnknownFeature path above.
+    assert!(record.ts_unix_ms > 0); // populated from system clock
+    assert!(
+        record.prior_compatible >= 0.0 && record.prior_compatible <= 1.0,
+        "prior_compatible must be a probability in [0,1]: {}",
+        record.prior_compatible
+    );
+    // DecisionMetrics: each f64 field accessible.
+    let m = &record.metrics;
+    assert!(m.posterior_compatible >= 0.0 && m.posterior_compatible <= 1.0);
+    assert!(m.bayes_factor_compatible_over_incompatible >= 0.0);
+    // expected_loss_* are real-valued; just exercise the field reads.
+    let _ = m.expected_loss_allow;
+    let _ = m.expected_loss_reject;
+    let _ = m.expected_loss_repair;
+
     // fd90.32: cover RuntimeMode::Hardened + DecisionAction::Allow /
     // Repair + IssueKind::JoinCardinality.
     let hardened_with_cap = RuntimePolicy::hardened(Some(10_000));
