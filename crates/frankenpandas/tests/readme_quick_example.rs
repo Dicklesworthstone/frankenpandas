@@ -3712,6 +3712,55 @@ fn readme_serialization_compiles_and_runs() -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
+/// fd90.46: to_datetime_with_format / to_datetime_with_unit /
+/// to_datetime_with_options functional coverage. All three are in
+/// the prelude but only name-checked in the compile guard until now.
+#[test]
+fn readme_datetime_helpers_round_trip() -> Result<(), Box<dyn std::error::Error>> {
+    let labels: Vec<IndexLabel> = vec![IndexLabel::Int64(0), IndexLabel::Int64(1)];
+
+    // ── to_datetime_with_format ──────────────────────────────────
+    // Strict format string parsing.
+    let str_series = Series::from_values(
+        "ts",
+        labels.clone(),
+        vec![
+            Scalar::Utf8("2024-01-15".into()),
+            Scalar::Utf8("2024-02-20".into()),
+        ],
+    )?;
+    let parsed_fmt = to_datetime_with_format(&str_series, Some("%Y-%m-%d"))?;
+    assert_eq!(parsed_fmt.len(), 2);
+    // Parsed values are non-null (Datetime64 ns since epoch).
+    assert!(!matches!(parsed_fmt.values()[0], Scalar::Null(_)));
+
+    // ── to_datetime_with_unit ───────────────────────────────────
+    // Numeric epoch values in seconds since Unix epoch.
+    let epoch_series = Series::from_values(
+        "epoch",
+        labels.clone(),
+        vec![
+            Scalar::Int64(1_700_000_000),
+            Scalar::Int64(1_700_086_400),
+        ],
+    )?;
+    let parsed_unit = to_datetime_with_unit(&epoch_series, "s")?;
+    assert_eq!(parsed_unit.len(), 2);
+    assert!(!matches!(parsed_unit.values()[0], Scalar::Null(_)));
+
+    // ── to_datetime_with_options ────────────────────────────────
+    // Full options struct: combine format + utc=true.
+    let opts = ToDatetimeOptions {
+        format: Some("%Y-%m-%d"),
+        utc: true,
+        ..ToDatetimeOptions::default()
+    };
+    let parsed_opts = to_datetime_with_options(&str_series, opts)?;
+    assert_eq!(parsed_opts.len(), 2);
+    assert!(!matches!(parsed_opts.values()[0], Scalar::Null(_)));
+    Ok(())
+}
+
 /// fd90.45: ColumnError variant triggers via Column binary ops with
 /// mismatched lengths or incompatible dtypes.
 #[test]
