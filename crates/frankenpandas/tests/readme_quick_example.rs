@@ -1870,6 +1870,17 @@ fn readme_apply_and_transform_compiles_and_runs() -> Result<(), Box<dyn std::err
         .pipe(|d| d.sort_values("revenue", true))?
         .pipe(|d| d.head(2))?;
     assert_eq!(result.index().len(), 2);
+
+    // fd90.275: more apply/assign variants.
+    // DataFrame.assign — bulk column-add via Vec<(name, Column)>.
+    let new_col = Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3), Scalar::Int64(4)])?;
+    let _ = df.assign(vec![("added", new_col)])?;
+    // DataFrame.apply_fn(func, axis) — Fn(&[Scalar]) -> Scalar; axis=0 column-wise.
+    let _ = df.apply_fn(|vals: &[Scalar]| vals.first().cloned().unwrap_or(Scalar::Null(NullKind::NaN)), 0)?;
+    // DataFrame.applymap_na_action — applymap with na pass-through.
+    let _ = df.applymap_na_action(|s: &Scalar| s.clone())?;
+    // DataFrame.apply_rows(func, name) — Fn(&[Scalar]) -> Scalar over rows, returns named Series.
+    let _ = df.apply_rows(|row: &[Scalar]| row.first().cloned().unwrap_or(Scalar::Null(NullKind::NaN)), "first_col_per_row")?;
     Ok(())
 }
 
