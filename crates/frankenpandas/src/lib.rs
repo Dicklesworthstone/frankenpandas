@@ -211,7 +211,9 @@ pub use fp_groupby::GroupByError;
 pub use fp_join::{
     AsofDirection, DataFrameMergeExt, JoinError, JoinExecutionOptions, JoinType, JoinedSeries,
     MergeAsofOptions, MergeExecutionOptions, MergeValidateMode, MergedDataFrame, join_series,
-    merge_asof, merge_asof_with_options, merge_dataframes_on, merge_ordered,
+    join_series_with_options, merge_asof, merge_asof_with_options, merge_dataframes,
+    merge_dataframes_on, merge_dataframes_on_with, merge_dataframes_on_with_options,
+    merge_ordered,
 };
 
 // ── Runtime policy ──────────────────────────────────────────────────────
