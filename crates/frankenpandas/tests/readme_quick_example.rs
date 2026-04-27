@@ -1881,6 +1881,43 @@ fn readme_apply_and_transform_compiles_and_runs() -> Result<(), Box<dyn std::err
     let _ = df.applymap_na_action(|s: &Scalar| s.clone())?;
     // DataFrame.apply_rows(func, name) — Fn(&[Scalar]) -> Scalar over rows, returns named Series.
     let _ = df.apply_rows(|row: &[Scalar]| row.first().cloned().unwrap_or(Scalar::Null(NullKind::NaN)), "first_col_per_row")?;
+
+    // fd90.276: combine variants + compare_with_result_names.
+    // Series.combine(other, Fn(&Scalar, &Scalar) -> Scalar) — outer-aligned pairwise.
+    let s_labels: Vec<IndexLabel> = (0..3i64).map(IndexLabel::Int64).collect();
+    let s_x = Series::from_values(
+        "x",
+        s_labels.clone(),
+        vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+    )?;
+    let s_y = Series::from_values(
+        "y",
+        s_labels,
+        vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+    )?;
+    let _ = s_x.combine(&s_y, |a, b| match (a, b) {
+        (Scalar::Int64(x), Scalar::Int64(y)) => Scalar::Int64(x + y),
+        _ => Scalar::Null(NullKind::NaN),
+    })?;
+    // DataFrame.combine_elementwise — Fn(&Scalar, &Scalar) -> Scalar.
+    let df_other = read_csv_str("a,b\n10,1\n20,2\n30,3\n40,4")?;
+    let _ = df.combine_elementwise(&df_other, |a, b| match (a, b) {
+        (Scalar::Int64(x), Scalar::Int64(y)) => Scalar::Int64((*x).max(*y)),
+        _ => Scalar::Null(NullKind::NaN),
+    })?;
+    // DataFrame.combine — column-pair Fn(&Series, &Series) -> Result<Series, FrameError>.
+    let _ = df.combine(
+        &df_other,
+        |left: &Series, right: &Series| left.combine(right, |a, b| match (a, b) {
+            (Scalar::Int64(x), Scalar::Int64(y)) => Scalar::Int64(x + y),
+            _ => Scalar::Null(NullKind::NaN),
+        }),
+        None,
+        false,
+    )?;
+    // DataFrame.compare_with_result_names — explicit (left_name, right_name) for the diff cols.
+    let df_clone = df.copy();
+    let _ = df.compare_with_result_names(&df_clone, ("self", "other"))?;
     Ok(())
 }
 
