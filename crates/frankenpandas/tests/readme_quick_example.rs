@@ -1763,6 +1763,37 @@ fn readme_column_manipulation_compiles_and_runs() -> Result<(), Box<dyn std::err
         .map(|n| n.as_str())
         .collect();
     assert_eq!(names, vec!["units", "revenue"]);
+
+    // fd90.234: DataFrame.drop / DataFrame.pop / Series.drop.
+
+    // df.pop — README line 1145: "(popped_series, remaining_df) = df.pop(...)".
+    let (popped, remaining) = df.pop("units")?;
+    assert_eq!(popped.len(), 3);
+    assert!(
+        !remaining
+            .column_names()
+            .iter()
+            .any(|n| n.as_str() == "units")
+    );
+
+    // df.drop — axis=1 drops columns, axis=0 drops rows.
+    let dropped_col = df.drop(&["cost"], 1)?;
+    assert!(
+        !dropped_col
+            .column_names()
+            .iter()
+            .any(|n| n.as_str() == "cost")
+    );
+
+    // Series.drop — drop rows by IndexLabel.
+    let s_labels: Vec<IndexLabel> = vec!["a".into(), "b".into(), "c".into()];
+    let s = Series::from_values(
+        "v",
+        s_labels,
+        vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+    )?;
+    let s_dropped = s.drop(&["b".into()])?;
+    assert_eq!(s_dropped.len(), 2);
     Ok(())
 }
 
