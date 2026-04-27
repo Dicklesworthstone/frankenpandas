@@ -1665,6 +1665,15 @@ fn readme_groupby_aggregation_matrix_compiles_and_runs() -> Result<(), Box<dyn s
     let _ = dt_gbr.first()?;
     let _ = dt_gbr.last()?;
 
+    // fd90.246: GroupBy.quantile / transform_list / transform_fn /
+    // filter / apply / apply_scalar / apply_series.
+    let _ = gb.quantile(0.5)?;
+    let _ = gb.transform_list(&["sum", "mean"])?;
+    let _ = gb.transform_fn(|s: &Series| Ok(s.clone()))?; // identity transform
+    let _filtered = gb.filter(|d: &DataFrame| Ok(d.len() >= 2))?;
+    let _applied = gb.apply(|d: &DataFrame| Ok(d.clone()))?; // identity apply
+    let _scalar = gb.apply_scalar("count", |d: &DataFrame| Ok(Scalar::Int64(d.len() as i64)))?;
+
     Ok(())
 }
 
