@@ -3802,6 +3802,57 @@ fn readme_serialization_compiles_and_runs() -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
+/// fd90.58: Index set operations (intersection / union_with /
+/// difference / symmetric_difference). Pandas-parity surface for
+/// index-level set algebra; uncovered by integration tests.
+#[test]
+fn readme_index_set_operations() -> Result<(), Box<dyn std::error::Error>> {
+    let left = Index::new(vec![
+        IndexLabel::Int64(0),
+        IndexLabel::Int64(1),
+        IndexLabel::Int64(2),
+        IndexLabel::Int64(3),
+    ]);
+    let right = Index::new(vec![
+        IndexLabel::Int64(2),
+        IndexLabel::Int64(3),
+        IndexLabel::Int64(4),
+        IndexLabel::Int64(5),
+    ]);
+
+    // ── intersection: shared labels {2, 3} ──────────────────────
+    let inter = left.intersection(&right);
+    assert_eq!(inter.len(), 2);
+    let inter_labels: Vec<IndexLabel> = inter.labels().to_vec();
+    assert!(inter_labels.contains(&IndexLabel::Int64(2)));
+    assert!(inter_labels.contains(&IndexLabel::Int64(3)));
+
+    // ── union_with: all labels ──────────────────────────────────
+    let union = left.union_with(&right);
+    assert_eq!(union.len(), 6);
+    let union_labels: Vec<IndexLabel> = union.labels().to_vec();
+    for v in 0..=5 {
+        assert!(union_labels.contains(&IndexLabel::Int64(v)));
+    }
+
+    // ── difference: left - right = {0, 1} ───────────────────────
+    let diff = left.difference(&right);
+    assert_eq!(diff.len(), 2);
+    let diff_labels: Vec<IndexLabel> = diff.labels().to_vec();
+    assert!(diff_labels.contains(&IndexLabel::Int64(0)));
+    assert!(diff_labels.contains(&IndexLabel::Int64(1)));
+
+    // ── symmetric_difference: (left ∪ right) - (left ∩ right) ──
+    // = {0, 1, 4, 5}
+    let sym = left.symmetric_difference(&right);
+    assert_eq!(sym.len(), 4);
+    let sym_labels: Vec<IndexLabel> = sym.labels().to_vec();
+    for v in [0, 1, 4, 5] {
+        assert!(sym_labels.contains(&IndexLabel::Int64(v)));
+    }
+    Ok(())
+}
+
 /// fd90.57: DataFrame.at(label, col) + .iat(row, col_pos) scalar
 /// access methods. Pandas-parity surface for cell-level reads;
 /// Series-level versions were tested but DataFrame versions were not.
