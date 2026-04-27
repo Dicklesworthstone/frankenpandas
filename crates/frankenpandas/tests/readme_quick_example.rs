@@ -1438,6 +1438,20 @@ fn readme_type_coercion_compiles_and_runs() -> Result<(), Box<dyn std::error::Er
     // DataFrame with int columns we'll cast.
     let df = read_csv_str("price,score\n100,1\n200,2\n300,3")?;
     let _ = df.astype_column("price", DType::Float64)?;
+
+    // fd90.277: astype_safe / bool_ / columns_index / columns_multiindex.
+    // DataFrame.astype_safe with errors='raise'/'ignore'/'coerce'.
+    let _ = df.astype_safe(DType::Float64, "ignore")?;
+    let _ = df.astype_columns_safe(&[("price", DType::Float64)], "raise")?;
+    // DataFrame.columns_index → MultiIndexOrIndex; columns_multiindex → Option<&MultiIndex>.
+    let _ = df.columns_index();
+    let _ = df.columns_multiindex();
+    // Series.astype_safe + bool_ on a single-element Bool Series.
+    let bool_labels: Vec<IndexLabel> = vec![IndexLabel::Int64(0)];
+    let one_bool = Series::from_values("b", bool_labels, vec![Scalar::Bool(true)])?;
+    assert_eq!(one_bool.bool_()?, true);
+    let _ = one_bool.astype_safe(DType::Bool, "raise")?;
+    let _ = one_bool.axes();
     // Multiple-column cast — both targets need to be reachable from Int64.
     let _ = df.astype_columns(&[("price", DType::Float64), ("score", DType::Float64)])?;
 
