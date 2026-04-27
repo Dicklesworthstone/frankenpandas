@@ -388,6 +388,12 @@ pub mod prelude {
         // exported at the crate root but missed prelude promotion —
         // pairs with SqlInspector being in the prelude already.
         inspect,
+        // fd90.12: Series ↔ Arrow array interop. README line 1580
+        // documents Arrow interop as a public surface; fd90.264 added
+        // the Series-level pair. Promote to the prelude alongside the
+        // rest of the IO surface.
+        series_from_arrow_array,
+        series_to_arrow_array,
         // fd90.11: module-level SQL helpers (fd90.21-32). Free-function
         // counterparts to SqlInspector methods — paired surface, same
         // semantics. Promote alongside SqlInspector / inspect for

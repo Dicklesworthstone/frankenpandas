@@ -3632,3 +3632,55 @@ fn readme_serialization_compiles_and_runs() -> Result<(), Box<dyn std::error::Er
     assert_eq!(col.len(), col_back.len());
     Ok(())
 }
+
+/// fd90.12: Series ↔ Arrow array round-trip.
+///
+/// README line 1580 documents Arrow interop as a public surface
+/// ("FrankenPandas data can be zero-copy shared with any Arrow-
+/// compatible system"). Verifies the Series-level pair from fd90.264
+/// is reachable via the prelude alone and round-trips identity for
+/// Int64, Float64, and Utf8 dtypes.
+#[test]
+fn readme_series_arrow_round_trip() -> Result<(), Box<dyn std::error::Error>> {
+    // Int64 with no nulls.
+    let labels: Vec<IndexLabel> = (0..3).map(IndexLabel::Int64).collect();
+    let int_series = Series::from_values(
+        "ints",
+        labels.clone(),
+        vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+    )?;
+    let (dt, arr) = series_to_arrow_array(&int_series)?;
+    let rebuilt = series_from_arrow_array("ints", labels.clone(), &*arr, &dt)?;
+    assert_eq!(rebuilt.len(), 3);
+    assert_eq!(rebuilt.values()[0], Scalar::Int64(10));
+    assert_eq!(rebuilt.values()[2], Scalar::Int64(30));
+
+    // Float64.
+    let float_series = Series::from_values(
+        "floats",
+        labels.clone(),
+        vec![
+            Scalar::Float64(1.5),
+            Scalar::Float64(2.5),
+            Scalar::Float64(3.5),
+        ],
+    )?;
+    let (dt_f, arr_f) = series_to_arrow_array(&float_series)?;
+    let rebuilt_f = series_from_arrow_array("floats", labels.clone(), &*arr_f, &dt_f)?;
+    assert_eq!(rebuilt_f.values()[1], Scalar::Float64(2.5));
+
+    // Utf8 — string round-trip with named series.
+    let str_series = Series::from_values(
+        "tags",
+        labels.clone(),
+        vec![
+            Scalar::Utf8("a".into()),
+            Scalar::Utf8("b".into()),
+            Scalar::Utf8("c".into()),
+        ],
+    )?;
+    let (dt_s, arr_s) = series_to_arrow_array(&str_series)?;
+    let rebuilt_s = series_from_arrow_array("tags", labels, &*arr_s, &dt_s)?;
+    assert_eq!(rebuilt_s.values()[0], Scalar::Utf8("a".into()));
+    Ok(())
+}
