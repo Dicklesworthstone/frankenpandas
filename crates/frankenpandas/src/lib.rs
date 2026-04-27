@@ -44,6 +44,10 @@ pub use fp_index::{
     // fd90.261: pandas-parity date/timedelta range constructors + helpers.
     DateOffset, DateRangeError, TimedeltaRangeError, apply_date_offset,
     apply_date_offset_to_nanos, date_range, infer_freq, timedelta_range,
+    // fd90.269: AACE Pipeline alignment fns + bdate_range + datetime utils.
+    align, align_inner, align_left, align_union, bdate_range, format_datetime_ns,
+    infer_freq_from_nanos, infer_freq_from_timestamps, leapfrog_intersection, leapfrog_union,
+    multi_way_align, validate_alignment_plan,
 };
 
 pub use fp_frame::{
@@ -441,6 +445,8 @@ pub mod prelude {
         DateOffset,
         date_range,
         timedelta_range,
+        // fd90.269: bdate_range pairs with date_range (pandas pd.bdate_range).
+        bdate_range,
         infer_dtype,
         isna,
         isnull,
@@ -773,6 +779,8 @@ mod tests {
         let _ = date_range;
         let _ = timedelta_range;
         let _: DateOffset = DateOffset::Day(1);
+        // fd90.269: bdate_range in prelude.
+        let _ = bdate_range;
 
         // fd90.259: window + groupby + accessor return types.
         let _is_rolling: fn(&Rolling<'_>) = |_| {};
