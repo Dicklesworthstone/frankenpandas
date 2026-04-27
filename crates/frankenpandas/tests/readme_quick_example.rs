@@ -298,6 +298,30 @@ fn readme_quick_start_round_trip_through_sqlite() -> Result<(), Box<dyn std::err
         .columns("parent", None)?
         .expect("parent still present");
     assert_eq!(post_truncate.columns.len(), 2);
+
+    // fd90.20: SqlQueryResult — return type of SqlConnection::query.
+    // Insert two parent rows, then query and inspect the result shape.
+    conn.execute("INSERT INTO parent (id, name) VALUES (10, 'alpha')", [])?;
+    conn.execute("INSERT INTO parent (id, name) VALUES (20, 'beta')", [])?;
+    let qr: SqlQueryResult = conn.query("SELECT id, name FROM parent ORDER BY id", &[])?;
+    assert_eq!(qr.columns, vec!["id".to_string(), "name".to_string()]);
+    assert_eq!(qr.rows.len(), 2);
+    assert_eq!(qr.rows[0][0], Scalar::Int64(10));
+    assert_eq!(qr.rows[1][0], Scalar::Int64(20));
+
+    // fd90.20: SqlIndexedChunkIterator — chunked reader with index_col
+    // promoting 'id' to the row index. Yields Result<DataFrame, IoError>.
+    let mut indexed_chunks: SqlIndexedChunkIterator = read_sql_chunks_with_index_col(
+        &conn,
+        "SELECT id, name FROM parent ORDER BY id",
+        Some("id"),
+        100,
+    )?;
+    let chunk = indexed_chunks.next().expect("at least one chunk")?;
+    assert_eq!(chunk.index().len(), 2);
+    // After id-promotion, only 'name' remains as a data column.
+    assert!(chunk.column("name").is_some());
+    assert!(chunk.column("id").is_none());
     Ok(())
 }
 

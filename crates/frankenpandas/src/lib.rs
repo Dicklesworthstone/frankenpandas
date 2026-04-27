@@ -427,6 +427,10 @@ pub mod prelude {
         SqlReflectedTable,
         SqlTableSchema,
         SqlUniqueConstraintSchema,
+        // fd90.20: paired producer for SqlIndexedChunkIterator (above).
+        // The other ~17 SQL index_col variants are advanced power-user
+        // surface; just the basic chunks+index_col reader belongs here.
+        read_sql_chunks_with_index_col,
         // fd90.10: inspect() is the documented convenience constructor
         // for SqlInspector (fd90.38 / br-frankenpandas-szs9). It was
         // exported at the crate root but missed prelude promotion —
