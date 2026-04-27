@@ -31,6 +31,9 @@ pub use fp_columnar::{ArithmeticOp, Column, ColumnError, ComparisonOp, ValidityM
 pub use fp_index::{
     AlignMode, AlignmentPlan, DuplicateKeep, Index, IndexError, IndexLabel, MultiAlignmentPlan,
     MultiIndex, MultiIndexOrIndex,
+    // fd90.261: pandas-parity date/timedelta range constructors + helpers.
+    DateOffset, DateRangeError, TimedeltaRangeError, apply_date_offset,
+    apply_date_offset_to_nanos, date_range, infer_freq, timedelta_range,
 };
 
 pub use fp_frame::{
@@ -403,6 +406,10 @@ pub mod prelude {
         // The README documents these as user-facing (lines 359, 771, 957, 1031).
         cast_scalar,
         common_dtype,
+        // fd90.261: pandas-parity date/timedelta range constructors.
+        DateOffset,
+        date_range,
+        timedelta_range,
         infer_dtype,
         isna,
         isnull,
@@ -731,6 +738,11 @@ mod tests {
         let _is_dict_result: fn(DataFrameDictResult) -> _ = |x| x;
         let _is_dict_split: fn(DataFrameDictSplit) -> _ = |x| x;
         let _is_dict_tight: fn(DataFrameDictTight) -> _ = |x| x;
+        // fd90.261: date/timedelta range constructors + DateOffset.
+        let _ = date_range;
+        let _ = timedelta_range;
+        let _: DateOffset = DateOffset::Day(1);
+
         // fd90.259: window + groupby + accessor return types.
         let _is_rolling: fn(&Rolling<'_>) = |_| {};
         let _is_expanding: fn(&Expanding<'_>) = |_| {};
