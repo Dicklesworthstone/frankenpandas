@@ -3802,6 +3802,51 @@ fn readme_serialization_compiles_and_runs() -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
+/// fd90.66: Index naming + rename + unique methods. Documented
+/// pandas-parity surface that was not functionally exercised.
+#[test]
+fn readme_index_naming_methods() -> Result<(), Box<dyn std::error::Error>> {
+    let idx = Index::new(vec![
+        IndexLabel::Int64(1),
+        IndexLabel::Int64(2),
+        IndexLabel::Int64(2),
+        IndexLabel::Int64(3),
+    ]);
+
+    // ── name() — None on un-named index ─────────────────────────
+    assert_eq!(idx.name(), None);
+
+    // ── set_name returns a NEW Index with the name set ──────────
+    let named = idx.set_name("year");
+    assert_eq!(named.name(), Some("year"));
+    // Original unchanged.
+    assert_eq!(idx.name(), None);
+
+    // ── rename_index(Some/None) ─────────────────────────────────
+    let renamed = named.rename_index(Some("revised"));
+    assert_eq!(renamed.name(), Some("revised"));
+    let cleared = named.rename_index(None);
+    assert_eq!(cleared.name(), None);
+
+    // ── rename: closure-based label rewrite ────────────────────
+    // Map each Int64 label to label*10.
+    let mapped = idx.rename(|label| match label {
+        IndexLabel::Int64(v) => IndexLabel::Int64(*v * 10),
+        other => other.clone(),
+    });
+    assert_eq!(mapped.labels()[0], IndexLabel::Int64(10));
+    assert_eq!(mapped.labels()[1], IndexLabel::Int64(20));
+    assert_eq!(mapped.labels()[3], IndexLabel::Int64(30));
+
+    // ── unique: dedupe duplicates ──────────────────────────────
+    let uniq = idx.unique();
+    assert_eq!(uniq.len(), 3); // {1, 2, 3}
+    assert!(idx.has_duplicates());
+    assert!(!uniq.has_duplicates());
+    assert!(uniq.is_unique());
+    Ok(())
+}
+
 /// fd90.65: Rolling / Expanding / EWM value assertions. Existing
 /// readme_window_operations exercises the matrix but with shape-only
 /// asserts and many `let _ =` patterns. This test pins specific
