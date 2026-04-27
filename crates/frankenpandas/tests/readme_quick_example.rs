@@ -1017,6 +1017,47 @@ fn readme_element_wise_operations_compiles_and_runs() -> Result<(), Box<dyn std:
     let renamed = bigger.rename("renamed_series")?;
     assert_eq!(renamed.name(), "renamed_series");
 
+    // fd90.238: reindex / truncate / insert across Series + DataFrame.
+
+    // Series.reindex — rebuild with a new label set (pads with NaN).
+    let new_idx: Vec<IndexLabel> = (0..8i64).map(IndexLabel::Int64).collect();
+    let s_reindexed = bigger.reindex(new_idx.clone())?;
+    assert_eq!(s_reindexed.len(), 8); // bigger has 6, padded to 8
+
+    // Series.truncate — keep the inclusive interval [before, after].
+    let s_truncated = bigger.truncate(
+        Some(&IndexLabel::Int64(1)),
+        Some(&IndexLabel::Int64(4)),
+    )?;
+    assert!(s_truncated.len() <= bigger.len());
+
+    // DataFrame.reindex — same shape, on the row axis.
+    let df_reindexed = df.reindex(new_idx)?;
+    assert_eq!(df_reindexed.index().len(), 8);
+
+    // DataFrame.truncate — same interval semantics.
+    let df_truncated = df.truncate(
+        Some(&IndexLabel::Int64(1)),
+        Some(&IndexLabel::Int64(2)),
+    )?;
+    assert!(df_truncated.index().len() <= df.index().len());
+
+    // DataFrame.insert — README line 1146: positional insert.
+    let new_col = Column::from_values(vec![
+        Scalar::Int64(0),
+        Scalar::Int64(1),
+        Scalar::Int64(2),
+        Scalar::Int64(3),
+    ])?;
+    let with_inserted = df.insert(0, "new_first", new_col)?;
+    assert_eq!(
+        with_inserted
+            .column_names()
+            .first()
+            .map(|n| n.as_str()),
+        Some("new_first"),
+    );
+
     // fd90.232 + fd90.233: DataFrame-level reductions. fd90.233 added
     // pandas-parity bare-name aliases (min/max/std/var/median/prod/
     // skew/kurt/kurtosis/sem) over the existing *_agg methods.
