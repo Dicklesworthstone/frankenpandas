@@ -3102,6 +3102,29 @@ fn readme_serialization_compiles_and_runs() -> Result<(), Box<dyn std::error::Er
     ])?;
     assert!(col_with_nan.has_any_missing());
 
+    // fd90.272: Sparse-typed Series + SparseAccessor methods.
+    // README line 251 lists "Sparse" as an extension dtype.
+    let sparse_labels: Vec<IndexLabel> = (0..5i64).map(IndexLabel::Int64).collect();
+    let sparse_series = Series::from_sparse_dense(
+        "sparse",
+        sparse_labels,
+        vec![
+            Scalar::Float64(1.0),
+            Scalar::Float64(0.0), // fill_value entries
+            Scalar::Float64(0.0),
+            Scalar::Float64(2.0),
+            Scalar::Float64(0.0),
+        ],
+        DType::Float64,
+        Scalar::Float64(0.0),
+    )?;
+    let sparse = sparse_series.sparse().expect("Series is sparse");
+    assert_eq!(sparse.value_dtype(), DType::Float64);
+    assert_eq!(sparse.fill_value(), &Scalar::Float64(0.0));
+    let _np = sparse.npoints(); // count of non-fill values
+    let _den = sparse.density(); // npoints / len
+    let _dense = sparse.to_dense(); // returns Series directly (no ?)
+
     // fd90.205: round-trip the remaining 7 types from the README's
     // Serialization list at line 1567:
     // DType, NullKind, Index, MultiIndex, Series, CategoricalMetadata, Column.
