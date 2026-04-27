@@ -1204,6 +1204,16 @@ fn readme_element_wise_operations_compiles_and_runs() -> Result<(), Box<dyn std:
     let _ = bigger.pct_change(1)?;
     let _ = bigger.rank("average", true, "keep")?;
 
+    // fd90.251: set_axis / copy.
+    // Series.set_axis — replace row labels.
+    let new_s_labels: Vec<IndexLabel> = (10..16i64).map(IndexLabel::Int64).collect();
+    let _ = bigger.set_axis(new_s_labels)?;
+    // DataFrame.set_axis(labels, axis) — axis=0 row labels, axis=1 column labels.
+    let new_row_labels: Vec<IndexLabel> = (10..14i64).map(IndexLabel::Int64).collect();
+    let _ = df.set_axis(new_row_labels, 0)?;
+    // DataFrame.copy — deep clone.
+    let _ = df.copy();
+
     // fd90.232 + fd90.233: DataFrame-level reductions. fd90.233 added
     // pandas-parity bare-name aliases (min/max/std/var/median/prod/
     // skew/kurt/kurtosis/sem) over the existing *_agg methods.
