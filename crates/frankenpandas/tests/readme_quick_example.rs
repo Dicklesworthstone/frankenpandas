@@ -3712,6 +3712,51 @@ fn readme_serialization_compiles_and_runs() -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
+/// fd90.39: Lock in the IndexLabel + ValidityMask serde JSON shapes.
+/// Sister to fd90.38 (Scalar). IndexLabel uses the same tagged-enum
+/// pattern; ValidityMask serializes as {bits: [bool...]}.
+#[test]
+fn readme_indexlabel_validitymask_serde_shape() -> Result<(), Box<dyn std::error::Error>> {
+    // ── IndexLabel ──────────────────────────────────────────────
+    // Same #[serde(tag="kind", content="value", rename_all="snake_case")]
+    // tagged-enum pattern as Scalar.
+    let int_label = serde_json::to_string(&IndexLabel::Int64(7))?;
+    assert_eq!(int_label, r#"{"kind":"int64","value":7}"#);
+
+    let str_label = serde_json::to_string(&IndexLabel::Utf8("alpha".into()))?;
+    assert_eq!(str_label, r#"{"kind":"utf8","value":"alpha"}"#);
+
+    let dt_label = serde_json::to_string(&IndexLabel::Datetime64(1_700_000_000_000_000_000))?;
+    assert_eq!(
+        dt_label,
+        r#"{"kind":"datetime64","value":1700000000000000000}"#
+    );
+
+    let td_label = serde_json::to_string(&IndexLabel::Timedelta64(86_400_000_000_000))?;
+    assert_eq!(
+        td_label,
+        r#"{"kind":"timedelta64","value":86400000000000}"#
+    );
+
+    // ── ValidityMask ────────────────────────────────────────────
+    // Custom Serialize impl emits {"bits": [bool, bool, ...]} —
+    // README §1578 says "serializes as a Vec<bool>", but the actual
+    // wire format wraps it in a struct. Pin the actual shape so any
+    // drift on the field name or wrapper structure surfaces here.
+    let mask = ValidityMask::from_values(&[
+        Scalar::Int64(1),
+        Scalar::Null(NullKind::NaN),
+        Scalar::Int64(3),
+    ]);
+    let mask_json = serde_json::to_string(&mask)?;
+    assert_eq!(mask_json, r#"{"bits":[true,false,true]}"#);
+
+    // Empty mask → empty bits array.
+    let empty = ValidityMask::all_valid(0);
+    assert_eq!(serde_json::to_string(&empty)?, r#"{"bits":[]}"#);
+    Ok(())
+}
+
 /// fd90.38: Lock in the README-documented Scalar serde JSON shape.
 /// README §1567 area documents the contract as
 /// {"kind":"int64","value":42} — tagged via #[serde(tag = "kind",
