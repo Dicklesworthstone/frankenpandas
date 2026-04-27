@@ -3802,6 +3802,71 @@ fn readme_serialization_compiles_and_runs() -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
+/// fd90.68: Series cumulative ops + diff/shift/pct_change value
+/// assertions. DataFrame versions were value-asserted in fd90.61
+/// but Series-level versions may use different code paths.
+#[test]
+fn readme_series_sequential_ops_round_trip() -> Result<(), Box<dyn std::error::Error>> {
+    let labels: Vec<IndexLabel> = (0..4i64).map(IndexLabel::Int64).collect();
+    let s = Series::from_values(
+        "v",
+        labels,
+        vec![
+            Scalar::Int64(1),
+            Scalar::Int64(2),
+            Scalar::Int64(3),
+            Scalar::Int64(4),
+        ],
+    )?;
+
+    fn num(scalar: &Scalar) -> Option<f64> {
+        match scalar {
+            Scalar::Int64(v) => Some(*v as f64),
+            Scalar::Float64(v) => Some(*v),
+            _ => None,
+        }
+    }
+
+    // ── cumsum: [1, 3, 6, 10] ──────────────────────────────────
+    let csum = s.cumsum()?;
+    let csum_nums: Vec<f64> = csum.values().iter().filter_map(num).collect();
+    assert_eq!(csum_nums, vec![1.0, 3.0, 6.0, 10.0]);
+
+    // ── cumprod: [1, 2, 6, 24] ─────────────────────────────────
+    let cprod = s.cumprod()?;
+    let cprod_nums: Vec<f64> = cprod.values().iter().filter_map(num).collect();
+    assert_eq!(cprod_nums, vec![1.0, 2.0, 6.0, 24.0]);
+
+    // ── cummax: monotonic [1, 2, 3, 4] ─────────────────────────
+    let cmax = s.cummax()?;
+    let cmax_nums: Vec<f64> = cmax.values().iter().filter_map(num).collect();
+    assert_eq!(cmax_nums, vec![1.0, 2.0, 3.0, 4.0]);
+
+    // ── cummin: stays at first [1, 1, 1, 1] ────────────────────
+    let cmin = s.cummin()?;
+    let cmin_nums: Vec<f64> = cmin.values().iter().filter_map(num).collect();
+    assert_eq!(cmin_nums, vec![1.0, 1.0, 1.0, 1.0]);
+
+    // ── diff(1): [Null, 1, 1, 1] ───────────────────────────────
+    let d = s.diff(1)?;
+    assert!(matches!(d.values()[0], Scalar::Null(_)));
+    assert_eq!(num(&d.values()[1]), Some(1.0));
+
+    // ── shift(1): [Null, 1, 2, 3] ──────────────────────────────
+    let sh = s.shift(1)?;
+    assert!(matches!(sh.values()[0], Scalar::Null(_)));
+    assert_eq!(num(&sh.values()[3]), Some(3.0));
+
+    // ── pct_change(1): row 1 = (2-1)/1 = 1.0 ───────────────────
+    let pct = s.pct_change(1)?;
+    assert!(matches!(pct.values()[0], Scalar::Null(_)));
+    assert!(matches!(
+        pct.values()[1],
+        Scalar::Float64(p) if (p - 1.0).abs() < 1e-9
+    ));
+    Ok(())
+}
+
 /// fd90.67: MultiIndex methods (is_lexsorted / get_tuple / take /
 /// isin / duplicated / has_duplicates / is_unique). Pandas-parity
 /// surface previously uncovered.
