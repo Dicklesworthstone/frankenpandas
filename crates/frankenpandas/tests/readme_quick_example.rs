@@ -3770,6 +3770,51 @@ fn readme_serialization_compiles_and_runs() -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
+/// fd90.52: RuntimePolicy field/default coverage + EvidenceLedger
+/// multi-record path. RuntimePolicy::default() should equal strict()
+/// per the Default impl; multiple decisions on one ledger should
+/// accumulate records in push order.
+#[test]
+fn readme_runtime_policy_fields_round_trip() -> Result<(), Box<dyn std::error::Error>> {
+    // ── RuntimePolicy::default() == strict() ────────────────────
+    let default_policy = RuntimePolicy::default();
+    let strict_policy = RuntimePolicy::strict();
+    assert_eq!(default_policy, strict_policy);
+
+    // ── Strict policy field values ──────────────────────────────
+    let strict = RuntimePolicy::strict();
+    assert!(matches!(strict.mode, RuntimeMode::Strict));
+    assert!(strict.fail_closed_unknown_features);
+    assert!(strict.hardened_join_row_cap.is_none());
+
+    // ── Hardened policy with explicit cap ───────────────────────
+    let hardened = RuntimePolicy::hardened(Some(50_000));
+    assert!(matches!(hardened.mode, RuntimeMode::Hardened));
+    assert!(!hardened.fail_closed_unknown_features);
+    assert_eq!(hardened.hardened_join_row_cap, Some(50_000));
+
+    // ── Hardened with None cap ──────────────────────────────────
+    let hardened_uncapped = RuntimePolicy::hardened(None);
+    assert!(hardened_uncapped.hardened_join_row_cap.is_none());
+
+    // ── EvidenceLedger empty + multi-record accumulation ────────
+    let mut ledger = EvidenceLedger::new();
+    assert!(ledger.records().is_empty());
+
+    // Drive 3 decisions through the same ledger.
+    let _ = strict.decide_unknown_feature("a", "first", &mut ledger);
+    let _ = strict.decide_unknown_feature("b", "second", &mut ledger);
+    let _ = hardened.decide_join_admission(1000, &mut ledger);
+    let recs = ledger.records();
+    assert_eq!(recs.len(), 3);
+    // Order is preserved: first record's issue subject matches first call.
+    assert_eq!(recs[0].issue.subject, "a");
+    assert_eq!(recs[1].issue.subject, "b");
+    // Third record is from the hardened join-admission path.
+    assert!(matches!(recs[2].issue.kind, IssueKind::JoinCardinality));
+    Ok(())
+}
+
 /// fd90.49: JoinedSeries field-level functional coverage.
 /// JoinedSeries is the return type of join_series. Its public fields
 /// (index, left_values, right_values) were reachable but never
