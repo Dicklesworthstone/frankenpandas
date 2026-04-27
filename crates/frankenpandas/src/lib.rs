@@ -204,7 +204,7 @@ pub use fp_expr::{DataFrameExprExt, ExprError};
 
 // ── GroupBy errors ──────────────────────────────────────────────────────
 
-pub use fp_groupby::GroupByError;
+pub use fp_groupby::{AggFunc, GroupByError, GroupByExecutionOptions, GroupByOptions};
 
 // ── Join/merge ──────────────────────────────────────────────────────────
 
