@@ -286,6 +286,10 @@ pub mod prelude {
         CsvReadOptions,
         CsvWriteOptions,
         DType,
+        // fd90.15: SparseDType pairs with SparseAccessor (in prelude)
+        // and the Scalar::Sparse workflow. Without this users couldn't
+        // name the dtype after calling sparse().to_dense() etc.
+        SparseDType,
         ExcelReadOptions,
         ExcelWriteOptions,
         DataFrame,
@@ -333,11 +337,21 @@ pub mod prelude {
         decision_to_card,
         Index,
         IndexLabel,
+        // fd90.15: Index → DataFrame/Series conversion helpers (fd90.270).
+        // Pair with Index being in the prelude.
+        index_to_frame,
+        index_to_series,
         // Error types (matches README "Error Architecture" section lines 829-853 —
         // all 8 typed error enums exposed for pattern matching).
         ColumnError,
         ExprError,
         FrameError,
+        // fd90.15: AggFunc + GroupByOptions / GroupByExecutionOptions
+        // pair with DataFrameGroupBy (in prelude). README documents the
+        // groupby aggregation surface extensively (line 1052+).
+        AggFunc,
+        GroupByOptions,
+        GroupByExecutionOptions,
         GroupByError,
         IndexError,
         IoError,

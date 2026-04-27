@@ -3633,6 +3633,20 @@ fn readme_serialization_compiles_and_runs() -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
+/// fd90.15: compile guard for the remaining paired-surface promotions
+/// (SparseDType, AggFunc, GroupByOptions, GroupByExecutionOptions,
+/// index_to_frame, index_to_series).
+#[allow(dead_code)]
+fn fd90_015_misc_helpers_via_prelude(
+    _sd: SparseDType,
+    _af: AggFunc,
+    _gbo: GroupByOptions,
+    _gbeo: GroupByExecutionOptions,
+) {
+    let _ = index_to_frame;
+    let _ = index_to_series;
+}
+
 /// fd90.14: compile guard for fp-types user-facing helpers promoted
 /// to the prelude (paired with Scalar::Datetime64/Timedelta64/Period/
 /// Interval workflows from fd90.263 / fd90.271).
