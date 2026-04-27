@@ -3657,6 +3657,45 @@ fn readme_serialization_compiles_and_runs() -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
+/// fd90.23: JSON / JSONL / Feather round-trip. Sister to fd90.21
+/// (IPC stream) and fd90.22 (Parquet + Excel). All three formats had
+/// one-way write coverage in earlier tests but no integration round-
+/// trip — a regression in any parser would not surface.
+#[test]
+fn readme_json_jsonl_feather_round_trip() -> Result<(), Box<dyn std::error::Error>> {
+    let original = read_csv_str(
+        "ticker,price,volume\nAAPL,185.50,1000\nGOOG,140.25,500\nMSFT,420.00,800",
+    )?;
+
+    // ── JSON (Records orient) round-trip ─────────────────────────
+    let json_str = write_json_string(&original, JsonOrient::Records)?;
+    assert!(!json_str.is_empty());
+    let json_back = read_json_str(&json_str, JsonOrient::Records)?;
+    assert_eq!(json_back.index().len(), 3);
+    assert!(json_back.column("ticker").is_some());
+    let json_price = json_back.column("price").unwrap();
+    assert_eq!(json_price.values()[0], Scalar::Float64(185.50));
+
+    // ── JSONL round-trip ─────────────────────────────────────────
+    let jsonl_str = write_jsonl_string(&original)?;
+    assert!(!jsonl_str.is_empty());
+    // JSONL = one JSON object per line. 3 rows → 3 lines (last may
+    // or may not have a trailing newline; both shapes parse).
+    let jsonl_back = read_jsonl_str(&jsonl_str)?;
+    assert_eq!(jsonl_back.index().len(), 3);
+    let jsonl_price = jsonl_back.column("price").unwrap();
+    assert_eq!(jsonl_price.values()[0], Scalar::Float64(185.50));
+
+    // ── Feather (Arrow IPC file) round-trip ──────────────────────
+    let feather_bytes = write_feather_bytes(&original)?;
+    assert!(!feather_bytes.is_empty());
+    let feather_back = read_feather_bytes(&feather_bytes)?;
+    assert_eq!(feather_back.index().len(), 3);
+    let feather_price = feather_back.column("price").unwrap();
+    assert_eq!(feather_price.values()[0], Scalar::Float64(185.50));
+    Ok(())
+}
+
 /// fd90.22: Parquet + Excel bytes round-trip. README §144-146 documents
 /// both formats as round-trippable. Existing coverage was one-way only
 /// (fd90.290 called .to_parquet_bytes() / .to_excel_bytes() but never
