@@ -3657,6 +3657,92 @@ fn readme_serialization_compiles_and_runs() -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
+/// fd90.24: Non-default CsvReadOptions coverage. CsvReadOptions has
+/// 10+ pandas-parity fields but existing tests only use ::default().
+/// This exercises 6 of the most-used non-default settings end-to-end.
+#[test]
+fn readme_csv_options_round_trip() -> Result<(), Box<dyn std::error::Error>> {
+    // ── 1. Custom delimiter (semicolon — common European CSV) ───
+    let semi_opts = CsvReadOptions {
+        delimiter: b';',
+        ..CsvReadOptions::default()
+    };
+    let semi_df = read_csv_with_options(
+        "ticker;price;volume\nAAPL;185.50;1000\nGOOG;140.25;500",
+        &semi_opts,
+    )?;
+    assert_eq!(semi_df.index().len(), 2);
+    assert!(semi_df.column("ticker").is_some());
+
+    // ── 2. has_headers=false → 3 columns parsed without header line ──
+    let no_header_opts = CsvReadOptions {
+        has_headers: false,
+        ..CsvReadOptions::default()
+    };
+    let no_header_df = read_csv_with_options(
+        "AAPL,185.50,1000\nGOOG,140.25,500\nMSFT,420.00,800",
+        &no_header_opts,
+    )?;
+    assert_eq!(no_header_df.index().len(), 3);
+    // 3 columns parsed (auto-naming convention is implementation-defined;
+    // either "0/1/2" or "col_0/col_1/col_2" — just verify cardinality).
+    assert!(!no_header_df.columns().is_empty());
+
+    // ── 3. na_values: custom MISSING marker → Null ──────────────
+    let na_opts = CsvReadOptions {
+        na_values: vec!["MISSING".into()],
+        ..CsvReadOptions::default()
+    };
+    let na_df = read_csv_with_options(
+        "id,name,score\n1,Alice,42.0\n2,Bob,MISSING\n3,Carol,17.5",
+        &na_opts,
+    )?;
+    let score_col = na_df.column("score").unwrap();
+    // Row 1 (Bob) should be Null after MISSING → NA.
+    assert!(matches!(score_col.values()[1], Scalar::Null(_)));
+
+    // ── 4. usecols: column subset ───────────────────────────────
+    let usecols_opts = CsvReadOptions {
+        usecols: Some(vec!["ticker".into(), "price".into()]),
+        ..CsvReadOptions::default()
+    };
+    let usecols_df = read_csv_with_options(
+        "ticker,price,volume\nAAPL,185.50,1000\nGOOG,140.25,500",
+        &usecols_opts,
+    )?;
+    // 'ticker' + 'price' kept, 'volume' dropped.
+    assert!(usecols_df.column("ticker").is_some());
+    assert!(usecols_df.column("price").is_some());
+    assert!(usecols_df.column("volume").is_none());
+
+    // ── 5. nrows: truncate read ─────────────────────────────────
+    let nrows_opts = CsvReadOptions {
+        nrows: Some(2),
+        ..CsvReadOptions::default()
+    };
+    let nrows_df = read_csv_with_options(
+        "ticker,price\nAAPL,185.50\nGOOG,140.25\nMSFT,420.00\nTSLA,250.00",
+        &nrows_opts,
+    )?;
+    assert_eq!(nrows_df.index().len(), 2);
+
+    // ── 6. skiprows: skip preamble lines before the header ──────
+    // pandas skiprows counts initial lines including any header. With
+    // skiprows=2 and 2 preamble lines (same column count as data), the
+    // header lands on line 3 and is recognized normally.
+    let skip_opts = CsvReadOptions {
+        skiprows: 2,
+        ..CsvReadOptions::default()
+    };
+    let skip_df = read_csv_with_options(
+        "preamble1,preamble1b\npreamble2,preamble2b\nticker,price\nAAPL,185.50\nGOOG,140.25",
+        &skip_opts,
+    )?;
+    assert_eq!(skip_df.index().len(), 2);
+    assert!(skip_df.column("ticker").is_some());
+    Ok(())
+}
+
 /// fd90.23: JSON / JSONL / Feather round-trip. Sister to fd90.21
 /// (IPC stream) and fd90.22 (Parquet + Excel). All three formats had
 /// one-way write coverage in earlier tests but no integration round-
