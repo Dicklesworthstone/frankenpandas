@@ -3046,6 +3046,31 @@ fn readme_serialization_compiles_and_runs() -> Result<(), Box<dyn std::error::Er
     assert!(m_a.get(0)); // bit 0 = valid in all_valid(4)
     assert!(!m_b.get(0));
 
+    // fd90.255: Column inspection methods.
+    // Column::new(dtype, values) — explicit-dtype constructor.
+    let col_int = Column::new(DType::Int64, vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)])?;
+    assert_eq!(col_int.dtype(), DType::Int64);
+    assert_eq!(col_int.len(), 3);
+    assert!(!col_int.is_empty());
+    assert_eq!(col_int.values().len(), 3);
+    assert_eq!(col_int.value(1), Some(&Scalar::Int64(2)));
+    assert!(col_int.iter_values().count() == 3);
+    let scalars = col_int.to_vec();
+    assert_eq!(scalars.len(), 3);
+    let _ = col_int.validity();
+    assert!(!col_int.has_any_missing());
+    assert!(!col_int.all_missing());
+    assert_eq!(col_int.first(), Some(&Scalar::Int64(1)));
+    assert_eq!(col_int.last(), Some(&Scalar::Int64(3)));
+
+    // has_any_missing == true on a column with a Null.
+    let col_with_nan = Column::from_values(vec![
+        Scalar::Float64(1.0),
+        Scalar::Null(NullKind::NaN),
+        Scalar::Float64(3.0),
+    ])?;
+    assert!(col_with_nan.has_any_missing());
+
     // fd90.205: round-trip the remaining 7 types from the README's
     // Serialization list at line 1567:
     // DType, NullKind, Index, MultiIndex, Series, CategoricalMetadata, Column.
