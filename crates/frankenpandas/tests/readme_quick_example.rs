@@ -879,6 +879,24 @@ fn readme_element_wise_operations_compiles_and_runs() -> Result<(), Box<dyn std:
     let _ = s_a.pow(&s_b)?;
     let _ = s_a.floordiv(&s_b)?;
 
+    // fd90.230: Series scalar reductions + cumulative transforms.
+    let _ = s_a.sum()?;
+    let _ = s_a.mean()?;
+    let _ = s_a.min()?;
+    let _ = s_a.max()?;
+    let _ = s_a.std()?;
+    let _ = s_a.var()?;
+    let _ = s_a.median()?;
+    let _ = s_a.prod()?;
+    let _ = s_a.quantile(0.5)?;
+    let _ = s_a.abs()?;
+    let _ = s_a.nunique();
+    // cumulative transforms — return Series of the same length.
+    let _ = s_a.cumsum()?;
+    let _ = s_a.cumprod()?;
+    let _ = s_a.cummax()?;
+    let _ = s_a.cummin()?;
+
     // Column.binary_numeric / binary_comparison — exercise via DataFrame columns.
     let col_a = df.column("a").expect("column a").clone();
     let col_b = df.column("b").expect("column b").clone();
