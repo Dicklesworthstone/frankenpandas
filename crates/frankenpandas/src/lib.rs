@@ -181,7 +181,10 @@ pub use fp_join::{
 
 // ── Runtime policy ──────────────────────────────────────────────────────
 
-pub use fp_runtime::{EvidenceLedger, RuntimePolicy};
+pub use fp_runtime::{
+    CompatibilityIssue, DecisionAction, DecisionMetrics, DecisionRecord, EvidenceLedger,
+    EvidenceTerm, GalaxyBrainCard, IssueKind, RuntimeMode, RuntimePolicy, decision_to_card,
+};
 
 // ── Convenience re-export of the default SQL backend ───────────────────
 //
@@ -230,8 +233,18 @@ pub mod prelude {
         DataFrameExprExt,
         DataFrameIoExt,
         DataFrameMergeExt,
-        // Runtime
+        // Runtime — Bayesian decision inspection (README lines 378-403).
+        // fd90.221: expose the types reachable via EvidenceLedger.records().
+        CompatibilityIssue,
+        DecisionAction,
+        DecisionMetrics,
+        DecisionRecord,
         EvidenceLedger,
+        EvidenceTerm,
+        GalaxyBrainCard,
+        IssueKind,
+        RuntimeMode,
+        decision_to_card,
         Index,
         IndexLabel,
         // Error types (matches README "Error Architecture" section lines 829-853 —
@@ -531,6 +544,18 @@ mod tests {
         let _ = read_sql_with_options::<rusqlite::Connection>;
         // fd90.220: SqlInsertMethod is the type of SqlWriteOptions.method.
         let _is_insert_method: fn(SqlInsertMethod) -> _ = |m| m;
+
+        // fd90.221: Bayesian runtime inspection types reachable via
+        // EvidenceLedger.records() and decision_to_card.
+        let _is_runtime_mode: fn(RuntimeMode) -> _ = |m| m;
+        let _is_decision_action: fn(DecisionAction) -> _ = |a| a;
+        let _is_issue_kind: fn(IssueKind) -> _ = |k| k;
+        let _is_compat_issue: fn(CompatibilityIssue) -> _ = |i| i;
+        let _is_evidence_term: fn(EvidenceTerm) -> _ = |t| t;
+        let _is_decision_metrics: fn(DecisionMetrics) -> _ = |m| m;
+        let _is_decision_record: fn(DecisionRecord) -> _ = |r| r;
+        let _is_galaxy_card: fn(GalaxyBrainCard) -> _ = |c| c;
+        let _ = decision_to_card;
 
         // fd90.211: ToDatetimeOptions + ToDatetimeOrigin in prelude.
         let _: ToDatetimeOptions<'_> = ToDatetimeOptions::default();
