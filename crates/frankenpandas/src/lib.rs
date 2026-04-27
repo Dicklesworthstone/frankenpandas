@@ -52,13 +52,16 @@ pub use fp_index::{
 
 pub use fp_frame::{
     CategoricalAccessor, CategoricalMetadata, ConcatJoin, DataFrame, DataFrameColumnInput,
-    DataFrameDictResult, DataFrameDictSplit, DataFrameDictTight, DropNaHow, FrameError, Series,
-    SeriesResetIndexResult, ToDatetimeOptions, ToDatetimeOrigin, ToTimedeltaErrors,
-    ToTimedeltaOptions, TzAmbiguousPolicy, TzLocalizeOptions, TzNonexistentPolicy,
+    DataFrameDictAxisLabels, DataFrameDictResult, DataFrameDictSplit, DataFrameDictTight,
+    DropNaHow, FrameError, Series, SeriesResetIndexResult, ToDatetimeOptions, ToDatetimeOrigin,
+    ToTimedeltaErrors, ToTimedeltaOptions, TzAmbiguousPolicy, TzLocalizeOptions,
+    TzNonexistentPolicy,
     // fd90.259: window + accessor + groupby return types.
     DataFrameEwm, DataFrameExpanding, DataFrameGroupBy, DataFrameResample, DataFrameRolling,
     DatetimeAccessor, Ewm, Expanding, GroupByResample, GroupByRolling, Resample, Rolling,
     SeriesGroupBy, SparseAccessor, StringAccessor,
+    // fd90.270: Index → DataFrame / Series conversion helpers.
+    index_to_frame, index_to_series,
 };
 
 // ── Module-level functions (like pd.concat, pd.to_datetime, etc.) ────
@@ -288,6 +291,8 @@ pub mod prelude {
         DataFrameDictResult,
         DataFrameDictSplit,
         DataFrameDictTight,
+        // fd90.270: DataFrameDictAxisLabels is the field type of DictTight.columns.
+        DataFrameDictAxisLabels,
         // fd90.259: window + groupby + accessor return types.
         DataFrameEwm,
         DataFrameExpanding,
@@ -775,6 +780,8 @@ mod tests {
         let _is_dict_result: fn(DataFrameDictResult) -> _ = |x| x;
         let _is_dict_split: fn(DataFrameDictSplit) -> _ = |x| x;
         let _is_dict_tight: fn(DataFrameDictTight) -> _ = |x| x;
+        // fd90.270: DataFrameDictAxisLabels is DictTight.columns field type.
+        let _is_dict_axis_labels: fn(DataFrameDictAxisLabels) -> _ = |x| x;
         // fd90.261: date/timedelta range constructors + DateOffset.
         let _ = date_range;
         let _ = timedelta_range;
