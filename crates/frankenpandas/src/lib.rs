@@ -215,9 +215,13 @@ pub use rusqlite;
 pub mod prelude {
     pub use crate::{
         // Core types
+        // fd90.222: ArithmeticOp + ComparisonOp are parameter types for
+        // Column.binary_numeric, DataFrame.compare_scalar, etc.
+        ArithmeticOp,
         CategoricalAccessor,
         CategoricalMetadata,
         Column,
+        ComparisonOp,
         ConcatJoin,
         CsvOnBadLines,
         CsvReadOptions,
@@ -544,6 +548,10 @@ mod tests {
         let _ = read_sql_with_options::<rusqlite::Connection>;
         // fd90.220: SqlInsertMethod is the type of SqlWriteOptions.method.
         let _is_insert_method: fn(SqlInsertMethod) -> _ = |m| m;
+        // fd90.222: ArithmeticOp + ComparisonOp are parameters of Column /
+        // DataFrame compare_scalar / binary_numeric methods.
+        let _: ArithmeticOp = ArithmeticOp::Add;
+        let _: ComparisonOp = ComparisonOp::Gt;
 
         // fd90.221: Bayesian runtime inspection types reachable via
         // EvidenceLedger.records() and decision_to_card.
