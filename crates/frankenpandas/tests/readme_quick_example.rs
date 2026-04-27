@@ -3712,6 +3712,43 @@ fn readme_serialization_compiles_and_runs() -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
+/// fd90.38: Lock in the README-documented Scalar serde JSON shape.
+/// README §1567 area documents the contract as
+/// {"kind":"int64","value":42} — tagged via #[serde(tag = "kind",
+/// content = "value")]. Existing tests check round-trip identity but
+/// not the literal JSON shape; a regression to internal/untagged
+/// tagging would still round-trip but break consumer integrations.
+#[test]
+fn readme_scalar_serde_shape() -> Result<(), Box<dyn std::error::Error>> {
+    // Int64.
+    let int_json = serde_json::to_string(&Scalar::Int64(42))?;
+    assert_eq!(int_json, r#"{"kind":"int64","value":42}"#);
+
+    // Bool.
+    let bool_json = serde_json::to_string(&Scalar::Bool(true))?;
+    assert_eq!(bool_json, r#"{"kind":"bool","value":true}"#);
+
+    // Float64.
+    let float_json = serde_json::to_string(&Scalar::Float64(2.5))?;
+    assert_eq!(float_json, r#"{"kind":"float64","value":2.5}"#);
+
+    // Utf8 (snake_case via serde's rename_all).
+    let utf8_json = serde_json::to_string(&Scalar::Utf8("hi".into()))?;
+    assert_eq!(utf8_json, r#"{"kind":"utf8","value":"hi"}"#);
+
+    // Timedelta64.
+    let td_json = serde_json::to_string(&Scalar::Timedelta64(86_400_000_000_000))?;
+    assert_eq!(
+        td_json,
+        r#"{"kind":"timedelta64","value":86400000000000}"#
+    );
+
+    // Null with NullKind discriminant.
+    let null_json = serde_json::to_string(&Scalar::Null(NullKind::NaT))?;
+    assert_eq!(null_json, r#"{"kind":"null","value":"na_t"}"#);
+    Ok(())
+}
+
 /// fd90.37: DType variant coverage. 4 of 8 variants untested:
 /// Null, Categorical, Timedelta64, Sparse. README documents
 /// Categorical and Timedelta64 as first-class.
