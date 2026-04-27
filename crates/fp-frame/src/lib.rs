@@ -23764,6 +23764,65 @@ impl DataFrame {
         self.reduce_numeric("sem")
     }
 
+    // ── fd90.233: pandas-parity bare-name aliases for the *_agg ──
+    // ── reductions. Each delegates to the corresponding _agg method. ──
+    // ── Without these, `df.min()` etc. fail to resolve (df.min was   ──
+    // ── reaching some Iterator-trait fallback with unsatisfied        ──
+    // ── bounds). Inherent methods shadow the trait fallback.          ──
+
+    /// Per-column min — pandas-parity alias for [`min_agg`](Self::min_agg).
+    pub fn min(&self) -> Result<Series, FrameError> {
+        self.min_agg()
+    }
+
+    /// Per-column max — pandas-parity alias for [`max_agg`](Self::max_agg).
+    pub fn max(&self) -> Result<Series, FrameError> {
+        self.max_agg()
+    }
+
+    /// Per-column std — pandas-parity alias for [`std_agg`](Self::std_agg).
+    pub fn std(&self) -> Result<Series, FrameError> {
+        self.std_agg()
+    }
+
+    /// Per-column var — pandas-parity alias for [`var_agg`](Self::var_agg).
+    pub fn var(&self) -> Result<Series, FrameError> {
+        self.var_agg()
+    }
+
+    /// Per-column median — pandas-parity alias for [`median_agg`](Self::median_agg).
+    pub fn median(&self) -> Result<Series, FrameError> {
+        self.median_agg()
+    }
+
+    /// Per-column product — pandas-parity alias for [`prod_agg`](Self::prod_agg).
+    pub fn prod(&self) -> Result<Series, FrameError> {
+        self.prod_agg()
+    }
+
+    /// Per-column skewness — pandas-parity alias for [`skew_agg`](Self::skew_agg).
+    pub fn skew(&self) -> Result<Series, FrameError> {
+        self.skew_agg()
+    }
+
+    /// Per-column excess kurtosis — pandas-parity alias for
+    /// [`kurtosis_agg`](Self::kurtosis_agg). Pandas uses both `kurt` and
+    /// `kurtosis` as aliases.
+    pub fn kurtosis(&self) -> Result<Series, FrameError> {
+        self.kurtosis_agg()
+    }
+
+    /// Per-column excess kurtosis (pandas alias for `kurtosis`).
+    pub fn kurt(&self) -> Result<Series, FrameError> {
+        self.kurtosis_agg()
+    }
+
+    /// Per-column standard error of the mean — pandas-parity alias for
+    /// [`sem_agg`](Self::sem_agg).
+    pub fn sem(&self) -> Result<Series, FrameError> {
+        self.sem_agg()
+    }
+
     // ── Row-axis (axis=1) aggregations ──
 
     /// Internal: reduce each row across numeric columns using a closure.

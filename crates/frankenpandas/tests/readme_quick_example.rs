@@ -936,15 +936,23 @@ fn readme_element_wise_operations_compiles_and_runs() -> Result<(), Box<dyn std:
     let _ = bigger.nlargest(3)?;
     let _ = bigger.nsmallest(2)?;
 
-    // fd90.232: DataFrame-level reductions (return per-column Series).
-    // Note: only sum/mean/count/nunique/abs exist directly on DataFrame.
-    // The rest (min/max/std/var/median/prod/skew/kurtosis/sem) are
-    // accessible per-column or via describe() — they aren't exposed as
-    // single-call DataFrame methods in fp-frame today.
+    // fd90.232 + fd90.233: DataFrame-level reductions. fd90.233 added
+    // pandas-parity bare-name aliases (min/max/std/var/median/prod/
+    // skew/kurt/kurtosis/sem) over the existing *_agg methods.
     let _ = df.sum()?;
     let _ = df.mean()?;
     let _ = df.count()?;
     let _ = df.nunique()?;
+    let _ = df.min()?;
+    let _ = df.max()?;
+    let _ = df.std()?;
+    let _ = df.var()?;
+    let _ = df.median()?;
+    let _ = df.prod()?;
+    let _ = df.skew()?;
+    let _ = df.kurt()?;
+    let _ = df.kurtosis()?;
+    let _ = df.sem()?;
     let _ = df.abs()?; // element-wise — returns DataFrame
 
     // Column.binary_numeric / binary_comparison — exercise via DataFrame columns.
