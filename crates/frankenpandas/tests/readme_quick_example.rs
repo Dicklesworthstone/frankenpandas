@@ -3712,6 +3712,35 @@ fn readme_serialization_compiles_and_runs() -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
+/// fd90.43: ExprError variant triggers via df.eval / df.query /
+/// df.query_with_locals with malformed expressions.
+#[test]
+fn readme_exprerror_variant_triggers() -> Result<(), Box<dyn std::error::Error>> {
+    use std::collections::BTreeMap;
+
+    let df = read_csv_str("a,b\n1,10\n2,20\n3,30")?;
+
+    // ── UnknownSeries: column reference doesn't resolve ─────────
+    let unknown_col = df.eval("nonexistent_col + 1");
+    assert!(matches!(
+        unknown_col,
+        Err(ExprError::UnknownSeries(ref name)) if name == "nonexistent_col"
+    ));
+
+    // ── UnknownLocal: @local reference not in bindings ──────────
+    let empty_locals: BTreeMap<String, Scalar> = BTreeMap::new();
+    let unknown_local = df.query_with_locals("a > @missing", &empty_locals);
+    assert!(matches!(
+        unknown_local,
+        Err(ExprError::UnknownLocal(ref name)) if name == "missing"
+    ));
+
+    // ── ParseError: syntax garbage ──────────────────────────────
+    let parse_err = df.eval("1 + + + + + ; / @ ?");
+    assert!(matches!(parse_err, Err(ExprError::ParseError(_))));
+    Ok(())
+}
+
 /// fd90.42: IoError variant triggers. Asserts that specific bad-input
 /// scenarios route to specific IoError variants — locks in the
 /// contract that consumers can pattern-match on enum variant rather
