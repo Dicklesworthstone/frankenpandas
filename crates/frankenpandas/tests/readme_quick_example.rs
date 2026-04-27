@@ -3679,6 +3679,86 @@ fn readme_serialization_compiles_and_runs() -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
+/// fd90.29: JoinType + MergeValidateMode variant coverage. Existing
+/// merge tests only exercised JoinType::Inner and
+/// MergeValidateMode::OneToOne. This drives the 4 other JoinType
+/// variants (Left/Right/Outer/Cross) and 3 other MergeValidateMode
+/// variants (OneToMany/ManyToOne/ManyToMany) end-to-end.
+#[test]
+fn readme_join_type_round_trip() -> Result<(), Box<dyn std::error::Error>> {
+    // Two frames with partial key overlap.
+    //   df1 keys: 1, 2, 3
+    //   df2 keys: 2, 3, 4
+    // Inner: 2 rows; Left: 3; Right: 3; Outer: 4 (1, 2, 3, 4).
+    let df1 = read_csv_str("key,a\n1,10\n2,20\n3,30")?;
+    let df2 = read_csv_str("key,b\n2,200\n3,300\n4,400")?;
+
+    let inner = merge_dataframes_on(&df1, &df2, &["key"], JoinType::Inner)?;
+    assert_eq!(inner.index.len(), 2);
+
+    let left = merge_dataframes_on(&df1, &df2, &["key"], JoinType::Left)?;
+    assert_eq!(left.index.len(), 3);
+
+    let right = merge_dataframes_on(&df1, &df2, &["key"], JoinType::Right)?;
+    assert_eq!(right.index.len(), 3);
+
+    let outer = merge_dataframes_on(&df1, &df2, &["key"], JoinType::Outer)?;
+    assert_eq!(outer.index.len(), 4);
+
+    // Cross join: all pairs (3 × 3 = 9 rows). Cross has no key dependency,
+    // so use a degenerate empty key list.
+    let cross = merge_dataframes_on(&df1, &df2, &[], JoinType::Cross)?;
+    assert_eq!(cross.index.len(), 9);
+
+    // ── MergeValidateMode variants ──────────────────────────────
+    // Setup: df1 has duplicate keys (k=1, k=1) and df2 has unique keys.
+    // OneToMany expects df1 unique + df2 may have duplicates → fails here.
+    // ManyToOne expects df1 may dup + df2 unique → succeeds.
+    // ManyToMany allows both.
+    let df_many = read_csv_str("key,a\n1,10\n1,11\n2,20")?;
+    let df_unique = read_csv_str("key,b\n1,100\n2,200")?;
+
+    let many_to_one = df_many.merge_with_options(
+        &df_unique,
+        &["key"],
+        &["key"],
+        JoinType::Inner,
+        MergeExecutionOptions {
+            validate_mode: Some(MergeValidateMode::ManyToOne),
+            ..Default::default()
+        },
+    )?;
+    // 2 dup + 1 unique on left; 2 unique on right; inner produces 3 rows.
+    assert_eq!(many_to_one.index.len(), 3);
+
+    let many_to_many = df_many.merge_with_options(
+        &df_unique,
+        &["key"],
+        &["key"],
+        JoinType::Inner,
+        MergeExecutionOptions {
+            validate_mode: Some(MergeValidateMode::ManyToMany),
+            ..Default::default()
+        },
+    )?;
+    assert_eq!(many_to_many.index.len(), 3);
+
+    // OneToMany: swap so left is unique and right may have dups.
+    let one_to_many = df_unique.merge_with_options(
+        &df_many,
+        &["key"],
+        &["key"],
+        JoinType::Inner,
+        MergeExecutionOptions {
+            validate_mode: Some(MergeValidateMode::OneToMany),
+            ..Default::default()
+        },
+    )?;
+    // df_unique (k=1, k=2) × df_many (k=1, k=1, k=2) → 3 inner rows.
+    assert_eq!(one_to_many.index.len(), 3);
+    Ok(())
+}
+
 /// fd90.27: JsonOrient round-trip across all 5 pandas-parity variants.
 /// Existing tests only exercise JsonOrient::Records; this asserts that
 /// each of Records / Columns / Index / Split / Values can write a
