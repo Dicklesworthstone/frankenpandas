@@ -3446,6 +3446,39 @@ fn readme_bayesian_runtime_policy_compiles_and_runs() -> Result<(), Box<dyn std:
     // decision_to_card transforms a record into a printable summary.
     let card = decision_to_card(record);
     assert!(!card.title.is_empty());
+
+    // fd90.32: cover RuntimeMode::Hardened + DecisionAction::Allow /
+    // Repair + IssueKind::JoinCardinality.
+    let hardened_with_cap = RuntimePolicy::hardened(Some(10_000));
+
+    // Within cap → Bayesian decision; record's mode is Hardened and
+    // the issue.kind is JoinCardinality.
+    let mut ledger_within = EvidenceLedger::new();
+    let _ = hardened_with_cap.decide_join_admission(1000, &mut ledger_within);
+    let within_record = &ledger_within.records()[0];
+    assert!(matches!(within_record.mode, RuntimeMode::Hardened));
+    assert!(matches!(
+        within_record.issue.kind,
+        IssueKind::JoinCardinality
+    ));
+    // Within-cap action is one of {Allow, Reject, Repair}; verify it's
+    // a valid DecisionAction (matches the enum).
+    let _ = match within_record.action {
+        DecisionAction::Allow => "allow",
+        DecisionAction::Reject => "reject",
+        DecisionAction::Repair => "repair",
+    };
+
+    // Over cap → Hardened forces Repair.
+    let mut ledger_over = EvidenceLedger::new();
+    let over_action = hardened_with_cap.decide_join_admission(1_000_000_000, &mut ledger_over);
+    assert!(
+        matches!(over_action, DecisionAction::Repair),
+        "Hardened+over-cap should force Repair, got {over_action:?}",
+    );
+    let over_record = &ledger_over.records()[0];
+    assert!(matches!(over_record.mode, RuntimeMode::Hardened));
+    assert!(matches!(over_record.action, DecisionAction::Repair));
     Ok(())
 }
 
