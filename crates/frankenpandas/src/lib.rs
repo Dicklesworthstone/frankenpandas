@@ -27,6 +27,8 @@ pub use fp_types::{
 pub use fp_types::{
     Interval, IntervalClosed, Period, PeriodFreq, Timedelta, TimedeltaComponents, TimedeltaError,
     Timestamp, period_range,
+    // fd90.271: pandas pd.interval_range equivalents (Vec<Interval> generators).
+    interval_range_by_periods, interval_range_by_step,
 };
 
 // NanOps: null-skipping aggregation primitives (matches README's NanOps section).
