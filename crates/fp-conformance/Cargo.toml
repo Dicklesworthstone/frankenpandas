@@ -37,7 +37,7 @@ sha2 = "0.11.0"
 thiserror = { workspace = true }
 
 [dev-dependencies]
-criterion = { version = "0.5", default-features = false }
+criterion = { version = "0.8", default-features = false }
 fp-columnar = { path = "../fp-columnar" }
 fp-index = { path = "../fp-index" }
 fp-io = { path = "../fp-io" }
