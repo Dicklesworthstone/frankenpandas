@@ -3712,6 +3712,47 @@ fn readme_serialization_compiles_and_runs() -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
+/// fd90.42: IoError variant triggers. Asserts that specific bad-input
+/// scenarios route to specific IoError variants — locks in the
+/// contract that consumers can pattern-match on enum variant rather
+/// than matching error message strings.
+#[test]
+fn readme_ioerror_variant_triggers() -> Result<(), Box<dyn std::error::Error>> {
+    // ── MissingHeaders: empty CSV ───────────────────────────────
+    let empty = read_csv_str("");
+    assert!(matches!(empty, Err(IoError::MissingHeaders)));
+
+    // ── MissingIndexColumn: index_col references absent column ─
+    let missing_idx_opts = CsvReadOptions {
+        index_col: Some("absent".to_string()),
+        ..CsvReadOptions::default()
+    };
+    let missing_idx = read_csv_with_options("a,b\n1,2\n3,4", &missing_idx_opts);
+    assert!(matches!(
+        missing_idx,
+        Err(IoError::MissingIndexColumn(ref name)) if name == "absent"
+    ));
+
+    // ── DuplicateColumnName: repeated header ────────────────────
+    let dup = read_csv_str("a,a,b\n1,2,3\n4,5,6");
+    assert!(matches!(
+        dup,
+        Err(IoError::DuplicateColumnName(ref name)) if name == "a"
+    ));
+
+    // ── MissingUsecols: usecols references absent column ────────
+    let missing_use_opts = CsvReadOptions {
+        usecols: Some(vec!["ghost".to_string()]),
+        ..CsvReadOptions::default()
+    };
+    let missing_use = read_csv_with_options("a,b\n1,2\n3,4", &missing_use_opts);
+    assert!(matches!(
+        missing_use,
+        Err(IoError::MissingUsecols(ref names)) if names == &["ghost".to_string()]
+    ));
+    Ok(())
+}
+
 /// fd90.41: TypeError variant triggers. Pattern-matches the specific
 /// error variant returned by cast_scalar / common_dtype on bad input,
 /// locking in the contract that specific failure modes route to
