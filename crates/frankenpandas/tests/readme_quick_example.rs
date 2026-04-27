@@ -3679,6 +3679,96 @@ fn readme_serialization_compiles_and_runs() -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
+/// fd90.31: CsvOnBadLines + ToTimedeltaErrors variant coverage. Both
+/// enums have observable behavioral differences but only the default
+/// path was being exercised by integration tests.
+#[test]
+fn readme_bad_lines_and_timedelta_errors() -> Result<(), Box<dyn std::error::Error>> {
+    // ── CsvOnBadLines ────────────────────────────────────────────
+    // Mixed-width CSV: header + 3 data rows; the middle row has EXTRA
+    // fields (short rows are preserved as missing; only extra-field
+    // rows trigger Skip/Warn/Error per pandas semantics).
+    let bad_csv = "ticker,price,volume\nAAPL,185.50,1000\nGOOG,140.25,500,EXTRA\nMSFT,420.00,800";
+
+    // Skip: silently drop the bad row → 2 valid rows survive.
+    let skip_opts = CsvReadOptions {
+        on_bad_lines: CsvOnBadLines::Skip,
+        ..CsvReadOptions::default()
+    };
+    let skip_df = read_csv_with_options(bad_csv, &skip_opts)?;
+    assert_eq!(skip_df.index().len(), 2);
+
+    // Warn: same outcome (drop bad row, possibly with diagnostic).
+    let warn_opts = CsvReadOptions {
+        on_bad_lines: CsvOnBadLines::Warn,
+        ..CsvReadOptions::default()
+    };
+    let warn_df = read_csv_with_options(bad_csv, &warn_opts)?;
+    assert_eq!(warn_df.index().len(), 2);
+
+    // Error: should fail.
+    let err_opts = CsvReadOptions {
+        on_bad_lines: CsvOnBadLines::Error,
+        ..CsvReadOptions::default()
+    };
+    let err_result = read_csv_with_options(bad_csv, &err_opts);
+    assert!(
+        err_result.is_err(),
+        "CsvOnBadLines::Error should fail on mismatched row"
+    );
+
+    // ── ToTimedeltaErrors ────────────────────────────────────────
+    // Series with 1 valid + 1 unparseable string.
+    let labels: Vec<IndexLabel> = vec![IndexLabel::Int64(0), IndexLabel::Int64(1)];
+    let mixed = Series::from_values(
+        "td",
+        labels,
+        vec![
+            Scalar::Utf8("1 days".into()),
+            Scalar::Utf8("not a duration".into()),
+        ],
+    )?;
+
+    // Coerce: parse failures don't error — the result Series has 2
+    // entries (length preserved) and the bad input becomes either Null
+    // or a NaT-sentinel Timedelta64 depending on the impl.
+    let coerce_opts = ToTimedeltaOptions {
+        errors: ToTimedeltaErrors::Coerce,
+        ..ToTimedeltaOptions::default()
+    };
+    let coerced = to_timedelta_with_options(&mixed, coerce_opts)?;
+    assert_eq!(coerced.len(), 2);
+    // Index 1 must be either Null (NaT) or a sentinel Timedelta64
+    // (i64::MIN). Both are valid representations of NaT.
+    let bad = &coerced.values()[1];
+    assert!(
+        matches!(bad, Scalar::Null(_))
+            || matches!(bad, Scalar::Timedelta64(n) if *n == Timedelta::NAT),
+        "expected NaT or Null for bad input, got {bad:?}",
+    );
+
+    // Raise (default): unparseable input causes an error.
+    let raise_opts = ToTimedeltaOptions {
+        errors: ToTimedeltaErrors::Raise,
+        ..ToTimedeltaOptions::default()
+    };
+    let raise_result = to_timedelta_with_options(&mixed, raise_opts);
+    assert!(
+        raise_result.is_err(),
+        "ToTimedeltaErrors::Raise should error on bad input"
+    );
+
+    // Ignore: input passes through unchanged on parse failure
+    // (semantics: result has 2 rows, parse failures don't error).
+    let ignore_opts = ToTimedeltaOptions {
+        errors: ToTimedeltaErrors::Ignore,
+        ..ToTimedeltaOptions::default()
+    };
+    let ignored = to_timedelta_with_options(&mixed, ignore_opts)?;
+    assert_eq!(ignored.len(), 2);
+    Ok(())
+}
+
 /// fd90.30: AsofDirection (Forward / Nearest) + DuplicateKeep
 /// (Last / None) + ConcatJoin::Outer variant coverage. The unmade
 /// variants are core pandas merge / dedup / concat surface and were
