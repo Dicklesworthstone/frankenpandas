@@ -790,19 +790,24 @@ fn readme_concat_full_options_compiles_and_runs() -> Result<(), Box<dyn std::err
 fn readme_element_wise_operations_compiles_and_runs() -> Result<(), Box<dyn std::error::Error>> {
     let df = read_csv_str("a,b\n10,1\n20,2\n30,3\n40,4")?;
 
-    // Scalar arithmetic.
+    // Scalar arithmetic — fd90.226 added sub_scalar.
     let _ = df.mul_scalar(2.0)?;
     let _ = df.add_scalar(100.0)?;
+    let _ = df.sub_scalar(5.0)?;
     let _ = df.div_scalar(2.0)?;
     let _ = df.pow_scalar(2.0)?;
     let _ = df.mod_scalar(10.0)?;
     let _ = df.floordiv_scalar(3.0)?;
 
-    // DataFrame-to-DataFrame (aligned).
+    // DataFrame-to-DataFrame (aligned). fd90.226 added the 4 missing.
     let df2 = read_csv_str("a,b\n5,1\n10,2\n15,3\n20,4")?;
+    let _ = df.add_df(&df2)?;
     let _ = df.sub_df(&df2)?;
     let _ = df.div_df(&df2)?;
     let _ = df.mul_df(&df2)?;
+    let _ = df.pow_df(&df2)?;
+    let _ = df.mod_df(&df2)?;
+    let _ = df.floordiv_df(&df2)?;
 
     // With fill value.
     let _ = df.add_df_fill(&df2, 0.0)?;
