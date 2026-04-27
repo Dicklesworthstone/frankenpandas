@@ -219,7 +219,14 @@ pub use fp_join::{
 pub use fp_runtime::{
     CompatibilityIssue, DecisionAction, DecisionMetrics, DecisionRecord, EvidenceLedger,
     EvidenceTerm, GalaxyBrainCard, IssueKind, RuntimeMode, RuntimePolicy, decision_to_card,
+    // fd90.265: remaining fp-runtime types (advanced — not in prelude).
+    ConformalGuard, ConformalPredictionSet, DecodeProof, LossMatrix, RaptorQEnvelope,
+    RaptorQMetadata, RuntimeError, ScrubStatus,
 };
+
+// outcome_to_action is gated behind the `asupersync` feature in fp-runtime.
+#[cfg(feature = "asupersync")]
+pub use fp_runtime::outcome_to_action;
 
 // ── Convenience re-export of the default SQL backend ───────────────────
 //
