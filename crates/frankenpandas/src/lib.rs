@@ -38,6 +38,10 @@ pub use fp_frame::{
     DataFrameDictResult, DataFrameDictSplit, DataFrameDictTight, DropNaHow, FrameError, Series,
     SeriesResetIndexResult, ToDatetimeOptions, ToDatetimeOrigin, ToTimedeltaErrors,
     ToTimedeltaOptions, TzAmbiguousPolicy, TzLocalizeOptions, TzNonexistentPolicy,
+    // fd90.259: window + accessor + groupby return types.
+    DataFrameEwm, DataFrameExpanding, DataFrameGroupBy, DataFrameResample, DataFrameRolling,
+    DatetimeAccessor, Ewm, Expanding, GroupByResample, GroupByRolling, Resample, Rolling,
+    SeriesGroupBy, SparseAccessor, StringAccessor,
 };
 
 // ── Module-level functions (like pd.concat, pd.to_datetime, etc.) ────
@@ -244,6 +248,22 @@ pub mod prelude {
         DataFrameDictResult,
         DataFrameDictSplit,
         DataFrameDictTight,
+        // fd90.259: window + groupby + accessor return types.
+        DataFrameEwm,
+        DataFrameExpanding,
+        DataFrameGroupBy,
+        DataFrameResample,
+        DataFrameRolling,
+        DatetimeAccessor,
+        Ewm,
+        Expanding,
+        GroupByResample,
+        GroupByRolling,
+        Resample,
+        Rolling,
+        SeriesGroupBy,
+        SparseAccessor,
+        StringAccessor,
         DropNaHow,
         DuplicateKeep,
         // Traits
@@ -705,6 +725,22 @@ mod tests {
         let _is_dict_result: fn(DataFrameDictResult) -> _ = |x| x;
         let _is_dict_split: fn(DataFrameDictSplit) -> _ = |x| x;
         let _is_dict_tight: fn(DataFrameDictTight) -> _ = |x| x;
+        // fd90.259: window + groupby + accessor return types.
+        let _is_rolling: fn(&Rolling<'_>) = |_| {};
+        let _is_expanding: fn(&Expanding<'_>) = |_| {};
+        let _is_ewm: fn(&Ewm<'_>) = |_| {};
+        let _is_resample: fn(&Resample<'_>) = |_| {};
+        let _is_df_rolling: fn(&DataFrameRolling<'_>) = |_| {};
+        let _is_df_expanding: fn(&DataFrameExpanding<'_>) = |_| {};
+        let _is_df_ewm: fn(&DataFrameEwm<'_>) = |_| {};
+        let _is_df_resample: fn(&DataFrameResample<'_>) = |_| {};
+        let _is_df_groupby: fn(&DataFrameGroupBy<'_>) = |_| {};
+        let _is_series_groupby: fn(&SeriesGroupBy<'_>) = |_| {};
+        let _is_gb_rolling: fn(&GroupByRolling<'_>) = |_| {};
+        let _is_gb_resample: fn(&GroupByResample<'_>) = |_| {};
+        let _is_str_acc: fn(&StringAccessor<'_>) = |_| {};
+        let _is_dt_acc: fn(&DatetimeAccessor<'_>) = |_| {};
+        let _is_sparse_acc: fn(&SparseAccessor<'_>) = |_| {};
 
         // fd90.208: pandas-style top-level null checks + dtype helpers.
         let na_check = vec![Scalar::Int64(1), Scalar::Null(NullKind::NaN)];
