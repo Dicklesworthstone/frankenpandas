@@ -1655,6 +1655,9 @@ fn readme_time_series_operations_compiles_and_runs() -> Result<(), Box<dyn std::
     // at_time / between_time — string-typed time matchers.
     let _ = df.at_time("12:00:00")?;
     let _ = df.between_time("09:00:00", "12:00:00")?;
+    // fd90.280: Series.at_time + Series.between_time on a datetime-indexed Series.
+    let _ = val_series.at_time("12:00:00")?;
+    let _ = val_series.between_time("09:00:00", "12:00:00")?;
 
     // Datetime component extraction via .dt() accessor.
     let date_series = Series::from_values(
