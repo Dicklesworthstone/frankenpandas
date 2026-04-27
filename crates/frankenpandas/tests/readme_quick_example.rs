@@ -860,6 +860,25 @@ fn readme_element_wise_operations_compiles_and_runs() -> Result<(), Box<dyn std:
     let _ = df.le_scalar_df(&Scalar::Int64(20))?;
     let _ = df.ge_scalar_df(&Scalar::Int64(20))?;
 
+    // fd90.228: Series binary arithmetic (aligned on index).
+    let labels: Vec<IndexLabel> = (0..3i64).map(IndexLabel::Int64).collect();
+    let s_a = Series::from_values(
+        "a",
+        labels.clone(),
+        vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)],
+    )?;
+    let s_b = Series::from_values(
+        "b",
+        labels,
+        vec![Scalar::Float64(2.0), Scalar::Float64(4.0), Scalar::Float64(6.0)],
+    )?;
+    let _ = s_a.add(&s_b)?;
+    let _ = s_a.sub(&s_b)?;
+    let _ = s_a.mul(&s_b)?;
+    let _ = s_a.div(&s_b)?;
+    let _ = s_a.pow(&s_b)?;
+    let _ = s_a.floordiv(&s_b)?;
+
     // Column.binary_numeric / binary_comparison — exercise via DataFrame columns.
     let col_a = df.column("a").expect("column a").clone();
     let col_b = df.column("b").expect("column b").clone();
