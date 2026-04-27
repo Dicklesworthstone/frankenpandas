@@ -3657,6 +3657,36 @@ fn readme_serialization_compiles_and_runs() -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
+/// fd90.27: JsonOrient round-trip across all 5 pandas-parity variants.
+/// Existing tests only exercise JsonOrient::Records; this asserts that
+/// each of Records / Columns / Index / Split / Values can write a
+/// DataFrame and read it back with shape preserved.
+#[test]
+fn readme_json_orient_round_trip() -> Result<(), Box<dyn std::error::Error>> {
+    let df = read_csv_str("ticker,price\nAAPL,185.50\nGOOG,140.25\nMSFT,420.00")?;
+
+    for orient in [
+        JsonOrient::Records,
+        JsonOrient::Columns,
+        JsonOrient::Index,
+        JsonOrient::Split,
+        JsonOrient::Values,
+    ] {
+        let json = write_json_string(&df, orient)?;
+        assert!(!json.is_empty(), "orient {orient:?} produced empty JSON");
+        let back = read_json_str(&json, orient)?;
+        // All orient modes must preserve row count.
+        assert_eq!(
+            back.index().len(),
+            df.index().len(),
+            "orient {orient:?} lost rows: {} → {}",
+            df.index().len(),
+            back.index().len()
+        );
+    }
+    Ok(())
+}
+
 /// fd90.26: Non-default ExcelReadOptions / ExcelWriteOptions coverage.
 /// Sister to fd90.24/25 (CSV options). Both option structs have been
 /// in the prelude since fd90.207/216 but only ::default() was used by
