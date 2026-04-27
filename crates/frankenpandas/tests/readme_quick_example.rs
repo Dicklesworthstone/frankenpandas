@@ -427,6 +427,23 @@ fn readme_merge_asof_compiles_and_runs() -> Result<(), Box<dyn std::error::Error
     assert_eq!(result.index().len(), 3);
     assert!(result.column_names().iter().any(|n| n.as_str() == "trade_price"));
     assert!(result.column_names().iter().any(|n| n.as_str() == "quote"));
+
+    // fd90.286: merge_asof_with_options — pandas pd.merge_asof(tolerance=...)
+    // shape. allow_exact_matches=true and tolerance=Some(5.0) means a quote
+    // at exactly trade_ts is fine, and the gap between trade and quote must
+    // be <= 5 nanoseconds.
+    let opts = MergeAsofOptions {
+        allow_exact_matches: true,
+        tolerance: Some(5.0),
+        by: None,
+    };
+    let _tuned = merge_asof_with_options(
+        &trades,
+        &quotes,
+        "timestamp",
+        AsofDirection::Backward,
+        opts,
+    )?;
     Ok(())
 }
 
