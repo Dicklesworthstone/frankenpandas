@@ -3802,6 +3802,78 @@ fn readme_serialization_compiles_and_runs() -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
+/// fd90.61: Sequential op result assertions. Existing tests called
+/// cumsum/cumprod/cummin/cummax/diff/pct_change/shift but only
+/// shape-asserted — a regression in any algorithm would not have
+/// surfaced. This pins the algebraic outputs.
+#[test]
+fn readme_sequential_ops_round_trip() -> Result<(), Box<dyn std::error::Error>> {
+    let df = read_csv_str("v\n1\n2\n3\n4")?;
+    let v = df.column("v").expect("v column");
+
+    // Helper: extract numeric value as f64 from either Int64 or Float64.
+    fn num(s: &Scalar) -> Option<f64> {
+        match s {
+            Scalar::Int64(v) => Some(*v as f64),
+            Scalar::Float64(v) => Some(*v),
+            _ => None,
+        }
+    }
+
+    // ── cumsum: [1, 3, 6, 10] ───────────────────────────────────
+    let csum = df.cumsum()?;
+    let csum_v = csum.column("v").unwrap();
+    let csum_nums: Vec<f64> = csum_v.values().iter().filter_map(num).collect();
+    assert_eq!(csum_nums, vec![1.0, 3.0, 6.0, 10.0]);
+
+    // ── cumprod: [1, 2, 6, 24] ──────────────────────────────────
+    let cprod = df.cumprod()?;
+    let cprod_v = cprod.column("v").unwrap();
+    let cprod_nums: Vec<f64> = cprod_v.values().iter().filter_map(num).collect();
+    assert_eq!(cprod_nums, vec![1.0, 2.0, 6.0, 24.0]);
+
+    // ── cummin: [1, 1, 1, 1] (input is monotonic increasing) ────
+    let cmin = df.cummin()?;
+    let cmin_v = cmin.column("v").unwrap();
+    let cmin_nums: Vec<f64> = cmin_v.values().iter().filter_map(num).collect();
+    assert_eq!(cmin_nums, vec![1.0, 1.0, 1.0, 1.0]);
+
+    // ── cummax: [1, 2, 3, 4] (each value sets new max) ──────────
+    let cmax = df.cummax()?;
+    let cmax_v = cmax.column("v").unwrap();
+    let cmax_nums: Vec<f64> = cmax_v.values().iter().filter_map(num).collect();
+    assert_eq!(cmax_nums, vec![1.0, 2.0, 3.0, 4.0]);
+
+    // ── diff(1): [Null, 1, 1, 1] ────────────────────────────────
+    let d = df.diff(1)?;
+    let d_v = d.column("v").unwrap();
+    assert!(matches!(d_v.values()[0], Scalar::Null(_)));
+    assert_eq!(num(&d_v.values()[1]), Some(1.0));
+    assert_eq!(num(&d_v.values()[2]), Some(1.0));
+    assert_eq!(num(&d_v.values()[3]), Some(1.0));
+
+    // ── shift(1): [Null, 1, 2, 3] ───────────────────────────────
+    let sh = df.shift(1)?;
+    let sh_v = sh.column("v").unwrap();
+    assert!(matches!(sh_v.values()[0], Scalar::Null(_)));
+    assert_eq!(num(&sh_v.values()[1]), Some(1.0));
+    assert_eq!(num(&sh_v.values()[2]), Some(2.0));
+    assert_eq!(num(&sh_v.values()[3]), Some(3.0));
+
+    // ── pct_change(1): row 1 = (2-1)/1 = 1.0 ────────────────────
+    let pct = df.pct_change(1)?;
+    let pct_v = pct.column("v").unwrap();
+    assert!(matches!(pct_v.values()[0], Scalar::Null(_)));
+    assert!(matches!(
+        pct_v.values()[1],
+        Scalar::Float64(p) if (p - 1.0).abs() < 1e-9
+    ));
+
+    // ── exercise count to suppress unused-let warning ───────────
+    let _ = v.len();
+    Ok(())
+}
+
 /// fd90.60: DataFrame + Series .head / .tail with positive AND
 /// negative N. Pandas-parity row slicing; previously uncovered at
 /// the DataFrame/Series level (groupby head/tail was tested).
