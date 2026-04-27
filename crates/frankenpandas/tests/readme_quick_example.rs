@@ -3712,6 +3712,51 @@ fn readme_serialization_compiles_and_runs() -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
+/// fd90.40: Pin DType + NullKind + CategoricalMetadata serde JSON
+/// shapes. Sister to fd90.38 (Scalar) and fd90.39 (IndexLabel +
+/// ValidityMask). All three are documented serializable types per
+/// README §1567+.
+#[test]
+fn readme_dtype_nullkind_catmeta_serde_shape() -> Result<(), Box<dyn std::error::Error>> {
+    // ── DType (unit-variant enum, rename_all=snake_case) ────────
+    assert_eq!(serde_json::to_string(&DType::Int64)?, r#""int64""#);
+    assert_eq!(serde_json::to_string(&DType::Float64)?, r#""float64""#);
+    assert_eq!(serde_json::to_string(&DType::Utf8)?, r#""utf8""#);
+    assert_eq!(serde_json::to_string(&DType::Bool)?, r#""bool""#);
+    assert_eq!(serde_json::to_string(&DType::Null)?, r#""null""#);
+    assert_eq!(
+        serde_json::to_string(&DType::Categorical)?,
+        r#""categorical""#
+    );
+    assert_eq!(
+        serde_json::to_string(&DType::Timedelta64)?,
+        r#""timedelta64""#
+    );
+    assert_eq!(serde_json::to_string(&DType::Sparse)?, r#""sparse""#);
+
+    // ── NullKind (rename_all=snake_case) ────────────────────────
+    assert_eq!(serde_json::to_string(&NullKind::Null)?, r#""null""#);
+    assert_eq!(serde_json::to_string(&NullKind::NaN)?, r#""na_n""#);
+    assert_eq!(serde_json::to_string(&NullKind::NaT)?, r#""na_t""#);
+
+    // ── CategoricalMetadata (default field-name struct) ─────────
+    let meta = CategoricalMetadata {
+        categories: vec![
+            Scalar::Utf8("low".into()),
+            Scalar::Utf8("high".into()),
+        ],
+        ordered: true,
+    };
+    let meta_json = serde_json::to_string(&meta)?;
+    // Wire format: {"categories":[<Scalar JSON>...], "ordered": true}
+    // Inner Scalar uses its tagged shape from fd90.38.
+    assert_eq!(
+        meta_json,
+        r#"{"categories":[{"kind":"utf8","value":"low"},{"kind":"utf8","value":"high"}],"ordered":true}"#
+    );
+    Ok(())
+}
+
 /// fd90.39: Lock in the IndexLabel + ValidityMask serde JSON shapes.
 /// Sister to fd90.38 (Scalar). IndexLabel uses the same tagged-enum
 /// pattern; ValidityMask serializes as {bits: [bool...]}.
