@@ -587,6 +587,21 @@ fn readme_window_operations_compiles_and_runs() -> Result<(), Box<dyn std::error
     let _ = r.median()?;
     let _ = r.quantile(0.5)?;
     let _ = r.apply(|vals: &[f64]| vals.iter().copied().sum::<f64>() / vals.len() as f64)?;
+    // fd90.282: rest of Rolling.
+    let _ = r.first()?;
+    let _ = r.last()?;
+    let _ = r.prod()?;
+    let _ = r.skew()?;
+    let _ = r.kurt()?;
+    let _ = r.agg(&["sum", "mean"])?;
+    // Rolling.corr / cov against another series — same length.
+    let other_series = Series::from_values(
+        "other",
+        (0..100i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+        (0..100i64).map(|v| Scalar::Float64((v + 1) as f64)).collect::<Vec<_>>(),
+    )?;
+    let _ = r.corr(&other_series)?;
+    let _ = r.cov(&other_series)?;
 
     // ── Series Expanding — full method set. Same f64 closure shape.
     let e = series.expanding(None);
