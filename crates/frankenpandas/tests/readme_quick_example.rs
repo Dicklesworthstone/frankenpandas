@@ -3802,6 +3802,51 @@ fn readme_serialization_compiles_and_runs() -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
+/// fd90.60: DataFrame + Series .head / .tail with positive AND
+/// negative N. Pandas-parity row slicing; previously uncovered at
+/// the DataFrame/Series level (groupby head/tail was tested).
+#[test]
+fn readme_head_tail_positive_negative_n() -> Result<(), Box<dyn std::error::Error>> {
+    let df = read_csv_str(
+        "v\n10\n20\n30\n40\n50",
+    )?;
+    assert_eq!(df.index().len(), 5);
+
+    // ── DataFrame.head(positive) ────────────────────────────────
+    let h2 = df.head(2)?;
+    assert_eq!(h2.index().len(), 2);
+    assert_eq!(h2.column("v").unwrap().values()[0], Scalar::Int64(10));
+    assert_eq!(h2.column("v").unwrap().values()[1], Scalar::Int64(20));
+
+    // ── DataFrame.tail(positive) ────────────────────────────────
+    let t2 = df.tail(2)?;
+    assert_eq!(t2.index().len(), 2);
+    assert_eq!(t2.column("v").unwrap().values()[0], Scalar::Int64(40));
+    assert_eq!(t2.column("v").unwrap().values()[1], Scalar::Int64(50));
+
+    // ── DataFrame.head(negative): all but last N ────────────────
+    let h_neg = df.head(-2)?;
+    assert_eq!(h_neg.index().len(), 3);
+    assert_eq!(h_neg.column("v").unwrap().values()[0], Scalar::Int64(10));
+    assert_eq!(h_neg.column("v").unwrap().values()[2], Scalar::Int64(30));
+
+    // ── DataFrame.tail(negative): all but first N ───────────────
+    let t_neg = df.tail(-2)?;
+    assert_eq!(t_neg.index().len(), 3);
+    assert_eq!(t_neg.column("v").unwrap().values()[0], Scalar::Int64(30));
+    assert_eq!(t_neg.column("v").unwrap().values()[2], Scalar::Int64(50));
+
+    // ── Series.head/tail same semantics ─────────────────────────
+    let s = df.column("v").expect("v column").clone();
+    let series = Series::new("v", df.index().clone(), s)?;
+    let s_head = series.head(2)?;
+    assert_eq!(s_head.len(), 2);
+    let s_tail = series.tail(2)?;
+    assert_eq!(s_tail.len(), 2);
+    assert_eq!(s_tail.values()[1], Scalar::Int64(50));
+    Ok(())
+}
+
 /// fd90.59: Index manipulation methods (insert / delete / take /
 /// repeat / append). Pandas-parity surface for index editing;
 /// uncovered by integration tests.
