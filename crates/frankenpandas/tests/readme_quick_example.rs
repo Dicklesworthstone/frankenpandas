@@ -2794,6 +2794,39 @@ fn readme_string_accessor_compiles_and_runs() -> Result<(), Box<dyn std::error::
     let _ = s.str().count("o")?;
     // extractall — DataFrame of regex captures across all matches.
     let _ = s.str().extractall(r"(\w+)")?;
+
+    // fd90.248: more StringAccessor methods.
+    // contains_any — true if any pattern matches.
+    let _ = s.str().contains_any(&["Foo", "abc"])?;
+    // count_literal — count exact substring occurrences.
+    let _ = s.str().count_literal("o")?;
+    // decode / encode — pass-through round-trip (UTF-8 only today).
+    let _ = s.str().encode("utf-8")?;
+    let _ = s.str().decode("utf-8")?;
+    // expandtabs — replace \t with N spaces.
+    let _ = s.str().expandtabs(4)?;
+    // strip_chars — strip arbitrary chars from both ends.
+    let _ = s.str().strip_chars(" *")?;
+    // slice_replace — replace [start, stop) with repl string.
+    let _ = s.str().slice_replace(0, Some(2), "**")?;
+    // replace_regex_all — like replace_regex but global.
+    let _ = s.str().replace_regex_all(r"\w", "X")?;
+    // extract_to_frame — DataFrame of named captures.
+    let _ = s.str().extract_to_frame(r"(?P<word>\w+)")?;
+    // split_expand — DataFrame with one column per split position.
+    let _ = csv.str().split_expand(",")?;
+    // wrap — wrap each row to width.
+    let _ = s.str().wrap(8)?;
+    // translate — character-by-character substitution table.
+    let _ = s.str().translate("abc", "ABC")?;
+    // get_dummies (str variant) — sep-separated tag → one-hot DataFrame.
+    let tag_labels: Vec<IndexLabel> = (0..3i64).map(IndexLabel::Int64).collect();
+    let tags = Series::from_values(
+        "tags",
+        tag_labels,
+        vec!["a|b".into(), "b|c".into(), "a|c".into()],
+    )?;
+    let _ = tags.str().get_dummies("|")?;
     Ok(())
 }
 
