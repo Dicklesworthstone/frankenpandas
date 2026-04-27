@@ -936,6 +936,22 @@ fn readme_element_wise_operations_compiles_and_runs() -> Result<(), Box<dyn std:
     let _ = bigger.nlargest(3)?;
     let _ = bigger.nsmallest(2)?;
 
+    // fd90.235: Series.apply / map_func / map (pandas Series.apply/map).
+    // apply takes Fn(&Scalar) -> Scalar.
+    let doubled = bigger.apply(|s| match s {
+        Scalar::Float64(v) => Scalar::Float64(v * 2.0),
+        other => other.clone(),
+    })?;
+    assert_eq!(doubled.len(), bigger.len());
+    // map_func — alias for apply.
+    let _ = bigger.map_func(|s| s.clone())?;
+    // map — slice of (from, to) pairs (pandas-style mapping dictionary).
+    let mapped = bigger.map(&[
+        (Scalar::Float64(1.0), Scalar::Float64(100.0)),
+        (Scalar::Float64(2.0), Scalar::Float64(200.0)),
+    ])?;
+    assert_eq!(mapped.len(), bigger.len());
+
     // fd90.232 + fd90.233: DataFrame-level reductions. fd90.233 added
     // pandas-parity bare-name aliases (min/max/std/var/median/prod/
     // skew/kurt/kurtosis/sem) over the existing *_agg methods.
