@@ -396,8 +396,12 @@ pub mod prelude {
         join_series,
         merge_asof,
         merge_asof_with_options,
+        merge_dataframes,
         merge_dataframes_on,
+        merge_dataframes_on_with,
+        merge_dataframes_on_with_options,
         merge_ordered,
+        join_series_with_options,
         // IO — readers (in-memory + path; covers all 8 documented formats)
         read_csv,
         read_csv_str,

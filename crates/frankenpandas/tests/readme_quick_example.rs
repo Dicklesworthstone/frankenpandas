@@ -120,6 +120,23 @@ fn readme_merge_with_options_compiles_and_runs() -> Result<(), Box<dyn std::erro
 
     // merge_ordered — outer join with optional fill_method.
     let _ordered = merge_ordered(&df1, &df2, &["key"], None)?;
+
+    // fd90.287: cover the remaining advanced merge/join variants.
+    // merge_dataframes — single-column-key alias of merge_dataframes_on.
+    let _ = merge_dataframes(&df1, &df2, "key", JoinType::Inner)?;
+    // merge_dataframes_on_with — different left_on / right_on key names.
+    let _ = merge_dataframes_on_with(&df1, &df2, &["key"], &["key"], JoinType::Inner)?;
+    // merge_dataframes_on_with_options — full MergeExecutionOptions support.
+    let _ = merge_dataframes_on_with_options(
+        &df1,
+        &df2,
+        &["key"],
+        &["key"],
+        JoinType::Inner,
+        MergeExecutionOptions::default(),
+    )?;
+    // join_series_with_options — pairs with JoinExecutionOptions.
+    let _ = join_series_with_options(&s_a, &s_b, JoinType::Inner, JoinExecutionOptions::default())?;
     Ok(())
 }
 
