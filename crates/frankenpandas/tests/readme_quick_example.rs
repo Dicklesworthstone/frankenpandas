@@ -3802,6 +3802,61 @@ fn readme_serialization_compiles_and_runs() -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
+/// fd90.70: Timedelta::from_unit + Period::cmp_same_freq +
+/// TimedeltaComponents field coverage. Three under-tested
+/// pandas-parity methods on Timedelta/Period.
+#[test]
+fn readme_timedelta_period_helpers() -> Result<(), Box<dyn std::error::Error>> {
+    use std::cmp::Ordering;
+
+    // ── Timedelta::from_unit ─────────────────────────────────────
+    // 2.5 hours = 9000 seconds = 9000 * NANOS_PER_SEC ns.
+    let two_half_hours = Timedelta::from_unit(2.5, "h")?;
+    assert_eq!(two_half_hours, 2 * Timedelta::NANOS_PER_HOUR + 30 * Timedelta::NANOS_PER_MIN);
+    // 1.5 days = 1d + 12h.
+    let day_and_half = Timedelta::from_unit(1.5, "D")?;
+    assert_eq!(
+        day_and_half,
+        Timedelta::NANOS_PER_DAY + 12 * Timedelta::NANOS_PER_HOUR
+    );
+    // 1000 ms = 1 sec.
+    let one_sec = Timedelta::from_unit(1000.0, "ms")?;
+    assert_eq!(one_sec, Timedelta::NANOS_PER_SEC);
+
+    // ── TimedeltaComponents — full struct fields ─────────────────
+    // 1 day + 2 hours + 30 minutes + 45 seconds + 123 microseconds.
+    let composite = Timedelta::NANOS_PER_DAY
+        + 2 * Timedelta::NANOS_PER_HOUR
+        + 30 * Timedelta::NANOS_PER_MIN
+        + 45 * Timedelta::NANOS_PER_SEC
+        + 123 * Timedelta::NANOS_PER_MICRO;
+    let comps = Timedelta::components(composite);
+    assert_eq!(comps.days, 1);
+    assert_eq!(comps.hours, 2);
+    assert_eq!(comps.minutes, 30);
+    assert_eq!(comps.seconds, 45);
+    // milliseconds + microseconds are derived from the residual.
+    let _ = comps.milliseconds;
+    let _ = comps.microseconds;
+    let _ = comps.nanoseconds;
+
+    // ── Period::cmp_same_freq ────────────────────────────────────
+    let q1 = Period::new(216, PeriodFreq::Quarterly);
+    let q2 = Period::new(217, PeriodFreq::Quarterly);
+    let q1_again = Period::new(216, PeriodFreq::Quarterly);
+    assert_eq!(q1.cmp_same_freq(&q2), Some(Ordering::Less));
+    assert_eq!(q2.cmp_same_freq(&q1), Some(Ordering::Greater));
+    assert_eq!(q1.cmp_same_freq(&q1_again), Some(Ordering::Equal));
+
+    // Different frequencies → None (incompatible).
+    let m1 = Period::new(216, PeriodFreq::Monthly);
+    assert_eq!(q1.cmp_same_freq(&m1), None);
+
+    // Same incompatibility on diff:
+    assert_eq!(q1.diff(&m1), None);
+    Ok(())
+}
+
 /// fd90.69: Timestamp arithmetic methods. 6+ documented methods on
 /// Timestamp uncovered by integration tests (add_timedelta,
 /// sub_timedelta, sub_timestamp, floor_to, ceil_to, round_to,
