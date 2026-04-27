@@ -952,6 +952,35 @@ fn readme_element_wise_operations_compiles_and_runs() -> Result<(), Box<dyn std:
     ])?;
     assert_eq!(mapped.len(), bigger.len());
 
+    // fd90.236: Series.unique / duplicated + round (Series + DataFrame).
+    // unique returns Vec<Scalar> (not Series, no ?-handling).
+    let dup_labels: Vec<IndexLabel> = (0..5i64).map(IndexLabel::Int64).collect();
+    let with_dups = Series::from_values(
+        "x",
+        dup_labels,
+        vec![
+            Scalar::Int64(1),
+            Scalar::Int64(2),
+            Scalar::Int64(1),
+            Scalar::Int64(3),
+            Scalar::Int64(2),
+        ],
+    )?;
+    let uniq = with_dups.unique();
+    assert_eq!(uniq.len(), 3); // 1, 2, 3 in first-seen order
+    let dup_mask = with_dups.duplicated()?;
+    assert_eq!(dup_mask.len(), 5);
+
+    // Series.round / DataFrame.round — element-wise.
+    let pi_labels: Vec<IndexLabel> = (0..2i64).map(IndexLabel::Int64).collect();
+    let pi_series = Series::from_values(
+        "pi",
+        pi_labels,
+        vec![Scalar::Float64(3.14159), Scalar::Float64(2.71828)],
+    )?;
+    let _rounded_s = pi_series.round(2)?;
+    let _rounded_df = df.round(0)?;
+
     // fd90.232 + fd90.233: DataFrame-level reductions. fd90.233 added
     // pandas-parity bare-name aliases (min/max/std/var/median/prod/
     // skew/kurt/kurtosis/sem) over the existing *_agg methods.
