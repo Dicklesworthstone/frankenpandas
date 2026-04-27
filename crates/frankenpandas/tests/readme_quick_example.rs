@@ -612,11 +612,28 @@ fn readme_window_operations_compiles_and_runs() -> Result<(), Box<dyn std::error
     let _ = e.var()?;
     let _ = e.median()?;
     let _ = e.apply(|vals: &[f64]| vals.iter().copied().sum::<f64>())?;
+    // fd90.283: rest of Expanding (count/quantile/kurt/skew/corr/cov).
+    let _ = e.count()?;
+    let _ = e.quantile(0.5)?;
+    let _ = e.kurt()?;
+    let _ = e.skew()?;
+    // Build a 100-element companion for corr/cov (matches `series` length).
+    let exp_other = Series::from_values(
+        "exp_other",
+        (0..100i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+        (0..100i64).map(|v| Scalar::Float64((v + 5) as f64)).collect::<Vec<_>>(),
+    )?;
+    let _ = e.corr(&exp_other)?;
+    let _ = e.cov(&exp_other)?;
 
     // ── Series EWM — std + var (mean already covered above).
     let ew = series.ewm(Some(20.0), None);
     let _ = ew.std()?;
     let _ = ew.var()?;
+    // fd90.283: remaining Series Ewm methods.
+    let _ = ew.sum()?;
+    let _ = ew.corr(&exp_other)?;
+    let _ = ew.cov(&exp_other)?;
 
     // ── Series Resample — needs datetime-indexed Series.
     let date_labels: Vec<IndexLabel> = vec![
