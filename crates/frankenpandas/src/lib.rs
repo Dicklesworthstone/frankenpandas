@@ -35,9 +35,9 @@ pub use fp_index::{
 
 pub use fp_frame::{
     CategoricalAccessor, CategoricalMetadata, ConcatJoin, DataFrame, DataFrameColumnInput,
-    DropNaHow, FrameError, Series, SeriesResetIndexResult, ToDatetimeOptions, ToDatetimeOrigin,
-    ToTimedeltaErrors, ToTimedeltaOptions, TzAmbiguousPolicy, TzLocalizeOptions,
-    TzNonexistentPolicy,
+    DataFrameDictResult, DataFrameDictSplit, DataFrameDictTight, DropNaHow, FrameError, Series,
+    SeriesResetIndexResult, ToDatetimeOptions, ToDatetimeOrigin, ToTimedeltaErrors,
+    ToTimedeltaOptions, TzAmbiguousPolicy, TzLocalizeOptions, TzNonexistentPolicy,
 };
 
 // ── Module-level functions (like pd.concat, pd.to_datetime, etc.) ────
@@ -239,6 +239,11 @@ pub mod prelude {
         ExcelWriteOptions,
         DataFrame,
         DataFrameColumnInput,
+        // fd90.258: DataFrameDictResult is the return type of df.to_dict(orient);
+        // DictSplit / DictTight are variant payloads.
+        DataFrameDictResult,
+        DataFrameDictSplit,
+        DataFrameDictTight,
         DropNaHow,
         DuplicateKeep,
         // Traits
@@ -696,6 +701,10 @@ mod tests {
         let _ = merge_asof_with_options;
         // fd90.257: JoinedSeries (return type of join_series).
         let _is_joined_series: fn(JoinedSeries) -> _ = |x| x;
+        // fd90.258: DataFrameDictResult + variant payloads.
+        let _is_dict_result: fn(DataFrameDictResult) -> _ = |x| x;
+        let _is_dict_split: fn(DataFrameDictSplit) -> _ = |x| x;
+        let _is_dict_tight: fn(DataFrameDictTight) -> _ = |x| x;
 
         // fd90.208: pandas-style top-level null checks + dtype helpers.
         let na_check = vec![Scalar::Int64(1), Scalar::Null(NullKind::NaN)];
