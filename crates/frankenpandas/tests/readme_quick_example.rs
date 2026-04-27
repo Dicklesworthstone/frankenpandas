@@ -2755,6 +2755,45 @@ fn readme_string_accessor_compiles_and_runs() -> Result<(), Box<dyn std::error::
     let lens = s.str().len()?;
     assert_eq!(lens.len(), n);
     let _ = s.str().get(0)?;
+
+    // fd90.247: more StringAccessor methods (~15 additions).
+    // Case (round out the 6 README cells).
+    let _ = s.str().casefold()?;
+    let _ = s.str().swapcase()?;
+    // Search positions.
+    let _ = s.str().find("o")?;
+    let _ = s.str().rfind("l")?;
+    let _ = s.str().index_of("e")?;
+    let _ = s.str().rindex_of("d")?;
+    // Predicates (round out the 9 README cells).
+    let _ = s.str().isalnum()?;
+    let _ = s.str().isdecimal()?;
+    let _ = s.str().islower()?;
+    let _ = s.str().isnumeric()?;
+    let _ = s.str().isspace()?;
+    let _ = s.str().istitle()?;
+    let _ = s.str().isupper()?;
+    // Concatenation across rows: cat returns a single String.
+    let _ = s.str().cat("|")?;
+    // Whitespace: lstrip with explicit chars.
+    let _ = s.str().lstrip_chars(" \t")?;
+    // Right-justify (the left-justify variant was in fd90.194).
+    let _ = s.str().rjust(10, ' ')?;
+    // Partition splits each row at first sep into (before, sep, after) Series.
+    let part_labels: Vec<IndexLabel> = (0..2i64).map(IndexLabel::Int64).collect();
+    let phones2 = Series::from_values(
+        "phones",
+        part_labels,
+        vec!["555-1234".into(), "555-9876".into()],
+    )?;
+    let _ = phones2.str().partition("-")?;
+    let _ = phones2.str().rpartition("-")?;
+    // Normalize Unicode form ("NFC" / "NFD" / "NFKC" / "NFKD").
+    let _ = s.str().normalize("NFC")?;
+    // Count occurrences (literal, not regex).
+    let _ = s.str().count("o")?;
+    // extractall — DataFrame of regex captures across all matches.
+    let _ = s.str().extractall(r"(\w+)")?;
     Ok(())
 }
 
