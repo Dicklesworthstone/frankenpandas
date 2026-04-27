@@ -3633,6 +3633,27 @@ fn readme_serialization_compiles_and_runs() -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
+/// fd90.14: compile guard for fp-types user-facing helpers promoted
+/// to the prelude (paired with Scalar::Datetime64/Timedelta64/Period/
+/// Interval workflows from fd90.263 / fd90.271).
+#[allow(dead_code)]
+fn fd90_014_fp_types_helpers_via_prelude(
+    _interval: Interval,
+    _ic: IntervalClosed,
+    _period: Period,
+    _pf: PeriodFreq,
+    _td: Timedelta,
+    _tdc: TimedeltaComponents,
+    _tde: TimedeltaError,
+    _ts: Timestamp,
+) {
+    // Function pointers: prove module-level helpers are reachable via
+    // prelude alone (signatures vary, just exercise the names).
+    let _ = period_range;
+    let _ = interval_range_by_periods;
+    let _ = interval_range_by_step;
+}
+
 /// fd90.13: compile guard for the 9 SQL schema/iterator return types
 /// promoted to the prelude. Naming each type via the prelude alone
 /// proves the surface is reachable; pairs with the SqlInspector

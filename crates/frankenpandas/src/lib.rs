@@ -364,6 +364,22 @@ pub mod prelude {
         // to_datetime_with_options function (already in the prelude).
         ToDatetimeOptions,
         ToDatetimeOrigin,
+        // fd90.14: pandas-equivalent helper types for the richer
+        // Scalar::Datetime64 / Timedelta64 / Period / Interval
+        // workflows (fd90.263 / fd90.271). Users typically interact via
+        // Scalar variants, but parsing, inspection, and constructed
+        // ranges need the helper types named.
+        Interval,
+        IntervalClosed,
+        Period,
+        PeriodFreq,
+        Timedelta,
+        TimedeltaComponents,
+        TimedeltaError,
+        Timestamp,
+        period_range,
+        interval_range_by_periods,
+        interval_range_by_step,
         // fd90.218: timedelta + tz option surfaces.
         ToTimedeltaErrors,
         ToTimedeltaOptions,
