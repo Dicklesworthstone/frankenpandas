@@ -841,6 +841,15 @@ fn readme_element_wise_operations_compiles_and_runs() -> Result<(), Box<dyn std:
     let _ = col_a_series.le_scalar(&Scalar::Int64(20))?;
     let _ = col_a_series.ge_scalar(&Scalar::Int64(20))?;
 
+    // fd90.225: DataFrame.{eq,ne,gt,lt,le,ge}_scalar_df — same shortcuts
+    // at the DataFrame level (each returns a Bool DataFrame).
+    let _ = df.eq_scalar_df(&Scalar::Int64(10))?;
+    let _ = df.ne_scalar_df(&Scalar::Int64(10))?;
+    let _ = df.gt_scalar_df(&Scalar::Int64(15))?;
+    let _ = df.lt_scalar_df(&Scalar::Int64(35))?;
+    let _ = df.le_scalar_df(&Scalar::Int64(20))?;
+    let _ = df.ge_scalar_df(&Scalar::Int64(20))?;
+
     // Column.binary_numeric / binary_comparison — exercise via DataFrame columns.
     let col_a = df.column("a").expect("column a").clone();
     let col_b = df.column("b").expect("column b").clone();
