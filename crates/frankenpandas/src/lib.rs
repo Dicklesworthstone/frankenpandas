@@ -108,6 +108,14 @@ pub use fp_io::{
     read_csv_with_options_path,
     read_excel,
     read_excel_bytes,
+    // fd90.243: multi-sheet + index-cols Excel readers (pandas-equivalent
+    // pd.read_excel(sheet_name=None) shape returning dict of DataFrames).
+    read_excel_bytes_with_index_cols,
+    read_excel_sheets,
+    read_excel_sheets_bytes,
+    read_excel_sheets_ordered,
+    read_excel_sheets_ordered_bytes,
+    read_excel_with_index_cols,
     // Feather (Arrow IPC)
     read_feather,
     read_feather_bytes,
@@ -322,6 +330,13 @@ pub mod prelude {
         read_csv_with_options_path,
         read_excel,
         read_excel_bytes,
+        // fd90.243: multi-sheet + index-cols Excel readers.
+        read_excel_bytes_with_index_cols,
+        read_excel_sheets,
+        read_excel_sheets_bytes,
+        read_excel_sheets_ordered,
+        read_excel_sheets_ordered_bytes,
+        read_excel_with_index_cols,
         read_feather,
         read_feather_bytes,
         read_ipc_stream_bytes,
@@ -645,6 +660,13 @@ mod tests {
         // fd90.207: Excel options + read_csv_with_options now in prelude.
         let _ = ExcelReadOptions::default();
         let _ = read_csv_with_options;
+        // fd90.243: multi-sheet + index-cols Excel readers.
+        let _ = read_excel_with_index_cols;
+        let _ = read_excel_bytes_with_index_cols;
+        let _ = read_excel_sheets;
+        let _ = read_excel_sheets_bytes;
+        let _ = read_excel_sheets_ordered;
+        let _ = read_excel_sheets_ordered_bytes;
         // fd90.215: path-based variant for completeness.
         let _ = read_csv_with_options_path;
         // fd90.219: CsvOnBadLines enum (field type for CsvReadOptions.on_bad_lines).
