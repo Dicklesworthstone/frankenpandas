@@ -195,6 +195,61 @@ fn readme_quick_start_round_trip_through_sqlite() -> Result<(), Box<dyn std::err
     assert!(!reflected.unique_constraints.is_empty());
     // Missing table → Ok(None).
     assert!(inspector.reflect_table("does_not_exist", None)?.is_none());
+
+    // fd90.10: cover the remaining SqlInspector entry points.
+    // dialect_name() — sqlite backend reports "sqlite".
+    assert_eq!(inspector.dialect_name(), "sqlite");
+
+    // server_version() — rusqlite override returns Some(library version).
+    let server_ver = inspector.server_version()?;
+    assert!(server_ver.is_some(), "sqlite server_version: {server_ver:?}");
+
+    // max_identifier_length() — Option<usize> probe; SQLite default impl
+    // may return None (no documented hard limit). Just exercise the call.
+    let _max_ident = inspector.max_identifier_length();
+
+    // table_exists(...) — schema-aware existence check.
+    assert!(inspector.table_exists("parent", None)?);
+    assert!(!inspector.table_exists("ghost_table", None)?);
+
+    // table_comment(...) — SQLite has no column-comment storage, so
+    // rusqlite override returns Ok(None). Verify the call dispatches.
+    assert!(inspector.table_comment("parent", None)?.is_none());
+
+    // has_column(...) — true for present, false for missing/ghost.
+    assert!(inspector.has_column("parent", "name", None)?);
+    assert!(!inspector.has_column("parent", "ghost_col", None)?);
+    assert!(!inspector.has_column("ghost_table", "id", None)?);
+
+    // column(...) — Option<SqlColumnSchema> for one column lookup.
+    let id_col = inspector
+        .column("parent", "id", None)?
+        .expect("parent.id present");
+    assert_eq!(id_col.name, "id");
+    assert_eq!(id_col.primary_key_ordinal, Some(0));
+    assert!(inspector.column("parent", "ghost", None)?.is_none());
+
+    // reflect_all_tables(None) — bundles for parent + child + sqlite-
+    // generated tables. At minimum both user tables show up.
+    let all_tables = inspector.reflect_all_tables(None)?;
+    let table_names: std::collections::BTreeSet<_> =
+        all_tables.iter().map(|b| b.table_name.as_str()).collect();
+    assert!(table_names.contains("parent"));
+    assert!(table_names.contains("child"));
+
+    // reflect_all_views(None) — one bundle for v_child. Views have no
+    // constraints, but PRAGMA table_info returns the column shape.
+    let all_views = inspector.reflect_all_views(None)?;
+    let v_child = all_views
+        .iter()
+        .find(|b| b.table_name == "v_child")
+        .expect("v_child reflected");
+    assert!(!v_child.columns.is_empty());
+    assert!(v_child.foreign_keys.is_empty());
+
+    // inspect(&conn) — module-level constructor sugar; same surface.
+    let via_free_fn = inspect(&conn);
+    assert_eq!(via_free_fn.dialect_name(), "sqlite");
     Ok(())
 }
 

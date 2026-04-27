@@ -383,6 +383,11 @@ pub mod prelude {
         SqlInspector,
         SqlReadOptions,
         SqlWriteOptions,
+        // fd90.10: inspect() is the documented convenience constructor
+        // for SqlInspector (fd90.38 / br-frankenpandas-szs9). It was
+        // exported at the crate root but missed prelude promotion —
+        // pairs with SqlInspector being in the prelude already.
+        inspect,
         read_sql_chunks,
         SqlIfExists,
         // Module-level functions (concat + join/merge family)
