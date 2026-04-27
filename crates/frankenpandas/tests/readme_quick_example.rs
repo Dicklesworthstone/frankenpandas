@@ -3802,6 +3802,75 @@ fn readme_serialization_compiles_and_runs() -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
+/// fd90.63: DataFrame scalar reductions (sum/mean/min/max/std/var/
+/// median) value-asserted. Existing tests called these but only as
+/// `let _ = df.sum()?` — return-Series values were uncovered.
+#[test]
+fn readme_dataframe_scalar_reductions() -> Result<(), Box<dyn std::error::Error>> {
+    // Two columns: a=[1..5] (sum=15), b=[2..6] (sum=20).
+    let df = read_csv_str("a,b\n1,2\n2,3\n3,4\n4,5\n5,6")?;
+
+    fn num(s: &Scalar) -> Option<f64> {
+        match s {
+            Scalar::Int64(v) => Some(*v as f64),
+            Scalar::Float64(v) => Some(*v),
+            _ => None,
+        }
+    }
+
+    // ── df.sum() → Series with one row per column ───────────────
+    let sum = df.sum()?;
+    // Returned Series has 2 rows (one per column).
+    assert_eq!(sum.len(), 2);
+    let sum_vals: Vec<f64> = sum.values().iter().filter_map(num).collect();
+    assert_eq!(sum_vals.len(), 2);
+    // Order may follow column-iteration; assert via membership on values.
+    assert!(sum_vals.contains(&15.0));
+    assert!(sum_vals.contains(&20.0));
+
+    // ── df.mean() ───────────────────────────────────────────────
+    let mean = df.mean()?;
+    let mean_vals: Vec<f64> = mean.values().iter().filter_map(num).collect();
+    assert!(mean_vals.contains(&3.0));
+    assert!(mean_vals.contains(&4.0));
+
+    // ── df.min() / df.max() ─────────────────────────────────────
+    let min = df.min()?;
+    let min_vals: Vec<f64> = min.values().iter().filter_map(num).collect();
+    assert!(min_vals.contains(&1.0));
+    assert!(min_vals.contains(&2.0));
+
+    let max = df.max()?;
+    let max_vals: Vec<f64> = max.values().iter().filter_map(num).collect();
+    assert!(max_vals.contains(&5.0));
+    assert!(max_vals.contains(&6.0));
+
+    // ── df.median() ─────────────────────────────────────────────
+    let median = df.median()?;
+    let median_vals: Vec<f64> = median.values().iter().filter_map(num).collect();
+    assert!(median_vals.contains(&3.0));
+    assert!(median_vals.contains(&4.0));
+
+    // ── df.std() / df.var() — 2.5 sample variance for [1..5] ───
+    let var = df.var()?;
+    let var_vals: Vec<f64> = var.values().iter().filter_map(num).collect();
+    // Both columns have variance 2.5.
+    for v in &var_vals {
+        assert!((v - 2.5).abs() < 1e-6, "expected 2.5, got {v}");
+    }
+
+    let std = df.std()?;
+    let std_vals: Vec<f64> = std.values().iter().filter_map(num).collect();
+    let expected_std = 2.5_f64.sqrt();
+    for v in &std_vals {
+        assert!(
+            (v - expected_std).abs() < 1e-6,
+            "expected {expected_std}, got {v}"
+        );
+    }
+    Ok(())
+}
+
 /// fd90.62: Series scalar reductions (sum/mean/min/max/std/var/median)
 /// directly asserted on results. Existing tests called these on
 /// Rolling/Expanding/Ewm wrappers but Series-direct outputs were
