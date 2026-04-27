@@ -548,6 +548,11 @@ pub mod prelude {
         // match on Result<_, DateRangeError> from the prelude alone.
         DateRangeError,
         TimedeltaRangeError,
+        // fd90.33: apply_date_offset is the primary use-site for
+        // DateOffset (above). Without it in the prelude the user can
+        // name the offset variant but can't apply it from prelude
+        // alone — paired-surface defect.
+        apply_date_offset,
         infer_dtype,
         isna,
         isnull,

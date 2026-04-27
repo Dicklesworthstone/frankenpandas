@@ -3712,6 +3712,75 @@ fn readme_serialization_compiles_and_runs() -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
+/// fd90.33: AlignMode + DateOffset + date_range/bdate_range functional
+/// coverage. Existing tests only exercised AlignMode::Outer and the
+/// DateOffset::Day variant in name-only form. date_range/bdate_range
+/// were in the prelude but never invoked.
+#[test]
+fn readme_align_and_date_offset_round_trip() -> Result<(), Box<dyn std::error::Error>> {
+    // ── AlignMode variants ──────────────────────────────────────
+    // df_a index 0,1,2; df_b index 1,2,3. Inner shares {1,2}; Outer
+    // unions to {0,1,2,3}; Left keeps {0,1,2}; Right keeps {1,2,3}.
+    let labels1: Vec<IndexLabel> = vec![
+        IndexLabel::Int64(0),
+        IndexLabel::Int64(1),
+        IndexLabel::Int64(2),
+    ];
+    let labels2: Vec<IndexLabel> = vec![
+        IndexLabel::Int64(1),
+        IndexLabel::Int64(2),
+        IndexLabel::Int64(3),
+    ];
+    let s1 = Series::from_values(
+        "a",
+        labels1,
+        vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+    )?;
+    let s2 = Series::from_values(
+        "b",
+        labels2,
+        vec![Scalar::Int64(100), Scalar::Int64(200), Scalar::Int64(300)],
+    )?;
+    let df_a = DataFrame::from_series(vec![s1])?;
+    let df_b = DataFrame::from_series(vec![s2])?;
+
+    let (left_inner, _) = df_a.align_on_index(&df_b, AlignMode::Inner)?;
+    assert_eq!(left_inner.index().len(), 2);
+
+    let (left_outer, _) = df_a.align_on_index(&df_b, AlignMode::Outer)?;
+    assert_eq!(left_outer.index().len(), 4);
+
+    let (left_left, _) = df_a.align_on_index(&df_b, AlignMode::Left)?;
+    assert_eq!(left_left.index().len(), 3);
+
+    let (left_right, _) = df_a.align_on_index(&df_b, AlignMode::Right)?;
+    assert_eq!(left_right.index().len(), 3);
+
+    // ── DateOffset variants ──────────────────────────────────────
+    // Apply each offset to a fixed timestamp; assert result is finite +
+    // moves in the documented direction.
+    let base = "2024-01-15";
+    let plus_day = apply_date_offset(base, DateOffset::Day(7))?;
+    let plus_bday = apply_date_offset(base, DateOffset::BusinessDay(5))?;
+    let plus_mend = apply_date_offset(base, DateOffset::MonthEnd(1))?;
+    // All three offsets are positive, so result > base nanos.
+    let base_ns = apply_date_offset(base, DateOffset::Day(0))?;
+    assert!(plus_day > base_ns);
+    assert!(plus_bday > base_ns);
+    assert!(plus_mend > base_ns);
+
+    // ── date_range ───────────────────────────────────────────────
+    // Daily range over 5 days starting 2024-01-15.
+    let day_ns = Timedelta::NANOS_PER_DAY;
+    let range = date_range(Some("2024-01-15"), None, Some(5), day_ns, None)?;
+    assert_eq!(range.len(), 5);
+
+    // ── bdate_range ──────────────────────────────────────────────
+    let brange = bdate_range(Some("2024-01-15"), None, Some(5), None)?;
+    assert_eq!(brange.len(), 5);
+    Ok(())
+}
+
 /// fd90.31: CsvOnBadLines + ToTimedeltaErrors variant coverage. Both
 /// enums have observable behavioral differences but only the default
 /// path was being exercised by integration tests.
