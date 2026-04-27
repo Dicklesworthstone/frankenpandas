@@ -3802,6 +3802,68 @@ fn readme_serialization_compiles_and_runs() -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
+/// fd90.64: NanOps numeric value assertions. The existing
+/// readme_nanops test only asserts on Scalar variant (Float64(_))
+/// without pinning the numeric output. A regression in any
+/// null-skipping algorithm would not surface from shape-only
+/// matching.
+#[test]
+fn readme_nanops_value_assertions() -> Result<(), Box<dyn std::error::Error>> {
+    // [1, 2, NaN, 4, 5] — 4 non-missing values.
+    let values = vec![
+        Scalar::Float64(1.0),
+        Scalar::Float64(2.0),
+        Scalar::Null(NullKind::NaN),
+        Scalar::Float64(4.0),
+        Scalar::Float64(5.0),
+    ];
+
+    fn num(s: &Scalar) -> f64 {
+        match s {
+            Scalar::Int64(v) => *v as f64,
+            Scalar::Float64(v) => *v,
+            _ => panic!("expected numeric, got {s:?}"),
+        }
+    }
+
+    // sum (1+2+4+5) = 12
+    assert_eq!(num(&nansum(&values)), 12.0);
+    // mean 12/4 = 3
+    assert_eq!(num(&nanmean(&values)), 3.0);
+    // median (sorted 1,2,4,5 → median 3)
+    assert_eq!(num(&nanmedian(&values)), 3.0);
+    // min/max
+    assert_eq!(num(&nanmin(&values)), 1.0);
+    assert_eq!(num(&nanmax(&values)), 5.0);
+    // ptp = max - min = 4
+    assert_eq!(num(&nanptp(&values)), 4.0);
+    // prod = 1*2*4*5 = 40
+    assert_eq!(num(&nanprod(&values)), 40.0);
+    // nancumsum: skip NaN at index 2 (preserve as NaN/Null in output)
+    let csum = nancumsum(&values);
+    assert_eq!(csum.len(), 5);
+    // First 2 elements: cumulative 1.0, 3.0
+    assert_eq!(num(&csum[0]), 1.0);
+    assert_eq!(num(&csum[1]), 3.0);
+    // Index 2 (was NaN): pandas-style nancumsum keeps it as NaN/Null
+    // in the output to preserve length while skipping in the running
+    // total. The next non-null position (index 3) should be 3+4=7.
+    assert_eq!(num(&csum[3]), 7.0);
+    assert_eq!(num(&csum[4]), 12.0);
+
+    // q50 (median equivalent) = 3.0
+    assert_eq!(num(&nanquantile(&values, 0.5)), 3.0);
+
+    // argmax → Some(4) (index of max=5.0 is position 4).
+    assert_eq!(nanargmax(&values), Some(4));
+    // argmin → Some(0) (index of min=1.0 is position 0).
+    assert_eq!(nanargmin(&values), Some(0));
+
+    // nunique = 4 (4 distinct non-missing values).
+    assert_eq!(nannunique(&values), Scalar::Int64(4));
+    Ok(())
+}
+
 /// fd90.63: DataFrame scalar reductions (sum/mean/min/max/std/var/
 /// median) value-asserted. Existing tests called these but only as
 /// `let _ = df.sum()?` — return-Series values were uncovered.
