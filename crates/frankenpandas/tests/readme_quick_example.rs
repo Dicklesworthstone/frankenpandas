@@ -250,6 +250,54 @@ fn readme_quick_start_round_trip_through_sqlite() -> Result<(), Box<dyn std::err
     // inspect(&conn) — module-level constructor sugar; same surface.
     let via_free_fn = inspect(&conn);
     assert_eq!(via_free_fn.dialect_name(), "sqlite");
+
+    // fd90.11: module-level free-function SQL helpers (fd90.21-32).
+    // Each pairs 1:1 with a SqlInspector method — call each here and
+    // verify it agrees with the inspector's output for the same input.
+    let tables_via_fn = list_sql_tables(&conn, None)?;
+    assert_eq!(tables_via_fn, inspector.tables(None)?);
+
+    let views_via_fn = list_sql_views(&conn, None)?;
+    assert_eq!(views_via_fn, inspector.views(None)?);
+
+    let schemas_via_fn = list_sql_schemas(&conn)?;
+    assert_eq!(schemas_via_fn, inspector.schemas()?);
+
+    let table_schema_via_fn = sql_table_schema(&conn, "parent", None)?;
+    assert_eq!(table_schema_via_fn, inspector.columns("parent", None)?);
+    assert!(sql_table_schema(&conn, "ghost_table", None)?.is_none());
+
+    let pk_via_fn = sql_primary_key_columns(&conn, "parent", None)?;
+    assert_eq!(pk_via_fn, inspector.primary_key_columns("parent", None)?);
+
+    let indexes_via_fn = list_sql_indexes(&conn, "child", None)?;
+    assert_eq!(indexes_via_fn, inspector.indexes("child", None)?);
+
+    let fks_via_fn = list_sql_foreign_keys(&conn, "child", None)?;
+    assert_eq!(fks_via_fn, inspector.foreign_keys("child", None)?);
+
+    let ucs_via_fn = list_sql_unique_constraints(&conn, "child", None)?;
+    assert_eq!(ucs_via_fn, inspector.unique_constraints("child", None)?);
+
+    let comment_via_fn = sql_table_comment(&conn, "parent", None)?;
+    assert_eq!(comment_via_fn, inspector.table_comment("parent", None)?);
+
+    let server_ver_via_fn = sql_server_version(&conn)?;
+    assert_eq!(server_ver_via_fn, inspector.server_version()?);
+
+    assert_eq!(sql_max_identifier_length(&conn), inspector.max_identifier_length());
+
+    // truncate_sql_table — DDL-style reset; emits DELETE FROM on SQLite
+    // (no native TRUNCATE). Insert a row, truncate, verify empty.
+    conn.execute(
+        "INSERT INTO parent (id, name) VALUES (1, 'doomed')",
+        [],
+    )?;
+    truncate_sql_table(&conn, "parent", None)?;
+    let post_truncate = inspector
+        .columns("parent", None)?
+        .expect("parent still present");
+    assert_eq!(post_truncate.columns.len(), 2);
     Ok(())
 }
 

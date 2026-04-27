@@ -388,6 +388,23 @@ pub mod prelude {
         // exported at the crate root but missed prelude promotion —
         // pairs with SqlInspector being in the prelude already.
         inspect,
+        // fd90.11: module-level SQL helpers (fd90.21-32). Free-function
+        // counterparts to SqlInspector methods — paired surface, same
+        // semantics. Promote alongside SqlInspector / inspect for
+        // surface consistency. README line 148 documents the
+        // introspection surface.
+        list_sql_foreign_keys,
+        list_sql_indexes,
+        list_sql_schemas,
+        list_sql_tables,
+        list_sql_unique_constraints,
+        list_sql_views,
+        sql_max_identifier_length,
+        sql_primary_key_columns,
+        sql_server_version,
+        sql_table_comment,
+        sql_table_schema,
+        truncate_sql_table,
         read_sql_chunks,
         SqlIfExists,
         // Module-level functions (concat + join/merge family)
