@@ -3657,6 +3657,57 @@ fn readme_serialization_compiles_and_runs() -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
+/// fd90.25: Non-default CsvWriteOptions coverage. Sister to fd90.24
+/// (read options). CsvWriteOptions has 5 pandas-parity fields and
+/// write_csv_string_with_options has been in the prelude since fd90.216
+/// — zero integration test coverage until now.
+#[test]
+fn readme_csv_write_options_round_trip() -> Result<(), Box<dyn std::error::Error>> {
+    let df = read_csv_str("ticker,price\nAAPL,185.50\nGOOG,140.25")?;
+
+    // ── 1. delimiter = b';' ─────────────────────────────────────
+    let semi_opts = CsvWriteOptions {
+        delimiter: b';',
+        ..CsvWriteOptions::default()
+    };
+    let semi_out = write_csv_string_with_options(&df, &semi_opts)?;
+    // Body uses ; separators. Header line has at least one ; per non-
+    // index column.
+    assert!(semi_out.contains(';'));
+    assert!(semi_out.contains("ticker;price"));
+
+    // ── 2. header = false ───────────────────────────────────────
+    let no_header_opts = CsvWriteOptions {
+        header: false,
+        ..CsvWriteOptions::default()
+    };
+    let no_header_out = write_csv_string_with_options(&df, &no_header_opts)?;
+    // Output starts with data, not a header line.
+    assert!(!no_header_out.starts_with("ticker,price"));
+    assert!(no_header_out.contains("AAPL"));
+
+    // ── 3. na_rep = "NA" — null values render as "NA" ───────────
+    let with_null = read_csv_str("ticker,price\nAAPL,185.50\nGOOG,")?;
+    let na_opts = CsvWriteOptions {
+        na_rep: "NA".to_string(),
+        ..CsvWriteOptions::default()
+    };
+    let na_out = write_csv_string_with_options(&with_null, &na_opts)?;
+    // The empty price cell should round-trip as "NA".
+    assert!(na_out.contains("GOOG,NA"));
+
+    // ── 4. include_index = true + index_label ───────────────────
+    let with_index_opts = CsvWriteOptions {
+        include_index: true,
+        index_label: Some("row_id".to_string()),
+        ..CsvWriteOptions::default()
+    };
+    let idx_out = write_csv_string_with_options(&df, &with_index_opts)?;
+    // Header now leads with row_id.
+    assert!(idx_out.starts_with("row_id,"));
+    Ok(())
+}
+
 /// fd90.24: Non-default CsvReadOptions coverage. CsvReadOptions has
 /// 10+ pandas-parity fields but existing tests only use ::default().
 /// This exercises 6 of the most-used non-default settings end-to-end.
