@@ -1537,6 +1537,34 @@ fn readme_advanced_selection_compiles_and_runs() -> Result<(), Box<dyn std::erro
     let pcts = grades.value_counts_with_options(true, true, false, true)?;
     assert!(pcts.len() >= 1);
 
+    // fd90.229: 4 additional value_counts variants.
+    // Series.value_counts_bins — binning a numeric Series.
+    let num_labels: Vec<IndexLabel> = (0..6i64).map(IndexLabel::Int64).collect();
+    let nums = Series::from_values(
+        "x",
+        num_labels,
+        vec![
+            Scalar::Float64(1.0),
+            Scalar::Float64(2.5),
+            Scalar::Float64(4.0),
+            Scalar::Float64(5.5),
+            Scalar::Float64(7.0),
+            Scalar::Float64(9.0),
+        ],
+    )?;
+    let _ = nums.value_counts_bins(3)?;
+
+    // DataFrame.value_counts_per_column — per-column counts.
+    let cnt_df = read_csv_str("a,b\n1,x\n2,y\n1,x\n3,y")?;
+    let _ = cnt_df.value_counts_per_column()?;
+
+    // DataFrame.value_counts_map — BTreeMap<String, Series> per column.
+    let map = cnt_df.value_counts_map()?;
+    assert!(map.contains_key("a") || map.contains_key("b"));
+
+    // DataFrame.value_counts_subset — restrict to specific columns.
+    let _ = cnt_df.value_counts_subset(&["a"])?;
+
     // isin — fd90.182 ergonomics: &[&str] inferred to Vec<Scalar> via .into().
     let test_set: Vec<Scalar> = vec!["A".into(), "B".into()];
     let _mask = grades.isin(&test_set)?;
