@@ -1034,6 +1034,10 @@ fn readme_element_wise_operations_compiles_and_runs() -> Result<(), Box<dyn std:
     let _ = bigger.nlargest(3)?;
     let _ = bigger.nsmallest(2)?;
 
+    // fd90.278: Series.sample + argsort.
+    let _ = bigger.sample(Some(3), None, false, Some(42))?;
+    let _ = bigger.argsort(true)?;
+
     // fd90.235: Series.apply / map_func / map (pandas Series.apply/map).
     // apply takes Fn(&Scalar) -> Scalar.
     let doubled = bigger.apply(|s| match s {
