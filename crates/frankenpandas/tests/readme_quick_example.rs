@@ -3633,6 +3633,24 @@ fn readme_serialization_compiles_and_runs() -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
+/// fd90.13: compile guard for the 9 SQL schema/iterator return types
+/// promoted to the prelude. Naming each type via the prelude alone
+/// proves the surface is reachable; pairs with the SqlInspector
+/// coverage in fd90.9 / fd90.10 / fd90.11.
+#[allow(dead_code)]
+fn fd90_013_sql_schema_types_via_prelude(
+    _chunk: SqlChunkIterator,
+    _col: SqlColumnSchema,
+    _fk: SqlForeignKeySchema,
+    _idx: SqlIndexSchema,
+    _ichunk: SqlIndexedChunkIterator,
+    _q: SqlQueryResult,
+    _refl: SqlReflectedTable,
+    _table: SqlTableSchema,
+    _uc: SqlUniqueConstraintSchema,
+) {
+}
+
 /// fd90.12: Series ↔ Arrow array round-trip.
 ///
 /// README line 1580 documents Arrow interop as a public surface

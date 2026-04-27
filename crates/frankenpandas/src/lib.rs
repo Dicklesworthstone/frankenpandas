@@ -383,6 +383,20 @@ pub mod prelude {
         SqlInspector,
         SqlReadOptions,
         SqlWriteOptions,
+        // fd90.13: SQL schema/iterator return types. These are the public
+        // result types of already-promoted SqlInspector methods (and
+        // read_sql_chunks). Users calling inspector.columns() get back
+        // SqlTableSchema; they need to be able to name the type via the
+        // prelude alone. Same paired-surface pattern as fd90.10-12.
+        SqlChunkIterator,
+        SqlColumnSchema,
+        SqlForeignKeySchema,
+        SqlIndexSchema,
+        SqlIndexedChunkIterator,
+        SqlQueryResult,
+        SqlReflectedTable,
+        SqlTableSchema,
+        SqlUniqueConstraintSchema,
         // fd90.10: inspect() is the documented convenience constructor
         // for SqlInspector (fd90.38 / br-frankenpandas-szs9). It was
         // exported at the crate root but missed prelude promotion —
