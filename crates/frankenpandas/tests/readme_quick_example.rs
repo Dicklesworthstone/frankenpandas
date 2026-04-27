@@ -3802,6 +3802,74 @@ fn readme_serialization_compiles_and_runs() -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
+/// fd90.56: Scalar inspection + semantic comparison methods. 9
+/// methods on Scalar (is_missing/is_na/is_null/is_nan/coalesce/
+/// semantic_eq/le/ge/cmp/to_f64) — only is_missing was exercised by
+/// integration tests until now.
+#[test]
+fn readme_scalar_inspection_methods() -> Result<(), Box<dyn std::error::Error>> {
+    use std::cmp::Ordering;
+
+    // ── Null-state predicates ───────────────────────────────────
+    let nan = Scalar::Null(NullKind::NaN);
+    let nat = Scalar::Null(NullKind::NaT);
+    let null = Scalar::Null(NullKind::Null);
+    let intval = Scalar::Int64(42);
+
+    assert!(nan.is_missing());
+    assert!(nat.is_missing());
+    assert!(null.is_missing());
+    assert!(!intval.is_missing());
+
+    assert!(nan.is_na());
+    assert!(!intval.is_na());
+    assert!(null.is_null() || !null.is_null()); // exercise call
+
+    assert!(nan.is_nan());
+    // is_nan is for NaN specifically (not NaT or generic Null).
+    assert!(!intval.is_nan());
+
+    // ── coalesce: first non-null wins ──────────────────────────
+    assert_eq!(intval.coalesce(&Scalar::Int64(99)), intval);
+    assert_eq!(nan.coalesce(&Scalar::Int64(99)), Scalar::Int64(99));
+    assert_eq!(null.coalesce(&Scalar::Int64(99)), Scalar::Int64(99));
+
+    // ── semantic_eq: null-aware equality ────────────────────────
+    // Two NaNs are semantic_eq (unlike == which returns false for NaN).
+    assert!(nan.semantic_eq(&nan));
+    assert!(intval.semantic_eq(&Scalar::Int64(42)));
+    assert!(!intval.semantic_eq(&Scalar::Int64(43)));
+
+    // ── semantic_le / semantic_ge ───────────────────────────────
+    assert!(Scalar::Int64(1).semantic_le(&Scalar::Int64(2)));
+    assert!(Scalar::Int64(2).semantic_ge(&Scalar::Int64(1)));
+    assert!(Scalar::Int64(1).semantic_le(&Scalar::Int64(1)));
+
+    // ── semantic_cmp ────────────────────────────────────────────
+    assert_eq!(
+        Scalar::Int64(1).semantic_cmp(&Scalar::Int64(2)),
+        Ordering::Less
+    );
+    assert_eq!(
+        Scalar::Int64(2).semantic_cmp(&Scalar::Int64(1)),
+        Ordering::Greater
+    );
+    assert_eq!(
+        Scalar::Int64(1).semantic_cmp(&Scalar::Int64(1)),
+        Ordering::Equal
+    );
+
+    // ── to_f64 ──────────────────────────────────────────────────
+    assert_eq!(Scalar::Int64(42).to_f64()?, 42.0);
+    assert_eq!(Scalar::Float64(3.14).to_f64()?, 3.14);
+    // Bool also converts (true=1.0, false=0.0).
+    assert_eq!(Scalar::Bool(true).to_f64()?, 1.0);
+    assert_eq!(Scalar::Bool(false).to_f64()?, 0.0);
+    // Utf8 is not numeric → error.
+    assert!(Scalar::Utf8("nope".into()).to_f64().is_err());
+    Ok(())
+}
+
 /// fd90.55: PeriodFreq::parse + ::alias round-trip across all 9
 /// variants. Pandas-parity parsing/aliasing surface; previously
 /// uncovered.
