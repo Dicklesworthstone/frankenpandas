@@ -322,6 +322,28 @@ fn readme_quick_start_round_trip_through_sqlite() -> Result<(), Box<dyn std::err
     // After id-promotion, only 'name' remains as a data column.
     assert!(chunk.column("name").is_some());
     assert!(chunk.column("id").is_none());
+
+    // fd90.28: SqlIfExists::Append — incremental load.
+    // by_ticker has 1 row (the AAPL aggregate). write to a fresh table,
+    // then append again — table should now have 2 rows.
+    write_sql(&by_ticker, &conn, "appended", SqlIfExists::Replace)?;
+    write_sql(&by_ticker, &conn, "appended", SqlIfExists::Append)?;
+    let appended_back = read_sql_table(&conn, "appended")?;
+    assert_eq!(appended_back.index().len(), 2);
+
+    // fd90.28: SqlInsertMethod::Multi — multi-row INSERT batching.
+    let multi_opts = SqlWriteOptions {
+        if_exists: SqlIfExists::Replace,
+        index: false,
+        index_label: None,
+        schema: None,
+        dtype: None,
+        method: SqlInsertMethod::Multi,
+        chunksize: None,
+    };
+    write_sql_with_options(&by_ticker, &conn, "multi_method", &multi_opts)?;
+    let multi_back = read_sql_table(&conn, "multi_method")?;
+    assert_eq!(multi_back.index().len(), 1);
     Ok(())
 }
 
