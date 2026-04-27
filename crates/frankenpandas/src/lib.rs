@@ -477,6 +477,10 @@ pub mod prelude {
         // IO — readers (in-memory + path; covers all 8 documented formats)
         read_csv,
         read_csv_str,
+        // fd90.16: index-cols readers pair with read_csv_with_options
+        // for the index_col argument shape pandas exposes.
+        read_csv_with_index_cols,
+        read_csv_with_index_cols_path,
         read_csv_with_options,
         read_csv_with_options_path,
         read_excel,
@@ -521,6 +525,9 @@ pub mod prelude {
         // fd90.208: pandas-style top-level null checks + dtype helpers.
         // The README documents these as user-facing (lines 359, 771, 957, 1031).
         cast_scalar,
+        // fd90.16: cast_scalar_owned pairs with cast_scalar (above) for
+        // owned-input flows where the caller can move rather than borrow.
+        cast_scalar_owned,
         common_dtype,
         // fd90.262: Vec<Scalar> helpers matching pandas' top-level surface.
         count_na,
@@ -532,6 +539,11 @@ pub mod prelude {
         timedelta_range,
         // fd90.269: bdate_range pairs with date_range (pandas pd.bdate_range).
         bdate_range,
+        // fd90.16: error types paired with the date/timedelta range
+        // constructors above. Without these the user can't pattern-
+        // match on Result<_, DateRangeError> from the prelude alone.
+        DateRangeError,
+        TimedeltaRangeError,
         infer_dtype,
         isna,
         isnull,

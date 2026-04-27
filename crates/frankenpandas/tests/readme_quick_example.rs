@@ -3633,6 +3633,19 @@ fn readme_serialization_compiles_and_runs() -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
+/// fd90.16: compile guard for the final paired-surface promotions
+/// (DateRangeError, TimedeltaRangeError, cast_scalar_owned, the two
+/// read_csv_with_index_cols variants).
+#[allow(dead_code)]
+fn fd90_016_paired_helpers_via_prelude(
+    _dre: DateRangeError,
+    _tdre: TimedeltaRangeError,
+) {
+    let _ = cast_scalar_owned;
+    let _ = read_csv_with_index_cols;
+    let _ = read_csv_with_index_cols_path;
+}
+
 /// fd90.15: compile guard for the remaining paired-surface promotions
 /// (SparseDType, AggFunc, GroupByOptions, GroupByExecutionOptions,
 /// index_to_frame, index_to_series).
