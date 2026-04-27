@@ -3802,6 +3802,49 @@ fn readme_serialization_compiles_and_runs() -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
+/// fd90.55: PeriodFreq::parse + ::alias round-trip across all 9
+/// variants. Pandas-parity parsing/aliasing surface; previously
+/// uncovered.
+#[test]
+fn readme_periodfreq_parse_alias_round_trip() -> Result<(), Box<dyn std::error::Error>> {
+    let cases: [(PeriodFreq, &str); 9] = [
+        (PeriodFreq::Annual, "A"),
+        (PeriodFreq::Quarterly, "Q"),
+        (PeriodFreq::Monthly, "M"),
+        (PeriodFreq::Weekly, "W"),
+        (PeriodFreq::Daily, "D"),
+        (PeriodFreq::Business, "B"),
+        (PeriodFreq::Hourly, "H"),
+        (PeriodFreq::Minutely, "T"),
+        (PeriodFreq::Secondly, "S"),
+    ];
+
+    // Each variant's alias() returns the canonical pandas alias char.
+    for (freq, expected_alias) in cases {
+        assert_eq!(freq.alias(), expected_alias);
+        // parse(canonical) round-trips back to the same variant.
+        let parsed = PeriodFreq::parse(expected_alias)
+            .unwrap_or_else(|| panic!("parse({expected_alias}) failed"));
+        assert_eq!(parsed, freq);
+        // parse is case-insensitive (lowercase round-trips too).
+        let parsed_lower = PeriodFreq::parse(&expected_alias.to_lowercase())
+            .unwrap_or_else(|| panic!("parse({}) failed", expected_alias.to_lowercase()));
+        assert_eq!(parsed_lower, freq);
+    }
+
+    // Long-form aliases also parse.
+    assert_eq!(PeriodFreq::parse("ANNUAL"), Some(PeriodFreq::Annual));
+    assert_eq!(PeriodFreq::parse("YEARLY"), Some(PeriodFreq::Annual));
+    assert_eq!(PeriodFreq::parse("Y"), Some(PeriodFreq::Annual));
+    assert_eq!(PeriodFreq::parse("MONTHLY"), Some(PeriodFreq::Monthly));
+    assert_eq!(PeriodFreq::parse("MIN"), Some(PeriodFreq::Minutely));
+
+    // Garbage input returns None.
+    assert_eq!(PeriodFreq::parse("garbage"), None);
+    assert_eq!(PeriodFreq::parse(""), None);
+    Ok(())
+}
+
 /// fd90.54: Display impls for Scalar / Interval / IntervalClosed /
 /// Timestamp / PeriodFreq + Timedelta::format. Several types document
 /// pandas-parity-aspiring Display contracts but no test pinned the
