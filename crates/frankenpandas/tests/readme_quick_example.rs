@@ -1683,6 +1683,27 @@ fn readme_time_series_operations_compiles_and_runs() -> Result<(), Box<dyn std::
     let _ = dt.is_quarter_end()?;
     let _ = dt.strftime("%Y-%m-%d %H:%M")?;
 
+    // fd90.279: more DatetimeAccessor methods.
+    let _ = dt.microsecond()?;
+    let _ = dt.nanosecond()?;
+    let _ = dt.date()?;
+    let _ = dt.day_name()?;
+    let _ = dt.month_name()?;
+    let _ = dt.days_in_month()?;
+    let _ = dt.is_leap_year()?;
+    let _ = dt.is_year_start()?;
+    let _ = dt.is_year_end()?;
+    let _ = dt.floor("D")?;
+    let _ = dt.ceil("D")?;
+    let _ = dt.round("D")?;
+    let _ = dt.to_timestamp()?;
+    let _ = dt.to_pydatetime()?;
+    // tz_localize_with_options uses TzLocalizeOptions (top-level export).
+    let _ = dt.tz_localize_with_options(
+        Some("America/New_York"),
+        TzLocalizeOptions::default(),
+    )?;
+
     // Timezone operations — tz arg is Option<&str>.
     let _ = date_series.dt().tz_localize(Some("America/New_York"))?;
     // tz_convert needs an already-localized series; use the localized output above.
