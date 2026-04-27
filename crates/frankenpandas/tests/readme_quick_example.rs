@@ -1197,6 +1197,13 @@ fn readme_element_wise_operations_compiles_and_runs() -> Result<(), Box<dyn std:
     // df.reorder_levels — permutation by level indices.
     let _reordered = mi_df.reorder_levels(&[1, 0])?;
 
+    // fd90.249: Series sequential / ranking ops (DataFrame counterparts
+    // are already tested above).
+    let _ = bigger.shift(1)?;
+    let _ = bigger.diff(1)?;
+    let _ = bigger.pct_change(1)?;
+    let _ = bigger.rank("average", true, "keep")?;
+
     // fd90.232 + fd90.233: DataFrame-level reductions. fd90.233 added
     // pandas-parity bare-name aliases (min/max/std/var/median/prod/
     // skew/kurt/kurtosis/sem) over the existing *_agg methods.
