@@ -139,6 +139,13 @@ fn readme_expression_driven_analysis_compiles_and_runs() -> Result<(), Box<dyn s
     let above = df.query_with_locals("value > @threshold", &locals)?;
     // value>100 → row 0 (150) + row 2 (200). Row 1 (80) drops.
     assert_eq!(above.index().len(), 2);
+
+    // fd90.242: eval_with_locals — @local variable references in eval
+    // expressions (mirrors query_with_locals at the eval surface).
+    let scaled = df.eval_with_locals("revenue * @scale", &BTreeMap::from([
+        ("scale".to_owned(), Scalar::Float64(0.5)),
+    ]))?;
+    assert_eq!(scaled.len(), 3);
     Ok(())
 }
 
