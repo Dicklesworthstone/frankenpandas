@@ -1058,6 +1058,17 @@ fn readme_element_wise_operations_compiles_and_runs() -> Result<(), Box<dyn std:
         Some("new_first"),
     );
 
+    // fd90.239: Series-level introspection (equals/memory_usage/describe/
+    // to_dict/to_csv).
+    let s_clone = bigger.clone();
+    assert!(bigger.equals(&s_clone));
+    let _bytes = bigger.memory_usage(); // returns usize
+    let _summary = bigger.describe()?; // returns Series with stat labels
+    let dict = bigger.to_dict();
+    assert_eq!(dict.len(), bigger.len());
+    let csv = bigger.to_csv(',', true);
+    assert!(!csv.is_empty());
+
     // fd90.232 + fd90.233: DataFrame-level reductions. fd90.233 added
     // pandas-parity bare-name aliases (min/max/std/var/median/prod/
     // skew/kurt/kurtosis/sem) over the existing *_agg methods.
