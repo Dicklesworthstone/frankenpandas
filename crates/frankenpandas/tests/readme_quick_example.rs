@@ -3712,6 +3712,50 @@ fn readme_serialization_compiles_and_runs() -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
+/// fd90.47: to_timedelta_with_unit functional coverage. Unit-explicit
+/// variant of to_timedelta — pandas pd.to_timedelta(s, unit='s').
+/// Previously only name-checked.
+#[test]
+fn readme_to_timedelta_with_unit_round_trip() -> Result<(), Box<dyn std::error::Error>> {
+    let labels: Vec<IndexLabel> = vec![IndexLabel::Int64(0), IndexLabel::Int64(1)];
+
+    // Numeric durations (1, 2) interpreted as seconds → 1e9 / 2e9 nanoseconds.
+    let secs_series = Series::from_values(
+        "dur",
+        labels.clone(),
+        vec![Scalar::Int64(1), Scalar::Int64(2)],
+    )?;
+    let result = to_timedelta_with_unit(&secs_series, "s")?;
+    assert_eq!(result.len(), 2);
+    // Index 0: 1 second = NANOS_PER_SEC = 1_000_000_000.
+    assert!(matches!(
+        result.values()[0],
+        Scalar::Timedelta64(n) if n == Timedelta::NANOS_PER_SEC
+    ));
+    // Index 1: 2 seconds.
+    assert!(matches!(
+        result.values()[1],
+        Scalar::Timedelta64(n) if n == 2 * Timedelta::NANOS_PER_SEC
+    ));
+
+    // Days unit: 1 day = NANOS_PER_DAY.
+    let days_series = Series::from_values(
+        "dur_days",
+        labels,
+        vec![Scalar::Int64(1), Scalar::Int64(7)],
+    )?;
+    let day_result = to_timedelta_with_unit(&days_series, "D")?;
+    assert!(matches!(
+        day_result.values()[0],
+        Scalar::Timedelta64(n) if n == Timedelta::NANOS_PER_DAY
+    ));
+    assert!(matches!(
+        day_result.values()[1],
+        Scalar::Timedelta64(n) if n == 7 * Timedelta::NANOS_PER_DAY
+    ));
+    Ok(())
+}
+
 /// fd90.46: to_datetime_with_format / to_datetime_with_unit /
 /// to_datetime_with_options functional coverage. All three are in
 /// the prelude but only name-checked in the compile guard until now.
