@@ -897,6 +897,45 @@ fn readme_element_wise_operations_compiles_and_runs() -> Result<(), Box<dyn std:
     let _ = s_a.cummax()?;
     let _ = s_a.cummin()?;
 
+    // fd90.231: Series higher-order statistics + structural inspection.
+    let bigger_labels: Vec<IndexLabel> = (0..6i64).map(IndexLabel::Int64).collect();
+    let bigger = Series::from_values(
+        "v",
+        bigger_labels,
+        vec![
+            Scalar::Float64(1.0),
+            Scalar::Float64(2.0),
+            Scalar::Float64(3.0),
+            Scalar::Float64(4.0),
+            Scalar::Float64(5.0),
+            Scalar::Float64(6.0),
+        ],
+    )?;
+    // f64 statistics.
+    let _ = bigger.skew()?;
+    let _ = bigger.kurt()?;
+    let _ = bigger.kurtosis()?;
+    let _ = bigger.sem()?;
+    // usize position lookups.
+    let _ = bigger.argmax()?;
+    let _ = bigger.argmin()?;
+    // bool structural inspection.
+    let _ = bigger.is_unique();
+    let _ = bigger.is_monotonic_increasing();
+    let _ = bigger.is_monotonic_decreasing();
+    // bool reductions on a Bool Series.
+    let bool_labels: Vec<IndexLabel> = (0..3i64).map(IndexLabel::Int64).collect();
+    let bools = Series::from_values(
+        "b",
+        bool_labels,
+        vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)],
+    )?;
+    let _ = bools.all()?;
+    let _ = bools.any()?;
+    // top/bottom-N at the Series level.
+    let _ = bigger.nlargest(3)?;
+    let _ = bigger.nsmallest(2)?;
+
     // Column.binary_numeric / binary_comparison — exercise via DataFrame columns.
     let col_a = df.column("a").expect("column a").clone();
     let col_b = df.column("b").expect("column b").clone();
