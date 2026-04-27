@@ -3712,6 +3712,55 @@ fn readme_serialization_compiles_and_runs() -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
+/// fd90.44: FrameError variant triggers. FrameError has direct
+/// variants (LengthMismatch, CompatibilityRejected) plus transparent
+/// wrappers (Column, Index). Length mismatch is triggerable via
+/// Series::from_values with label/value arrays of different lengths.
+#[test]
+fn readme_frameerror_variant_triggers() -> Result<(), Box<dyn std::error::Error>> {
+    // ── FrameError::LengthMismatch ──────────────────────────────
+    // 3 labels, 2 values — Series::new (called by from_values) detects
+    // and returns LengthMismatch{index_len:3, column_len:2}.
+    let mismatched = Series::from_values(
+        "x",
+        vec![
+            IndexLabel::Int64(0),
+            IndexLabel::Int64(1),
+            IndexLabel::Int64(2),
+        ],
+        vec![Scalar::Int64(1), Scalar::Int64(2)],
+    );
+    assert!(matches!(
+        mismatched,
+        Err(FrameError::LengthMismatch {
+            index_len: 3,
+            column_len: 2
+        })
+    ));
+
+    // ── DataFrame::new mismatched index/column lengths ──────────
+    use std::collections::BTreeMap;
+    let idx = Index::new(vec![IndexLabel::Int64(0), IndexLabel::Int64(1)]);
+    let mut cols = BTreeMap::new();
+    cols.insert(
+        "x".to_string(),
+        Column::from_values(vec![
+            Scalar::Int64(1),
+            Scalar::Int64(2),
+            Scalar::Int64(3),
+        ])?,
+    );
+    let bad_df = DataFrame::new(idx, cols);
+    assert!(matches!(
+        bad_df,
+        Err(FrameError::LengthMismatch {
+            index_len: 2,
+            column_len: 3
+        })
+    ));
+    Ok(())
+}
+
 /// fd90.43: ExprError variant triggers via df.eval / df.query /
 /// df.query_with_locals with malformed expressions.
 #[test]
