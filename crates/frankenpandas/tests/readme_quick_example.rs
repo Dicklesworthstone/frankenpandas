@@ -3657,6 +3657,73 @@ fn readme_serialization_compiles_and_runs() -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
+/// fd90.26: Non-default ExcelReadOptions / ExcelWriteOptions coverage.
+/// Sister to fd90.24/25 (CSV options). Both option structs have been
+/// in the prelude since fd90.207/216 but only ::default() was used by
+/// integration tests until now.
+#[test]
+fn readme_excel_options_round_trip() -> Result<(), Box<dyn std::error::Error>> {
+    let df = read_csv_str("ticker,price\nAAPL,185.50\nGOOG,140.25\nMSFT,420.00")?;
+
+    // ── 1. Write with custom sheet_name + read it back ──────────
+    let write_opts = ExcelWriteOptions {
+        sheet_name: "Holdings".to_string(),
+        ..ExcelWriteOptions::default()
+    };
+    let bytes = write_excel_bytes_with_options(&df, &write_opts)?;
+    assert!(!bytes.is_empty());
+
+    let read_opts = ExcelReadOptions {
+        sheet_name: Some("Holdings".to_string()),
+        ..ExcelReadOptions::default()
+    };
+    let back = read_excel_bytes(&bytes, &read_opts)?;
+    assert_eq!(back.index().len(), 3);
+    assert!(back.column("ticker").is_some());
+
+    // ── 2. Write with index=false (drop index column) ───────────
+    let no_idx_opts = ExcelWriteOptions {
+        index: false,
+        ..ExcelWriteOptions::default()
+    };
+    let no_idx_bytes = write_excel_bytes_with_options(&df, &no_idx_opts)?;
+    let no_idx_back = read_excel_bytes(&no_idx_bytes, &ExcelReadOptions::default())?;
+    // Round-trip preserves the data columns (no index column written
+    // means the Excel file has just the original 2 named columns).
+    assert!(no_idx_back.column("ticker").is_some());
+    assert!(no_idx_back.column("price").is_some());
+
+    // ── 3. Write with header=false ──────────────────────────────
+    let no_hdr_opts = ExcelWriteOptions {
+        header: false,
+        index: false,
+        ..ExcelWriteOptions::default()
+    };
+    let no_hdr_bytes = write_excel_bytes_with_options(&df, &no_hdr_opts)?;
+    let no_hdr_back = read_excel_bytes(
+        &no_hdr_bytes,
+        &ExcelReadOptions {
+            has_headers: false,
+            ..ExcelReadOptions::default()
+        },
+    )?;
+    // Without headers, all 3 data rows survive.
+    assert_eq!(no_hdr_back.index().len(), 3);
+
+    // ── 4. ExcelReadOptions::names — explicit column overrides ──
+    // Use no_idx_bytes (2 columns, no index) so 2 names map cleanly.
+    let names_opts = ExcelReadOptions {
+        has_headers: true,
+        names: Some(vec!["symbol".into(), "px".into()]),
+        ..ExcelReadOptions::default()
+    };
+    let renamed = read_excel_bytes(&no_idx_bytes, &names_opts)?;
+    // After rename, original headers are replaced.
+    assert!(renamed.column("symbol").is_some());
+    assert!(renamed.column("px").is_some());
+    Ok(())
+}
+
 /// fd90.25: Non-default CsvWriteOptions coverage. Sister to fd90.24
 /// (read options). CsvWriteOptions has 5 pandas-parity fields and
 /// write_csv_string_with_options has been in the prelude since fd90.216
