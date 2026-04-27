@@ -82,6 +82,23 @@ fn readme_quick_start_round_trip_through_sqlite() -> Result<(), Box<dyn std::err
     let mut chunks = read_sql_chunks(&conn, "SELECT * FROM results", 100)?;
     let first_chunk = chunks.next().expect("at least one chunk")?;
     assert_eq!(first_chunk.index().len(), 1);
+
+    // fd90.289: SQL options-bearing read/write functions (in prelude but
+    // not previously called from any test).
+    let write_opts = SqlWriteOptions {
+        if_exists: SqlIfExists::Replace,
+        index: false,
+        index_label: None,
+        schema: None,
+        dtype: None,
+        method: SqlInsertMethod::Single,
+        chunksize: None,
+    };
+    write_sql_with_options(&by_ticker, &conn, "results_v2", &write_opts)?;
+    let read_opts = SqlReadOptions::default();
+    let _ = read_sql_with_options(&conn, "SELECT * FROM results_v2", &read_opts)?;
+    let _ = read_sql_query(&conn, "SELECT * FROM results_v2")?;
+    let _ = read_sql_table_with_options(&conn, "results_v2", &read_opts)?;
     Ok(())
 }
 
