@@ -3712,6 +3712,50 @@ fn readme_serialization_compiles_and_runs() -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
+/// fd90.48: module-level null/dtype helpers functional coverage.
+/// The Vec<Scalar> versions of pandas-equivalent helpers were called
+/// in the lib.rs prelude guard but their results were never asserted.
+#[test]
+fn readme_module_level_null_helpers() -> Result<(), Box<dyn std::error::Error>> {
+    let values = vec![
+        Scalar::Int64(1),
+        Scalar::Null(NullKind::NaN),
+        Scalar::Int64(3),
+    ];
+
+    // ── isna / isnull / notna / notnull ─────────────────────────
+    assert_eq!(isna(&values), vec![false, true, false]);
+    assert_eq!(isnull(&values), vec![false, true, false]);
+    assert_eq!(notna(&values), vec![true, false, true]);
+    assert_eq!(notnull(&values), vec![true, false, true]);
+
+    // ── count_na ────────────────────────────────────────────────
+    assert_eq!(count_na(&values), 1);
+
+    // ── fill_na ─────────────────────────────────────────────────
+    let filled = fill_na(&values, &Scalar::Int64(0));
+    assert_eq!(filled.len(), 3);
+    assert_eq!(filled[0], Scalar::Int64(1));
+    assert_eq!(filled[1], Scalar::Int64(0));
+    assert_eq!(filled[2], Scalar::Int64(3));
+
+    // ── dropna ──────────────────────────────────────────────────
+    let dropped = dropna(&values);
+    assert_eq!(dropped.len(), 2);
+    assert_eq!(dropped[0], Scalar::Int64(1));
+    assert_eq!(dropped[1], Scalar::Int64(3));
+
+    // ── infer_dtype on mixed numeric types → Float64 (widening) ─
+    let mixed = vec![Scalar::Int64(1), Scalar::Float64(2.5)];
+    let dt = infer_dtype(&mixed)?;
+    assert_eq!(dt, DType::Float64);
+
+    // infer_dtype on homogeneous Int64 → Int64.
+    let homog = vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)];
+    assert_eq!(infer_dtype(&homog)?, DType::Int64);
+    Ok(())
+}
+
 /// fd90.47: to_timedelta_with_unit functional coverage. Unit-explicit
 /// variant of to_timedelta — pandas pd.to_timedelta(s, unit='s').
 /// Previously only name-checked.
