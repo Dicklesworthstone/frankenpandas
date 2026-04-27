@@ -3657,6 +3657,40 @@ fn readme_serialization_compiles_and_runs() -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
+/// fd90.21: Arrow IPC stream format round-trip. README §147 documents
+/// read_ipc_stream_bytes / write_ipc_stream_bytes as first-class IO
+/// surface (line 150: "Arrow IPC stream format is reachable through
+/// the standalone read_ipc_stream_bytes / write_ipc_stream_bytes
+/// functions"). Both have been in the prelude since fd90.125 but
+/// had zero integration test coverage.
+#[test]
+fn readme_ipc_stream_round_trip() -> Result<(), Box<dyn std::error::Error>> {
+    // Build a simple DataFrame with mixed numeric columns.
+    let original = read_csv_str(
+        "ticker,price,volume\nAAPL,185.50,1000\nGOOG,140.25,500\nMSFT,420.00,800",
+    )?;
+    assert_eq!(original.index().len(), 3);
+
+    // Encode as Arrow IPC stream bytes.
+    let bytes = write_ipc_stream_bytes(&original)?;
+    // Streaming format has a non-trivial header; verify we got real bytes.
+    assert!(!bytes.is_empty());
+
+    // Decode back into a DataFrame.
+    let restored = read_ipc_stream_bytes(&bytes)?;
+
+    // Shape must survive.
+    assert_eq!(restored.index().len(), original.index().len());
+    assert!(restored.column("ticker").is_some());
+    assert!(restored.column("price").is_some());
+    assert!(restored.column("volume").is_some());
+
+    // Spot-check a value to prove this is real data, not just shape.
+    let price_col = restored.column("price").unwrap();
+    assert_eq!(price_col.values()[0], Scalar::Float64(185.50));
+    Ok(())
+}
+
 /// fd90.19: functional round-trip exercising the 5 paired helpers
 /// promoted to the prelude in fd90.16. Distinct from the compile-guard
 /// fd90_016_paired_helpers_via_prelude — this drives DateRangeError /
