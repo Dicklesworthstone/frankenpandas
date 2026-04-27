@@ -3657,6 +3657,36 @@ fn readme_serialization_compiles_and_runs() -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
+/// fd90.22: Parquet + Excel bytes round-trip. README §144-146 documents
+/// both formats as round-trippable. Existing coverage was one-way only
+/// (fd90.290 called .to_parquet_bytes() / .to_excel_bytes() but never
+/// read them back) — a regression in either parser would not be caught.
+#[test]
+fn readme_parquet_excel_round_trip() -> Result<(), Box<dyn std::error::Error>> {
+    let original = read_csv_str(
+        "ticker,price,volume\nAAPL,185.50,1000\nGOOG,140.25,500\nMSFT,420.00,800",
+    )?;
+
+    // ── Parquet round-trip ───────────────────────────────────────
+    let pq_bytes = write_parquet_bytes(&original)?;
+    assert!(!pq_bytes.is_empty());
+    let pq_back = read_parquet_bytes(&pq_bytes)?;
+    assert_eq!(pq_back.index().len(), 3);
+    assert!(pq_back.column("ticker").is_some());
+    let pq_price = pq_back.column("price").unwrap();
+    assert_eq!(pq_price.values()[0], Scalar::Float64(185.50));
+
+    // ── Excel round-trip ─────────────────────────────────────────
+    let xl_bytes = write_excel_bytes(&original)?;
+    assert!(!xl_bytes.is_empty());
+    let xl_back = read_excel_bytes(&xl_bytes, &ExcelReadOptions::default())?;
+    assert_eq!(xl_back.index().len(), 3);
+    assert!(xl_back.column("ticker").is_some());
+    let xl_price = xl_back.column("price").unwrap();
+    assert_eq!(xl_price.values()[0], Scalar::Float64(185.50));
+    Ok(())
+}
+
 /// fd90.21: Arrow IPC stream format round-trip. README §147 documents
 /// read_ipc_stream_bytes / write_ipc_stream_bytes as first-class IO
 /// surface (line 150: "Arrow IPC stream format is reachable through
