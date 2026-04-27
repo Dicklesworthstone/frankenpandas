@@ -1065,6 +1065,44 @@ fn readme_element_wise_operations_compiles_and_runs() -> Result<(), Box<dyn std:
         Some("new_first"),
     );
 
+    // fd90.245: DataFrame.with_column / drop_columns / rename_columns.
+    // with_column — immutable add-or-replace.
+    let added_col = Column::from_values(vec![
+        Scalar::Int64(0),
+        Scalar::Int64(1),
+        Scalar::Int64(2),
+        Scalar::Int64(3),
+    ])?;
+    let with_added = df.with_column("added", added_col)?;
+    assert!(
+        with_added
+            .column_names()
+            .iter()
+            .any(|n| n.as_str() == "added")
+    );
+    // drop_columns — bulk drop (alternative to drop with axis arg).
+    let dropped = with_added.drop_columns(&["added"])?;
+    assert!(
+        !dropped
+            .column_names()
+            .iter()
+            .any(|n| n.as_str() == "added")
+    );
+    // rename_columns — paired renames.
+    let renamed_cols = df.rename_columns(&[("a", "alpha"), ("b", "beta")])?;
+    assert!(
+        renamed_cols
+            .column_names()
+            .iter()
+            .any(|n| n.as_str() == "alpha")
+    );
+    assert!(
+        renamed_cols
+            .column_names()
+            .iter()
+            .any(|n| n.as_str() == "beta")
+    );
+
     // fd90.239: Series-level introspection (equals/memory_usage/describe/
     // to_dict/to_csv).
     let s_clone = bigger.clone();
