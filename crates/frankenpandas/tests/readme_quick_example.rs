@@ -3802,6 +3802,63 @@ fn readme_serialization_compiles_and_runs() -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
+/// fd90.62: Series scalar reductions (sum/mean/min/max/std/var/median)
+/// directly asserted on results. Existing tests called these on
+/// Rolling/Expanding/Ewm wrappers but Series-direct outputs were
+/// uncovered.
+#[test]
+fn readme_series_scalar_reductions() -> Result<(), Box<dyn std::error::Error>> {
+    let labels: Vec<IndexLabel> = (0..5i64).map(IndexLabel::Int64).collect();
+    let s = Series::from_values(
+        "v",
+        labels,
+        vec![
+            Scalar::Int64(1),
+            Scalar::Int64(2),
+            Scalar::Int64(3),
+            Scalar::Int64(4),
+            Scalar::Int64(5),
+        ],
+    )?;
+
+    // Helper: extract numeric value as f64 from either Int64 or Float64.
+    fn num(s: &Scalar) -> Option<f64> {
+        match s {
+            Scalar::Int64(v) => Some(*v as f64),
+            Scalar::Float64(v) => Some(*v),
+            _ => None,
+        }
+    }
+
+    // sum=15, mean=3, min=1, max=5, median=3
+    let sum = s.sum()?;
+    assert_eq!(num(&sum), Some(15.0));
+    let mean = s.mean()?;
+    assert_eq!(num(&mean), Some(3.0));
+    let min = s.min()?;
+    assert_eq!(num(&min), Some(1.0));
+    let max = s.max()?;
+    assert_eq!(num(&max), Some(5.0));
+    let median = s.median()?;
+    assert!(matches!(
+        median,
+        Scalar::Float64(v) if (v - 3.0).abs() < 1e-9
+    ));
+
+    // std/var: sample variance of [1..5] = 2.5; std = sqrt(2.5) ≈ 1.581
+    let var = s.var()?;
+    assert!(matches!(
+        var,
+        Scalar::Float64(v) if (v - 2.5).abs() < 1e-6
+    ));
+    let std = s.std()?;
+    assert!(matches!(
+        std,
+        Scalar::Float64(v) if (v - 2.5_f64.sqrt()).abs() < 1e-6
+    ));
+    Ok(())
+}
+
 /// fd90.61: Sequential op result assertions. Existing tests called
 /// cumsum/cumprod/cummin/cummax/diff/pct_change/shift but only
 /// shape-asserted — a regression in any algorithm would not have
