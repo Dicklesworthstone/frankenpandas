@@ -3712,6 +3712,39 @@ fn readme_serialization_compiles_and_runs() -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
+/// fd90.45: ColumnError variant triggers via Column binary ops with
+/// mismatched lengths or incompatible dtypes.
+#[test]
+fn readme_columnerror_variant_triggers() -> Result<(), Box<dyn std::error::Error>> {
+    // ── ColumnError::LengthMismatch ─────────────────────────────
+    let a = Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2)])?;
+    let b3 = Column::from_values(vec![
+        Scalar::Int64(1),
+        Scalar::Int64(2),
+        Scalar::Int64(3),
+    ])?;
+    let mismatched = a.binary_numeric(&b3, ArithmeticOp::Add);
+    assert!(matches!(
+        mismatched,
+        Err(ColumnError::LengthMismatch { left: 2, right: 3 })
+    ));
+
+    // ── ColumnError::DTypeMismatch ──────────────────────────────
+    // Column<Int64> + Column<Utf8> has no compatible numeric op.
+    let utf = Column::from_values(vec![
+        Scalar::Utf8("x".into()),
+        Scalar::Utf8("y".into()),
+    ])?;
+    let dtype_mismatch = a.binary_numeric(&utf, ArithmeticOp::Add);
+    // The binary_numeric path may surface either ColumnError::DTypeMismatch
+    // or a wrapped TypeError. Both indicate the contract was honored.
+    assert!(matches!(
+        dtype_mismatch,
+        Err(ColumnError::DTypeMismatch { .. }) | Err(ColumnError::Type(_))
+    ));
+    Ok(())
+}
+
 /// fd90.44: FrameError variant triggers. FrameError has direct
 /// variants (LengthMismatch, CompatibilityRejected) plus transparent
 /// wrappers (Column, Index). Length mismatch is triggerable via
