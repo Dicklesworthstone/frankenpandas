@@ -628,6 +628,13 @@ fn readme_window_operations_compiles_and_runs() -> Result<(), Box<dyn std::error
     let _ = monthly.max()?;
     let _ = monthly.first()?;
     let _ = monthly.last()?;
+    // fd90.281: rest of Resample (std/var/median/prod + apply/apply_fn).
+    let _ = monthly.std()?;
+    let _ = monthly.var()?;
+    let _ = monthly.median()?;
+    let _ = monthly.prod()?;
+    let _ = monthly.apply(|vals: &[Scalar]| vals.first().cloned().unwrap_or(Scalar::Null(NullKind::NaN)))?;
+    let _ = monthly.apply_fn(|vals: &[Scalar]| Ok(vals.first().cloned().unwrap_or(Scalar::Null(NullKind::NaN))))?;
 
     // ── DataFrame versions.
     let df = read_csv_str("a,b\n1,10\n2,20\n3,30\n4,40\n5,50\n6,60\n7,70\n8,80\n9,90\n10,100")?;
