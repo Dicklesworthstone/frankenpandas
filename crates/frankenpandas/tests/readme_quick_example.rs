@@ -3712,6 +3712,56 @@ fn readme_serialization_compiles_and_runs() -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
+/// fd90.49: JoinedSeries field-level functional coverage.
+/// JoinedSeries is the return type of join_series. Its public fields
+/// (index, left_values, right_values) were reachable but never
+/// asserted — a regression in alignment logic would not surface.
+#[test]
+fn readme_joined_series_fields_round_trip() -> Result<(), Box<dyn std::error::Error>> {
+    let labels: Vec<IndexLabel> =
+        vec![IndexLabel::Int64(0), IndexLabel::Int64(1), IndexLabel::Int64(2)];
+    let other_labels: Vec<IndexLabel> =
+        vec![IndexLabel::Int64(1), IndexLabel::Int64(2), IndexLabel::Int64(3)];
+
+    let s_a = Series::from_values(
+        "a",
+        labels,
+        vec![
+            Scalar::Int64(10),
+            Scalar::Int64(20),
+            Scalar::Int64(30),
+        ],
+    )?;
+    let s_b = Series::from_values(
+        "b",
+        other_labels,
+        vec![
+            Scalar::Int64(100),
+            Scalar::Int64(200),
+            Scalar::Int64(300),
+        ],
+    )?;
+
+    // Inner join: shared labels {1, 2} → length 2.
+    let inner: JoinedSeries = join_series(&s_a, &s_b, JoinType::Inner)?;
+    assert_eq!(inner.index.len(), 2);
+    assert_eq!(inner.left_values.len(), 2);
+    assert_eq!(inner.right_values.len(), 2);
+
+    // Left join: keep all left labels {0, 1, 2} → length 3.
+    let left: JoinedSeries = join_series(&s_a, &s_b, JoinType::Left)?;
+    assert_eq!(left.index.len(), 3);
+    assert_eq!(left.left_values.len(), 3);
+    assert_eq!(left.right_values.len(), 3);
+
+    // Outer join: union {0, 1, 2, 3} → length 4.
+    let outer: JoinedSeries = join_series(&s_a, &s_b, JoinType::Outer)?;
+    assert_eq!(outer.index.len(), 4);
+    assert_eq!(outer.left_values.len(), 4);
+    assert_eq!(outer.right_values.len(), 4);
+    Ok(())
+}
+
 /// fd90.48: module-level null/dtype helpers functional coverage.
 /// The Vec<Scalar> versions of pandas-equivalent helpers were called
 /// in the lib.rs prelude guard but their results were never asserted.
