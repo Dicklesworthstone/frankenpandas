@@ -3712,6 +3712,46 @@ fn readme_serialization_compiles_and_runs() -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
+/// fd90.41: TypeError variant triggers. Pattern-matches the specific
+/// error variant returned by cast_scalar / common_dtype on bad input,
+/// locking in the contract that specific failure modes route to
+/// specific TypeError variants.
+#[test]
+fn readme_typeerror_variant_triggers() -> Result<(), Box<dyn std::error::Error>> {
+    // ── LossyFloatToInt: 3.14 → Int64 must error ────────────────
+    let lossy = cast_scalar(&Scalar::Float64(3.14), DType::Int64);
+    assert!(matches!(
+        lossy,
+        Err(TypeError::LossyFloatToInt { value }) if (value - 3.14).abs() < 1e-9
+    ));
+
+    // ── InvalidBoolInt: 2 → Bool must error (only 0/1 allowed) ──
+    let bad_bool_int = cast_scalar(&Scalar::Int64(2), DType::Bool);
+    assert!(matches!(
+        bad_bool_int,
+        Err(TypeError::InvalidBoolInt { value: 2 })
+    ));
+
+    // ── InvalidBoolFloat: 0.5 → Bool must error ─────────────────
+    let bad_bool_float = cast_scalar(&Scalar::Float64(0.5), DType::Bool);
+    assert!(matches!(
+        bad_bool_float,
+        Err(TypeError::InvalidBoolFloat { value }) if (value - 0.5).abs() < 1e-9
+    ));
+
+    // ── IncompatibleDtypes via common_dtype: Utf8 vs Bool ───────
+    // common_dtype on (Utf8, Bool) has no compatible common type.
+    let incompat = common_dtype(DType::Utf8, DType::Bool);
+    assert!(matches!(
+        incompat,
+        Err(TypeError::IncompatibleDtypes {
+            left: DType::Utf8,
+            right: DType::Bool,
+        })
+    ));
+    Ok(())
+}
+
 /// fd90.40: Pin DType + NullKind + CategoricalMetadata serde JSON
 /// shapes. Sister to fd90.38 (Scalar) and fd90.39 (IndexLabel +
 /// ValidityMask). All three are documented serializable types per
