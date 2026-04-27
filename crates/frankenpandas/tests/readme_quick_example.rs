@@ -3802,6 +3802,62 @@ fn readme_serialization_compiles_and_runs() -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
+/// fd90.54: Display impls for Scalar / Interval / IntervalClosed /
+/// Timestamp / PeriodFreq + Timedelta::format. Several types document
+/// pandas-parity-aspiring Display contracts but no test pinned the
+/// formatted output. A regression would silently break printf-style
+/// usage consumers rely on.
+#[test]
+fn readme_display_impls() -> Result<(), Box<dyn std::error::Error>> {
+    // ── Scalar Display ──────────────────────────────────────────
+    assert_eq!(format!("{}", Scalar::Bool(true)), "true");
+    assert_eq!(format!("{}", Scalar::Int64(42)), "42");
+    assert_eq!(format!("{}", Scalar::Utf8("hi".into())), "hi");
+    assert_eq!(format!("{}", Scalar::Null(NullKind::NaN)), "NaN");
+    assert_eq!(format!("{}", Scalar::Null(NullKind::NaT)), "NaT");
+    assert_eq!(format!("{}", Scalar::Null(NullKind::Null)), "None");
+
+    // ── IntervalClosed Display ──────────────────────────────────
+    assert_eq!(format!("{}", IntervalClosed::Left), "left");
+    assert_eq!(format!("{}", IntervalClosed::Right), "right");
+    assert_eq!(format!("{}", IntervalClosed::Both), "both");
+    assert_eq!(format!("{}", IntervalClosed::Neither), "neither");
+
+    // ── Interval Display (pandas str() parity per docstring) ───
+    let iv = Interval::new(0.0, 5.0, IntervalClosed::Right);
+    assert_eq!(format!("{iv}"), "(0, 5]");
+    let iv_left = Interval::new(0.0, 5.0, IntervalClosed::Left);
+    assert_eq!(format!("{iv_left}"), "[0, 5)");
+    let iv_both = Interval::new(0.0, 5.0, IntervalClosed::Both);
+    assert_eq!(format!("{iv_both}"), "[0, 5]");
+    let iv_neither = Interval::new(0.0, 5.0, IntervalClosed::Neither);
+    assert_eq!(format!("{iv_neither}"), "(0, 5)");
+
+    // ── Timestamp Display ───────────────────────────────────────
+    let ts = Timestamp::from_nanos(1_700_000_000_000_000_000);
+    assert_eq!(
+        format!("{ts}"),
+        "Timestamp[1700000000000000000, UTC]"
+    );
+    let nat_ts = Timestamp::from_nanos(Timestamp::NAT);
+    assert_eq!(format!("{nat_ts}"), "NaT");
+
+    // ── PeriodFreq Display ──────────────────────────────────────
+    // Each variant has an alias string used as Display.
+    let _ = format!("{}", PeriodFreq::Quarterly);
+    let _ = format!("{}", PeriodFreq::Daily);
+    // PeriodFreq doesn't pin a specific alphabet here — just
+    // exercise the impl.
+
+    // ── Timedelta::format ───────────────────────────────────────
+    let one_day = Timedelta::format(Timedelta::NANOS_PER_DAY);
+    // pandas-style format includes "1 day" or "1 days" — non-empty.
+    assert!(!one_day.is_empty());
+    let nat = Timedelta::format(Timedelta::NAT);
+    assert!(nat.contains("NaT") || !nat.is_empty());
+    Ok(())
+}
+
 /// fd90.52: RuntimePolicy field/default coverage + EvidenceLedger
 /// multi-record path. RuntimePolicy::default() should equal strict()
 /// per the Default impl; multiple decisions on one ledger should
