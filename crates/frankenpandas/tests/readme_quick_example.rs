@@ -731,6 +731,9 @@ fn readme_window_operations_compiles_and_runs() -> Result<(), Box<dyn std::error
     let _ = drs.max()?;
     let _ = drs.first()?; // fd90.200 parity with Series Resample
     let _ = drs.last()?;
+    // fd90.285: agg + prod (rest of DataFrameResample's 9-method surface).
+    let _ = drs.agg(&["sum", "mean"])?;
+    let _ = drs.prod()?;
     Ok(())
 }
 
