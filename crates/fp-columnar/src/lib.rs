@@ -587,7 +587,7 @@ fn vectorized_binary_f64(
         ArithmeticOp::Sub => |a, b| a - b,
         ArithmeticOp::Mul => |a, b| a * b,
         ArithmeticOp::Div => |a, b| a / b,
-        ArithmeticOp::Mod => |a, b| a % b,
+        ArithmeticOp::Mod => python_mod_f64,
         ArithmeticOp::Pow => |a, b| a.powf(b),
         ArithmeticOp::FloorDiv => |a, b| (a / b).floor(),
     };
@@ -606,6 +606,39 @@ fn vectorized_binary_f64(
         .collect();
 
     (out, combined)
+}
+
+fn python_mod_f64(lhs: f64, rhs: f64) -> f64 {
+    lhs - (lhs / rhs).floor() * rhs
+}
+
+fn python_floor_div_i64(lhs: i64, rhs: i64) -> i64 {
+    debug_assert_ne!(rhs, 0);
+    if lhs == i64::MIN && rhs == -1 {
+        return i64::MIN;
+    }
+
+    let quotient = lhs / rhs;
+    let remainder = lhs % rhs;
+    if remainder != 0 && ((remainder > 0) != (rhs > 0)) {
+        quotient - 1
+    } else {
+        quotient
+    }
+}
+
+fn python_mod_i64(lhs: i64, rhs: i64) -> i64 {
+    debug_assert_ne!(rhs, 0);
+    if lhs == i64::MIN && rhs == -1 {
+        return 0;
+    }
+
+    let quotient = i128::from(python_floor_div_i64(lhs, rhs));
+    let remainder = i128::from(lhs) - quotient * i128::from(rhs);
+    let Ok(value) = i64::try_from(remainder) else {
+        return 0;
+    };
+    value
 }
 
 /// AG-10: Vectorized binary arithmetic on `&[i64]` slices.
@@ -642,20 +675,8 @@ fn vectorized_binary_i64(
         ArithmeticOp::Add => |a, b| a.wrapping_add(b),
         ArithmeticOp::Sub => |a, b| a.wrapping_sub(b),
         ArithmeticOp::Mul => |a, b| a.wrapping_mul(b),
-        ArithmeticOp::Mod => |a, b| {
-            if a == i64::MIN && b == -1 {
-                0
-            } else {
-                a.rem_euclid(b)
-            }
-        },
-        ArithmeticOp::FloorDiv => |a, b| {
-            if a == i64::MIN && b == -1 {
-                i64::MIN
-            } else {
-                a.div_euclid(b)
-            }
-        },
+        ArithmeticOp::Mod => python_mod_i64,
+        ArithmeticOp::FloorDiv => python_floor_div_i64,
         ArithmeticOp::Div | ArithmeticOp::Pow => unreachable!("handled by early return above"),
     };
 
@@ -1351,7 +1372,7 @@ impl Column {
                     ArithmeticOp::Sub => lhs - rhs,
                     ArithmeticOp::Mul => lhs * rhs,
                     ArithmeticOp::Div => lhs / rhs,
-                    ArithmeticOp::Mod => lhs % rhs,
+                    ArithmeticOp::Mod => python_mod_f64(lhs, rhs),
                     ArithmeticOp::Pow => lhs.powf(rhs),
                     ArithmeticOp::FloorDiv => (lhs / rhs).floor(),
                 };
@@ -4482,9 +4503,7 @@ mod tests {
         assert_eq!(modulo.dtype(), DType::Float64);
         assert!(matches!(modulo.values()[0], Scalar::Float64(v) if (v - 1.0).abs() < 1e-10));
         assert!(matches!(modulo.values()[1], Scalar::Float64(v) if (v - 2.0).abs() < 1e-10));
-        assert!(
-            matches!(modulo.values()[2], Scalar::Float64(v) if (v - (-3.0_f64 % 2.0)).abs() < 1e-10)
-        );
+        assert!(matches!(modulo.values()[2], Scalar::Float64(v) if (v - 1.0).abs() < 1e-10));
 
         let pow = left.binary_numeric(&right, ArithmeticOp::Pow).expect("pow");
         assert_eq!(pow.dtype(), DType::Float64);
@@ -4530,6 +4549,84 @@ mod tests {
         assert_eq!(floordiv.values()[0], Scalar::Int64(3));
         assert_eq!(floordiv.values()[1], Scalar::Int64(2));
         assert_eq!(floordiv.values()[2], Scalar::Int64(7));
+    }
+
+    #[test]
+    fn int64_mod_floordiv_match_pandas_negative_operand_signs() {
+        let left = Column::from_values(vec![
+            Scalar::Int64(7),
+            Scalar::Int64(-7),
+            Scalar::Int64(-7),
+            Scalar::Int64(7),
+        ])
+        .expect("left");
+        let right = Column::from_values(vec![
+            Scalar::Int64(-3),
+            Scalar::Int64(3),
+            Scalar::Int64(-3),
+            Scalar::Int64(3),
+        ])
+        .expect("right");
+
+        let modulo = left.binary_numeric(&right, ArithmeticOp::Mod).expect("mod");
+        assert_eq!(modulo.dtype(), DType::Int64);
+        assert_eq!(
+            modulo.values(),
+            &[
+                Scalar::Int64(-2),
+                Scalar::Int64(2),
+                Scalar::Int64(-1),
+                Scalar::Int64(1)
+            ]
+        );
+
+        let floordiv = left
+            .binary_numeric(&right, ArithmeticOp::FloorDiv)
+            .expect("floordiv");
+        assert_eq!(floordiv.dtype(), DType::Int64);
+        assert_eq!(
+            floordiv.values(),
+            &[
+                Scalar::Int64(-3),
+                Scalar::Int64(-3),
+                Scalar::Int64(2),
+                Scalar::Int64(2)
+            ]
+        );
+    }
+
+    #[test]
+    fn float64_mod_floordiv_match_pandas_negative_operand_signs() {
+        let left = Column::from_values(vec![
+            Scalar::Float64(7.0),
+            Scalar::Float64(-7.0),
+            Scalar::Float64(-7.0),
+            Scalar::Float64(7.0),
+        ])
+        .expect("left");
+        let right = Column::from_values(vec![
+            Scalar::Float64(-3.0),
+            Scalar::Float64(3.0),
+            Scalar::Float64(-3.0),
+            Scalar::Float64(3.0),
+        ])
+        .expect("right");
+
+        let modulo = left.binary_numeric(&right, ArithmeticOp::Mod).expect("mod");
+        assert_eq!(modulo.dtype(), DType::Float64);
+        assert!(matches!(modulo.values()[0], Scalar::Float64(v) if (v + 2.0).abs() < 1e-10));
+        assert!(matches!(modulo.values()[1], Scalar::Float64(v) if (v - 2.0).abs() < 1e-10));
+        assert!(matches!(modulo.values()[2], Scalar::Float64(v) if (v + 1.0).abs() < 1e-10));
+        assert!(matches!(modulo.values()[3], Scalar::Float64(v) if (v - 1.0).abs() < 1e-10));
+
+        let floordiv = left
+            .binary_numeric(&right, ArithmeticOp::FloorDiv)
+            .expect("floordiv");
+        assert_eq!(floordiv.dtype(), DType::Float64);
+        assert!(matches!(floordiv.values()[0], Scalar::Float64(v) if (v + 3.0).abs() < 1e-10));
+        assert!(matches!(floordiv.values()[1], Scalar::Float64(v) if (v + 3.0).abs() < 1e-10));
+        assert!(matches!(floordiv.values()[2], Scalar::Float64(v) if (v - 2.0).abs() < 1e-10));
+        assert!(matches!(floordiv.values()[3], Scalar::Float64(v) if (v - 2.0).abs() < 1e-10));
     }
 
     #[test]
