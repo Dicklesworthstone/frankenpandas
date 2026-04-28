@@ -1,10 +1,12 @@
 use serde::{Deserialize, Serialize};
 
-use crate::asupersync::codec::ArtifactCodec;
-use crate::asupersync::config::AsupersyncConfig;
-use crate::asupersync::error::AsupersyncError;
-use crate::asupersync::integrity::{IntegrityProof, IntegrityVerifier};
-use crate::asupersync::transport::{TransferStatus, TransportLayer};
+use crate::asupersync::{
+    codec::ArtifactCodec,
+    config::AsupersyncConfig,
+    error::AsupersyncError,
+    integrity::{IntegrityProof, IntegrityVerifier},
+    transport::{TransferStatus, TransportLayer},
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

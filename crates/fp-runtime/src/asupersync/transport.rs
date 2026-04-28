@@ -1,12 +1,16 @@
-use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex},
+};
 
 use serde::{Deserialize, Serialize};
 
-use crate::asupersync::codec::EncodedArtifact;
-use crate::asupersync::config::{AsupersyncConfig, CapabilitySet, CxCapability};
-use crate::asupersync::error::AsupersyncError;
-use crate::asupersync::validate_capability_gate;
+use crate::asupersync::{
+    codec::EncodedArtifact,
+    config::{AsupersyncConfig, CapabilitySet, CxCapability},
+    error::AsupersyncError,
+    validate_capability_gate,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

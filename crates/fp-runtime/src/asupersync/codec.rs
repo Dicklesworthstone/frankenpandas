@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::asupersync::config::AsupersyncConfig;
-use crate::asupersync::error::AsupersyncError;
+use crate::asupersync::{config::AsupersyncConfig, error::AsupersyncError};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtifactPayload {

@@ -1,5 +1,7 @@
-use self::config::{AsupersyncConfig, CapabilitySet};
-use self::error::AsupersyncError;
+use self::{
+    config::{AsupersyncConfig, CapabilitySet},
+    error::AsupersyncError,
+};
 
 pub mod codec;
 pub mod config;

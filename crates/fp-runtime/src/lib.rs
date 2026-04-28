@@ -63,10 +63,13 @@
 //!   behind the feature so they don't appear in the default
 //!   docs.rs render.)
 
-use std::borrow::Cow;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    borrow::Cow,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 #[cfg(feature = "asupersync")]
@@ -441,6 +444,7 @@ pub struct RaptorQEnvelope {
 }
 
 pub const MAX_DECODE_PROOFS: usize = 1_000;
+pub const DEFAULT_RAPTORQ_SYMBOL_BYTES: usize = 1_024;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RaptorQMetadata {
@@ -466,20 +470,36 @@ pub struct DecodeProof {
 
 impl RaptorQEnvelope {
     #[must_use]
-    pub fn placeholder(artifact_id: impl Into<String>, artifact_type: impl Into<String>) -> Self {
+    pub fn from_source_bytes(
+        artifact_id: impl Into<String>,
+        artifact_type: impl Into<String>,
+        source_bytes: &[u8],
+        repair_symbols: u32,
+    ) -> Self {
+        let symbol_hashes: Vec<String> = source_bytes
+            .chunks(DEFAULT_RAPTORQ_SYMBOL_BYTES)
+            .map(|chunk| format!("sha256:{}", sha256_hex(chunk)))
+            .collect();
+        let k = u32::try_from(symbol_hashes.len()).unwrap_or(u32::MAX);
+        let overhead_ratio = if k == 0 {
+            0.0
+        } else {
+            f64::from(repair_symbols) / f64::from(k)
+        };
+
         Self {
             artifact_id: artifact_id.into(),
             artifact_type: artifact_type.into(),
-            source_hash: "blake3:placeholder".to_owned(),
+            source_hash: format!("sha256:{}", sha256_hex(source_bytes)),
             raptorq: RaptorQMetadata {
-                k: 0,
-                repair_symbols: 0,
-                overhead_ratio: 0.0,
-                symbol_hashes: Vec::new(),
+                k,
+                repair_symbols,
+                overhead_ratio,
+                symbol_hashes,
             },
             scrub: ScrubStatus {
-                last_ok_unix_ms: 0,
-                status: "placeholder".to_owned(),
+                last_ok_unix_ms: now_unix_ms().unwrap_or_default(),
+                status: "ok".to_owned(),
             },
             decode_proofs: Vec::new(),
         }
@@ -495,6 +515,17 @@ impl RaptorQEnvelope {
         }
         self.decode_proofs.push(proof);
     }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        hex.push(char::from(HEX[usize::from(byte >> 4)]));
+        hex.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    hex
 }
 
 // === Conformal Calibration for Decision Engine (bd-2t5e.9, AG-09) ===
@@ -686,14 +717,14 @@ pub fn outcome_to_action<T, E>(outcome: &::asupersync::Outcome<T, E>) -> Decisio
 
 #[cfg(test)]
 mod tests {
+    use std::{borrow::Cow, hint::black_box, time::Instant};
+
+    use serde::Serialize;
+
     use super::{
         ConformalGuard, DecisionAction, EvidenceLedger, RaptorQEnvelope, RuntimeMode,
         RuntimePolicy, decision_to_card,
     };
-    use serde::Serialize;
-    use std::borrow::Cow;
-    use std::hint::black_box;
-    use std::time::Instant;
 
     const ASUPERSYNC_PACKET_ID: &str = "ASUPERSYNC-E";
     const REPLAY_PREFIX: &str = "cargo test -p fp-runtime --";
@@ -1146,16 +1177,35 @@ mod tests {
     }
 
     #[test]
-    fn placeholder_raptorq_envelope_is_well_formed() {
-        let envelope = RaptorQEnvelope::placeholder("packet-001", "conformance");
+    fn source_backed_raptorq_envelope_records_manifest_fields() {
+        let mut source = vec![7_u8; super::DEFAULT_RAPTORQ_SYMBOL_BYTES];
+        source.extend_from_slice(b"tail");
+
+        let envelope = RaptorQEnvelope::from_source_bytes("packet-001", "conformance", &source, 3);
+
         assert_eq!(envelope.artifact_id, "packet-001");
         assert_eq!(envelope.artifact_type, "conformance");
-        assert_eq!(envelope.scrub.status, "placeholder");
+        assert!(envelope.source_hash.starts_with("sha256:"));
+        assert_eq!(envelope.source_hash.len(), "sha256:".len() + 64);
+        assert_eq!(envelope.raptorq.k, 2);
+        assert_eq!(envelope.raptorq.repair_symbols, 3);
+        assert_eq!(envelope.raptorq.overhead_ratio, 1.5);
+        assert_eq!(envelope.raptorq.symbol_hashes.len(), 2);
+        assert!(
+            envelope
+                .raptorq
+                .symbol_hashes
+                .iter()
+                .all(|hash| hash.starts_with("sha256:") && hash.len() == "sha256:".len() + 64)
+        );
+        assert_eq!(envelope.scrub.status, "ok");
+        assert!(envelope.scrub.last_ok_unix_ms > 0);
     }
 
     #[test]
     fn decode_proof_append_is_capped_and_evicts_oldest() {
-        let mut envelope = RaptorQEnvelope::placeholder("packet-001", "conformance");
+        let mut envelope =
+            RaptorQEnvelope::from_source_bytes("packet-001", "conformance", b"source", 1);
         let total = super::MAX_DECODE_PROOFS + 5;
 
         for idx in 0..total {
