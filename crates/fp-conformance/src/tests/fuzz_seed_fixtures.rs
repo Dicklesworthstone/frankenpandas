@@ -467,6 +467,94 @@ fn fuzz_column_arith_bytes_accepts_floor_div_zero_seed() {
 }
 
 #[test]
+fn fuzz_column_arith_bytes_mod_pos_div_pos_inf() {
+    let seed = include_bytes!(
+        "../../fixtures/adversarial/fuzz_corpus/column_arith/mod_pos_div_pos_inf.bin"
+    );
+    fuzz_column_arith_bytes(seed).expect("mod pos/+inf seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_column_arith_bytes_mod_neg_div_pos_inf() {
+    let seed = include_bytes!(
+        "../../fixtures/adversarial/fuzz_corpus/column_arith/mod_neg_div_pos_inf.bin"
+    );
+    fuzz_column_arith_bytes(seed).expect("mod neg/+inf seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_column_arith_bytes_mod_pos_div_neg_inf() {
+    let seed = include_bytes!(
+        "../../fixtures/adversarial/fuzz_corpus/column_arith/mod_pos_div_neg_inf.bin"
+    );
+    fuzz_column_arith_bytes(seed).expect("mod pos/-inf seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_column_arith_bytes_mod_neg_div_neg_inf() {
+    let seed = include_bytes!(
+        "../../fixtures/adversarial/fuzz_corpus/column_arith/mod_neg_div_neg_inf.bin"
+    );
+    fuzz_column_arith_bytes(seed).expect("mod neg/-inf seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_column_arith_bytes_mod_zero_div_inf() {
+    let seed = include_bytes!(
+        "../../fixtures/adversarial/fuzz_corpus/column_arith/mod_zero_div_inf.bin"
+    );
+    fuzz_column_arith_bytes(seed).expect("mod 0/inf seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_column_arith_bytes_mod_nan_div_inf() {
+    let seed = include_bytes!(
+        "../../fixtures/adversarial/fuzz_corpus/column_arith/mod_nan_div_inf.bin"
+    );
+    fuzz_column_arith_bytes(seed).expect("mod nan/inf seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_column_arith_bytes_floordiv_pos_div_inf() {
+    let seed = include_bytes!(
+        "../../fixtures/adversarial/fuzz_corpus/column_arith/floordiv_pos_div_inf.bin"
+    );
+    fuzz_column_arith_bytes(seed).expect("floordiv pos/inf seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_column_arith_bytes_floordiv_neg_div_inf() {
+    let seed = include_bytes!(
+        "../../fixtures/adversarial/fuzz_corpus/column_arith/floordiv_neg_div_inf.bin"
+    );
+    fuzz_column_arith_bytes(seed).expect("floordiv neg/inf seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_column_arith_bytes_mul_inf_by_zero() {
+    let seed = include_bytes!(
+        "../../fixtures/adversarial/fuzz_corpus/column_arith/mul_inf_by_zero.bin"
+    );
+    fuzz_column_arith_bytes(seed).expect("mul inf*0 seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_column_arith_bytes_div_by_neg_zero() {
+    let seed = include_bytes!(
+        "../../fixtures/adversarial/fuzz_corpus/column_arith/div_by_neg_zero.bin"
+    );
+    fuzz_column_arith_bytes(seed).expect("div by -0 seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_column_arith_bytes_add_inf_to_neg_inf() {
+    let seed = include_bytes!(
+        "../../fixtures/adversarial/fuzz_corpus/column_arith/add_inf_to_neg_inf.bin"
+    );
+    fuzz_column_arith_bytes(seed).expect("add inf+(-inf) seed should satisfy invariants");
+}
+
+#[test]
 fn fuzz_join_series_bytes_accepts_inner_overlap_seed() {
     let seed = include_bytes!(
         "../../fixtures/adversarial/fuzz_corpus/join_series/inner_overlap_seed.bin"
