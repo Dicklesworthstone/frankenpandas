@@ -6288,7 +6288,7 @@ fn fuzz_sql_index_col(mode: u8) -> Option<&'static str> {
     }
 }
 
-fn fuzz_sql_table_name<'a>(mode: u8, text: &'a str) -> &'a str {
+fn fuzz_sql_table_name(mode: u8, text: &str) -> &str {
     match (mode >> 2) % 4 {
         0 => "t1",
         1 => "t2",
@@ -6301,7 +6301,7 @@ fn assert_sql_fuzz_frame_invariants(frame: &DataFrame) -> Result<(), String> {
     let index_len = frame.index().len();
     for name in frame.column_names() {
         let column = frame
-            .column(&name)
+            .column(name)
             .ok_or_else(|| format!("column_names mentions missing SQL column {name}"))?;
         if column.len() != index_len {
             return Err(format!(
