@@ -1505,7 +1505,7 @@ fn readme_element_wise_operations_compiles_and_runs() -> Result<(), Box<dyn std:
     let pi_series = Series::from_values(
         "pi",
         pi_labels,
-        vec![Scalar::Float64(3.14159), Scalar::Float64(2.71828)],
+        vec![Scalar::Float64(3.5), Scalar::Float64(2.5)],
     )?;
     let _rounded_s = pi_series.round(2)?;
     let _rounded_df = df.round(0)?;
@@ -1880,7 +1880,7 @@ fn readme_type_coercion_compiles_and_runs() -> Result<(), Box<dyn std::error::Er
     // Series.astype_safe + bool_ on a single-element Bool Series.
     let bool_labels: Vec<IndexLabel> = vec![IndexLabel::Int64(0)];
     let one_bool = Series::from_values("b", bool_labels, vec![Scalar::Bool(true)])?;
-    assert_eq!(one_bool.bool_()?, true);
+    assert!(one_bool.bool_()?);
     let _ = one_bool.astype_safe(DType::Bool, "raise")?;
     let _ = one_bool.axes();
     // Multiple-column cast — both targets need to be reachable from Int64.
@@ -2216,7 +2216,7 @@ fn readme_groupby_aggregation_matrix_compiles_and_runs() -> Result<(), Box<dyn s
     let _ = gb.pct_change(1)?;
     let _ = gb.value_counts()?;
     let group_one = gb.get_group("1")?; // groups by column 'a': keys are 1 and 2
-    assert!(group_one.index().len() >= 1);
+    assert!(!group_one.index().is_empty());
     let piped = gb.pipe(|g| g.sum())?;
     assert!(!piped.column_names().is_empty());
     let _ = gb.ohlc()?;
@@ -2519,9 +2519,9 @@ fn readme_advanced_selection_compiles_and_runs() -> Result<(), Box<dyn std::erro
         ],
     )?;
     let counts = grades.value_counts()?;
-    assert!(counts.len() >= 1);
+    assert!(!counts.is_empty());
     let pcts = grades.value_counts_with_options(true, true, false, true)?;
-    assert!(pcts.len() >= 1);
+    assert!(!pcts.is_empty());
 
     // fd90.229: 4 additional value_counts variants.
     // Series.value_counts_bins — binning a numeric Series.
@@ -2578,11 +2578,11 @@ fn readme_advanced_selection_compiles_and_runs() -> Result<(), Box<dyn std::erro
     // factorize returns (codes, uniques) tuple.
     let (codes, uniques) = grades.factorize()?;
     assert_eq!(codes.len(), 6);
-    assert!(uniques.len() >= 1);
+    assert!(!uniques.is_empty());
 
     // select_dtypes — include and exclude paths.
     let numeric_only = df.select_dtypes(&[DType::Int64, DType::Float64], &[])?;
-    assert!(numeric_only.column_names().len() >= 1);
+    assert!(!numeric_only.column_names().is_empty());
     let non_numeric = df.select_dtypes(&[], &[DType::Int64, DType::Float64])?;
     assert!(non_numeric.column_names().iter().any(|n| n.as_str() == "ticker"));
 
@@ -2764,7 +2764,7 @@ fn readme_selection_and_indexing_compiles_and_runs() -> Result<(), Box<dyn std::
 
     // select_dtypes_by_name — string-form of dtype filtering.
     let numeric_only = df.select_dtypes_by_name(&["int64", "float64"], &[])?;
-    assert!(numeric_only.column_names().len() >= 1);
+    assert!(!numeric_only.column_names().is_empty());
     Ok(())
 }
 
@@ -3614,7 +3614,7 @@ fn readme_serialization_compiles_and_runs() -> Result<(), Box<dyn std::error::Er
     let cases = vec![
         Scalar::Bool(true),
         Scalar::Int64(42),
-        Scalar::Float64(3.14),
+        Scalar::Float64(3.5),
         Scalar::Utf8("hello".to_owned()),
         Scalar::Null(NullKind::NaN),
     ];
@@ -4207,41 +4207,41 @@ fn readme_nanops_value_assertions() -> Result<(), Box<dyn std::error::Error>> {
         Scalar::Float64(5.0),
     ];
 
-    fn num(s: &Scalar) -> f64 {
+    fn num(s: &Scalar) -> Result<f64, Box<dyn std::error::Error>> {
         match s {
-            Scalar::Int64(v) => *v as f64,
-            Scalar::Float64(v) => *v,
-            _ => panic!("expected numeric, got {s:?}"),
+            Scalar::Int64(v) => Ok(*v as f64),
+            Scalar::Float64(v) => Ok(*v),
+            _ => Err(format!("expected numeric, got {s:?}").into()),
         }
     }
 
     // sum (1+2+4+5) = 12
-    assert_eq!(num(&nansum(&values)), 12.0);
+    assert_eq!(num(&nansum(&values))?, 12.0);
     // mean 12/4 = 3
-    assert_eq!(num(&nanmean(&values)), 3.0);
+    assert_eq!(num(&nanmean(&values))?, 3.0);
     // median (sorted 1,2,4,5 → median 3)
-    assert_eq!(num(&nanmedian(&values)), 3.0);
+    assert_eq!(num(&nanmedian(&values))?, 3.0);
     // min/max
-    assert_eq!(num(&nanmin(&values)), 1.0);
-    assert_eq!(num(&nanmax(&values)), 5.0);
+    assert_eq!(num(&nanmin(&values))?, 1.0);
+    assert_eq!(num(&nanmax(&values))?, 5.0);
     // ptp = max - min = 4
-    assert_eq!(num(&nanptp(&values)), 4.0);
+    assert_eq!(num(&nanptp(&values))?, 4.0);
     // prod = 1*2*4*5 = 40
-    assert_eq!(num(&nanprod(&values)), 40.0);
+    assert_eq!(num(&nanprod(&values))?, 40.0);
     // nancumsum: skip NaN at index 2 (preserve as NaN/Null in output)
     let csum = nancumsum(&values);
     assert_eq!(csum.len(), 5);
     // First 2 elements: cumulative 1.0, 3.0
-    assert_eq!(num(&csum[0]), 1.0);
-    assert_eq!(num(&csum[1]), 3.0);
+    assert_eq!(num(&csum[0])?, 1.0);
+    assert_eq!(num(&csum[1])?, 3.0);
     // Index 2 (was NaN): pandas-style nancumsum keeps it as NaN/Null
     // in the output to preserve length while skipping in the running
     // total. The next non-null position (index 3) should be 3+4=7.
-    assert_eq!(num(&csum[3]), 7.0);
-    assert_eq!(num(&csum[4]), 12.0);
+    assert_eq!(num(&csum[3])?, 7.0);
+    assert_eq!(num(&csum[4])?, 12.0);
 
     // q50 (median equivalent) = 3.0
-    assert_eq!(num(&nanquantile(&values, 0.5)), 3.0);
+    assert_eq!(num(&nanquantile(&values, 0.5))?, 3.0);
 
     // argmax → Some(4) (index of max=5.0 is position 4).
     assert_eq!(nanargmax(&values), Some(4));
@@ -4699,7 +4699,7 @@ fn readme_scalar_inspection_methods() -> Result<(), Box<dyn std::error::Error>> 
 
     // ── to_f64 ──────────────────────────────────────────────────
     assert_eq!(Scalar::Int64(42).to_f64()?, 42.0);
-    assert_eq!(Scalar::Float64(3.14).to_f64()?, 3.14);
+    assert_eq!(Scalar::Float64(3.5).to_f64()?, 3.5);
     // Bool also converts (true=1.0, false=0.0).
     assert_eq!(Scalar::Bool(true).to_f64()?, 1.0);
     assert_eq!(Scalar::Bool(false).to_f64()?, 0.0);
@@ -4730,11 +4730,12 @@ fn readme_periodfreq_parse_alias_round_trip() -> Result<(), Box<dyn std::error::
         assert_eq!(freq.alias(), expected_alias);
         // parse(canonical) round-trips back to the same variant.
         let parsed = PeriodFreq::parse(expected_alias)
-            .unwrap_or_else(|| panic!("parse({expected_alias}) failed"));
+            .ok_or_else(|| format!("parse({expected_alias}) failed"))?;
         assert_eq!(parsed, freq);
         // parse is case-insensitive (lowercase round-trips too).
-        let parsed_lower = PeriodFreq::parse(&expected_alias.to_lowercase())
-            .unwrap_or_else(|| panic!("parse({}) failed", expected_alias.to_lowercase()));
+        let lower_alias = expected_alias.to_lowercase();
+        let parsed_lower = PeriodFreq::parse(&lower_alias)
+            .ok_or_else(|| format!("parse({lower_alias}) failed"))?;
         assert_eq!(parsed_lower, freq);
     }
 
@@ -5197,11 +5198,11 @@ fn readme_ioerror_variant_triggers() -> Result<(), Box<dyn std::error::Error>> {
 /// specific TypeError variants.
 #[test]
 fn readme_typeerror_variant_triggers() -> Result<(), Box<dyn std::error::Error>> {
-    // ── LossyFloatToInt: 3.14 → Int64 must error ────────────────
-    let lossy = cast_scalar(&Scalar::Float64(3.14), DType::Int64);
+    // ── LossyFloatToInt: 3.5 → Int64 must error ─────────────────
+    let lossy = cast_scalar(&Scalar::Float64(3.5), DType::Int64);
     assert!(matches!(
         lossy,
-        Err(TypeError::LossyFloatToInt { value }) if (value - 3.14).abs() < 1e-9
+        Err(TypeError::LossyFloatToInt { value }) if (value - 3.5).abs() < 1e-9
     ));
 
     // ── InvalidBoolInt: 2 → Bool must error (only 0/1 allowed) ──
@@ -6208,7 +6209,7 @@ fn readme_paired_helpers_round_trip() -> Result<(), Box<dyn std::error::Error>> 
 /// fd90_015_misc_helpers_via_prelude — this asserts runtime behavior of
 /// index_to_frame / index_to_series / AggFunc variants / GroupByOptions
 /// + GroupByExecutionOptions Default semantics so a runtime regression
-/// surfaces here, not just at compile time.
+///   surfaces here, not just at compile time.
 #[test]
 fn readme_index_helpers_round_trip() -> Result<(), Box<dyn std::error::Error>> {
     // ── index_to_frame / index_to_series ─────────────────────────
