@@ -1452,11 +1452,12 @@ pub fn nancummax(values: &[Scalar]) -> Vec<Scalar> {
         }
         match v.to_f64() {
             Ok(x) if !x.is_nan() => {
-                running = Some(match running {
+                let new_val = match running {
                     Some(prev) => prev.max(x),
                     None => x,
-                });
-                out.push(Scalar::Float64(running.unwrap()));
+                };
+                running = Some(new_val);
+                out.push(Scalar::Float64(new_val));
             }
             _ => out.push(Scalar::Null(NullKind::NaN)),
         }
@@ -1477,11 +1478,12 @@ pub fn nancummin(values: &[Scalar]) -> Vec<Scalar> {
         }
         match v.to_f64() {
             Ok(x) if !x.is_nan() => {
-                running = Some(match running {
+                let new_val = match running {
                     Some(prev) => prev.min(x),
                     None => x,
-                });
-                out.push(Scalar::Float64(running.unwrap()));
+                };
+                running = Some(new_val);
+                out.push(Scalar::Float64(new_val));
             }
             _ => out.push(Scalar::Null(NullKind::NaN)),
         }
