@@ -79,11 +79,11 @@
 
 ### DISC-013: Series + Series union alignment does not sort the result index
 - **Reference:** Pandas `Series.add(other)` (and `series + other` operator) on differently-indexed Series performs an outer-join alignment that returns a sorted result index by default.
-- **Our impl:** fp-frame's series-add union alignment preserves discovery order (left labels first, then right-only labels appended) rather than sorting. So `Series([1,2], index=[1,3]) + Series([10,20], index=[1,2])` yields a result indexed `[1, 3, 2]` while pandas yields `[1, 2, 3]`.
-- **Impact:** Conformance packet `FP-P2C-001 series_add_alignment_union_strict` fails with `index mismatch: actual=[Int64(1), Int64(3), Int64(2)], expected=[Int64(1), Int64(2), Int64(3)]`. Downstream test `live_oracle_unavailable_falls_back_to_fixture_when_enabled` re-surfaces this via the FP-P2C-001 fallback fixture. Same mismatch will appear on any `+` / `-` / `*` / `/` between Series with non-matching indexes where the union order would differ.
-- **Resolution:** WILL-FIX - implementing sorted union alignment in fp-index's `align_union` (and the SeriesArithmetic dispatcher in fp-frame) is a non-trivial behavior change that could affect any downstream code relying on discovery-order alignment. Tracked as a future fp-index/fp-frame coordinated slice. Per br-frankenpandas-9seu (fd90.81).
-- **Tests affected:** `packet_filter_runs::FP-P2C-001/series_add_alignment_union_strict`, `live_oracle_harness_availability::live_oracle_unavailable_falls_back_to_fixture_when_enabled` (the latter wraps the former via the fallback report).
-- **Review date:** 2026-04-26
+- **Our impl:** RESOLVED - unique-label Series arithmetic now uses a sorted outer union for `+` / `-` / `*` / `/` and fill-value arithmetic, while preserving the duplicate-aware cross-product path tracked separately by DISC-014.
+- **Impact:** The `FP-P2C-001 series_add_alignment_union_strict` fallback fixture has been refreshed to pandas 2.2.3 output: result index `[1, 2, 3]`, values `[NaN, NaN, 34.0]`.
+- **Resolution:** FIXED in br-frankenpandas-cod1d13 by routing unique-label Series arithmetic through sorted union alignment in fp-frame instead of changing the generic fp-index discovery-order helper.
+- **Tests affected:** `series_add_aligns_on_union_index`, `series_add_fill_sorts_unique_outer_union_index`, `FP-P2C-001/series_add_alignment_union_strict`.
+- **Review date:** 2026-04-28
 
 ### DISC-014: Series + Series duplicate-label arithmetic doesn't promote Int64 to Float64
 - **Reference:** Pandas `Series + Series` with duplicate labels on either side performs cross-product alignment that can introduce NaN for the pairings with no match. Pandas promotes the result to `Float64` to accommodate the NaN even when both sources are pure `Int64` and the actual numeric result fits in `Int64`.

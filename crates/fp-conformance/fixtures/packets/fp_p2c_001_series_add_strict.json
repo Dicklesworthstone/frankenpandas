@@ -5,8 +5,8 @@
   "operation": "series_add",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "f38b2fca36d3f10acdeb5fb41213653c2250ca347046ceaea93ef3d4926f4919",
-    "generated_at": "2026-04-22T21:02:48Z"
+    "oracle_script_sha256": "c6e519c71f866379120790b7cbf098ce2876efe6f6260311ca14ac6d6799514a",
+    "generated_at": "2026-04-28T19:57:12Z"
   },
   "left": {
     "name": "lhs",
@@ -33,13 +33,13 @@
   "expected_series": {
     "index": [
       { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 3 },
-      { "kind": "int64", "value": 2 }
+      { "kind": "int64", "value": 2 },
+      { "kind": "int64", "value": 3 }
     ],
     "values": [
-      { "kind": "null", "value": "null" },
-      { "kind": "int64", "value": 34 },
-      { "kind": "null", "value": "null" }
+      { "kind": "null", "value": "na_n" },
+      { "kind": "null", "value": "na_n" },
+      { "kind": "float64", "value": 34.0 }
     ]
   }
 }

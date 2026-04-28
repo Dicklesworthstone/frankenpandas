@@ -1021,6 +1021,55 @@ fn align_union_plan(left: &Index, right: &Index) -> AlignmentPlan {
     }
 }
 
+fn align_union_sorted_unique(left: &Index, right: &Index) -> AlignmentPlan {
+    debug_assert!(!left.has_duplicates());
+    debug_assert!(!right.has_duplicates());
+
+    let left_map: HashMap<IndexLabel, usize> = left
+        .labels()
+        .iter()
+        .cloned()
+        .enumerate()
+        .map(|(position, label)| (label, position))
+        .collect();
+    let right_map: HashMap<IndexLabel, usize> = right
+        .labels()
+        .iter()
+        .cloned()
+        .enumerate()
+        .map(|(position, label)| (label, position))
+        .collect();
+
+    let union_labels = left
+        .labels()
+        .iter()
+        .chain(right.labels())
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+
+    let left_positions = union_labels
+        .iter()
+        .map(|label| left_map.get(label).copied())
+        .collect();
+    let right_positions = union_labels
+        .iter()
+        .map(|label| right_map.get(label).copied())
+        .collect();
+
+    let mut union_index = Index::new(union_labels);
+    if left.name() == right.name() {
+        union_index = union_index.set_names(left.name());
+    }
+
+    AlignmentPlan {
+        union_index,
+        left_positions,
+        right_positions,
+    }
+}
+
 /// Ordering helper that works across Scalar variants without requiring
 /// an `Ord` derive on `Scalar` itself.
 ///
@@ -1336,15 +1385,15 @@ impl Series {
         ledger: &mut EvidenceLedger,
     ) -> Result<Self, FrameError> {
         let has_duplicate_labels = self.index.has_duplicates() || other.index.has_duplicates();
-        let exact_duplicate_fast_path = has_duplicate_labels && self.index == other.index;
+        let exact_index_fast_path = self.index == other.index;
 
-        let (union_index, left_positions, right_positions) = if exact_duplicate_fast_path {
+        let (union_index, left_positions, right_positions) = if exact_index_fast_path {
             let positions = (0..self.len()).map(Some).collect::<Vec<_>>();
             (self.index.clone(), positions.clone(), positions)
         } else if has_duplicate_labels {
             align_union_duplicate_aware(&self.index, &other.index)
         } else {
-            let plan = align_union(&self.index, &other.index);
+            let plan = align_union_sorted_unique(&self.index, &other.index);
             validate_alignment_plan(&plan)?;
             (plan.union_index, plan.left_positions, plan.right_positions)
         };
@@ -1447,15 +1496,32 @@ impl Series {
         op: ArithmeticOp,
         fill_value: f64,
     ) -> Result<Self, FrameError> {
-        let (left_aligned, right_aligned) = self.align(other, AlignMode::Outer)?;
+        let has_duplicate_labels = self.index.has_duplicates() || other.index.has_duplicates();
+        let plan = if self.index == other.index {
+            let positions = (0..self.len()).map(Some).collect::<Vec<_>>();
+            AlignmentPlan {
+                union_index: self.index.clone(),
+                left_positions: positions.clone(),
+                right_positions: positions,
+            }
+        } else if has_duplicate_labels {
+            let (union_index, left_positions, right_positions) =
+                align_union_duplicate_aware(&self.index, &other.index);
+            AlignmentPlan {
+                union_index,
+                left_positions,
+                right_positions,
+            }
+        } else {
+            align_union_sorted_unique(&self.index, &other.index)
+        };
+        validate_alignment_plan(&plan)?;
 
-        let mut out = Vec::with_capacity(left_aligned.len());
-        for (lv, rv) in left_aligned
-            .column()
-            .values()
-            .iter()
-            .zip(right_aligned.column().values().iter())
-        {
+        let left_col = self.column.reindex_by_positions(&plan.left_positions)?;
+        let right_col = other.column.reindex_by_positions(&plan.right_positions)?;
+
+        let mut out = Vec::with_capacity(plan.union_index.len());
+        for (lv, rv) in left_col.values().iter().zip(right_col.values().iter()) {
             let result = match (lv.is_missing(), rv.is_missing()) {
                 (true, true) => Scalar::Null(NullKind::NaN),
                 (true, false) => {
@@ -1571,7 +1637,7 @@ impl Series {
             format!("{}{op_sym}{}", self.name, other.name)
         };
 
-        Self::from_values(&out_name, left_aligned.index().labels().to_vec(), out)
+        Self::from_values(&out_name, plan.union_index.labels().to_vec(), out)
     }
 
     /// Add with fill_value for NaN handling.
@@ -29868,16 +29934,36 @@ mod tests {
 
         assert_eq!(
             out.index().labels(),
-            &[1_i64.into(), 3_i64.into(), 2_i64.into()]
+            &[1_i64.into(), 2_i64.into(), 3_i64.into()]
         );
         assert_eq!(
             out.values(),
             &[
                 Scalar::Null(NullKind::Null),
-                Scalar::Int64(34),
-                Scalar::Null(NullKind::Null)
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(34)
             ]
         );
+    }
+
+    #[test]
+    fn series_add_preserves_exact_unsorted_index_order() {
+        let left = Series::from_values(
+            "left",
+            vec![3_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(30), Scalar::Int64(10)],
+        )
+        .expect("left");
+        let right = Series::from_values(
+            "right",
+            vec![3_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(4), Scalar::Int64(2)],
+        )
+        .expect("right");
+
+        let out = left.add(&right).expect("add should pass");
+        assert_eq!(out.index().labels(), &[3_i64.into(), 1_i64.into()]);
+        assert_eq!(out.values(), &[Scalar::Int64(34), Scalar::Int64(12)]);
     }
 
     #[test]
@@ -46071,6 +46157,32 @@ mod tests {
         assert_eq!(result.values()[0], Scalar::Float64(11.0)); // 1+10
         assert_eq!(result.values()[1], Scalar::Float64(20.0)); // 0+20 (fill)
         assert_eq!(result.values()[2], Scalar::Float64(3.0)); // 3+0 (fill)
+    }
+
+    #[test]
+    fn series_add_fill_sorts_unique_outer_union_index() {
+        let s1 = Series::from_values(
+            "a",
+            vec![3_i64.into(), 1_i64.into()],
+            vec![Scalar::Float64(30.0), Scalar::Float64(10.0)],
+        )
+        .unwrap();
+
+        let s2 = Series::from_values("b", vec![2_i64.into()], vec![Scalar::Float64(2.0)]).unwrap();
+
+        let result = s1.add_fill(&s2, 0.0).unwrap();
+        assert_eq!(
+            result.index().labels(),
+            &[1_i64.into(), 2_i64.into(), 3_i64.into()]
+        );
+        assert_eq!(
+            result.values(),
+            &[
+                Scalar::Float64(10.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(30.0)
+            ]
+        );
     }
 
     #[test]
