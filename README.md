@@ -34,7 +34,7 @@
 | Row MultiIndex | Yes | No | Yes (DataFrame/groupby/indexing/reshape/IO integration) |
 | Categorical dtype | Yes | Yes | Yes (metadata layer) |
 | 8 IO formats (CSV/JSON/JSONL/Parquet/Excel/SQL/Feather/IPC) | Yes (SQL: any SQLAlchemy engine) | Partial | Yes (SQL: generic `SqlConnection`, SQLite default backend; PostgreSQL/MySQL planned) |
-| Conformance testing against pandas oracle | - | - | Yes (430+ packet suites, 1250 fixtures; 557 lib packets passing, 5 known divergences tracked in DISCREPANCIES.md DISC-011 through DISC-014) |
+| Conformance testing against pandas oracle | - | - | Yes (430+ packet suites, 1250 fixtures; 557 lib packets passing, 14 documented divergences in DISCREPANCIES.md; 4 cause test failures: DISC-011/012/013/014) |
 
 ## Quick Example
 
