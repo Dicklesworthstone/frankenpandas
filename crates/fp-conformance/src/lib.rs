@@ -102,11 +102,14 @@ use fp_index::{
     validate_alignment_plan,
 };
 use fp_io::{
-    CsvOnBadLines, CsvReadOptions, ExcelReadOptions, IoError as FpIoError, JsonOrient, read_csv_str,
-    read_csv_with_options, read_excel_bytes, read_feather_bytes, read_ipc_stream_bytes,
-    read_json_str, read_jsonl_str, read_parquet_bytes, read_sql, series_from_arrow_array,
-    series_to_arrow_array, write_csv_string, write_excel_bytes, write_feather_bytes,
-    write_ipc_stream_bytes, write_json_string, write_jsonl_string, write_parquet_bytes,
+    CsvOnBadLines, CsvReadOptions, ExcelReadOptions, IoError as FpIoError, JsonOrient,
+    SqlReadOptions, read_csv_str, read_csv_with_options, read_excel_bytes, read_feather_bytes,
+    read_ipc_stream_bytes, read_json_str, read_jsonl_str, read_parquet_bytes, read_sql,
+    read_sql_query, read_sql_query_with_options, read_sql_query_with_options_and_index_col,
+    read_sql_table_with_index_col, read_sql_table_with_options_and_index_col,
+    read_sql_with_index_col, read_sql_with_options, series_from_arrow_array, series_to_arrow_array,
+    write_csv_string, write_excel_bytes, write_feather_bytes, write_ipc_stream_bytes,
+    write_json_string, write_jsonl_string, write_parquet_bytes,
 };
 use fp_join::{
     JoinExecutionOptions, JoinType, JoinedSeries, MergeExecutionOptions, MergeValidateMode,
@@ -6204,23 +6207,25 @@ fn assert_op_chain_invariants(frame: &DataFrame, label: &str) -> Result<(), Stri
     Ok(())
 }
 
-/// Structure-aware fuzz entrypoint for `fp_io::read_sql(...)` against an
-/// in-memory SQLite connection.
+/// Structure-aware fuzz entrypoint for SQL read APIs against an in-memory
+/// SQLite connection.
 ///
 /// Per br-frankenpandas-gpxk Phase 1: fp-io exposes six pub fns that accept
 /// untrusted query strings (`read_sql`, `read_sql_with_options`,
 /// `read_sql_with_index_col`, `read_sql_table`, `read_sql_table_with_index_col`,
-/// `read_sql_table_columns`). None had fuzz coverage. This target covers the
-/// narrowest surface (`read_sql`) using rusqlite's in-memory connection, which
-/// is good-enough: all higher-level SQL entrypoints ultimately route through
-/// the same `SqlConnection::query` trait method.
+/// `read_sql_table_columns`). This target keeps the narrow query parser path
+/// covered while also dispatching into the indexed read variants, where
+/// `index_col` validation has separate edge cases.
 ///
 /// Harness shape:
 /// - Construct a fixed-schema in-memory SQLite (two small tables populated
 ///   with deterministic rows).
-/// - Convert input bytes to lossy UTF-8, clamp to 4 KB.
-/// - Call `read_sql(&conn, &query_str)`; Ok and Err are both acceptable,
-///   panics are not.
+/// - Convert input bytes to lossy UTF-8, clamp to 4 KB. Legacy corpus entries
+///   are interpreted entirely as SQL/table text; inputs prefixed with
+///   `[0xff, mode]` use `mode` for API/index_col dispatch and the remaining
+///   bytes as SQL/table text.
+/// - Call one SQL read entrypoint; Ok and Err are both acceptable, panics are
+///   not. Successful frames must preserve column/index length invariants.
 pub fn fuzz_read_sql_bytes(input: &[u8]) -> Result<(), String> {
     if input.len() > 4 * 1024 {
         return Ok(());
@@ -6237,8 +6242,74 @@ pub fn fuzz_read_sql_bytes(input: &[u8]) -> Result<(), String> {
     )
     .map_err(|e| format!("execute_batch failed: {e}"))?;
 
-    let query = String::from_utf8_lossy(input);
-    let _ = read_sql(&conn, &query);
+    let (mode, payload) = match input {
+        [0xff, mode, rest @ ..] => (*mode, rest),
+        [mode, ..] => (*mode, input),
+        [] => (0, input),
+    };
+    let text = String::from_utf8_lossy(payload);
+    let index_col = fuzz_sql_index_col(mode);
+    let options = SqlReadOptions {
+        index_col: if mode & 0b1000 != 0 {
+            index_col.map(str::to_owned)
+        } else {
+            None
+        },
+        ..SqlReadOptions::default()
+    };
+
+    let result = match mode % 8 {
+        0 => read_sql(&conn, &text),
+        1 => read_sql_with_options(&conn, &text, &options),
+        2 => read_sql_with_index_col(&conn, &text, index_col),
+        3 => read_sql_query(&conn, &text),
+        4 => read_sql_query_with_options(&conn, &text, &options),
+        5 => read_sql_query_with_options_and_index_col(&conn, &text, &options, index_col),
+        6 => read_sql_table_with_index_col(&conn, fuzz_sql_table_name(mode, &text), index_col),
+        _ => read_sql_table_with_options_and_index_col(
+            &conn,
+            fuzz_sql_table_name(mode, &text),
+            &options,
+            index_col,
+        ),
+    };
+    if let Ok(frame) = result {
+        assert_sql_fuzz_frame_invariants(&frame)?;
+    }
+    Ok(())
+}
+
+fn fuzz_sql_index_col(mode: u8) -> Option<&'static str> {
+    match (mode >> 4) % 4 {
+        0 => None,
+        1 => Some("a"),
+        2 => Some("k"),
+        _ => Some(""),
+    }
+}
+
+fn fuzz_sql_table_name<'a>(mode: u8, text: &'a str) -> &'a str {
+    match (mode >> 2) % 4 {
+        0 => "t1",
+        1 => "t2",
+        2 => "empty_t",
+        _ => text.trim(),
+    }
+}
+
+fn assert_sql_fuzz_frame_invariants(frame: &DataFrame) -> Result<(), String> {
+    let index_len = frame.index().len();
+    for name in frame.column_names() {
+        let column = frame
+            .column(&name)
+            .ok_or_else(|| format!("column_names mentions missing SQL column {name}"))?;
+        if column.len() != index_len {
+            return Err(format!(
+                "SQL frame column {name} length {} != index length {index_len}",
+                column.len()
+            ));
+        }
+    }
     Ok(())
 }
 

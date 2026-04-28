@@ -3827,7 +3827,7 @@ impl Iterator for SqlIndexedChunkIterator {
     fn next(&mut self) -> Option<Self::Item> {
         let chunk = self.inner.next()?;
         Some(match (chunk, self.index_col.as_deref()) {
-            (Ok(frame), Some(index_col)) => promote_column_to_index(&frame, index_col),
+            (Ok(frame), Some(index_col)) => apply_sql_index_col(frame, Some(index_col)),
             (Ok(frame), None) => Ok(frame),
             (Err(err), _) => Err(err),
         })
@@ -3838,12 +3838,17 @@ fn sql_indexed_chunks(
     inner: SqlChunkIterator,
     index_col: Option<&str>,
 ) -> Result<SqlIndexedChunkIterator, IoError> {
-    if let Some(col_name) = index_col
-        && !inner.headers.iter().any(|header| header == col_name)
-    {
-        return Err(IoError::Sql(format!(
-            "index_col {col_name:?} not present in result columns"
-        )));
+    if let Some(col_name) = index_col {
+        if col_name.is_empty() {
+            return Err(IoError::Sql(
+                "index_col: empty string is not a valid column name".to_owned(),
+            ));
+        }
+        if !inner.headers.iter().any(|header| header == col_name) {
+            return Err(IoError::Sql(format!(
+                "index_col {col_name:?} not present in result columns"
+            )));
+        }
     }
     Ok(SqlIndexedChunkIterator {
         inner,
@@ -5198,10 +5203,7 @@ pub fn read_sql_with_options<C: SqlConnection>(
 
 /// Per br-frankenpandas-c1h9 (fd90.36): promote `options.index_col`
 /// to the DataFrame index when set, with empty-string rejection.
-fn apply_sql_index_col(
-    frame: DataFrame,
-    index_col: Option<&str>,
-) -> Result<DataFrame, IoError> {
+fn apply_sql_index_col(frame: DataFrame, index_col: Option<&str>) -> Result<DataFrame, IoError> {
     let Some(name) = index_col else {
         return Ok(frame);
     };
@@ -5249,7 +5251,7 @@ pub fn read_sql_query_with_options_and_index_col<C: SqlConnection>(
             ..options.clone()
         };
         let frame = read_sql_query_with_options(conn, query, &cleared)?;
-        return promote_column_to_index(&frame, col_name);
+        return apply_sql_index_col(frame, Some(col_name));
     }
     read_sql_query_with_options(conn, query, options)
 }
@@ -5490,10 +5492,7 @@ pub fn read_sql_with_index_col<C: SqlConnection>(
     index_col: Option<&str>,
 ) -> Result<DataFrame, IoError> {
     let frame = read_sql(conn, query)?;
-    let Some(col_name) = index_col else {
-        return Ok(frame);
-    };
-    promote_column_to_index(&frame, col_name)
+    apply_sql_index_col(frame, index_col)
 }
 
 /// Read an entire SQL table with one column promoted to the index.
@@ -5505,10 +5504,7 @@ pub fn read_sql_table_with_index_col<C: SqlConnection>(
     index_col: Option<&str>,
 ) -> Result<DataFrame, IoError> {
     let frame = read_sql_table(conn, table_name)?;
-    let Some(col_name) = index_col else {
-        return Ok(frame);
-    };
-    promote_column_to_index(&frame, col_name)
+    apply_sql_index_col(frame, index_col)
 }
 
 fn promote_column_to_index(frame: &DataFrame, col_name: &str) -> Result<DataFrame, IoError> {
@@ -6086,7 +6082,7 @@ pub fn read_sql_table_with_options_and_index_col<C: SqlConnection>(
             ..options.clone()
         };
         let frame = read_sql_table_with_options(conn, table_name, &cleared)?;
-        return promote_column_to_index(&frame, col_name);
+        return apply_sql_index_col(frame, Some(col_name));
     }
     read_sql_table_with_options(conn, table_name, options)
 }
@@ -6175,10 +6171,7 @@ pub fn read_sql_table_columns_with_index_col<C: SqlConnection>(
     index_col: Option<&str>,
 ) -> Result<DataFrame, IoError> {
     let frame = read_sql_table_columns(conn, table_name, columns)?;
-    let Some(col_name) = index_col else {
-        return Ok(frame);
-    };
-    promote_column_to_index(&frame, col_name)
+    apply_sql_index_col(frame, index_col)
 }
 
 /// Read a subset of columns from a SQL table as DataFrame chunks.
@@ -16650,6 +16643,76 @@ mod tests {
         )
         .expect_err("empty index_col must be rejected");
         assert!(matches!(err, IoError::Sql(msg) if msg.contains("empty string")));
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn read_sql_explicit_index_col_empty_string_rejected_across_entrypoints() {
+        fn assert_empty_index_col(err: IoError) {
+            assert!(
+                matches!(err, IoError::Sql(ref msg) if msg.contains("empty string")),
+                "expected empty index_col error, got {err:?}"
+            );
+        }
+
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE TABLE explicit_idx (a INTEGER, b TEXT);
+             INSERT INTO explicit_idx VALUES (1, 'x'), (2, 'y');",
+        )
+        .unwrap();
+
+        assert_empty_index_col(
+            read_sql_with_index_col(&conn, "SELECT a, b FROM explicit_idx", Some(""))
+                .expect_err("empty explicit read_sql index_col must be rejected"),
+        );
+        assert_empty_index_col(
+            read_sql_query_with_options_and_index_col(
+                &conn,
+                "SELECT a, b FROM explicit_idx",
+                &SqlReadOptions::default(),
+                Some(""),
+            )
+            .expect_err("empty explicit read_sql_query index_col must be rejected"),
+        );
+        assert_empty_index_col(
+            read_sql_query_chunks_with_options_and_index_col(
+                &conn,
+                "SELECT a, b FROM explicit_idx",
+                &SqlReadOptions::default(),
+                Some(""),
+                1,
+            )
+            .expect_err("empty explicit query chunk index_col must be rejected"),
+        );
+        assert_empty_index_col(
+            read_sql_table_with_index_col(&conn, "explicit_idx", Some(""))
+                .expect_err("empty explicit table index_col must be rejected"),
+        );
+        assert_empty_index_col(
+            read_sql_table_with_options_and_index_col(
+                &conn,
+                "explicit_idx",
+                &SqlReadOptions::default(),
+                Some(""),
+            )
+            .expect_err("empty explicit table options index_col must be rejected"),
+        );
+        assert_empty_index_col(
+            read_sql_table_columns_with_index_col(&conn, "explicit_idx", &["a"], Some(""))
+                .expect_err("empty explicit table-columns index_col must be rejected"),
+        );
+        assert_empty_index_col(
+            read_sql_table_columns_chunks_with_index_col(
+                &conn,
+                "explicit_idx",
+                &["a"],
+                Some(""),
+                1,
+            )
+            .expect_err("empty explicit table-columns chunk index_col must be rejected"),
+        );
     }
 
     #[cfg(feature = "sql-sqlite")]

@@ -230,6 +230,26 @@ fn fuzz_ipc_stream_io_bytes_reports_invalid_raw_bytes() {
 }
 
 #[test]
+fn fuzz_read_sql_bytes_accepts_indexed_query_dispatch_seed() {
+    let mut seed = vec![0xff, 0x15];
+    seed.extend(b"SELECT a, b FROM t1 ORDER BY a");
+    fuzz_read_sql_bytes(&seed).expect("indexed query SQL fuzz seed should parse");
+}
+
+#[test]
+fn fuzz_read_sql_bytes_accepts_empty_index_col_dispatch_seed() {
+    let mut seed = vec![0xff, 0x35];
+    seed.extend(b"SELECT a, b FROM t1 ORDER BY a");
+    fuzz_read_sql_bytes(&seed).expect("empty index_col SQL fuzz seed should not panic");
+}
+
+#[test]
+fn fuzz_read_sql_bytes_accepts_indexed_table_dispatch_seed() {
+    let seed = [0xff, 0x26, b'x'];
+    fuzz_read_sql_bytes(&seed).expect("indexed table SQL fuzz seed should parse");
+}
+
+#[test]
 fn fuzz_format_cross_round_trip_bytes_accepts_all_arrow_format_pairs() {
     let payload = [
         3, 2, 0, 1, 2, 3, 10, 20, 11, 21, 12, 22, 13, 23, 14, 24, 15, 25, 16, 26, 17, 27, 18,
