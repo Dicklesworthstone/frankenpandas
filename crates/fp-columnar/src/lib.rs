@@ -609,7 +609,21 @@ fn vectorized_binary_f64(
 }
 
 fn python_mod_f64(lhs: f64, rhs: f64) -> f64 {
-    lhs - (lhs / rhs).floor() * rhs
+    if rhs.is_infinite() {
+        if rhs.is_sign_positive() {
+            if lhs >= 0.0 || lhs.is_nan() {
+                lhs
+            } else {
+                f64::INFINITY
+            }
+        } else if lhs <= 0.0 || lhs.is_nan() {
+            lhs
+        } else {
+            f64::NEG_INFINITY
+        }
+    } else {
+        lhs - (lhs / rhs).floor() * rhs
+    }
 }
 
 fn python_floor_div_i64(lhs: i64, rhs: i64) -> i64 {
@@ -8255,6 +8269,22 @@ mod tests {
                 counts.values(),
                 &[Scalar::Float64(2.0 / 3.0), Scalar::Float64(1.0 / 3.0)]
             );
+        }
+
+        #[test]
+        fn python_mod_f64_handles_infinity_divisor() {
+            use crate::python_mod_f64;
+
+            assert_eq!(python_mod_f64(5.0, f64::INFINITY), 5.0);
+            assert_eq!(python_mod_f64(-5.0, f64::INFINITY), f64::INFINITY);
+            assert_eq!(python_mod_f64(5.0, f64::NEG_INFINITY), f64::NEG_INFINITY);
+            assert_eq!(python_mod_f64(-5.0, f64::NEG_INFINITY), -5.0);
+            assert_eq!(python_mod_f64(0.0, f64::INFINITY), 0.0);
+            assert_eq!(python_mod_f64(0.0, f64::NEG_INFINITY), 0.0);
+            assert_eq!(python_mod_f64(-0.0, f64::INFINITY), -0.0);
+            assert_eq!(python_mod_f64(-0.0, f64::NEG_INFINITY), -0.0);
+            assert!(python_mod_f64(f64::NAN, f64::INFINITY).is_nan());
+            assert!(python_mod_f64(f64::NAN, f64::NEG_INFINITY).is_nan());
         }
     }
 }
