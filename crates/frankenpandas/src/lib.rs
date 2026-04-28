@@ -172,6 +172,7 @@ pub use fp_io::{
     read_sql_query_chunks_with_options_and_index_col,
     read_sql_query_with_index_col,
     read_sql_query_with_options,
+    read_sql_query_with_options_and_index_col,
     read_sql_table,
     read_sql_table_chunks,
     read_sql_table_chunks_with_index_col,
@@ -512,6 +513,7 @@ pub mod prelude {
         // fd90.244: round out the SQL reader surface.
         read_sql_query,
         read_sql_query_with_options,
+        read_sql_query_with_options_and_index_col,
         read_sql_table_chunks,
         read_sql_table_with_options,
         // IO — datetime/numeric helpers (full module-level fn surface)
@@ -707,7 +709,7 @@ mod tests {
         // fd90.182: From<bool/i64/f64/&str/String> for Scalar.
         let _: Scalar = true.into();
         let _: Scalar = 42i64.into();
-        let _: Scalar = 3.14f64.into();
+        let _: Scalar = 1.25f64.into();
         let _: Scalar = "hi".into();
         let _: Scalar = String::from("hello").into();
 
@@ -751,6 +753,7 @@ mod tests {
         // fd90.244: extra SQL reader variants.
         let _ = read_sql_query::<rusqlite::Connection>;
         let _ = read_sql_query_with_options::<rusqlite::Connection>;
+        let _ = read_sql_query_with_options_and_index_col::<rusqlite::Connection>;
         let _ = read_sql_table_chunks::<rusqlite::Connection>;
         let _ = read_sql_table_with_options::<rusqlite::Connection>;
         // fd90.220: SqlInsertMethod is the type of SqlWriteOptions.method.

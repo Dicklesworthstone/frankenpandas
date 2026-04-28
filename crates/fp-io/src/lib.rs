@@ -5233,6 +5233,27 @@ pub fn read_sql_query_with_options<C: SqlConnection>(
     read_sql_with_options(conn, query, options)
 }
 
+/// Read a SQL query result with read-time options and optional index promotion.
+///
+/// Matches the supported subset of
+/// `pd.read_sql_query(sql, con, params=[...], parse_dates=..., coerce_float=..., index_col=...)`.
+pub fn read_sql_query_with_options_and_index_col<C: SqlConnection>(
+    conn: &C,
+    query: &str,
+    options: &SqlReadOptions,
+    index_col: Option<&str>,
+) -> Result<DataFrame, IoError> {
+    if let Some(col_name) = index_col {
+        let cleared = SqlReadOptions {
+            index_col: None,
+            ..options.clone()
+        };
+        let frame = read_sql_query_with_options(conn, query, &cleared)?;
+        return promote_column_to_index(&frame, col_name);
+    }
+    read_sql_query_with_options(conn, query, options)
+}
+
 /// Read the result of a SQL query as an iterator of DataFrame chunks.
 ///
 /// Matches the supported subset of `pd.read_sql_query(sql, con, chunksize=...)`.
@@ -8910,13 +8931,14 @@ mod tests {
         read_sql_query, read_sql_query_chunks, read_sql_query_chunks_with_index_col,
         read_sql_query_chunks_with_options,
         read_sql_query_chunks_with_options_and_index_col, read_sql_query_with_index_col,
-        read_sql_query_with_options, read_sql_table, read_sql_table_chunks,
-        read_sql_table_chunks_with_index_col, read_sql_table_chunks_with_options,
-        read_sql_table_chunks_with_options_and_index_col, read_sql_table_columns,
-        read_sql_table_columns_chunks, read_sql_table_columns_chunks_with_index_col,
-        read_sql_table_columns_with_index_col, read_sql_table_with_index_col,
-        read_sql_table_with_options, read_sql_table_with_options_and_index_col,
-        read_sql_with_index_col, read_sql_with_options,
+        read_sql_query_with_options, read_sql_query_with_options_and_index_col, read_sql_table,
+        read_sql_table_chunks, read_sql_table_chunks_with_index_col,
+        read_sql_table_chunks_with_options, read_sql_table_chunks_with_options_and_index_col,
+        read_sql_table_columns, read_sql_table_columns_chunks,
+        read_sql_table_columns_chunks_with_index_col, read_sql_table_columns_with_index_col,
+        read_sql_table_with_index_col, read_sql_table_with_options,
+        read_sql_table_with_options_and_index_col, read_sql_with_index_col,
+        read_sql_with_options,
     };
 
     // Per br-frankenpandas-7a49 (fd90.48): the helper itself only
@@ -9716,6 +9738,116 @@ mod tests {
         );
     }
 
+    #[test]
+    fn sql_read_query_with_options_and_index_col_uses_generic_connection() {
+        use std::cell::RefCell;
+
+        struct RecordingSqlConn {
+            seen_query: RefCell<Option<String>>,
+            seen_params: RefCell<Vec<Scalar>>,
+        }
+
+        impl super::SqlConnection for RecordingSqlConn {
+            fn query(&self, query: &str, params: &[Scalar]) -> Result<SqlQueryResult, IoError> {
+                *self.seen_query.borrow_mut() = Some(query.to_owned());
+                *self.seen_params.borrow_mut() = params.to_vec();
+                Ok(SqlQueryResult {
+                    columns: vec![
+                        "row_id".to_owned(),
+                        "ts".to_owned(),
+                        "amount".to_owned(),
+                        "label".to_owned(),
+                    ],
+                    rows: vec![
+                        vec![
+                            Scalar::Int64(101),
+                            Scalar::Utf8("2024-01-15".to_owned()),
+                            Scalar::Utf8("$1.25".to_owned()),
+                            Scalar::Utf8("alpha".to_owned()),
+                        ],
+                        vec![
+                            Scalar::Int64(102),
+                            Scalar::Utf8("2024-01-16".to_owned()),
+                            Scalar::Utf8("2.50".to_owned()),
+                            Scalar::Utf8("beta".to_owned()),
+                        ],
+                    ],
+                })
+            }
+
+            fn execute_batch(&self, _sql: &str) -> Result<(), IoError> {
+                Ok(())
+            }
+
+            fn table_exists(&self, _table_name: &str) -> Result<bool, IoError> {
+                Ok(false)
+            }
+
+            fn insert_rows(&self, _insert_sql: &str, _rows: &[Vec<Scalar>]) -> Result<(), IoError> {
+                Ok(())
+            }
+
+            fn dtype_sql(&self, _dtype: DType) -> &'static str {
+                "TEXT"
+            }
+
+            fn index_dtype_sql(&self, _index: &Index) -> &'static str {
+                "BIGINT"
+            }
+        }
+
+        let conn = RecordingSqlConn {
+            seen_query: RefCell::new(None),
+            seen_params: RefCell::new(Vec::new()),
+        };
+        let query = "SELECT row_id, ts, amount, label FROM events WHERE amount > ?";
+        let frame = super::read_sql_query_with_options_and_index_col(
+            &conn,
+            query,
+            &SqlReadOptions {
+                params: Some(vec![Scalar::Float64(1.0)]),
+                parse_dates: Some(vec!["ts".to_owned()]),
+                coerce_float: true,
+                dtype: None,
+                schema: None,
+                columns: None,
+                index_col: Some("amount".to_owned()),
+            },
+            Some("row_id"),
+        )
+        .expect("generic read_sql query with options and index_col");
+
+        assert_eq!(conn.seen_query.borrow().as_deref(), Some(query));
+        assert_eq!(
+            conn.seen_params.borrow().as_slice(),
+            &[Scalar::Float64(1.0)]
+        );
+        assert_eq!(frame.index().name(), Some("row_id"));
+        assert_eq!(
+            frame.index().labels(),
+            &[IndexLabel::Int64(101), IndexLabel::Int64(102)]
+        );
+        assert_eq!(frame.column_names(), vec!["ts", "amount", "label"]);
+        assert_eq!(
+            frame.column("ts").unwrap().values(),
+            &[
+                Scalar::Utf8("2024-01-15 00:00:00".to_owned()),
+                Scalar::Utf8("2024-01-16 00:00:00".to_owned())
+            ]
+        );
+        assert_eq!(
+            frame.column("amount").unwrap().values(),
+            &[Scalar::Float64(1.25), Scalar::Float64(2.5)]
+        );
+        assert_eq!(
+            frame.column("label").unwrap().values(),
+            &[
+                Scalar::Utf8("alpha".to_owned()),
+                Scalar::Utf8("beta".to_owned())
+            ]
+        );
+    }
+
     #[cfg(feature = "sql-sqlite")]
     #[test]
     fn sql_read_query_with_index_col_promotes_named_column() {
@@ -9952,6 +10084,80 @@ mod tests {
         .expect_err("missing index_col should error during iterator construction");
 
         assert!(matches!(err, IoError::Sql(msg) if msg.contains("index_col")));
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn sql_read_query_with_options_and_index_col_applies_options_before_indexing() {
+        let conn = make_sql_test_conn();
+        conn.execute_batch(
+            "CREATE TABLE query_frame_index_events (ts TEXT, amount TEXT, keep INTEGER);
+             INSERT INTO query_frame_index_events (ts, amount, keep) VALUES
+                ('2024-01-15', '12.50', 0),
+                ('2024-02-01 05:06:07', '$1,234.50', 1),
+                ('2024-03-03', '-3.25', 1);",
+        )
+        .expect("create query_frame_index_events table");
+
+        let frame = read_sql_query_with_options_and_index_col(
+            &conn,
+            "SELECT ts, amount FROM query_frame_index_events WHERE keep = ? ORDER BY ts",
+            &SqlReadOptions {
+                params: Some(vec![Scalar::Int64(1)]),
+                parse_dates: Some(vec!["ts".to_owned()]),
+                coerce_float: true,
+                dtype: None,
+                schema: None,
+                columns: None,
+                index_col: None,
+            },
+            Some("ts"),
+        )
+        .expect("read indexed query frame");
+
+        assert_eq!(frame.index().name(), Some("ts"));
+        assert_eq!(
+            frame.index().labels(),
+            &[
+                IndexLabel::Utf8("2024-02-01 05:06:07".to_owned()),
+                IndexLabel::Utf8("2024-03-03 00:00:00".to_owned())
+            ]
+        );
+        assert!(frame.column("ts").is_none());
+        assert_eq!(
+            frame.column("amount").unwrap().values(),
+            &[Scalar::Float64(1234.5), Scalar::Float64(-3.25)]
+        );
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn sql_read_query_with_options_and_index_col_explicit_arg_wins() {
+        let conn = make_sql_test_conn();
+        conn.execute_batch(
+            "CREATE TABLE query_frame_index_override (a INTEGER, b INTEGER, val TEXT);
+             INSERT INTO query_frame_index_override (a, b, val) VALUES
+                (1, 100, 'x'),
+                (2, 200, 'y');",
+        )
+        .expect("create query_frame_index_override table");
+
+        let frame = read_sql_query_with_options_and_index_col(
+            &conn,
+            "SELECT a, b, val FROM query_frame_index_override ORDER BY a",
+            &SqlReadOptions {
+                index_col: Some("a".to_owned()),
+                ..SqlReadOptions::default()
+            },
+            Some("b"),
+        )
+        .expect("read indexed query frame with override");
+
+        assert_eq!(frame.column_names(), vec!["a", "val"]);
+        assert_eq!(
+            frame.index().labels(),
+            &[IndexLabel::Int64(100), IndexLabel::Int64(200)]
+        );
     }
 
     #[cfg(feature = "sql-sqlite")]
