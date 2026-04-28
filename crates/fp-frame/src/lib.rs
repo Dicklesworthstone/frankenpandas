@@ -29831,7 +29831,7 @@ impl GroupByResample<'_> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::{collections::BTreeMap, path::Path};
 
     use chrono::Duration;
     use fp_columnar::Column;
@@ -29846,6 +29846,34 @@ mod tests {
         TzLocalizeOptions, TzNonexistentPolicy, cut, index_to_frame, index_to_series, qcut,
         to_numeric,
     };
+
+    fn assert_text_golden(golden_name: &str, actual: &str) {
+        let golden_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("goldens")
+            .join(golden_name);
+
+        if std::env::var_os("UPDATE_GOLDENS").is_some() {
+            let parent = golden_path
+                .parent()
+                .expect("golden path should have a parent directory");
+            std::fs::create_dir_all(parent).expect("golden directory should be creatable");
+            std::fs::write(&golden_path, actual).expect("golden file should be writable");
+            return;
+        }
+
+        let mut expected =
+            std::fs::read_to_string(&golden_path).expect("golden file should be readable");
+        if expected.ends_with('\n') {
+            expected.pop();
+        }
+        assert_eq!(
+            actual,
+            expected,
+            "golden mismatch for {}",
+            golden_path.display()
+        );
+    }
 
     fn expect_float64(value: &Scalar) -> f64 {
         if let Scalar::Float64(v) = value {
@@ -44847,10 +44875,7 @@ mod tests {
         )
         .unwrap();
         let output = format!("{s}");
-        assert!(output.contains("Name: x"));
-        assert!(output.contains("Length: 3"));
-        assert!(output.contains("Float64"));
-        assert!(output.contains("2.5"));
+        assert_text_golden("series_display.txt", &output);
     }
 
     #[test]
@@ -44871,11 +44896,7 @@ mod tests {
         ])
         .unwrap();
         let output = format!("{df}");
-        assert!(output.contains("a"));
-        assert!(output.contains("b"));
-        assert!(output.contains("10"));
-        assert!(output.contains("2.5"));
-        assert!(output.contains("[2 rows x 2 columns]"));
+        assert_text_golden("dataframe_display.txt", &output);
     }
 
     // ── DatetimeAccessor tests ──

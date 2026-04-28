@@ -1,0 +1,4 @@
+0    1
+1    2.5
+2    3
+Name: x, Length: 3, dtype: Float64
