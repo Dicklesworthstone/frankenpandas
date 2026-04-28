@@ -103,6 +103,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use thiserror::Error;
 use unicode_casefold::UnicodeCaseFold;
+use unicode_normalization::UnicodeNormalization;
 
 #[derive(Debug, Error)]
 #[non_exhaustive]
@@ -10910,20 +10911,37 @@ impl StringAccessor<'_> {
 
     /// Normalize Unicode strings.
     ///
-    /// Matches `pd.Series.str.normalize(form)`. Supported forms: NFC, NFKC.
-    /// NFD/NFKD require a full Unicode decomposition library; we approximate
-    /// by returning the input unchanged for unsupported forms.
+    /// Matches `pd.Series.str.normalize(form)` for NFC, NFKC, NFD, and NFKD.
     pub fn normalize(&self, form: &str) -> Result<Series, FrameError> {
-        let form = form.to_uppercase();
+        #[derive(Clone, Copy)]
+        enum NormalizationForm {
+            Nfc,
+            Nfkc,
+            Nfd,
+            Nfkd,
+        }
+
+        let form = match form {
+            "NFC" => NormalizationForm::Nfc,
+            "NFKC" => NormalizationForm::Nfkc,
+            "NFD" => NormalizationForm::Nfd,
+            "NFKD" => NormalizationForm::Nfkd,
+            other => {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "invalid normalization form: {other}"
+                )));
+            }
+        };
+
         self.apply_str(
             |s| {
-                // For NFC/NFKC, Rust strings are already NFC-like for ASCII.
-                // Full Unicode normalization would need the `unicode-normalization` crate.
-                // We pass through unchanged as a best-effort for ASCII-dominant data.
-                match form.as_str() {
-                    "NFC" | "NFKC" | "NFD" | "NFKD" => Scalar::Utf8(s.to_string()),
-                    _ => Scalar::Null(NullKind::NaN),
-                }
+                let normalized: String = match form {
+                    NormalizationForm::Nfc => s.nfc().collect(),
+                    NormalizationForm::Nfkc => s.nfkc().collect(),
+                    NormalizationForm::Nfd => s.nfd().collect(),
+                    NormalizationForm::Nfkd => s.nfkd().collect(),
+                };
+                Scalar::Utf8(normalized)
             },
             self.series.name(),
         )
@@ -54305,6 +54323,48 @@ mod tests {
         assert_eq!(result.column().values()[2], Scalar::Utf8("plain".into()));
     }
 
+    #[test]
+    fn str_normalize_unicode_forms() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("e\u{301}".into()),
+                Scalar::Utf8("①".into()),
+                Scalar::Null(NullKind::NaN),
+            ],
+        )
+        .unwrap();
+
+        let nfc = s.str().normalize("NFC").unwrap();
+        assert_eq!(nfc.column().values()[0], Scalar::Utf8("é".into()));
+        assert_eq!(nfc.column().values()[1], Scalar::Utf8("①".into()));
+        assert!(nfc.column().values()[2].is_missing());
+
+        let nfd = s.str().normalize("NFD").unwrap();
+        assert_eq!(nfd.column().values()[0], Scalar::Utf8("e\u{301}".into()));
+
+        let nfkc = s.str().normalize("NFKC").unwrap();
+        assert_eq!(nfkc.column().values()[0], Scalar::Utf8("é".into()));
+        assert_eq!(nfkc.column().values()[1], Scalar::Utf8("1".into()));
+
+        let nfkd = s.str().normalize("NFKD").unwrap();
+        assert_eq!(nfkd.column().values()[0], Scalar::Utf8("e\u{301}".into()));
+        assert_eq!(nfkd.column().values()[1], Scalar::Utf8("1".into()));
+    }
+
+    #[test]
+    fn str_normalize_rejects_invalid_form() {
+        let s =
+            Series::from_values("x", vec![0_i64.into()], vec![Scalar::Utf8("é".into())]).unwrap();
+        let err = s.str().normalize("nfc").unwrap_err();
+        assert!(matches!(
+            err,
+            FrameError::CompatibilityRejected(msg)
+                if msg.contains("invalid normalization form: nfc")
+        ));
+    }
+
     // ── Batch 12b: DataFrame-to-DataFrame arithmetic ──
 
     #[test]
@@ -55811,11 +55871,7 @@ mod tests {
             &["a"],
             vec![(
                 "a",
-                vec![
-                    Scalar::Int64(100),
-                    Scalar::Int64(200),
-                    Scalar::Int64(300),
-                ],
+                vec![Scalar::Int64(100), Scalar::Int64(200), Scalar::Int64(300)],
             )],
         )
         .unwrap();
