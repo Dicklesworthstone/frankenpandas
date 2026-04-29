@@ -119,6 +119,51 @@ pub enum FrameError {
     Index(#[from] IndexError),
 }
 
+fn normalize_describe_percentiles(percentiles: &[f64]) -> Result<Vec<f64>, FrameError> {
+    let mut normalized = Vec::with_capacity(percentiles.len() + 1);
+
+    for &percentile in percentiles {
+        if !percentile.is_finite() || !(0.0..=1.0).contains(&percentile) {
+            return Err(FrameError::CompatibilityRejected(
+                "describe: percentiles should all be in the interval [0, 1]".to_owned(),
+            ));
+        }
+        if normalized.contains(&percentile) {
+            return Err(FrameError::CompatibilityRejected(
+                "describe: percentiles cannot contain duplicates".to_owned(),
+            ));
+        }
+        normalized.push(percentile);
+    }
+
+    if !normalized.contains(&0.5) {
+        normalized.push(0.5);
+    }
+    normalized.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
+    Ok(normalized)
+}
+
+fn describe_percentile_label(percentile: f64) -> String {
+    let percent = percentile * 100.0;
+    if percent.fract() == 0.0 {
+        return format!("{}%", percent as i64);
+    }
+
+    let precision = if !(0.1..=99.9).contains(&percent.abs()) {
+        2
+    } else {
+        1
+    };
+    let mut label = format!("{percent:.precision$}");
+    while label.contains('.') && label.ends_with('0') {
+        label.pop();
+    }
+    if label.ends_with('.') {
+        label.pop();
+    }
+    format!("{label}%")
+}
+
 /// Metadata for categorical (factor) data.
 ///
 /// Stores the unique category values and an ordered flag. The underlying
@@ -5705,6 +5750,7 @@ impl Series {
     ///
     /// Matches `pd.Series.describe(percentiles=[...])`.
     pub fn describe_with_percentiles(&self, percentiles: &[f64]) -> Result<Self, FrameError> {
+        let percentiles = normalize_describe_percentiles(percentiles)?;
         let floats: Vec<f64> = self
             .column
             .values()
@@ -5761,9 +5807,8 @@ impl Series {
             Scalar::Float64(min),
         ];
 
-        for &p in percentiles {
-            let pct_label = format!("{}%", (p * 100.0).round() as i64);
-            labels.push(IndexLabel::Utf8(pct_label));
+        for &p in &percentiles {
+            labels.push(IndexLabel::Utf8(describe_percentile_label(p)));
             values.push(Scalar::Float64(compute_percentile(p)));
         }
 
@@ -18264,16 +18309,16 @@ impl DataFrame {
     /// Describe with custom percentiles.
     ///
     /// Matches `pd.DataFrame.describe(percentiles=[...])`.
-    /// Custom percentiles replace the default 25%/50%/75%.
     pub fn describe_with_percentiles(&self, percentiles: &[f64]) -> Result<Self, FrameError> {
+        let percentiles = normalize_describe_percentiles(percentiles)?;
         let mut stat_labels = vec![
             IndexLabel::Utf8("count".to_owned()),
             IndexLabel::Utf8("mean".to_owned()),
             IndexLabel::Utf8("std".to_owned()),
             IndexLabel::Utf8("min".to_owned()),
         ];
-        for p in percentiles {
-            stat_labels.push(IndexLabel::Utf8(format!("{}%", (*p * 100.0) as i64)));
+        for &p in &percentiles {
+            stat_labels.push(IndexLabel::Utf8(describe_percentile_label(p)));
         }
         stat_labels.push(IndexLabel::Utf8("max".to_owned()));
         let out_index = Index::new(stat_labels);
@@ -18321,8 +18366,8 @@ impl DataFrame {
                 stats.push(Scalar::Float64(mean));
                 stats.push(Scalar::Float64(var.sqrt()));
                 stats.push(Scalar::Float64(nums[0]));
-                for p in percentiles {
-                    stats.push(Scalar::Float64(Self::percentile_linear(&nums, *p)));
+                for &p in &percentiles {
+                    stats.push(Scalar::Float64(Self::percentile_linear(&nums, p)));
                 }
                 stats.push(Scalar::Float64(nums[nums.len() - 1]));
             }
@@ -56726,6 +56771,55 @@ mod tests {
     }
 
     #[test]
+    fn describe_with_percentiles_sorts_and_inserts_median() {
+        let df = DataFrame::from_dict(
+            &["x"],
+            vec![(
+                "x",
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(2.0),
+                    Scalar::Float64(3.0),
+                    Scalar::Float64(4.0),
+                    Scalar::Float64(5.0),
+                ],
+            )],
+        )
+        .unwrap();
+
+        let result = df.describe_with_percentiles(&[0.75, 0.25]).unwrap();
+        let idx = result.index.labels();
+        assert_eq!(
+            idx,
+            &[
+                IndexLabel::Utf8("count".to_owned()),
+                IndexLabel::Utf8("mean".to_owned()),
+                IndexLabel::Utf8("std".to_owned()),
+                IndexLabel::Utf8("min".to_owned()),
+                IndexLabel::Utf8("25%".to_owned()),
+                IndexLabel::Utf8("50%".to_owned()),
+                IndexLabel::Utf8("75%".to_owned()),
+                IndexLabel::Utf8("max".to_owned()),
+            ]
+        );
+        assert_eq!(result.columns["x"].values()[5], Scalar::Float64(3.0));
+    }
+
+    #[test]
+    fn describe_with_percentiles_rejects_invalid_and_duplicates() {
+        let df = DataFrame::from_dict(
+            &["x"],
+            vec![("x", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)])],
+        )
+        .unwrap();
+
+        for percentiles in [&[-0.1][..], &[1.2][..], &[f64::NAN][..], &[0.25, 0.25][..]] {
+            let err = df.describe_with_percentiles(percentiles).unwrap_err();
+            assert!(matches!(err, FrameError::CompatibilityRejected(_)));
+        }
+    }
+
+    #[test]
     fn str_encode_returns_byte_lengths() {
         let s = Series::from_values(
             "s",
@@ -58153,6 +58247,84 @@ mod tests {
         assert_eq!(result.index().labels()[5], IndexLabel::Utf8("50%".into()));
         assert_eq!(result.index().labels()[6], IndexLabel::Utf8("90%".into()));
         assert_eq!(result.values()[5], Scalar::Float64(30.0)); // 50% = median
+    }
+
+    #[test]
+    fn series_describe_with_percentiles_sorts_and_inserts_median() {
+        let s = Series::from_values(
+            "x",
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+            ],
+            vec![
+                Scalar::Float64(10.0),
+                Scalar::Float64(20.0),
+                Scalar::Float64(30.0),
+                Scalar::Float64(40.0),
+                Scalar::Float64(50.0),
+            ],
+        )
+        .unwrap();
+
+        let result = s.describe_with_percentiles(&[0.75, 0.25]).unwrap();
+        assert_eq!(
+            result.index().labels(),
+            &[
+                IndexLabel::Utf8("count".into()),
+                IndexLabel::Utf8("mean".into()),
+                IndexLabel::Utf8("std".into()),
+                IndexLabel::Utf8("min".into()),
+                IndexLabel::Utf8("25%".into()),
+                IndexLabel::Utf8("50%".into()),
+                IndexLabel::Utf8("75%".into()),
+                IndexLabel::Utf8("max".into()),
+            ]
+        );
+        assert_eq!(result.values()[5], Scalar::Float64(30.0));
+    }
+
+    #[test]
+    fn series_describe_with_percentiles_formats_fractional_labels() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Float64(10.0),
+                Scalar::Float64(20.0),
+                Scalar::Float64(30.0),
+            ],
+        )
+        .unwrap();
+
+        let result = s
+            .describe_with_percentiles(&[0.025, 0.3333, 0.9999])
+            .unwrap();
+        assert_eq!(result.index().labels()[4], IndexLabel::Utf8("2.5%".into()));
+        assert_eq!(result.index().labels()[5], IndexLabel::Utf8("33.3%".into()));
+        assert_eq!(result.index().labels()[6], IndexLabel::Utf8("50%".into()));
+        assert_eq!(
+            result.index().labels()[7],
+            IndexLabel::Utf8("99.99%".into())
+        );
+    }
+
+    #[test]
+    fn series_describe_with_percentiles_rejects_invalid_and_duplicates() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Float64(10.0), Scalar::Float64(20.0)],
+        )
+        .unwrap();
+
+        for percentiles in [&[-0.1][..], &[1.2][..], &[f64::NAN][..], &[0.25, 0.25][..]] {
+            let err = s.describe_with_percentiles(percentiles).unwrap_err();
+            assert!(matches!(err, FrameError::CompatibilityRejected(_)));
+        }
     }
 
     #[test]
