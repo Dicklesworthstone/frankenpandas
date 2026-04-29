@@ -1272,7 +1272,7 @@ fn is_json_value_end_boundary(input: &str, index: usize) -> bool {
         .is_none_or(|ch| matches!(ch, ',' | ']' | '}'))
 }
 
-fn column_from_json_records_values(values: Vec<Scalar>) -> Result<Column, IoError> {
+fn column_from_json_values(values: Vec<Scalar>) -> Result<Column, IoError> {
     let saw_utf8 = values.iter().any(|value| matches!(value, Scalar::Utf8(_)));
     let saw_missing = values.iter().any(Scalar::is_missing);
     let saw_numeric_like = values.iter().any(|value| {
@@ -1549,7 +1549,7 @@ pub fn read_json_str(input: &str, orient: JsonOrient) -> Result<DataFrame, IoErr
             let row_count = arr.len() as i64;
             let mut out = BTreeMap::new();
             for (name, vals) in columns {
-                out.insert(name, column_from_json_records_values(vals)?);
+                out.insert(name, column_from_json_values(vals)?);
             }
             let index = Index::from_i64((0..row_count).collect());
             let frame = DataFrame::new_with_column_order(index, out, col_names)?;
@@ -1601,7 +1601,7 @@ pub fn read_json_str(input: &str, orient: JsonOrient) -> Result<DataFrame, IoErr
 
             let mut out = BTreeMap::new();
             for (name, vals) in raw_columns {
-                out.insert(name, Column::from_values(vals)?);
+                out.insert(name, column_from_json_values(vals)?);
             }
 
             let frame =
@@ -1657,7 +1657,7 @@ pub fn read_json_str(input: &str, orient: JsonOrient) -> Result<DataFrame, IoErr
 
             let mut out = BTreeMap::new();
             for (name, vals) in columns {
-                out.insert(name, Column::from_values(vals)?);
+                out.insert(name, column_from_json_values(vals)?);
             }
             let frame =
                 DataFrame::new_with_column_order(Index::new(index_labels), out, column_order)?;
@@ -1729,7 +1729,7 @@ pub fn read_json_str(input: &str, orient: JsonOrient) -> Result<DataFrame, IoErr
             let row_count = data.len() as i64;
             let mut out = BTreeMap::new();
             for (name, vals) in columns {
-                out.insert(name, Column::from_values(vals)?);
+                out.insert(name, column_from_json_values(vals)?);
             }
             let index = match explicit_index {
                 Some(labels) => {
@@ -1789,7 +1789,7 @@ pub fn read_json_str(input: &str, orient: JsonOrient) -> Result<DataFrame, IoErr
 
             let mut out = BTreeMap::new();
             for (name, vals) in columns {
-                out.insert(name, Column::from_values(vals)?);
+                out.insert(name, column_from_json_values(vals)?);
             }
             let index = Index::from_i64((0..rows.len() as i64).collect());
             let frame = DataFrame::new_with_column_order(index, out, column_order)?;
@@ -1806,17 +1806,17 @@ pub fn write_json_string(frame: &DataFrame, orient: JsonOrient) -> Result<String
 
     let headers: Vec<String> = frame.column_names().into_iter().cloned().collect();
     let row_count = frame.index().len();
+    let column_float_promotions = headers
+        .iter()
+        .map(|name| {
+            frame
+                .column(name)
+                .is_some_and(|column| column_promotes_int_json_values_to_float(column.values()))
+        })
+        .collect::<Vec<_>>();
 
     match orient {
         JsonOrient::Records => {
-            let column_float_promotions = headers
-                .iter()
-                .map(|name| {
-                    frame.column(name).is_some_and(|column| {
-                        column_promotes_int_json_values_to_float(column.values())
-                    })
-                })
-                .collect::<Vec<_>>();
             let mut records = Vec::with_capacity(row_count);
             for row_idx in 0..row_count {
                 let mut obj = serde_json::Map::new();
@@ -1838,12 +1838,18 @@ pub fn write_json_string(frame: &DataFrame, orient: JsonOrient) -> Result<String
         }
         JsonOrient::Columns => {
             let mut outer = serde_json::Map::new();
-            for name in &headers {
+            for (name, promote_int_to_float) in headers.iter().zip(column_float_promotions.iter()) {
                 let mut col_obj = serde_json::Map::new();
                 if let Some(col) = frame.column(name) {
                     for (label, val) in frame.index().labels().iter().zip(col.values()) {
                         let key = label.to_string();
-                        if col_obj.insert(key.clone(), scalar_to_json(val)).is_some() {
+                        if col_obj
+                            .insert(
+                                key.clone(),
+                                scalar_to_json_with_column_promotion(val, *promote_int_to_float),
+                            )
+                            .is_some()
+                        {
                             return Err(IoError::JsonFormat(format!(
                                 "columns orient cannot encode duplicate index label key: {key}"
                             )));
@@ -1858,11 +1864,15 @@ pub fn write_json_string(frame: &DataFrame, orient: JsonOrient) -> Result<String
             let mut outer = serde_json::Map::new();
             for row_idx in 0..row_count {
                 let mut row_obj = serde_json::Map::new();
-                for name in &headers {
+                for (name, promote_int_to_float) in
+                    headers.iter().zip(column_float_promotions.iter())
+                {
                     let val = frame
                         .column(name)
                         .and_then(|c| c.value(row_idx))
-                        .map(scalar_to_json)
+                        .map(|value| {
+                            scalar_to_json_with_column_promotion(value, *promote_int_to_float)
+                        })
                         .unwrap_or(serde_json::Value::Null);
                     row_obj.insert(name.clone(), val);
                 }
@@ -1895,11 +1905,14 @@ pub fn write_json_string(frame: &DataFrame, orient: JsonOrient) -> Result<String
             for row_idx in 0..row_count {
                 let row: Vec<serde_json::Value> = headers
                     .iter()
-                    .map(|name| {
+                    .zip(column_float_promotions.iter())
+                    .map(|(name, promote_int_to_float)| {
                         frame
                             .column(name)
                             .and_then(|c| c.value(row_idx))
-                            .map(scalar_to_json)
+                            .map(|value| {
+                                scalar_to_json_with_column_promotion(value, *promote_int_to_float)
+                            })
                             .unwrap_or(serde_json::Value::Null)
                     })
                     .collect();
@@ -1917,11 +1930,14 @@ pub fn write_json_string(frame: &DataFrame, orient: JsonOrient) -> Result<String
             for row_idx in 0..row_count {
                 let row: Vec<serde_json::Value> = headers
                     .iter()
-                    .map(|name| {
+                    .zip(column_float_promotions.iter())
+                    .map(|(name, promote_int_to_float)| {
                         frame
                             .column(name)
                             .and_then(|c| c.value(row_idx))
-                            .map(scalar_to_json)
+                            .map(|value| {
+                                scalar_to_json_with_column_promotion(value, *promote_int_to_float)
+                            })
                             .unwrap_or(serde_json::Value::Null)
                     })
                     .collect();
@@ -2024,7 +2040,7 @@ pub fn read_jsonl_str(input: &str) -> Result<DataFrame, IoError> {
     let mut out_columns = BTreeMap::new();
     let mut column_order = Vec::new();
     for (name, values) in col_names.into_iter().zip(columns) {
-        out_columns.insert(name.clone(), column_from_json_records_values(values)?);
+        out_columns.insert(name.clone(), column_from_json_values(values)?);
         column_order.push(name);
     }
 
@@ -7670,10 +7686,10 @@ mod tests {
         let a = frame.column("a").expect("a");
         let b = frame.column("b").expect("b");
 
-        assert_eq!(a.values()[0], Scalar::Int64(1));
+        assert_eq!(a.values()[0], Scalar::Float64(1.0));
         assert!(a.values()[1].is_missing());
         assert!(b.values()[0].is_missing());
-        assert_eq!(b.values()[1], Scalar::Int64(2));
+        assert_eq!(b.values()[1], Scalar::Float64(2.0));
     }
 
     #[test]
@@ -7711,7 +7727,7 @@ mod tests {
         let frame = read_json_str(input, JsonOrient::Values).expect("read json values");
         assert_eq!(frame.index().len(), 2);
         assert_eq!(frame.column_names(), vec!["0", "1"]);
-        assert_eq!(frame.column("0").unwrap().values()[0], Scalar::Int64(1));
+        assert_eq!(frame.column("0").unwrap().values()[0], Scalar::Float64(1.0));
         assert_eq!(
             frame.column("1").unwrap().values()[1],
             Scalar::Utf8("Bob".into())
@@ -7749,6 +7765,65 @@ mod tests {
         let json = write_json_string(&frame, JsonOrient::Records).expect("write");
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, serde_json::json!([{"a": 1.0}, {"a": null}]));
+    }
+
+    #[test]
+    fn json_non_records_nullable_int_reads_promote_to_float() {
+        let cases = [
+            (JsonOrient::Columns, r#"{"a":{"0":1,"1":null}}"#),
+            (JsonOrient::Index, r#"{"0":{"a":1},"1":{"a":null}}"#),
+            (
+                JsonOrient::Split,
+                r#"{"columns":["a"],"index":[0,1],"data":[[1],[null]]}"#,
+            ),
+            (JsonOrient::Values, r#"[[1],[null]]"#),
+        ];
+
+        for (orient, input) in cases {
+            let frame = read_json_str(input, orient).expect("read json");
+            let column_name = if orient == JsonOrient::Values {
+                "0"
+            } else {
+                "a"
+            };
+            let values = frame.column(column_name).expect("column").values();
+            assert_eq!(values[0], Scalar::Float64(1.0));
+            assert!(matches!(values[1], Scalar::Null(NullKind::NaN)));
+        }
+    }
+
+    #[test]
+    fn json_non_records_nullable_int_writes_promote_to_float() {
+        let frame = DataFrame::from_dict(
+            &["a"],
+            vec![("a", vec![Scalar::Int64(1), Scalar::Null(NullKind::Null)])],
+        )
+        .unwrap();
+
+        let columns_json: serde_json::Value =
+            serde_json::from_str(&write_json_string(&frame, JsonOrient::Columns).unwrap()).unwrap();
+        assert_eq!(
+            columns_json,
+            serde_json::json!({"a": {"0": 1.0, "1": null}})
+        );
+
+        let index_json: serde_json::Value =
+            serde_json::from_str(&write_json_string(&frame, JsonOrient::Index).unwrap()).unwrap();
+        assert_eq!(
+            index_json,
+            serde_json::json!({"0": {"a": 1.0}, "1": {"a": null}})
+        );
+
+        let split_json: serde_json::Value =
+            serde_json::from_str(&write_json_string(&frame, JsonOrient::Split).unwrap()).unwrap();
+        assert_eq!(
+            split_json,
+            serde_json::json!({"columns": ["a"], "index": [0, 1], "data": [[1.0], [null]]})
+        );
+
+        let values_json: serde_json::Value =
+            serde_json::from_str(&write_json_string(&frame, JsonOrient::Values).unwrap()).unwrap();
+        assert_eq!(values_json, serde_json::json!([[1.0], [null]]));
     }
 
     #[test]
