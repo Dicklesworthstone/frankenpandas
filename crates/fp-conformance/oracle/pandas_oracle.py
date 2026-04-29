@@ -4818,6 +4818,28 @@ def op_series_nsmallest(pd, payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def op_series_describe(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    if left is None:
+        raise OracleError("series_describe requires left payload")
+
+    index = [label_from_json(item) for item in left["index"]]
+    values = [scalar_from_json(item) for item in left["values"]]
+    series = pd.Series(values, index=index, name=left.get("name", "series"))
+
+    try:
+        out = series.describe()
+    except Exception as exc:
+        raise OracleError(f"series_describe failed: {exc}") from exc
+
+    return {
+        "expected_series": {
+            "index": [label_to_json(v) for v in out.index.tolist()],
+            "values": [scalar_to_json(v) for v in out.tolist()],
+        }
+    }
+
+
 def require_join_type(payload: dict[str, Any], op_name: str, *, allow_cross: bool = False) -> str:
     join_type = payload.get("join_type")
     allowed = {"inner", "left", "right", "outer"}
@@ -5361,6 +5383,8 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_series_nlargest(pd, payload)
     if op in {"series_nsmallest", "series_nsmallest_default"}:
         return op_series_nsmallest(pd, payload)
+    if op in {"series_describe", "series_describe_default"}:
+        return op_series_describe(pd, payload)
     if op == "series_any":
         return op_series_any(pd, payload)
     if op == "series_all":
