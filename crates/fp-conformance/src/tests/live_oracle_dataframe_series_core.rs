@@ -5683,3 +5683,167 @@ fn live_oracle_series_fillna_int_with_int() {
     let result = series.fillna(&fp_types::Scalar::Int64(0)).expect("fillna");
     super::compare_series_expected(&result, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_series_dropna_basic() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DROPNA-BASIC",
+        "case_id": "series_dropna_basic",
+        "mode": "strict",
+        "operation": "series_dropna",
+        "oracle_source": "live_legacy_pandas",
+        "left": {
+            "name": "sparse",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 4 }
+            ],
+            "values": [
+                { "kind": "float64", "value": 1.0 },
+                { "kind": "null", "value": "null" },
+                { "kind": "float64", "value": 3.0 },
+                { "kind": "null", "value": "null" },
+                { "kind": "float64", "value": 5.0 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping dropna basic test: {message}");
+        return;
+    }
+    assert!(
+        expected_result.is_ok(),
+        "live oracle expected: {expected_result:?}"
+    );
+    let expected = match expected_result {
+        Ok(expected) => expected,
+        Err(super::HarnessError::OracleUnavailable(_)) => return,
+        Err(_) => return,
+    };
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Series(_)),
+        "expected live oracle series payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let result = series.dropna().expect("dropna");
+    super::compare_series_expected(&result, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_series_dropna_no_nulls() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DROPNA-NONULLS",
+        "case_id": "series_dropna_no_nulls",
+        "mode": "strict",
+        "operation": "series_dropna",
+        "oracle_source": "live_legacy_pandas",
+        "left": {
+            "name": "complete",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "values": [
+                { "kind": "float64", "value": 1.0 },
+                { "kind": "float64", "value": 2.0 },
+                { "kind": "float64", "value": 3.0 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping dropna no nulls test: {message}");
+        return;
+    }
+    assert!(
+        expected_result.is_ok(),
+        "live oracle expected: {expected_result:?}"
+    );
+    let expected = match expected_result {
+        Ok(expected) => expected,
+        Err(super::HarnessError::OracleUnavailable(_)) => return,
+        Err(_) => return,
+    };
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Series(_)),
+        "expected live oracle series payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let result = series.dropna().expect("dropna");
+    super::compare_series_expected(&result, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_series_dropna_all_nulls() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DROPNA-ALLNULLS",
+        "case_id": "series_dropna_all_nulls",
+        "mode": "strict",
+        "operation": "series_dropna",
+        "oracle_source": "live_legacy_pandas",
+        "left": {
+            "name": "empty",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 }
+            ],
+            "values": [
+                { "kind": "null", "value": "null" },
+                { "kind": "null", "value": "null" }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping dropna all nulls test: {message}");
+        return;
+    }
+    assert!(
+        expected_result.is_ok(),
+        "live oracle expected: {expected_result:?}"
+    );
+    let expected = match expected_result {
+        Ok(expected) => expected,
+        Err(super::HarnessError::OracleUnavailable(_)) => return,
+        Err(_) => return,
+    };
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Series(_)),
+        "expected live oracle series payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let result = series.dropna().expect("dropna");
+    super::compare_series_expected(&result, &expected).expect("pandas parity");
+}
