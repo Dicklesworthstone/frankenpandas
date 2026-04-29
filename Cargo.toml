@@ -48,4 +48,5 @@ thiserror = "2.0.18"
 # in pay no dependency cost.
 tracing = { version = "0.1.41", default-features = false }
 unicode-casefold = "0.2.0"
+unicode-general-category = "1.1.0"
 unicode-normalization = "0.1.25"
