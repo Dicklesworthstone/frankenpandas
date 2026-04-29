@@ -1868,6 +1868,8 @@ pub struct PacketFixture {
     #[serde(default)]
     pub pct_change_axis: Option<usize>,
     #[serde(default)]
+    pub mode_dropna: Option<bool>,
+    #[serde(default)]
     pub idxmin_skipna: Option<bool>,
     #[serde(default)]
     pub idxmax_skipna: Option<bool>,
@@ -3218,6 +3220,8 @@ struct OracleRequest {
     pub pct_change_periods: Option<i64>,
     #[serde(default)]
     pub pct_change_axis: Option<usize>,
+    #[serde(default)]
+    pub mode_dropna: Option<bool>,
     #[serde(default)]
     pub idxmin_skipna: Option<bool>,
     #[serde(default)]
@@ -9212,7 +9216,9 @@ fn run_fixture_operation(
         FixtureOperation::SeriesMode => {
             let left = require_left_series(fixture)?;
             let series = build_series(left)?;
-            let actual = series.mode().map_err(|err| err.to_string());
+            let actual = series
+                .mode_with_dropna(fixture.mode_dropna.unwrap_or(true))
+                .map_err(|err| err.to_string());
             match expected {
                 ResolvedExpected::Series(series) => compare_series_expected(&actual?, &series),
                 ResolvedExpected::ErrorContains(substr) => match actual {
@@ -12281,6 +12287,7 @@ fn capture_live_oracle_expected(
         shift_axis: fixture.shift_axis,
         pct_change_periods: fixture.pct_change_periods,
         pct_change_axis: fixture.pct_change_axis,
+        mode_dropna: fixture.mode_dropna,
         idxmin_skipna: fixture.idxmin_skipna,
         idxmax_skipna: fixture.idxmax_skipna,
         autocorr_lag: fixture.autocorr_lag,
@@ -17981,7 +17988,9 @@ fn execute_and_compare_differential(
         FixtureOperation::SeriesMode => {
             let left = require_left_series(fixture)?;
             let series = build_series(left)?;
-            let actual = series.mode().map_err(|err| err.to_string());
+            let actual = series
+                .mode_with_dropna(fixture.mode_dropna.unwrap_or(true))
+                .map_err(|err| err.to_string());
             match expected {
                 ResolvedExpected::Series(s) => Ok(diff_series(&actual?, &s)),
                 ResolvedExpected::ErrorContains(substr) => Ok(match actual {

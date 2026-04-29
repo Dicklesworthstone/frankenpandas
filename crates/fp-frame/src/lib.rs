@@ -4276,7 +4276,11 @@ impl Series {
     pub fn mode_with_dropna(&self, dropna: bool) -> Result<Self, FrameError> {
         let modes = mode_values(self.column.values(), dropna);
         let labels: Vec<IndexLabel> = (0..modes.len()).map(|i| (i as i64).into()).collect();
-        Self::from_values(self.name.clone(), labels, modes)
+        Self::new(
+            self.name.clone(),
+            Index::new(labels),
+            build_mode_column(modes)?,
+        )
     }
 
     // --- Shift / Diff / Cumulative ---
@@ -43767,7 +43771,7 @@ mod tests {
         let result = s.mode_with_dropna(false).unwrap();
         assert_eq!(
             result.values(),
-            &[Scalar::Int64(1), Scalar::Null(NullKind::NaN)]
+            &[Scalar::Float64(1.0), Scalar::Null(NullKind::NaN)]
         );
     }
 

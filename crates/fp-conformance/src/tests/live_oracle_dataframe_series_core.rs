@@ -1543,6 +1543,125 @@ fn live_oracle_series_idxmax_skipna_false_with_null_returns_nan() {
     );
 }
 
+fn assert_series_mode_dropna_false_fixture(
+    fixture: &super::PacketFixture,
+    context: &str,
+    run_differential: bool,
+) {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = true;
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping {context}: {message}");
+        return;
+    }
+
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Series(_)),
+        "expected live oracle series payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
+
+    let actual = super::build_series(fixture.left.as_ref().expect("left"))
+        .expect("series")
+        .mode_with_dropna(fixture.mode_dropna.unwrap_or(true))
+        .expect("actual series");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+
+    if run_differential {
+        let diff = super::run_differential_fixture(
+            &cfg,
+            fixture,
+            &super::SuiteOptions {
+                packet_filter: None,
+                oracle_mode: super::OracleMode::LiveLegacyPandas,
+            },
+        )
+        .expect("differential report");
+        assert_eq!(diff.status, super::CaseStatus::Pass, "{diff:?}");
+        assert!(
+            diff.drift_records.is_empty(),
+            "expected no mode(dropna=false) drift: {diff:?}"
+        );
+    }
+}
+
+#[test]
+fn live_oracle_series_mode_dropna_false_counts_nan_matches_pandas() {
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-SERIES-MODE-DROPNA-FALSE",
+        "case_id": "series_mode_dropna_false_counts_nan_live",
+        "mode": "strict",
+        "operation": "series_mode",
+        "oracle_source": "live_legacy_pandas",
+        "mode_dropna": false,
+        "left": {
+            "name": "test_series",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 4 },
+                { "kind": "int64", "value": 5 }
+            ],
+            "values": [
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 4 },
+                { "kind": "null", "value": "na_n" },
+                { "kind": "null", "value": "na_n" },
+                { "kind": "int64", "value": 4 },
+                { "kind": "null", "value": "na_n" }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    assert_series_mode_dropna_false_fixture(
+        &fixture,
+        "series mode dropna=false missing-value mode oracle test",
+        true,
+    );
+}
+
+#[test]
+fn live_oracle_series_mode_dropna_false_tie_sorts_nan_last_matches_pandas() {
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-SERIES-MODE-DROPNA-FALSE",
+        "case_id": "series_mode_dropna_false_tie_nan_last_live",
+        "mode": "strict",
+        "operation": "series_mode",
+        "oracle_source": "live_legacy_pandas",
+        "mode_dropna": false,
+        "left": {
+            "name": "test_series",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 }
+            ],
+            "values": [
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "null", "value": "na_n" },
+                { "kind": "null", "value": "na_n" }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    assert_series_mode_dropna_false_fixture(
+        &fixture,
+        "series mode dropna=false tied missing-value oracle test",
+        false,
+    );
+}
+
 #[test]
 fn live_oracle_series_argsort_ascending() {
     let mut cfg = super::HarnessConfig::default_paths();
