@@ -7464,3 +7464,299 @@ fn live_oracle_series_all_with_nulls_skipped() {
     let actual = series.all().expect("all");
     assert_eq!(actual, expected_bool, "series_all: actual={actual}, expected={expected_bool}");
 }
+
+#[test]
+fn live_oracle_series_sort_values_ascending() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-SORTVALS-ASC",
+        "case_id": "series_sort_values_ascending",
+        "mode": "strict",
+        "operation": "series_sort_values",
+        "oracle_source": "live_legacy_pandas",
+        "sort_ascending": true,
+        "left": {
+            "name": "vals",
+            "index": [
+                { "kind": "utf8", "value": "a" },
+                { "kind": "utf8", "value": "b" },
+                { "kind": "utf8", "value": "c" },
+                { "kind": "utf8", "value": "d" }
+            ],
+            "values": [
+                { "kind": "float64", "value": 3.0 },
+                { "kind": "float64", "value": 1.0 },
+                { "kind": "float64", "value": 4.0 },
+                { "kind": "float64", "value": 2.0 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping sort_values asc test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Series(_)),
+        "expected live oracle series payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let result = series.sort_values(true).expect("sort_values");
+    super::compare_series_expected(&result, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_series_sort_values_descending() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-SORTVALS-DESC",
+        "case_id": "series_sort_values_descending",
+        "mode": "strict",
+        "operation": "series_sort_values",
+        "oracle_source": "live_legacy_pandas",
+        "sort_ascending": false,
+        "left": {
+            "name": "vals",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 }
+            ],
+            "values": [
+                { "kind": "int64", "value": 30 },
+                { "kind": "int64", "value": 10 },
+                { "kind": "int64", "value": 40 },
+                { "kind": "int64", "value": 20 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping sort_values desc test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Series(_)),
+        "expected live oracle series payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let result = series.sort_values(false).expect("sort_values");
+    super::compare_series_expected(&result, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_series_sort_values_with_nulls_last() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-SORTVALS-NULLS",
+        "case_id": "series_sort_values_with_nulls",
+        "mode": "strict",
+        "operation": "series_sort_values",
+        "oracle_source": "live_legacy_pandas",
+        "sort_ascending": true,
+        "left": {
+            "name": "vals",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 4 }
+            ],
+            "values": [
+                { "kind": "float64", "value": 3.0 },
+                { "kind": "null", "value": "null" },
+                { "kind": "float64", "value": 1.0 },
+                { "kind": "null", "value": "null" },
+                { "kind": "float64", "value": 2.0 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping sort_values nulls test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Series(_)),
+        "expected live oracle series payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let result = series
+        .sort_values_na(true, "last")
+        .expect("sort_values_na");
+    super::compare_series_expected(&result, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_series_sort_index_ascending() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-SORTIDX-ASC",
+        "case_id": "series_sort_index_ascending",
+        "mode": "strict",
+        "operation": "series_sort_index",
+        "oracle_source": "live_legacy_pandas",
+        "sort_ascending": true,
+        "left": {
+            "name": "vals",
+            "index": [
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 0 }
+            ],
+            "values": [
+                { "kind": "float64", "value": 30.0 },
+                { "kind": "float64", "value": 10.0 },
+                { "kind": "float64", "value": 20.0 },
+                { "kind": "float64", "value": 0.0 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping sort_index asc test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Series(_)),
+        "expected live oracle series payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let result = series.sort_index(true).expect("sort_index");
+    super::compare_series_expected(&result, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_series_sort_index_descending() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-SORTIDX-DESC",
+        "case_id": "series_sort_index_descending",
+        "mode": "strict",
+        "operation": "series_sort_index",
+        "oracle_source": "live_legacy_pandas",
+        "sort_ascending": false,
+        "left": {
+            "name": "vals",
+            "index": [
+                { "kind": "utf8", "value": "b" },
+                { "kind": "utf8", "value": "a" },
+                { "kind": "utf8", "value": "d" },
+                { "kind": "utf8", "value": "c" }
+            ],
+            "values": [
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 4 },
+                { "kind": "int64", "value": 3 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping sort_index desc test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Series(_)),
+        "expected live oracle series payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let result = series.sort_index(false).expect("sort_index");
+    super::compare_series_expected(&result, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_series_sort_index_already_sorted() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-SORTIDX-NOOP",
+        "case_id": "series_sort_index_already_sorted",
+        "mode": "strict",
+        "operation": "series_sort_index",
+        "oracle_source": "live_legacy_pandas",
+        "sort_ascending": true,
+        "left": {
+            "name": "vals",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "values": [
+                { "kind": "int64", "value": 100 },
+                { "kind": "int64", "value": 200 },
+                { "kind": "int64", "value": 300 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping sort_index noop test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Series(_)),
+        "expected live oracle series payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let result = series.sort_index(true).expect("sort_index");
+    super::compare_series_expected(&result, &expected).expect("pandas parity");
+}
