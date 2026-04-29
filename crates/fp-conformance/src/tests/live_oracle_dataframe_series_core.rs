@@ -7188,3 +7188,255 @@ fn live_oracle_series_pct_change_with_zero_baseline() {
     let result = series.pct_change(1).expect("pct_change");
     super::compare_series_expected(&result, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_series_any_with_truthy_value() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-ANY-TRUTHY",
+        "case_id": "series_any_with_truthy",
+        "mode": "strict",
+        "operation": "series_any",
+        "oracle_source": "live_legacy_pandas",
+        "left": {
+            "name": "vals",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "values": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 0 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping any truthy test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    let super::ResolvedExpected::Bool(expected_bool) = expected else {
+        panic!("expected bool payload, got {expected:?}");
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let actual = series.any().expect("any");
+    assert_eq!(actual, expected_bool, "series_any: actual={actual}, expected={expected_bool}");
+}
+
+#[test]
+fn live_oracle_series_any_all_zeros() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-ANY-ZEROS",
+        "case_id": "series_any_all_zeros",
+        "mode": "strict",
+        "operation": "series_any",
+        "oracle_source": "live_legacy_pandas",
+        "left": {
+            "name": "vals",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "values": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 0 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping any all-zeros test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    let super::ResolvedExpected::Bool(expected_bool) = expected else {
+        panic!("expected bool payload, got {expected:?}");
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let actual = series.any().expect("any");
+    assert_eq!(actual, expected_bool, "series_any: actual={actual}, expected={expected_bool}");
+}
+
+#[test]
+fn live_oracle_series_any_with_nulls_only() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-ANY-NULLS",
+        "case_id": "series_any_nulls_only",
+        "mode": "strict",
+        "operation": "series_any",
+        "oracle_source": "live_legacy_pandas",
+        "left": {
+            "name": "vals",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 }
+            ],
+            "values": [
+                { "kind": "null", "value": "null" },
+                { "kind": "null", "value": "null" }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping any nulls test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    let super::ResolvedExpected::Bool(expected_bool) = expected else {
+        panic!("expected bool payload, got {expected:?}");
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let actual = series.any().expect("any");
+    assert_eq!(actual, expected_bool, "series_any: actual={actual}, expected={expected_bool}");
+}
+
+#[test]
+fn live_oracle_series_all_with_truthy_values() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-ALL-TRUTHY",
+        "case_id": "series_all_with_truthy",
+        "mode": "strict",
+        "operation": "series_all",
+        "oracle_source": "live_legacy_pandas",
+        "left": {
+            "name": "vals",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "values": [
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping all truthy test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    let super::ResolvedExpected::Bool(expected_bool) = expected else {
+        panic!("expected bool payload, got {expected:?}");
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let actual = series.all().expect("all");
+    assert_eq!(actual, expected_bool, "series_all: actual={actual}, expected={expected_bool}");
+}
+
+#[test]
+fn live_oracle_series_all_with_zero_value() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-ALL-ZERO",
+        "case_id": "series_all_with_zero",
+        "mode": "strict",
+        "operation": "series_all",
+        "oracle_source": "live_legacy_pandas",
+        "left": {
+            "name": "vals",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "values": [
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 3 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping all-zero test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    let super::ResolvedExpected::Bool(expected_bool) = expected else {
+        panic!("expected bool payload, got {expected:?}");
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let actual = series.all().expect("all");
+    assert_eq!(actual, expected_bool, "series_all: actual={actual}, expected={expected_bool}");
+}
+
+#[test]
+fn live_oracle_series_all_with_nulls_skipped() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-ALL-NULLS",
+        "case_id": "series_all_with_nulls",
+        "mode": "strict",
+        "operation": "series_all",
+        "oracle_source": "live_legacy_pandas",
+        "left": {
+            "name": "vals",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 }
+            ],
+            "values": [
+                { "kind": "float64", "value": 1.0 },
+                { "kind": "null", "value": "null" },
+                { "kind": "float64", "value": 2.0 },
+                { "kind": "float64", "value": 3.0 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping all nulls test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    let super::ResolvedExpected::Bool(expected_bool) = expected else {
+        panic!("expected bool payload, got {expected:?}");
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let actual = series.all().expect("all");
+    assert_eq!(actual, expected_bool, "series_all: actual={actual}, expected={expected_bool}");
+}
