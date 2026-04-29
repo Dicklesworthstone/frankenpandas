@@ -2772,9 +2772,10 @@ impl Column {
                 remainder.push(Scalar::Null(NullKind::NaN));
                 continue;
             }
-            // Floor-division and Python-style modulo.
-            let q = (num / den).floor();
-            let r = num - q * den;
+            // Floor-division and Python-style modulo, including pandas' signed
+            // zero and infinity behavior.
+            let q = python_floor_div_f64(num, den);
+            let r = python_mod_f64(num, den);
             quotient.push(Scalar::Float64(q));
             remainder.push(Scalar::Float64(r));
         }
@@ -7648,6 +7649,38 @@ mod tests {
             let (q, r) = a.divmod(&b).expect("divmod");
             assert!(q.values()[0].is_missing());
             assert!(r.values()[0].is_missing());
+        }
+
+        #[test]
+        fn divmod_infinite_operands_match_pandas_float_semantics() {
+            let a = Column::from_values(vec![
+                Scalar::Float64(f64::INFINITY),
+                Scalar::Float64(f64::NEG_INFINITY),
+                Scalar::Float64(5.0),
+                Scalar::Float64(-5.0),
+                Scalar::Float64(f64::INFINITY),
+            ])
+            .expect("a");
+            let b = Column::from_values(vec![
+                Scalar::Float64(2.0),
+                Scalar::Float64(-2.0),
+                Scalar::Float64(f64::INFINITY),
+                Scalar::Float64(f64::INFINITY),
+                Scalar::Float64(f64::INFINITY),
+            ])
+            .expect("b");
+
+            let (q, r) = a.divmod(&b).expect("divmod");
+            assert!(matches!(q.values()[0], Scalar::Float64(v) if v.is_nan()));
+            assert!(matches!(r.values()[0], Scalar::Float64(v) if v.is_nan()));
+            assert!(matches!(q.values()[1], Scalar::Float64(v) if v.is_nan()));
+            assert!(matches!(r.values()[1], Scalar::Float64(v) if v.is_nan()));
+            assert_eq!(q.values()[2], Scalar::Float64(0.0));
+            assert_eq!(r.values()[2], Scalar::Float64(5.0));
+            assert_eq!(q.values()[3], Scalar::Float64(-1.0));
+            assert_eq!(r.values()[3], Scalar::Float64(f64::INFINITY));
+            assert!(matches!(q.values()[4], Scalar::Float64(v) if v.is_nan()));
+            assert!(matches!(r.values()[4], Scalar::Float64(v) if v.is_nan()));
         }
 
         #[test]
