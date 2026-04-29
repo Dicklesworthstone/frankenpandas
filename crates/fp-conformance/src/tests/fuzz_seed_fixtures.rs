@@ -363,8 +363,7 @@ fn fuzz_pivot_table_bytes_accepts_aggfunc_first_seed() {
 
 #[test]
 fn fuzz_pivot_table_bytes_accepts_single_row_seed() {
-    let seed =
-        include_bytes!("../../fixtures/adversarial/fuzz_corpus/pivot_table/single_row.bin");
+    let seed = include_bytes!("../../fixtures/adversarial/fuzz_corpus/pivot_table/single_row.bin");
     fuzz_pivot_table_bytes(seed).expect("single_row seed should satisfy invariants");
 }
 
@@ -396,15 +395,13 @@ fn fuzz_pivot_table_bytes_accepts_negative_vals_seed() {
 
 #[test]
 fn fuzz_pivot_table_bytes_accepts_float_vals_seed() {
-    let seed =
-        include_bytes!("../../fixtures/adversarial/fuzz_corpus/pivot_table/float_vals.bin");
+    let seed = include_bytes!("../../fixtures/adversarial/fuzz_corpus/pivot_table/float_vals.bin");
     fuzz_pivot_table_bytes(seed).expect("float_vals seed should satisfy invariants");
 }
 
 #[test]
 fn fuzz_pivot_table_bytes_accepts_mixed_nulls_seed() {
-    let seed =
-        include_bytes!("../../fixtures/adversarial/fuzz_corpus/pivot_table/mixed_nulls.bin");
+    let seed = include_bytes!("../../fixtures/adversarial/fuzz_corpus/pivot_table/mixed_nulls.bin");
     fuzz_pivot_table_bytes(seed).expect("mixed_nulls seed should satisfy invariants");
 }
 
@@ -445,6 +442,136 @@ fn fuzz_rolling_window_bytes_accepts_min_periods_gt_window_seed() {
     let seed = [1, 4, 5, 1, 100, 2, 110, 3, 120, 4, 130, 1, 140];
     fuzz_rolling_window_bytes(&seed)
         .expect("min_periods > window seed should stay bounded and non-panicking");
+}
+
+#[test]
+fn fuzz_rolling_window_bytes_accepts_window_0_min_none() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/rolling_window/window_0_min_none.bin");
+    fuzz_rolling_window_bytes(seed).expect("window_0_min_none seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_rolling_window_bytes_accepts_window_1_min_1() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/rolling_window/window_1_min_1.bin");
+    fuzz_rolling_window_bytes(seed).expect("window_1_min_1 seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_rolling_window_bytes_accepts_window_len_min_none() {
+    let seed = include_bytes!(
+        "../../fixtures/adversarial/fuzz_corpus/rolling_window/window_len_min_none.bin"
+    );
+    fuzz_rolling_window_bytes(seed).expect("window_len_min_none seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_rolling_window_bytes_accepts_window_len_plus1() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/rolling_window/window_len_plus1.bin");
+    fuzz_rolling_window_bytes(seed).expect("window_len_plus1 seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_rolling_window_bytes_accepts_window_max() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/rolling_window/window_max.bin");
+    fuzz_rolling_window_bytes(seed).expect("window_max seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_rolling_window_bytes_accepts_all_nulls() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/rolling_window/all_nulls.bin");
+    fuzz_rolling_window_bytes(seed).expect("all_nulls seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_rolling_window_bytes_accepts_no_nulls() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/rolling_window/no_nulls.bin");
+    fuzz_rolling_window_bytes(seed).expect("no_nulls seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_rolling_window_bytes_accepts_alternating_nulls() {
+    let seed = include_bytes!(
+        "../../fixtures/adversarial/fuzz_corpus/rolling_window/alternating_nulls.bin"
+    );
+    fuzz_rolling_window_bytes(seed).expect("alternating_nulls seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_rolling_window_bytes_accepts_single_value() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/rolling_window/single_value.bin");
+    fuzz_rolling_window_bytes(seed).expect("single_value seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_rolling_window_bytes_accepts_increasing() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/rolling_window/increasing.bin");
+    fuzz_rolling_window_bytes(seed).expect("increasing seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_rolling_window_bytes_accepts_decreasing() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/rolling_window/decreasing.bin");
+    fuzz_rolling_window_bytes(seed).expect("decreasing seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_rolling_window_bytes_accepts_large_series() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/rolling_window/large_series.bin");
+    fuzz_rolling_window_bytes(seed).expect("large_series seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_rolling_window_bytes_accepts_min_periods_0() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/rolling_window/min_periods_0.bin");
+    fuzz_rolling_window_bytes(seed).expect("min_periods_0 seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_rolling_window_bytes_accepts_min_periods_window() {
+    let seed = include_bytes!(
+        "../../fixtures/adversarial/fuzz_corpus/rolling_window/min_periods_window.bin"
+    );
+    fuzz_rolling_window_bytes(seed).expect("min_periods_window seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_rolling_window_bytes_accepts_min_periods_exceeded() {
+    let seed = include_bytes!(
+        "../../fixtures/adversarial/fuzz_corpus/rolling_window/min_periods_exceeded.bin"
+    );
+    fuzz_rolling_window_bytes(seed).expect("min_periods_exceeded seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_rolling_window_bytes_accepts_negative_values() {
+    let seed = include_bytes!(
+        "../../fixtures/adversarial/fuzz_corpus/rolling_window/negative_values.bin"
+    );
+    fuzz_rolling_window_bytes(seed).expect("negative_values seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_rolling_window_bytes_accepts_zeros() {
+    let seed = include_bytes!("../../fixtures/adversarial/fuzz_corpus/rolling_window/zeros.bin");
+    fuzz_rolling_window_bytes(seed).expect("zeros seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_rolling_window_bytes_accepts_mixed_signs() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/rolling_window/mixed_signs.bin");
+    fuzz_rolling_window_bytes(seed).expect("mixed_signs seed should satisfy invariants");
 }
 
 #[test]
@@ -836,8 +963,9 @@ fn fuzz_join_series_bytes_accepts_left_null_values() {
 
 #[test]
 fn fuzz_join_series_bytes_accepts_outer_large_overlap() {
-    let seed =
-        include_bytes!("../../fixtures/adversarial/fuzz_corpus/join_series/outer_large_overlap.bin");
+    let seed = include_bytes!(
+        "../../fixtures/adversarial/fuzz_corpus/join_series/outer_large_overlap.bin"
+    );
     fuzz_join_series_bytes(seed).expect("outer-large-overlap seed should satisfy invariants");
 }
 
@@ -857,8 +985,7 @@ fn fuzz_join_series_bytes_accepts_left_asymmetric() {
 
 #[test]
 fn fuzz_join_series_bytes_accepts_cross_small() {
-    let seed =
-        include_bytes!("../../fixtures/adversarial/fuzz_corpus/join_series/cross_small.bin");
+    let seed = include_bytes!("../../fixtures/adversarial/fuzz_corpus/join_series/cross_small.bin");
     fuzz_join_series_bytes(seed).expect("cross-small seed should satisfy invariants");
 }
 
@@ -1039,22 +1166,19 @@ fn fuzz_index_align_bytes_accepts_utf8_right_only_seed() {
 
 #[test]
 fn fuzz_index_align_bytes_accepts_empty_left() {
-    let seed =
-        include_bytes!("../../fixtures/adversarial/fuzz_corpus/index_align/empty_left.bin");
+    let seed = include_bytes!("../../fixtures/adversarial/fuzz_corpus/index_align/empty_left.bin");
     fuzz_index_align_bytes(seed).expect("empty-left seed should satisfy invariants");
 }
 
 #[test]
 fn fuzz_index_align_bytes_accepts_empty_right() {
-    let seed =
-        include_bytes!("../../fixtures/adversarial/fuzz_corpus/index_align/empty_right.bin");
+    let seed = include_bytes!("../../fixtures/adversarial/fuzz_corpus/index_align/empty_right.bin");
     fuzz_index_align_bytes(seed).expect("empty-right seed should satisfy invariants");
 }
 
 #[test]
 fn fuzz_index_align_bytes_accepts_both_empty() {
-    let seed =
-        include_bytes!("../../fixtures/adversarial/fuzz_corpus/index_align/both_empty.bin");
+    let seed = include_bytes!("../../fixtures/adversarial/fuzz_corpus/index_align/both_empty.bin");
     fuzz_index_align_bytes(seed).expect("both-empty seed should satisfy invariants");
 }
 
@@ -1092,29 +1216,25 @@ fn fuzz_index_align_bytes_accepts_mixed_overlap() {
 
 #[test]
 fn fuzz_index_align_bytes_accepts_max_length() {
-    let seed =
-        include_bytes!("../../fixtures/adversarial/fuzz_corpus/index_align/max_length.bin");
+    let seed = include_bytes!("../../fixtures/adversarial/fuzz_corpus/index_align/max_length.bin");
     fuzz_index_align_bytes(seed).expect("max-length seed should satisfy invariants");
 }
 
 #[test]
 fn fuzz_index_align_bytes_accepts_single_same() {
-    let seed =
-        include_bytes!("../../fixtures/adversarial/fuzz_corpus/index_align/single_same.bin");
+    let seed = include_bytes!("../../fixtures/adversarial/fuzz_corpus/index_align/single_same.bin");
     fuzz_index_align_bytes(seed).expect("single-same seed should satisfy invariants");
 }
 
 #[test]
 fn fuzz_index_align_bytes_accepts_single_diff() {
-    let seed =
-        include_bytes!("../../fixtures/adversarial/fuzz_corpus/index_align/single_diff.bin");
+    let seed = include_bytes!("../../fixtures/adversarial/fuzz_corpus/index_align/single_diff.bin");
     fuzz_index_align_bytes(seed).expect("single-diff seed should satisfy invariants");
 }
 
 #[test]
 fn fuzz_index_align_bytes_accepts_interleaved() {
-    let seed =
-        include_bytes!("../../fixtures/adversarial/fuzz_corpus/index_align/interleaved.bin");
+    let seed = include_bytes!("../../fixtures/adversarial/fuzz_corpus/index_align/interleaved.bin");
     fuzz_index_align_bytes(seed).expect("interleaved seed should satisfy invariants");
 }
 
@@ -1173,36 +1293,41 @@ fn fuzz_json_io_bytes_reports_invalid_json() {
 
 #[test]
 fn fuzz_dataframe_merge_bytes_accepts_inner_single_each() {
-    let seed =
-        include_bytes!("../../fixtures/adversarial/fuzz_corpus/dataframe_merge/inner_single_each.bin");
+    let seed = include_bytes!(
+        "../../fixtures/adversarial/fuzz_corpus/dataframe_merge/inner_single_each.bin"
+    );
     fuzz_dataframe_merge_bytes(seed).expect("inner-single-each seed should satisfy invariants");
 }
 
 #[test]
 fn fuzz_dataframe_merge_bytes_accepts_outer_no_overlap() {
-    let seed =
-        include_bytes!("../../fixtures/adversarial/fuzz_corpus/dataframe_merge/outer_no_overlap.bin");
+    let seed = include_bytes!(
+        "../../fixtures/adversarial/fuzz_corpus/dataframe_merge/outer_no_overlap.bin"
+    );
     fuzz_dataframe_merge_bytes(seed).expect("outer-no-overlap seed should satisfy invariants");
 }
 
 #[test]
 fn fuzz_dataframe_merge_bytes_accepts_inner_all_overlap() {
-    let seed =
-        include_bytes!("../../fixtures/adversarial/fuzz_corpus/dataframe_merge/inner_all_overlap.bin");
+    let seed = include_bytes!(
+        "../../fixtures/adversarial/fuzz_corpus/dataframe_merge/inner_all_overlap.bin"
+    );
     fuzz_dataframe_merge_bytes(seed).expect("inner-all-overlap seed should satisfy invariants");
 }
 
 #[test]
 fn fuzz_dataframe_merge_bytes_accepts_left_asymmetric() {
-    let seed =
-        include_bytes!("../../fixtures/adversarial/fuzz_corpus/dataframe_merge/left_asymmetric.bin");
+    let seed = include_bytes!(
+        "../../fixtures/adversarial/fuzz_corpus/dataframe_merge/left_asymmetric.bin"
+    );
     fuzz_dataframe_merge_bytes(seed).expect("left-asymmetric seed should satisfy invariants");
 }
 
 #[test]
 fn fuzz_dataframe_merge_bytes_accepts_right_asymmetric() {
-    let seed =
-        include_bytes!("../../fixtures/adversarial/fuzz_corpus/dataframe_merge/right_asymmetric.bin");
+    let seed = include_bytes!(
+        "../../fixtures/adversarial/fuzz_corpus/dataframe_merge/right_asymmetric.bin"
+    );
     fuzz_dataframe_merge_bytes(seed).expect("right-asymmetric seed should satisfy invariants");
 }
 
@@ -1215,8 +1340,9 @@ fn fuzz_dataframe_merge_bytes_accepts_outer_max_rows() {
 
 #[test]
 fn fuzz_dataframe_merge_bytes_accepts_inner_empty_result() {
-    let seed =
-        include_bytes!("../../fixtures/adversarial/fuzz_corpus/dataframe_merge/inner_empty_result.bin");
+    let seed = include_bytes!(
+        "../../fixtures/adversarial/fuzz_corpus/dataframe_merge/inner_empty_result.bin"
+    );
     fuzz_dataframe_merge_bytes(seed).expect("inner-empty-result seed should satisfy invariants");
 }
 
@@ -1242,8 +1368,7 @@ fn fuzz_dataframe_merge_bytes_accepts_outer_partial_overlap() {
     let seed = include_bytes!(
         "../../fixtures/adversarial/fuzz_corpus/dataframe_merge/outer_partial_overlap.bin"
     );
-    fuzz_dataframe_merge_bytes(seed)
-        .expect("outer-partial-overlap seed should satisfy invariants");
+    fuzz_dataframe_merge_bytes(seed).expect("outer-partial-overlap seed should satisfy invariants");
 }
 
 #[test]
@@ -1251,13 +1376,13 @@ fn fuzz_dataframe_merge_bytes_accepts_inner_duplicate_keys() {
     let seed = include_bytes!(
         "../../fixtures/adversarial/fuzz_corpus/dataframe_merge/inner_duplicate_keys.bin"
     );
-    fuzz_dataframe_merge_bytes(seed)
-        .expect("inner-duplicate-keys seed should satisfy invariants");
+    fuzz_dataframe_merge_bytes(seed).expect("inner-duplicate-keys seed should satisfy invariants");
 }
 
 #[test]
 fn fuzz_dataframe_merge_bytes_accepts_left_all_matched() {
-    let seed =
-        include_bytes!("../../fixtures/adversarial/fuzz_corpus/dataframe_merge/left_all_matched.bin");
+    let seed = include_bytes!(
+        "../../fixtures/adversarial/fuzz_corpus/dataframe_merge/left_all_matched.bin"
+    );
     fuzz_dataframe_merge_bytes(seed).expect("left-all-matched seed should satisfy invariants");
 }
