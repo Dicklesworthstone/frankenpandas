@@ -1005,7 +1005,7 @@ impl HyperLogLog {
             / self
                 .registers
                 .iter()
-                .map(|&r| f64::from(2_u32.pow(u32::from(r))).recip())
+                .map(|&r| 2_f64.powi(i32::from(r)).recip())
                 .sum::<f64>();
 
         // Small range correction (linear counting).
@@ -2843,6 +2843,17 @@ mod tests {
         fn hll_memory_usage() {
             let hll = HyperLogLog::default_precision();
             assert_eq!(hll.memory_bytes(), 16384, "p=14 -> 2^14 = 16384 bytes");
+        }
+
+        #[test]
+        fn hll_high_rho_does_not_overflow() {
+            let mut hll = HyperLogLog::new(6);
+            hll.registers[0] = 40;
+            hll.registers[1] = 50;
+            hll.registers[2] = 60;
+            let est = hll.estimate();
+            assert!(est.is_finite(), "HLL estimate overflowed: {est}");
+            assert!(est > 0.0, "HLL estimate should be positive: {est}");
         }
 
         // --- KLL Sketch Tests ---
