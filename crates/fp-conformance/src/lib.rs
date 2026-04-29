@@ -1845,6 +1845,8 @@ pub struct PacketFixture {
     #[serde(default)]
     pub pct_change_periods: Option<i64>,
     #[serde(default)]
+    pub pct_change_axis: Option<usize>,
+    #[serde(default)]
     pub autocorr_lag: Option<usize>,
     #[serde(default)]
     pub diff_axis: Option<usize>,
@@ -3184,6 +3186,8 @@ struct OracleRequest {
     pub shift_axis: Option<usize>,
     #[serde(default)]
     pub pct_change_periods: Option<i64>,
+    #[serde(default)]
+    pub pct_change_axis: Option<usize>,
     #[serde(default)]
     pub autocorr_lag: Option<usize>,
     #[serde(default)]
@@ -12093,6 +12097,7 @@ fn capture_live_oracle_expected(
         shift_periods: fixture.shift_periods,
         shift_axis: fixture.shift_axis,
         pct_change_periods: fixture.pct_change_periods,
+        pct_change_axis: fixture.pct_change_axis,
         autocorr_lag: fixture.autocorr_lag,
         diff_axis: fixture.diff_axis,
         clip_lower: fixture.clip_lower,
@@ -14414,8 +14419,11 @@ fn execute_dataframe_fixture_operation(fixture: &PacketFixture) -> Result<DataFr
         FixtureOperation::DataFramePctChange => {
             let frame = build_dataframe(require_frame(fixture)?)
                 .map_err(|err| format!("frame build failed: {err}"))?;
-            let periods = fixture.diff_periods.unwrap_or(1);
-            let axis = fixture.diff_axis.unwrap_or(0);
+            let periods = fixture
+                .diff_periods
+                .or(fixture.pct_change_periods)
+                .unwrap_or(1);
+            let axis = fixture.diff_axis.or(fixture.pct_change_axis).unwrap_or(0);
             if axis == 1 {
                 frame
                     .pct_change_axis1(periods)

@@ -622,6 +622,68 @@ fn live_oracle_dataframe_pct_change_axis1_matches_pandas() {
 }
 
 #[test]
+fn live_oracle_dataframe_pct_change_alias_fields_match_pandas() {
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-056",
+        "case_id": "dataframe_pct_change_alias_fields_live",
+        "mode": "strict",
+        "operation": "dataframe_pct_change",
+        "oracle_source": "live_legacy_pandas",
+        "pct_change_periods": 2,
+        "pct_change_axis": 1,
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 }
+            ],
+            "column_order": ["a", "b", "c", "d"],
+            "columns": {
+                "a": [
+                    { "kind": "float64", "value": 10.0 },
+                    { "kind": "float64", "value": 20.0 }
+                ],
+                "b": [
+                    { "kind": "float64", "value": 20.0 },
+                    { "kind": "float64", "value": 10.0 }
+                ],
+                "c": [
+                    { "kind": "float64", "value": 40.0 },
+                    { "kind": "float64", "value": 30.0 }
+                ],
+                "d": [
+                    { "kind": "float64", "value": 80.0 },
+                    { "kind": "float64", "value": 15.0 }
+                ]
+            }
+        }
+    }))
+    .expect("fixture");
+
+    let actual = super::execute_dataframe_fixture_operation(&fixture).expect("actual frame");
+    assert!(actual.column("a").unwrap().values()[0].is_missing());
+    assert!(actual.column("b").unwrap().values()[1].is_missing());
+    assert_eq!(
+        actual.column("c").unwrap().values(),
+        &[
+            fp_types::Scalar::Float64(3.0),
+            fp_types::Scalar::Float64(0.5)
+        ]
+    );
+    assert_eq!(
+        actual.column("d").unwrap().values(),
+        &[
+            fp_types::Scalar::Float64(3.0),
+            fp_types::Scalar::Float64(0.5)
+        ]
+    );
+
+    assert_live_oracle_dataframe_pct_change_parity(
+        fixture,
+        "dataframe pct_change alias-field oracle test",
+    );
+}
+
+#[test]
 fn live_oracle_dataframe_pct_change_axis1_negative_periods_matches_pandas() {
     let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
         "packet_id": "FP-P2D-062",
