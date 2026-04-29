@@ -3558,7 +3558,7 @@ impl Column {
                 continue;
             }
             match v.to_f64() {
-                Ok(x) => out.push(Scalar::Float64((x * factor).round() / factor)),
+                Ok(x) => out.push(Scalar::Float64((x * factor).round_ties_even() / factor)),
                 Err(err) => return Err(ColumnError::Type(err)),
             }
         }
@@ -5832,6 +5832,48 @@ mod tests {
             let col = Column::from_values(vec![Scalar::Float64(1234.0)]).expect("col");
             let r = col.round(-2).expect("round");
             assert_eq!(r.values()[0], Scalar::Float64(1200.0));
+        }
+
+        #[test]
+        fn round_uses_pandas_half_even_ties() {
+            let col = Column::from_values(vec![
+                Scalar::Float64(1.5),
+                Scalar::Float64(2.5),
+                Scalar::Float64(-1.5),
+                Scalar::Float64(3.5),
+            ])
+            .expect("col");
+            let r = col.round(0).expect("round");
+            assert_eq!(
+                r.values(),
+                &[
+                    Scalar::Float64(2.0),
+                    Scalar::Float64(2.0),
+                    Scalar::Float64(-2.0),
+                    Scalar::Float64(4.0)
+                ]
+            );
+        }
+
+        #[test]
+        fn round_negative_decimals_uses_half_even_ties() {
+            let col = Column::from_values(vec![
+                Scalar::Float64(15.0),
+                Scalar::Float64(25.0),
+                Scalar::Float64(35.0),
+                Scalar::Float64(-15.0),
+            ])
+            .expect("col");
+            let r = col.round(-1).expect("round");
+            assert_eq!(
+                r.values(),
+                &[
+                    Scalar::Float64(20.0),
+                    Scalar::Float64(20.0),
+                    Scalar::Float64(40.0),
+                    Scalar::Float64(-20.0)
+                ]
+            );
         }
 
         #[test]

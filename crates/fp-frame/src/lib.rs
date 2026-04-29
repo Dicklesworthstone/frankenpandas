@@ -3998,7 +3998,7 @@ impl Series {
                 out.push(val.clone());
             } else {
                 let v = val.to_f64().map_err(ColumnError::from)?;
-                out.push(Scalar::Float64((v * factor).round() / factor));
+                out.push(Scalar::Float64((v * factor).round_ties_even() / factor));
             }
         }
         Self::from_values(self.name.clone(), self.index.labels().to_vec(), out)
@@ -33079,12 +33079,64 @@ mod tests {
         );
 
         let r = s.round(2).unwrap();
-        let expected_neg_pi_2dp = (neg_pi * 100.0).round() / 100.0;
-        let expected_e_2dp = (e * 100.0).round() / 100.0;
+        let expected_neg_pi_2dp = (neg_pi * 100.0).round_ties_even() / 100.0;
+        let expected_e_2dp = (e * 100.0).round_ties_even() / 100.0;
         assert!(
             matches!(r.values()[0], Scalar::Float64(v) if (v - expected_neg_pi_2dp).abs() < 1e-12)
         );
         assert!(matches!(r.values()[1], Scalar::Float64(v) if (v - expected_e_2dp).abs() < 1e-12));
+    }
+
+    #[test]
+    fn series_round_uses_pandas_half_even_ties() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Float64(1.5),
+                Scalar::Float64(2.5),
+                Scalar::Float64(-1.5),
+                Scalar::Float64(3.5),
+            ],
+        )
+        .unwrap();
+
+        let rounded = s.round(0).unwrap();
+        assert_eq!(
+            rounded.values(),
+            &[
+                Scalar::Float64(2.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(-2.0),
+                Scalar::Float64(4.0)
+            ]
+        );
+    }
+
+    #[test]
+    fn series_round_negative_decimals_uses_half_even_ties() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Float64(15.0),
+                Scalar::Float64(25.0),
+                Scalar::Float64(35.0),
+                Scalar::Float64(-15.0),
+            ],
+        )
+        .unwrap();
+
+        let rounded = s.round(-1).unwrap();
+        assert_eq!(
+            rounded.values(),
+            &[
+                Scalar::Float64(20.0),
+                Scalar::Float64(20.0),
+                Scalar::Float64(40.0),
+                Scalar::Float64(-20.0)
+            ]
+        );
     }
 
     #[test]
