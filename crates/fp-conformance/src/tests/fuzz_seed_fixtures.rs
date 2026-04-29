@@ -446,8 +446,9 @@ fn fuzz_rolling_window_bytes_accepts_min_periods_gt_window_seed() {
 
 #[test]
 fn fuzz_rolling_window_bytes_accepts_window_0_min_none() {
-    let seed =
-        include_bytes!("../../fixtures/adversarial/fuzz_corpus/rolling_window/window_0_min_none.bin");
+    let seed = include_bytes!(
+        "../../fixtures/adversarial/fuzz_corpus/rolling_window/window_0_min_none.bin"
+    );
     fuzz_rolling_window_bytes(seed).expect("window_0_min_none seed should satisfy invariants");
 }
 
@@ -468,8 +469,9 @@ fn fuzz_rolling_window_bytes_accepts_window_len_min_none() {
 
 #[test]
 fn fuzz_rolling_window_bytes_accepts_window_len_plus1() {
-    let seed =
-        include_bytes!("../../fixtures/adversarial/fuzz_corpus/rolling_window/window_len_plus1.bin");
+    let seed = include_bytes!(
+        "../../fixtures/adversarial/fuzz_corpus/rolling_window/window_len_plus1.bin"
+    );
     fuzz_rolling_window_bytes(seed).expect("window_len_plus1 seed should satisfy invariants");
 }
 
@@ -489,8 +491,7 @@ fn fuzz_rolling_window_bytes_accepts_all_nulls() {
 
 #[test]
 fn fuzz_rolling_window_bytes_accepts_no_nulls() {
-    let seed =
-        include_bytes!("../../fixtures/adversarial/fuzz_corpus/rolling_window/no_nulls.bin");
+    let seed = include_bytes!("../../fixtures/adversarial/fuzz_corpus/rolling_window/no_nulls.bin");
     fuzz_rolling_window_bytes(seed).expect("no_nulls seed should satisfy invariants");
 }
 
@@ -555,9 +556,8 @@ fn fuzz_rolling_window_bytes_accepts_min_periods_exceeded() {
 
 #[test]
 fn fuzz_rolling_window_bytes_accepts_negative_values() {
-    let seed = include_bytes!(
-        "../../fixtures/adversarial/fuzz_corpus/rolling_window/negative_values.bin"
-    );
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/rolling_window/negative_values.bin");
     fuzz_rolling_window_bytes(seed).expect("negative_values seed should satisfy invariants");
 }
 
@@ -597,6 +597,104 @@ fn fuzz_dataframe_eval_bytes_accepts_simple_numeric_expression() {
         20, 30, 21, 31,
     ]);
     fuzz_dataframe_eval_bytes(&seed).expect("simple eval seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_query_str_with_locals_bytes_accepts_structured_corpus_seeds() {
+    let seeds: &[(&str, &[u8])] = &[
+        (
+            "arithmetic_local_threshold",
+            include_bytes!(
+                "../../../../fuzz/corpus/fuzz_query_str_with_locals/arithmetic_local_threshold"
+            ),
+        ),
+        (
+            "column_collision_and_limit",
+            include_bytes!(
+                "../../../../fuzz/corpus/fuzz_query_str_with_locals/column_collision_and_limit"
+            ),
+        ),
+        (
+            "column_collision_eq",
+            include_bytes!(
+                "../../../../fuzz/corpus/fuzz_query_str_with_locals/column_collision_eq"
+            ),
+        ),
+        (
+            "dunder_arithmetic",
+            include_bytes!("../../../../fuzz/corpus/fuzz_query_str_with_locals/dunder_arithmetic"),
+        ),
+        (
+            "empty",
+            include_bytes!("../../../../fuzz/corpus/fuzz_query_str_with_locals/empty"),
+        ),
+        (
+            "empty_bytes",
+            include_bytes!("../../../../fuzz/corpus/fuzz_query_str_with_locals/empty_bytes"),
+        ),
+        (
+            "hardened_or_threshold",
+            include_bytes!(
+                "../../../../fuzz/corpus/fuzz_query_str_with_locals/hardened_or_threshold"
+            ),
+        ),
+        (
+            "local_secret_int_cmp",
+            include_bytes!(
+                "../../../../fuzz/corpus/fuzz_query_str_with_locals/local_secret_int_cmp"
+            ),
+        ),
+        (
+            "missing_local_error_path",
+            include_bytes!(
+                "../../../../fuzz/corpus/fuzz_query_str_with_locals/missing_local_error_path"
+            ),
+        ),
+        (
+            "nested_attr",
+            include_bytes!("../../../../fuzz/corpus/fuzz_query_str_with_locals/nested_attr"),
+        ),
+        (
+            "null_local_eq",
+            include_bytes!("../../../../fuzz/corpus/fuzz_query_str_with_locals/null_local_eq"),
+        ),
+        (
+            "parenthesized_mixed_arithmetic",
+            include_bytes!(
+                "../../../../fuzz/corpus/fuzz_query_str_with_locals/parenthesized_mixed_arithmetic"
+            ),
+        ),
+        (
+            "policy_cmp",
+            include_bytes!("../../../../fuzz/corpus/fuzz_query_str_with_locals/policy_cmp"),
+        ),
+        (
+            "scalar_threshold_strict",
+            include_bytes!(
+                "../../../../fuzz/corpus/fuzz_query_str_with_locals/scalar_threshold_strict"
+            ),
+        ),
+        (
+            "utf8_local_type_mismatch",
+            include_bytes!(
+                "../../../../fuzz/corpus/fuzz_query_str_with_locals/utf8_local_type_mismatch"
+            ),
+        ),
+        (
+            "whole_expr_starts_with_local",
+            include_bytes!(
+                "../../../../fuzz/corpus/fuzz_query_str_with_locals/whole_expr_starts_with_local"
+            ),
+        ),
+    ];
+
+    for &(name, seed) in seeds {
+        let result = fuzz_query_str_with_locals_bytes(seed);
+        assert!(
+            result.is_ok(),
+            "query-with-locals seed {name} should satisfy invariants: {result:?}"
+        );
+    }
 }
 
 #[test]
