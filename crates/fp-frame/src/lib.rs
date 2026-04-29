@@ -5686,9 +5686,12 @@ impl Series {
         } else {
             let sum: f64 = floats.iter().sum();
             let mean = sum / count;
-            let var =
-                floats.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (count - 1.0).max(1.0);
-            let std = var.sqrt();
+            let std = if floats.len() > 1 {
+                let var = floats.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (count - 1.0);
+                var.sqrt()
+            } else {
+                f64::NAN
+            };
             let min = floats.iter().copied().fold(f64::INFINITY, f64::min);
             let max = floats.iter().copied().fold(f64::NEG_INFINITY, f64::max);
             (mean, std, min, max)
@@ -58003,6 +58006,14 @@ mod tests {
         assert_eq!(result.index().labels()[5], IndexLabel::Utf8("50%".into()));
         assert_eq!(result.index().labels()[6], IndexLabel::Utf8("90%".into()));
         assert_eq!(result.values()[5], Scalar::Float64(30.0)); // 50% = median
+    }
+
+    #[test]
+    fn series_describe_single_value_std_is_nan() {
+        let s = Series::from_values("x", vec![0_i64.into()], vec![Scalar::Float64(42.0)]).unwrap();
+
+        let result = s.describe().unwrap();
+        assert!(matches!(result.values()[2], Scalar::Float64(v) if v.is_nan()));
     }
 
     // ── DataFrame.to_csv_options ────────────────────────────────
