@@ -3450,9 +3450,9 @@ impl Column {
 
     /// Element-wise absolute value.
     ///
-    /// Matches `pd.Series.abs()`. Int/Float/Timedelta paths preserve
-    /// dtype; Bool/Utf8 inputs return `ColumnError::Type` because
-    /// pandas raises TypeError on non-numeric .abs().
+    /// Matches `pd.Series.abs()`. Int/Float/Bool/Timedelta paths preserve
+    /// dtype; Utf8 inputs return `ColumnError::Type` because pandas raises
+    /// TypeError on non-numeric .abs().
     pub fn abs(&self) -> Result<Self, ColumnError> {
         let mut out = Vec::with_capacity(self.values.len());
         for v in &self.values {
@@ -3461,6 +3461,7 @@ impl Column {
                 continue;
             }
             match v {
+                Scalar::Bool(x) => out.push(Scalar::Bool(*x)),
                 Scalar::Int64(x) => out.push(Scalar::Int64(x.wrapping_abs())),
                 Scalar::Float64(x) => out.push(Scalar::Float64(x.abs())),
                 Scalar::Timedelta64(x) if *x != Timedelta::NAT => {
@@ -5745,6 +5746,15 @@ mod tests {
             let b = float_col.abs().expect("abs");
             assert_eq!(b.values()[0], Scalar::Float64(1.5));
             assert!(b.values()[1].is_missing());
+        }
+
+        #[test]
+        fn abs_bool_preserves_dtype() {
+            let bool_col =
+                Column::from_values(vec![Scalar::Bool(true), Scalar::Bool(false)]).expect("bool");
+            let result = bool_col.abs().expect("abs");
+            assert_eq!(result.dtype(), DType::Bool);
+            assert_eq!(result.values(), &[Scalar::Bool(true), Scalar::Bool(false)]);
         }
 
         #[test]

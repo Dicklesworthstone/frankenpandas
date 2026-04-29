@@ -3973,18 +3973,10 @@ impl Series {
 
     /// Absolute value of each element.
     ///
-    /// Matches `pd.Series.abs()`. NaN values pass through.
+    /// Matches `pd.Series.abs()`. Numeric, boolean, and timedelta dtypes
+    /// retain their pandas-observable dtype; missing values pass through.
     pub fn abs(&self) -> Result<Self, FrameError> {
-        let mut out = Vec::with_capacity(self.len());
-        for val in self.column.values() {
-            if val.is_missing() {
-                out.push(val.clone());
-            } else {
-                let v = val.to_f64().map_err(ColumnError::from)?;
-                out.push(Scalar::Float64(v.abs()));
-            }
-        }
-        Self::from_values(self.name.clone(), self.index.labels().to_vec(), out)
+        Self::new(self.name.clone(), self.index.clone(), self.column.abs()?)
     }
 
     /// Round each element to `decimals` decimal places.
@@ -33085,6 +33077,41 @@ mod tests {
             matches!(r.values()[0], Scalar::Float64(v) if (v - expected_neg_pi_2dp).abs() < 1e-12)
         );
         assert!(matches!(r.values()[1], Scalar::Float64(v) if (v - expected_e_2dp).abs() < 1e-12));
+    }
+
+    #[test]
+    fn series_abs_preserves_int_dtype() {
+        let s = Series::from_values(
+            "vals",
+            vec![
+                IndexLabel::from("a"),
+                IndexLabel::from("b"),
+                IndexLabel::from("c"),
+            ],
+            vec![Scalar::Int64(-5), Scalar::Int64(0), Scalar::Int64(i64::MIN)],
+        )
+        .unwrap();
+
+        let result = s.abs().unwrap();
+        assert_eq!(result.dtype(), DType::Int64);
+        assert_eq!(
+            result.values(),
+            &[Scalar::Int64(5), Scalar::Int64(0), Scalar::Int64(i64::MIN)]
+        );
+    }
+
+    #[test]
+    fn series_abs_preserves_bool_dtype() {
+        let s = Series::from_values(
+            "vals",
+            vec![IndexLabel::from("a"), IndexLabel::from("b")],
+            vec![Scalar::Bool(true), Scalar::Bool(false)],
+        )
+        .unwrap();
+
+        let result = s.abs().unwrap();
+        assert_eq!(result.dtype(), DType::Bool);
+        assert_eq!(result.values(), &[Scalar::Bool(true), Scalar::Bool(false)]);
     }
 
     #[test]
