@@ -560,6 +560,10 @@ pub enum FixtureOperation {
         alias = "series_drop_duplicates_default"
     )]
     SeriesDropDuplicates,
+    #[serde(rename = "series_unique", alias = "series_unique_default")]
+    SeriesUnique,
+    #[serde(rename = "series_factorize", alias = "series_factorize_default")]
+    SeriesFactorize,
     #[serde(rename = "series_where", alias = "series_where_default")]
     SeriesWhere,
     #[serde(rename = "series_mask", alias = "series_mask_default")]
@@ -1375,6 +1379,8 @@ impl FixtureOperation {
             Self::SeriesDescribe => "series_describe",
             Self::SeriesDuplicated => "series_duplicated",
             Self::SeriesDropDuplicates => "series_drop_duplicates",
+            Self::SeriesUnique => "series_unique",
+            Self::SeriesFactorize => "series_factorize",
             Self::SeriesWhere => "series_where",
             Self::SeriesMask => "series_mask",
             Self::SeriesReplace => "series_replace",
@@ -2553,6 +2559,8 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::SeriesDescribe
         | FixtureOperation::SeriesDuplicated
         | FixtureOperation::SeriesDropDuplicates
+        | FixtureOperation::SeriesUnique
+        | FixtureOperation::SeriesFactorize
         | FixtureOperation::SeriesWhere
         | FixtureOperation::SeriesMask
         | FixtureOperation::SeriesReplace
@@ -9425,6 +9433,73 @@ fn run_fixture_operation(
                 ),
             }
         }
+        FixtureOperation::SeriesUnique => {
+            let left = require_left_series(fixture)?;
+            let series = build_series(left)?;
+            let unique_values = series.unique();
+            let labels: Vec<IndexLabel> = (0..unique_values.len())
+                .map(|i| IndexLabel::Int64(i as i64))
+                .collect();
+            let actual = Series::from_values(series.name().to_owned(), labels, unique_values)
+                .map_err(|err| err.to_string());
+            match expected {
+                ResolvedExpected::Series(expected_series) => {
+                    compare_series_expected(&actual?, &expected_series)
+                }
+                ResolvedExpected::ErrorContains(substr) => match actual {
+                    Err(message) if message.contains(&substr) => Ok(()),
+                    Err(message) => Err(format!(
+                        "expected series_unique error containing '{substr}', got '{message}'"
+                    )),
+                    Ok(_) => Err(format!(
+                        "expected series_unique to fail with error containing '{substr}'"
+                    )),
+                },
+                ResolvedExpected::ErrorAny => {
+                    if actual.is_err() {
+                        Ok(())
+                    } else {
+                        Err("expected series_unique to fail but operation succeeded".to_owned())
+                    }
+                }
+                _ => Err(
+                    "expected_series or expected_error is required for series_unique".to_owned(),
+                ),
+            }
+        }
+        FixtureOperation::SeriesFactorize => {
+            let left = require_left_series(fixture)?;
+            let series = build_series(left)?;
+            let actual = series
+                .factorize()
+                .map(|(codes, _uniques)| codes)
+                .map_err(|err| err.to_string());
+            match expected {
+                ResolvedExpected::Series(expected_series) => {
+                    compare_series_expected(&actual?, &expected_series)
+                }
+                ResolvedExpected::ErrorContains(substr) => match actual {
+                    Err(message) if message.contains(&substr) => Ok(()),
+                    Err(message) => Err(format!(
+                        "expected series_factorize error containing '{substr}', got '{message}'"
+                    )),
+                    Ok(_) => Err(format!(
+                        "expected series_factorize to fail with error containing '{substr}'"
+                    )),
+                },
+                ResolvedExpected::ErrorAny => {
+                    if actual.is_err() {
+                        Ok(())
+                    } else {
+                        Err("expected series_factorize to fail but operation succeeded".to_owned())
+                    }
+                }
+                _ => Err(
+                    "expected_series or expected_error is required for series_factorize"
+                        .to_owned(),
+                ),
+            }
+        }
         FixtureOperation::SeriesWhere => {
             let left = require_left_series(fixture)?;
             let series = build_series(left)?;
@@ -11974,6 +12049,8 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::SeriesDescribe
         | FixtureOperation::SeriesDuplicated
         | FixtureOperation::SeriesDropDuplicates
+        | FixtureOperation::SeriesUnique
+        | FixtureOperation::SeriesFactorize
         | FixtureOperation::SeriesWhere
         | FixtureOperation::SeriesMask
         | FixtureOperation::SeriesReplace
@@ -12640,6 +12717,8 @@ fn capture_live_oracle_expected(
         | FixtureOperation::SeriesDescribe
         | FixtureOperation::SeriesDuplicated
         | FixtureOperation::SeriesDropDuplicates
+        | FixtureOperation::SeriesUnique
+        | FixtureOperation::SeriesFactorize
         | FixtureOperation::SeriesWhere
         | FixtureOperation::SeriesMask
         | FixtureOperation::SeriesReplace
@@ -18415,6 +18494,86 @@ fn execute_and_compare_differential(
                 _ => Err(
                     "expected_series or expected_error required for series_drop_duplicates"
                         .to_owned(),
+                ),
+            }
+        }
+        FixtureOperation::SeriesUnique => {
+            let left = require_left_series(fixture)?;
+            let series = build_series(left)?;
+            let unique_values = series.unique();
+            let labels: Vec<IndexLabel> = (0..unique_values.len())
+                .map(|i| IndexLabel::Int64(i as i64))
+                .collect();
+            let actual = Series::from_values(series.name().to_owned(), labels, unique_values)
+                .map_err(|err| err.to_string());
+            match expected {
+                ResolvedExpected::Series(s) => Ok(diff_series(&actual?, &s)),
+                ResolvedExpected::ErrorContains(substr) => Ok(match actual {
+                    Err(message) if message.contains(&substr) => Vec::new(),
+                    Err(message) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_unique.error",
+                        format!(
+                            "expected series_unique error containing '{substr}', got '{message}'"
+                        ),
+                    )],
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_unique.error",
+                        "expected series_unique to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                ResolvedExpected::ErrorAny => Ok(match actual {
+                    Err(_) => Vec::new(),
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_unique.error",
+                        "expected series_unique to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                _ => Err("expected_series or expected_error required for series_unique".to_owned()),
+            }
+        }
+        FixtureOperation::SeriesFactorize => {
+            let left = require_left_series(fixture)?;
+            let series = build_series(left)?;
+            let actual = series
+                .factorize()
+                .map(|(codes, _uniques)| codes)
+                .map_err(|err| err.to_string());
+            match expected {
+                ResolvedExpected::Series(s) => Ok(diff_series(&actual?, &s)),
+                ResolvedExpected::ErrorContains(substr) => Ok(match actual {
+                    Err(message) if message.contains(&substr) => Vec::new(),
+                    Err(message) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_factorize.error",
+                        format!(
+                            "expected series_factorize error containing '{substr}', got '{message}'"
+                        ),
+                    )],
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_factorize.error",
+                        "expected series_factorize to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                ResolvedExpected::ErrorAny => Ok(match actual {
+                    Err(_) => Vec::new(),
+                    Ok(_) => vec![make_drift_record(
+                        ComparisonCategory::Value,
+                        DriftLevel::Critical,
+                        "series_factorize.error",
+                        "expected series_factorize to fail but operation succeeded".to_owned(),
+                    )],
+                }),
+                _ => Err(
+                    "expected_series or expected_error required for series_factorize".to_owned(),
                 ),
             }
         }
