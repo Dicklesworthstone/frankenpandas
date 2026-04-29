@@ -1885,6 +1885,29 @@ def op_series_rank(pd, payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def op_series_argsort(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    if left is None:
+        raise OracleError("series_argsort requires left payload")
+
+    ascending = payload.get("sort_ascending")
+    if ascending is None:
+        ascending = True
+    na_position = payload.get("na_position") or "last"
+
+    index = [label_from_json(item) for item in left["index"]]
+    values = [scalar_from_json(item) for item in left["values"]]
+    series = pd.Series(values, index=index, name=left.get("name", "series"))
+    out = series.argsort(ascending=ascending, na_position=na_position)
+
+    return {
+        "expected_series": {
+            "index": [label_to_json(v) for v in out.index.tolist()],
+            "values": [scalar_to_json(v) for v in out.tolist()],
+        }
+    }
+
+
 def op_series_any(pd, payload: dict[str, Any]) -> dict[str, Any]:
     left = payload.get("left")
     if left is None:
@@ -5158,6 +5181,8 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_series_idxmax(pd, payload)
     if op in {"series_rank", "series_rank_default"}:
         return op_series_rank(pd, payload)
+    if op in {"series_argsort", "series_argsort_default"}:
+        return op_series_argsort(pd, payload)
     if op == "series_any":
         return op_series_any(pd, payload)
     if op == "series_all":
