@@ -349,7 +349,10 @@ def op_series_div(pd, payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def op_series_mode(pd, payload: dict[str, Any]) -> dict[str, Any]:
-    series = fixture_series_from_payload(pd, payload.get("series"), "series_mode")
+    series_payload = payload.get("series")
+    if series_payload is None:
+        series_payload = payload.get("left")
+    series = fixture_series_from_payload(pd, series_payload, "series_mode")
     dropna = payload.get("mode_dropna")
     if dropna is None:
         dropna = True
