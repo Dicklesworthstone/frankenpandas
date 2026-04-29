@@ -1131,93 +1131,95 @@ fn fuzz_groupby_sum_bytes_accepts_alignment_seed() {
 }
 
 #[test]
-fn fuzz_groupby_sum_all_null_keys() {
-    let seed: &[u8] = &[0x00, 0x00, 0x00, 0x01, 0x01, 0x01, 0x02, 0x7c, 0x00, 0x00, 0x01, 0x01, 0x01, 0x02];
-    fuzz_groupby_sum_bytes(seed).expect("all null keys seed should satisfy invariants");
-}
+fn fuzz_groupby_sum_bytes_accepts_structured_corpus_seeds() {
+    let seeds: &[(&str, &[u8])] = &[
+        (
+            "alignment_seed.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_groupby_sum/alignment_seed.bin"),
+        ),
+        (
+            "all_null_keys.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_groupby_sum/all_null_keys.bin"),
+        ),
+        (
+            "all_null_values.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_groupby_sum/all_null_values.bin"),
+        ),
+        (
+            "alternating_keys.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_groupby_sum/alternating_keys.bin"),
+        ),
+        (
+            "boundary_key_modulo.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_groupby_sum/boundary_key_modulo.bin"),
+        ),
+        (
+            "dropna_false_null_group_seed.bin",
+            include_bytes!(
+                "../../../../fuzz/corpus/fuzz_groupby_sum/dropna_false_null_group_seed.bin"
+            ),
+        ),
+        (
+            "dropna_true_seed.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_groupby_sum/dropna_true_seed.bin"),
+        ),
+        (
+            "dropna_true_with_nulls.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_groupby_sum/dropna_true_with_nulls.bin"),
+        ),
+        (
+            "empty_keys.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_groupby_sum/empty_keys.bin"),
+        ),
+        (
+            "empty_values.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_groupby_sum/empty_values.bin"),
+        ),
+        (
+            "float_edge_values.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_groupby_sum/float_edge_values.bin"),
+        ),
+        (
+            "many_unique_keys.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_groupby_sum/many_unique_keys.bin"),
+        ),
+        (
+            "mixed_int_float.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_groupby_sum/mixed_int_float.bin"),
+        ),
+        (
+            "multi_key_single_value.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_groupby_sum/multi_key_single_value.bin"),
+        ),
+        (
+            "negative_values.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_groupby_sum/negative_values.bin"),
+        ),
+        (
+            "same_key_repeated.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_groupby_sum/same_key_repeated.bin"),
+        ),
+        (
+            "seed-empty.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_groupby_sum/seed-empty.bin"),
+        ),
+        (
+            "single_key_multi_value.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_groupby_sum/single_key_multi_value.bin"),
+        ),
+        (
+            "zero_sum_group.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_groupby_sum/zero_sum_group.bin"),
+        ),
+    ];
 
-#[test]
-fn fuzz_groupby_sum_all_null_values() {
-    let seed: &[u8] = &[0x00, 0x00, 0x01, 0x01, 0x01, 0x01, 0x02, 0x7c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
-    fuzz_groupby_sum_bytes(seed).expect("all null values seed should satisfy invariants");
-}
-
-#[test]
-fn fuzz_groupby_sum_single_key_multi_value() {
-    let seed: &[u8] = &[0x02, 0x00, 0x01, 0x01, 0x01, 0x01, 0x01, 0x02, 0x01, 0x01, 0x7c, 0x00, 0x01, 0x02, 0x01, 0x03, 0x04, 0x01, 0x05, 0x06];
-    fuzz_groupby_sum_bytes(seed).expect("single key multi value seed should satisfy invariants");
-}
-
-#[test]
-fn fuzz_groupby_sum_multi_key_single_value() {
-    let seed: &[u8] = &[0x00, 0x00, 0x01, 0x01, 0x01, 0x05, 0x02, 0x02, 0x09, 0x03, 0x03, 0x0d, 0x7c, 0x00, 0x01, 0x02, 0x01, 0x01, 0x02, 0x02, 0x01, 0x02];
-    fuzz_groupby_sum_bytes(seed).expect("multi key single value seed should satisfy invariants");
-}
-
-#[test]
-fn fuzz_groupby_sum_negative_values() {
-    let seed: &[u8] = &[0x01, 0x00, 0x01, 0x01, 0x01, 0x01, 0x02, 0x7c, 0x00, 0x01, 0x88, 0x01, 0x01, 0x8c, 0x02, 0x01, 0x84];
-    fuzz_groupby_sum_bytes(seed).expect("negative values seed should satisfy invariants");
-}
-
-#[test]
-fn fuzz_groupby_sum_mixed_int_float() {
-    let seed: &[u8] = &[0x00, 0x00, 0x01, 0x01, 0x01, 0x01, 0x02, 0x7c, 0x00, 0x01, 0x04, 0x01, 0x02, 0x80, 0x02, 0x03, 0x00];
-    fuzz_groupby_sum_bytes(seed).expect("mixed int float seed should satisfy invariants");
-}
-
-#[test]
-fn fuzz_groupby_sum_many_unique_keys() {
-    let seed: &[u8] = &[0x02, 0x00, 0x01, 0x00, 0x01, 0x05, 0x00, 0x02, 0x09, 0x00, 0x03, 0x0d, 0x00, 0x04, 0x11, 0x00, 0x05, 0x15, 0x7c, 0x00, 0x01, 0x01, 0x01, 0x01, 0x02, 0x02, 0x01, 0x03, 0x03, 0x01, 0x04, 0x04, 0x01, 0x05];
-    fuzz_groupby_sum_bytes(seed).expect("many unique keys seed should satisfy invariants");
-}
-
-#[test]
-fn fuzz_groupby_sum_same_key_repeated() {
-    let seed: &[u8] = &[0x00, 0x00, 0x01, 0x01, 0x01, 0x01, 0x01, 0x02, 0x01, 0x01, 0x7c, 0x00, 0x01, 0x01, 0x01, 0x01, 0x02, 0x02, 0x01, 0x03];
-    fuzz_groupby_sum_bytes(seed).expect("same key repeated seed should satisfy invariants");
-}
-
-#[test]
-fn fuzz_groupby_sum_alternating_keys() {
-    let seed: &[u8] = &[0x01, 0x00, 0x01, 0x00, 0x01, 0x05, 0x01, 0x02, 0x01, 0x00, 0x03, 0x05, 0x01, 0x7c, 0x00, 0x01, 0x01, 0x01, 0x01, 0x02, 0x02, 0x01, 0x03, 0x03, 0x01];
-    fuzz_groupby_sum_bytes(seed).expect("alternating keys seed should satisfy invariants");
-}
-
-#[test]
-fn fuzz_groupby_sum_float_edge_values() {
-    let seed: &[u8] = &[0x00, 0x00, 0x01, 0x01, 0x01, 0x01, 0x02, 0x7c, 0x00, 0x02, 0x7f, 0x01, 0x02, 0x80, 0x02, 0x02, 0x00];
-    fuzz_groupby_sum_bytes(seed).expect("float edge values seed should satisfy invariants");
-}
-
-#[test]
-fn fuzz_groupby_sum_zero_sum_group() {
-    let seed: &[u8] = &[0x02, 0x00, 0x01, 0x01, 0x01, 0x01, 0x02, 0x7c, 0x00, 0x01, 0x04, 0x01, 0x01, 0xfc, 0x02, 0x03, 0x00];
-    fuzz_groupby_sum_bytes(seed).expect("zero sum group seed should satisfy invariants");
-}
-
-#[test]
-fn fuzz_groupby_sum_empty_keys() {
-    let seed: &[u8] = &[0x00, 0x7c, 0x00, 0x01, 0x01, 0x01, 0x01, 0x02, 0x02, 0x01, 0x03];
-    fuzz_groupby_sum_bytes(seed).expect("empty keys seed should satisfy invariants");
-}
-
-#[test]
-fn fuzz_groupby_sum_empty_values() {
-    let seed: &[u8] = &[0x00, 0x00, 0x01, 0x01, 0x01, 0x01, 0x02, 0x7c];
-    fuzz_groupby_sum_bytes(seed).expect("empty values seed should satisfy invariants");
-}
-
-#[test]
-fn fuzz_groupby_sum_boundary_key_modulo() {
-    let seed: &[u8] = &[0x00, 0x00, 0x03, 0xff, 0x01, 0x07, 0x00, 0x02, 0x03, 0x00, 0x7c, 0x00, 0x01, 0x01, 0x01, 0x01, 0x02, 0x02, 0x01, 0x03];
-    fuzz_groupby_sum_bytes(seed).expect("boundary key modulo seed should satisfy invariants");
-}
-
-#[test]
-fn fuzz_groupby_sum_dropna_true_with_nulls_corpus() {
-    let seed: &[u8] = &[0x02, 0x00, 0x00, 0x00, 0x01, 0x01, 0x00, 0x02, 0x00, 0x00, 0x7c, 0x00, 0x00, 0x00, 0x01, 0x01, 0x01, 0x02, 0x01, 0x02];
-    fuzz_groupby_sum_bytes(seed).expect("dropna true with nulls corpus seed should satisfy invariants");
+    for &(name, seed) in seeds {
+        let result = fuzz_groupby_sum_bytes(seed);
+        assert!(
+            result.is_ok(),
+            "{name} should satisfy groupby_sum invariants: {result:?}"
+        );
+    }
 }
 
 #[test]

@@ -6578,20 +6578,47 @@ impl Series {
     /// Compute the dot product with another Series.
     ///
     /// Matches `series.dot(other)` / `series @ other`.
-    /// Skips positions where either value is null/NaN.
     pub fn dot(&self, other: &Self) -> Result<f64, FrameError> {
         let a_vals = self.column.values();
         let b_vals = other.column.values();
-        let len = a_vals.len().min(b_vals.len());
+        let left_labels = self.index.labels();
+        let right_labels = other.index.labels();
+
+        let aligned_positions: Vec<(usize, usize)> = if left_labels == right_labels {
+            (0..left_labels.len()).map(|pos| (pos, pos)).collect()
+        } else {
+            if left_labels.len() != right_labels.len()
+                || self.index.has_duplicates()
+                || other.index.has_duplicates()
+            {
+                return Err(FrameError::CompatibilityRejected(
+                    "matrices are not aligned".to_owned(),
+                ));
+            }
+
+            let right_positions = other.index.position_map_first();
+            let mut positions = Vec::with_capacity(left_labels.len());
+            for (left_pos, label) in left_labels.iter().enumerate() {
+                let Some(&right_pos) = right_positions.get(label) else {
+                    return Err(FrameError::CompatibilityRejected(
+                        "matrices are not aligned".to_owned(),
+                    ));
+                };
+                positions.push((left_pos, right_pos));
+            }
+            positions
+        };
 
         let mut result = 0.0_f64;
-        for i in 0..len {
-            if let (Ok(x), Ok(y)) = (a_vals[i].to_f64(), b_vals[i].to_f64())
-                && !x.is_nan()
-                && !y.is_nan()
-            {
-                result += x * y;
+        for (left_pos, right_pos) in aligned_positions {
+            let left = &a_vals[left_pos];
+            let right = &b_vals[right_pos];
+            if left.is_missing() || right.is_missing() {
+                return Ok(f64::NAN);
             }
+            let x = left.to_f64().map_err(ColumnError::Type)?;
+            let y = right.to_f64().map_err(ColumnError::Type)?;
+            result += x * y;
         }
 
         Ok(result)
@@ -49551,9 +49578,48 @@ mod tests {
         )
         .unwrap();
 
-        // 1*4 + 3*6 = 4 + 18 = 22 (skips null)
         let result = a.dot(&b).unwrap();
-        assert!((result - 22.0).abs() < f64::EPSILON);
+        assert!(result.is_nan());
+    }
+
+    #[test]
+    fn series_dot_aligns_by_index_label() {
+        let a = Series::from_values(
+            "a",
+            vec!["a".into(), "b".into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2)],
+        )
+        .unwrap();
+        let b = Series::from_values(
+            "b",
+            vec!["b".into(), "a".into()],
+            vec![Scalar::Int64(10), Scalar::Int64(20)],
+        )
+        .unwrap();
+
+        let result = a.dot(&b).unwrap();
+        assert!((result - 40.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn series_dot_rejects_misaligned_label_sets() {
+        let a = Series::from_values(
+            "a",
+            vec!["a".into(), "b".into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2)],
+        )
+        .unwrap();
+        let b = Series::from_values(
+            "b",
+            vec!["a".into(), "c".into()],
+            vec![Scalar::Int64(10), Scalar::Int64(20)],
+        )
+        .unwrap();
+
+        let err = a.dot(&b).unwrap_err();
+        assert!(
+            matches!(err, FrameError::CompatibilityRejected(message) if message.contains("matrices are not aligned"))
+        );
     }
 
     // ── DataFrame to_string_table tests ──
