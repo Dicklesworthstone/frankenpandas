@@ -1972,15 +1972,23 @@ pub fn write_json(frame: &DataFrame, path: &Path, orient: JsonOrient) -> Result<
 pub fn write_jsonl_string(frame: &DataFrame) -> Result<String, IoError> {
     let headers: Vec<String> = frame.column_names().into_iter().cloned().collect();
     let row_count = frame.index().len();
+    let column_float_promotions = headers
+        .iter()
+        .map(|name| {
+            frame
+                .column(name)
+                .is_some_and(|column| column_promotes_int_json_values_to_float(column.values()))
+        })
+        .collect::<Vec<_>>();
 
     let mut lines = Vec::with_capacity(row_count);
     for row_idx in 0..row_count {
         let mut obj = serde_json::Map::new();
-        for name in &headers {
+        for (name, promote_int_to_float) in headers.iter().zip(column_float_promotions.iter()) {
             let val = frame
                 .column(name)
                 .and_then(|c| c.value(row_idx))
-                .map(scalar_to_json)
+                .map(|value| scalar_to_json_with_column_promotion(value, *promote_int_to_float))
                 .unwrap_or(serde_json::Value::Null);
             obj.insert(name.clone(), val);
         }
@@ -12002,6 +12010,29 @@ mod tests {
         let jsonl = super::write_jsonl_string(&frame).unwrap();
         let back = super::read_jsonl_str(&jsonl).unwrap();
         assert!(back.column("v").unwrap().values()[1].is_missing());
+    }
+
+    #[test]
+    fn jsonl_records_write_promotes_nullable_int_column_to_float() {
+        let frame = DataFrame::from_dict(
+            &["a"],
+            vec![("a", vec![Scalar::Int64(1), Scalar::Null(NullKind::Null)])],
+        )
+        .unwrap();
+
+        let jsonl = super::write_jsonl_string(&frame).expect("write jsonl");
+        let rows = jsonl
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            rows,
+            vec![
+                serde_json::json!({"a": 1.0}),
+                serde_json::json!({"a": null})
+            ]
+        );
     }
 
     #[test]
