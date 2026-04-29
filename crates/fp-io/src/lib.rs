@@ -1499,7 +1499,7 @@ fn promote_synthetic_row_multiindex_if_present(frame: &DataFrame) -> Result<Data
 }
 
 pub fn read_json_str(input: &str, orient: JsonOrient) -> Result<DataFrame, IoError> {
-    let parsed: serde_json::Value = serde_json::from_str(input)?;
+    let parsed = parse_json_value_allowing_pandas_nan(input)?;
 
     match orient {
         JsonOrient::Records => {
@@ -7761,6 +7761,29 @@ mod tests {
         let frame = read_json_str(input, JsonOrient::Records).expect("parse");
         assert!(frame.column("a").unwrap().values()[1].is_missing());
         assert!(frame.column("b").unwrap().values()[0].is_missing());
+    }
+
+    #[test]
+    fn json_read_accepts_pandas_bare_nan_tokens() {
+        let cases = [
+            (JsonOrient::Records, r#"[{"a":NaN}]"#),
+            (JsonOrient::Columns, r#"{"a":{"0":NaN}}"#),
+            (
+                JsonOrient::Split,
+                r#"{"columns":["a"],"index":[0],"data":[[NaN]]}"#,
+            ),
+            (JsonOrient::Values, r#"[[NaN]]"#),
+        ];
+
+        for (orient, input) in cases {
+            let frame = read_json_str(input, orient).expect("parse bare NaN");
+            let column_name = if orient == JsonOrient::Values {
+                "0"
+            } else {
+                "a"
+            };
+            assert!(frame.column(column_name).unwrap().values()[0].is_missing());
+        }
     }
 
     #[test]
