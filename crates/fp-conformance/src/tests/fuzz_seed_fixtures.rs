@@ -1102,6 +1102,85 @@ fn fuzz_series_add_bytes_accepts_missing_alignment_seed() {
 }
 
 #[test]
+fn fuzz_series_add_bytes_replays_committed_corpus_seeds() {
+    let seeds: &[(&str, &[u8])] = &[
+        (
+            "single_same_idx_int",
+            include_bytes!("../../fixtures/adversarial/fuzz_corpus/series_add/single_same_idx_int.bin"),
+        ),
+        (
+            "single_diff_idx_int",
+            include_bytes!("../../fixtures/adversarial/fuzz_corpus/series_add/single_diff_idx_int.bin"),
+        ),
+        (
+            "null_plus_int",
+            include_bytes!("../../fixtures/adversarial/fuzz_corpus/series_add/null_plus_int.bin"),
+        ),
+        (
+            "nan_plus_int",
+            include_bytes!("../../fixtures/adversarial/fuzz_corpus/series_add/nan_plus_int.bin"),
+        ),
+        (
+            "int_plus_float",
+            include_bytes!("../../fixtures/adversarial/fuzz_corpus/series_add/int_plus_float.bin"),
+        ),
+        (
+            "float_plus_inf",
+            include_bytes!("../../fixtures/adversarial/fuzz_corpus/series_add/float_plus_inf.bin"),
+        ),
+        (
+            "float_plus_neginf",
+            include_bytes!("../../fixtures/adversarial/fuzz_corpus/series_add/float_plus_neginf.bin"),
+        ),
+        (
+            "float_plus_nanfloat",
+            include_bytes!("../../fixtures/adversarial/fuzz_corpus/series_add/float_plus_nanfloat.bin"),
+        ),
+        (
+            "multi_overlap_nulls",
+            include_bytes!("../../fixtures/adversarial/fuzz_corpus/series_add/multi_overlap_nulls.bin"),
+        ),
+        (
+            "all_nulls_left",
+            include_bytes!("../../fixtures/adversarial/fuzz_corpus/series_add/all_nulls_left.bin"),
+        ),
+        (
+            "all_nans_left",
+            include_bytes!("../../fixtures/adversarial/fuzz_corpus/series_add/all_nans_left.bin"),
+        ),
+        (
+            "mixed_types_both",
+            include_bytes!("../../fixtures/adversarial/fuzz_corpus/series_add/mixed_types_both.bin"),
+        ),
+        (
+            "neg_int_values",
+            include_bytes!("../../fixtures/adversarial/fuzz_corpus/series_add/neg_int_values.bin"),
+        ),
+        (
+            "zero_plus_negzero",
+            include_bytes!("../../fixtures/adversarial/fuzz_corpus/series_add/zero_plus_negzero.bin"),
+        ),
+        (
+            "large_plus_small",
+            include_bytes!("../../fixtures/adversarial/fuzz_corpus/series_add/large_plus_small.bin"),
+        ),
+        (
+            "string_idx_labels",
+            include_bytes!("../../fixtures/adversarial/fuzz_corpus/series_add/string_idx_labels.bin"),
+        ),
+        (
+            "dup_labels_same",
+            include_bytes!("../../fixtures/adversarial/fuzz_corpus/series_add/dup_labels_same.bin"),
+        ),
+    ];
+
+    for (name, seed) in seeds {
+        fuzz_series_add_bytes(seed)
+            .unwrap_or_else(|err| panic!("seed {name} failed: {err}"));
+    }
+}
+
+#[test]
 fn fuzz_column_arith_bytes_accepts_add_missing_seed() {
     let seed =
         include_bytes!("../../fixtures/adversarial/fuzz_corpus/column_arith/add_missing_seed.bin");
