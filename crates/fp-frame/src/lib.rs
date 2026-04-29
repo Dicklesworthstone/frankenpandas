@@ -4938,14 +4938,13 @@ impl Series {
             return Ok(-1);
         }
         let mut best_idx: Option<usize> = None;
-        let mut best_val = f64::INFINITY;
+        let mut best_val: Option<&Scalar> = None;
         for (i, val) in self.column.values().iter().enumerate() {
             if val.is_missing() {
                 continue;
             }
-            let v = val.to_f64().map_err(ColumnError::from)?;
-            if v < best_val {
-                best_val = v;
+            if best_val.is_none_or(|best| compare_non_missing_scalars_for_sort(val, best).is_lt()) {
+                best_val = Some(val);
                 best_idx = Some(i);
             }
         }
@@ -4973,14 +4972,13 @@ impl Series {
             return Ok(-1);
         }
         let mut best_idx: Option<usize> = None;
-        let mut best_val = f64::NEG_INFINITY;
+        let mut best_val: Option<&Scalar> = None;
         for (i, val) in self.column.values().iter().enumerate() {
             if val.is_missing() {
                 continue;
             }
-            let v = val.to_f64().map_err(ColumnError::from)?;
-            if v > best_val {
-                best_val = v;
+            if best_val.is_none_or(|best| compare_non_missing_scalars_for_sort(val, best).is_gt()) {
+                best_val = Some(val);
                 best_idx = Some(i);
             }
         }
@@ -47911,6 +47909,23 @@ mod tests {
 
         assert_eq!(s.argmin().unwrap(), 2);
         assert_eq!(s.argmax().unwrap(), 1);
+    }
+
+    #[test]
+    fn series_argmin_argmax_utf8_match_pandas() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("c".into()),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(s.argmin().unwrap(), 1);
+        assert_eq!(s.argmax().unwrap(), 2);
     }
 
     #[test]
