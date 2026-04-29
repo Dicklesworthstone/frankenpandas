@@ -5027,6 +5027,52 @@ def op_series_drop_duplicates(pd, payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def op_series_unique(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    if left is None:
+        raise OracleError("series_unique requires left payload")
+
+    index = [label_from_json(item) for item in left["index"]]
+    values = [scalar_from_json(item) for item in left["values"]]
+    series = pd.Series(values, index=index, name=left.get("name", "series"))
+
+    try:
+        out = series.unique()
+    except Exception as exc:
+        raise OracleError(f"series_unique failed: {exc}") from exc
+
+    return {
+        "expected_series": {
+            "index": [{"kind": "int64", "value": i} for i in range(len(out))],
+            "values": [scalar_to_json(v) for v in out.tolist()],
+        }
+    }
+
+
+def op_series_factorize(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    sort = payload.get("factorize_sort", False)
+
+    if left is None:
+        raise OracleError("series_factorize requires left payload")
+
+    index = [label_from_json(item) for item in left["index"]]
+    values = [scalar_from_json(item) for item in left["values"]]
+    series = pd.Series(values, index=index, name=left.get("name", "series"))
+
+    try:
+        codes, _uniques = series.factorize(sort=sort)
+    except Exception as exc:
+        raise OracleError(f"series_factorize failed: {exc}") from exc
+
+    return {
+        "expected_series": {
+            "index": [label_to_json(v) for v in series.index.tolist()],
+            "values": [{"kind": "int64", "value": int(c)} for c in codes.tolist()],
+        }
+    }
+
+
 def op_series_abs(pd, payload: dict[str, Any]) -> dict[str, Any]:
     left = payload.get("left")
     if left is None:
@@ -5666,6 +5712,10 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_series_cummin(pd, payload)
     if op in {"series_drop_duplicates", "series_drop_duplicates_default"}:
         return op_series_drop_duplicates(pd, payload)
+    if op in {"series_unique", "series_unique_default"}:
+        return op_series_unique(pd, payload)
+    if op in {"series_factorize", "series_factorize_default"}:
+        return op_series_factorize(pd, payload)
     if op in {"series_abs", "series_abs_default"}:
         return op_series_abs(pd, payload)
     if op in {"series_round", "series_round_default"}:
