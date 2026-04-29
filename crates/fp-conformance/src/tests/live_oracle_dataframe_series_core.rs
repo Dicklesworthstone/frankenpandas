@@ -2063,3 +2063,217 @@ fn live_oracle_series_argmax_with_nulls() {
     let actual = super::Scalar::Int64(idx);
     super::compare_scalar(&actual, &expected, "series_argmax").expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_series_searchsorted_left() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-SEARCHSORTED-L",
+        "case_id": "series_searchsorted_left",
+        "mode": "strict",
+        "operation": "series_searchsorted",
+        "oracle_source": "live_legacy_pandas",
+        "searchsorted_value": { "kind": "float64", "value": 2.5 },
+        "searchsorted_side": "left",
+        "left": {
+            "name": "sorted_series",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 }
+            ],
+            "values": [
+                { "kind": "float64", "value": 1.0 },
+                { "kind": "float64", "value": 2.0 },
+                { "kind": "float64", "value": 3.0 },
+                { "kind": "float64", "value": 4.0 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping searchsorted left test: {message}");
+        return;
+    }
+
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Scalar(_)),
+        "expected live oracle scalar payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Scalar(expected) = expected else {
+        return;
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let needle = fixture.searchsorted_value.as_ref().expect("needle");
+    let pos = series.searchsorted(needle, "left").expect("searchsorted");
+    let actual = super::Scalar::Int64(pos as i64);
+    super::compare_scalar(&actual, &expected, "series_searchsorted").expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_series_searchsorted_right() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-SEARCHSORTED-R",
+        "case_id": "series_searchsorted_right",
+        "mode": "strict",
+        "operation": "series_searchsorted",
+        "oracle_source": "live_legacy_pandas",
+        "searchsorted_value": { "kind": "float64", "value": 2.0 },
+        "searchsorted_side": "right",
+        "left": {
+            "name": "sorted_series",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 }
+            ],
+            "values": [
+                { "kind": "float64", "value": 1.0 },
+                { "kind": "float64", "value": 2.0 },
+                { "kind": "float64", "value": 3.0 },
+                { "kind": "float64", "value": 4.0 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping searchsorted right test: {message}");
+        return;
+    }
+
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Scalar(_)),
+        "expected live oracle scalar payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Scalar(expected) = expected else {
+        return;
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let needle = fixture.searchsorted_value.as_ref().expect("needle");
+    let pos = series.searchsorted(needle, "right").expect("searchsorted");
+    let actual = super::Scalar::Int64(pos as i64);
+    super::compare_scalar(&actual, &expected, "series_searchsorted").expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_series_searchsorted_exact_match() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-SEARCHSORTED-EXACT",
+        "case_id": "series_searchsorted_exact_match",
+        "mode": "strict",
+        "operation": "series_searchsorted",
+        "oracle_source": "live_legacy_pandas",
+        "searchsorted_value": { "kind": "float64", "value": 3.0 },
+        "searchsorted_side": "left",
+        "left": {
+            "name": "sorted_series",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 }
+            ],
+            "values": [
+                { "kind": "float64", "value": 1.0 },
+                { "kind": "float64", "value": 2.0 },
+                { "kind": "float64", "value": 3.0 },
+                { "kind": "float64", "value": 4.0 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping searchsorted exact test: {message}");
+        return;
+    }
+
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Scalar(_)),
+        "expected live oracle scalar payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Scalar(expected) = expected else {
+        return;
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let needle = fixture.searchsorted_value.as_ref().expect("needle");
+    let pos = series.searchsorted(needle, "left").expect("searchsorted");
+    let actual = super::Scalar::Int64(pos as i64);
+    super::compare_scalar(&actual, &expected, "series_searchsorted").expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_series_searchsorted_integers() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-SEARCHSORTED-INT",
+        "case_id": "series_searchsorted_integers",
+        "mode": "strict",
+        "operation": "series_searchsorted",
+        "oracle_source": "live_legacy_pandas",
+        "searchsorted_value": { "kind": "int64", "value": 25 },
+        "searchsorted_side": "left",
+        "left": {
+            "name": "int_series",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 4 }
+            ],
+            "values": [
+                { "kind": "int64", "value": 10 },
+                { "kind": "int64", "value": 20 },
+                { "kind": "int64", "value": 30 },
+                { "kind": "int64", "value": 40 },
+                { "kind": "int64", "value": 50 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping searchsorted integers test: {message}");
+        return;
+    }
+
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Scalar(_)),
+        "expected live oracle scalar payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Scalar(expected) = expected else {
+        return;
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let needle = fixture.searchsorted_value.as_ref().expect("needle");
+    let pos = series.searchsorted(needle, "left").expect("searchsorted");
+    let actual = super::Scalar::Int64(pos as i64);
+    super::compare_scalar(&actual, &expected, "series_searchsorted").expect("pandas parity");
+}

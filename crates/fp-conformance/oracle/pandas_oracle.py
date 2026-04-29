@@ -1903,6 +1903,29 @@ def op_series_argmax(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return {"expected_scalar": scalar_to_json(int(out))}
 
 
+def op_series_searchsorted(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    if left is None:
+        raise OracleError("series_searchsorted requires left payload")
+
+    needle = payload.get("searchsorted_value")
+    if needle is None:
+        raise OracleError("series_searchsorted requires searchsorted_value")
+
+    side = payload.get("searchsorted_side") or "left"
+
+    index = [label_from_json(item) for item in left["index"]]
+    values = [scalar_from_json(item) for item in left["values"]]
+    series = pd.Series(values, index=index, name=left.get("name", "series"))
+    needle_val = scalar_from_json(needle)
+    try:
+        out = series.searchsorted(needle_val, side=side)
+    except (ValueError, TypeError) as exc:
+        raise OracleError(f"series_searchsorted failed: {exc}") from exc
+
+    return {"expected_scalar": scalar_to_json(int(out))}
+
+
 def op_series_rank(pd, payload: dict[str, Any]) -> dict[str, Any]:
     left = payload.get("left")
     if left is None:
@@ -5243,6 +5266,8 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_series_argmin(pd, payload)
     if op in {"series_argmax", "series_argmax_default"}:
         return op_series_argmax(pd, payload)
+    if op in {"series_searchsorted", "series_searchsorted_default"}:
+        return op_series_searchsorted(pd, payload)
     if op in {"series_rank", "series_rank_default"}:
         return op_series_rank(pd, payload)
     if op in {"series_argsort", "series_argsort_default"}:
