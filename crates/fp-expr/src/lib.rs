@@ -900,8 +900,12 @@ fn tokenize(input: &str) -> Result<Vec<Token>, ExprError> {
                 {
                     let start = i;
                     let mut scan = i + 1;
+                    let mut dot_count = 0;
                     while scan < chars.len() && (chars[scan].is_ascii_digit() || chars[scan] == '.')
                     {
+                        if chars[scan] == '.' {
+                            dot_count += 1;
+                        }
                         scan += 1;
                     }
                     let mut after = scan;
@@ -915,7 +919,12 @@ fn tokenize(input: &str) -> Result<Vec<Token>, ExprError> {
                     }
                     i = scan;
                     let num_str: String = chars[start..i].iter().collect();
-                    if num_str.contains('.') {
+                    if dot_count > 1 {
+                        return Err(ExprError::ParseError(format!(
+                            "invalid number literal with multiple decimal points: {num_str}"
+                        )));
+                    }
+                    if dot_count == 1 {
                         tokens.push(Token::Float(num_str.parse::<f64>().map_err(|_| {
                             ExprError::ParseError(format!("invalid float: {num_str}"))
                         })?));
@@ -932,10 +941,19 @@ fn tokenize(input: &str) -> Result<Vec<Token>, ExprError> {
             '.' if i + 1 < chars.len() && chars[i + 1].is_ascii_digit() => {
                 let start = i;
                 i += 1;
+                let mut extra_dots = 0;
                 while i < chars.len() && (chars[i].is_ascii_digit() || chars[i] == '.') {
+                    if chars[i] == '.' {
+                        extra_dots += 1;
+                    }
                     i += 1;
                 }
                 let num_str: String = chars[start..i].iter().collect();
+                if extra_dots > 0 {
+                    return Err(ExprError::ParseError(format!(
+                        "invalid number literal with multiple decimal points: {num_str}"
+                    )));
+                }
                 tokens.push(Token::Float(num_str.parse::<f64>().map_err(|_| {
                     ExprError::ParseError(format!("invalid float: {num_str}"))
                 })?));
@@ -1016,14 +1034,29 @@ fn tokenize(input: &str) -> Result<Vec<Token>, ExprError> {
             '\'' | '"' => {
                 let quote = c;
                 i += 1;
-                let start = i;
+                let mut s = String::new();
                 while i < chars.len() && chars[i] != quote {
+                    if chars[i] == '\\' && i + 1 < chars.len() {
+                        i += 1;
+                        match chars[i] {
+                            'n' => s.push('\n'),
+                            't' => s.push('\t'),
+                            'r' => s.push('\r'),
+                            '\\' => s.push('\\'),
+                            c if c == quote => s.push(c),
+                            other => {
+                                s.push('\\');
+                                s.push(other);
+                            }
+                        }
+                    } else {
+                        s.push(chars[i]);
+                    }
                     i += 1;
                 }
                 if i >= chars.len() {
                     return Err(ExprError::ParseError("unterminated string literal".into()));
                 }
-                let s: String = chars[start..i].iter().collect();
                 tokens.push(Token::Str(s));
                 i += 1; // skip closing quote
             }
@@ -1055,11 +1088,20 @@ fn tokenize(input: &str) -> Result<Vec<Token>, ExprError> {
             }
             _ if c.is_ascii_digit() => {
                 let start = i;
+                let mut dot_count = 0;
                 while i < chars.len() && (chars[i].is_ascii_digit() || chars[i] == '.') {
+                    if chars[i] == '.' {
+                        dot_count += 1;
+                    }
                     i += 1;
                 }
                 let num_str: String = chars[start..i].iter().collect();
-                if num_str.contains('.') {
+                if dot_count > 1 {
+                    return Err(ExprError::ParseError(format!(
+                        "invalid number literal with multiple decimal points: {num_str}"
+                    )));
+                }
+                if dot_count == 1 {
                     tokens.push(Token::Float(num_str.parse::<f64>().map_err(|_| {
                         ExprError::ParseError(format!("invalid float: {num_str}"))
                     })?));
@@ -2582,6 +2624,69 @@ mod tests {
     #[test]
     fn parse_error_single_equals() {
         assert!(super::parse_expr("x = 1").is_err());
+    }
+
+    #[test]
+    fn parse_string_with_escaped_quote() {
+        let expr = super::parse_expr(r#"name == 'O\'Brien'"#).unwrap();
+        if let Expr::Compare { right, .. } = expr {
+            assert_eq!(
+                *right,
+                Expr::Literal {
+                    value: Scalar::Utf8("O'Brien".into())
+                }
+            );
+        } else {
+            panic!("expected Compare");
+        }
+    }
+
+    #[test]
+    fn parse_string_with_escape_sequences() {
+        let expr = super::parse_expr(r#"msg == "hello\nworld""#).unwrap();
+        if let Expr::Compare { right, .. } = expr {
+            assert_eq!(
+                *right,
+                Expr::Literal {
+                    value: Scalar::Utf8("hello\nworld".into())
+                }
+            );
+        } else {
+            panic!("expected Compare");
+        }
+    }
+
+    #[test]
+    fn parse_string_with_escaped_backslash() {
+        let expr = super::parse_expr(r#"path == "c:\\users""#).unwrap();
+        if let Expr::Compare { right, .. } = expr {
+            assert_eq!(
+                *right,
+                Expr::Literal {
+                    value: Scalar::Utf8("c:\\users".into())
+                }
+            );
+        } else {
+            panic!("expected Compare");
+        }
+    }
+
+    #[test]
+    fn parse_error_multiple_decimal_points() {
+        let err = super::parse_expr("x > 1.2.3").unwrap_err();
+        assert!(matches!(err, ExprError::ParseError(msg) if msg.contains("multiple decimal points")));
+    }
+
+    #[test]
+    fn parse_error_negative_multiple_decimal_points() {
+        let err = super::parse_expr("x > -1.2.3").unwrap_err();
+        assert!(matches!(err, ExprError::ParseError(msg) if msg.contains("multiple decimal points")));
+    }
+
+    #[test]
+    fn parse_error_leading_dot_multiple_decimal_points() {
+        let err = super::parse_expr("x > .1.2").unwrap_err();
+        assert!(matches!(err, ExprError::ParseError(msg) if msg.contains("multiple decimal points")));
     }
 
     #[test]
