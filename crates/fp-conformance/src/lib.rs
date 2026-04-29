@@ -537,6 +537,10 @@ pub enum FixtureOperation {
     SeriesIdxmin,
     #[serde(rename = "series_idxmax", alias = "series_idxmax_default")]
     SeriesIdxmax,
+    #[serde(rename = "series_argmin", alias = "series_argmin_default")]
+    SeriesArgmin,
+    #[serde(rename = "series_argmax", alias = "series_argmax_default")]
+    SeriesArgmax,
     #[serde(rename = "series_mode", alias = "series_mode_default")]
     SeriesMode,
     #[serde(rename = "series_rank", alias = "series_rank_default")]
@@ -1357,6 +1361,8 @@ impl FixtureOperation {
             Self::SeriesLastValidIndex => "series_last_valid_index",
             Self::SeriesIdxmin => "series_idxmin",
             Self::SeriesIdxmax => "series_idxmax",
+            Self::SeriesArgmin => "series_argmin",
+            Self::SeriesArgmax => "series_argmax",
             Self::SeriesMode => "series_mode",
             Self::SeriesRank => "series_rank",
             Self::SeriesArgsort => "series_argsort",
@@ -1874,6 +1880,10 @@ pub struct PacketFixture {
     #[serde(default)]
     pub idxmax_skipna: Option<bool>,
     #[serde(default)]
+    pub argmin_skipna: Option<bool>,
+    #[serde(default)]
+    pub argmax_skipna: Option<bool>,
+    #[serde(default)]
     pub autocorr_lag: Option<usize>,
     #[serde(default)]
     pub diff_axis: Option<usize>,
@@ -2347,6 +2357,8 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::SeriesLastValidIndex
         | FixtureOperation::SeriesIdxmin
         | FixtureOperation::SeriesIdxmax
+        | FixtureOperation::SeriesArgmin
+        | FixtureOperation::SeriesArgmax
         | FixtureOperation::DataFrameCount
         | FixtureOperation::DataFrameMode
         | FixtureOperation::DataFrameCumsum
@@ -3226,6 +3238,10 @@ struct OracleRequest {
     pub idxmin_skipna: Option<bool>,
     #[serde(default)]
     pub idxmax_skipna: Option<bool>,
+    #[serde(default)]
+    pub argmin_skipna: Option<bool>,
+    #[serde(default)]
+    pub argmax_skipna: Option<bool>,
     #[serde(default)]
     pub autocorr_lag: Option<usize>,
     #[serde(default)]
@@ -9835,6 +9851,40 @@ fn run_fixture_operation(
                 )),
             }
         }
+        FixtureOperation::SeriesArgmin | FixtureOperation::SeriesArgmax => {
+            let actual_result = execute_series_arg_fixture_scalar(fixture);
+            match (actual_result, expected) {
+                (Ok(actual), ResolvedExpected::Scalar(scalar)) => {
+                    compare_scalar(&actual, &scalar, fixture.operation.operation_name())
+                }
+                (Err(message), ResolvedExpected::ErrorContains(substr)) => {
+                    if message.contains(&substr) {
+                        Ok(())
+                    } else {
+                        Err(format!(
+                            "{}: expected error containing '{}', got '{}'",
+                            fixture.operation.operation_name(),
+                            substr,
+                            message
+                        ))
+                    }
+                }
+                (Ok(_), ResolvedExpected::ErrorContains(substr)) => Err(format!(
+                    "{}: expected error containing '{}', but got Ok",
+                    fixture.operation.operation_name(),
+                    substr
+                )),
+                (Err(message), ResolvedExpected::Scalar(_)) => Err(format!(
+                    "{}: expected scalar, got error: {}",
+                    fixture.operation.operation_name(),
+                    message
+                )),
+                (_, _) => Err(format!(
+                    "expected_scalar or expected_error_contains required for {}",
+                    fixture.operation.operation_name()
+                )),
+            }
+        }
         FixtureOperation::DataFrameCount => {
             let frame = build_dataframe(require_frame(fixture)?)
                 .map_err(|err| format!("frame build failed: {err}"))?;
@@ -12173,6 +12223,8 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::SeriesLastValidIndex
         | FixtureOperation::SeriesIdxmin
         | FixtureOperation::SeriesIdxmax
+        | FixtureOperation::SeriesArgmin
+        | FixtureOperation::SeriesArgmax
         | FixtureOperation::DataFrameToJsonRecords => fixture
             .expected_scalar
             .clone()
@@ -12290,6 +12342,8 @@ fn capture_live_oracle_expected(
         mode_dropna: fixture.mode_dropna,
         idxmin_skipna: fixture.idxmin_skipna,
         idxmax_skipna: fixture.idxmax_skipna,
+        argmin_skipna: fixture.argmin_skipna,
+        argmax_skipna: fixture.argmax_skipna,
         autocorr_lag: fixture.autocorr_lag,
         diff_axis: fixture.diff_axis,
         clip_lower: fixture.clip_lower,
@@ -12825,6 +12879,8 @@ fn capture_live_oracle_expected(
         | FixtureOperation::SeriesLastValidIndex
         | FixtureOperation::SeriesIdxmin
         | FixtureOperation::SeriesIdxmax
+        | FixtureOperation::SeriesArgmin
+        | FixtureOperation::SeriesArgmax
         | FixtureOperation::DataFrameToJsonRecords => response
             .expected_scalar
             .map(ResolvedExpected::Scalar)
@@ -12878,6 +12934,22 @@ fn execute_series_idx_fixture_scalar(fixture: &PacketFixture) -> Result<Scalar, 
     }
     .map_err(|err| err.to_string())?;
     Ok(index_label_to_scalar(&label))
+}
+
+fn execute_series_arg_fixture_scalar(fixture: &PacketFixture) -> Result<Scalar, String> {
+    let left = require_left_series(fixture)?;
+    let series = build_series(left)?;
+    let idx = match fixture.operation {
+        FixtureOperation::SeriesArgmin => {
+            series.argmin_skipna(fixture.argmin_skipna.unwrap_or(true))
+        }
+        FixtureOperation::SeriesArgmax => {
+            series.argmax_skipna(fixture.argmax_skipna.unwrap_or(true))
+        }
+        _ => return Err("series arg fixture scalar requires argmin or argmax".to_owned()),
+    }
+    .map_err(|err| err.to_string())?;
+    Ok(Scalar::Int64(idx))
 }
 
 fn require_left_series(fixture: &PacketFixture) -> Result<&FixtureSeries, String> {
@@ -18736,6 +18808,57 @@ fn execute_and_compare_differential(
         }
         FixtureOperation::SeriesIdxmin | FixtureOperation::SeriesIdxmax => {
             let actual_result = execute_series_idx_fixture_scalar(fixture);
+            match (actual_result, expected) {
+                (Ok(actual), ResolvedExpected::Scalar(scalar)) => Ok(diff_scalar(
+                    &actual,
+                    &scalar,
+                    fixture.operation.operation_name(),
+                )),
+                (Err(message), ResolvedExpected::ErrorContains(substr)) => {
+                    if message.contains(&substr) {
+                        Ok(Vec::new())
+                    } else {
+                        Ok(vec![make_drift_record(
+                            ComparisonCategory::Value,
+                            DriftLevel::Critical,
+                            format!("{}.error", fixture.operation.operation_name()),
+                            format!(
+                                "expected {} error containing '{}', got '{}'",
+                                fixture.operation.operation_name(),
+                                substr,
+                                message
+                            ),
+                        )])
+                    }
+                }
+                (Ok(_), ResolvedExpected::ErrorContains(substr)) => Ok(vec![make_drift_record(
+                    ComparisonCategory::Value,
+                    DriftLevel::Critical,
+                    format!("{}.error", fixture.operation.operation_name()),
+                    format!(
+                        "expected {} error containing '{}', but got Ok",
+                        fixture.operation.operation_name(),
+                        substr
+                    ),
+                )]),
+                (Err(message), ResolvedExpected::Scalar(_)) => Ok(vec![make_drift_record(
+                    ComparisonCategory::Value,
+                    DriftLevel::Critical,
+                    format!("{}.error", fixture.operation.operation_name()),
+                    format!(
+                        "expected {} scalar, got error: {}",
+                        fixture.operation.operation_name(),
+                        message
+                    ),
+                )]),
+                (_, _) => Err(format!(
+                    "expected_scalar or expected_error_contains required for {}",
+                    fixture.operation.operation_name()
+                )),
+            }
+        }
+        FixtureOperation::SeriesArgmin | FixtureOperation::SeriesArgmax => {
+            let actual_result = execute_series_arg_fixture_scalar(fixture);
             match (actual_result, expected) {
                 (Ok(actual), ResolvedExpected::Scalar(scalar)) => Ok(diff_scalar(
                     &actual,

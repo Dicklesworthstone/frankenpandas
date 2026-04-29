@@ -1863,6 +1863,46 @@ def op_series_idxmax(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return {"expected_scalar": scalar_to_json(out)}
 
 
+def op_series_argmin(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    if left is None:
+        raise OracleError("series_argmin requires left payload")
+
+    skipna = payload.get("argmin_skipna")
+    if skipna is None:
+        skipna = True
+
+    index = [label_from_json(item) for item in left["index"]]
+    values = [scalar_from_json(item) for item in left["values"]]
+    series = pd.Series(values, index=index, name=left.get("name", "series"))
+    try:
+        out = series.argmin(skipna=skipna)
+    except ValueError as exc:
+        raise OracleError(f"series_argmin failed: {exc}") from exc
+
+    return {"expected_scalar": scalar_to_json(int(out))}
+
+
+def op_series_argmax(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    if left is None:
+        raise OracleError("series_argmax requires left payload")
+
+    skipna = payload.get("argmax_skipna")
+    if skipna is None:
+        skipna = True
+
+    index = [label_from_json(item) for item in left["index"]]
+    values = [scalar_from_json(item) for item in left["values"]]
+    series = pd.Series(values, index=index, name=left.get("name", "series"))
+    try:
+        out = series.argmax(skipna=skipna)
+    except ValueError as exc:
+        raise OracleError(f"series_argmax failed: {exc}") from exc
+
+    return {"expected_scalar": scalar_to_json(int(out))}
+
+
 def op_series_rank(pd, payload: dict[str, Any]) -> dict[str, Any]:
     left = payload.get("left")
     if left is None:
@@ -5199,6 +5239,10 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_series_idxmin(pd, payload)
     if op in {"series_idxmax", "series_idxmax_default"}:
         return op_series_idxmax(pd, payload)
+    if op in {"series_argmin", "series_argmin_default"}:
+        return op_series_argmin(pd, payload)
+    if op in {"series_argmax", "series_argmax_default"}:
+        return op_series_argmax(pd, payload)
     if op in {"series_rank", "series_rank_default"}:
         return op_series_rank(pd, payload)
     if op in {"series_argsort", "series_argsort_default"}:
