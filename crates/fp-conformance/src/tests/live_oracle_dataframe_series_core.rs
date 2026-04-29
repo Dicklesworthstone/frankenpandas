@@ -4259,3 +4259,259 @@ fn live_oracle_series_round_negative_decimals() {
     let actual = series.round(-1).expect("round");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_series_replace_int() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-REPLACE-INT",
+        "case_id": "series_replace_int",
+        "mode": "strict",
+        "operation": "series_replace",
+        "oracle_source": "live_legacy_pandas",
+        "replace_to_find": [
+            { "kind": "int64", "value": 1 },
+            { "kind": "int64", "value": 3 }
+        ],
+        "replace_to_value": [
+            { "kind": "int64", "value": 100 },
+            { "kind": "int64", "value": 300 }
+        ],
+        "left": {
+            "name": "test_series",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 4 }
+            ],
+            "values": [
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 4 },
+                { "kind": "int64", "value": 1 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping replace int test: {message}");
+        return;
+    }
+
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Series(_)),
+        "expected live oracle series payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let replacements: Vec<(super::Scalar, super::Scalar)> = fixture
+        .replace_to_find
+        .as_ref()
+        .expect("to_find")
+        .iter()
+        .zip(fixture.replace_to_value.as_ref().expect("to_value").iter())
+        .map(|(f, v)| (f.clone(), v.clone()))
+        .collect();
+    let actual = series.replace(&replacements).expect("replace");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_series_replace_with_null() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-REPLACE-NULL",
+        "case_id": "series_replace_with_null",
+        "mode": "strict",
+        "operation": "series_replace",
+        "oracle_source": "live_legacy_pandas",
+        "replace_to_find": [
+            { "kind": "int64", "value": 2 }
+        ],
+        "replace_to_value": [
+            { "kind": "null", "value": "null" }
+        ],
+        "left": {
+            "name": "test_series",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 }
+            ],
+            "values": [
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 2 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping replace with null test: {message}");
+        return;
+    }
+
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Series(_)),
+        "expected live oracle series payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let replacements: Vec<(super::Scalar, super::Scalar)> = fixture
+        .replace_to_find
+        .as_ref()
+        .expect("to_find")
+        .iter()
+        .zip(fixture.replace_to_value.as_ref().expect("to_value").iter())
+        .map(|(f, v)| (f.clone(), v.clone()))
+        .collect();
+    let actual = series.replace(&replacements).expect("replace");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_series_replace_float() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-REPLACE-FLOAT",
+        "case_id": "series_replace_float",
+        "mode": "strict",
+        "operation": "series_replace",
+        "oracle_source": "live_legacy_pandas",
+        "replace_to_find": [
+            { "kind": "float64", "value": 1.5 },
+            { "kind": "float64", "value": 3.5 }
+        ],
+        "replace_to_value": [
+            { "kind": "float64", "value": 10.5 },
+            { "kind": "float64", "value": 30.5 }
+        ],
+        "left": {
+            "name": "test_series",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 }
+            ],
+            "values": [
+                { "kind": "float64", "value": 1.5 },
+                { "kind": "float64", "value": 2.5 },
+                { "kind": "float64", "value": 3.5 },
+                { "kind": "float64", "value": 4.5 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping replace float test: {message}");
+        return;
+    }
+
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Series(_)),
+        "expected live oracle series payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let replacements: Vec<(super::Scalar, super::Scalar)> = fixture
+        .replace_to_find
+        .as_ref()
+        .expect("to_find")
+        .iter()
+        .zip(fixture.replace_to_value.as_ref().expect("to_value").iter())
+        .map(|(f, v)| (f.clone(), v.clone()))
+        .collect();
+    let actual = series.replace(&replacements).expect("replace");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_series_replace_no_match() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-REPLACE-NOMATCH",
+        "case_id": "series_replace_no_match",
+        "mode": "strict",
+        "operation": "series_replace",
+        "oracle_source": "live_legacy_pandas",
+        "replace_to_find": [
+            { "kind": "int64", "value": 99 }
+        ],
+        "replace_to_value": [
+            { "kind": "int64", "value": 999 }
+        ],
+        "left": {
+            "name": "test_series",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "values": [
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping replace no match test: {message}");
+        return;
+    }
+
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Series(_)),
+        "expected live oracle series payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let replacements: Vec<(super::Scalar, super::Scalar)> = fixture
+        .replace_to_find
+        .as_ref()
+        .expect("to_find")
+        .iter()
+        .zip(fixture.replace_to_value.as_ref().expect("to_value").iter())
+        .map(|(f, v)| (f.clone(), v.clone()))
+        .collect();
+    let actual = series.replace(&replacements).expect("replace");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}

@@ -5073,6 +5073,39 @@ def op_series_round(pd, payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def op_series_replace(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    to_find = payload.get("replace_to_find")
+    to_value = payload.get("replace_to_value")
+
+    if left is None:
+        raise OracleError("series_replace requires left payload")
+    if to_find is None:
+        raise OracleError("series_replace requires replace_to_find payload")
+    if to_value is None:
+        raise OracleError("series_replace requires replace_to_value payload")
+
+    index = [label_from_json(item) for item in left["index"]]
+    values = [scalar_from_json(item) for item in left["values"]]
+    series = pd.Series(values, index=index, name=left.get("name", "series"))
+
+    find_values = [scalar_from_json(item) for item in to_find]
+    replace_values = [scalar_from_json(item) for item in to_value]
+    replacements = dict(zip(find_values, replace_values))
+
+    try:
+        out = series.replace(replacements)
+    except Exception as exc:
+        raise OracleError(f"series_replace failed: {exc}") from exc
+
+    return {
+        "expected_series": {
+            "index": [label_to_json(v) for v in out.index.tolist()],
+            "values": [scalar_to_json(v) for v in out.tolist()],
+        }
+    }
+
+
 def require_join_type(payload: dict[str, Any], op_name: str, *, allow_cross: bool = False) -> str:
     join_type = payload.get("join_type")
     allowed = {"inner", "left", "right", "outer"}
@@ -5636,6 +5669,8 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_series_abs(pd, payload)
     if op in {"series_round", "series_round_default"}:
         return op_series_round(pd, payload)
+    if op in {"series_replace", "series_replace_default"}:
+        return op_series_replace(pd, payload)
     if op == "series_any":
         return op_series_any(pd, payload)
     if op == "series_all":
