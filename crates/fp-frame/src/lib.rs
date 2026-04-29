@@ -3983,17 +3983,11 @@ impl Series {
     ///
     /// Matches `pd.Series.round(decimals)`. NaN values pass through.
     pub fn round(&self, decimals: i32) -> Result<Self, FrameError> {
-        let factor = 10.0_f64.powi(decimals);
-        let mut out = Vec::with_capacity(self.len());
-        for val in self.column.values() {
-            if val.is_missing() {
-                out.push(val.clone());
-            } else {
-                let v = val.to_f64().map_err(ColumnError::from)?;
-                out.push(Scalar::Float64((v * factor).round_ties_even() / factor));
-            }
-        }
-        Self::from_values(self.name.clone(), self.index.labels().to_vec(), out)
+        Self::new(
+            self.name.clone(),
+            self.index.clone(),
+            self.column.round(decimals)?,
+        )
     }
 
     // --- Descriptive Statistics ---
@@ -33344,6 +33338,47 @@ mod tests {
                 Scalar::Float64(-20.0)
             ]
         );
+    }
+
+    #[test]
+    fn series_round_int_negative_decimals_preserves_dtype() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Int64(15),
+                Scalar::Int64(25),
+                Scalar::Int64(35),
+                Scalar::Int64(-15),
+            ],
+        )
+        .unwrap();
+
+        let rounded = s.round(-1).unwrap();
+        assert_eq!(rounded.dtype(), DType::Int64);
+        assert_eq!(
+            rounded.values(),
+            &[
+                Scalar::Int64(20),
+                Scalar::Int64(20),
+                Scalar::Int64(40),
+                Scalar::Int64(-20)
+            ]
+        );
+    }
+
+    #[test]
+    fn series_round_bool_preserves_dtype() {
+        let s = Series::from_values(
+            "flags",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Bool(true), Scalar::Bool(false)],
+        )
+        .unwrap();
+
+        let rounded = s.round(-2).unwrap();
+        assert_eq!(rounded.dtype(), DType::Bool);
+        assert_eq!(rounded.values(), &[Scalar::Bool(true), Scalar::Bool(false)]);
     }
 
     #[test]

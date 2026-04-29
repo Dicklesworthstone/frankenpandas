@@ -1008,6 +1008,33 @@ fn normalize_tail_window(n: i64, len: usize) -> (usize, usize) {
     }
 }
 
+fn round_i64_negative_decimals(value: i64, decimals: i32) -> i64 {
+    debug_assert!(decimals < 0);
+    let factor = match 10_i128.checked_pow(decimals.unsigned_abs()) {
+        Some(factor) => factor,
+        None => return 0,
+    };
+    let magnitude = i128::from(value).abs();
+    let quotient = magnitude / factor;
+    let remainder = magnitude % factor;
+    let rounded_magnitude = match (remainder * 2).cmp(&factor) {
+        std::cmp::Ordering::Less => quotient * factor,
+        std::cmp::Ordering::Greater => (quotient + 1) * factor,
+        std::cmp::Ordering::Equal if quotient % 2 == 0 => quotient * factor,
+        std::cmp::Ordering::Equal => (quotient + 1) * factor,
+    };
+    let rounded = if value < 0 {
+        -rounded_magnitude
+    } else {
+        rounded_magnitude
+    };
+    match i64::try_from(rounded) {
+        Ok(value) => value,
+        Err(_) if rounded < 0 => i64::MIN,
+        Err(_) => i64::MAX,
+    }
+}
+
 impl Column {
     fn normalize_missing_for_dtype(value: Scalar, dtype: DType) -> Scalar {
         match value {
@@ -3546,10 +3573,26 @@ impl Column {
     ///
     /// Matches `pd.Series.round(decimals)`. Negative `decimals` rounds
     /// to the left of the decimal point. Int columns pass through
-    /// unchanged for decimals >= 0. Missing values are preserved.
+    /// unchanged for decimals >= 0 and retain Int64 dtype for negative
+    /// decimals. Bool columns pass through unchanged. Missing values are
+    /// preserved.
     pub fn round(&self, decimals: i32) -> Result<Self, ColumnError> {
-        if self.dtype == DType::Int64 && decimals >= 0 {
+        if matches!(self.dtype, DType::Bool) || (self.dtype == DType::Int64 && decimals >= 0) {
             return Ok(self.clone());
+        }
+        if self.dtype == DType::Int64 {
+            let out = self
+                .values
+                .iter()
+                .map(|v| match v {
+                    Scalar::Int64(value) => {
+                        Scalar::Int64(round_i64_negative_decimals(*value, decimals))
+                    }
+                    Scalar::Null(kind) => Scalar::Null(*kind),
+                    other => other.clone(),
+                })
+                .collect();
+            return Self::new(DType::Int64, out);
         }
         let factor = 10f64.powi(decimals);
         let mut out = Vec::with_capacity(self.values.len());
@@ -5835,6 +5878,37 @@ mod tests {
             let r = col.round(2).expect("round");
             assert_eq!(r.values(), col.values());
             assert_eq!(r.dtype(), DType::Int64);
+        }
+
+        #[test]
+        fn round_int_negative_decimals_preserves_dtype() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(15),
+                Scalar::Int64(25),
+                Scalar::Int64(35),
+                Scalar::Int64(-15),
+            ])
+            .expect("col");
+            let r = col.round(-1).expect("round");
+            assert_eq!(r.dtype(), DType::Int64);
+            assert_eq!(
+                r.values(),
+                &[
+                    Scalar::Int64(20),
+                    Scalar::Int64(20),
+                    Scalar::Int64(40),
+                    Scalar::Int64(-20)
+                ]
+            );
+        }
+
+        #[test]
+        fn round_bool_is_noop() {
+            let col =
+                Column::from_values(vec![Scalar::Bool(true), Scalar::Bool(false)]).expect("col");
+            let r = col.round(-2).expect("round");
+            assert_eq!(r.dtype(), DType::Bool);
+            assert_eq!(r.values(), col.values());
         }
 
         #[test]
