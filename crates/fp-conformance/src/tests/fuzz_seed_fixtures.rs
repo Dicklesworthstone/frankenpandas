@@ -746,6 +746,144 @@ fn fuzz_dataframe_eval_bytes_accepts_simple_numeric_expression() {
 }
 
 #[test]
+fn fuzz_dataframe_eval_bytes_replays_committed_corpus_seeds() {
+    let seeds: &[(&str, &[u8])] = &[
+        (
+            "arith_add.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_dataframe_eval/arith_add.bin"),
+        ),
+        (
+            "arith_sub.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_dataframe_eval/arith_sub.bin"),
+        ),
+        (
+            "arith_mul.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_dataframe_eval/arith_mul.bin"),
+        ),
+        (
+            "arith_div.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_dataframe_eval/arith_div.bin"),
+        ),
+        (
+            "arith_chain.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_dataframe_eval/arith_chain.bin"),
+        ),
+        (
+            "arith_paren.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_dataframe_eval/arith_paren.bin"),
+        ),
+        (
+            "cmp_gt.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_dataframe_eval/cmp_gt.bin"),
+        ),
+        (
+            "cmp_lt.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_dataframe_eval/cmp_lt.bin"),
+        ),
+        (
+            "cmp_gte.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_dataframe_eval/cmp_gte.bin"),
+        ),
+        (
+            "cmp_lte.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_dataframe_eval/cmp_lte.bin"),
+        ),
+        (
+            "cmp_eq.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_dataframe_eval/cmp_eq.bin"),
+        ),
+        (
+            "cmp_neq.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_dataframe_eval/cmp_neq.bin"),
+        ),
+        (
+            "unary_neg.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_dataframe_eval/unary_neg.bin"),
+        ),
+        (
+            "unary_pos.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_dataframe_eval/unary_pos.bin"),
+        ),
+        (
+            "hardened_mul_add.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_dataframe_eval/hardened_mul_add.bin"),
+        ),
+        (
+            "hardened_add_mul.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_dataframe_eval/hardened_add_mul.bin"),
+        ),
+        (
+            "four_col_chain.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_dataframe_eval/four_col_chain.bin"),
+        ),
+        (
+            "four_col_paren.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_dataframe_eval/four_col_paren.bin"),
+        ),
+        (
+            "float_add.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_dataframe_eval/float_add.bin"),
+        ),
+        (
+            "float_mul.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_dataframe_eval/float_mul.bin"),
+        ),
+        (
+            "col_plus_literal.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_dataframe_eval/col_plus_literal.bin"),
+        ),
+        (
+            "col_times_literal.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_dataframe_eval/col_times_literal.bin"),
+        ),
+        (
+            "self_subtract.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_dataframe_eval/self_subtract.bin"),
+        ),
+        (
+            "self_divide.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_dataframe_eval/self_divide.bin"),
+        ),
+        (
+            "pow_square.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_dataframe_eval/pow_square.bin"),
+        ),
+        (
+            "floor_div.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_dataframe_eval/floor_div.bin"),
+        ),
+        (
+            "modulo.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_dataframe_eval/modulo.bin"),
+        ),
+        (
+            "nested_paren.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_dataframe_eval/nested_paren.bin"),
+        ),
+        (
+            "null_values.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_dataframe_eval/null_values.bin"),
+        ),
+        (
+            "eight_rows.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_dataframe_eval/eight_rows.bin"),
+        ),
+        (
+            "seed-empty.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_dataframe_eval/seed-empty.bin"),
+        ),
+    ];
+
+    for (name, seed) in seeds {
+        let result = fuzz_dataframe_eval_bytes(seed);
+        assert!(
+            result.is_ok(),
+            "dataframe_eval corpus seed {name} should pass: {result:?}"
+        );
+    }
+}
+
+#[test]
 fn fuzz_query_str_with_locals_bytes_accepts_structured_corpus_seeds() {
     let seeds: &[(&str, &[u8])] = &[
         (
