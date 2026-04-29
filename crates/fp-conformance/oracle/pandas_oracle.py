@@ -4877,6 +4877,37 @@ def op_series_between(pd, payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def op_series_duplicated(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    keep = payload.get("keep", "first")
+
+    if left is None:
+        raise OracleError("series_duplicated requires left payload")
+    if keep not in {"first", "last", False}:
+        if isinstance(keep, str) and keep.lower() == "none":
+            keep = False
+        else:
+            raise OracleError(
+                f"series_duplicated keep must be first|last|none, got {keep!r}"
+            )
+
+    index = [label_from_json(item) for item in left["index"]]
+    values = [scalar_from_json(item) for item in left["values"]]
+    series = pd.Series(values, index=index, name=left.get("name", "series"))
+
+    try:
+        out = series.duplicated(keep=keep)
+    except Exception as exc:
+        raise OracleError(f"series_duplicated failed: {exc}") from exc
+
+    return {
+        "expected_series": {
+            "index": [label_to_json(v) for v in out.index.tolist()],
+            "values": [scalar_to_json(v) for v in out.tolist()],
+        }
+    }
+
+
 def require_join_type(payload: dict[str, Any], op_name: str, *, allow_cross: bool = False) -> str:
     join_type = payload.get("join_type")
     allowed = {"inner", "left", "right", "outer"}
@@ -5424,6 +5455,8 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_series_describe(pd, payload)
     if op in {"series_between", "series_between_default"}:
         return op_series_between(pd, payload)
+    if op in {"series_duplicated", "series_duplicated_default"}:
+        return op_series_duplicated(pd, payload)
     if op == "series_any":
         return op_series_any(pd, payload)
     if op == "series_all":
