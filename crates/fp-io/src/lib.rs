@@ -5464,7 +5464,7 @@ pub fn read_sql_chunks_with_options_and_index_col<C: SqlConnection>(
     chunk_size: usize,
 ) -> Result<SqlIndexedChunkIterator, IoError> {
     let inner = read_sql_chunks_with_options(conn, query, options, chunk_size)?;
-    sql_indexed_chunks(inner, index_col)
+    sql_indexed_chunks(inner, index_col.or(options.index_col.as_deref()))
 }
 
 /// Read a SQL query result as DataFrame chunks with optional index promotion.
@@ -6125,7 +6125,7 @@ pub fn read_sql_table_chunks_with_options_and_index_col<C: SqlConnection>(
     chunk_size: usize,
 ) -> Result<SqlIndexedChunkIterator, IoError> {
     let inner = read_sql_table_chunks_with_options(conn, table_name, options, chunk_size)?;
-    sql_indexed_chunks(inner, index_col)
+    sql_indexed_chunks(inner, index_col.or(options.index_col.as_deref()))
 }
 
 /// Read an entire SQL table as chunks with one column promoted to each chunk's index.
@@ -10051,6 +10051,48 @@ mod tests {
 
     #[cfg(feature = "sql-sqlite")]
     #[test]
+    fn sql_read_chunks_with_options_and_index_col_uses_options_index_when_explicit_none() {
+        let conn = make_sql_test_conn();
+        conn.execute_batch(
+            "CREATE TABLE query_options_struct_index (id INTEGER, amount TEXT);
+             INSERT INTO query_options_struct_index (id, amount) VALUES
+                (10, '$10.50'),
+                (20, '11.25');",
+        )
+        .expect("create query_options_struct_index table");
+
+        let chunks = read_sql_chunks_with_options_and_index_col(
+            &conn,
+            "SELECT id, amount FROM query_options_struct_index ORDER BY id",
+            &SqlReadOptions {
+                params: None,
+                parse_dates: None,
+                coerce_float: true,
+                dtype: None,
+                schema: None,
+                columns: None,
+                index_col: Some("id".to_owned()),
+            },
+            None,
+            1,
+        )
+        .expect("query chunk iterator")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("all chunks");
+
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].index().name(), Some("id"));
+        assert_eq!(chunks[0].index().labels(), &[IndexLabel::Int64(10)]);
+        assert!(chunks[0].column("id").is_none());
+        assert_eq!(chunks[1].index().labels(), &[IndexLabel::Int64(20)]);
+        assert_eq!(
+            chunks[1].column("amount").unwrap().values(),
+            &[Scalar::Float64(11.25)]
+        );
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
     fn sql_read_query_chunks_with_options_and_index_col_missing_column_errors() {
         let conn = make_sql_test_conn();
         conn.execute_batch(
@@ -10599,6 +10641,51 @@ mod tests {
             chunks[1].index().labels(),
             &[IndexLabel::Utf8("2024-05-03 00:00:00".to_owned())]
         );
+        assert_eq!(
+            chunks[1].column("amount").unwrap().values(),
+            &[Scalar::Float64(30.5)]
+        );
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn sql_read_table_chunks_with_options_and_index_col_uses_options_index_when_explicit_none() {
+        let conn = make_sql_test_conn();
+        conn.execute_batch(
+            "CREATE TABLE table_options_struct_index (id INTEGER, amount TEXT);
+             INSERT INTO table_options_struct_index (id, amount) VALUES
+                (10, '$10.00'),
+                (20, '$20.00'),
+                (30, '$30.50');",
+        )
+        .expect("create table_options_struct_index table");
+
+        let chunks = read_sql_table_chunks_with_options_and_index_col(
+            &conn,
+            "table_options_struct_index",
+            &SqlReadOptions {
+                params: None,
+                parse_dates: None,
+                coerce_float: true,
+                dtype: None,
+                schema: None,
+                columns: None,
+                index_col: Some("id".to_owned()),
+            },
+            None,
+            2,
+        )
+        .expect("table indexed option chunk iterator")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("all chunks");
+
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(
+            chunks[0].index().labels(),
+            &[IndexLabel::Int64(10), IndexLabel::Int64(20)]
+        );
+        assert!(chunks[0].column("id").is_none());
+        assert_eq!(chunks[1].index().labels(), &[IndexLabel::Int64(30)]);
         assert_eq!(
             chunks[1].column("amount").unwrap().values(),
             &[Scalar::Float64(30.5)]
