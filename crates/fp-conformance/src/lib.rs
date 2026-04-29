@@ -549,6 +549,8 @@ pub enum FixtureOperation {
     SeriesArgsort,
     #[serde(rename = "series_searchsorted", alias = "series_searchsorted_default")]
     SeriesSearchsorted,
+    #[serde(rename = "series_dot", alias = "series_dot_default")]
+    SeriesDot,
     #[serde(rename = "series_describe", alias = "series_describe_default")]
     SeriesDescribe,
     #[serde(rename = "series_duplicated", alias = "series_duplicated_default")]
@@ -1369,6 +1371,7 @@ impl FixtureOperation {
             Self::SeriesRank => "series_rank",
             Self::SeriesArgsort => "series_argsort",
             Self::SeriesSearchsorted => "series_searchsorted",
+            Self::SeriesDot => "series_dot",
             Self::SeriesDescribe => "series_describe",
             Self::SeriesDuplicated => "series_duplicated",
             Self::SeriesDropDuplicates => "series_drop_duplicates",
@@ -2367,6 +2370,7 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::SeriesArgmin
         | FixtureOperation::SeriesArgmax
         | FixtureOperation::SeriesSearchsorted
+        | FixtureOperation::SeriesDot
         | FixtureOperation::DataFrameCount
         | FixtureOperation::DataFrameMode
         | FixtureOperation::DataFrameCumsum
@@ -9931,6 +9935,40 @@ fn run_fixture_operation(
                 )),
             }
         }
+        FixtureOperation::SeriesDot => {
+            let actual_result = execute_series_dot_fixture(fixture);
+            match (actual_result, expected) {
+                (Ok(actual), ResolvedExpected::Scalar(scalar)) => {
+                    compare_scalar(&actual, &scalar, fixture.operation.operation_name())
+                }
+                (Err(message), ResolvedExpected::ErrorContains(substr)) => {
+                    if message.contains(&substr) {
+                        Ok(())
+                    } else {
+                        Err(format!(
+                            "{}: expected error containing '{}', got '{}'",
+                            fixture.operation.operation_name(),
+                            substr,
+                            message
+                        ))
+                    }
+                }
+                (Ok(_), ResolvedExpected::ErrorContains(substr)) => Err(format!(
+                    "{}: expected error containing '{}', but got Ok",
+                    fixture.operation.operation_name(),
+                    substr
+                )),
+                (Err(message), ResolvedExpected::Scalar(_)) => Err(format!(
+                    "{}: expected scalar, got error: {}",
+                    fixture.operation.operation_name(),
+                    message
+                )),
+                (_, _) => Err(format!(
+                    "expected_scalar or expected_error_contains required for {}",
+                    fixture.operation.operation_name()
+                )),
+            }
+        }
         FixtureOperation::DataFrameCount => {
             let frame = build_dataframe(require_frame(fixture)?)
                 .map_err(|err| format!("frame build failed: {err}"))?;
@@ -12272,6 +12310,7 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::SeriesArgmin
         | FixtureOperation::SeriesArgmax
         | FixtureOperation::SeriesSearchsorted
+        | FixtureOperation::SeriesDot
         | FixtureOperation::DataFrameToJsonRecords => fixture
             .expected_scalar
             .clone()
@@ -12931,6 +12970,7 @@ fn capture_live_oracle_expected(
         | FixtureOperation::SeriesArgmin
         | FixtureOperation::SeriesArgmax
         | FixtureOperation::SeriesSearchsorted
+        | FixtureOperation::SeriesDot
         | FixtureOperation::DataFrameToJsonRecords => response
             .expected_scalar
             .map(ResolvedExpected::Scalar)
@@ -13014,6 +13054,17 @@ fn execute_series_searchsorted_fixture(fixture: &PacketFixture) -> Result<Scalar
         .searchsorted(needle, side)
         .map_err(|err| err.to_string())?;
     Ok(Scalar::Int64(pos as i64))
+}
+
+fn execute_series_dot_fixture(fixture: &PacketFixture) -> Result<Scalar, String> {
+    let left = require_left_series(fixture)?;
+    let right = require_right_series(fixture)?;
+    let left_series = build_series(left)?;
+    let right_series = build_series(right)?;
+    let result = left_series
+        .dot(&right_series)
+        .map_err(|err| err.to_string())?;
+    Ok(Scalar::Float64(result))
 }
 
 fn require_left_series(fixture: &PacketFixture) -> Result<&FixtureSeries, String> {
@@ -18974,6 +19025,57 @@ fn execute_and_compare_differential(
         }
         FixtureOperation::SeriesSearchsorted => {
             let actual_result = execute_series_searchsorted_fixture(fixture);
+            match (actual_result, expected) {
+                (Ok(actual), ResolvedExpected::Scalar(scalar)) => Ok(diff_scalar(
+                    &actual,
+                    &scalar,
+                    fixture.operation.operation_name(),
+                )),
+                (Err(message), ResolvedExpected::ErrorContains(substr)) => {
+                    if message.contains(&substr) {
+                        Ok(Vec::new())
+                    } else {
+                        Ok(vec![make_drift_record(
+                            ComparisonCategory::Value,
+                            DriftLevel::Critical,
+                            format!("{}.error", fixture.operation.operation_name()),
+                            format!(
+                                "expected {} error containing '{}', got '{}'",
+                                fixture.operation.operation_name(),
+                                substr,
+                                message
+                            ),
+                        )])
+                    }
+                }
+                (Ok(_), ResolvedExpected::ErrorContains(substr)) => Ok(vec![make_drift_record(
+                    ComparisonCategory::Value,
+                    DriftLevel::Critical,
+                    format!("{}.error", fixture.operation.operation_name()),
+                    format!(
+                        "expected {} error containing '{}', but got Ok",
+                        fixture.operation.operation_name(),
+                        substr
+                    ),
+                )]),
+                (Err(message), ResolvedExpected::Scalar(_)) => Ok(vec![make_drift_record(
+                    ComparisonCategory::Value,
+                    DriftLevel::Critical,
+                    format!("{}.error", fixture.operation.operation_name()),
+                    format!(
+                        "expected {} scalar, got error: {}",
+                        fixture.operation.operation_name(),
+                        message
+                    ),
+                )]),
+                (_, _) => Err(format!(
+                    "expected_scalar or expected_error_contains required for {}",
+                    fixture.operation.operation_name()
+                )),
+            }
+        }
+        FixtureOperation::SeriesDot => {
+            let actual_result = execute_series_dot_fixture(fixture);
             match (actual_result, expected) {
                 (Ok(actual), ResolvedExpected::Scalar(scalar)) => Ok(diff_scalar(
                     &actual,

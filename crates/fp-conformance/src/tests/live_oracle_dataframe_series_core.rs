@@ -2277,3 +2277,259 @@ fn live_oracle_series_searchsorted_integers() {
     let actual = super::Scalar::Int64(pos as i64);
     super::compare_scalar(&actual, &expected, "series_searchsorted").expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_series_dot_basic() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DOT-BASIC",
+        "case_id": "series_dot_basic",
+        "mode": "strict",
+        "operation": "series_dot",
+        "oracle_source": "live_legacy_pandas",
+        "left": {
+            "name": "a",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 }
+            ],
+            "values": [
+                { "kind": "float64", "value": 1.0 },
+                { "kind": "float64", "value": 2.0 },
+                { "kind": "float64", "value": 3.0 },
+                { "kind": "float64", "value": 4.0 }
+            ]
+        },
+        "right": {
+            "name": "b",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 }
+            ],
+            "values": [
+                { "kind": "float64", "value": 1.0 },
+                { "kind": "float64", "value": 1.0 },
+                { "kind": "float64", "value": 1.0 },
+                { "kind": "float64", "value": 1.0 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping dot basic test: {message}");
+        return;
+    }
+
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Scalar(_)),
+        "expected live oracle scalar payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Scalar(expected) = expected else {
+        return;
+    };
+
+    let left = super::build_series(fixture.left.as_ref().expect("left")).expect("left");
+    let right = super::build_series(fixture.right.as_ref().expect("right")).expect("right");
+    let result = left.dot(&right).expect("dot");
+    let actual = super::Scalar::Float64(result);
+    super::compare_scalar(&actual, &expected, "series_dot").expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_series_dot_integers() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DOT-INT",
+        "case_id": "series_dot_integers",
+        "mode": "strict",
+        "operation": "series_dot",
+        "oracle_source": "live_legacy_pandas",
+        "left": {
+            "name": "a",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "values": [
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 4 }
+            ]
+        },
+        "right": {
+            "name": "b",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "values": [
+                { "kind": "int64", "value": 5 },
+                { "kind": "int64", "value": 6 },
+                { "kind": "int64", "value": 7 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping dot integers test: {message}");
+        return;
+    }
+
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Scalar(_)),
+        "expected live oracle scalar payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Scalar(expected) = expected else {
+        return;
+    };
+
+    let left = super::build_series(fixture.left.as_ref().expect("left")).expect("left");
+    let right = super::build_series(fixture.right.as_ref().expect("right")).expect("right");
+    let result = left.dot(&right).expect("dot");
+    let actual = super::Scalar::Float64(result);
+    super::compare_scalar(&actual, &expected, "series_dot").expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_series_dot_with_nulls() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DOT-NULL",
+        "case_id": "series_dot_with_nulls",
+        "mode": "strict",
+        "operation": "series_dot",
+        "oracle_source": "live_legacy_pandas",
+        "left": {
+            "name": "a",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 }
+            ],
+            "values": [
+                { "kind": "float64", "value": 1.0 },
+                { "kind": "null", "value": "null" },
+                { "kind": "float64", "value": 3.0 },
+                { "kind": "float64", "value": 4.0 }
+            ]
+        },
+        "right": {
+            "name": "b",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 }
+            ],
+            "values": [
+                { "kind": "float64", "value": 2.0 },
+                { "kind": "float64", "value": 2.0 },
+                { "kind": "float64", "value": 2.0 },
+                { "kind": "float64", "value": 2.0 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping dot nulls test: {message}");
+        return;
+    }
+
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Scalar(_)),
+        "expected live oracle scalar payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Scalar(expected) = expected else {
+        return;
+    };
+
+    let left = super::build_series(fixture.left.as_ref().expect("left")).expect("left");
+    let right = super::build_series(fixture.right.as_ref().expect("right")).expect("right");
+    let result = left.dot(&right).expect("dot");
+    let actual = super::Scalar::Float64(result);
+    super::compare_scalar(&actual, &expected, "series_dot").expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_series_dot_negative_values() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DOT-NEG",
+        "case_id": "series_dot_negative",
+        "mode": "strict",
+        "operation": "series_dot",
+        "oracle_source": "live_legacy_pandas",
+        "left": {
+            "name": "a",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "values": [
+                { "kind": "float64", "value": -1.5 },
+                { "kind": "float64", "value": 2.5 },
+                { "kind": "float64", "value": -3.5 }
+            ]
+        },
+        "right": {
+            "name": "b",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "values": [
+                { "kind": "float64", "value": 4.0 },
+                { "kind": "float64", "value": -2.0 },
+                { "kind": "float64", "value": 1.0 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping dot negative test: {message}");
+        return;
+    }
+
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Scalar(_)),
+        "expected live oracle scalar payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Scalar(expected) = expected else {
+        return;
+    };
+
+    let left = super::build_series(fixture.left.as_ref().expect("left")).expect("left");
+    let right = super::build_series(fixture.right.as_ref().expect("right")).expect("right");
+    let result = left.dot(&right).expect("dot");
+    let actual = super::Scalar::Float64(result);
+    super::compare_scalar(&actual, &expected, "series_dot").expect("pandas parity");
+}
