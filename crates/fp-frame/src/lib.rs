@@ -4786,6 +4786,23 @@ impl Series {
         keep: &str,
         ascending: bool,
     ) -> Result<Self, FrameError> {
+        enum TopKeep {
+            First,
+            Last,
+            All,
+        }
+
+        let keep = match keep {
+            "first" => TopKeep::First,
+            "last" => TopKeep::Last,
+            "all" => TopKeep::All,
+            _ => {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "top-k keep must be one of 'first', 'last', or 'all', got {keep:?}"
+                )));
+            }
+        };
+
         let mut indexed: Vec<(usize, f64)> = self
             .column
             .values()
@@ -4807,7 +4824,7 @@ impl Series {
         }
 
         match keep {
-            "last" => {
+            TopKeep::Last => {
                 // Reverse position order for ties
                 indexed.sort_by(|a, b| {
                     let cmp = if ascending {
@@ -4823,9 +4840,11 @@ impl Series {
                 });
                 indexed.truncate(n);
             }
-            "all" => {
+            TopKeep::All => {
                 // Keep all values tied with the nth value
-                if indexed.len() > n {
+                if n == 0 {
+                    indexed.clear();
+                } else if indexed.len() > n {
                     let threshold = indexed[n - 1].1;
                     indexed.retain(|&(_, v)| {
                         if ascending {
@@ -4836,7 +4855,7 @@ impl Series {
                     });
                 }
             }
-            _ => {
+            TopKeep::First => {
                 // "first" - default, already in position order
                 indexed.truncate(n);
             }
@@ -46838,6 +46857,32 @@ mod tests {
         // with keep='all', should return all tied values
         let result = s.nsmallest_keep(2, "all").unwrap();
         assert!(result.len() >= 2);
+    }
+
+    #[test]
+    fn series_topk_keep_all_zero_returns_empty() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(3), Scalar::Int64(1), Scalar::Int64(2)],
+        )
+        .unwrap();
+
+        assert_eq!(s.nlargest_keep(0, "all").unwrap().len(), 0);
+        assert_eq!(s.nsmallest_keep(0, "all").unwrap().len(), 0);
+    }
+
+    #[test]
+    fn series_topk_rejects_invalid_keep_even_for_zero_n() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(3), Scalar::Int64(1), Scalar::Int64(2)],
+        )
+        .unwrap();
+
+        assert!(s.nlargest_keep(0, "bogus").is_err());
+        assert!(s.nsmallest_keep(0, "bogus").is_err());
     }
 
     // --- DataFrame.apply_row tests ---
