@@ -1549,7 +1549,7 @@ pub fn read_json_str(input: &str, orient: JsonOrient) -> Result<DataFrame, IoErr
             let row_count = arr.len() as i64;
             let mut out = BTreeMap::new();
             for (name, vals) in columns {
-                out.insert(name, Column::from_values(vals)?);
+                out.insert(name, column_from_json_records_values(vals)?);
             }
             let index = Index::from_i64((0..row_count).collect());
             let frame = DataFrame::new_with_column_order(index, out, col_names)?;
@@ -3961,9 +3961,7 @@ pub trait SqlConnection {
     /// driver layers).
     fn quote_identifier(&self, ident: &str) -> Result<String, IoError> {
         if ident.contains('\0') {
-            return Err(IoError::Sql(
-                "invalid SQL identifier: NUL byte".to_owned(),
-            ));
+            return Err(IoError::Sql("invalid SQL identifier: NUL byte".to_owned()));
         }
         Ok(format!("\"{}\"", ident.replace('"', "\"\"")))
     }
@@ -4191,11 +4189,7 @@ pub trait SqlConnection {
     /// auto-increment sequences. The schema arg routes through
     /// `quote_identifier` and is silently ignored when
     /// `supports_schemas() == false`.
-    fn truncate_table(
-        &self,
-        table_name: &str,
-        schema: Option<&str>,
-    ) -> Result<(), IoError> {
+    fn truncate_table(&self, table_name: &str, schema: Option<&str>) -> Result<(), IoError> {
         validate_sql_table_name(table_name)?;
         let qualified = match schema {
             Some(s) if self.supports_schemas() => {
@@ -4563,10 +4557,7 @@ impl SqlConnection for rusqlite::Connection {
         // origin is 'c' for CREATE INDEX (user), 'pk' for PRIMARY KEY auto,
         // 'u' for UNIQUE constraint auto. SQLAlchemy.Inspector surfaces
         // only the user-created ones, so we filter out 'pk' to match.
-        let pragma_list = format!(
-            "PRAGMA index_list(\"{}\")",
-            table_name.replace('"', "\"\"")
-        );
+        let pragma_list = format!("PRAGMA index_list(\"{}\")", table_name.replace('"', "\"\""));
         let mut list_stmt = self
             .prepare(&pragma_list)
             .map_err(|e| IoError::Sql(format!("list_indexes prepare failed: {e}")))?;
@@ -4599,10 +4590,7 @@ impl SqlConnection for rusqlite::Connection {
             // PRAGMA index_info(idx) returns: seqno, cid, column_name (col2 may
             // be NULL for expression-based indexes — skip those rather than
             // surfacing partial column lists).
-            let pragma_info = format!(
-                "PRAGMA index_info(\"{}\")",
-                name.replace('"', "\"\"")
-            );
+            let pragma_info = format!("PRAGMA index_info(\"{}\")", name.replace('"', "\"\""));
             let mut info_stmt = self
                 .prepare(&pragma_info)
                 .map_err(|e| IoError::Sql(format!("index_info prepare failed: {e}")))?;
@@ -4641,10 +4629,7 @@ impl SqlConnection for rusqlite::Connection {
         //   'c' = CREATE INDEX (user) — surfaces via list_indexes
         //   'u' = UNIQUE constraint   — surfaces here
         //   'pk' = PRIMARY KEY auto   — surfaces via primary_key_columns
-        let pragma_list = format!(
-            "PRAGMA index_list(\"{}\")",
-            table_name.replace('"', "\"\"")
-        );
+        let pragma_list = format!("PRAGMA index_list(\"{}\")", table_name.replace('"', "\"\""));
         let mut list_stmt = self
             .prepare(&pragma_list)
             .map_err(|e| IoError::Sql(format!("list_unique_constraints prepare failed: {e}")))?;
@@ -4664,8 +4649,7 @@ impl SqlConnection for rusqlite::Connection {
             if origin != "u" {
                 continue;
             }
-            let pragma_info =
-                format!("PRAGMA index_info(\"{}\")", name.replace('"', "\"\""));
+            let pragma_info = format!("PRAGMA index_info(\"{}\")", name.replace('"', "\"\""));
             let mut info_stmt = self
                 .prepare(&pragma_info)
                 .map_err(|e| IoError::Sql(format!("uq index_info prepare failed: {e}")))?;
@@ -4740,7 +4724,10 @@ impl SqlConnection for rusqlite::Connection {
             if !grouped.contains_key(&id) {
                 order.push(id);
             }
-            grouped.entry(id).or_default().push((seq, ref_table, from_col, to_col));
+            grouped
+                .entry(id)
+                .or_default()
+                .push((seq, ref_table, from_col, to_col));
         }
 
         let mut fks = Vec::with_capacity(order.len());
@@ -4752,8 +4739,7 @@ impl SqlConnection for rusqlite::Connection {
                 .map(|(_, t, _, _)| t.clone())
                 .unwrap_or_default();
             let mut columns = Vec::with_capacity(group.len());
-            let mut referenced_columns: Vec<Option<String>> =
-                Vec::with_capacity(group.len());
+            let mut referenced_columns: Vec<Option<String>> = Vec::with_capacity(group.len());
             for (_, _, from_col, to_col) in group {
                 columns.push(from_col);
                 referenced_columns.push(to_col);
@@ -4764,10 +4750,7 @@ impl SqlConnection for rusqlite::Connection {
             // parent's primary key columns. SQLAlchemy.Inspector
             // surfaces these as resolved-to-PK references; matching
             // that behavior keeps callers from missing real FKs.
-            let resolved_columns: Vec<String> = if referenced_columns
-                .iter()
-                .all(Option::is_none)
-            {
+            let resolved_columns: Vec<String> = if referenced_columns.iter().all(Option::is_none) {
                 // Implicit-PK reference: look up parent's PK.
                 let pk = self.primary_key_columns(&ref_table, None)?;
                 if pk.len() == columns.len() {
@@ -4905,10 +4888,7 @@ fn validate_sql_identifier_length(
     Ok(())
 }
 
-fn sql_select_all_query<C: SqlConnection>(
-    conn: &C,
-    table_name: &str,
-) -> Result<String, IoError> {
+fn sql_select_all_query<C: SqlConnection>(conn: &C, table_name: &str) -> Result<String, IoError> {
     sql_select_all_query_in_schema(conn, table_name, None)
 }
 
@@ -5853,11 +5833,7 @@ impl<'a, C: SqlConnection> SqlInspector<'a, C> {
 
     /// Schema-aware existence check. Routes to
     /// `SqlConnection::table_exists_in_schema`.
-    pub fn table_exists(
-        &self,
-        table_name: &str,
-        schema: Option<&str>,
-    ) -> Result<bool, IoError> {
+    pub fn table_exists(&self, table_name: &str, schema: Option<&str>) -> Result<bool, IoError> {
         self.conn.table_exists_in_schema(table_name, schema)
     }
 
@@ -5945,8 +5921,7 @@ impl<'a, C: SqlConnection> SqlInspector<'a, C> {
         let primary_key_columns = primary_keys_from_schema(&meta);
         let indexes = self.conn.list_indexes(table_name, schema)?;
         let foreign_keys = self.conn.list_foreign_keys(table_name, schema)?;
-        let unique_constraints =
-            self.conn.list_unique_constraints(table_name, schema)?;
+        let unique_constraints = self.conn.list_unique_constraints(table_name, schema)?;
         let comment = self.conn.table_comment(table_name, schema)?;
         Ok(Some(SqlReflectedTable {
             table_name: meta.table_name,
@@ -6020,9 +5995,7 @@ fn primary_keys_from_schema(meta: &SqlTableSchema) -> Vec<String> {
     let mut pk: Vec<(usize, String)> = meta
         .columns
         .iter()
-        .filter_map(|c| {
-            c.primary_key_ordinal.map(|ord| (ord, c.name.clone()))
-        })
+        .filter_map(|c| c.primary_key_ordinal.map(|ord| (ord, c.name.clone())))
         .collect();
     pk.sort_by_key(|(ord, _)| *ord);
     pk.into_iter().map(|(_, name)| name).collect()
@@ -6051,12 +6024,7 @@ pub fn read_sql_table_with_options<C: SqlConnection>(
     let query = match options.columns.as_deref() {
         Some(cols) => {
             let refs: Vec<&str> = cols.iter().map(String::as_str).collect();
-            sql_select_columns_query_in_schema(
-                conn,
-                table_name,
-                options.schema.as_deref(),
-                &refs,
-            )?
+            sql_select_columns_query_in_schema(conn, table_name, options.schema.as_deref(), &refs)?
         }
         None => sql_select_all_query_in_schema(conn, table_name, options.schema.as_deref())?,
     };
@@ -6108,8 +6076,7 @@ pub fn read_sql_table_chunks_with_options<C: SqlConnection>(
     options: &SqlReadOptions,
     chunk_size: usize,
 ) -> Result<SqlChunkIterator, IoError> {
-    let query =
-        sql_select_all_query_in_schema(conn, table_name, options.schema.as_deref())?;
+    let query = sql_select_all_query_in_schema(conn, table_name, options.schema.as_deref())?;
     read_sql_chunks_with_options(conn, &query, options, chunk_size)
 }
 
@@ -6310,7 +6277,9 @@ pub fn write_sql_with_options<C: SqlConnection>(
             .map(|name| {
                 // Per br-frankenpandas-ev2s (fd90.18): explicit per-column
                 // SQL-type override wins over the inferred conn.dtype_sql.
-                let override_sql = dtype_overrides.and_then(|m| m.get(name)).map(|s| s.as_str());
+                let override_sql = dtype_overrides
+                    .and_then(|m| m.get(name))
+                    .map(|s| s.as_str());
                 let sql_type = match override_sql {
                     Some(s) => s,
                     None => {
@@ -7524,6 +7493,16 @@ mod tests {
         let output = write_json_string(&frame, JsonOrient::Records).expect("write");
         let frame2 = read_json_str(&output, JsonOrient::Records).expect("re-read");
         assert_eq!(frame2.index().len(), 2);
+    }
+
+    #[test]
+    fn json_records_nullable_int_roundtrip_is_stable() {
+        let input = r#"[{"city":"Boston","temp":72},{"city":"Paris","temp":null}]"#;
+        let frame = read_json_str(input, JsonOrient::Records).expect("read json records");
+        let output = write_json_string(&frame, JsonOrient::Records).expect("write records");
+        let frame2 = read_json_str(&output, JsonOrient::Records).expect("re-read records");
+
+        assert!(frame.equals(&frame2));
     }
 
     #[test]
@@ -8911,18 +8890,16 @@ mod tests {
     use super::{
         SqlColumnSchema, SqlForeignKeySchema, SqlIfExists, SqlIndexSchema, SqlInsertMethod,
         SqlInspector, SqlQueryResult, SqlReadOptions, SqlReflectedTable, SqlTableSchema,
-        SqlUniqueConstraintSchema, SqlWriteOptions, list_sql_foreign_keys,
-        list_sql_indexes, list_sql_schemas, list_sql_tables, list_sql_unique_constraints,
-        list_sql_views, sql_max_identifier_length, sql_primary_key_columns,
-        sql_server_version, sql_table_comment, sql_table_schema, truncate_sql_table,
-        write_sql, write_sql_with_options,
+        SqlUniqueConstraintSchema, SqlWriteOptions, list_sql_foreign_keys, list_sql_indexes,
+        list_sql_schemas, list_sql_tables, list_sql_unique_constraints, list_sql_views,
+        sql_max_identifier_length, sql_primary_key_columns, sql_server_version, sql_table_comment,
+        sql_table_schema, truncate_sql_table, write_sql, write_sql_with_options,
     };
     #[cfg(feature = "sql-sqlite")]
     use super::{
-        read_sql, read_sql_chunks, read_sql_chunks_with_index_col,
-        read_sql_chunks_with_options, read_sql_chunks_with_options_and_index_col,
-        read_sql_query, read_sql_query_chunks, read_sql_query_chunks_with_index_col,
-        read_sql_query_chunks_with_options,
+        read_sql, read_sql_chunks, read_sql_chunks_with_index_col, read_sql_chunks_with_options,
+        read_sql_chunks_with_options_and_index_col, read_sql_query, read_sql_query_chunks,
+        read_sql_query_chunks_with_index_col, read_sql_query_chunks_with_options,
         read_sql_query_chunks_with_options_and_index_col, read_sql_query_with_index_col,
         read_sql_query_with_options, read_sql_query_with_options_and_index_col, read_sql_table,
         read_sql_table_chunks, read_sql_table_chunks_with_index_col,
@@ -8930,8 +8907,7 @@ mod tests {
         read_sql_table_columns, read_sql_table_columns_chunks,
         read_sql_table_columns_chunks_with_index_col, read_sql_table_columns_with_index_col,
         read_sql_table_with_index_col, read_sql_table_with_options,
-        read_sql_table_with_options_and_index_col, read_sql_with_index_col,
-        read_sql_with_options,
+        read_sql_table_with_options_and_index_col, read_sql_with_index_col, read_sql_with_options,
     };
 
     // Per br-frankenpandas-7a49 (fd90.48): the helper itself only
@@ -9374,8 +9350,7 @@ mod tests {
     fn sql_query_builders_create_and_insert_use_backend_contracts() {
         let conn = DollarMarkerSqlConn::default();
         let column_defs = vec![
-            super::sql_column_definition(&conn, "row id", "TEXT")
-                .expect("index column definition"),
+            super::sql_column_definition(&conn, "row id", "TEXT").expect("index column definition"),
             super::sql_column_definition(&conn, "value\"raw", "BIGINT")
                 .expect("value column definition"),
         ];
@@ -9427,9 +9402,7 @@ mod tests {
             }
             fn quote_identifier(&self, ident: &str) -> Result<String, IoError> {
                 if ident.contains('\0') {
-                    return Err(IoError::Sql(
-                        "invalid SQL identifier: NUL byte".to_owned(),
-                    ));
+                    return Err(IoError::Sql("invalid SQL identifier: NUL byte".to_owned()));
                 }
                 // MySQL-style backtick quoting; embedded backticks doubled.
                 Ok(format!("`{}`", ident.replace('`', "``")))
@@ -9447,8 +9420,7 @@ mod tests {
             "SELECT `id`, `name` FROM `users`"
         );
         // CREATE / INSERT helpers flow through quote_identifier.
-        let col_defs =
-            vec![super::sql_column_definition(&conn, "id", "INTEGER").expect("col def")];
+        let col_defs = vec![super::sql_column_definition(&conn, "id", "INTEGER").expect("col def")];
         assert_eq!(
             super::sql_create_table_query(&conn, "users", &col_defs).expect("create"),
             "CREATE TABLE IF NOT EXISTS `users` (`id` INTEGER)"
@@ -9505,10 +9477,10 @@ mod tests {
                 if_exists: SqlIfExists::Fail,
                 index: true,
                 index_label: None,
-            schema: None,
-            dtype: None,
-            method: SqlInsertMethod::Single,
-            chunksize: None,
+                schema: None,
+                dtype: None,
+                method: SqlInsertMethod::Single,
+                chunksize: None,
             },
         )
         .expect("write with named index");
@@ -9538,10 +9510,10 @@ mod tests {
                 if_exists: SqlIfExists::Fail,
                 index: true,
                 index_label: None,
-            schema: None,
-            dtype: None,
-            method: SqlInsertMethod::Single,
-            chunksize: None,
+                schema: None,
+                dtype: None,
+                method: SqlInsertMethod::Single,
+                chunksize: None,
             },
         )
         .expect("write with unnamed index");
@@ -9577,10 +9549,10 @@ mod tests {
                 if_exists: SqlIfExists::Fail,
                 index: true,
                 index_label: Some("custom_id".to_string()),
-            schema: None,
-            dtype: None,
-            method: SqlInsertMethod::Single,
-            chunksize: None,
+                schema: None,
+                dtype: None,
+                method: SqlInsertMethod::Single,
+                chunksize: None,
             },
         )
         .expect("write with custom index label");
@@ -9623,10 +9595,10 @@ mod tests {
                 if_exists: SqlIfExists::Fail,
                 index: false,
                 index_label: Some("custom_id".to_string()),
-            schema: None,
-            dtype: None,
-            method: SqlInsertMethod::Single,
-            chunksize: None,
+                schema: None,
+                dtype: None,
+                method: SqlInsertMethod::Single,
+                chunksize: None,
             },
         )
         .expect("write without index");
@@ -10866,7 +10838,10 @@ mod tests {
         // path coerces decimal-like text columns to Float64 by default.
         let default_frame =
             read_sql(&conn, "SELECT amount FROM payments ORDER BY id").expect("default read");
-        assert_eq!(default_frame.column("amount").unwrap().dtype(), DType::Float64);
+        assert_eq!(
+            default_frame.column("amount").unwrap().dtype(),
+            DType::Float64
+        );
         assert_eq!(
             default_frame.column("amount").unwrap().values(),
             &[Scalar::Float64(12.5), Scalar::Float64(-3.25)],
@@ -12686,8 +12661,8 @@ mod tests {
             }
         }
         let conn = PgLikeSchemaSql;
-        let q = super::sql_select_all_query_in_schema(&conn, "users", Some("analytics"))
-            .expect("q");
+        let q =
+            super::sql_select_all_query_in_schema(&conn, "users", Some("analytics")).expect("q");
         assert_eq!(q, "SELECT * FROM \"analytics\".\"users\"");
         let bare = super::sql_select_all_query_in_schema(&conn, "users", None).expect("bare");
         assert_eq!(bare, "SELECT * FROM \"users\"");
@@ -12791,19 +12766,14 @@ mod tests {
         }
         let conn = PgLikeWrite;
         let cols = vec!["id INTEGER".to_owned(), "name TEXT".to_owned()];
-        let q = super::sql_create_table_query_in_schema(
-            &conn,
-            "users",
-            Some("analytics"),
-            &cols,
-        )
-        .expect("create");
+        let q = super::sql_create_table_query_in_schema(&conn, "users", Some("analytics"), &cols)
+            .expect("create");
         assert_eq!(
             q,
             "CREATE TABLE IF NOT EXISTS \"analytics\".\"users\" (id INTEGER, name TEXT)"
         );
-        let bare = super::sql_create_table_query_in_schema(&conn, "users", None, &cols)
-            .expect("bare");
+        let bare =
+            super::sql_create_table_query_in_schema(&conn, "users", None, &cols).expect("bare");
         assert_eq!(
             bare,
             "CREATE TABLE IF NOT EXISTS \"users\" (id INTEGER, name TEXT)"
@@ -12912,13 +12882,9 @@ mod tests {
         }
         let conn = PgLikeValidate;
         let cols = vec!["x INTEGER".to_owned()];
-        let err = super::sql_create_table_query_in_schema(
-            &conn,
-            "users",
-            Some("evil; DROP"),
-            &cols,
-        )
-        .expect_err("malformed schema must reject");
+        let err =
+            super::sql_create_table_query_in_schema(&conn, "users", Some("evil; DROP"), &cols)
+                .expect_err("malformed schema must reject");
         // Per fd90.56: schema validation error now says invalid
         // schema name (not invalid table name).
         assert!(matches!(err, IoError::Sql(msg) if msg.contains("invalid schema name")));
@@ -12994,8 +12960,7 @@ mod tests {
         let q = super::sql_drop_table_query_in_schema(&conn, "users", Some("analytics"))
             .expect("drop qualified");
         assert_eq!(q, "DROP TABLE IF EXISTS \"analytics\".\"users\"");
-        let bare =
-            super::sql_drop_table_query_in_schema(&conn, "users", None).expect("drop bare");
+        let bare = super::sql_drop_table_query_in_schema(&conn, "users", None).expect("drop bare");
         assert_eq!(bare, "DROP TABLE IF EXISTS \"users\"");
     }
 
@@ -13073,8 +13038,7 @@ mod tests {
         // Schema is ignored by the default impl.
         assert!(super::SqlConnection::table_exists_in_schema(&conn, "users", None).unwrap());
         assert!(
-            super::SqlConnection::table_exists_in_schema(&conn, "users", Some("ignored"))
-                .unwrap()
+            super::SqlConnection::table_exists_in_schema(&conn, "users", Some("ignored")).unwrap()
         );
         assert!(!super::SqlConnection::table_exists_in_schema(&conn, "missing", None).unwrap());
     }
@@ -13125,13 +13089,10 @@ mod tests {
         );
         // Different schema → false.
         assert!(
-            !super::SqlConnection::table_exists_in_schema(&conn, "users", Some("audit"))
-                .unwrap()
+            !super::SqlConnection::table_exists_in_schema(&conn, "users", Some("audit")).unwrap()
         );
         // No schema → false (override scopes by Some).
-        assert!(
-            !super::SqlConnection::table_exists_in_schema(&conn, "users", None).unwrap()
-        );
+        assert!(!super::SqlConnection::table_exists_in_schema(&conn, "users", None).unwrap());
     }
 
     #[cfg(feature = "sql-sqlite")]
@@ -13140,16 +13101,10 @@ mod tests {
         // SQLite ignores schema everywhere; the Fail branch still reports
         // 'table already exists' when the bare table is present.
         let conn = make_sql_test_conn();
-        super::SqlConnection::execute_batch(
-            &conn,
-            "CREATE TABLE preexists_tbl (x INTEGER);",
-        )
-        .unwrap();
-        let frame = fp_frame::DataFrame::from_dict(
-            &["x"],
-            vec![("x", vec![Scalar::Int64(1)])],
-        )
-        .unwrap();
+        super::SqlConnection::execute_batch(&conn, "CREATE TABLE preexists_tbl (x INTEGER);")
+            .unwrap();
+        let frame =
+            fp_frame::DataFrame::from_dict(&["x"], vec![("x", vec![Scalar::Int64(1)])]).unwrap();
         let err = write_sql_with_options(
             &frame,
             &conn,
@@ -13263,11 +13218,8 @@ mod tests {
     #[test]
     fn write_sql_dtype_override_for_missing_column_silently_ignored() {
         let conn = make_sql_test_conn();
-        let frame = fp_frame::DataFrame::from_dict(
-            &["x"],
-            vec![("x", vec![Scalar::Int64(1)])],
-        )
-        .unwrap();
+        let frame =
+            fp_frame::DataFrame::from_dict(&["x"], vec![("x", vec![Scalar::Int64(1)])]).unwrap();
         let mut overrides = BTreeMap::new();
         overrides.insert("nonexistent".to_owned(), "BIGINT".to_owned());
         // No error — pandas silently ignores dtype entries for columns not in the frame.
@@ -13305,11 +13257,8 @@ mod tests {
     #[test]
     fn write_sql_dtype_none_falls_back_to_inferred_type() {
         let conn = make_sql_test_conn();
-        let frame = fp_frame::DataFrame::from_dict(
-            &["x"],
-            vec![("x", vec![Scalar::Int64(1)])],
-        )
-        .unwrap();
+        let frame =
+            fp_frame::DataFrame::from_dict(&["x"], vec![("x", vec![Scalar::Int64(1)])]).unwrap();
         write_sql_with_options(
             &frame,
             &conn,
@@ -13453,7 +13402,10 @@ mod tests {
         let sql =
             super::sql_multi_row_insert_query_in_schema(&conn, "tbl", None, &cols, 3).unwrap();
         // Expect: INSERT INTO "tbl" ("a", "b") VALUES ($1, $2), ($3, $4), ($5, $6)
-        assert!(sql.contains("VALUES ($1, $2), ($3, $4), ($5, $6)"), "got: {sql}");
+        assert!(
+            sql.contains("VALUES ($1, $2), ($3, $4), ($5, $6)"),
+            "got: {sql}"
+        );
     }
 
     #[test]
@@ -13747,11 +13699,8 @@ mod tests {
             "CREATE TABLE seq_demo (id INTEGER PRIMARY KEY AUTOINCREMENT, v TEXT);",
         )
         .unwrap();
-        super::SqlConnection::execute_batch(
-            &conn,
-            "INSERT INTO seq_demo (v) VALUES ('one');",
-        )
-        .unwrap();
+        super::SqlConnection::execute_batch(&conn, "INSERT INTO seq_demo (v) VALUES ('one');")
+            .unwrap();
         let tables = list_sql_tables(&conn, None).unwrap();
         assert_eq!(tables, vec!["seq_demo"]);
         assert!(!tables.iter().any(|name| name.starts_with("sqlite_")));
@@ -13767,21 +13716,9 @@ mod tests {
         // underscore is treated literally, so only names starting with
         // the literal substring 'sqlite_' are excluded.
         let conn = make_sql_test_conn();
-        super::SqlConnection::execute_batch(
-            &conn,
-            "CREATE TABLE sqliteX (x INTEGER);",
-        )
-        .unwrap();
-        super::SqlConnection::execute_batch(
-            &conn,
-            "CREATE TABLE sqliteY (y TEXT);",
-        )
-        .unwrap();
-        super::SqlConnection::execute_batch(
-            &conn,
-            "CREATE TABLE sqlite1234 (z REAL);",
-        )
-        .unwrap();
+        super::SqlConnection::execute_batch(&conn, "CREATE TABLE sqliteX (x INTEGER);").unwrap();
+        super::SqlConnection::execute_batch(&conn, "CREATE TABLE sqliteY (y TEXT);").unwrap();
+        super::SqlConnection::execute_batch(&conn, "CREATE TABLE sqlite1234 (z REAL);").unwrap();
         let tables = list_sql_tables(&conn, None).unwrap();
         assert_eq!(tables, vec!["sqlite1234", "sqliteX", "sqliteY"]);
     }
@@ -13811,8 +13748,7 @@ mod tests {
         // arg must NOT error; it is silently dropped and all tables are
         // returned (matches the documented option-struct ignore policy).
         let conn = make_sql_test_conn();
-        super::SqlConnection::execute_batch(&conn, "CREATE TABLE only_one (x INTEGER);")
-            .unwrap();
+        super::SqlConnection::execute_batch(&conn, "CREATE TABLE only_one (x INTEGER);").unwrap();
         let with_schema =
             list_sql_tables(&conn, Some("ignored_on_sqlite")).expect("schema arg must not error");
         let without_schema = list_sql_tables(&conn, None).unwrap();
@@ -13904,10 +13840,7 @@ mod tests {
             list_sql_tables(&conn, Some("missing")).unwrap(),
             Vec::<String>::new()
         );
-        assert_eq!(
-            list_sql_tables(&conn, None).unwrap(),
-            vec!["public_table"]
-        );
+        assert_eq!(list_sql_tables(&conn, None).unwrap(), vec!["public_table"]);
     }
 
     // ── sql_table_schema / SqlConnection::table_schema (br-w43q / fd90.21) ─
@@ -13924,11 +13857,8 @@ mod tests {
     #[test]
     fn sql_table_schema_simple_table() {
         let conn = make_sql_test_conn();
-        super::SqlConnection::execute_batch(
-            &conn,
-            "CREATE TABLE simple (id INTEGER, name TEXT);",
-        )
-        .unwrap();
+        super::SqlConnection::execute_batch(&conn, "CREATE TABLE simple (id INTEGER, name TEXT);")
+            .unwrap();
         let schema = sql_table_schema(&conn, "simple", None).unwrap().unwrap();
         assert_eq!(schema.table_name, "simple");
         assert_eq!(schema.columns.len(), 2);
@@ -13982,8 +13912,7 @@ mod tests {
     #[test]
     fn sql_table_schema_schema_silently_ignored_on_sqlite() {
         let conn = make_sql_test_conn();
-        super::SqlConnection::execute_batch(&conn, "CREATE TABLE only_one (x INTEGER);")
-            .unwrap();
+        super::SqlConnection::execute_batch(&conn, "CREATE TABLE only_one (x INTEGER);").unwrap();
         let with_schema = sql_table_schema(&conn, "only_one", Some("ignored_on_sqlite"))
             .expect("schema arg must not error")
             .expect("table exists");
@@ -13997,8 +13926,7 @@ mod tests {
         // The PRAGMA path can't bind parameters, so we validate the
         // identifier first. Reject anything with non-alphanumeric chars.
         let conn = make_sql_test_conn();
-        let err =
-            sql_table_schema(&conn, "x; DROP TABLE users", None).expect_err("must reject");
+        let err = sql_table_schema(&conn, "x; DROP TABLE users", None).expect_err("must reject");
         assert!(matches!(err, IoError::Sql(msg) if msg.contains("invalid")));
     }
 
@@ -14087,8 +14015,15 @@ mod tests {
         let analytics_users = sql_table_schema(&conn, "users", Some("analytics"))
             .unwrap()
             .expect("found");
-        assert_eq!(analytics_users.columns[0].declared_type.as_deref(), Some("BIGINT"));
-        assert!(sql_table_schema(&conn, "users", Some("audit")).unwrap().is_none());
+        assert_eq!(
+            analytics_users.columns[0].declared_type.as_deref(),
+            Some("BIGINT")
+        );
+        assert!(
+            sql_table_schema(&conn, "users", Some("audit"))
+                .unwrap()
+                .is_none()
+        );
         assert!(sql_table_schema(&conn, "users", None).unwrap().is_none());
     }
 
@@ -14225,26 +14160,23 @@ mod tests {
     #[test]
     fn truncate_sql_table_clears_rows_but_preserves_schema() {
         let conn = make_sql_test_conn();
-        super::SqlConnection::execute_batch(
-            &conn,
-            "CREATE TABLE rolling (id INTEGER, val TEXT);",
-        )
-        .unwrap();
+        super::SqlConnection::execute_batch(&conn, "CREATE TABLE rolling (id INTEGER, val TEXT);")
+            .unwrap();
         super::SqlConnection::execute_batch(
             &conn,
             "INSERT INTO rolling VALUES (1, 'a'), (2, 'b'), (3, 'c');",
         )
         .unwrap();
         // Sanity: rows present.
-        let before = super::SqlConnection::query(&conn, "SELECT COUNT(*) FROM rolling", &[])
-            .unwrap();
+        let before =
+            super::SqlConnection::query(&conn, "SELECT COUNT(*) FROM rolling", &[]).unwrap();
         assert_eq!(before.rows[0][0], Scalar::Int64(3));
 
         truncate_sql_table(&conn, "rolling", None).unwrap();
 
         // Rows gone, table still there.
-        let after = super::SqlConnection::query(&conn, "SELECT COUNT(*) FROM rolling", &[])
-            .unwrap();
+        let after =
+            super::SqlConnection::query(&conn, "SELECT COUNT(*) FROM rolling", &[]).unwrap();
         assert_eq!(after.rows[0][0], Scalar::Int64(0));
         assert!(super::SqlConnection::table_exists(&conn, "rolling").unwrap());
     }
@@ -14373,14 +14305,13 @@ mod tests {
     #[test]
     fn sql_server_version_returns_sqlite_version_string() {
         let conn = make_sql_test_conn();
-        let version = sql_server_version(&conn).unwrap().expect("SQLite reports version");
+        let version = sql_server_version(&conn)
+            .unwrap()
+            .expect("SQLite reports version");
         // Expect dotted-version format like "3.45.1". The parts must be
         // non-empty digits — exact value depends on the bundled SQLite.
         let parts: Vec<&str> = version.split('.').collect();
-        assert!(
-            parts.len() >= 2,
-            "expected dotted version; got: {version}"
-        );
+        assert!(parts.len() >= 2, "expected dotted version; got: {version}");
         for part in &parts {
             assert!(
                 !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()),
@@ -14396,7 +14327,10 @@ mod tests {
         // rusqlite is current (3.40+), so the major must be "3".
         let conn = make_sql_test_conn();
         let version = sql_server_version(&conn).unwrap().unwrap();
-        assert!(version.starts_with("3."), "expected SQLite 3.x; got {version}");
+        assert!(
+            version.starts_with("3."),
+            "expected SQLite 3.x; got {version}"
+        );
     }
 
     #[test]
@@ -14512,11 +14446,8 @@ mod tests {
     #[test]
     fn sql_primary_key_columns_table_without_pk_returns_empty() {
         let conn = make_sql_test_conn();
-        super::SqlConnection::execute_batch(
-            &conn,
-            "CREATE TABLE no_pk (a INTEGER, b TEXT);",
-        )
-        .unwrap();
+        super::SqlConnection::execute_batch(&conn, "CREATE TABLE no_pk (a INTEGER, b TEXT);")
+            .unwrap();
         let pk = sql_primary_key_columns(&conn, "no_pk", None).unwrap();
         assert!(pk.is_empty());
     }
@@ -14583,7 +14514,11 @@ mod tests {
             }
         }
         let conn = NoIntrospection;
-        assert!(sql_primary_key_columns(&conn, "anything", None).unwrap().is_empty());
+        assert!(
+            sql_primary_key_columns(&conn, "anything", None)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -14675,7 +14610,11 @@ mod tests {
         // Sorted by primary_key_ordinal: 0=year, 1=month, 2=code.
         assert_eq!(pk, vec!["year", "month", "code"]);
         // Wrong schema → empty (table_schema returns None).
-        assert!(sql_primary_key_columns(&conn, "events", Some("audit")).unwrap().is_empty());
+        assert!(
+            sql_primary_key_columns(&conn, "events", Some("audit"))
+                .unwrap()
+                .is_empty()
+        );
     }
 
     // ── sql_max_identifier_length / SqlConnection::max_identifier_length
@@ -14846,8 +14785,7 @@ mod tests {
         .expect("SQLite has no identifier limit");
     }
 
-    fn make_pg_like_recorder()
-    -> impl super::SqlConnection + 'static {
+    fn make_pg_like_recorder() -> impl super::SqlConnection + 'static {
         // Stub PG-like backend: enforces 63-char limit, accepts all
         // execute_batch / insert_rows so write_sql can reach the
         // identifier-length check before failing on emit.
@@ -14917,11 +14855,8 @@ mod tests {
         // 64-char identifier (table names also subject to the PG cap).
         // Use only alphanumeric so validate_sql_table_name passes first.
         let long_tbl: String = std::iter::repeat_n('t', 64).collect();
-        let frame = fp_frame::DataFrame::from_dict(
-            &["x"],
-            vec![("x", vec![Scalar::Int64(1)])],
-        )
-        .unwrap();
+        let frame =
+            fp_frame::DataFrame::from_dict(&["x"], vec![("x", vec![Scalar::Int64(1)])]).unwrap();
         let err = write_sql_with_options(
             &frame,
             &conn,
@@ -14944,11 +14879,8 @@ mod tests {
     fn write_sql_rejects_long_index_label_on_pg_like_backend() {
         let conn = make_pg_like_recorder();
         let long_label: String = std::iter::repeat_n('i', 64).collect();
-        let frame = fp_frame::DataFrame::from_dict(
-            &["x"],
-            vec![("x", vec![Scalar::Int64(1)])],
-        )
-        .unwrap();
+        let frame =
+            fp_frame::DataFrame::from_dict(&["x"], vec![("x", vec![Scalar::Int64(1)])]).unwrap();
         let err = write_sql_with_options(
             &frame,
             &conn,
@@ -14973,11 +14905,8 @@ mod tests {
     fn write_sql_rejects_long_schema_name_on_pg_like_backend() {
         let conn = make_pg_like_recorder();
         let long_schema: String = std::iter::repeat_n('s', 64).collect();
-        let frame = fp_frame::DataFrame::from_dict(
-            &["x"],
-            vec![("x", vec![Scalar::Int64(1)])],
-        )
-        .unwrap();
+        let frame =
+            fp_frame::DataFrame::from_dict(&["x"], vec![("x", vec![Scalar::Int64(1)])]).unwrap();
         let err = write_sql_with_options(
             &frame,
             &conn,
@@ -14993,9 +14922,7 @@ mod tests {
             },
         )
         .expect_err("64-char schema must exceed PG limit");
-        assert!(
-            matches!(err, IoError::Sql(msg) if msg.contains("schema") && msg.contains("63"))
-        );
+        assert!(matches!(err, IoError::Sql(msg) if msg.contains("schema") && msg.contains("63")));
     }
 
     #[test]
@@ -15039,11 +14966,8 @@ mod tests {
     #[test]
     fn list_sql_indexes_table_without_indexes() {
         let conn = make_sql_test_conn();
-        super::SqlConnection::execute_batch(
-            &conn,
-            "CREATE TABLE plain (a INTEGER, b TEXT);",
-        )
-        .unwrap();
+        super::SqlConnection::execute_batch(&conn, "CREATE TABLE plain (a INTEGER, b TEXT);")
+            .unwrap();
         let indexes = list_sql_indexes(&conn, "plain", None).unwrap();
         assert!(indexes.is_empty());
     }
@@ -15052,16 +14976,10 @@ mod tests {
     #[test]
     fn list_sql_indexes_single_column() {
         let conn = make_sql_test_conn();
-        super::SqlConnection::execute_batch(
-            &conn,
-            "CREATE TABLE events (id INTEGER, ts TEXT);",
-        )
-        .unwrap();
-        super::SqlConnection::execute_batch(
-            &conn,
-            "CREATE INDEX idx_events_ts ON events (ts);",
-        )
-        .unwrap();
+        super::SqlConnection::execute_batch(&conn, "CREATE TABLE events (id INTEGER, ts TEXT);")
+            .unwrap();
+        super::SqlConnection::execute_batch(&conn, "CREATE INDEX idx_events_ts ON events (ts);")
+            .unwrap();
         let indexes = list_sql_indexes(&conn, "events", None).unwrap();
         assert_eq!(indexes.len(), 1);
         assert_eq!(indexes[0].name, "idx_events_ts");
@@ -15073,11 +14991,8 @@ mod tests {
     #[test]
     fn list_sql_indexes_unique_index() {
         let conn = make_sql_test_conn();
-        super::SqlConnection::execute_batch(
-            &conn,
-            "CREATE TABLE users (id INTEGER, email TEXT);",
-        )
-        .unwrap();
+        super::SqlConnection::execute_batch(&conn, "CREATE TABLE users (id INTEGER, email TEXT);")
+            .unwrap();
         super::SqlConnection::execute_batch(
             &conn,
             "CREATE UNIQUE INDEX idx_users_email ON users (email);",
@@ -15167,7 +15082,11 @@ mod tests {
                 "TEXT"
             }
         }
-        assert!(list_sql_indexes(&NoIntrospection, "anything", None).unwrap().is_empty());
+        assert!(
+            list_sql_indexes(&NoIntrospection, "anything", None)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -15224,9 +15143,17 @@ mod tests {
         let conn = MultiSchemaIdx;
         let indexes = list_sql_indexes(&conn, "events", Some("analytics")).unwrap();
         assert_eq!(indexes.len(), 2);
-        assert!(indexes.iter().any(|i| i.unique && i.name == "uq_events_uid"));
+        assert!(
+            indexes
+                .iter()
+                .any(|i| i.unique && i.name == "uq_events_uid")
+        );
         // Wrong schema → empty (override scopes by Some).
-        assert!(list_sql_indexes(&conn, "events", Some("audit")).unwrap().is_empty());
+        assert!(
+            list_sql_indexes(&conn, "events", Some("audit"))
+                .unwrap()
+                .is_empty()
+        );
     }
 
     // ── list_sql_foreign_keys / SqlConnection::list_foreign_keys
@@ -15244,11 +15171,8 @@ mod tests {
     #[test]
     fn list_sql_foreign_keys_table_without_fk() {
         let conn = make_sql_test_conn();
-        super::SqlConnection::execute_batch(
-            &conn,
-            "CREATE TABLE plain (a INTEGER, b TEXT);",
-        )
-        .unwrap();
+        super::SqlConnection::execute_batch(&conn, "CREATE TABLE plain (a INTEGER, b TEXT);")
+            .unwrap();
         let fks = list_sql_foreign_keys(&conn, "plain", None).unwrap();
         assert!(fks.is_empty());
     }
@@ -15312,16 +15236,10 @@ mod tests {
     #[test]
     fn list_sql_foreign_keys_multiple_fks_on_one_table() {
         let conn = make_sql_test_conn();
-        super::SqlConnection::execute_batch(
-            &conn,
-            "CREATE TABLE users (id INTEGER PRIMARY KEY);",
-        )
-        .unwrap();
-        super::SqlConnection::execute_batch(
-            &conn,
-            "CREATE TABLE products (sku TEXT PRIMARY KEY);",
-        )
-        .unwrap();
+        super::SqlConnection::execute_batch(&conn, "CREATE TABLE users (id INTEGER PRIMARY KEY);")
+            .unwrap();
+        super::SqlConnection::execute_batch(&conn, "CREATE TABLE products (sku TEXT PRIMARY KEY);")
+            .unwrap();
         super::SqlConnection::execute_batch(
             &conn,
             "CREATE TABLE orders ( \
@@ -15338,7 +15256,10 @@ mod tests {
         let user_fk = fks.iter().find(|f| f.referenced_table == "users").unwrap();
         assert_eq!(user_fk.columns, vec!["user_id"]);
         assert_eq!(user_fk.referenced_columns, vec!["id"]);
-        let prod_fk = fks.iter().find(|f| f.referenced_table == "products").unwrap();
+        let prod_fk = fks
+            .iter()
+            .find(|f| f.referenced_table == "products")
+            .unwrap();
         assert_eq!(prod_fk.columns, vec!["product_sku"]);
         assert_eq!(prod_fk.referenced_columns, vec!["sku"]);
     }
@@ -15375,7 +15296,11 @@ mod tests {
         )
         .unwrap();
         let fks = list_sql_foreign_keys(&conn, "imp_child", None).unwrap();
-        assert_eq!(fks.len(), 1, "implicit-PK FK must surface (was being silently dropped)");
+        assert_eq!(
+            fks.len(),
+            1,
+            "implicit-PK FK must surface (was being silently dropped)"
+        );
         assert_eq!(fks[0].columns, vec!["parent_id"]);
         assert_eq!(fks[0].referenced_table, "imp_parent");
         // resolved from parent's PK.
@@ -15524,7 +15449,11 @@ mod tests {
         assert_eq!(fks[0].constraint_name.as_deref(), Some("orders_user_fk"));
         assert_eq!(fks[0].referenced_table, "users");
         // Wrong schema → empty (override scopes by Some).
-        assert!(list_sql_foreign_keys(&conn, "orders", Some("audit")).unwrap().is_empty());
+        assert!(
+            list_sql_foreign_keys(&conn, "orders", Some("audit"))
+                .unwrap()
+                .is_empty()
+        );
     }
 
     // ── list_sql_views / SqlConnection::list_views (br-gm3r / fd90.30) ────
@@ -15583,11 +15512,7 @@ mod tests {
     fn list_sql_views_schema_silently_ignored_on_sqlite() {
         let conn = make_sql_test_conn();
         super::SqlConnection::execute_batch(&conn, "CREATE TABLE t (x INTEGER);").unwrap();
-        super::SqlConnection::execute_batch(
-            &conn,
-            "CREATE VIEW v AS SELECT x FROM t;",
-        )
-        .unwrap();
+        super::SqlConnection::execute_batch(&conn, "CREATE VIEW v AS SELECT x FROM t;").unwrap();
         let with_schema =
             list_sql_views(&conn, Some("ignored_on_sqlite")).expect("schema arg must not error");
         let without_schema = list_sql_views(&conn, None).unwrap();
@@ -15748,11 +15673,8 @@ mod tests {
              );",
         )
         .unwrap();
-        super::SqlConnection::execute_batch(
-            &conn,
-            "CREATE UNIQUE INDEX idx_mixed_b ON mixed (b);",
-        )
-        .unwrap();
+        super::SqlConnection::execute_batch(&conn, "CREATE UNIQUE INDEX idx_mixed_b ON mixed (b);")
+            .unwrap();
 
         let uqs = list_sql_unique_constraints(&conn, "mixed", None).unwrap();
         let idxs = list_sql_indexes(&conn, "mixed", None).unwrap();
@@ -15915,7 +15837,11 @@ mod tests {
             }
         }
         let conn = NoIntrospection;
-        assert!(sql_table_comment(&conn, "anything", None).unwrap().is_none());
+        assert!(
+            sql_table_comment(&conn, "anything", None)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -15960,11 +15886,21 @@ mod tests {
         }
         let conn = PgLikeStub;
         assert_eq!(
-            sql_table_comment(&conn, "users", Some("public")).unwrap().as_deref(),
+            sql_table_comment(&conn, "users", Some("public"))
+                .unwrap()
+                .as_deref(),
             Some("Customer accounts table")
         );
-        assert!(sql_table_comment(&conn, "users", Some("audit")).unwrap().is_none());
-        assert!(sql_table_comment(&conn, "missing", Some("public")).unwrap().is_none());
+        assert!(
+            sql_table_comment(&conn, "users", Some("audit"))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            sql_table_comment(&conn, "missing", Some("public"))
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -15997,12 +15933,14 @@ mod tests {
                 _table: &str,
                 _schema: Option<&str>,
             ) -> Result<Option<String>, IoError> {
-                Err(IoError::Sql("permission denied for pg_description".to_owned()))
+                Err(IoError::Sql(
+                    "permission denied for pg_description".to_owned(),
+                ))
             }
         }
         let conn = BrokenIntrospection;
-        let err = sql_table_comment(&conn, "anything", None)
-            .expect_err("backend error must surface");
+        let err =
+            sql_table_comment(&conn, "anything", None).expect_err("backend error must surface");
         assert!(matches!(err, IoError::Sql(msg) if msg.contains("permission denied")));
     }
 
@@ -16012,11 +15950,8 @@ mod tests {
     #[test]
     fn write_sql_chunksize_zero_rejected() {
         let conn = make_sql_test_conn();
-        let frame = fp_frame::DataFrame::from_dict(
-            &["x"],
-            vec![("x", vec![Scalar::Int64(1)])],
-        )
-        .unwrap();
+        let frame =
+            fp_frame::DataFrame::from_dict(&["x"], vec![("x", vec![Scalar::Int64(1)])]).unwrap();
         let err = write_sql_with_options(
             &frame,
             &conn,
@@ -16438,11 +16373,8 @@ mod tests {
             "CREATE TABLE ordered_proj (a INT, b INT, c INT);",
         )
         .unwrap();
-        super::SqlConnection::execute_batch(
-            &conn,
-            "INSERT INTO ordered_proj VALUES (1, 2, 3);",
-        )
-        .unwrap();
+        super::SqlConnection::execute_batch(&conn, "INSERT INTO ordered_proj VALUES (1, 2, 3);")
+            .unwrap();
         let frame = read_sql_table_with_options(
             &conn,
             "ordered_proj",
@@ -16469,9 +16401,7 @@ mod tests {
             },
         )
         .expect_err("empty columns must be rejected");
-        assert!(
-            matches!(err, IoError::Sql(msg) if msg.contains("columns must be non-empty"))
-        );
+        assert!(matches!(err, IoError::Sql(msg) if msg.contains("columns must be non-empty")));
     }
 
     #[cfg(feature = "sql-sqlite")]
@@ -16535,11 +16465,8 @@ mod tests {
         // SQLite has no column-comment storage; the rusqlite override
         // must always emit comment=None even when the table is real.
         let conn = make_sql_test_conn();
-        super::SqlConnection::execute_batch(
-            &conn,
-            "CREATE TABLE labeled (id INTEGER, name TEXT);",
-        )
-        .unwrap();
+        super::SqlConnection::execute_batch(&conn, "CREATE TABLE labeled (id INTEGER, name TEXT);")
+            .unwrap();
         let schema = sql_table_schema(&conn, "labeled", None).unwrap().unwrap();
         for col in &schema.columns {
             assert!(
@@ -16640,11 +16567,8 @@ mod tests {
     #[test]
     fn read_sql_with_options_index_col_none_keeps_range_index() {
         let conn = make_sql_test_conn();
-        super::SqlConnection::execute_batch(
-            &conn,
-            "CREATE TABLE keyed (id INTEGER, val INTEGER);",
-        )
-        .unwrap();
+        super::SqlConnection::execute_batch(&conn, "CREATE TABLE keyed (id INTEGER, val INTEGER);")
+            .unwrap();
         super::SqlConnection::execute_batch(&conn, "INSERT INTO keyed VALUES (1, 10), (2, 20);")
             .unwrap();
         let frame = read_sql_with_options(
@@ -16665,11 +16589,8 @@ mod tests {
     #[test]
     fn read_sql_with_options_index_col_promotes_named_column() {
         let conn = make_sql_test_conn();
-        super::SqlConnection::execute_batch(
-            &conn,
-            "CREATE TABLE keyed (id INTEGER, val INTEGER);",
-        )
-        .unwrap();
+        super::SqlConnection::execute_batch(&conn, "CREATE TABLE keyed (id INTEGER, val INTEGER);")
+            .unwrap();
         super::SqlConnection::execute_batch(&conn, "INSERT INTO keyed VALUES (10, 1), (20, 2);")
             .unwrap();
         let frame = read_sql_with_options(
@@ -16902,7 +16823,10 @@ mod tests {
             "INTEGER PRIMARY KEY must be autoincrement; got {id:?}"
         );
         let name = schema.column("name").unwrap();
-        assert!(!name.autoincrement, "non-PK column must not be autoincrement");
+        assert!(
+            !name.autoincrement,
+            "non-PK column must not be autoincrement"
+        );
     }
 
     #[cfg(feature = "sql-sqlite")]
@@ -16971,7 +16895,9 @@ mod tests {
              );",
         )
         .unwrap();
-        let schema = sql_table_schema(&conn, "composite_pk", None).unwrap().unwrap();
+        let schema = sql_table_schema(&conn, "composite_pk", None)
+            .unwrap()
+            .unwrap();
         let year = schema.column("year").unwrap();
         let month = schema.column("month").unwrap();
         let code = schema.column("code").unwrap();
@@ -16980,7 +16906,10 @@ mod tests {
         assert_eq!(year.primary_key_ordinal, Some(0));
         assert_eq!(month.primary_key_ordinal, Some(1));
         assert_eq!(code.primary_key_ordinal, Some(2));
-        assert!(!year.autoincrement, "composite PK first col must not be autoincrement");
+        assert!(
+            !year.autoincrement,
+            "composite PK first col must not be autoincrement"
+        );
         assert!(!month.autoincrement);
         assert!(!code.autoincrement);
     }
@@ -17006,10 +16935,14 @@ mod tests {
         )
         .unwrap();
 
-        let single = sql_table_schema(&conn, "single_int_pk", None).unwrap().unwrap();
+        let single = sql_table_schema(&conn, "single_int_pk", None)
+            .unwrap()
+            .unwrap();
         assert!(single.column("id").unwrap().autoincrement);
 
-        let composite = sql_table_schema(&conn, "composite_int_pk", None).unwrap().unwrap();
+        let composite = sql_table_schema(&conn, "composite_int_pk", None)
+            .unwrap()
+            .unwrap();
         // Both columns have INTEGER type and pk>0 but neither qualifies.
         assert!(!composite.column("a").unwrap().autoincrement);
         assert!(!composite.column("b").unwrap().autoincrement);
@@ -17093,11 +17026,7 @@ mod tests {
         let conn = make_sql_test_conn();
         super::SqlConnection::execute_batch(&conn, "CREATE TABLE t1 (x INTEGER);").unwrap();
         super::SqlConnection::execute_batch(&conn, "CREATE TABLE t2 (y TEXT);").unwrap();
-        super::SqlConnection::execute_batch(
-            &conn,
-            "CREATE VIEW v1 AS SELECT x FROM t1;",
-        )
-        .unwrap();
+        super::SqlConnection::execute_batch(&conn, "CREATE VIEW v1 AS SELECT x FROM t1;").unwrap();
 
         let inspector = SqlInspector::new(&conn);
         assert_eq!(inspector.tables(None).unwrap(), vec!["t1", "t2"]);
@@ -17125,11 +17054,8 @@ mod tests {
              );",
         )
         .unwrap();
-        super::SqlConnection::execute_batch(
-            &conn,
-            "CREATE INDEX idx_child_tag ON child(tag);",
-        )
-        .unwrap();
+        super::SqlConnection::execute_batch(&conn, "CREATE INDEX idx_child_tag ON child(tag);")
+            .unwrap();
 
         let inspector = SqlInspector::new(&conn);
 
@@ -17261,16 +17187,10 @@ mod tests {
         let conn = PgLikeStub;
         let inspector = SqlInspector::new(&conn);
 
-        assert_eq!(
-            inspector.tables(Some("analytics")).unwrap(),
-            vec!["events"]
-        );
+        assert_eq!(inspector.tables(Some("analytics")).unwrap(), vec!["events"]);
         assert_eq!(inspector.views(Some("analytics")).unwrap(), vec!["daily"]);
         assert!(inspector.tables(Some("audit")).unwrap().is_empty());
-        assert_eq!(
-            inspector.schemas().unwrap(),
-            vec!["public", "analytics"]
-        );
+        assert_eq!(inspector.schemas().unwrap(), vec!["public", "analytics"]);
         assert_eq!(inspector.dialect_name(), "postgresql");
         assert_eq!(inspector.max_identifier_length(), Some(63));
     }
@@ -17295,11 +17215,7 @@ mod tests {
     #[test]
     fn sql_inspector_has_column_returns_false_for_missing_column() {
         let conn = make_sql_test_conn();
-        super::SqlConnection::execute_batch(
-            &conn,
-            "CREATE TABLE only_id (id INTEGER);",
-        )
-        .unwrap();
+        super::SqlConnection::execute_batch(&conn, "CREATE TABLE only_id (id INTEGER);").unwrap();
         let inspector = SqlInspector::new(&conn);
         // Table exists but no such column.
         assert!(!inspector.has_column("only_id", "name", None).unwrap());
@@ -17311,7 +17227,11 @@ mod tests {
         let conn = make_sql_test_conn();
         let inspector = SqlInspector::new(&conn);
         // Table doesn't exist → has_column propagates Ok(false), not error.
-        assert!(!inspector.has_column("no_such_tbl", "any_col", None).unwrap());
+        assert!(
+            !inspector
+                .has_column("no_such_tbl", "any_col", None)
+                .unwrap()
+        );
     }
 
     #[cfg(feature = "sql-sqlite")]
@@ -17331,7 +17251,10 @@ mod tests {
         // INTEGER PRIMARY KEY → SQLite autoincrement (rowid alias).
         assert!(id.autoincrement);
 
-        let status = inspector.column("detailed", "status", None).unwrap().unwrap();
+        let status = inspector
+            .column("detailed", "status", None)
+            .unwrap()
+            .unwrap();
         assert_eq!(status.declared_type.as_deref(), Some("TEXT"));
         assert!(status.nullable);
         assert_eq!(status.default_value.as_deref(), Some("'active'"));
@@ -17342,11 +17265,15 @@ mod tests {
     #[test]
     fn sql_inspector_column_returns_none_for_missing_column_or_table() {
         let conn = make_sql_test_conn();
-        super::SqlConnection::execute_batch(&conn, "CREATE TABLE only_x (x INTEGER);")
-            .unwrap();
+        super::SqlConnection::execute_batch(&conn, "CREATE TABLE only_x (x INTEGER);").unwrap();
         let inspector = SqlInspector::new(&conn);
         // Existing table, missing column → None.
-        assert!(inspector.column("only_x", "missing", None).unwrap().is_none());
+        assert!(
+            inspector
+                .column("only_x", "missing", None)
+                .unwrap()
+                .is_none()
+        );
         // Missing table → None.
         assert!(inspector.column("no_such", "any", None).unwrap().is_none());
     }
@@ -17406,7 +17333,11 @@ mod tests {
         let inspector = SqlInspector::new(&conn);
         assert!(inspector.has_column("users", "id", Some("public")).unwrap());
         assert!(!inspector.has_column("users", "id", Some("audit")).unwrap());
-        assert!(!inspector.has_column("users", "missing", Some("public")).unwrap());
+        assert!(
+            !inspector
+                .has_column("users", "missing", Some("public"))
+                .unwrap()
+        );
 
         let id_col = inspector
             .column("users", "id", Some("public"))
@@ -17414,7 +17345,12 @@ mod tests {
             .unwrap();
         assert_eq!(id_col.declared_type.as_deref(), Some("BIGINT"));
         assert!(id_col.autoincrement);
-        assert!(inspector.column("users", "id", Some("audit")).unwrap().is_none());
+        assert!(
+            inspector
+                .column("users", "id", Some("audit"))
+                .unwrap()
+                .is_none()
+        );
     }
 
     // ── SqlInspector::reflect_table (br-76mw / fd90.40) ──────────────────
@@ -17778,11 +17714,7 @@ mod tests {
                 },
                 SqlIndexSchema {
                     name: "idx_rolling_y_m_c".to_owned(),
-                    columns: vec![
-                        "year".to_owned(),
-                        "month".to_owned(),
-                        "code".to_owned(),
-                    ],
+                    columns: vec!["year".to_owned(), "month".to_owned(), "code".to_owned()],
                     unique: false,
                 },
             ],
@@ -17824,11 +17756,7 @@ mod tests {
                 },
                 SqlUniqueConstraintSchema {
                     name: "uq_events_user_event_ts".to_owned(),
-                    columns: vec![
-                        "user_id".to_owned(),
-                        "event_id".to_owned(),
-                        "ts".to_owned(),
-                    ],
+                    columns: vec!["user_id".to_owned(), "event_id".to_owned(), "ts".to_owned()],
                 },
             ],
             comment: None,
@@ -17847,7 +17775,11 @@ mod tests {
         let ts_uqs = bundle.unique_constraints_for_column("ts");
         assert_eq!(ts_uqs.len(), 1);
 
-        assert!(bundle.unique_constraints_for_column("nonexistent").is_empty());
+        assert!(
+            bundle
+                .unique_constraints_for_column("nonexistent")
+                .is_empty()
+        );
     }
 
     #[test]
@@ -17914,11 +17846,8 @@ mod tests {
             "CREATE TABLE alpha (id INTEGER PRIMARY KEY, name TEXT);",
         )
         .unwrap();
-        super::SqlConnection::execute_batch(
-            &conn,
-            "CREATE TABLE beta (uid INTEGER, label TEXT);",
-        )
-        .unwrap();
+        super::SqlConnection::execute_batch(&conn, "CREATE TABLE beta (uid INTEGER, label TEXT);")
+            .unwrap();
         let inspector = SqlInspector::new(&conn);
         let bundles = inspector.reflect_all_tables(None).unwrap();
         assert_eq!(bundles.len(), 2);
@@ -17927,7 +17856,11 @@ mod tests {
         assert_eq!(bundles[1].table_name, "beta");
         // Each bundle has full metadata.
         assert_eq!(
-            bundles[0].columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
+            bundles[0]
+                .columns
+                .iter()
+                .map(|c| c.name.as_str())
+                .collect::<Vec<_>>(),
             vec!["id", "name"]
         );
         assert_eq!(bundles[0].primary_key_columns, vec!["id"]);
@@ -18062,9 +17995,17 @@ mod tests {
         let bundles = inspector.reflect_all_tables(Some("analytics")).unwrap();
         assert_eq!(bundles.len(), 1);
         assert_eq!(bundles[0].table_name, "events");
-        assert_eq!(bundles[0].columns[0].declared_type.as_deref(), Some("TIMESTAMPTZ"));
+        assert_eq!(
+            bundles[0].columns[0].declared_type.as_deref(),
+            Some("TIMESTAMPTZ")
+        );
         // Wrong schema -> empty.
-        assert!(inspector.reflect_all_tables(Some("audit")).unwrap().is_empty());
+        assert!(
+            inspector
+                .reflect_all_tables(Some("audit"))
+                .unwrap()
+                .is_empty()
+        );
     }
 
     // ── SqlInspector::reflect_all_views (br-zuqt / fd90.54) ──────────────
@@ -18082,11 +18023,8 @@ mod tests {
     #[test]
     fn sql_inspector_reflect_all_views_returns_one_bundle_per_view() {
         let conn = make_sql_test_conn();
-        super::SqlConnection::execute_batch(
-            &conn,
-            "CREATE TABLE base (id INTEGER, label TEXT);",
-        )
-        .unwrap();
+        super::SqlConnection::execute_batch(&conn, "CREATE TABLE base (id INTEGER, label TEXT);")
+            .unwrap();
         super::SqlConnection::execute_batch(
             &conn,
             "CREATE VIEW alpha_view AS SELECT id FROM base;",
@@ -18105,11 +18043,19 @@ mod tests {
         assert_eq!(bundles[1].table_name, "zebra_view");
         // Each view's columns are surfaced via PRAGMA table_info.
         assert_eq!(
-            bundles[0].columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
+            bundles[0]
+                .columns
+                .iter()
+                .map(|c| c.name.as_str())
+                .collect::<Vec<_>>(),
             vec!["id"]
         );
         assert_eq!(
-            bundles[1].columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
+            bundles[1]
+                .columns
+                .iter()
+                .map(|c| c.name.as_str())
+                .collect::<Vec<_>>(),
             vec!["label"]
         );
         // Views don't carry constraints — PK/FK/UC/index lists are empty.
@@ -18186,7 +18132,12 @@ mod tests {
         assert_eq!(bundles[0].table_name, "weekly_summary");
         assert_eq!(bundles[0].columns[0].declared_type.as_deref(), Some("DATE"));
         // Wrong schema -> empty.
-        assert!(inspector.reflect_all_views(Some("audit")).unwrap().is_empty());
+        assert!(
+            inspector
+                .reflect_all_views(Some("audit"))
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -18262,7 +18213,10 @@ mod tests {
         // / read_sql_table. We must match — any bare ::default() call
         // should opt INTO coerce_float, not opt out.
         let opts = SqlReadOptions::default();
-        assert!(opts.coerce_float, "default coerce_float must be true (pandas parity)");
+        assert!(
+            opts.coerce_float,
+            "default coerce_float must be true (pandas parity)"
+        );
         // Sanity: other defaults are the natural empty / None values.
         assert!(opts.params.is_none());
         assert!(opts.parse_dates.is_none());
