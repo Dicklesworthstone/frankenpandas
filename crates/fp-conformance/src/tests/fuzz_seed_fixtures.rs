@@ -1106,11 +1106,15 @@ fn fuzz_series_add_bytes_replays_committed_corpus_seeds() {
     let seeds: &[(&str, &[u8])] = &[
         (
             "single_same_idx_int",
-            include_bytes!("../../fixtures/adversarial/fuzz_corpus/series_add/single_same_idx_int.bin"),
+            include_bytes!(
+                "../../fixtures/adversarial/fuzz_corpus/series_add/single_same_idx_int.bin"
+            ),
         ),
         (
             "single_diff_idx_int",
-            include_bytes!("../../fixtures/adversarial/fuzz_corpus/series_add/single_diff_idx_int.bin"),
+            include_bytes!(
+                "../../fixtures/adversarial/fuzz_corpus/series_add/single_diff_idx_int.bin"
+            ),
         ),
         (
             "null_plus_int",
@@ -1130,15 +1134,21 @@ fn fuzz_series_add_bytes_replays_committed_corpus_seeds() {
         ),
         (
             "float_plus_neginf",
-            include_bytes!("../../fixtures/adversarial/fuzz_corpus/series_add/float_plus_neginf.bin"),
+            include_bytes!(
+                "../../fixtures/adversarial/fuzz_corpus/series_add/float_plus_neginf.bin"
+            ),
         ),
         (
             "float_plus_nanfloat",
-            include_bytes!("../../fixtures/adversarial/fuzz_corpus/series_add/float_plus_nanfloat.bin"),
+            include_bytes!(
+                "../../fixtures/adversarial/fuzz_corpus/series_add/float_plus_nanfloat.bin"
+            ),
         ),
         (
             "multi_overlap_nulls",
-            include_bytes!("../../fixtures/adversarial/fuzz_corpus/series_add/multi_overlap_nulls.bin"),
+            include_bytes!(
+                "../../fixtures/adversarial/fuzz_corpus/series_add/multi_overlap_nulls.bin"
+            ),
         ),
         (
             "all_nulls_left",
@@ -1150,7 +1160,9 @@ fn fuzz_series_add_bytes_replays_committed_corpus_seeds() {
         ),
         (
             "mixed_types_both",
-            include_bytes!("../../fixtures/adversarial/fuzz_corpus/series_add/mixed_types_both.bin"),
+            include_bytes!(
+                "../../fixtures/adversarial/fuzz_corpus/series_add/mixed_types_both.bin"
+            ),
         ),
         (
             "neg_int_values",
@@ -1158,25 +1170,34 @@ fn fuzz_series_add_bytes_replays_committed_corpus_seeds() {
         ),
         (
             "zero_plus_negzero",
-            include_bytes!("../../fixtures/adversarial/fuzz_corpus/series_add/zero_plus_negzero.bin"),
+            include_bytes!(
+                "../../fixtures/adversarial/fuzz_corpus/series_add/zero_plus_negzero.bin"
+            ),
         ),
         (
             "large_plus_small",
-            include_bytes!("../../fixtures/adversarial/fuzz_corpus/series_add/large_plus_small.bin"),
+            include_bytes!(
+                "../../fixtures/adversarial/fuzz_corpus/series_add/large_plus_small.bin"
+            ),
         ),
         (
             "string_idx_labels",
-            include_bytes!("../../fixtures/adversarial/fuzz_corpus/series_add/string_idx_labels.bin"),
+            include_bytes!(
+                "../../fixtures/adversarial/fuzz_corpus/series_add/string_idx_labels.bin"
+            ),
         ),
         (
             "dup_labels_same",
             include_bytes!("../../fixtures/adversarial/fuzz_corpus/series_add/dup_labels_same.bin"),
         ),
+        (
+            "seed-empty",
+            include_bytes!("../../fixtures/adversarial/fuzz_corpus/series_add/seed-empty.bin"),
+        ),
     ];
 
     for (name, seed) in seeds {
-        fuzz_series_add_bytes(seed)
-            .unwrap_or_else(|err| panic!("seed {name} failed: {err}"));
+        fuzz_series_add_bytes(seed).unwrap_or_else(|err| panic!("seed {name} failed: {err}"));
     }
 }
 

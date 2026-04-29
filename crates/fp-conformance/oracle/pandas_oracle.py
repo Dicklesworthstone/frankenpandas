@@ -5027,6 +5027,52 @@ def op_series_drop_duplicates(pd, payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def op_series_abs(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    if left is None:
+        raise OracleError("series_abs requires left payload")
+
+    index = [label_from_json(item) for item in left["index"]]
+    values = [scalar_from_json(item) for item in left["values"]]
+    series = pd.Series(values, index=index, name=left.get("name", "series"))
+
+    try:
+        out = series.abs()
+    except Exception as exc:
+        raise OracleError(f"series_abs failed: {exc}") from exc
+
+    return {
+        "expected_series": {
+            "index": [label_to_json(v) for v in out.index.tolist()],
+            "values": [scalar_to_json(v) for v in out.tolist()],
+        }
+    }
+
+
+def op_series_round(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    decimals = payload.get("round_decimals", 0)
+
+    if left is None:
+        raise OracleError("series_round requires left payload")
+
+    index = [label_from_json(item) for item in left["index"]]
+    values = [scalar_from_json(item) for item in left["values"]]
+    series = pd.Series(values, index=index, name=left.get("name", "series"))
+
+    try:
+        out = series.round(decimals=decimals)
+    except Exception as exc:
+        raise OracleError(f"series_round failed: {exc}") from exc
+
+    return {
+        "expected_series": {
+            "index": [label_to_json(v) for v in out.index.tolist()],
+            "values": [scalar_to_json(v) for v in out.tolist()],
+        }
+    }
+
+
 def require_join_type(payload: dict[str, Any], op_name: str, *, allow_cross: bool = False) -> str:
     join_type = payload.get("join_type")
     allowed = {"inner", "left", "right", "outer"}
@@ -5586,6 +5632,10 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_series_cummin(pd, payload)
     if op in {"series_drop_duplicates", "series_drop_duplicates_default"}:
         return op_series_drop_duplicates(pd, payload)
+    if op in {"series_abs", "series_abs_default"}:
+        return op_series_abs(pd, payload)
+    if op in {"series_round", "series_round_default"}:
+        return op_series_round(pd, payload)
     if op == "series_any":
         return op_series_any(pd, payload)
     if op == "series_all":
