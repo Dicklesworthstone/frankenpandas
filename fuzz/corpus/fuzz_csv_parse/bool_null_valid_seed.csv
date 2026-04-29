@@ -1,0 +1,4 @@
+id,flag,note
+1,true,yes
+2,false,no
+3,,missing
