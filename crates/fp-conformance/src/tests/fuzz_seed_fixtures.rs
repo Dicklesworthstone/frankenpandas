@@ -1197,7 +1197,11 @@ fn fuzz_series_add_bytes_replays_committed_corpus_seeds() {
     ];
 
     for (name, seed) in seeds {
-        fuzz_series_add_bytes(seed).unwrap_or_else(|err| panic!("seed {name} failed: {err}"));
+        let result = fuzz_series_add_bytes(seed);
+        assert!(
+            result.is_ok(),
+            "series_add corpus seed {name} should pass: {result:?}"
+        );
     }
 }
 
