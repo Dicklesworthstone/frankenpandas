@@ -7222,8 +7222,12 @@ fn live_oracle_series_any_with_truthy_value() {
         return;
     }
     let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Bool(_)),
+        "expected live oracle bool payload, got {expected:?}"
+    );
     let super::ResolvedExpected::Bool(expected_bool) = expected else {
-        panic!("expected bool payload, got {expected:?}");
+        return;
     };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
@@ -7264,8 +7268,12 @@ fn live_oracle_series_any_all_zeros() {
         return;
     }
     let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Bool(_)),
+        "expected live oracle bool payload, got {expected:?}"
+    );
     let super::ResolvedExpected::Bool(expected_bool) = expected else {
-        panic!("expected bool payload, got {expected:?}");
+        return;
     };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
@@ -7304,8 +7312,12 @@ fn live_oracle_series_any_with_nulls_only() {
         return;
     }
     let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Bool(_)),
+        "expected live oracle bool payload, got {expected:?}"
+    );
     let super::ResolvedExpected::Bool(expected_bool) = expected else {
-        panic!("expected bool payload, got {expected:?}");
+        return;
     };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
@@ -7346,8 +7358,12 @@ fn live_oracle_series_all_with_truthy_values() {
         return;
     }
     let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Bool(_)),
+        "expected live oracle bool payload, got {expected:?}"
+    );
     let super::ResolvedExpected::Bool(expected_bool) = expected else {
-        panic!("expected bool payload, got {expected:?}");
+        return;
     };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
@@ -7388,8 +7404,12 @@ fn live_oracle_series_all_with_zero_value() {
         return;
     }
     let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Bool(_)),
+        "expected live oracle bool payload, got {expected:?}"
+    );
     let super::ResolvedExpected::Bool(expected_bool) = expected else {
-        panic!("expected bool payload, got {expected:?}");
+        return;
     };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
@@ -7432,8 +7452,12 @@ fn live_oracle_series_all_with_nulls_skipped() {
         return;
     }
     let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Bool(_)),
+        "expected live oracle bool payload, got {expected:?}"
+    );
     let super::ResolvedExpected::Bool(expected_bool) = expected else {
-        panic!("expected bool payload, got {expected:?}");
+        return;
     };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
