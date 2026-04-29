@@ -887,6 +887,109 @@ fn fuzz_scalar_cast_bytes_accepts_lossy_float_error_seed() {
 }
 
 #[test]
+fn fuzz_scalar_cast_bytes_replays_committed_corpus_seeds() {
+    let corpus: &[(&str, &[u8])] = &[
+        (
+            "null_to_null.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_scalar_cast/null_to_null.bin"),
+        ),
+        (
+            "null_to_bool.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_scalar_cast/null_to_bool.bin"),
+        ),
+        (
+            "null_to_int.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_scalar_cast/null_to_int.bin"),
+        ),
+        (
+            "null_to_float.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_scalar_cast/null_to_float.bin"),
+        ),
+        (
+            "null_to_utf8.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_scalar_cast/null_to_utf8.bin"),
+        ),
+        (
+            "nan_to_float.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_scalar_cast/nan_to_float.bin"),
+        ),
+        (
+            "bool_true_to_int.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_scalar_cast/bool_true_to_int.bin"),
+        ),
+        (
+            "bool_false_to_float.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_scalar_cast/bool_false_to_float.bin"),
+        ),
+        (
+            "int_max_to_float.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_scalar_cast/int_max_to_float.bin"),
+        ),
+        (
+            "int_min_to_float.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_scalar_cast/int_min_to_float.bin"),
+        ),
+        (
+            "int_to_utf8.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_scalar_cast/int_to_utf8.bin"),
+        ),
+        (
+            "float_inf_to_int.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_scalar_cast/float_inf_to_int.bin"),
+        ),
+        (
+            "float_nan_to_int.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_scalar_cast/float_nan_to_int.bin"),
+        ),
+        (
+            "float_zero_to_bool.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_scalar_cast/float_zero_to_bool.bin"),
+        ),
+        (
+            "float_one_to_bool.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_scalar_cast/float_one_to_bool.bin"),
+        ),
+        (
+            "float_neg_to_utf8.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_scalar_cast/float_neg_to_utf8.bin"),
+        ),
+        (
+            "utf8_42_to_int.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_scalar_cast/utf8_42_to_int.bin"),
+        ),
+        (
+            "utf8_empty_to_bool.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_scalar_cast/utf8_empty_to_bool.bin"),
+        ),
+        (
+            "bool_to_null.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_scalar_cast/bool_to_null.bin"),
+        ),
+        (
+            "bool_false_to_utf8.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_scalar_cast/bool_false_to_utf8.bin"),
+        ),
+        (
+            "float_neginf_to_float.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_scalar_cast/float_neginf_to_float.bin"),
+        ),
+        (
+            "utf8_neg1_to_int.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_scalar_cast/utf8_neg1_to_int.bin"),
+        ),
+        (
+            "int_zero_to_float.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_scalar_cast/int_zero_to_float.bin"),
+        ),
+    ];
+
+    for (name, seed) in corpus {
+        fuzz_scalar_cast_bytes(seed)
+            .unwrap_or_else(|err| panic!("scalar_cast corpus seed {name} should pass: {err:?}"));
+    }
+}
+
+#[test]
 fn fuzz_series_add_bytes_accepts_unique_overlap_seed() {
     let seed =
         include_bytes!("../../fixtures/adversarial/fuzz_corpus/series_add/unique_overlap_seed.bin");
