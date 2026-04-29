@@ -641,6 +641,96 @@ fn fuzz_semantic_eq_bytes_locks_nan_missing_bridge() {
 }
 
 #[test]
+fn fuzz_semantic_eq_bytes_replays_committed_corpus_seeds() {
+    let seeds: &[(&str, &[u8])] = &[
+        (
+            "int_same.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_semantic_eq/int_same.bin"),
+        ),
+        (
+            "float_same.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_semantic_eq/float_same.bin"),
+        ),
+        (
+            "bool_same.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_semantic_eq/bool_same.bin"),
+        ),
+        (
+            "utf8_same.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_semantic_eq/utf8_same.bin"),
+        ),
+        (
+            "int_diff.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_semantic_eq/int_diff.bin"),
+        ),
+        (
+            "float_diff.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_semantic_eq/float_diff.bin"),
+        ),
+        (
+            "bool_diff.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_semantic_eq/bool_diff.bin"),
+        ),
+        (
+            "null_null.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_semantic_eq/null_null.bin"),
+        ),
+        (
+            "null_nan.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_semantic_eq/null_nan.bin"),
+        ),
+        (
+            "null_nat.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_semantic_eq/null_nat.bin"),
+        ),
+        (
+            "nan_nat.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_semantic_eq/nan_nat.bin"),
+        ),
+        (
+            "float_nan.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_semantic_eq/float_nan.bin"),
+        ),
+        (
+            "float_nan_vs_null.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_semantic_eq/float_nan_vs_null.bin"),
+        ),
+        (
+            "int_vs_float.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_semantic_eq/int_vs_float.bin"),
+        ),
+        (
+            "int_vs_bool.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_semantic_eq/int_vs_bool.bin"),
+        ),
+        (
+            "float_vs_bool.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_semantic_eq/float_vs_bool.bin"),
+        ),
+        (
+            "int_zero.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_semantic_eq/int_zero.bin"),
+        ),
+        (
+            "float_zero.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_semantic_eq/float_zero.bin"),
+        ),
+        (
+            "seed-empty.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_semantic_eq/seed-empty.bin"),
+        ),
+    ];
+
+    for (name, seed) in seeds {
+        let result = fuzz_semantic_eq_bytes(seed);
+        assert!(
+            result.is_ok(),
+            "semantic_eq corpus seed {name} should pass: {result:?}"
+        );
+    }
+}
+
+#[test]
 fn fuzz_dataframe_eval_bytes_accepts_empty_input() {
     fuzz_dataframe_eval_bytes(&[]).expect("empty input should be a no-op");
 }
