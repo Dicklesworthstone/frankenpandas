@@ -5022,12 +5022,19 @@ impl Series {
                 "searchsorted: side must be 'left' or 'right', got {side:?}"
             )));
         }
-        if value.is_missing() {
-            return Err(FrameError::CompatibilityRejected(
-                "searchsorted: needle cannot be missing".to_owned(),
-            ));
-        }
         let vals = self.column.values();
+        if value.is_missing() {
+            return Ok(match side {
+                "right" => vals
+                    .iter()
+                    .rposition(Scalar::is_missing)
+                    .map_or(vals.len(), |pos| pos + 1),
+                _ => vals
+                    .iter()
+                    .position(Scalar::is_missing)
+                    .unwrap_or(vals.len()),
+            });
+        }
         let pos = vals
             .iter()
             .position(|v| {
@@ -48127,21 +48134,28 @@ mod tests {
     }
 
     #[test]
-    fn series_searchsorted_values_reject_missing_value() {
+    fn series_searchsorted_values_accept_missing_value() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), 1_i64.into()],
-            vec![Scalar::Float64(1.0), Scalar::Float64(2.0)],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::NaN),
+            ],
         )
         .unwrap();
 
-        let err = s
+        let positions = s
             .searchsorted_values(&[Scalar::Null(NullKind::NaN)], "left")
-            .unwrap_err();
-        // New error path uses CompatibilityRejected with a clearer message
-        // ("searchsorted: needle cannot be missing") instead of wrapping a
-        // numeric-coercion TypeError.
-        assert!(matches!(err, FrameError::CompatibilityRejected(_)));
+            .unwrap();
+        assert_eq!(positions, vec![2]);
+
+        let positions = s
+            .searchsorted_values(&[Scalar::Null(NullKind::NaN)], "right")
+            .unwrap();
+        assert_eq!(positions, vec![4]);
     }
 
     #[test]
@@ -48200,13 +48214,40 @@ mod tests {
     }
 
     #[test]
-    fn series_searchsorted_rejects_missing_needle() {
+    fn series_searchsorted_missing_needle_inserts_at_nan_tail() {
         let s =
             Series::from_values("x", vec![0_i64.into()], vec![Scalar::Utf8("a".into())]).unwrap();
-        let err = s
-            .searchsorted(&Scalar::Null(NullKind::NaN), "left")
-            .unwrap_err();
-        assert!(matches!(err, FrameError::CompatibilityRejected(_)));
+        assert_eq!(
+            s.searchsorted(&Scalar::Null(NullKind::NaN), "left")
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            s.searchsorted(&Scalar::Null(NullKind::NaN), "right")
+                .unwrap(),
+            1
+        );
+
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::NaN),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            s.searchsorted(&Scalar::Null(NullKind::NaN), "left")
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            s.searchsorted(&Scalar::Null(NullKind::NaN), "right")
+                .unwrap(),
+            3
+        );
     }
 
     #[test]
