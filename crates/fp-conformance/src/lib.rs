@@ -7094,20 +7094,8 @@ fn fuzz_column_arith_oracle_scalar(
             ArithmeticOp::Add => lhs.wrapping_add(rhs),
             ArithmeticOp::Sub => lhs.wrapping_sub(rhs),
             ArithmeticOp::Mul => lhs.wrapping_mul(rhs),
-            ArithmeticOp::Mod => {
-                if lhs == i64::MIN && rhs == -1 {
-                    0
-                } else {
-                    lhs.rem_euclid(rhs)
-                }
-            }
-            ArithmeticOp::FloorDiv => {
-                if lhs == i64::MIN && rhs == -1 {
-                    i64::MIN
-                } else {
-                    lhs.div_euclid(rhs)
-                }
-            }
+            ArithmeticOp::Mod => fuzz_python_mod_i64(lhs, rhs),
+            ArithmeticOp::FloorDiv => fuzz_python_floor_div_i64(lhs, rhs),
             ArithmeticOp::Div | ArithmeticOp::Pow => {
                 return Err(format!(
                     "int oracle received unsupported op {:?} for dtype {:?}",
@@ -7129,11 +7117,86 @@ fn fuzz_column_arith_oracle_scalar(
         ArithmeticOp::Sub => lhs - rhs,
         ArithmeticOp::Mul => lhs * rhs,
         ArithmeticOp::Div => lhs / rhs,
-        ArithmeticOp::Mod => lhs % rhs,
+        ArithmeticOp::Mod => fuzz_python_mod_f64(lhs, rhs),
         ArithmeticOp::Pow => lhs.powf(rhs),
-        ArithmeticOp::FloorDiv => (lhs / rhs).floor(),
+        ArithmeticOp::FloorDiv => fuzz_python_floor_div_f64(lhs, rhs),
     };
     Ok(Scalar::Float64(result))
+}
+
+fn fuzz_python_floor_div_i64(lhs: i64, rhs: i64) -> i64 {
+    debug_assert_ne!(rhs, 0);
+    if lhs == i64::MIN && rhs == -1 {
+        return i64::MIN;
+    }
+
+    let quotient = lhs / rhs;
+    let remainder = lhs % rhs;
+    if remainder != 0 && ((remainder > 0) != (rhs > 0)) {
+        quotient - 1
+    } else {
+        quotient
+    }
+}
+
+fn fuzz_python_mod_i64(lhs: i64, rhs: i64) -> i64 {
+    debug_assert_ne!(rhs, 0);
+    if lhs == i64::MIN && rhs == -1 {
+        return 0;
+    }
+
+    let quotient = i128::from(fuzz_python_floor_div_i64(lhs, rhs));
+    let remainder = i128::from(lhs) - quotient * i128::from(rhs);
+    let Ok(value) = i64::try_from(remainder) else {
+        return 0;
+    };
+    value
+}
+
+fn fuzz_python_mod_f64(lhs: f64, rhs: f64) -> f64 {
+    if lhs.is_nan() || rhs.is_nan() {
+        return f64::NAN;
+    }
+
+    if rhs.is_infinite() {
+        if lhs.is_infinite() {
+            return f64::NAN;
+        }
+        if lhs == 0.0 {
+            return 0.0_f64.copysign(rhs);
+        }
+        if lhs.is_sign_positive() == rhs.is_sign_positive() {
+            lhs
+        } else {
+            rhs
+        }
+    } else {
+        lhs - fuzz_python_floor_div_f64(lhs, rhs) * rhs
+    }
+}
+
+fn fuzz_python_floor_div_f64(lhs: f64, rhs: f64) -> f64 {
+    if lhs.is_nan() || rhs.is_nan() {
+        return f64::NAN;
+    }
+
+    if rhs.is_infinite() {
+        if lhs.is_infinite() {
+            return f64::NAN;
+        }
+        if lhs == 0.0 {
+            return (lhs / rhs).floor();
+        }
+        if lhs.is_sign_positive() == rhs.is_sign_positive() {
+            0.0
+        } else {
+            -1.0
+        }
+    } else if lhs.is_infinite() && rhs != 0.0 {
+        f64::NAN
+    } else {
+        (lhs / rhs).floor()
+    }
 }
 
 fn scalars_equivalent(actual: &Scalar, expected: &Scalar, preserves_nan_missing: bool) -> bool {
