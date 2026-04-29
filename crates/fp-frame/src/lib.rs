@@ -1135,6 +1135,34 @@ fn compare_non_missing_scalars_for_sort(left: &Scalar, right: &Scalar) -> Orderi
     }
 }
 
+fn compare_non_missing_scalars_for_between(
+    value: &Scalar,
+    bound: &Scalar,
+) -> Result<Ordering, FrameError> {
+    match (value, bound) {
+        (Scalar::Bool(_), Scalar::Bool(_))
+        | (Scalar::Bool(_), Scalar::Int64(_))
+        | (Scalar::Bool(_), Scalar::Float64(_))
+        | (Scalar::Int64(_), Scalar::Bool(_))
+        | (Scalar::Int64(_), Scalar::Int64(_))
+        | (Scalar::Int64(_), Scalar::Float64(_))
+        | (Scalar::Float64(_), Scalar::Bool(_))
+        | (Scalar::Float64(_), Scalar::Int64(_))
+        | (Scalar::Float64(_), Scalar::Float64(_)) => {
+            let value = value.to_f64().map_err(ColumnError::from)?;
+            let bound = bound.to_f64().map_err(ColumnError::from)?;
+            Ok(value.partial_cmp(&bound).unwrap_or(Ordering::Less))
+        }
+        (Scalar::Utf8(lhs), Scalar::Utf8(rhs)) => Ok(lhs.cmp(rhs)),
+        (Scalar::Timedelta64(lhs), Scalar::Timedelta64(rhs)) => Ok(lhs.cmp(rhs)),
+        _ => Err(FrameError::CompatibilityRejected(format!(
+            "between: cannot compare {:?} value with {:?} bound",
+            value.dtype(),
+            bound.dtype()
+        ))),
+    }
+}
+
 fn compare_scalars_with_na_last(left: &Scalar, right: &Scalar, ascending: bool) -> Ordering {
     compare_scalars_with_na_position(left, right, ascending, false)
 }
@@ -4624,32 +4652,26 @@ impl Series {
             )));
         }
 
-        let left_f = left.to_f64().map_err(ColumnError::from)?;
-        let right_f = right.to_f64().map_err(ColumnError::from)?;
-
         let values: Vec<Scalar> = self
             .column
             .values()
             .iter()
-            .map(|val| {
+            .map(|val| -> Result<Scalar, FrameError> {
                 if val.is_missing() {
-                    return Scalar::Bool(false);
+                    return Ok(Scalar::Bool(false));
                 }
-                match val.to_f64() {
-                    Ok(v) => {
-                        let result = match inclusive {
-                            "both" => v >= left_f && v <= right_f,
-                            "neither" => v > left_f && v < right_f,
-                            "left" => v >= left_f && v < right_f,
-                            "right" => v > left_f && v <= right_f,
-                            _ => unreachable!("inclusive validated above"),
-                        };
-                        Scalar::Bool(result)
-                    }
-                    Err(_) => Scalar::Bool(false),
-                }
+                let left_cmp = compare_non_missing_scalars_for_between(val, left)?;
+                let right_cmp = compare_non_missing_scalars_for_between(val, right)?;
+                let result = match inclusive {
+                    "both" => !left_cmp.is_lt() && !right_cmp.is_gt(),
+                    "neither" => left_cmp.is_gt() && right_cmp.is_lt(),
+                    "left" => !left_cmp.is_lt() && right_cmp.is_lt(),
+                    "right" => left_cmp.is_gt() && !right_cmp.is_gt(),
+                    _ => unreachable!("inclusive validated above"),
+                };
+                Ok(Scalar::Bool(result))
             })
-            .collect();
+            .collect::<Result<_, _>>()?;
 
         Self::from_values(self.name.clone(), self.index.labels().to_vec(), values)
     }
@@ -37056,6 +37078,51 @@ mod tests {
         assert_eq!(result.values()[0], Scalar::Bool(false));
         assert_eq!(result.values()[1], Scalar::Bool(true));
         assert_eq!(result.values()[2], Scalar::Bool(false));
+    }
+
+    #[test]
+    fn series_between_string_range() {
+        let s = Series::from_values(
+            "x",
+            vec!["a".into(), "b".into(), "c".into(), "d".into()],
+            vec![
+                Scalar::Utf8("alpha".into()),
+                Scalar::Utf8("bravo".into()),
+                Scalar::Utf8("charlie".into()),
+                Scalar::Null(NullKind::NaN),
+            ],
+        )
+        .unwrap();
+
+        let result = s
+            .between(
+                &Scalar::Utf8("bravo".into()),
+                &Scalar::Utf8("charlie".into()),
+                "both",
+            )
+            .unwrap();
+        assert_eq!(result.values()[0], Scalar::Bool(false));
+        assert_eq!(result.values()[1], Scalar::Bool(true));
+        assert_eq!(result.values()[2], Scalar::Bool(true));
+        assert_eq!(result.values()[3], Scalar::Bool(false));
+    }
+
+    #[test]
+    fn series_between_mixed_string_numeric_rejects() {
+        let s = Series::from_values(
+            "x",
+            vec!["a".into(), "b".into()],
+            vec![Scalar::Int64(1), Scalar::Utf8("x".into())],
+        )
+        .unwrap();
+
+        let err = s
+            .between(&Scalar::Int64(0), &Scalar::Int64(2), "both")
+            .expect_err("mixed scalar comparisons should error");
+        assert!(
+            matches!(&err, FrameError::CompatibilityRejected(msg) if msg.contains("cannot compare")),
+            "unexpected error: {err:?}"
+        );
     }
 
     #[test]
