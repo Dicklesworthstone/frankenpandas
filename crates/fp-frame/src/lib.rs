@@ -4854,10 +4854,39 @@ impl Series {
 
     /// Return the integer indices that would sort the Series.
     ///
-    /// Matches `pd.Series.argsort()`. NaN values are placed last.
+    /// Matches `pd.Series.argsort()` for the default ascending path.
+    ///
+    /// Current pandas maps missing positions to `-1`; descending argsort is a
+    /// FrankenPandas extension and keeps missing values last.
     pub fn argsort(&self, ascending: bool) -> Result<Self, FrameError> {
         let mut order: Vec<usize> = (0..self.len()).collect();
         let vals = self.column.values();
+        if ascending && vals.iter().any(Scalar::is_missing) {
+            let non_missing: Vec<(usize, &Scalar)> = vals
+                .iter()
+                .enumerate()
+                .filter(|(_, value)| !value.is_missing())
+                .collect();
+            let mut compact_order: Vec<usize> = (0..non_missing.len()).collect();
+            compact_order.sort_by(|&a, &b| {
+                compare_scalars_with_na_last(non_missing[a].1, non_missing[b].1, true)
+            });
+            let mut compact_idx = 0usize;
+            let mut out_vals = Vec::with_capacity(vals.len());
+            for value in vals {
+                if value.is_missing() {
+                    out_vals.push(Scalar::Int64(-1));
+                } else if let Some(&position) = compact_order.get(compact_idx) {
+                    out_vals.push(Scalar::Int64(position as i64));
+                    compact_idx += 1;
+                } else {
+                    return Err(FrameError::CompatibilityRejected(
+                        "argsort non-missing count changed during sorting".to_string(),
+                    ));
+                }
+            }
+            return Self::from_values(self.name.clone(), self.index.labels().to_vec(), out_vals);
+        }
         order.sort_by(|&a, &b| compare_scalars_with_na_last(&vals[a], &vals[b], ascending));
 
         let labels = self.index.labels().to_vec();
@@ -47700,6 +47729,40 @@ mod tests {
         assert_eq!(result.values()[0], Scalar::Int64(0)); // 3.0 is largest
         assert_eq!(result.values()[1], Scalar::Int64(2)); // 2.0 is next
         assert_eq!(result.values()[2], Scalar::Int64(1)); // 1.0 is smallest
+    }
+
+    #[test]
+    fn series_argsort_missing_values_match_pandas_current_sentinel() {
+        let s = Series::from_values(
+            "x",
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+            ],
+            vec![
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(5.0),
+                Scalar::Float64(2.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(3.0),
+            ],
+        )
+        .unwrap();
+
+        let result = s.argsort(true).unwrap();
+        assert_eq!(
+            result.values(),
+            &[
+                Scalar::Int64(-1),
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(-1),
+                Scalar::Int64(0),
+            ]
+        );
     }
 
     #[test]

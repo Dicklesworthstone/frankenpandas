@@ -1894,11 +1894,28 @@ def op_series_argsort(pd, payload: dict[str, Any]) -> dict[str, Any]:
     if ascending is None:
         ascending = True
     na_position = payload.get("na_position") or "last"
+    if not isinstance(ascending, bool):
+        raise OracleError("series_argsort sort_ascending must be a boolean")
+    if na_position not in ("first", "last"):
+        raise OracleError("series_argsort na_position must be 'first' or 'last'")
 
     index = [label_from_json(item) for item in left["index"]]
     values = [scalar_from_json(item) for item in left["values"]]
     series = pd.Series(values, index=index, name=left.get("name", "series"))
-    out = series.argsort(ascending=ascending, na_position=na_position)
+    if ascending:
+        if na_position != "last":
+            raise OracleError("pandas Series.argsort does not support na_position='first'")
+        out = series.argsort()
+    else:
+        # pandas Series.argsort has no ascending parameter. FrankenPandas exposes
+        # descending argsort as an extension, so derive that oracle from pandas'
+        # value ordering over positional labels.
+        sorted_positions = (
+            pd.Series(values, index=range(len(values)))
+            .sort_values(ascending=False, na_position=na_position, kind="mergesort")
+            .index.tolist()
+        )
+        out = pd.Series(sorted_positions, index=index, name=series.name)
 
     return {
         "expected_series": {
