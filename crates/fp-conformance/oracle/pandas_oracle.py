@@ -4760,6 +4760,64 @@ def op_dataframe_nsmallest(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return {"expected_frame": dataframe_to_json(out)}
 
 
+def op_series_nlargest(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    n = payload.get("nlargest_n")
+    keep = payload.get("keep", "first")
+
+    if left is None:
+        raise OracleError("series_nlargest requires left payload")
+    if not isinstance(n, int) or isinstance(n, bool) or n < 0:
+        raise OracleError("series_nlargest requires non-negative integer nlargest_n")
+    if keep not in {"first", "last", "all"}:
+        raise OracleError(f"series_nlargest keep must be one of first|last|all, got {keep!r}")
+
+    index = [label_from_json(item) for item in left["index"]]
+    values = [scalar_from_json(item) for item in left["values"]]
+    series = pd.Series(values, index=index, name=left.get("name", "series"))
+
+    try:
+        out = series.nlargest(n=n, keep=keep)
+    except Exception as exc:
+        raise OracleError(f"series_nlargest failed: {exc}") from exc
+
+    return {
+        "expected_series": {
+            "index": [label_to_json(v) for v in out.index.tolist()],
+            "values": [scalar_to_json(v) for v in out.tolist()],
+        }
+    }
+
+
+def op_series_nsmallest(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    n = payload.get("nlargest_n")
+    keep = payload.get("keep", "first")
+
+    if left is None:
+        raise OracleError("series_nsmallest requires left payload")
+    if not isinstance(n, int) or isinstance(n, bool) or n < 0:
+        raise OracleError("series_nsmallest requires non-negative integer nlargest_n")
+    if keep not in {"first", "last", "all"}:
+        raise OracleError(f"series_nsmallest keep must be one of first|last|all, got {keep!r}")
+
+    index = [label_from_json(item) for item in left["index"]]
+    values = [scalar_from_json(item) for item in left["values"]]
+    series = pd.Series(values, index=index, name=left.get("name", "series"))
+
+    try:
+        out = series.nsmallest(n=n, keep=keep)
+    except Exception as exc:
+        raise OracleError(f"series_nsmallest failed: {exc}") from exc
+
+    return {
+        "expected_series": {
+            "index": [label_to_json(v) for v in out.index.tolist()],
+            "values": [scalar_to_json(v) for v in out.tolist()],
+        }
+    }
+
+
 def require_join_type(payload: dict[str, Any], op_name: str, *, allow_cross: bool = False) -> str:
     join_type = payload.get("join_type")
     allowed = {"inner", "left", "right", "outer"}
@@ -5299,6 +5357,10 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_series_rank(pd, payload)
     if op in {"series_argsort", "series_argsort_default"}:
         return op_series_argsort(pd, payload)
+    if op in {"series_nlargest", "series_nlargest_default"}:
+        return op_series_nlargest(pd, payload)
+    if op in {"series_nsmallest", "series_nsmallest_default"}:
+        return op_series_nsmallest(pd, payload)
     if op == "series_any":
         return op_series_any(pd, payload)
     if op == "series_all":

@@ -2533,3 +2533,210 @@ fn live_oracle_series_dot_negative_values() {
     let actual = super::Scalar::Float64(result);
     super::compare_scalar(&actual, &expected, "series_dot").expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_series_nlargest_basic() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-NLARGEST-BASIC",
+        "case_id": "series_nlargest_basic",
+        "mode": "strict",
+        "operation": "series_nlargest",
+        "oracle_source": "live_legacy_pandas",
+        "nlargest_n": 3,
+        "left": {
+            "name": "test_series",
+            "index": [
+                { "kind": "utf8", "value": "a" },
+                { "kind": "utf8", "value": "b" },
+                { "kind": "utf8", "value": "c" },
+                { "kind": "utf8", "value": "d" },
+                { "kind": "utf8", "value": "e" }
+            ],
+            "values": [
+                { "kind": "float64", "value": 3.5 },
+                { "kind": "float64", "value": 1.0 },
+                { "kind": "float64", "value": 5.0 },
+                { "kind": "float64", "value": 2.0 },
+                { "kind": "float64", "value": 4.5 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping nlargest basic test: {message}");
+        return;
+    }
+
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Series(_)),
+        "expected live oracle series payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let actual = series.nlargest(3).expect("nlargest");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_series_nlargest_with_keep_last() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-NLARGEST-KEEP-LAST",
+        "case_id": "series_nlargest_keep_last",
+        "mode": "strict",
+        "operation": "series_nlargest",
+        "oracle_source": "live_legacy_pandas",
+        "nlargest_n": 2,
+        "keep": "last",
+        "left": {
+            "name": "dup_series",
+            "index": [
+                { "kind": "utf8", "value": "a" },
+                { "kind": "utf8", "value": "b" },
+                { "kind": "utf8", "value": "c" },
+                { "kind": "utf8", "value": "d" }
+            ],
+            "values": [
+                { "kind": "float64", "value": 5.0 },
+                { "kind": "float64", "value": 5.0 },
+                { "kind": "float64", "value": 3.0 },
+                { "kind": "float64", "value": 3.0 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping nlargest keep=last test: {message}");
+        return;
+    }
+
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Series(_)),
+        "expected live oracle series payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let actual = series.nlargest_keep(2, "last").expect("nlargest_keep");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_series_nsmallest_basic() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-NSMALLEST-BASIC",
+        "case_id": "series_nsmallest_basic",
+        "mode": "strict",
+        "operation": "series_nsmallest",
+        "oracle_source": "live_legacy_pandas",
+        "nlargest_n": 3,
+        "left": {
+            "name": "test_series",
+            "index": [
+                { "kind": "utf8", "value": "a" },
+                { "kind": "utf8", "value": "b" },
+                { "kind": "utf8", "value": "c" },
+                { "kind": "utf8", "value": "d" },
+                { "kind": "utf8", "value": "e" }
+            ],
+            "values": [
+                { "kind": "float64", "value": 3.5 },
+                { "kind": "float64", "value": 1.0 },
+                { "kind": "float64", "value": 5.0 },
+                { "kind": "float64", "value": 2.0 },
+                { "kind": "float64", "value": 4.5 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping nsmallest basic test: {message}");
+        return;
+    }
+
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Series(_)),
+        "expected live oracle series payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let actual = series.nsmallest(3).expect("nsmallest");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_series_nsmallest_with_nulls() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-NSMALLEST-NULLS",
+        "case_id": "series_nsmallest_with_nulls",
+        "mode": "strict",
+        "operation": "series_nsmallest",
+        "oracle_source": "live_legacy_pandas",
+        "nlargest_n": 2,
+        "left": {
+            "name": "null_series",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 4 }
+            ],
+            "values": [
+                { "kind": "null", "value": "null" },
+                { "kind": "float64", "value": 10.0 },
+                { "kind": "float64", "value": 2.0 },
+                { "kind": "null", "value": "null" },
+                { "kind": "float64", "value": 5.0 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping nsmallest nulls test: {message}");
+        return;
+    }
+
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Series(_)),
+        "expected live oracle series payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let actual = series.nsmallest(2).expect("nsmallest");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}

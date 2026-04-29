@@ -15737,13 +15737,19 @@ fn execute_series_module_utility_fixture_operation(
             let n = fixture
                 .nlargest_n
                 .ok_or_else(|| "nlargest_n required for series_nlargest".to_owned())?;
-            series.nlargest(n).map_err(|err| err.to_string())
+            match fixture.keep.as_deref() {
+                Some(keep) => series.nlargest_keep(n, keep).map_err(|err| err.to_string()),
+                None => series.nlargest(n).map_err(|err| err.to_string()),
+            }
         }
         FixtureOperation::SeriesNsmallest => {
             let n = fixture
                 .nlargest_n
                 .ok_or_else(|| "nlargest_n required for series_nsmallest".to_owned())?;
-            series.nsmallest(n).map_err(|err| err.to_string())
+            match fixture.keep.as_deref() {
+                Some(keep) => series.nsmallest_keep(n, keep).map_err(|err| err.to_string()),
+                None => series.nsmallest(n).map_err(|err| err.to_string()),
+            }
         }
         FixtureOperation::SeriesBetween => {
             let left = fixture
