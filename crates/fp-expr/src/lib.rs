@@ -1060,6 +1060,24 @@ fn tokenize(input: &str) -> Result<Vec<Token>, ExprError> {
                 tokens.push(Token::Str(s));
                 i += 1; // skip closing quote
             }
+            '`' => {
+                i += 1;
+                let mut name = String::new();
+                while i < chars.len() && chars[i] != '`' {
+                    name.push(chars[i]);
+                    i += 1;
+                }
+                if i >= chars.len() {
+                    return Err(ExprError::ParseError(
+                        "unterminated backtick identifier".into(),
+                    ));
+                }
+                if name.is_empty() {
+                    return Err(ExprError::ParseError("empty backtick identifier".into()));
+                }
+                tokens.push(Token::Ident(name));
+                i += 1; // skip closing backtick
+            }
             '@' => {
                 i += 1;
                 if i >= chars.len() || !(chars[i].is_alphabetic() || chars[i] == '_') {
@@ -1359,13 +1377,11 @@ mod tests {
     use std::collections::BTreeMap;
 
     use fp_columnar::ComparisonOp;
+    use fp_frame::{FrameError, Series};
     use fp_runtime::{EvidenceLedger, RuntimePolicy};
     use fp_types::Scalar;
 
-    use super::{EvalContext, Expr, ExprError, SeriesRef, evaluate};
-    use fp_frame::{FrameError, Series};
-
-    use super::{Delta, MaterializedView};
+    use super::{Delta, EvalContext, Expr, ExprError, MaterializedView, SeriesRef, evaluate};
 
     #[test]
     fn expression_add_works_through_series_refs() {
@@ -2622,8 +2638,36 @@ mod tests {
     }
 
     #[test]
+    fn parse_backtick_identifier() {
+        let expr = super::parse_expr("`gross margin` + normal").unwrap();
+        assert!(matches!(&expr, Expr::Add { .. }));
+        if let Expr::Add { left, right } = expr {
+            assert_eq!(
+                *left,
+                Expr::Series {
+                    name: SeriesRef("gross margin".into()),
+                }
+            );
+            assert_eq!(
+                *right,
+                Expr::Series {
+                    name: SeriesRef("normal".into()),
+                }
+            );
+        }
+    }
+
+    #[test]
     fn parse_error_single_equals() {
         assert!(super::parse_expr("x = 1").is_err());
+    }
+
+    #[test]
+    fn parse_error_unterminated_backtick_identifier() {
+        let err = super::parse_expr("`gross margin + normal").unwrap_err();
+        assert!(
+            matches!(err, ExprError::ParseError(msg) if msg.contains("unterminated backtick identifier"))
+        );
     }
 
     #[test]
@@ -2674,19 +2718,25 @@ mod tests {
     #[test]
     fn parse_error_multiple_decimal_points() {
         let err = super::parse_expr("x > 1.2.3").unwrap_err();
-        assert!(matches!(err, ExprError::ParseError(msg) if msg.contains("multiple decimal points")));
+        assert!(
+            matches!(err, ExprError::ParseError(msg) if msg.contains("multiple decimal points"))
+        );
     }
 
     #[test]
     fn parse_error_negative_multiple_decimal_points() {
         let err = super::parse_expr("x > -1.2.3").unwrap_err();
-        assert!(matches!(err, ExprError::ParseError(msg) if msg.contains("multiple decimal points")));
+        assert!(
+            matches!(err, ExprError::ParseError(msg) if msg.contains("multiple decimal points"))
+        );
     }
 
     #[test]
     fn parse_error_leading_dot_multiple_decimal_points() {
         let err = super::parse_expr("x > .1.2").unwrap_err();
-        assert!(matches!(err, ExprError::ParseError(msg) if msg.contains("multiple decimal points")));
+        assert!(
+            matches!(err, ExprError::ParseError(msg) if msg.contains("multiple decimal points"))
+        );
     }
 
     #[test]
@@ -2768,6 +2818,33 @@ mod tests {
     }
 
     #[test]
+    fn eval_str_accepts_backtick_column_names() {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "gross margin",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![Scalar::Int64(10), Scalar::Int64(20)],
+            )
+            .unwrap(),
+            fp_frame::Series::from_values(
+                "and",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![Scalar::Int64(1), Scalar::Int64(2)],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let result =
+            super::eval_str("`gross margin` + `and`", &frame, &policy, &mut ledger).unwrap();
+        assert_eq!(result.values()[0], Scalar::Int64(11));
+        assert_eq!(result.values()[1], Scalar::Int64(22));
+    }
+
+    #[test]
     fn eval_str_unary_minus_respects_pow_precedence() {
         let policy = RuntimePolicy::hardened(Some(100));
         let mut ledger = EvidenceLedger::new();
@@ -2821,6 +2898,42 @@ mod tests {
         assert_eq!(result.len(), 1);
         assert_eq!(result.columns()["a"].values()[0], Scalar::Int64(5));
         assert_eq!(result.columns()["b"].values()[0], Scalar::Int64(20));
+    }
+
+    #[test]
+    fn query_str_accepts_backtick_column_names() {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "gross margin",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+            )
+            .unwrap(),
+            fp_frame::Series::from_values(
+                "and",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let result = super::query_str(
+            "`gross margin` > 15 and `and` < 3",
+            &frame,
+            &policy,
+            &mut ledger,
+        )
+        .unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result.columns()["gross margin"].values()[0],
+            Scalar::Int64(20)
+        );
+        assert_eq!(result.columns()["and"].values()[0], Scalar::Int64(2));
     }
 
     #[test]
