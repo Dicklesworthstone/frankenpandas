@@ -4419,9 +4419,33 @@ impl Series {
     ///
     /// Matches `pd.Series.cumsum(skipna=True)`.
     pub fn cumsum(&self) -> Result<Self, FrameError> {
+        let values = self.column.values();
+        if !values.is_empty() && values.iter().all(|value| matches!(value, Scalar::Int64(_))) {
+            let mut acc = 0_i64;
+            let mut out = Vec::with_capacity(values.len());
+            for value in values {
+                if let Scalar::Int64(v) = value {
+                    acc = acc.wrapping_add(*v);
+                    out.push(Scalar::Int64(acc));
+                }
+            }
+            return Self::from_values(self.name.clone(), self.index.labels().to_vec(), out);
+        }
+        if !values.is_empty() && values.iter().all(|value| matches!(value, Scalar::Bool(_))) {
+            let mut acc = 0_i64;
+            let mut out = Vec::with_capacity(values.len());
+            for value in values {
+                if let Scalar::Bool(v) = value {
+                    acc = acc.wrapping_add(i64::from(*v));
+                    out.push(Scalar::Int64(acc));
+                }
+            }
+            return Self::from_values(self.name.clone(), self.index.labels().to_vec(), out);
+        }
+
         let mut acc = 0.0_f64;
         let mut out = Vec::with_capacity(self.len());
-        for val in self.column.values() {
+        for val in values {
             if val.is_missing() {
                 out.push(Scalar::Null(NullKind::NaN));
             } else {
@@ -4436,9 +4460,33 @@ impl Series {
     ///
     /// Matches `pd.Series.cumprod(skipna=True)`.
     pub fn cumprod(&self) -> Result<Self, FrameError> {
+        let values = self.column.values();
+        if !values.is_empty() && values.iter().all(|value| matches!(value, Scalar::Int64(_))) {
+            let mut acc = 1_i64;
+            let mut out = Vec::with_capacity(values.len());
+            for value in values {
+                if let Scalar::Int64(v) = value {
+                    acc = acc.wrapping_mul(*v);
+                    out.push(Scalar::Int64(acc));
+                }
+            }
+            return Self::from_values(self.name.clone(), self.index.labels().to_vec(), out);
+        }
+        if !values.is_empty() && values.iter().all(|value| matches!(value, Scalar::Bool(_))) {
+            let mut acc = 1_i64;
+            let mut out = Vec::with_capacity(values.len());
+            for value in values {
+                if let Scalar::Bool(v) = value {
+                    acc = acc.wrapping_mul(i64::from(*v));
+                    out.push(Scalar::Int64(acc));
+                }
+            }
+            return Self::from_values(self.name.clone(), self.index.labels().to_vec(), out);
+        }
+
         let mut acc = 1.0_f64;
         let mut out = Vec::with_capacity(self.len());
-        for val in self.column.values() {
+        for val in values {
             if val.is_missing() {
                 out.push(Scalar::Null(NullKind::NaN));
             } else {
@@ -4453,9 +4501,33 @@ impl Series {
     ///
     /// Matches `pd.Series.cummin(skipna=True)`.
     pub fn cummin(&self) -> Result<Self, FrameError> {
+        let values = self.column.values();
+        if !values.is_empty() && values.iter().all(|value| matches!(value, Scalar::Int64(_))) {
+            let mut acc = i64::MAX;
+            let mut out = Vec::with_capacity(values.len());
+            for value in values {
+                if let Scalar::Int64(v) = value {
+                    acc = acc.min(*v);
+                    out.push(Scalar::Int64(acc));
+                }
+            }
+            return Self::from_values(self.name.clone(), self.index.labels().to_vec(), out);
+        }
+        if !values.is_empty() && values.iter().all(|value| matches!(value, Scalar::Bool(_))) {
+            let mut acc = true;
+            let mut out = Vec::with_capacity(values.len());
+            for value in values {
+                if let Scalar::Bool(v) = value {
+                    acc &= *v;
+                    out.push(Scalar::Bool(acc));
+                }
+            }
+            return Self::from_values(self.name.clone(), self.index.labels().to_vec(), out);
+        }
+
         let mut acc = f64::INFINITY;
         let mut out = Vec::with_capacity(self.len());
-        for val in self.column.values() {
+        for val in values {
             if val.is_missing() {
                 out.push(Scalar::Null(NullKind::NaN));
             } else {
@@ -4473,9 +4545,33 @@ impl Series {
     ///
     /// Matches `pd.Series.cummax(skipna=True)`.
     pub fn cummax(&self) -> Result<Self, FrameError> {
+        let values = self.column.values();
+        if !values.is_empty() && values.iter().all(|value| matches!(value, Scalar::Int64(_))) {
+            let mut acc = i64::MIN;
+            let mut out = Vec::with_capacity(values.len());
+            for value in values {
+                if let Scalar::Int64(v) = value {
+                    acc = acc.max(*v);
+                    out.push(Scalar::Int64(acc));
+                }
+            }
+            return Self::from_values(self.name.clone(), self.index.labels().to_vec(), out);
+        }
+        if !values.is_empty() && values.iter().all(|value| matches!(value, Scalar::Bool(_))) {
+            let mut acc = false;
+            let mut out = Vec::with_capacity(values.len());
+            for value in values {
+                if let Scalar::Bool(v) = value {
+                    acc |= *v;
+                    out.push(Scalar::Bool(acc));
+                }
+            }
+            return Self::from_values(self.name.clone(), self.index.labels().to_vec(), out);
+        }
+
         let mut acc = f64::NEG_INFINITY;
         let mut out = Vec::with_capacity(self.len());
-        for val in self.column.values() {
+        for val in values {
             if val.is_missing() {
                 out.push(Scalar::Null(NullKind::NaN));
             } else {
@@ -32933,6 +33029,90 @@ mod tests {
         assert_eq!(cmax.values()[0], Scalar::Float64(3.0));
         assert_eq!(cmax.values()[1], Scalar::Float64(3.0));
         assert_eq!(cmax.values()[2], Scalar::Float64(3.0));
+    }
+
+    #[test]
+    fn series_cumulative_integer_ops_preserve_int_dtype() {
+        let s = Series::from_values(
+            "vals",
+            vec![
+                IndexLabel::from("a"),
+                IndexLabel::from("b"),
+                IndexLabel::from("c"),
+            ],
+            vec![Scalar::Int64(3), Scalar::Int64(1), Scalar::Int64(2)],
+        )
+        .unwrap();
+
+        let cumsum = s.cumsum().unwrap();
+        assert_eq!(cumsum.dtype(), DType::Int64);
+        assert_eq!(
+            cumsum.values(),
+            &[Scalar::Int64(3), Scalar::Int64(4), Scalar::Int64(6)]
+        );
+
+        let cumprod = s.cumprod().unwrap();
+        assert_eq!(cumprod.dtype(), DType::Int64);
+        assert_eq!(
+            cumprod.values(),
+            &[Scalar::Int64(3), Scalar::Int64(3), Scalar::Int64(6)]
+        );
+
+        let cummin = s.cummin().unwrap();
+        assert_eq!(cummin.dtype(), DType::Int64);
+        assert_eq!(
+            cummin.values(),
+            &[Scalar::Int64(3), Scalar::Int64(1), Scalar::Int64(1)]
+        );
+
+        let cummax = s.cummax().unwrap();
+        assert_eq!(cummax.dtype(), DType::Int64);
+        assert_eq!(
+            cummax.values(),
+            &[Scalar::Int64(3), Scalar::Int64(3), Scalar::Int64(3)]
+        );
+    }
+
+    #[test]
+    fn series_cumulative_bool_ops_match_pandas_dtypes() {
+        let s = Series::from_values(
+            "flags",
+            vec![
+                IndexLabel::from("a"),
+                IndexLabel::from("b"),
+                IndexLabel::from("c"),
+            ],
+            vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)],
+        )
+        .unwrap();
+
+        let cumsum = s.cumsum().unwrap();
+        assert_eq!(cumsum.dtype(), DType::Int64);
+        assert_eq!(
+            cumsum.values(),
+            &[Scalar::Int64(1), Scalar::Int64(1), Scalar::Int64(2)]
+        );
+
+        let cumprod = s.cumprod().unwrap();
+        assert_eq!(cumprod.dtype(), DType::Int64);
+        assert_eq!(
+            cumprod.values(),
+            &[Scalar::Int64(1), Scalar::Int64(0), Scalar::Int64(0)]
+        );
+
+        let cummin = s.cummin().unwrap();
+        assert_eq!(cummin.dtype(), DType::Bool);
+        assert_eq!(
+            cummin.values(),
+            &[Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(false)]
+        );
+
+        let cummax = s.cummax().unwrap();
+        assert_eq!(cummax.dtype(), DType::Bool);
+        assert_eq!(
+            cummax.values(),
+            &[Scalar::Bool(true), Scalar::Bool(true), Scalar::Bool(true)]
+        );
     }
 
     #[test]
