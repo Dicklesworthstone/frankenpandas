@@ -937,3 +937,94 @@ fn fuzz_json_io_bytes_reports_invalid_json() {
         "expected JSON parse error, got {err:?}"
     );
 }
+
+#[test]
+fn fuzz_dataframe_merge_bytes_accepts_inner_single_each() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/dataframe_merge/inner_single_each.bin");
+    fuzz_dataframe_merge_bytes(seed).expect("inner-single-each seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_dataframe_merge_bytes_accepts_outer_no_overlap() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/dataframe_merge/outer_no_overlap.bin");
+    fuzz_dataframe_merge_bytes(seed).expect("outer-no-overlap seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_dataframe_merge_bytes_accepts_inner_all_overlap() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/dataframe_merge/inner_all_overlap.bin");
+    fuzz_dataframe_merge_bytes(seed).expect("inner-all-overlap seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_dataframe_merge_bytes_accepts_left_asymmetric() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/dataframe_merge/left_asymmetric.bin");
+    fuzz_dataframe_merge_bytes(seed).expect("left-asymmetric seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_dataframe_merge_bytes_accepts_right_asymmetric() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/dataframe_merge/right_asymmetric.bin");
+    fuzz_dataframe_merge_bytes(seed).expect("right-asymmetric seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_dataframe_merge_bytes_accepts_outer_max_rows() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/dataframe_merge/outer_max_rows.bin");
+    fuzz_dataframe_merge_bytes(seed).expect("outer-max-rows seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_dataframe_merge_bytes_accepts_inner_empty_result() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/dataframe_merge/inner_empty_result.bin");
+    fuzz_dataframe_merge_bytes(seed).expect("inner-empty-result seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_dataframe_merge_bytes_accepts_left_single_unmatched() {
+    let seed = include_bytes!(
+        "../../fixtures/adversarial/fuzz_corpus/dataframe_merge/left_single_unmatched.bin"
+    );
+    fuzz_dataframe_merge_bytes(seed).expect("left-single-unmatched seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_dataframe_merge_bytes_accepts_right_single_unmatched() {
+    let seed = include_bytes!(
+        "../../fixtures/adversarial/fuzz_corpus/dataframe_merge/right_single_unmatched.bin"
+    );
+    fuzz_dataframe_merge_bytes(seed)
+        .expect("right-single-unmatched seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_dataframe_merge_bytes_accepts_outer_partial_overlap() {
+    let seed = include_bytes!(
+        "../../fixtures/adversarial/fuzz_corpus/dataframe_merge/outer_partial_overlap.bin"
+    );
+    fuzz_dataframe_merge_bytes(seed)
+        .expect("outer-partial-overlap seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_dataframe_merge_bytes_accepts_inner_duplicate_keys() {
+    let seed = include_bytes!(
+        "../../fixtures/adversarial/fuzz_corpus/dataframe_merge/inner_duplicate_keys.bin"
+    );
+    fuzz_dataframe_merge_bytes(seed)
+        .expect("inner-duplicate-keys seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_dataframe_merge_bytes_accepts_left_all_matched() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/dataframe_merge/left_all_matched.bin");
+    fuzz_dataframe_merge_bytes(seed).expect("left-all-matched seed should satisfy invariants");
+}
