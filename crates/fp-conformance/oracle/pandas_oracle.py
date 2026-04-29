@@ -5073,6 +5073,43 @@ def op_series_factorize(pd, payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def op_series_astype(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    target_dtype = payload.get("astype_dtype")
+    errors = payload.get("astype_errors", "raise")
+
+    if left is None:
+        raise OracleError("series_astype requires left payload")
+    if target_dtype is None:
+        raise OracleError("series_astype requires astype_dtype payload")
+
+    dtype_map = {
+        "int64": "int64",
+        "float64": "float64",
+        "bool": "bool",
+        "utf8": "str",
+        "string": "str",
+        "object": "object",
+    }
+    pandas_dtype = dtype_map.get(target_dtype, target_dtype)
+
+    index = [label_from_json(item) for item in left["index"]]
+    values = [scalar_from_json(item) for item in left["values"]]
+    series = pd.Series(values, index=index, name=left.get("name", "series"))
+
+    try:
+        out = series.astype(pandas_dtype, errors=errors)
+    except Exception as exc:
+        raise OracleError(f"series_astype failed: {exc}") from exc
+
+    return {
+        "expected_series": {
+            "index": [label_to_json(v) for v in out.index.tolist()],
+            "values": [scalar_to_json(v) for v in out.tolist()],
+        }
+    }
+
+
 def op_series_abs(pd, payload: dict[str, Any]) -> dict[str, Any]:
     left = payload.get("left")
     if left is None:
@@ -5716,6 +5753,8 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_series_unique(pd, payload)
     if op in {"series_factorize", "series_factorize_default"}:
         return op_series_factorize(pd, payload)
+    if op in {"series_astype", "series_astype_default"}:
+        return op_series_astype(pd, payload)
     if op in {"series_abs", "series_abs_default"}:
         return op_series_abs(pd, payload)
     if op in {"series_round", "series_round_default"}:
