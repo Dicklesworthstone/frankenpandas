@@ -2228,6 +2228,46 @@ fn fuzz_json_io_bytes_accepts_jsonl_seed_fixture() {
 }
 
 #[test]
+fn fuzz_json_io_bytes_accepts_columns_orient_seed_fixture() {
+    let seed = include_bytes!(
+        "../../fixtures/adversarial/fuzz_corpus/fuzz_json_io/columns_orient_seed.json"
+    );
+    fuzz_json_io_bytes(seed).expect("columns orient json seed should parse");
+}
+
+#[test]
+fn fuzz_json_io_bytes_accepts_index_orient_seed_fixture() {
+    let seed = include_bytes!(
+        "../../fixtures/adversarial/fuzz_corpus/fuzz_json_io/index_orient_seed.json"
+    );
+    fuzz_json_io_bytes(seed).expect("index orient json seed should parse");
+}
+
+#[test]
+fn fuzz_json_io_bytes_accepts_empty_records_seed_fixture() {
+    let seed = include_bytes!(
+        "../../fixtures/adversarial/fuzz_corpus/fuzz_json_io/empty_records_seed.json"
+    );
+    fuzz_json_io_bytes(seed).expect("empty records json seed should parse");
+}
+
+#[test]
+fn fuzz_json_io_bytes_accepts_single_record_seed_fixture() {
+    let seed = include_bytes!(
+        "../../fixtures/adversarial/fuzz_corpus/fuzz_json_io/single_record_seed.json"
+    );
+    fuzz_json_io_bytes(seed).expect("single record json seed should parse");
+}
+
+#[test]
+fn fuzz_json_io_bytes_accepts_jsonl_with_nulls_seed_fixture() {
+    let seed = include_bytes!(
+        "../../fixtures/adversarial/fuzz_corpus/fuzz_json_io/jsonl_with_nulls_seed.jsonl"
+    );
+    fuzz_json_io_bytes(seed).expect("jsonl with nulls seed should parse");
+}
+
+#[test]
 fn fuzz_json_io_bytes_replays_committed_corpus_seeds() {
     let corpus: &[(&str, &[u8])] = &[
         (
