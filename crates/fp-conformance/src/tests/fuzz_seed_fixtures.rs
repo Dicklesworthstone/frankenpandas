@@ -344,6 +344,10 @@ fn fuzz_dataframe_eval_bytes_accepts_simple_numeric_expression() {
 fn fuzz_dataframe_op_chain_bytes_accepts_structured_corpus_seeds() {
     let seeds: &[(&str, &[u8])] = &[
         (
+            "drop_then_select",
+            include_bytes!("../../../../fuzz/corpus/fuzz_dataframe_op_chain/drop_then_select"),
+        ),
+        (
             "drop_to_empty_after_reset",
             include_bytes!(
                 "../../../../fuzz/corpus/fuzz_dataframe_op_chain/drop_to_empty_after_reset"
@@ -368,8 +372,16 @@ fn fuzz_dataframe_op_chain_bytes_accepts_structured_corpus_seeds() {
             ),
         ),
         (
+            "empty",
+            include_bytes!("../../../../fuzz/corpus/fuzz_dataframe_op_chain/empty"),
+        ),
+        (
             "missing_heavy_values",
             include_bytes!("../../../../fuzz/corpus/fuzz_dataframe_op_chain/missing_heavy_values"),
+        ),
+        (
+            "mixed_chain",
+            include_bytes!("../../../../fuzz/corpus/fuzz_dataframe_op_chain/mixed_chain"),
         ),
         (
             "nan_heavy_float",
@@ -390,6 +402,10 @@ fn fuzz_dataframe_op_chain_bytes_accepts_structured_corpus_seeds() {
         (
             "short_min_valid",
             include_bytes!("../../../../fuzz/corpus/fuzz_dataframe_op_chain/short_min_valid"),
+        ),
+        (
+            "select_only",
+            include_bytes!("../../../../fuzz/corpus/fuzz_dataframe_op_chain/select_only"),
         ),
         (
             "wide_desc_sort_churn",
