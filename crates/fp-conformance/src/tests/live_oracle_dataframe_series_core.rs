@@ -842,3 +842,197 @@ fn live_oracle_dataframe_take_axis1_matches_pandas() {
     let actual = super::execute_dataframe_fixture_operation(&fixture).expect("actual frame");
     super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_series_first_valid_index_with_leading_nulls() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-FIRST-VALID-INDEX",
+        "case_id": "series_first_valid_index_leading_nulls",
+        "mode": "strict",
+        "operation": "series_first_valid_index",
+        "oracle_source": "live_legacy_pandas",
+        "left": {
+            "name": "test_series",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 }
+            ],
+            "values": [
+                { "kind": "null", "value": "null" },
+                { "kind": "null", "value": "null" },
+                { "kind": "float64", "value": 3.14 },
+                { "kind": "float64", "value": 2.71 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping first_valid_index test: {message}");
+        return;
+    }
+
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Scalar(_)),
+        "expected live oracle scalar payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Scalar(expected) = expected else {
+        return;
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let label_opt = series.first_valid_index();
+    let actual = super::optional_index_label_to_scalar(label_opt);
+    super::compare_scalar(&actual, &expected, "series_first_valid_index").expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_series_last_valid_index_with_trailing_nulls() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-LAST-VALID-INDEX",
+        "case_id": "series_last_valid_index_trailing_nulls",
+        "mode": "strict",
+        "operation": "series_last_valid_index",
+        "oracle_source": "live_legacy_pandas",
+        "left": {
+            "name": "test_series",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 }
+            ],
+            "values": [
+                { "kind": "float64", "value": 1.5 },
+                { "kind": "float64", "value": 2.5 },
+                { "kind": "null", "value": "null" },
+                { "kind": "null", "value": "null" }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping last_valid_index test: {message}");
+        return;
+    }
+
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Scalar(_)),
+        "expected live oracle scalar payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Scalar(expected) = expected else {
+        return;
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let label_opt = series.last_valid_index();
+    let actual = super::optional_index_label_to_scalar(label_opt);
+    super::compare_scalar(&actual, &expected, "series_last_valid_index").expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_series_first_valid_index_all_null_returns_none() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-FIRST-VALID-INDEX-ALLNULL",
+        "case_id": "series_first_valid_index_all_null",
+        "mode": "strict",
+        "operation": "series_first_valid_index",
+        "oracle_source": "live_legacy_pandas",
+        "left": {
+            "name": "all_null",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 }
+            ],
+            "values": [
+                { "kind": "null", "value": "null" },
+                { "kind": "null", "value": "null" }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping first_valid_index all_null test: {message}");
+        return;
+    }
+
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Scalar(_)),
+        "expected live oracle scalar payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Scalar(expected) = expected else {
+        return;
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let label_opt = series.first_valid_index();
+    let actual = super::optional_index_label_to_scalar(label_opt);
+    super::compare_scalar(&actual, &expected, "series_first_valid_index").expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_series_first_valid_index_string_index() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-FIRST-VALID-INDEX-STR",
+        "case_id": "series_first_valid_index_string_index",
+        "mode": "strict",
+        "operation": "series_first_valid_index",
+        "oracle_source": "live_legacy_pandas",
+        "left": {
+            "name": "str_idx",
+            "index": [
+                { "kind": "utf8", "value": "a" },
+                { "kind": "utf8", "value": "b" },
+                { "kind": "utf8", "value": "c" }
+            ],
+            "values": [
+                { "kind": "null", "value": "null" },
+                { "kind": "int64", "value": 42 },
+                { "kind": "int64", "value": 99 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping first_valid_index string_index test: {message}");
+        return;
+    }
+
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Scalar(_)),
+        "expected live oracle scalar payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Scalar(expected) = expected else {
+        return;
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let label_opt = series.first_valid_index();
+    let actual = super::optional_index_label_to_scalar(label_opt);
+    super::compare_scalar(&actual, &expected, "series_first_valid_index").expect("pandas parity");
+}

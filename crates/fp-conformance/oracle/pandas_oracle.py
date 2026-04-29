@@ -1794,6 +1794,32 @@ def op_series_count(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return {"expected_scalar": scalar_to_json(out)}
 
 
+def op_series_first_valid_index(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    if left is None:
+        raise OracleError("series_first_valid_index requires left payload")
+
+    index = [label_from_json(item) for item in left["index"]]
+    values = [scalar_from_json(item) for item in left["values"]]
+    series = pd.Series(values, index=index, name=left.get("name", "series"))
+    out = series.first_valid_index()
+
+    return {"expected_scalar": scalar_to_json(out)}
+
+
+def op_series_last_valid_index(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    if left is None:
+        raise OracleError("series_last_valid_index requires left payload")
+
+    index = [label_from_json(item) for item in left["index"]]
+    values = [scalar_from_json(item) for item in left["values"]]
+    series = pd.Series(values, index=index, name=left.get("name", "series"))
+    out = series.last_valid_index()
+
+    return {"expected_scalar": scalar_to_json(out)}
+
+
 def op_series_rank(pd, payload: dict[str, Any]) -> dict[str, Any]:
     left = payload.get("left")
     if left is None:
@@ -5067,6 +5093,10 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_series_dropna(pd, payload)
     if op == "series_count":
         return op_series_count(pd, payload)
+    if op in {"series_first_valid_index", "series_first_valid_index_default"}:
+        return op_series_first_valid_index(pd, payload)
+    if op in {"series_last_valid_index", "series_last_valid_index_default"}:
+        return op_series_last_valid_index(pd, payload)
     if op in {"series_rank", "series_rank_default"}:
         return op_series_rank(pd, payload)
     if op == "series_any":

@@ -523,6 +523,16 @@ pub enum FixtureOperation {
     SeriesCount,
     #[serde(rename = "series_nunique", alias = "series_nunique_default")]
     SeriesNunique,
+    #[serde(
+        rename = "series_first_valid_index",
+        alias = "series_first_valid_index_default"
+    )]
+    SeriesFirstValidIndex,
+    #[serde(
+        rename = "series_last_valid_index",
+        alias = "series_last_valid_index_default"
+    )]
+    SeriesLastValidIndex,
     #[serde(rename = "series_mode", alias = "series_mode_default")]
     SeriesMode,
     #[serde(rename = "series_rank", alias = "series_rank_default")]
@@ -1337,6 +1347,8 @@ impl FixtureOperation {
             Self::SeriesDropNa => "series_dropna",
             Self::SeriesCount => "series_count",
             Self::SeriesNunique => "series_nunique",
+            Self::SeriesFirstValidIndex => "series_first_valid_index",
+            Self::SeriesLastValidIndex => "series_last_valid_index",
             Self::SeriesMode => "series_mode",
             Self::SeriesRank => "series_rank",
             Self::SeriesDescribe => "series_describe",
@@ -2316,6 +2328,8 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::NanCount
         | FixtureOperation::SeriesCount
         | FixtureOperation::SeriesNunique
+        | FixtureOperation::SeriesFirstValidIndex
+        | FixtureOperation::SeriesLastValidIndex
         | FixtureOperation::DataFrameCount
         | FixtureOperation::DataFrameMode
         | FixtureOperation::DataFrameCumsum
@@ -9651,6 +9665,25 @@ fn run_fixture_operation(
                 )),
             }
         }
+        FixtureOperation::SeriesFirstValidIndex | FixtureOperation::SeriesLastValidIndex => {
+            let left = require_left_series(fixture)?;
+            let series = build_series(left)?;
+            let label_opt = match fixture.operation {
+                FixtureOperation::SeriesFirstValidIndex => series.first_valid_index(),
+                FixtureOperation::SeriesLastValidIndex => series.last_valid_index(),
+                _ => unreachable!(),
+            };
+            let actual = optional_index_label_to_scalar(label_opt);
+            match expected {
+                ResolvedExpected::Scalar(scalar) => {
+                    compare_scalar(&actual, &scalar, fixture.operation.operation_name())
+                }
+                _ => Err(format!(
+                    "expected_scalar is required for {}",
+                    fixture.operation.operation_name()
+                )),
+            }
+        }
         FixtureOperation::DataFrameCount => {
             let frame = build_dataframe(require_frame(fixture)?)
                 .map_err(|err| format!("frame build failed: {err}"))?;
@@ -11984,6 +12017,8 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::SeriesAutocorr
         | FixtureOperation::SeriesCount
         | FixtureOperation::SeriesNunique
+        | FixtureOperation::SeriesFirstValidIndex
+        | FixtureOperation::SeriesLastValidIndex
         | FixtureOperation::DataFrameToJsonRecords => fixture
             .expected_scalar
             .clone()
@@ -12628,6 +12663,8 @@ fn capture_live_oracle_expected(
         | FixtureOperation::SeriesAutocorr
         | FixtureOperation::SeriesCount
         | FixtureOperation::SeriesNunique
+        | FixtureOperation::SeriesFirstValidIndex
+        | FixtureOperation::SeriesLastValidIndex
         | FixtureOperation::DataFrameToJsonRecords => response
             .expected_scalar
             .map(ResolvedExpected::Scalar)
@@ -12648,6 +12685,13 @@ fn capture_live_oracle_expected(
             .expected_dtype
             .map(ResolvedExpected::Dtype)
             .ok_or_else(|| HarnessError::FixtureFormat("oracle omitted expected_dtype".to_owned())),
+    }
+}
+
+pub fn optional_index_label_to_scalar(label: Option<fp_index::IndexLabel>) -> Scalar {
+    match label {
+        None => Scalar::Null(NullKind::Null),
+        Some(ref l) => index_label_to_scalar(l),
     }
 }
 
@@ -18432,6 +18476,27 @@ fn execute_and_compare_differential(
                 _ => unreachable!(),
             };
             let actual = Scalar::Int64(value as i64);
+            match expected {
+                ResolvedExpected::Scalar(scalar) => Ok(diff_scalar(
+                    &actual,
+                    &scalar,
+                    fixture.operation.operation_name(),
+                )),
+                _ => Err(format!(
+                    "expected_scalar required for {}",
+                    fixture.operation.operation_name()
+                )),
+            }
+        }
+        FixtureOperation::SeriesFirstValidIndex | FixtureOperation::SeriesLastValidIndex => {
+            let left = require_left_series(fixture)?;
+            let series = build_series(left)?;
+            let label_opt = match fixture.operation {
+                FixtureOperation::SeriesFirstValidIndex => series.first_valid_index(),
+                FixtureOperation::SeriesLastValidIndex => series.last_valid_index(),
+                _ => unreachable!(),
+            };
+            let actual = optional_index_label_to_scalar(label_opt);
             match expected {
                 ResolvedExpected::Scalar(scalar) => Ok(diff_scalar(
                     &actual,
