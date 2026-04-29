@@ -1,0 +1,1 @@
+	SELECT k, v FROM t2 WHERE v >= 2.5 ORDER BY v DESC;

@@ -1,0 +1,1 @@
+ SELECT a, b, a * 10 AS scaled FROM t1 WHERE a BETWEEN 1 AND 3 ORDER BY scaled DESC;
