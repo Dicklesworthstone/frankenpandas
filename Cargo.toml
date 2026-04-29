@@ -47,6 +47,6 @@ thiserror = "2.0.18"
 # and gate it behind their own `tracing` feature so users who don't opt
 # in pay no dependency cost.
 tracing = { version = "0.1.41", default-features = false }
+ucd = "0.1.1"
 unicode-casefold = "0.2.0"
-unicode-general-category = "1.1.0"
 unicode-normalization = "0.1.25"

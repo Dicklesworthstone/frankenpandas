@@ -102,8 +102,8 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use thiserror::Error;
+use ucd::{Codepoint, NumericType};
 use unicode_casefold::UnicodeCaseFold;
-use unicode_general_category::{GeneralCategory, get_general_category};
 use unicode_normalization::UnicodeNormalization;
 
 #[derive(Debug, Error)]
@@ -963,34 +963,18 @@ fn index_position_groups(index: &Index) -> BTreeMap<IndexLabel, Vec<usize>> {
 }
 
 fn is_unicode_decimal(ch: char) -> bool {
-    get_general_category(ch) == GeneralCategory::DecimalNumber
+    matches!(ch.numeric_type(), Some(NumericType::Decimal))
 }
 
 fn is_unicode_digit(ch: char) -> bool {
-    is_unicode_decimal(ch)
-        || matches!(
-            ch,
-            '\u{B2}'..='\u{B3}'
-                | '\u{B9}'
-                | '\u{1369}'..='\u{1371}'
-                | '\u{19DA}'
-                | '\u{2070}'
-                | '\u{2074}'..='\u{2079}'
-                | '\u{2080}'..='\u{2089}'
-                | '\u{2460}'..='\u{2468}'
-                | '\u{2474}'..='\u{247C}'
-                | '\u{2488}'..='\u{2490}'
-                | '\u{24EA}'
-                | '\u{24F5}'..='\u{24FD}'
-                | '\u{24FF}'
-                | '\u{2776}'..='\u{277E}'
-                | '\u{2780}'..='\u{2788}'
-                | '\u{278A}'..='\u{2792}'
-                | '\u{10A40}'..='\u{10A43}'
-                | '\u{10E60}'..='\u{10E68}'
-                | '\u{11052}'..='\u{1105A}'
-                | '\u{1F100}'..='\u{1F10A}'
-        )
+    matches!(
+        ch.numeric_type(),
+        Some(NumericType::Decimal | NumericType::Digit)
+    )
+}
+
+fn is_unicode_numeric(ch: char) -> bool {
+    ch.numeric_type().is_some()
 }
 
 /// Duplicate-aware outer alignment for Series arithmetic.
@@ -10966,7 +10950,7 @@ impl StringAccessor<'_> {
     /// Matches `pd.Series.str.isnumeric()`.
     pub fn isnumeric(&self) -> Result<Series, FrameError> {
         self.apply_str(
-            |s| Scalar::Bool(!s.is_empty() && s.chars().all(|c| c.is_numeric())),
+            |s| Scalar::Bool(!s.is_empty() && s.chars().all(is_unicode_numeric)),
             self.series.name(),
         )
     }
@@ -46180,10 +46164,21 @@ mod tests {
     fn str_isnumeric() {
         let s = Series::from_values(
             "x",
-            vec![0_i64.into(), 1_i64.into()],
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+                5_i64.into(),
+            ],
             vec![
                 Scalar::Utf8("123".to_owned()),
                 Scalar::Utf8("12.3".to_owned()),
+                Scalar::Utf8("٣۳𝟠".to_owned()),
+                Scalar::Utf8("²①፩".to_owned()),
+                Scalar::Utf8("⅕".to_owned()),
+                Scalar::Utf8("一二三㊈".to_owned()),
             ],
         )
         .unwrap();
@@ -46191,6 +46186,10 @@ mod tests {
         let result = s.str().isnumeric().unwrap();
         assert_eq!(result.values()[0], Scalar::Bool(true));
         assert_eq!(result.values()[1], Scalar::Bool(false)); // '.' is not numeric
+        assert_eq!(result.values()[2], Scalar::Bool(true));
+        assert_eq!(result.values()[3], Scalar::Bool(true));
+        assert_eq!(result.values()[4], Scalar::Bool(true));
+        assert_eq!(result.values()[5], Scalar::Bool(true));
     }
 
     // --- Series binary ops with fill_value tests ---

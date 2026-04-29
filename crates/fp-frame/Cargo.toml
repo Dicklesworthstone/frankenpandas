@@ -30,8 +30,8 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true, optional = true }
+ucd = { workspace = true }
 unicode-casefold = { workspace = true }
-unicode-general-category = { workspace = true }
 unicode-normalization = { workspace = true }
 
 [package.metadata.docs.rs]
