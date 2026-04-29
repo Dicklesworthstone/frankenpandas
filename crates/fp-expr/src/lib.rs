@@ -1190,8 +1190,9 @@ fn parse_not(tokens: &[Token], pos: &mut usize) -> Result<Expr, ExprError> {
 }
 
 fn parse_comparison(tokens: &[Token], pos: &mut usize) -> Result<Expr, ExprError> {
-    let left = parse_add(tokens, pos)?;
-    if *pos < tokens.len() {
+    let mut left = parse_add(tokens, pos)?;
+    let mut chained = None;
+    while *pos < tokens.len() {
         let op = match &tokens[*pos] {
             Token::EqEq => Some(ComparisonOp::Eq),
             Token::NotEq => Some(ComparisonOp::Ne),
@@ -1204,14 +1205,24 @@ fn parse_comparison(tokens: &[Token], pos: &mut usize) -> Result<Expr, ExprError
         if let Some(op) = op {
             *pos += 1;
             let right = parse_add(tokens, pos)?;
-            return Ok(Expr::Compare {
-                left: Box::new(left),
-                right: Box::new(right),
+            let comparison = Expr::Compare {
+                left: Box::new(left.clone()),
+                right: Box::new(right.clone()),
                 op,
+            };
+            chained = Some(match chained {
+                Some(previous) => Expr::And {
+                    left: Box::new(previous),
+                    right: Box::new(comparison),
+                },
+                None => comparison,
             });
+            left = right;
+        } else {
+            break;
         }
     }
-    Ok(left)
+    Ok(chained.unwrap_or(left))
 }
 
 fn parse_add(tokens: &[Token], pos: &mut usize) -> Result<Expr, ExprError> {
@@ -2442,6 +2453,58 @@ mod tests {
     }
 
     #[test]
+    fn parse_chained_comparison_lowers_to_pairwise_and() {
+        let expr = super::parse_expr("a < b <= c").unwrap();
+        let Expr::And { left, right } = expr else {
+            panic!("expected And, got {expr:?}");
+        };
+
+        assert!(matches!(
+            left.as_ref(),
+            Expr::Compare {
+                op: ComparisonOp::Lt,
+                ..
+            }
+        ));
+        assert!(matches!(
+            right.as_ref(),
+            Expr::Compare {
+                op: ComparisonOp::Le,
+                ..
+            }
+        ));
+
+        if let Expr::Compare { left, right, .. } = left.as_ref() {
+            assert_eq!(
+                left.as_ref(),
+                &Expr::Series {
+                    name: SeriesRef("a".into())
+                }
+            );
+            assert_eq!(
+                right.as_ref(),
+                &Expr::Series {
+                    name: SeriesRef("b".into())
+                }
+            );
+        }
+        if let Expr::Compare { left, right, .. } = right.as_ref() {
+            assert_eq!(
+                left.as_ref(),
+                &Expr::Series {
+                    name: SeriesRef("b".into())
+                }
+            );
+            assert_eq!(
+                right.as_ref(),
+                &Expr::Series {
+                    name: SeriesRef("c".into())
+                }
+            );
+        }
+    }
+
+    #[test]
     fn parse_and_or_expression() {
         let expr = super::parse_expr("a > 1 and b < 2").unwrap();
         assert!(
@@ -3011,6 +3074,41 @@ mod tests {
         assert_eq!(result.len(), 1); // only row 1 (a=5, b=20)
         assert_eq!(result.columns()["a"].values()[0], Scalar::Int64(5));
         assert_eq!(result.columns()["b"].values()[0], Scalar::Int64(20));
+    }
+
+    #[test]
+    fn query_str_chained_comparison_matches_pandas_pairwise_semantics() {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "a",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            )
+            .unwrap(),
+            fp_frame::Series::from_values(
+                "b",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![Scalar::Int64(2), Scalar::Int64(2), Scalar::Int64(4)],
+            )
+            .unwrap(),
+            fp_frame::Series::from_values(
+                "c",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![Scalar::Int64(3), Scalar::Int64(1), Scalar::Int64(5)],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let result = super::query_str("a < b < c", &frame, &policy, &mut ledger).unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(
+            result.columns()["a"].values(),
+            &[Scalar::Int64(1), Scalar::Int64(3)]
+        );
     }
 
     // ── eval/query parity tests (frankenpandas-xmp) ──
