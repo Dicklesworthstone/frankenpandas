@@ -533,6 +533,10 @@ pub enum FixtureOperation {
         alias = "series_last_valid_index_default"
     )]
     SeriesLastValidIndex,
+    #[serde(rename = "series_idxmin", alias = "series_idxmin_default")]
+    SeriesIdxmin,
+    #[serde(rename = "series_idxmax", alias = "series_idxmax_default")]
+    SeriesIdxmax,
     #[serde(rename = "series_mode", alias = "series_mode_default")]
     SeriesMode,
     #[serde(rename = "series_rank", alias = "series_rank_default")]
@@ -1349,6 +1353,8 @@ impl FixtureOperation {
             Self::SeriesNunique => "series_nunique",
             Self::SeriesFirstValidIndex => "series_first_valid_index",
             Self::SeriesLastValidIndex => "series_last_valid_index",
+            Self::SeriesIdxmin => "series_idxmin",
+            Self::SeriesIdxmax => "series_idxmax",
             Self::SeriesMode => "series_mode",
             Self::SeriesRank => "series_rank",
             Self::SeriesDescribe => "series_describe",
@@ -2330,6 +2336,8 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::SeriesNunique
         | FixtureOperation::SeriesFirstValidIndex
         | FixtureOperation::SeriesLastValidIndex
+        | FixtureOperation::SeriesIdxmin
+        | FixtureOperation::SeriesIdxmax
         | FixtureOperation::DataFrameCount
         | FixtureOperation::DataFrameMode
         | FixtureOperation::DataFrameCumsum
@@ -9684,6 +9692,48 @@ fn run_fixture_operation(
                 )),
             }
         }
+        FixtureOperation::SeriesIdxmin | FixtureOperation::SeriesIdxmax => {
+            let left = require_left_series(fixture)?;
+            let series = build_series(left)?;
+            let label_result = match fixture.operation {
+                FixtureOperation::SeriesIdxmin => series.idxmin(),
+                FixtureOperation::SeriesIdxmax => series.idxmax(),
+                _ => unreachable!(),
+            };
+            match (label_result, expected) {
+                (Ok(label), ResolvedExpected::Scalar(scalar)) => {
+                    let actual = index_label_to_scalar(&label);
+                    compare_scalar(&actual, &scalar, fixture.operation.operation_name())
+                }
+                (Err(err), ResolvedExpected::ErrorContains(substr)) => {
+                    let msg = err.to_string();
+                    if msg.contains(&substr) {
+                        Ok(())
+                    } else {
+                        Err(format!(
+                            "{}: expected error containing '{}', got '{}'",
+                            fixture.operation.operation_name(),
+                            substr,
+                            msg
+                        ))
+                    }
+                }
+                (Ok(_), ResolvedExpected::ErrorContains(substr)) => Err(format!(
+                    "{}: expected error containing '{}', but got Ok",
+                    fixture.operation.operation_name(),
+                    substr
+                )),
+                (Err(err), ResolvedExpected::Scalar(_)) => Err(format!(
+                    "{}: expected scalar, got error: {}",
+                    fixture.operation.operation_name(),
+                    err
+                )),
+                (_, _) => Err(format!(
+                    "expected_scalar or expected_error_contains required for {}",
+                    fixture.operation.operation_name()
+                )),
+            }
+        }
         FixtureOperation::DataFrameCount => {
             let frame = build_dataframe(require_frame(fixture)?)
                 .map_err(|err| format!("frame build failed: {err}"))?;
@@ -12019,6 +12069,8 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::SeriesNunique
         | FixtureOperation::SeriesFirstValidIndex
         | FixtureOperation::SeriesLastValidIndex
+        | FixtureOperation::SeriesIdxmin
+        | FixtureOperation::SeriesIdxmax
         | FixtureOperation::DataFrameToJsonRecords => fixture
             .expected_scalar
             .clone()
@@ -12665,6 +12717,8 @@ fn capture_live_oracle_expected(
         | FixtureOperation::SeriesNunique
         | FixtureOperation::SeriesFirstValidIndex
         | FixtureOperation::SeriesLastValidIndex
+        | FixtureOperation::SeriesIdxmin
+        | FixtureOperation::SeriesIdxmax
         | FixtureOperation::DataFrameToJsonRecords => response
             .expected_scalar
             .map(ResolvedExpected::Scalar)
@@ -18505,6 +18559,67 @@ fn execute_and_compare_differential(
                 )),
                 _ => Err(format!(
                     "expected_scalar required for {}",
+                    fixture.operation.operation_name()
+                )),
+            }
+        }
+        FixtureOperation::SeriesIdxmin | FixtureOperation::SeriesIdxmax => {
+            let left = require_left_series(fixture)?;
+            let series = build_series(left)?;
+            let label_result = match fixture.operation {
+                FixtureOperation::SeriesIdxmin => series.idxmin(),
+                FixtureOperation::SeriesIdxmax => series.idxmax(),
+                _ => unreachable!(),
+            };
+            match (label_result, expected) {
+                (Ok(label), ResolvedExpected::Scalar(scalar)) => {
+                    let actual = index_label_to_scalar(&label);
+                    Ok(diff_scalar(
+                        &actual,
+                        &scalar,
+                        fixture.operation.operation_name(),
+                    ))
+                }
+                (Err(err), ResolvedExpected::ErrorContains(substr)) => {
+                    let msg = err.to_string();
+                    if msg.contains(&substr) {
+                        Ok(Vec::new())
+                    } else {
+                        Ok(vec![make_drift_record(
+                            ComparisonCategory::Value,
+                            DriftLevel::Critical,
+                            format!("{}.error", fixture.operation.operation_name()),
+                            format!(
+                                "expected {} error containing '{}', got '{}'",
+                                fixture.operation.operation_name(),
+                                substr,
+                                msg
+                            ),
+                        )])
+                    }
+                }
+                (Ok(_), ResolvedExpected::ErrorContains(substr)) => Ok(vec![make_drift_record(
+                    ComparisonCategory::Value,
+                    DriftLevel::Critical,
+                    format!("{}.error", fixture.operation.operation_name()),
+                    format!(
+                        "expected {} error containing '{}', but got Ok",
+                        fixture.operation.operation_name(),
+                        substr
+                    ),
+                )]),
+                (Err(err), ResolvedExpected::Scalar(_)) => Ok(vec![make_drift_record(
+                    ComparisonCategory::Value,
+                    DriftLevel::Critical,
+                    format!("{}.error", fixture.operation.operation_name()),
+                    format!(
+                        "expected {} scalar, got error: {}",
+                        fixture.operation.operation_name(),
+                        err
+                    ),
+                )]),
+                (_, _) => Err(format!(
+                    "expected_scalar or expected_error_contains required for {}",
                     fixture.operation.operation_name()
                 )),
             }

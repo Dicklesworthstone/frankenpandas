@@ -1820,6 +1820,46 @@ def op_series_last_valid_index(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return {"expected_scalar": scalar_to_json(out)}
 
 
+def op_series_idxmin(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    if left is None:
+        raise OracleError("series_idxmin requires left payload")
+
+    skipna = payload.get("idxmin_skipna")
+    if skipna is None:
+        skipna = True
+
+    index = [label_from_json(item) for item in left["index"]]
+    values = [scalar_from_json(item) for item in left["values"]]
+    series = pd.Series(values, index=index, name=left.get("name", "series"))
+    try:
+        out = series.idxmin(skipna=skipna)
+    except ValueError as exc:
+        raise OracleError(f"series_idxmin failed: {exc}") from exc
+
+    return {"expected_scalar": scalar_to_json(out)}
+
+
+def op_series_idxmax(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    if left is None:
+        raise OracleError("series_idxmax requires left payload")
+
+    skipna = payload.get("idxmax_skipna")
+    if skipna is None:
+        skipna = True
+
+    index = [label_from_json(item) for item in left["index"]]
+    values = [scalar_from_json(item) for item in left["values"]]
+    series = pd.Series(values, index=index, name=left.get("name", "series"))
+    try:
+        out = series.idxmax(skipna=skipna)
+    except ValueError as exc:
+        raise OracleError(f"series_idxmax failed: {exc}") from exc
+
+    return {"expected_scalar": scalar_to_json(out)}
+
+
 def op_series_rank(pd, payload: dict[str, Any]) -> dict[str, Any]:
     left = payload.get("left")
     if left is None:
@@ -5097,6 +5137,10 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_series_first_valid_index(pd, payload)
     if op in {"series_last_valid_index", "series_last_valid_index_default"}:
         return op_series_last_valid_index(pd, payload)
+    if op in {"series_idxmin", "series_idxmin_default"}:
+        return op_series_idxmin(pd, payload)
+    if op in {"series_idxmax", "series_idxmax_default"}:
+        return op_series_idxmax(pd, payload)
     if op in {"series_rank", "series_rank_default"}:
         return op_series_rank(pd, payload)
     if op == "series_any":
