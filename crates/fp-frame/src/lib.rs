@@ -4618,6 +4618,12 @@ impl Series {
         right: &Scalar,
         inclusive: &str,
     ) -> Result<Self, FrameError> {
+        if !matches!(inclusive, "both" | "neither" | "left" | "right") {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "between: inclusive must be one of 'both', 'neither', 'left', or 'right', got {inclusive:?}"
+            )));
+        }
+
         let left_f = left.to_f64().map_err(ColumnError::from)?;
         let right_f = right.to_f64().map_err(ColumnError::from)?;
 
@@ -4636,7 +4642,7 @@ impl Series {
                             "neither" => v > left_f && v < right_f,
                             "left" => v >= left_f && v < right_f,
                             "right" => v > left_f && v <= right_f,
-                            _ => v >= left_f && v <= right_f, // default to "both"
+                            _ => unreachable!("inclusive validated above"),
                         };
                         Scalar::Bool(result)
                     }
@@ -37050,6 +37056,24 @@ mod tests {
         assert_eq!(result.values()[0], Scalar::Bool(false));
         assert_eq!(result.values()[1], Scalar::Bool(true));
         assert_eq!(result.values()[2], Scalar::Bool(false));
+    }
+
+    #[test]
+    fn series_between_rejects_invalid_inclusive() {
+        let s = Series::from_values(
+            "x",
+            vec!["a".into(), "b".into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2)],
+        )
+        .unwrap();
+
+        let err = s
+            .between(&Scalar::Int64(1), &Scalar::Int64(2), "middle")
+            .expect_err("invalid inclusive must error");
+        assert!(
+            matches!(&err, FrameError::CompatibilityRejected(msg) if msg.contains("inclusive")),
+            "unexpected error: {err:?}"
+        );
     }
 
     // --- Series::idxmin / idxmax tests ---
