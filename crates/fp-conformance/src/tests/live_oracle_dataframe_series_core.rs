@@ -5173,3 +5173,289 @@ fn live_oracle_series_astype_float_to_string() {
     let result = series.astype(fp_types::DType::Utf8).expect("astype");
     super::compare_series_expected(&result, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_series_clip_both_bounds() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-CLIP-BOTH",
+        "case_id": "series_clip_both_bounds",
+        "mode": "strict",
+        "operation": "series_clip",
+        "oracle_source": "live_legacy_pandas",
+        "left": {
+            "name": "nums",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 4 }
+            ],
+            "values": [
+                { "kind": "float64", "value": -5.0 },
+                { "kind": "float64", "value": 2.0 },
+                { "kind": "float64", "value": 7.0 },
+                { "kind": "float64", "value": 15.0 },
+                { "kind": "float64", "value": 3.5 }
+            ]
+        },
+        "clip_lower": 0.0,
+        "clip_upper": 10.0
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping clip both bounds test: {message}");
+        return;
+    }
+    assert!(
+        expected_result.is_ok(),
+        "live oracle expected: {expected_result:?}"
+    );
+    let expected = match expected_result {
+        Ok(expected) => expected,
+        Err(super::HarnessError::OracleUnavailable(_)) => return,
+        Err(_) => return,
+    };
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Series(_)),
+        "expected live oracle series payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let result = series.clip(Some(0.0), Some(10.0)).expect("clip");
+    super::compare_series_expected(&result, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_series_clip_lower_only() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-CLIP-LOWER",
+        "case_id": "series_clip_lower_only",
+        "mode": "strict",
+        "operation": "series_clip",
+        "oracle_source": "live_legacy_pandas",
+        "left": {
+            "name": "vals",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "values": [
+                { "kind": "float64", "value": -10.0 },
+                { "kind": "float64", "value": 5.0 },
+                { "kind": "float64", "value": 100.0 }
+            ]
+        },
+        "clip_lower": 0.0
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping clip lower only test: {message}");
+        return;
+    }
+    assert!(
+        expected_result.is_ok(),
+        "live oracle expected: {expected_result:?}"
+    );
+    let expected = match expected_result {
+        Ok(expected) => expected,
+        Err(super::HarnessError::OracleUnavailable(_)) => return,
+        Err(_) => return,
+    };
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Series(_)),
+        "expected live oracle series payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let result = series.clip(Some(0.0), None).expect("clip");
+    super::compare_series_expected(&result, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_series_clip_upper_only() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-CLIP-UPPER",
+        "case_id": "series_clip_upper_only",
+        "mode": "strict",
+        "operation": "series_clip",
+        "oracle_source": "live_legacy_pandas",
+        "left": {
+            "name": "vals",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "values": [
+                { "kind": "float64", "value": -10.0 },
+                { "kind": "float64", "value": 5.0 },
+                { "kind": "float64", "value": 100.0 }
+            ]
+        },
+        "clip_upper": 50.0
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping clip upper only test: {message}");
+        return;
+    }
+    assert!(
+        expected_result.is_ok(),
+        "live oracle expected: {expected_result:?}"
+    );
+    let expected = match expected_result {
+        Ok(expected) => expected,
+        Err(super::HarnessError::OracleUnavailable(_)) => return,
+        Err(_) => return,
+    };
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Series(_)),
+        "expected live oracle series payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let result = series.clip(None, Some(50.0)).expect("clip");
+    super::compare_series_expected(&result, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_series_clip_with_nulls() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-CLIP-NULLS",
+        "case_id": "series_clip_with_nulls",
+        "mode": "strict",
+        "operation": "series_clip",
+        "oracle_source": "live_legacy_pandas",
+        "left": {
+            "name": "sparse",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 }
+            ],
+            "values": [
+                { "kind": "float64", "value": -5.0 },
+                { "kind": "null", "value": "null" },
+                { "kind": "float64", "value": 25.0 },
+                { "kind": "null", "value": "null" }
+            ]
+        },
+        "clip_lower": 0.0,
+        "clip_upper": 10.0
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping clip with nulls test: {message}");
+        return;
+    }
+    assert!(
+        expected_result.is_ok(),
+        "live oracle expected: {expected_result:?}"
+    );
+    let expected = match expected_result {
+        Ok(expected) => expected,
+        Err(super::HarnessError::OracleUnavailable(_)) => return,
+        Err(_) => return,
+    };
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Series(_)),
+        "expected live oracle series payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let result = series.clip(Some(0.0), Some(10.0)).expect("clip");
+    super::compare_series_expected(&result, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_series_clip_negative_bounds() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-CLIP-NEG",
+        "case_id": "series_clip_negative_bounds",
+        "mode": "strict",
+        "operation": "series_clip",
+        "oracle_source": "live_legacy_pandas",
+        "left": {
+            "name": "temps",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 }
+            ],
+            "values": [
+                { "kind": "float64", "value": -100.0 },
+                { "kind": "float64", "value": -15.0 },
+                { "kind": "float64", "value": 5.0 },
+                { "kind": "float64", "value": 50.0 }
+            ]
+        },
+        "clip_lower": -20.0,
+        "clip_upper": -5.0
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping clip negative bounds test: {message}");
+        return;
+    }
+    assert!(
+        expected_result.is_ok(),
+        "live oracle expected: {expected_result:?}"
+    );
+    let expected = match expected_result {
+        Ok(expected) => expected,
+        Err(super::HarnessError::OracleUnavailable(_)) => return,
+        Err(_) => return,
+    };
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Series(_)),
+        "expected live oracle series payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let result = series.clip(Some(-20.0), Some(-5.0)).expect("clip");
+    super::compare_series_expected(&result, &expected).expect("pandas parity");
+}
