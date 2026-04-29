@@ -884,6 +884,132 @@ fn fuzz_dataframe_eval_bytes_replays_committed_corpus_seeds() {
 }
 
 #[test]
+fn fuzz_query_str_bytes_replays_committed_corpus_seeds() {
+    let seeds: &[(&str, &[u8])] = &[
+        (
+            "cmp_gt_zero.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_query_str/cmp_gt_zero.bin"),
+        ),
+        (
+            "cmp_lt_zero.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_query_str/cmp_lt_zero.bin"),
+        ),
+        (
+            "cmp_gte_zero.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_query_str/cmp_gte_zero.bin"),
+        ),
+        (
+            "cmp_lte_zero.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_query_str/cmp_lte_zero.bin"),
+        ),
+        (
+            "cmp_eq_zero.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_query_str/cmp_eq_zero.bin"),
+        ),
+        (
+            "cmp_neq_zero.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_query_str/cmp_neq_zero.bin"),
+        ),
+        (
+            "cmp_col_gt.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_query_str/cmp_col_gt.bin"),
+        ),
+        (
+            "cmp_col_lt.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_query_str/cmp_col_lt.bin"),
+        ),
+        (
+            "cmp_col_eq.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_query_str/cmp_col_eq.bin"),
+        ),
+        (
+            "cmp_col_neq.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_query_str/cmp_col_neq.bin"),
+        ),
+        (
+            "bool_and.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_query_str/bool_and.bin"),
+        ),
+        (
+            "bool_or.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_query_str/bool_or.bin"),
+        ),
+        (
+            "bool_not.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_query_str/bool_not.bin"),
+        ),
+        (
+            "bool_paren_and.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_query_str/bool_paren_and.bin"),
+        ),
+        (
+            "bool_paren_or.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_query_str/bool_paren_or.bin"),
+        ),
+        (
+            "arith_cmp.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_query_str/arith_cmp.bin"),
+        ),
+        (
+            "arith_sub_cmp.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_query_str/arith_sub_cmp.bin"),
+        ),
+        (
+            "arith_mul_cmp.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_query_str/arith_mul_cmp.bin"),
+        ),
+        (
+            "hardened_cmp.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_query_str/hardened_cmp.bin"),
+        ),
+        (
+            "hardened_chain.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_query_str/hardened_chain.bin"),
+        ),
+        (
+            "four_col_and.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_query_str/four_col_and.bin"),
+        ),
+        (
+            "four_col_arith.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_query_str/four_col_arith.bin"),
+        ),
+        (
+            "float_cmp.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_query_str/float_cmp.bin"),
+        ),
+        (
+            "null_frame.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_query_str/null_frame.bin"),
+        ),
+        (
+            "eight_rows.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_query_str/eight_rows.bin"),
+        ),
+        (
+            "filter_some.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_query_str/filter_some.bin"),
+        ),
+        (
+            "filter_none.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_query_str/filter_none.bin"),
+        ),
+        (
+            "filter_all.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_query_str/filter_all.bin"),
+        ),
+    ];
+
+    for (name, seed) in seeds {
+        let result = fuzz_query_str_bytes(seed);
+        assert!(
+            result.is_ok(),
+            "query_str corpus seed {name} should pass: {result:?}"
+        );
+    }
+}
+
+#[test]
 fn fuzz_query_str_with_locals_bytes_accepts_structured_corpus_seeds() {
     let seeds: &[(&str, &[u8])] = &[
         (
