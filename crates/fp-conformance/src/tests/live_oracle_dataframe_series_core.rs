@@ -2985,7 +2985,11 @@ fn live_oracle_series_between_basic() {
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series
-        .between(&super::Scalar::Float64(2.0), &super::Scalar::Float64(4.0), "both")
+        .between(
+            &super::Scalar::Float64(2.0),
+            &super::Scalar::Float64(4.0),
+            "both",
+        )
         .expect("between");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
@@ -3041,7 +3045,11 @@ fn live_oracle_series_between_inclusive_neither() {
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series
-        .between(&super::Scalar::Float64(2.0), &super::Scalar::Float64(4.0), "neither")
+        .between(
+            &super::Scalar::Float64(2.0),
+            &super::Scalar::Float64(4.0),
+            "neither",
+        )
         .expect("between");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
@@ -3094,7 +3102,11 @@ fn live_oracle_series_between_with_nulls() {
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series
-        .between(&super::Scalar::Float64(0.0), &super::Scalar::Float64(10.0), "both")
+        .between(
+            &super::Scalar::Float64(0.0),
+            &super::Scalar::Float64(10.0),
+            "both",
+        )
         .expect("between");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }

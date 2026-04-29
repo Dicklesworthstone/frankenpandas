@@ -941,8 +941,11 @@ fn fuzz_common_dtype_bytes_replays_committed_corpus_seeds() {
     ];
 
     for (name, seed) in corpus {
-        fuzz_common_dtype_bytes(seed)
-            .unwrap_or_else(|err| panic!("common_dtype corpus seed {name} should pass: {err:?}"));
+        let result = fuzz_common_dtype_bytes(seed);
+        assert!(
+            result.is_ok(),
+            "common_dtype corpus seed {name} should pass: {result:?}"
+        );
     }
 }
 
@@ -1067,8 +1070,11 @@ fn fuzz_scalar_cast_bytes_replays_committed_corpus_seeds() {
     ];
 
     for (name, seed) in corpus {
-        fuzz_scalar_cast_bytes(seed)
-            .unwrap_or_else(|err| panic!("scalar_cast corpus seed {name} should pass: {err:?}"));
+        let result = fuzz_scalar_cast_bytes(seed);
+        assert!(
+            result.is_ok(),
+            "scalar_cast corpus seed {name} should pass: {result:?}"
+        );
     }
 }
 
@@ -1711,6 +1717,60 @@ fn fuzz_json_io_bytes_accepts_jsonl_seed_fixture() {
         "../../fixtures/adversarial/fuzz_corpus/fuzz_json_io/jsonl_valid_seed.jsonl"
     );
     fuzz_json_io_bytes(seed).expect("jsonl fuzz seed should parse");
+}
+
+#[test]
+fn fuzz_json_io_bytes_replays_committed_corpus_seeds() {
+    let corpus: &[(&str, &[u8])] = &[
+        (
+            "columns_bool_float_seed.json",
+            include_bytes!("../../../../fuzz/corpus/fuzz_json_io/columns_bool_float_seed.json"),
+        ),
+        (
+            "index_nested_labels_seed.json",
+            include_bytes!("../../../../fuzz/corpus/fuzz_json_io/index_nested_labels_seed.json"),
+        ),
+        (
+            "jsonl_sparse_unicode_seed.jsonl",
+            include_bytes!("../../../../fuzz/corpus/fuzz_json_io/jsonl_sparse_unicode_seed.jsonl"),
+        ),
+        (
+            "records_bool_null_seed.json",
+            include_bytes!("../../../../fuzz/corpus/fuzz_json_io/records_bool_null_seed.json"),
+        ),
+        (
+            "records_sparse_keys_seed.json",
+            include_bytes!("../../../../fuzz/corpus/fuzz_json_io/records_sparse_keys_seed.json"),
+        ),
+        (
+            "split_empty_columns_seed.json",
+            include_bytes!("../../../../fuzz/corpus/fuzz_json_io/split_empty_columns_seed.json"),
+        ),
+        (
+            "split_mixed_scalar_seed.json",
+            include_bytes!("../../../../fuzz/corpus/fuzz_json_io/split_mixed_scalar_seed.json"),
+        ),
+        (
+            "values_rectangular_seed.json",
+            include_bytes!("../../../../fuzz/corpus/fuzz_json_io/values_rectangular_seed.json"),
+        ),
+        (
+            "values_single_column_seed.json",
+            include_bytes!("../../../../fuzz/corpus/fuzz_json_io/values_single_column_seed.json"),
+        ),
+        (
+            "whitespace_records_seed.json",
+            include_bytes!("../../../../fuzz/corpus/fuzz_json_io/whitespace_records_seed.json"),
+        ),
+    ];
+
+    for (name, seed) in corpus {
+        let result = fuzz_json_io_bytes(seed);
+        assert!(
+            result.is_ok(),
+            "committed json io corpus seed {name} failed: {result:?}"
+        );
+    }
 }
 
 #[test]
