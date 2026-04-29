@@ -4840,6 +4840,43 @@ def op_series_describe(pd, payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def op_series_between(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    between_left = payload.get("between_left")
+    between_right = payload.get("between_right")
+    inclusive = payload.get("between_inclusive", "both")
+
+    if left is None:
+        raise OracleError("series_between requires left payload")
+    if between_left is None:
+        raise OracleError("series_between requires between_left payload")
+    if between_right is None:
+        raise OracleError("series_between requires between_right payload")
+    if inclusive not in {"both", "neither", "left", "right"}:
+        raise OracleError(
+            f"series_between inclusive must be both|neither|left|right, got {inclusive!r}"
+        )
+
+    index = [label_from_json(item) for item in left["index"]]
+    values = [scalar_from_json(item) for item in left["values"]]
+    series = pd.Series(values, index=index, name=left.get("name", "series"))
+
+    left_bound = scalar_from_json(between_left)
+    right_bound = scalar_from_json(between_right)
+
+    try:
+        out = series.between(left_bound, right_bound, inclusive=inclusive)
+    except Exception as exc:
+        raise OracleError(f"series_between failed: {exc}") from exc
+
+    return {
+        "expected_series": {
+            "index": [label_to_json(v) for v in out.index.tolist()],
+            "values": [scalar_to_json(v) for v in out.tolist()],
+        }
+    }
+
+
 def require_join_type(payload: dict[str, Any], op_name: str, *, allow_cross: bool = False) -> str:
     join_type = payload.get("join_type")
     allowed = {"inner", "left", "right", "outer"}
@@ -5385,6 +5422,8 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_series_nsmallest(pd, payload)
     if op in {"series_describe", "series_describe_default"}:
         return op_series_describe(pd, payload)
+    if op in {"series_between", "series_between_default"}:
+        return op_series_between(pd, payload)
     if op == "series_any":
         return op_series_any(pd, payload)
     if op == "series_all":
