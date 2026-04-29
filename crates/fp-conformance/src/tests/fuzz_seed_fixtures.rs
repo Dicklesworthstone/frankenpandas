@@ -297,6 +297,138 @@ fn fuzz_pivot_table_bytes_accepts_raw_projection_mode() {
 }
 
 #[test]
+fn fuzz_pivot_table_bytes_accepts_aggfunc_sum_seed() {
+    let seed = include_bytes!("../../fixtures/adversarial/fuzz_corpus/pivot_table/aggfunc_sum.bin");
+    fuzz_pivot_table_bytes(seed).expect("aggfunc_sum seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_pivot_table_bytes_accepts_aggfunc_mean_seed() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/pivot_table/aggfunc_mean.bin");
+    fuzz_pivot_table_bytes(seed).expect("aggfunc_mean seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_pivot_table_bytes_accepts_aggfunc_count_seed() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/pivot_table/aggfunc_count.bin");
+    fuzz_pivot_table_bytes(seed).expect("aggfunc_count seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_pivot_table_bytes_accepts_aggfunc_min_seed() {
+    let seed = include_bytes!("../../fixtures/adversarial/fuzz_corpus/pivot_table/aggfunc_min.bin");
+    fuzz_pivot_table_bytes(seed).expect("aggfunc_min seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_pivot_table_bytes_accepts_aggfunc_max_seed() {
+    let seed = include_bytes!("../../fixtures/adversarial/fuzz_corpus/pivot_table/aggfunc_max.bin");
+    fuzz_pivot_table_bytes(seed).expect("aggfunc_max seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_pivot_table_bytes_accepts_aggfunc_prod_seed() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/pivot_table/aggfunc_prod.bin");
+    fuzz_pivot_table_bytes(seed).expect("aggfunc_prod seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_pivot_table_bytes_accepts_aggfunc_median_seed() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/pivot_table/aggfunc_median.bin");
+    fuzz_pivot_table_bytes(seed).expect("aggfunc_median seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_pivot_table_bytes_accepts_aggfunc_var_seed() {
+    let seed = include_bytes!("../../fixtures/adversarial/fuzz_corpus/pivot_table/aggfunc_var.bin");
+    fuzz_pivot_table_bytes(seed).expect("aggfunc_var seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_pivot_table_bytes_accepts_aggfunc_std_seed() {
+    let seed = include_bytes!("../../fixtures/adversarial/fuzz_corpus/pivot_table/aggfunc_std.bin");
+    fuzz_pivot_table_bytes(seed).expect("aggfunc_std seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_pivot_table_bytes_accepts_aggfunc_first_seed() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/pivot_table/aggfunc_first.bin");
+    fuzz_pivot_table_bytes(seed).expect("aggfunc_first seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_pivot_table_bytes_accepts_single_row_seed() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/pivot_table/single_row.bin");
+    fuzz_pivot_table_bytes(seed).expect("single_row seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_pivot_table_bytes_accepts_all_nulls_seed() {
+    let seed = include_bytes!("../../fixtures/adversarial/fuzz_corpus/pivot_table/all_nulls.bin");
+    fuzz_pivot_table_bytes(seed).expect("all_nulls seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_pivot_table_bytes_accepts_same_cell_seed() {
+    let seed = include_bytes!("../../fixtures/adversarial/fuzz_corpus/pivot_table/same_cell.bin");
+    fuzz_pivot_table_bytes(seed).expect("same_cell seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_pivot_table_bytes_accepts_synth_mode_sum_seed() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/pivot_table/synth_mode_sum.bin");
+    fuzz_pivot_table_bytes(seed).expect("synth_mode_sum seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_pivot_table_bytes_accepts_negative_vals_seed() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/pivot_table/negative_vals.bin");
+    fuzz_pivot_table_bytes(seed).expect("negative_vals seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_pivot_table_bytes_accepts_float_vals_seed() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/pivot_table/float_vals.bin");
+    fuzz_pivot_table_bytes(seed).expect("float_vals seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_pivot_table_bytes_accepts_mixed_nulls_seed() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/pivot_table/mixed_nulls.bin");
+    fuzz_pivot_table_bytes(seed).expect("mixed_nulls seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_pivot_table_bytes_accepts_zeros_seed() {
+    let seed = include_bytes!("../../fixtures/adversarial/fuzz_corpus/pivot_table/zeros.bin");
+    fuzz_pivot_table_bytes(seed).expect("zeros seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_pivot_table_bytes_accepts_max_rows_raw_seed() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/pivot_table/max_rows_raw.bin");
+    fuzz_pivot_table_bytes(seed).expect("max_rows_raw seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_pivot_table_bytes_accepts_synth_max_rows_seed() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/pivot_table/synth_max_rows.bin");
+    fuzz_pivot_table_bytes(seed).expect("synth_max_rows seed should satisfy invariants");
+}
+
+#[test]
 fn fuzz_rolling_window_bytes_accepts_empty_input() {
     fuzz_rolling_window_bytes(&[]).expect("empty input should be a no-op");
 }
