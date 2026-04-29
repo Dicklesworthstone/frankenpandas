@@ -5110,6 +5110,7 @@ def op_series_astype(pd, payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+
 def op_series_abs(pd, payload: dict[str, Any]) -> dict[str, Any]:
     left = payload.get("left")
     if left is None:
