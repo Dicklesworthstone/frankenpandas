@@ -2066,6 +2066,21 @@ def op_dataframe_shift(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return {"expected_frame": dataframe_to_json(out)}
 
 
+def op_dataframe_pct_change(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    if frame_payload is None:
+        raise OracleError("dataframe_pct_change requires frame payload")
+
+    periods = payload.get("diff_periods", payload.get("pct_change_periods", 1))
+    axis = payload.get("diff_axis", payload.get("pct_change_axis", 0))
+    if axis not in (0, 1):
+        raise OracleError(f"dataframe_pct_change axis must be 0 or 1 (got {axis!r})")
+
+    frame = dataframe_from_json(pd, frame_payload)
+    out = frame.pct_change(periods=int(periods), axis=axis)
+    return {"expected_frame": dataframe_to_json(out)}
+
+
 def op_series_pct_change(pd, payload: dict[str, Any]) -> dict[str, Any]:
     left = payload.get("left")
     if left is None:
@@ -5278,6 +5293,8 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_dataframe_round(pd, payload)
     if op in {"dataframe_shift", "data_frame_shift"}:
         return op_dataframe_shift(pd, payload)
+    if op in {"dataframe_pct_change", "data_frame_pct_change"}:
+        return op_dataframe_pct_change(pd, payload)
     if op in {"dataframe_fillna", "data_frame_fillna"}:
         return op_dataframe_fillna(pd, payload)
     if op in {"dataframe_dropna", "data_frame_dropna"}:

@@ -554,6 +554,122 @@ fn live_oracle_dataframe_shift_axis1_matches_pandas() {
     super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
 }
 
+fn assert_live_oracle_dataframe_pct_change_parity(fixture: super::PacketFixture, context: &str) {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = true;
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping {context}: {message}");
+        return;
+    }
+
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Frame(_)),
+        "expected live oracle frame payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Frame(expected) = expected else {
+        return;
+    };
+
+    let actual = super::execute_dataframe_fixture_operation(&fixture).expect("actual frame");
+    super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_dataframe_pct_change_axis1_matches_pandas() {
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-062",
+        "case_id": "dataframe_pct_change_axis1_live",
+        "mode": "strict",
+        "operation": "dataframe_pct_change",
+        "oracle_source": "live_legacy_pandas",
+        "diff_periods": 1,
+        "diff_axis": 1,
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "column_order": ["a", "b", "c"],
+            "columns": {
+                "a": [
+                    { "kind": "float64", "value": 100.0 },
+                    { "kind": "float64", "value": 50.0 },
+                    { "kind": "float64", "value": -20.0 }
+                ],
+                "b": [
+                    { "kind": "float64", "value": 110.0 },
+                    { "kind": "float64", "value": 40.0 },
+                    { "kind": "float64", "value": -10.0 }
+                ],
+                "c": [
+                    { "kind": "float64", "value": 121.0 },
+                    { "kind": "float64", "value": 80.0 },
+                    { "kind": "float64", "value": -5.0 }
+                ]
+            }
+        }
+    }))
+    .expect("fixture");
+
+    assert_live_oracle_dataframe_pct_change_parity(
+        fixture,
+        "dataframe pct_change axis=1 oracle test",
+    );
+}
+
+#[test]
+fn live_oracle_dataframe_pct_change_axis1_negative_periods_matches_pandas() {
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-062",
+        "case_id": "dataframe_pct_change_axis1_negative_periods_live",
+        "mode": "strict",
+        "operation": "dataframe_pct_change",
+        "oracle_source": "live_legacy_pandas",
+        "diff_periods": -1,
+        "diff_axis": 1,
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "column_order": ["a", "b", "c", "d"],
+            "columns": {
+                "a": [
+                    { "kind": "float64", "value": 100.0 },
+                    { "kind": "float64", "value": 50.0 },
+                    { "kind": "float64", "value": 10.0 }
+                ],
+                "b": [
+                    { "kind": "float64", "value": 120.0 },
+                    { "kind": "float64", "value": 25.0 },
+                    { "kind": "float64", "value": 20.0 }
+                ],
+                "c": [
+                    { "kind": "float64", "value": 60.0 },
+                    { "kind": "float64", "value": 100.0 },
+                    { "kind": "float64", "value": 40.0 }
+                ],
+                "d": [
+                    { "kind": "float64", "value": 30.0 },
+                    { "kind": "float64", "value": 50.0 },
+                    { "kind": "float64", "value": 80.0 }
+                ]
+            }
+        }
+    }))
+    .expect("fixture");
+
+    assert_live_oracle_dataframe_pct_change_parity(
+        fixture,
+        "dataframe pct_change axis=1 negative-period oracle test",
+    );
+}
+
 #[test]
 fn live_oracle_dataframe_take_axis0_negative_indices_matches_pandas() {
     let mut cfg = super::HarnessConfig::default_paths();
