@@ -575,6 +575,7 @@ impl ConformalGuard {
     /// Create a new conformal guard with the given window size and significance level.
     #[must_use]
     pub fn new(window_size: usize, alpha: f64) -> Self {
+        let window_size = window_size.max(1);
         Self {
             scores: Vec::with_capacity(window_size),
             window_size,
@@ -1334,6 +1335,19 @@ mod tests {
 
         // Under 100 decisions, no alert regardless of coverage
         assert!(!guard.coverage_alert());
+    }
+
+    #[test]
+    fn conformal_guard_zero_window_size_is_clamped() {
+        let mut guard = ConformalGuard::new(0, 0.1);
+        let mut ledger = EvidenceLedger::new();
+        let policy = RuntimePolicy::hardened(Some(100_000));
+
+        policy.decide_join_admission(1000, &mut ledger);
+        let set = guard.evaluate(&ledger.records()[0]);
+
+        assert!(set.bayesian_action_in_set);
+        assert_eq!(guard.calibration_count(), 1);
     }
 
     #[test]
