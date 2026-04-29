@@ -63,6 +63,56 @@ fn fuzz_csv_parse_bytes_reports_duplicate_headers() {
 }
 
 #[test]
+fn fuzz_csv_parse_bytes_accepts_empty_cells_seed_fixture() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/csv_parse/empty_cells_seed.csv");
+    fuzz_csv_parse_bytes(seed).expect("empty cells csv fuzz seed should parse");
+}
+
+#[test]
+fn fuzz_csv_parse_bytes_accepts_numeric_columns_seed_fixture() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/csv_parse/numeric_columns_seed.csv");
+    fuzz_csv_parse_bytes(seed).expect("numeric columns csv fuzz seed should parse");
+}
+
+#[test]
+fn fuzz_csv_parse_bytes_accepts_escaped_quotes_seed_fixture() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/csv_parse/escaped_quotes_seed.csv");
+    fuzz_csv_parse_bytes(seed).expect("escaped quotes csv fuzz seed should parse");
+}
+
+#[test]
+fn fuzz_csv_parse_bytes_accepts_single_column_seed_fixture() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/csv_parse/single_column_seed.csv");
+    fuzz_csv_parse_bytes(seed).expect("single column csv fuzz seed should parse");
+}
+
+#[test]
+fn fuzz_csv_parse_bytes_accepts_header_only_seed_fixture() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/csv_parse/header_only_seed.csv");
+    fuzz_csv_parse_bytes(seed).expect("header-only csv fuzz seed should parse");
+}
+
+#[test]
+fn fuzz_csv_parse_bytes_accepts_trailing_whitespace_seed_fixture() {
+    let seed = include_bytes!(
+        "../../fixtures/adversarial/fuzz_corpus/csv_parse/trailing_whitespace_seed.csv"
+    );
+    fuzz_csv_parse_bytes(seed).expect("trailing whitespace csv fuzz seed should parse");
+}
+
+#[test]
+fn fuzz_csv_parse_bytes_accepts_many_columns_seed_fixture() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/csv_parse/many_columns_seed.csv");
+    fuzz_csv_parse_bytes(seed).expect("many columns csv fuzz seed should parse");
+}
+
+#[test]
 fn fuzz_excel_io_bytes_accepts_valid_seed_fixture() {
     let seed =
         include_bytes!("../../fixtures/adversarial/fuzz_corpus/excel_io/simple_valid_seed.xlsx");
