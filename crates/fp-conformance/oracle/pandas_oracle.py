@@ -4908,6 +4908,94 @@ def op_series_duplicated(pd, payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def op_series_cumsum(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    if left is None:
+        raise OracleError("series_cumsum requires left payload")
+
+    index = [label_from_json(item) for item in left["index"]]
+    values = [scalar_from_json(item) for item in left["values"]]
+    series = pd.Series(values, index=index, name=left.get("name", "series"))
+
+    try:
+        out = series.cumsum()
+    except Exception as exc:
+        raise OracleError(f"series_cumsum failed: {exc}") from exc
+
+    return {
+        "expected_series": {
+            "index": [label_to_json(v) for v in out.index.tolist()],
+            "values": [scalar_to_json(v) for v in out.tolist()],
+        }
+    }
+
+
+def op_series_cumprod(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    if left is None:
+        raise OracleError("series_cumprod requires left payload")
+
+    index = [label_from_json(item) for item in left["index"]]
+    values = [scalar_from_json(item) for item in left["values"]]
+    series = pd.Series(values, index=index, name=left.get("name", "series"))
+
+    try:
+        out = series.cumprod()
+    except Exception as exc:
+        raise OracleError(f"series_cumprod failed: {exc}") from exc
+
+    return {
+        "expected_series": {
+            "index": [label_to_json(v) for v in out.index.tolist()],
+            "values": [scalar_to_json(v) for v in out.tolist()],
+        }
+    }
+
+
+def op_series_cummax(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    if left is None:
+        raise OracleError("series_cummax requires left payload")
+
+    index = [label_from_json(item) for item in left["index"]]
+    values = [scalar_from_json(item) for item in left["values"]]
+    series = pd.Series(values, index=index, name=left.get("name", "series"))
+
+    try:
+        out = series.cummax()
+    except Exception as exc:
+        raise OracleError(f"series_cummax failed: {exc}") from exc
+
+    return {
+        "expected_series": {
+            "index": [label_to_json(v) for v in out.index.tolist()],
+            "values": [scalar_to_json(v) for v in out.tolist()],
+        }
+    }
+
+
+def op_series_cummin(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    if left is None:
+        raise OracleError("series_cummin requires left payload")
+
+    index = [label_from_json(item) for item in left["index"]]
+    values = [scalar_from_json(item) for item in left["values"]]
+    series = pd.Series(values, index=index, name=left.get("name", "series"))
+
+    try:
+        out = series.cummin()
+    except Exception as exc:
+        raise OracleError(f"series_cummin failed: {exc}") from exc
+
+    return {
+        "expected_series": {
+            "index": [label_to_json(v) for v in out.index.tolist()],
+            "values": [scalar_to_json(v) for v in out.tolist()],
+        }
+    }
+
+
 def require_join_type(payload: dict[str, Any], op_name: str, *, allow_cross: bool = False) -> str:
     join_type = payload.get("join_type")
     allowed = {"inner", "left", "right", "outer"}
@@ -5457,6 +5545,14 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_series_between(pd, payload)
     if op in {"series_duplicated", "series_duplicated_default"}:
         return op_series_duplicated(pd, payload)
+    if op in {"series_cumsum", "series_cumsum_default"}:
+        return op_series_cumsum(pd, payload)
+    if op in {"series_cumprod", "series_cumprod_default"}:
+        return op_series_cumprod(pd, payload)
+    if op in {"series_cummax", "series_cummax_default"}:
+        return op_series_cummax(pd, payload)
+    if op in {"series_cummin", "series_cummin_default"}:
+        return op_series_cummin(pd, payload)
     if op == "series_any":
         return op_series_any(pd, payload)
     if op == "series_all":

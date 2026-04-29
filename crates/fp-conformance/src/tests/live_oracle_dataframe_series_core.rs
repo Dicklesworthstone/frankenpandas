@@ -3380,3 +3380,407 @@ fn live_oracle_series_duplicated_with_nulls() {
         .expect("duplicated");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_series_cumsum_int() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-CUMSUM-INT",
+        "case_id": "series_cumsum_int",
+        "mode": "strict",
+        "operation": "series_cumsum",
+        "oracle_source": "live_legacy_pandas",
+        "left": {
+            "name": "test_series",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 4 }
+            ],
+            "values": [
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 4 },
+                { "kind": "int64", "value": 5 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping cumsum int test: {message}");
+        return;
+    }
+
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Series(_)),
+        "expected live oracle series payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let actual = series.cumsum().expect("cumsum");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_series_cumsum_with_nulls() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-CUMSUM-NULLS",
+        "case_id": "series_cumsum_with_nulls",
+        "mode": "strict",
+        "operation": "series_cumsum",
+        "oracle_source": "live_legacy_pandas",
+        "left": {
+            "name": "test_series",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 4 }
+            ],
+            "values": [
+                { "kind": "float64", "value": 1.0 },
+                { "kind": "null", "value": "null" },
+                { "kind": "float64", "value": 3.0 },
+                { "kind": "float64", "value": 4.0 },
+                { "kind": "null", "value": "null" }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping cumsum nulls test: {message}");
+        return;
+    }
+
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Series(_)),
+        "expected live oracle series payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let actual = series.cumsum().expect("cumsum");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_series_cumprod_int() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-CUMPROD-INT",
+        "case_id": "series_cumprod_int",
+        "mode": "strict",
+        "operation": "series_cumprod",
+        "oracle_source": "live_legacy_pandas",
+        "left": {
+            "name": "test_series",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 }
+            ],
+            "values": [
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 4 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping cumprod int test: {message}");
+        return;
+    }
+
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Series(_)),
+        "expected live oracle series payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let actual = series.cumprod().expect("cumprod");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_series_cumprod_float() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-CUMPROD-FLOAT",
+        "case_id": "series_cumprod_float",
+        "mode": "strict",
+        "operation": "series_cumprod",
+        "oracle_source": "live_legacy_pandas",
+        "left": {
+            "name": "test_series",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 }
+            ],
+            "values": [
+                { "kind": "float64", "value": 1.5 },
+                { "kind": "float64", "value": 2.0 },
+                { "kind": "null", "value": "null" },
+                { "kind": "float64", "value": 3.0 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping cumprod float test: {message}");
+        return;
+    }
+
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Series(_)),
+        "expected live oracle series payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let actual = series.cumprod().expect("cumprod");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_series_cummax_int() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-CUMMAX-INT",
+        "case_id": "series_cummax_int",
+        "mode": "strict",
+        "operation": "series_cummax",
+        "oracle_source": "live_legacy_pandas",
+        "left": {
+            "name": "test_series",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 4 }
+            ],
+            "values": [
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 4 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 5 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping cummax int test: {message}");
+        return;
+    }
+
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Series(_)),
+        "expected live oracle series payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let actual = series.cummax().expect("cummax");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_series_cummax_with_nulls() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-CUMMAX-NULLS",
+        "case_id": "series_cummax_with_nulls",
+        "mode": "strict",
+        "operation": "series_cummax",
+        "oracle_source": "live_legacy_pandas",
+        "left": {
+            "name": "test_series",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 4 }
+            ],
+            "values": [
+                { "kind": "float64", "value": 2.0 },
+                { "kind": "null", "value": "null" },
+                { "kind": "float64", "value": 5.0 },
+                { "kind": "float64", "value": 3.0 },
+                { "kind": "null", "value": "null" }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping cummax nulls test: {message}");
+        return;
+    }
+
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Series(_)),
+        "expected live oracle series payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let actual = series.cummax().expect("cummax");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_series_cummin_int() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-CUMMIN-INT",
+        "case_id": "series_cummin_int",
+        "mode": "strict",
+        "operation": "series_cummin",
+        "oracle_source": "live_legacy_pandas",
+        "left": {
+            "name": "test_series",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 4 }
+            ],
+            "values": [
+                { "kind": "int64", "value": 5 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 7 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 8 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping cummin int test: {message}");
+        return;
+    }
+
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Series(_)),
+        "expected live oracle series payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let actual = series.cummin().expect("cummin");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_series_cummin_with_nulls() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-CUMMIN-NULLS",
+        "case_id": "series_cummin_with_nulls",
+        "mode": "strict",
+        "operation": "series_cummin",
+        "oracle_source": "live_legacy_pandas",
+        "left": {
+            "name": "test_series",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 4 }
+            ],
+            "values": [
+                { "kind": "float64", "value": 4.0 },
+                { "kind": "null", "value": "null" },
+                { "kind": "float64", "value": 2.0 },
+                { "kind": "float64", "value": 6.0 },
+                { "kind": "null", "value": "null" }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping cummin nulls test: {message}");
+        return;
+    }
+
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Series(_)),
+        "expected live oracle series payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let actual = series.cummin().expect("cummin");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
