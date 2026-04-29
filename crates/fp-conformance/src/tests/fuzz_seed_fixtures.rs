@@ -1982,3 +1982,85 @@ fn fuzz_dataframe_merge_bytes_accepts_left_all_matched() {
     );
     fuzz_dataframe_merge_bytes(seed).expect("left-all-matched seed should satisfy invariants");
 }
+
+#[test]
+fn fuzz_parse_expr_bytes_replays_committed_corpus_seeds() {
+    let seeds: &[(&str, &[u8])] = &[
+        (
+            "arith_add",
+            include_bytes!("../../fixtures/adversarial/fuzz_corpus/parse_expr/arith_add.txt"),
+        ),
+        (
+            "arith_multi",
+            include_bytes!("../../fixtures/adversarial/fuzz_corpus/parse_expr/arith_multi.txt"),
+        ),
+        (
+            "arith_complex",
+            include_bytes!("../../fixtures/adversarial/fuzz_corpus/parse_expr/arith_complex.txt"),
+        ),
+        (
+            "arith_chain",
+            include_bytes!("../../fixtures/adversarial/fuzz_corpus/parse_expr/arith_chain.txt"),
+        ),
+        (
+            "cmp_gt",
+            include_bytes!("../../fixtures/adversarial/fuzz_corpus/parse_expr/cmp_gt.txt"),
+        ),
+        (
+            "cmp_lte",
+            include_bytes!("../../fixtures/adversarial/fuzz_corpus/parse_expr/cmp_lte.txt"),
+        ),
+        (
+            "cmp_eq",
+            include_bytes!("../../fixtures/adversarial/fuzz_corpus/parse_expr/cmp_eq.txt"),
+        ),
+        (
+            "cmp_neq",
+            include_bytes!("../../fixtures/adversarial/fuzz_corpus/parse_expr/cmp_neq.txt"),
+        ),
+        (
+            "bool_and",
+            include_bytes!("../../fixtures/adversarial/fuzz_corpus/parse_expr/bool_and.txt"),
+        ),
+        (
+            "bool_or",
+            include_bytes!("../../fixtures/adversarial/fuzz_corpus/parse_expr/bool_or.txt"),
+        ),
+        (
+            "bool_not",
+            include_bytes!("../../fixtures/adversarial/fuzz_corpus/parse_expr/bool_not.txt"),
+        ),
+        (
+            "bool_combined",
+            include_bytes!("../../fixtures/adversarial/fuzz_corpus/parse_expr/bool_combined.txt"),
+        ),
+        (
+            "nested_paren",
+            include_bytes!("../../fixtures/adversarial/fuzz_corpus/parse_expr/nested_paren.txt"),
+        ),
+        (
+            "deeply_nested",
+            include_bytes!("../../fixtures/adversarial/fuzz_corpus/parse_expr/deeply_nested.txt"),
+        ),
+        (
+            "col_underscore",
+            include_bytes!("../../fixtures/adversarial/fuzz_corpus/parse_expr/col_underscore.txt"),
+        ),
+        (
+            "lit_int",
+            include_bytes!("../../fixtures/adversarial/fuzz_corpus/parse_expr/lit_int.txt"),
+        ),
+        (
+            "lit_float",
+            include_bytes!("../../fixtures/adversarial/fuzz_corpus/parse_expr/lit_float.txt"),
+        ),
+        (
+            "lit_neg",
+            include_bytes!("../../fixtures/adversarial/fuzz_corpus/parse_expr/lit_neg.txt"),
+        ),
+    ];
+
+    for (name, seed) in seeds {
+        fuzz_parse_expr_bytes(seed).unwrap_or_else(|err| panic!("seed {name} failed: {err}"));
+    }
+}
