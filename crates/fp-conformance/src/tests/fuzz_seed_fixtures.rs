@@ -249,6 +249,62 @@ fn fuzz_read_sql_bytes_accepts_indexed_table_dispatch_seed() {
 }
 
 #[test]
+fn fuzz_read_sql_bytes_replays_committed_corpus_seeds() {
+    let corpus: &[(&str, &[u8])] = &[
+        (
+            "aggregate_ordered_query.sql",
+            include_bytes!("../../../../fuzz/corpus/fuzz_sql_read/aggregate_ordered_query.sql"),
+        ),
+        (
+            "commented_indexed_t2_query.sql",
+            include_bytes!("../../../../fuzz/corpus/fuzz_sql_read/commented_indexed_t2_query.sql"),
+        ),
+        (
+            "derived_column_projection.sql",
+            include_bytes!("../../../../fuzz/corpus/fuzz_sql_read/derived_column_projection.sql"),
+        ),
+        (
+            "join_case_mapping.sql",
+            include_bytes!("../../../../fuzz/corpus/fuzz_sql_read/join_case_mapping.sql"),
+        ),
+        (
+            "mode1_filtered_projection.sql",
+            include_bytes!("../../../../fuzz/corpus/fuzz_sql_read/mode1_filtered_projection.sql"),
+        ),
+        (
+            "mode1_t2_desc_projection.sql",
+            include_bytes!("../../../../fuzz/corpus/fuzz_sql_read/mode1_t2_desc_projection.sql"),
+        ),
+        (
+            "mode2_leading_newline_projection.sql",
+            include_bytes!(
+                "../../../../fuzz/corpus/fuzz_sql_read/mode2_leading_newline_projection.sql"
+            ),
+        ),
+        (
+            "mode5_indexed_join_aliases.sql",
+            include_bytes!("../../../../fuzz/corpus/fuzz_sql_read/mode5_indexed_join_aliases.sql"),
+        ),
+        (
+            "table_mode6_t2",
+            include_bytes!("../../../../fuzz/corpus/fuzz_sql_read/table_mode6_t2"),
+        ),
+        (
+            "table_mode7_t2_with_options",
+            include_bytes!("../../../../fuzz/corpus/fuzz_sql_read/table_mode7_t2_with_options"),
+        ),
+    ];
+
+    for (name, seed) in corpus {
+        let result = fuzz_read_sql_bytes(seed);
+        assert!(
+            result.is_ok(),
+            "SQL fuzz corpus seed {name} should parse: {result:?}"
+        );
+    }
+}
+
+#[test]
 fn fuzz_format_cross_round_trip_bytes_accepts_all_arrow_format_pairs() {
     let payload = [
         3, 2, 0, 1, 2, 3, 10, 20, 11, 21, 12, 22, 13, 23, 14, 24, 15, 25, 16, 26, 17, 27, 18, 28,
