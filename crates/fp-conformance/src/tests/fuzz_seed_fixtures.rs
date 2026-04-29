@@ -341,6 +341,76 @@ fn fuzz_dataframe_eval_bytes_accepts_simple_numeric_expression() {
 }
 
 #[test]
+fn fuzz_dataframe_op_chain_bytes_accepts_structured_corpus_seeds() {
+    let seeds: &[(&str, &[u8])] = &[
+        (
+            "drop_to_empty_after_reset",
+            include_bytes!(
+                "../../../../fuzz/corpus/fuzz_dataframe_op_chain/drop_to_empty_after_reset"
+            ),
+        ),
+        (
+            "eight_step_all_ops_mixed",
+            include_bytes!(
+                "../../../../fuzz/corpus/fuzz_dataframe_op_chain/eight_step_all_ops_mixed"
+            ),
+        ),
+        (
+            "interleaved_select_reset",
+            include_bytes!(
+                "../../../../fuzz/corpus/fuzz_dataframe_op_chain/interleaved_select_reset"
+            ),
+        ),
+        (
+            "max_rows_four_col_desc",
+            include_bytes!(
+                "../../../../fuzz/corpus/fuzz_dataframe_op_chain/max_rows_four_col_desc"
+            ),
+        ),
+        (
+            "missing_heavy_values",
+            include_bytes!("../../../../fuzz/corpus/fuzz_dataframe_op_chain/missing_heavy_values"),
+        ),
+        (
+            "nan_heavy_float",
+            include_bytes!("../../../../fuzz/corpus/fuzz_dataframe_op_chain/nan_heavy_float"),
+        ),
+        (
+            "select_drop_boundary",
+            include_bytes!("../../../../fuzz/corpus/fuzz_dataframe_op_chain/select_drop_boundary"),
+        ),
+        (
+            "single_row_reset_sort",
+            include_bytes!("../../../../fuzz/corpus/fuzz_dataframe_op_chain/single_row_reset_sort"),
+        ),
+        (
+            "sort_desc_float",
+            include_bytes!("../../../../fuzz/corpus/fuzz_dataframe_op_chain/sort_desc_float"),
+        ),
+        (
+            "short_min_valid",
+            include_bytes!("../../../../fuzz/corpus/fuzz_dataframe_op_chain/short_min_valid"),
+        ),
+        (
+            "wide_desc_sort_churn",
+            include_bytes!("../../../../fuzz/corpus/fuzz_dataframe_op_chain/wide_desc_sort_churn"),
+        ),
+        (
+            "wide_int_sort_churn",
+            include_bytes!("../../../../fuzz/corpus/fuzz_dataframe_op_chain/wide_int_sort_churn"),
+        ),
+    ];
+
+    for &(name, seed) in seeds {
+        let result = fuzz_dataframe_op_chain_bytes(seed);
+        assert!(
+            result.is_ok(),
+            "op-chain seed {name} should satisfy invariants: {result:?}"
+        );
+    }
+}
+
+#[test]
 fn fuzz_common_dtype_bytes_accepts_identical_dtype_seed() {
     let seed = include_bytes!(
         "../../fixtures/adversarial/fuzz_corpus/common_dtype/identical_int64_seed.bin"

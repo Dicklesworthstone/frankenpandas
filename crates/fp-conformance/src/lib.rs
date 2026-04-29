@@ -6139,7 +6139,7 @@ pub fn fuzz_parallel_dataframe_bytes(input: &[u8]) -> Result<(), String> {
 /// Op alphabet (byte-tag % len):
 /// 0: select_columns(first_column)
 /// 1: drop_column(last_column)
-/// 2: sort_values(first_column, ascending)
+/// 2: sort_values(selected_column, ascending from the next tag bit)
 /// 3: reset_index(drop=false)
 ///
 /// Invariants checked after every op:
@@ -6175,7 +6175,7 @@ pub fn fuzz_dataframe_op_chain_bytes(input: &[u8]) -> Result<(), String> {
             }
             2 => {
                 let col = pick(*op_byte as usize);
-                let ascending = op_byte.is_multiple_of(2);
+                let ascending = (*op_byte / 4).is_multiple_of(2);
                 frame.sort_values(&col, ascending)
             }
             _ => frame.reset_index(false),
