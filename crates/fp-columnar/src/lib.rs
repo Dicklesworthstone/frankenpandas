@@ -589,7 +589,7 @@ fn vectorized_binary_f64(
         ArithmeticOp::Div => |a, b| a / b,
         ArithmeticOp::Mod => python_mod_f64,
         ArithmeticOp::Pow => |a, b| a.powf(b),
-        ArithmeticOp::FloorDiv => |a, b| (a / b).floor(),
+        ArithmeticOp::FloorDiv => python_floor_div_f64,
     };
 
     let out: Vec<f64> = left
@@ -609,20 +609,48 @@ fn vectorized_binary_f64(
 }
 
 fn python_mod_f64(lhs: f64, rhs: f64) -> f64 {
+    if lhs.is_nan() || rhs.is_nan() {
+        return f64::NAN;
+    }
+
     if rhs.is_infinite() {
-        if rhs.is_sign_positive() {
-            if lhs >= 0.0 || lhs.is_nan() {
-                lhs
-            } else {
-                f64::INFINITY
-            }
-        } else if lhs <= 0.0 || lhs.is_nan() {
+        if lhs.is_infinite() {
+            return f64::NAN;
+        }
+        if lhs == 0.0 {
+            return 0.0_f64.copysign(rhs);
+        }
+        if lhs.is_sign_positive() == rhs.is_sign_positive() {
             lhs
         } else {
-            f64::NEG_INFINITY
+            rhs
         }
     } else {
-        lhs - (lhs / rhs).floor() * rhs
+        lhs - python_floor_div_f64(lhs, rhs) * rhs
+    }
+}
+
+fn python_floor_div_f64(lhs: f64, rhs: f64) -> f64 {
+    if lhs.is_nan() || rhs.is_nan() {
+        return f64::NAN;
+    }
+
+    if rhs.is_infinite() {
+        if lhs.is_infinite() {
+            return f64::NAN;
+        }
+        if lhs == 0.0 {
+            return (lhs / rhs).floor();
+        }
+        if lhs.is_sign_positive() == rhs.is_sign_positive() {
+            0.0
+        } else {
+            -1.0
+        }
+    } else if lhs.is_infinite() && rhs != 0.0 {
+        f64::NAN
+    } else {
+        (lhs / rhs).floor()
     }
 }
 
@@ -1388,7 +1416,7 @@ impl Column {
                     ArithmeticOp::Div => lhs / rhs,
                     ArithmeticOp::Mod => python_mod_f64(lhs, rhs),
                     ArithmeticOp::Pow => lhs.powf(rhs),
-                    ArithmeticOp::FloorDiv => (lhs / rhs).floor(),
+                    ArithmeticOp::FloorDiv => python_floor_div_f64(lhs, rhs),
                 };
 
                 Ok(Scalar::Float64(result))
@@ -8280,11 +8308,30 @@ mod tests {
             assert_eq!(python_mod_f64(5.0, f64::NEG_INFINITY), f64::NEG_INFINITY);
             assert_eq!(python_mod_f64(-5.0, f64::NEG_INFINITY), -5.0);
             assert_eq!(python_mod_f64(0.0, f64::INFINITY), 0.0);
-            assert_eq!(python_mod_f64(0.0, f64::NEG_INFINITY), 0.0);
-            assert_eq!(python_mod_f64(-0.0, f64::INFINITY), -0.0);
+            assert!(python_mod_f64(0.0, f64::NEG_INFINITY).is_sign_negative());
+            assert_eq!(python_mod_f64(-0.0, f64::INFINITY), 0.0);
             assert_eq!(python_mod_f64(-0.0, f64::NEG_INFINITY), -0.0);
             assert!(python_mod_f64(f64::NAN, f64::INFINITY).is_nan());
             assert!(python_mod_f64(f64::NAN, f64::NEG_INFINITY).is_nan());
+            assert!(python_mod_f64(f64::INFINITY, f64::INFINITY).is_nan());
+            assert!(python_mod_f64(f64::NEG_INFINITY, f64::NEG_INFINITY).is_nan());
+        }
+
+        #[test]
+        fn python_floor_div_f64_handles_infinite_operands() {
+            use crate::python_floor_div_f64;
+
+            assert_eq!(python_floor_div_f64(5.0, f64::INFINITY), 0.0);
+            assert_eq!(python_floor_div_f64(-5.0, f64::INFINITY), -1.0);
+            assert_eq!(python_floor_div_f64(5.0, f64::NEG_INFINITY), -1.0);
+            assert_eq!(python_floor_div_f64(-5.0, f64::NEG_INFINITY), 0.0);
+            assert_eq!(python_floor_div_f64(0.0, f64::INFINITY), 0.0);
+            assert!(python_floor_div_f64(-0.0, f64::INFINITY).is_sign_negative());
+            assert!(python_floor_div_f64(0.0, f64::NEG_INFINITY).is_sign_negative());
+            assert_eq!(python_floor_div_f64(-0.0, f64::NEG_INFINITY), 0.0);
+            assert!(python_floor_div_f64(f64::INFINITY, 2.0).is_nan());
+            assert!(python_floor_div_f64(f64::NEG_INFINITY, -2.0).is_nan());
+            assert!(python_floor_div_f64(f64::INFINITY, f64::INFINITY).is_nan());
         }
     }
 }
