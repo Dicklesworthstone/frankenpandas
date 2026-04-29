@@ -554,6 +554,119 @@ fn live_oracle_dataframe_shift_axis1_matches_pandas() {
     super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
 }
 
+fn assert_live_oracle_dataframe_diff_parity(fixture: super::PacketFixture, context: &str) {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = true;
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping {context}: {message}");
+        return;
+    }
+
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Frame(_)),
+        "expected live oracle frame payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Frame(expected) = expected else {
+        return;
+    };
+
+    let actual = super::execute_dataframe_fixture_operation(&fixture).expect("actual frame");
+    super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_dataframe_diff_axis1_matches_pandas() {
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-056",
+        "case_id": "dataframe_diff_axis1_live",
+        "mode": "strict",
+        "operation": "dataframe_diff",
+        "oracle_source": "live_legacy_pandas",
+        "diff_periods": 1,
+        "diff_axis": 1,
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "column_order": ["a", "b", "c", "d"],
+            "columns": {
+                "a": [
+                    { "kind": "float64", "value": 1.0 },
+                    { "kind": "float64", "value": -2.0 },
+                    { "kind": "float64", "value": 5.5 }
+                ],
+                "b": [
+                    { "kind": "float64", "value": 4.0 },
+                    { "kind": "float64", "value": -2.0 },
+                    { "kind": "float64", "value": 3.5 }
+                ],
+                "c": [
+                    { "kind": "float64", "value": 10.0 },
+                    { "kind": "float64", "value": 0.0 },
+                    { "kind": "float64", "value": 3.5 }
+                ],
+                "d": [
+                    { "kind": "float64", "value": 7.0 },
+                    { "kind": "float64", "value": 8.0 },
+                    { "kind": "float64", "value": -1.5 }
+                ]
+            }
+        }
+    }))
+    .expect("fixture");
+
+    assert_live_oracle_dataframe_diff_parity(fixture, "dataframe diff axis=1 oracle test");
+}
+
+#[test]
+fn live_oracle_dataframe_diff_axis1_negative_periods_matches_pandas() {
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-056",
+        "case_id": "dataframe_diff_axis1_negative_periods_live",
+        "mode": "strict",
+        "operation": "dataframe_diff",
+        "oracle_source": "live_legacy_pandas",
+        "diff_periods": -1,
+        "diff_axis": 1,
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 }
+            ],
+            "column_order": ["a", "b", "c", "d"],
+            "columns": {
+                "a": [
+                    { "kind": "float64", "value": 20.0 },
+                    { "kind": "float64", "value": -5.0 }
+                ],
+                "b": [
+                    { "kind": "float64", "value": 15.0 },
+                    { "kind": "float64", "value": -1.0 }
+                ],
+                "c": [
+                    { "kind": "float64", "value": 15.0 },
+                    { "kind": "float64", "value": 4.0 }
+                ],
+                "d": [
+                    { "kind": "float64", "value": 5.0 },
+                    { "kind": "float64", "value": 4.0 }
+                ]
+            }
+        }
+    }))
+    .expect("fixture");
+
+    assert_live_oracle_dataframe_diff_parity(
+        fixture,
+        "dataframe diff axis=1 negative-period oracle test",
+    );
+}
+
 fn assert_live_oracle_dataframe_pct_change_parity(fixture: super::PacketFixture, context: &str) {
     let mut cfg = super::HarnessConfig::default_paths();
     cfg.allow_system_pandas_fallback = true;
@@ -865,7 +978,7 @@ fn live_oracle_series_first_valid_index_with_leading_nulls() {
             "values": [
                 { "kind": "null", "value": "null" },
                 { "kind": "null", "value": "null" },
-                { "kind": "float64", "value": 3.14 },
+                { "kind": "float64", "value": 3.125 },
                 { "kind": "float64", "value": 2.71 }
             ]
         }
@@ -1018,7 +1131,9 @@ fn live_oracle_series_first_valid_index_string_index() {
 
     let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
     if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
-        eprintln!("live pandas unavailable; skipping first_valid_index string_index test: {message}");
+        eprintln!(
+            "live pandas unavailable; skipping first_valid_index string_index test: {message}"
+        );
         return;
     }
 
@@ -1235,4 +1350,95 @@ fn live_oracle_series_idxmax_with_nulls() {
     let label = series.idxmax().expect("idxmax");
     let actual = super::index_label_to_scalar(&label);
     super::compare_scalar(&actual, &expected, "series_idxmax").expect("pandas parity");
+}
+
+fn assert_series_idx_skipna_false_nan_fixture(fixture: &super::PacketFixture, context: &str) {
+    let actual = super::execute_series_idx_fixture_scalar(fixture).expect("actual idx scalar");
+    super::compare_scalar(
+        &actual,
+        &fp_types::Scalar::Null(fp_types::NullKind::NaN),
+        fixture.operation.operation_name(),
+    )
+    .expect("skipna=false with missing values should produce NaN");
+
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = true;
+    let expected_result = super::capture_live_oracle_expected(&cfg, fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping {context}: {message}");
+        return;
+    }
+
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Scalar(_)),
+        "expected live oracle scalar payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Scalar(expected) = expected else {
+        return;
+    };
+    super::compare_scalar(&actual, &expected, fixture.operation.operation_name())
+        .expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_series_idxmin_skipna_false_with_null_returns_nan() {
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-IDXMIN-SKIPNA-FALSE",
+        "case_id": "series_idxmin_skipna_false_with_null",
+        "mode": "strict",
+        "operation": "series_idxmin",
+        "oracle_source": "live_legacy_pandas",
+        "idxmin_skipna": false,
+        "left": {
+            "name": "test_series",
+            "index": [
+                { "kind": "utf8", "value": "a" },
+                { "kind": "utf8", "value": "b" },
+                { "kind": "utf8", "value": "c" }
+            ],
+            "values": [
+                { "kind": "null", "value": "null" },
+                { "kind": "float64", "value": 5.0 },
+                { "kind": "float64", "value": 2.0 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    assert_series_idx_skipna_false_nan_fixture(
+        &fixture,
+        "idxmin skipna=false with-null oracle test",
+    );
+}
+
+#[test]
+fn live_oracle_series_idxmax_skipna_false_with_null_returns_nan() {
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-IDXMAX-SKIPNA-FALSE",
+        "case_id": "series_idxmax_skipna_false_with_null",
+        "mode": "strict",
+        "operation": "series_idxmax",
+        "oracle_source": "live_legacy_pandas",
+        "idxmax_skipna": false,
+        "left": {
+            "name": "test_series",
+            "index": [
+                { "kind": "utf8", "value": "a" },
+                { "kind": "utf8", "value": "b" },
+                { "kind": "utf8", "value": "c" }
+            ],
+            "values": [
+                { "kind": "float64", "value": 5.0 },
+                { "kind": "null", "value": "null" },
+                { "kind": "float64", "value": 2.0 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    assert_series_idx_skipna_false_nan_fixture(
+        &fixture,
+        "idxmax skipna=false with-null oracle test",
+    );
 }

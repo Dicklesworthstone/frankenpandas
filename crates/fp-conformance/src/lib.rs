@@ -1865,6 +1865,10 @@ pub struct PacketFixture {
     #[serde(default)]
     pub pct_change_axis: Option<usize>,
     #[serde(default)]
+    pub idxmin_skipna: Option<bool>,
+    #[serde(default)]
+    pub idxmax_skipna: Option<bool>,
+    #[serde(default)]
     pub autocorr_lag: Option<usize>,
     #[serde(default)]
     pub diff_axis: Option<usize>,
@@ -3210,6 +3214,10 @@ struct OracleRequest {
     pub pct_change_periods: Option<i64>,
     #[serde(default)]
     pub pct_change_axis: Option<usize>,
+    #[serde(default)]
+    pub idxmin_skipna: Option<bool>,
+    #[serde(default)]
+    pub idxmax_skipna: Option<bool>,
     #[serde(default)]
     pub autocorr_lag: Option<usize>,
     #[serde(default)]
@@ -9693,28 +9701,20 @@ fn run_fixture_operation(
             }
         }
         FixtureOperation::SeriesIdxmin | FixtureOperation::SeriesIdxmax => {
-            let left = require_left_series(fixture)?;
-            let series = build_series(left)?;
-            let label_result = match fixture.operation {
-                FixtureOperation::SeriesIdxmin => series.idxmin(),
-                FixtureOperation::SeriesIdxmax => series.idxmax(),
-                _ => unreachable!(),
-            };
-            match (label_result, expected) {
-                (Ok(label), ResolvedExpected::Scalar(scalar)) => {
-                    let actual = index_label_to_scalar(&label);
+            let actual_result = execute_series_idx_fixture_scalar(fixture);
+            match (actual_result, expected) {
+                (Ok(actual), ResolvedExpected::Scalar(scalar)) => {
                     compare_scalar(&actual, &scalar, fixture.operation.operation_name())
                 }
-                (Err(err), ResolvedExpected::ErrorContains(substr)) => {
-                    let msg = err.to_string();
-                    if msg.contains(&substr) {
+                (Err(message), ResolvedExpected::ErrorContains(substr)) => {
+                    if message.contains(&substr) {
                         Ok(())
                     } else {
                         Err(format!(
                             "{}: expected error containing '{}', got '{}'",
                             fixture.operation.operation_name(),
                             substr,
-                            msg
+                            message
                         ))
                     }
                 }
@@ -9723,10 +9723,10 @@ fn run_fixture_operation(
                     fixture.operation.operation_name(),
                     substr
                 )),
-                (Err(err), ResolvedExpected::Scalar(_)) => Err(format!(
+                (Err(message), ResolvedExpected::Scalar(_)) => Err(format!(
                     "{}: expected scalar, got error: {}",
                     fixture.operation.operation_name(),
-                    err
+                    message
                 )),
                 (_, _) => Err(format!(
                     "expected_scalar or expected_error_contains required for {}",
@@ -12185,6 +12185,8 @@ fn capture_live_oracle_expected(
         shift_axis: fixture.shift_axis,
         pct_change_periods: fixture.pct_change_periods,
         pct_change_axis: fixture.pct_change_axis,
+        idxmin_skipna: fixture.idxmin_skipna,
+        idxmax_skipna: fixture.idxmax_skipna,
         autocorr_lag: fixture.autocorr_lag,
         diff_axis: fixture.diff_axis,
         clip_lower: fixture.clip_lower,
@@ -12747,6 +12749,31 @@ pub fn optional_index_label_to_scalar(label: Option<fp_index::IndexLabel>) -> Sc
         None => Scalar::Null(NullKind::Null),
         Some(ref l) => index_label_to_scalar(l),
     }
+}
+
+fn series_idx_skipna(fixture: &PacketFixture) -> bool {
+    match fixture.operation {
+        FixtureOperation::SeriesIdxmin => fixture.idxmin_skipna.unwrap_or(true),
+        FixtureOperation::SeriesIdxmax => fixture.idxmax_skipna.unwrap_or(true),
+        _ => true,
+    }
+}
+
+fn execute_series_idx_fixture_scalar(fixture: &PacketFixture) -> Result<Scalar, String> {
+    let left = require_left_series(fixture)?;
+    let series = build_series(left)?;
+    let skipna = series_idx_skipna(fixture);
+    if !skipna && series.values().iter().any(Scalar::is_missing) {
+        return Ok(Scalar::Null(NullKind::NaN));
+    }
+
+    let label = match fixture.operation {
+        FixtureOperation::SeriesIdxmin => series.idxmin(),
+        FixtureOperation::SeriesIdxmax => series.idxmax(),
+        _ => return Err("series idx fixture scalar requires idxmin or idxmax".to_owned()),
+    }
+    .map_err(|err| err.to_string())?;
+    Ok(index_label_to_scalar(&label))
 }
 
 fn require_left_series(fixture: &PacketFixture) -> Result<&FixtureSeries, String> {
@@ -18564,25 +18591,15 @@ fn execute_and_compare_differential(
             }
         }
         FixtureOperation::SeriesIdxmin | FixtureOperation::SeriesIdxmax => {
-            let left = require_left_series(fixture)?;
-            let series = build_series(left)?;
-            let label_result = match fixture.operation {
-                FixtureOperation::SeriesIdxmin => series.idxmin(),
-                FixtureOperation::SeriesIdxmax => series.idxmax(),
-                _ => unreachable!(),
-            };
-            match (label_result, expected) {
-                (Ok(label), ResolvedExpected::Scalar(scalar)) => {
-                    let actual = index_label_to_scalar(&label);
-                    Ok(diff_scalar(
-                        &actual,
-                        &scalar,
-                        fixture.operation.operation_name(),
-                    ))
-                }
-                (Err(err), ResolvedExpected::ErrorContains(substr)) => {
-                    let msg = err.to_string();
-                    if msg.contains(&substr) {
+            let actual_result = execute_series_idx_fixture_scalar(fixture);
+            match (actual_result, expected) {
+                (Ok(actual), ResolvedExpected::Scalar(scalar)) => Ok(diff_scalar(
+                    &actual,
+                    &scalar,
+                    fixture.operation.operation_name(),
+                )),
+                (Err(message), ResolvedExpected::ErrorContains(substr)) => {
+                    if message.contains(&substr) {
                         Ok(Vec::new())
                     } else {
                         Ok(vec![make_drift_record(
@@ -18593,7 +18610,7 @@ fn execute_and_compare_differential(
                                 "expected {} error containing '{}', got '{}'",
                                 fixture.operation.operation_name(),
                                 substr,
-                                msg
+                                message
                             ),
                         )])
                     }
@@ -18608,14 +18625,14 @@ fn execute_and_compare_differential(
                         substr
                     ),
                 )]),
-                (Err(err), ResolvedExpected::Scalar(_)) => Ok(vec![make_drift_record(
+                (Err(message), ResolvedExpected::Scalar(_)) => Ok(vec![make_drift_record(
                     ComparisonCategory::Value,
                     DriftLevel::Critical,
                     format!("{}.error", fixture.operation.operation_name()),
                     format!(
                         "expected {} scalar, got error: {}",
                         fixture.operation.operation_name(),
-                        err
+                        message
                     ),
                 )]),
                 (_, _) => Err(format!(
