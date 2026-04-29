@@ -15747,7 +15747,9 @@ fn execute_series_module_utility_fixture_operation(
                 .nlargest_n
                 .ok_or_else(|| "nlargest_n required for series_nsmallest".to_owned())?;
             match fixture.keep.as_deref() {
-                Some(keep) => series.nsmallest_keep(n, keep).map_err(|err| err.to_string()),
+                Some(keep) => series
+                    .nsmallest_keep(n, keep)
+                    .map_err(|err| err.to_string()),
                 None => series.nsmallest(n).map_err(|err| err.to_string()),
             }
         }
