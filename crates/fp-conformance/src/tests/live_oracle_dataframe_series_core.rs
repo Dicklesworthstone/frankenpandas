@@ -4080,7 +4080,7 @@ fn live_oracle_series_abs_float() {
                 { "kind": "int64", "value": 3 }
             ],
             "values": [
-                { "kind": "float64", "value": -3.14 },
+                { "kind": "float64", "value": -3.125 },
                 { "kind": "float64", "value": 2.71 },
                 { "kind": "float64", "value": -0.0 },
                 { "kind": "null", "value": "null" }
@@ -4183,7 +4183,7 @@ fn live_oracle_series_round_decimals_2() {
             "values": [
                 { "kind": "float64", "value": 1.234 },
                 { "kind": "float64", "value": 1.235 },
-                { "kind": "float64", "value": -3.14159 },
+                { "kind": "float64", "value": -3.15159 },
                 { "kind": "null", "value": "null" }
             ]
         }

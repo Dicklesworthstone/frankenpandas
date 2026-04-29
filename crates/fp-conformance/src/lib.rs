@@ -9492,20 +9492,10 @@ fn run_fixture_operation(
         FixtureOperation::SeriesReplace => {
             let left = require_left_series(fixture)?;
             let series = build_series(left)?;
-            let to_find = fixture
-                .replace_to_find
-                .as_ref()
-                .ok_or_else(|| "replace_to_find required for series_replace".to_owned())?;
-            let to_value = fixture
-                .replace_to_value
-                .as_ref()
-                .ok_or_else(|| "replace_to_value required for series_replace".to_owned())?;
-            let replacements: Vec<(Scalar, Scalar)> = to_find
-                .iter()
-                .zip(to_value.iter())
-                .map(|(f, v)| (f.clone(), v.clone()))
-                .collect();
-            let actual = series.replace(&replacements).map_err(|err| err.to_string());
+            let actual =
+                require_replacement_pairs(fixture, "series_replace").and_then(|replacements| {
+                    series.replace(&replacements).map_err(|err| err.to_string())
+                });
             match expected {
                 ResolvedExpected::Series(series) => compare_series_expected(&actual?, &series),
                 ResolvedExpected::ErrorContains(substr) => match actual {
@@ -13081,6 +13071,32 @@ fn require_right_series(fixture: &PacketFixture) -> Result<&FixtureSeries, Strin
         .ok_or_else(|| "missing right fixture series".to_owned())
 }
 
+fn require_replacement_pairs(
+    fixture: &PacketFixture,
+    operation: &str,
+) -> Result<Vec<(Scalar, Scalar)>, String> {
+    let to_find = fixture
+        .replace_to_find
+        .as_ref()
+        .ok_or_else(|| format!("replace_to_find required for {operation}"))?;
+    let to_value = fixture
+        .replace_to_value
+        .as_ref()
+        .ok_or_else(|| format!("replace_to_value required for {operation}"))?;
+    if to_find.len() != to_value.len() {
+        return Err(format!(
+            "{operation} replacement lists must match in length: replace_to_find={}, replace_to_value={}",
+            to_find.len(),
+            to_value.len()
+        ));
+    }
+    Ok(to_find
+        .iter()
+        .zip(to_value.iter())
+        .map(|(from, to)| (from.clone(), to.clone()))
+        .collect())
+}
+
 fn require_frame(fixture: &PacketFixture) -> Result<&FixtureDataFrame, String> {
     fixture
         .frame
@@ -15217,19 +15233,7 @@ fn execute_dataframe_fixture_operation(fixture: &PacketFixture) -> Result<DataFr
         FixtureOperation::DataFrameReplace => {
             let frame = build_dataframe(require_frame(fixture)?)
                 .map_err(|err| format!("frame build failed: {err}"))?;
-            let to_find = fixture
-                .replace_to_find
-                .as_ref()
-                .ok_or_else(|| "replace_to_find required for dataframe_replace".to_owned())?;
-            let to_value = fixture
-                .replace_to_value
-                .as_ref()
-                .ok_or_else(|| "replace_to_value required for dataframe_replace".to_owned())?;
-            let replacements: Vec<(Scalar, Scalar)> = to_find
-                .iter()
-                .zip(to_value.iter())
-                .map(|(from, to)| (from.clone(), to.clone()))
-                .collect();
+            let replacements = require_replacement_pairs(fixture, "dataframe_replace")?;
             frame.replace(&replacements).map_err(|err| err.to_string())
         }
         FixtureOperation::DataFrameWhere => {
@@ -18497,20 +18501,10 @@ fn execute_and_compare_differential(
         FixtureOperation::SeriesReplace => {
             let left = require_left_series(fixture)?;
             let series = build_series(left)?;
-            let to_find = fixture
-                .replace_to_find
-                .as_ref()
-                .ok_or_else(|| "replace_to_find required for series_replace".to_owned())?;
-            let to_value = fixture
-                .replace_to_value
-                .as_ref()
-                .ok_or_else(|| "replace_to_value required for series_replace".to_owned())?;
-            let replacements: Vec<(Scalar, Scalar)> = to_find
-                .iter()
-                .zip(to_value.iter())
-                .map(|(f, v)| (f.clone(), v.clone()))
-                .collect();
-            let actual = series.replace(&replacements).map_err(|err| err.to_string());
+            let actual =
+                require_replacement_pairs(fixture, "series_replace").and_then(|replacements| {
+                    series.replace(&replacements).map_err(|err| err.to_string())
+                });
             match expected {
                 ResolvedExpected::Series(s) => Ok(diff_series(&actual?, &s)),
                 ResolvedExpected::ErrorContains(substr) => Ok(match actual {
@@ -26318,6 +26312,46 @@ mod tests {
         .expect("legacy packet fixture should deserialize");
 
         assert!(fixture.fixture_provenance.is_none());
+    }
+
+    #[test]
+    fn series_replace_replacement_length_mismatch_matches_expected_error() {
+        let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+            "packet_id": "FP-TEST",
+            "case_id": "series_replace_mismatched_replacements",
+            "mode": "strict",
+            "operation": "series_replace",
+            "left": {
+                "name": "left",
+                "index": [
+                    { "kind": "int64", "value": 0 },
+                    { "kind": "int64", "value": 1 }
+                ],
+                "values": [
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "int64", "value": 2 }
+                ]
+            },
+            "replace_to_find": [
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "replace_to_value": [
+                { "kind": "int64", "value": 10 }
+            ],
+            "expected_error_contains": "replacement lists must match in length"
+        }))
+        .expect("series_replace fixture should deserialize");
+
+        let mut ledger = super::EvidenceLedger::new();
+        super::run_fixture_operation(
+            &super::HarnessConfig::default_paths(),
+            &fixture,
+            &super::RuntimePolicy::strict(),
+            &mut ledger,
+            super::OracleMode::FixtureExpected,
+        )
+        .expect("mismatched replacement lists should satisfy expected_error_contains");
     }
 
     #[test]

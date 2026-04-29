@@ -5080,10 +5080,12 @@ def op_series_replace(pd, payload: dict[str, Any]) -> dict[str, Any]:
 
     if left is None:
         raise OracleError("series_replace requires left payload")
-    if to_find is None:
-        raise OracleError("series_replace requires replace_to_find payload")
-    if to_value is None:
-        raise OracleError("series_replace requires replace_to_value payload")
+    if not isinstance(to_find, list):
+        raise OracleError("series_replace requires replace_to_find list")
+    if not isinstance(to_value, list):
+        raise OracleError("series_replace requires replace_to_value list")
+    if len(to_find) != len(to_value):
+        raise OracleError("series_replace replacement lists must match in length")
 
     index = [label_from_json(item) for item in left["index"]]
     values = [scalar_from_json(item) for item in left["values"]]
@@ -5091,10 +5093,9 @@ def op_series_replace(pd, payload: dict[str, Any]) -> dict[str, Any]:
 
     find_values = [scalar_from_json(item) for item in to_find]
     replace_values = [scalar_from_json(item) for item in to_value]
-    replacements = dict(zip(find_values, replace_values))
 
     try:
-        out = series.replace(replacements)
+        out = series.replace(find_values, replace_values)
     except Exception as exc:
         raise OracleError(f"series_replace failed: {exc}") from exc
 
