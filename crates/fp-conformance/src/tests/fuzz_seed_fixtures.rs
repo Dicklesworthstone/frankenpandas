@@ -714,6 +714,90 @@ fn fuzz_groupby_agg_bytes_accepts_named_aggregation_seed() {
 }
 
 #[test]
+fn fuzz_groupby_agg_bytes_accepts_structured_corpus_seeds() {
+    let seeds: &[(&str, &[u8])] = &[
+        (
+            "agg_dict_list_median_prod",
+            include_bytes!(
+                "../../../../fuzz/corpus/fuzz_groupby_agg_dispatch/agg_dict_list_median_prod"
+            ),
+        ),
+        (
+            "agg_dict_list_midpoint_split",
+            include_bytes!(
+                "../../../../fuzz/corpus/fuzz_groupby_agg_dispatch/agg_dict_list_midpoint_split"
+            ),
+        ),
+        (
+            "agg_dict_list_sum_count_max",
+            include_bytes!(
+                "../../../../fuzz/corpus/fuzz_groupby_agg_dispatch/agg_dict_list_sum_count_max"
+            ),
+        ),
+        (
+            "agg_list_bogus_rejected",
+            include_bytes!(
+                "../../../../fuzz/corpus/fuzz_groupby_agg_dispatch/agg_list_bogus_rejected"
+            ),
+        ),
+        (
+            "agg_list_sum_count_max",
+            include_bytes!(
+                "../../../../fuzz/corpus/fuzz_groupby_agg_dispatch/agg_list_sum_count_max"
+            ),
+        ),
+        (
+            "agg_named_duplicate_func_dedup",
+            include_bytes!(
+                "../../../../fuzz/corpus/fuzz_groupby_agg_dispatch/agg_named_duplicate_func_dedup"
+            ),
+        ),
+        (
+            "agg_named_last_nunique",
+            include_bytes!(
+                "../../../../fuzz/corpus/fuzz_groupby_agg_dispatch/agg_named_last_nunique"
+            ),
+        ),
+        (
+            "agg_named_sum_count_max",
+            include_bytes!(
+                "../../../../fuzz/corpus/fuzz_groupby_agg_dispatch/agg_named_sum_count_max"
+            ),
+        ),
+        (
+            "agg_single_first_null_keys",
+            include_bytes!(
+                "../../../../fuzz/corpus/fuzz_groupby_agg_dispatch/agg_single_first_null_keys"
+            ),
+        ),
+        (
+            "agg_single_mean_duplicates",
+            include_bytes!(
+                "../../../../fuzz/corpus/fuzz_groupby_agg_dispatch/agg_single_mean_duplicates"
+            ),
+        ),
+        (
+            "default_sum_empty_func",
+            include_bytes!(
+                "../../../../fuzz/corpus/fuzz_groupby_agg_dispatch/default_sum_empty_func"
+            ),
+        ),
+        (
+            "short_row_boundary",
+            include_bytes!("../../../../fuzz/corpus/fuzz_groupby_agg_dispatch/short_row_boundary"),
+        ),
+    ];
+
+    for &(name, seed) in seeds {
+        let result = fuzz_groupby_agg_bytes(seed);
+        assert!(
+            result.is_ok(),
+            "groupby agg dispatch seed {name} should satisfy invariants: {result:?}"
+        );
+    }
+}
+
+#[test]
 fn fuzz_index_align_bytes_accepts_unique_overlap_seed() {
     let seed = include_bytes!(
         "../../fixtures/adversarial/fuzz_corpus/index_align/unique_overlap_seed.bin"
