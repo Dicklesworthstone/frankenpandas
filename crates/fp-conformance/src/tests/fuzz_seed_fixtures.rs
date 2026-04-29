@@ -864,6 +864,89 @@ fn fuzz_common_dtype_bytes_accepts_incompatible_seed() {
 }
 
 #[test]
+fn fuzz_common_dtype_bytes_replays_committed_corpus_seeds() {
+    let corpus: &[(&str, &[u8])] = &[
+        (
+            "null_null.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_common_dtype/null_null.bin"),
+        ),
+        (
+            "bool_bool.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_common_dtype/bool_bool.bin"),
+        ),
+        (
+            "int64_int64.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_common_dtype/int64_int64.bin"),
+        ),
+        (
+            "float64_float64.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_common_dtype/float64_float64.bin"),
+        ),
+        (
+            "utf8_utf8.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_common_dtype/utf8_utf8.bin"),
+        ),
+        (
+            "null_bool.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_common_dtype/null_bool.bin"),
+        ),
+        (
+            "null_int64.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_common_dtype/null_int64.bin"),
+        ),
+        (
+            "null_float64.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_common_dtype/null_float64.bin"),
+        ),
+        (
+            "null_utf8.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_common_dtype/null_utf8.bin"),
+        ),
+        (
+            "bool_int64.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_common_dtype/bool_int64.bin"),
+        ),
+        (
+            "bool_float64.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_common_dtype/bool_float64.bin"),
+        ),
+        (
+            "int64_float64.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_common_dtype/int64_float64.bin"),
+        ),
+        (
+            "bool_utf8.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_common_dtype/bool_utf8.bin"),
+        ),
+        (
+            "int64_utf8.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_common_dtype/int64_utf8.bin"),
+        ),
+        (
+            "float64_utf8.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_common_dtype/float64_utf8.bin"),
+        ),
+        (
+            "float64_bool.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_common_dtype/float64_bool.bin"),
+        ),
+        (
+            "float64_int64.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_common_dtype/float64_int64.bin"),
+        ),
+        (
+            "utf8_null.bin",
+            include_bytes!("../../../../fuzz/corpus/fuzz_common_dtype/utf8_null.bin"),
+        ),
+    ];
+
+    for (name, seed) in corpus {
+        fuzz_common_dtype_bytes(seed)
+            .unwrap_or_else(|err| panic!("common_dtype corpus seed {name} should pass: {err:?}"));
+    }
+}
+
+#[test]
 fn fuzz_scalar_cast_bytes_accepts_identity_int64_seed() {
     let seed = include_bytes!(
         "../../fixtures/adversarial/fuzz_corpus/scalar_cast/identity_int64_seed.bin"
