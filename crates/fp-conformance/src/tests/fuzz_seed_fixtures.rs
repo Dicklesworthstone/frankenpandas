@@ -906,6 +906,107 @@ fn fuzz_index_align_bytes_accepts_utf8_right_only_seed() {
 }
 
 #[test]
+fn fuzz_index_align_bytes_accepts_empty_left() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/index_align/empty_left.bin");
+    fuzz_index_align_bytes(seed).expect("empty-left seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_index_align_bytes_accepts_empty_right() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/index_align/empty_right.bin");
+    fuzz_index_align_bytes(seed).expect("empty-right seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_index_align_bytes_accepts_both_empty() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/index_align/both_empty.bin");
+    fuzz_index_align_bytes(seed).expect("both-empty seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_index_align_bytes_accepts_identical() {
+    let seed = include_bytes!("../../fixtures/adversarial/fuzz_corpus/index_align/identical.bin");
+    fuzz_index_align_bytes(seed).expect("identical seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_index_align_bytes_accepts_no_overlap_int() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/index_align/no_overlap_int.bin");
+    fuzz_index_align_bytes(seed).expect("no-overlap-int seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_index_align_bytes_accepts_dup_left() {
+    let seed = include_bytes!("../../fixtures/adversarial/fuzz_corpus/index_align/dup_left.bin");
+    fuzz_index_align_bytes(seed).expect("dup-left seed should satisfy multiplicity invariants");
+}
+
+#[test]
+fn fuzz_index_align_bytes_accepts_dup_right() {
+    let seed = include_bytes!("../../fixtures/adversarial/fuzz_corpus/index_align/dup_right.bin");
+    fuzz_index_align_bytes(seed).expect("dup-right seed should satisfy multiplicity invariants");
+}
+
+#[test]
+fn fuzz_index_align_bytes_accepts_mixed_overlap() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/index_align/mixed_overlap.bin");
+    fuzz_index_align_bytes(seed).expect("mixed-overlap seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_index_align_bytes_accepts_max_length() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/index_align/max_length.bin");
+    fuzz_index_align_bytes(seed).expect("max-length seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_index_align_bytes_accepts_single_same() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/index_align/single_same.bin");
+    fuzz_index_align_bytes(seed).expect("single-same seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_index_align_bytes_accepts_single_diff() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/index_align/single_diff.bin");
+    fuzz_index_align_bytes(seed).expect("single-diff seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_index_align_bytes_accepts_interleaved() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/index_align/interleaved.bin");
+    fuzz_index_align_bytes(seed).expect("interleaved seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_index_align_bytes_accepts_utf8_overlap() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/index_align/utf8_overlap.bin");
+    fuzz_index_align_bytes(seed).expect("utf8-overlap seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_index_align_bytes_accepts_utf8_no_overlap() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/index_align/utf8_no_overlap.bin");
+    fuzz_index_align_bytes(seed).expect("utf8-no-overlap seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_index_align_bytes_accepts_seed_empty() {
+    let seed = include_bytes!("../../fixtures/adversarial/fuzz_corpus/index_align/seed-empty.bin");
+    fuzz_index_align_bytes(seed).expect("seed-empty should satisfy invariants");
+}
+
+#[test]
 fn fuzz_json_io_bytes_accepts_records_seed_fixture() {
     let seed = include_bytes!(
         "../../fixtures/adversarial/fuzz_corpus/fuzz_json_io/records_valid_seed.json"
