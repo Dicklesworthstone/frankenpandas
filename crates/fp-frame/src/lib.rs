@@ -512,11 +512,11 @@ fn mode_output_dtype(values: &[Scalar]) -> Option<DType> {
         }
     }
 
-    // Padding-induced missing values must not widen an Int64 or Bool
-    // column to Float64: pandas preserves the original dtype and keeps
-    // the null marker alongside it. Only widen for genuine Float64
-    // values or for Bool+Int mixes (dtype-lattice resolution).
-    if saw_float || (saw_bool && saw_int) {
+    // Pandas widens integer mode columns to Float64 when padding with
+    // NaN is required for shorter mode lists. Bool+NaN is represented
+    // as object upstream, but FrankenPandas keeps the bool/null values
+    // directly because dtype is not yet an object bucket.
+    if saw_float || (saw_missing && saw_int) || (saw_bool && saw_int) {
         Some(DType::Float64)
     } else if saw_int {
         Some(DType::Int64)
@@ -52941,11 +52941,11 @@ mod tests {
     }
 
     #[test]
-    fn df_mode_preserves_int64_dtype_when_padding_with_nulls() {
+    fn df_mode_widens_int64_to_float64_when_padding_with_nan() {
         // FP-P2D-057/dataframe_mode_ties_strict: column 'a' has two tied
         // modes (forcing max_modes=2) while column 'b' has a single
-        // mode. The pad cell in 'b' must be a null Scalar, and the
-        // column dtype must stay Int64 — not widen to Float64.
+        // mode. Pandas widens column 'b' to float64 because the pad
+        // cell is NaN.
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
@@ -52976,10 +52976,10 @@ mod tests {
         let col_a = &result.columns()["a"];
         let col_b = &result.columns()["b"];
         assert_eq!(col_a.dtype(), DType::Int64);
-        assert_eq!(col_b.dtype(), DType::Int64, "b must stay Int64");
+        assert_eq!(col_b.dtype(), DType::Float64, "b must widen to Float64");
         assert_eq!(col_a.values()[0], Scalar::Int64(1));
         assert_eq!(col_a.values()[1], Scalar::Int64(2));
-        assert_eq!(col_b.values()[0], Scalar::Int64(3));
+        assert_eq!(col_b.values()[0], Scalar::Float64(3.0));
         assert!(col_b.values()[1].is_missing(), "b padding must be null");
     }
 

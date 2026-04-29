@@ -42,7 +42,7 @@
         { "kind": "int64", "value": 2 }
       ],
       "b": [
-        { "kind": "int64", "value": 3 },
+        { "kind": "float64", "value": 3.0 },
         { "kind": "null", "value": "na_n" }
       ]
     },

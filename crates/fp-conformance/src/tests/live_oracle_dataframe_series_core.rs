@@ -258,6 +258,106 @@ fn live_oracle_dataframe_combine_first_object_matches_pandas() {
     super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
 }
 
+fn assert_live_oracle_dataframe_mode_parity(fixture: super::PacketFixture, context: &str) {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = true;
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping {context}: {message}");
+        return;
+    }
+
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Frame(_)),
+        "expected live oracle frame payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Frame(expected) = expected else {
+        return;
+    };
+
+    let actual = super::execute_dataframe_fixture_operation(&fixture).expect("actual frame");
+    super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_dataframe_mode_single_mode_matches_pandas() {
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-057",
+        "case_id": "dataframe_mode_single_mode_live",
+        "mode": "strict",
+        "operation": "dataframe_mode",
+        "oracle_source": "live_legacy_pandas",
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 4 }
+            ],
+            "column_order": ["a", "b"],
+            "columns": {
+                "a": [
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "int64", "value": 2 },
+                    { "kind": "int64", "value": 2 },
+                    { "kind": "int64", "value": 2 },
+                    { "kind": "int64", "value": 3 }
+                ],
+                "b": [
+                    { "kind": "int64", "value": 5 },
+                    { "kind": "int64", "value": 5 },
+                    { "kind": "int64", "value": 5 },
+                    { "kind": "int64", "value": 6 },
+                    { "kind": "int64", "value": 7 }
+                ]
+            }
+        }
+    }))
+    .expect("fixture");
+
+    assert_live_oracle_dataframe_mode_parity(fixture, "dataframe mode single-mode oracle test");
+}
+
+#[test]
+fn live_oracle_dataframe_mode_ties_matches_pandas() {
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-057",
+        "case_id": "dataframe_mode_ties_live",
+        "mode": "strict",
+        "operation": "dataframe_mode",
+        "oracle_source": "live_legacy_pandas",
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 }
+            ],
+            "column_order": ["a", "b"],
+            "columns": {
+                "a": [
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "int64", "value": 2 },
+                    { "kind": "int64", "value": 2 }
+                ],
+                "b": [
+                    { "kind": "int64", "value": 3 },
+                    { "kind": "int64", "value": 3 },
+                    { "kind": "int64", "value": 3 },
+                    { "kind": "int64", "value": 4 }
+                ]
+            }
+        }
+    }))
+    .expect("fixture");
+
+    assert_live_oracle_dataframe_mode_parity(fixture, "dataframe mode ties oracle test");
+}
+
 #[test]
 fn live_oracle_series_to_datetime_unit_seconds_matches_pandas() {
     let mut cfg = super::HarnessConfig::default_paths();
