@@ -4901,7 +4901,23 @@ impl Series {
     /// Return the integer position of the minimum value.
     ///
     /// Matches `pd.Series.argmin()`. Skips missing values.
-    pub fn argmin(&self) -> Result<usize, FrameError> {
+    pub fn argmin(&self) -> Result<i64, FrameError> {
+        self.argmin_skipna(true)
+    }
+
+    /// Return the integer position of the minimum value with explicit NA handling.
+    ///
+    /// Matches `pd.Series.argmin(skipna=...)`. Current pandas returns `-1` for
+    /// all-NA inputs and for `skipna=false` inputs containing any NA.
+    pub fn argmin_skipna(&self, skipna: bool) -> Result<i64, FrameError> {
+        if self.is_empty() {
+            return Err(FrameError::CompatibilityRejected(
+                "argmin of empty series".to_owned(),
+            ));
+        }
+        if !skipna && self.column.values().iter().any(Scalar::is_missing) {
+            return Ok(-1);
+        }
         let mut best_idx: Option<usize> = None;
         let mut best_val = f64::INFINITY;
         for (i, val) in self.column.values().iter().enumerate() {
@@ -4914,15 +4930,29 @@ impl Series {
                 best_idx = Some(i);
             }
         }
-        best_idx.ok_or_else(|| {
-            FrameError::CompatibilityRejected("argmin of empty or all-null series".to_owned())
-        })
+        Ok(best_idx.map_or(-1, |idx| idx as i64))
     }
 
     /// Return the integer position of the maximum value.
     ///
     /// Matches `pd.Series.argmax()`. Skips missing values.
-    pub fn argmax(&self) -> Result<usize, FrameError> {
+    pub fn argmax(&self) -> Result<i64, FrameError> {
+        self.argmax_skipna(true)
+    }
+
+    /// Return the integer position of the maximum value with explicit NA handling.
+    ///
+    /// Matches `pd.Series.argmax(skipna=...)`. Current pandas returns `-1` for
+    /// all-NA inputs and for `skipna=false` inputs containing any NA.
+    pub fn argmax_skipna(&self, skipna: bool) -> Result<i64, FrameError> {
+        if self.is_empty() {
+            return Err(FrameError::CompatibilityRejected(
+                "argmax of empty series".to_owned(),
+            ));
+        }
+        if !skipna && self.column.values().iter().any(Scalar::is_missing) {
+            return Ok(-1);
+        }
         let mut best_idx: Option<usize> = None;
         let mut best_val = f64::NEG_INFINITY;
         for (i, val) in self.column.values().iter().enumerate() {
@@ -4935,9 +4965,7 @@ impl Series {
                 best_idx = Some(i);
             }
         }
-        best_idx.ok_or_else(|| {
-            FrameError::CompatibilityRejected("argmax of empty or all-null series".to_owned())
-        })
+        Ok(best_idx.map_or(-1, |idx| idx as i64))
     }
 
     /// Select elements by integer positions.
@@ -47801,6 +47829,36 @@ mod tests {
 
         assert_eq!(s.argmin().unwrap(), 2);
         assert_eq!(s.argmax().unwrap(), 1);
+    }
+
+    #[test]
+    fn series_argmin_argmax_all_nan_match_pandas_sentinel() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Null(NullKind::NaN), Scalar::Null(NullKind::NaN)],
+        )
+        .unwrap();
+
+        assert_eq!(s.argmin().unwrap(), -1);
+        assert_eq!(s.argmax().unwrap(), -1);
+    }
+
+    #[test]
+    fn series_argmin_argmax_skipna_false_missing_match_pandas_sentinel() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(3.0),
+                Scalar::Float64(1.0),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(s.argmin_skipna(false).unwrap(), -1);
+        assert_eq!(s.argmax_skipna(false).unwrap(), -1);
     }
 
     #[test]
