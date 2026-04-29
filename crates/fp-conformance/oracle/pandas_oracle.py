@@ -1022,6 +1022,23 @@ def op_series_asof(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return {"expected_scalar": scalar_to_json(out)}
 
 
+def op_series_autocorr(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    if left is None:
+        raise OracleError("series_autocorr requires left payload")
+
+    lag = payload.get("autocorr_lag")
+    if lag is None:
+        lag = 1
+
+    series = fixture_series_from_payload(pd, left, "series_autocorr")
+    try:
+        out = series.autocorr(lag=int(lag))
+    except Exception as exc:
+        raise OracleError(f"series_autocorr failed: {exc}") from exc
+    return {"expected_scalar": scalar_to_json(out)}
+
+
 def op_series_clip(pd, payload: dict[str, Any]) -> dict[str, Any]:
     left = payload.get("left")
     if left is None:
@@ -4901,6 +4918,8 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_series_combine_first(pd, payload)
     if op == "series_asof":
         return op_series_asof(pd, payload)
+    if op == "series_autocorr":
+        return op_series_autocorr(pd, payload)
     if op == "series_clip":
         return op_series_clip(pd, payload)
     if op in {"series_to_datetime", "to_datetime"}:

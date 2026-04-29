@@ -1,9 +1,11 @@
 #![forbid(unsafe_code)]
 
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::ExitCode;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::ExitCode,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -449,12 +451,14 @@ fn print_summary(report: &GovernanceGateReport) {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
+    use tempfile::tempdir;
+
     use super::{
         RULE_CLEAN_ROOM_METHOD_STACK, RULE_NO_MINIMAL_SCOPE, RULE_TOTAL_PARITY,
         find_unnegated_narrowing_phrase, run_governance_gate,
     };
-    use std::fs;
-    use tempfile::tempdir;
 
     fn seed_repo(root: &std::path::Path, agents: &str, readme: &str, issues: &[&str]) {
         fs::write(root.join("AGENTS.md"), agents).expect("agents");

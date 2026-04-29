@@ -7,8 +7,6 @@
 //! Properties verify behavioral invariants that must hold for ALL inputs,
 //! not just hand-picked fixtures.
 
-use proptest::prelude::*;
-
 use fp_frame::{DataFrame, DropNaHow, FrameError, Series};
 use fp_groupby::{
     GroupByExecutionOptions, GroupByOptions, groupby_count, groupby_mean, groupby_sum,
@@ -20,6 +18,7 @@ use fp_join::{
 };
 use fp_runtime::{EvidenceLedger, RuntimePolicy};
 use fp_types::{NullKind, Scalar, Timedelta};
+use proptest::prelude::*;
 
 // ---------------------------------------------------------------------------
 // Strategy generators

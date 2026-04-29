@@ -78,12 +78,14 @@
 //! Forwards the `asupersync` cargo feature down to fp-runtime.
 //! Test-only — no production callers should depend on this crate.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::fs;
-use std::io::Write;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap},
+    fs,
+    io::Write,
+    path::{Path, PathBuf},
+    process::{Command, Stdio},
+    time::{Instant, SystemTime, UNIX_EPOCH},
+};
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime};
 use fp_columnar::{ArithmeticOp, Column};
@@ -329,6 +331,8 @@ pub enum FixtureOperation {
     SeriesCombineFirst,
     #[serde(rename = "series_asof", alias = "series_asof_default")]
     SeriesAsof,
+    #[serde(rename = "series_autocorr", alias = "series_autocorr_default")]
+    SeriesAutocorr,
     // FP-P2C-007: Missingness + nanops
     NanSum,
     NanMean,
@@ -1245,6 +1249,7 @@ impl FixtureOperation {
             Self::SeriesConcat => "series_concat",
             Self::SeriesCombineFirst => "series_combine_first",
             Self::SeriesAsof => "series_asof",
+            Self::SeriesAutocorr => "series_autocorr",
             Self::NanSum => "nan_sum",
             Self::NanMean => "nan_mean",
             Self::NanMin => "nan_min",
@@ -1839,6 +1844,8 @@ pub struct PacketFixture {
     pub shift_axis: Option<usize>,
     #[serde(default)]
     pub pct_change_periods: Option<i64>,
+    #[serde(default)]
+    pub autocorr_lag: Option<usize>,
     #[serde(default)]
     pub diff_axis: Option<usize>,
     #[serde(default)]
@@ -2586,6 +2593,7 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::SeriesExpandingVar
         | FixtureOperation::SeriesEwmMean
         | FixtureOperation::SeriesAsof
+        | FixtureOperation::SeriesAutocorr
         | FixtureOperation::SeriesResampleSum
         | FixtureOperation::SeriesResampleMean
         | FixtureOperation::SeriesResampleCount
@@ -3176,6 +3184,8 @@ struct OracleRequest {
     pub shift_axis: Option<usize>,
     #[serde(default)]
     pub pct_change_periods: Option<i64>,
+    #[serde(default)]
+    pub autocorr_lag: Option<usize>,
     #[serde(default)]
     pub diff_axis: Option<usize>,
     #[serde(default)]
@@ -6026,8 +6036,8 @@ pub fn fuzz_query_str_with_locals_bytes(input: &[u8]) -> Result<(), String> {
     let key_tag = policy_tag as usize;
     let key = match key_tag % 3 {
         0 => "x",
-        1 => "a",           // collides with fuzz_eval_frame column name
-        _ => "__secret__",  // reserved-style identifier
+        1 => "a",          // collides with fuzz_eval_frame column name
+        _ => "__secret__", // reserved-style identifier
     };
     let value = match (policy_tag >> 2) % 4 {
         0 => Scalar::Int64(0),
@@ -6077,8 +6087,7 @@ pub fn fuzz_query_str_with_locals_bytes(input: &[u8]) -> Result<(), String> {
 /// OnceLock init path or in any other shared-state that future Sync
 /// work might introduce.
 pub fn fuzz_parallel_dataframe_bytes(input: &[u8]) -> Result<(), String> {
-    use std::sync::Arc;
-    use std::thread;
+    use std::{sync::Arc, thread};
 
     if input.is_empty() || input.len() > 64 * 1024 {
         return Ok(());
@@ -6195,7 +6204,9 @@ fn assert_op_chain_invariants(frame: &DataFrame, label: &str) -> Result<(), Stri
     }
     for name in frame.column_names() {
         let Some(column) = columns.get(name) else {
-            return Err(format!("{label}: column_names mentions missing column {name}"));
+            return Err(format!(
+                "{label}: column_names mentions missing column {name}"
+            ));
         };
         if column.len() != index_len {
             return Err(format!(
@@ -8620,6 +8631,14 @@ fn run_fixture_operation(
                 _ => return Err("expected_scalar is required for series_asof".to_owned()),
             };
             compare_scalar(&actual, &expected, "series_asof")
+        }
+        FixtureOperation::SeriesAutocorr => {
+            let actual = execute_series_autocorr_fixture_operation(fixture)?;
+            let expected = match expected {
+                ResolvedExpected::Scalar(scalar) => scalar,
+                _ => return Err("expected_scalar is required for series_autocorr".to_owned()),
+            };
+            compare_scalar(&actual, &expected, "series_autocorr")
         }
         FixtureOperation::NanSum
         | FixtureOperation::NanMean
@@ -11958,6 +11977,7 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::NanVar
         | FixtureOperation::NanCount
         | FixtureOperation::SeriesAsof
+        | FixtureOperation::SeriesAutocorr
         | FixtureOperation::SeriesCount
         | FixtureOperation::SeriesNunique
         | FixtureOperation::DataFrameToJsonRecords => fixture
@@ -12073,6 +12093,7 @@ fn capture_live_oracle_expected(
         shift_periods: fixture.shift_periods,
         shift_axis: fixture.shift_axis,
         pct_change_periods: fixture.pct_change_periods,
+        autocorr_lag: fixture.autocorr_lag,
         diff_axis: fixture.diff_axis,
         clip_lower: fixture.clip_lower,
         clip_upper: fixture.clip_upper,
@@ -12599,6 +12620,7 @@ fn capture_live_oracle_expected(
         | FixtureOperation::NanVar
         | FixtureOperation::NanCount
         | FixtureOperation::SeriesAsof
+        | FixtureOperation::SeriesAutocorr
         | FixtureOperation::SeriesCount
         | FixtureOperation::SeriesNunique
         | FixtureOperation::DataFrameToJsonRecords => response
@@ -13310,6 +13332,10 @@ fn resolve_rank_axis(fixture: &PacketFixture) -> Result<usize, String> {
 
 fn resolve_rank_pct(fixture: &PacketFixture) -> bool {
     fixture.rank_pct.unwrap_or(false)
+}
+
+fn resolve_autocorr_lag(fixture: &PacketFixture) -> usize {
+    fixture.autocorr_lag.unwrap_or(1)
 }
 
 fn resolve_take_axis(fixture: &PacketFixture) -> Result<usize, String> {
@@ -15172,6 +15198,23 @@ fn execute_series_asof_fixture_operation(fixture: &PacketFixture) -> Result<Scal
         .asof(label)
         .cloned()
         .unwrap_or_else(|| series_asof_missing_scalar(&left)))
+}
+
+fn execute_series_autocorr_fixture_operation(fixture: &PacketFixture) -> Result<Scalar, String> {
+    let series = build_series(require_left_series(fixture)?)
+        .map_err(|err| format!("series build failed: {err}"))?;
+    let value = series
+        .autocorr(resolve_autocorr_lag(fixture))
+        .map_err(|err| err.to_string())?;
+    Ok(float_result_scalar(value))
+}
+
+fn float_result_scalar(value: f64) -> Scalar {
+    if value.is_nan() {
+        Scalar::Null(NullKind::NaN)
+    } else {
+        Scalar::Float64(value)
+    }
 }
 
 fn series_asof_missing_scalar(series: &Series) -> Scalar {
@@ -18802,6 +18845,15 @@ fn execute_and_compare_differential(
                     Ok(diff_scalar(&actual?, &scalar, "series_asof"))
                 }
                 _ => Err("expected_scalar required for series_asof".to_owned()),
+            }
+        }
+        FixtureOperation::SeriesAutocorr => {
+            let actual = execute_series_autocorr_fixture_operation(fixture);
+            match expected {
+                ResolvedExpected::Scalar(scalar) => {
+                    Ok(diff_scalar(&actual?, &scalar, "series_autocorr"))
+                }
+                _ => Err("expected_scalar required for series_autocorr".to_owned()),
             }
         }
         FixtureOperation::SeriesToNumeric

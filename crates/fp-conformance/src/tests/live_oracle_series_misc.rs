@@ -250,6 +250,123 @@ fn live_oracle_series_between_time_matches_pandas() {
         .expect("pandas parity");
 }
 
+fn autocorr_fixture(
+    case_id: &str,
+    lag: usize,
+    values: Vec<serde_json::Value>,
+) -> super::PacketFixture {
+    let index = (0..values.len())
+        .map(|value| serde_json::json!({ "kind": "int64", "value": value }))
+        .collect::<Vec<_>>();
+
+    serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-430",
+        "case_id": case_id,
+        "mode": "strict",
+        "operation": "series_autocorr",
+        "oracle_source": "live_legacy_pandas",
+        "autocorr_lag": lag,
+        "left": {
+            "name": "values",
+            "index": index,
+            "values": values
+        }
+    }))
+    .expect("fixture")
+}
+
+#[test]
+fn live_oracle_series_autocorr_matches_pandas() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = true;
+
+    let long_mixed = (0..64)
+        .map(|idx| {
+            if idx % 17 == 0 {
+                serde_json::json!({ "kind": "null", "value": "na_n" })
+            } else {
+                let value = ((idx * idx + 3 * idx) % 37) as f64 - 18.5;
+                serde_json::json!({ "kind": "float64", "value": value })
+            }
+        })
+        .collect::<Vec<_>>();
+    let fixtures = [
+        autocorr_fixture("series_autocorr_lag3_mixed_missing_live", 3, long_mixed),
+        autocorr_fixture(
+            "series_autocorr_lag0_self_live",
+            0,
+            vec![
+                serde_json::json!({ "kind": "int64", "value": 1 }),
+                serde_json::json!({ "kind": "int64", "value": 4 }),
+                serde_json::json!({ "kind": "int64", "value": 9 }),
+                serde_json::json!({ "kind": "int64", "value": 16 }),
+            ],
+        ),
+        autocorr_fixture(
+            "series_autocorr_constant_nan_live",
+            1,
+            vec![
+                serde_json::json!({ "kind": "int64", "value": 7 }),
+                serde_json::json!({ "kind": "int64", "value": 7 }),
+                serde_json::json!({ "kind": "int64", "value": 7 }),
+                serde_json::json!({ "kind": "int64", "value": 7 }),
+            ],
+        ),
+        autocorr_fixture(
+            "series_autocorr_lag_exceeds_len_live",
+            5,
+            vec![
+                serde_json::json!({ "kind": "int64", "value": 2 }),
+                serde_json::json!({ "kind": "int64", "value": 3 }),
+            ],
+        ),
+    ];
+
+    for fixture in fixtures {
+        let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+        if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+            eprintln!("live pandas unavailable; skipping series autocorr oracle test: {message}");
+            return;
+        }
+
+        let expected = expected_result.expect("live oracle expected");
+        assert!(
+            matches!(&expected, super::ResolvedExpected::Scalar(_)),
+            "expected live oracle scalar payload for {}, got {expected:?}",
+            fixture.case_id
+        );
+        let super::ResolvedExpected::Scalar(expected) = expected else {
+            return;
+        };
+
+        let actual =
+            super::execute_series_autocorr_fixture_operation(&fixture).expect("actual scalar");
+        let scalar_comparison = super::compare_scalar(&actual, &expected, "series_autocorr");
+        assert!(
+            scalar_comparison.is_ok(),
+            "{}: {}",
+            fixture.case_id,
+            scalar_comparison.err().unwrap_or_default()
+        );
+
+        let diff = super::run_differential_fixture(
+            &cfg,
+            &fixture,
+            &super::SuiteOptions {
+                packet_filter: None,
+                oracle_mode: super::OracleMode::LiveLegacyPandas,
+            },
+        )
+        .expect("differential report");
+        assert_eq!(diff.status, super::CaseStatus::Pass, "{diff:?}");
+        assert!(
+            diff.drift_records.is_empty(),
+            "expected no autocorr drift for {}: {diff:?}",
+            fixture.case_id
+        );
+    }
+}
+
 #[test]
 fn live_oracle_series_extractall_matches_pandas() {
     let mut cfg = super::HarnessConfig::default_paths();

@@ -221,8 +221,7 @@ fn fuzz_ipc_stream_io_bytes_reports_invalid_raw_bytes() {
     let seed = include_bytes!(
         "../../fixtures/adversarial/fuzz_corpus/ipc_stream_io/invalid_text_seed.bin"
     );
-    let err =
-        fuzz_ipc_stream_io_bytes(seed).expect_err("invalid IPC stream bytes should error");
+    let err = fuzz_ipc_stream_io_bytes(seed).expect_err("invalid IPC stream bytes should error");
     assert!(
         matches!(err, fp_io::IoError::Arrow(_)),
         "expected Arrow parse error, got {err:?}"
@@ -252,8 +251,8 @@ fn fuzz_read_sql_bytes_accepts_indexed_table_dispatch_seed() {
 #[test]
 fn fuzz_format_cross_round_trip_bytes_accepts_all_arrow_format_pairs() {
     let payload = [
-        3, 2, 0, 1, 2, 3, 10, 20, 11, 21, 12, 22, 13, 23, 14, 24, 15, 25, 16, 26, 17, 27, 18,
-        28, 19, 29, 20, 30, 21, 31, 22, 32, 23, 33, 24, 34,
+        3, 2, 0, 1, 2, 3, 10, 20, 11, 21, 12, 22, 13, 23, 14, 24, 15, 25, 16, 26, 17, 27, 18, 28,
+        19, 29, 20, 30, 21, 31, 22, 32, 23, 33, 24, 34,
     ];
     let pairs = [(0_u8, 0_u8), (0, 1), (1, 0), (1, 1), (2, 0), (2, 1)];
     for (primary, secondary) in pairs {
@@ -276,8 +275,8 @@ fn fuzz_pivot_table_bytes_accepts_empty_input() {
 #[test]
 fn fuzz_pivot_table_bytes_accepts_all_supported_aggfuncs() {
     let payload = [
-        7, 1, 10, 20, 30, 40, 50, 2, 11, 21, 31, 41, 51, 3, 12, 22, 32, 42, 52, 4, 13, 23, 33,
-        43, 53, 5, 14, 24, 34, 44, 54, 6, 15, 25, 35, 45, 55, 7, 16, 26, 36, 46, 56,
+        7, 1, 10, 20, 30, 40, 50, 2, 11, 21, 31, 41, 51, 3, 12, 22, 32, 42, 52, 4, 13, 23, 33, 43,
+        53, 5, 14, 24, 34, 44, 54, 6, 15, 25, 35, 45, 55, 7, 16, 26, 36, 46, 56,
     ];
     for agg_tag in 0..FUZZ_PIVOT_AGGFUNCS.len() {
         let mut seed = vec![1, agg_tag as u8];
@@ -290,8 +289,8 @@ fn fuzz_pivot_table_bytes_accepts_all_supported_aggfuncs() {
 #[test]
 fn fuzz_pivot_table_bytes_accepts_raw_projection_mode() {
     let seed = [
-        0, 3, 6, 0, 1, 0, 5, 0, 2, 1, 6, 1, 7, 2, 0, 2, 8, 3, 9, 1, 1, 4, 10, 2, 11, 0, 12, 3,
-        13, 1, 14, 2,
+        0, 3, 6, 0, 1, 0, 5, 0, 2, 1, 6, 1, 7, 2, 0, 2, 8, 3, 9, 1, 1, 4, 10, 2, 11, 0, 12, 3, 13,
+        1, 14, 2,
     ];
     fuzz_pivot_table_bytes(&seed)
         .expect("raw projection mode should satisfy pivot_table invariants");
@@ -335,8 +334,8 @@ fn fuzz_dataframe_eval_bytes_accepts_empty_input() {
 fn fuzz_dataframe_eval_bytes_accepts_simple_numeric_expression() {
     let mut seed = vec![0, b'a', b'+', b'b'];
     seed.extend([
-        4, 2, 0, 1, 10, 20, 11, 21, 12, 22, 13, 23, 14, 24, 15, 25, 16, 26, 17, 27, 18, 28, 19,
-        29, 20, 30, 21, 31,
+        4, 2, 0, 1, 10, 20, 11, 21, 12, 22, 13, 23, 14, 24, 15, 25, 16, 26, 17, 27, 18, 28, 19, 29,
+        20, 30, 21, 31,
     ]);
     fuzz_dataframe_eval_bytes(&seed).expect("simple eval seed should satisfy invariants");
 }
@@ -375,9 +374,8 @@ fn fuzz_scalar_cast_bytes_accepts_identity_int64_seed() {
 
 #[test]
 fn fuzz_scalar_cast_bytes_accepts_missing_float_seed() {
-    let seed = include_bytes!(
-        "../../fixtures/adversarial/fuzz_corpus/scalar_cast/missing_float_seed.bin"
-    );
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/scalar_cast/missing_float_seed.bin");
     fuzz_scalar_cast_bytes(seed).expect("missing float seed should satisfy invariants");
 }
 
@@ -386,15 +384,13 @@ fn fuzz_scalar_cast_bytes_accepts_lossy_float_error_seed() {
     let seed = include_bytes!(
         "../../fixtures/adversarial/fuzz_corpus/scalar_cast/lossy_float_to_int_seed.bin"
     );
-    fuzz_scalar_cast_bytes(seed)
-        .expect("lossy float cast seed should still satisfy invariants");
+    fuzz_scalar_cast_bytes(seed).expect("lossy float cast seed should still satisfy invariants");
 }
 
 #[test]
 fn fuzz_series_add_bytes_accepts_unique_overlap_seed() {
-    let seed = include_bytes!(
-        "../../fixtures/adversarial/fuzz_corpus/series_add/unique_overlap_seed.bin"
-    );
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/series_add/unique_overlap_seed.bin");
     fuzz_series_add_bytes(seed).expect("unique-overlap seed should satisfy invariants");
 }
 
@@ -403,8 +399,7 @@ fn fuzz_series_add_bytes_accepts_duplicate_cross_product_seed() {
     let seed = include_bytes!(
         "../../fixtures/adversarial/fuzz_corpus/series_add/duplicate_cross_product_seed.bin"
     );
-    fuzz_series_add_bytes(seed)
-        .expect("duplicate cross-product seed should satisfy invariants");
+    fuzz_series_add_bytes(seed).expect("duplicate cross-product seed should satisfy invariants");
 }
 
 #[test]
@@ -438,9 +433,8 @@ fn fuzz_column_arith_bytes_accepts_mixed_mul_seed() {
 
 #[test]
 fn fuzz_column_arith_bytes_accepts_div_seed() {
-    let seed = include_bytes!(
-        "../../fixtures/adversarial/fuzz_corpus/column_arith/div_identity_seed.bin"
-    );
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/column_arith/div_identity_seed.bin");
     fuzz_column_arith_bytes(seed).expect("div seed should satisfy invariants");
 }
 
@@ -500,17 +494,15 @@ fn fuzz_column_arith_bytes_mod_neg_div_neg_inf() {
 
 #[test]
 fn fuzz_column_arith_bytes_mod_zero_div_inf() {
-    let seed = include_bytes!(
-        "../../fixtures/adversarial/fuzz_corpus/column_arith/mod_zero_div_inf.bin"
-    );
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/column_arith/mod_zero_div_inf.bin");
     fuzz_column_arith_bytes(seed).expect("mod 0/inf seed should satisfy invariants");
 }
 
 #[test]
 fn fuzz_column_arith_bytes_mod_nan_div_inf() {
-    let seed = include_bytes!(
-        "../../fixtures/adversarial/fuzz_corpus/column_arith/mod_nan_div_inf.bin"
-    );
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/column_arith/mod_nan_div_inf.bin");
     fuzz_column_arith_bytes(seed).expect("mod nan/inf seed should satisfy invariants");
 }
 
@@ -532,17 +524,15 @@ fn fuzz_column_arith_bytes_floordiv_neg_div_inf() {
 
 #[test]
 fn fuzz_column_arith_bytes_mul_inf_by_zero() {
-    let seed = include_bytes!(
-        "../../fixtures/adversarial/fuzz_corpus/column_arith/mul_inf_by_zero.bin"
-    );
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/column_arith/mul_inf_by_zero.bin");
     fuzz_column_arith_bytes(seed).expect("mul inf*0 seed should satisfy invariants");
 }
 
 #[test]
 fn fuzz_column_arith_bytes_div_by_neg_zero() {
-    let seed = include_bytes!(
-        "../../fixtures/adversarial/fuzz_corpus/column_arith/div_by_neg_zero.bin"
-    );
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/column_arith/div_by_neg_zero.bin");
     fuzz_column_arith_bytes(seed).expect("div by -0 seed should satisfy invariants");
 }
 
@@ -556,9 +546,8 @@ fn fuzz_column_arith_bytes_add_inf_to_neg_inf() {
 
 #[test]
 fn fuzz_join_series_bytes_accepts_inner_overlap_seed() {
-    let seed = include_bytes!(
-        "../../fixtures/adversarial/fuzz_corpus/join_series/inner_overlap_seed.bin"
-    );
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/join_series/inner_overlap_seed.bin");
     fuzz_join_series_bytes(seed).expect("inner-overlap seed should satisfy invariants");
 }
 
@@ -587,9 +576,8 @@ fn fuzz_join_series_bytes_accepts_outer_union_seed() {
 
 #[test]
 fn fuzz_join_series_bytes_accepts_cross_product_seed() {
-    let seed = include_bytes!(
-        "../../fixtures/adversarial/fuzz_corpus/join_series/cross_product_seed.bin"
-    );
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/join_series/cross_product_seed.bin");
     fuzz_join_series_bytes(seed).expect("cross-product seed should satisfy invariants");
 }
 
@@ -605,8 +593,7 @@ fn fuzz_groupby_sum_bytes_accepts_dropna_false_null_group_seed() {
     let seed = include_bytes!(
         "../../fixtures/adversarial/fuzz_corpus/groupby_sum/dropna_false_null_group_seed.bin"
     );
-    fuzz_groupby_sum_bytes(seed)
-        .expect("dropna=false null-group seed should satisfy invariants");
+    fuzz_groupby_sum_bytes(seed).expect("dropna=false null-group seed should satisfy invariants");
 }
 
 #[test]
@@ -653,8 +640,7 @@ fn fuzz_index_align_bytes_accepts_duplicate_cross_product_seed() {
     let seed = include_bytes!(
         "../../fixtures/adversarial/fuzz_corpus/index_align/duplicate_cross_product_seed.bin"
     );
-    fuzz_index_align_bytes(seed)
-        .expect("duplicate seed should satisfy multiplicity invariants");
+    fuzz_index_align_bytes(seed).expect("duplicate seed should satisfy multiplicity invariants");
 }
 
 #[test]
@@ -675,9 +661,8 @@ fn fuzz_json_io_bytes_accepts_records_seed_fixture() {
 
 #[test]
 fn fuzz_json_io_bytes_accepts_split_seed_fixture() {
-    let seed = include_bytes!(
-        "../../fixtures/adversarial/fuzz_corpus/fuzz_json_io/split_valid_seed.json"
-    );
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/fuzz_json_io/split_valid_seed.json");
     fuzz_json_io_bytes(seed).expect("split fuzz seed should parse");
 }
 

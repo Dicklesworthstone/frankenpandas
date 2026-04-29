@@ -1,8 +1,6 @@
 #![forbid(unsafe_code)]
 
-use std::fs;
-use std::path::PathBuf;
-use std::process::ExitCode;
+use std::{fs, path::PathBuf, process::ExitCode};
 
 use fp_conformance::{
     CiForensicsReport, CiGate, CiPipelineConfig, HarnessConfig, build_ci_forensics_report,

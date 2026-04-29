@@ -12,12 +12,10 @@
 
 use super::*;
 
-
 #[test]
 fn packet_filter_runs_only_requested_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2C-002", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2C-002", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2C-002"));
     assert!(
         report.fixture_count >= 3,
@@ -29,8 +27,7 @@ fn packet_filter_runs_only_requested_packet() {
 #[test]
 fn packet_filter_runs_series_add_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2C-003", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2C-003", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2C-003"));
     assert!(
         report.fixture_count >= 3,
@@ -42,8 +39,7 @@ fn packet_filter_runs_series_add_packet() {
 #[test]
 fn packet_filter_runs_index_monotonic_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-058", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-058", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-058"));
     assert!(
         report.fixture_count >= 4,
@@ -55,8 +51,7 @@ fn packet_filter_runs_index_monotonic_packet() {
 #[test]
 fn packet_filter_runs_join_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2C-004", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2C-004", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2C-004"));
     assert!(report.fixture_count >= 3, "expected join packet fixtures");
     assert!(report.is_green());
@@ -65,8 +60,7 @@ fn packet_filter_runs_join_packet() {
 #[test]
 fn packet_filter_runs_groupby_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2C-005", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2C-005", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2C-005"));
     assert!(
         report.fixture_count >= 4,
@@ -78,8 +72,7 @@ fn packet_filter_runs_groupby_packet() {
 #[test]
 fn packet_filter_runs_groupby_aggregate_matrix_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2C-011", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2C-011", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2C-011"));
     assert!(
         report.fixture_count >= 23,
@@ -91,8 +84,7 @@ fn packet_filter_runs_groupby_aggregate_matrix_packet() {
 #[test]
 fn packet_filter_runs_dataframe_merge_concat_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-014", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-014", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-014"));
     assert!(
         report.fixture_count >= 8,
@@ -104,8 +96,7 @@ fn packet_filter_runs_dataframe_merge_concat_packet() {
 #[test]
 fn packet_filter_runs_nanops_matrix_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-015", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-015", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-015"));
     assert!(
         report.fixture_count >= 14,
@@ -117,8 +108,7 @@ fn packet_filter_runs_nanops_matrix_packet() {
 #[test]
 fn packet_filter_runs_csv_edge_case_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-016", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-016", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-016"));
     assert!(
         report.fixture_count >= 14,
@@ -130,8 +120,7 @@ fn packet_filter_runs_csv_edge_case_packet() {
 #[test]
 fn packet_filter_runs_constructor_dtype_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-017", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-017", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-017"));
     assert!(
         report.fixture_count >= 15,
@@ -143,8 +132,7 @@ fn packet_filter_runs_constructor_dtype_packet() {
 #[test]
 fn packet_filter_runs_dataframe_constructor_matrix_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-018", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-018", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-018"));
     assert!(
         report.fixture_count >= 14,
@@ -156,8 +144,7 @@ fn packet_filter_runs_dataframe_constructor_matrix_packet() {
 #[test]
 fn packet_filter_runs_constructor_kwargs_matrix_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-019", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-019", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-019"));
     assert!(
         report.fixture_count >= 14,
@@ -169,8 +156,7 @@ fn packet_filter_runs_constructor_kwargs_matrix_packet() {
 #[test]
 fn packet_filter_runs_constructor_scalar_and_dict_series_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-020", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-020", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-020"));
     assert!(
         report.fixture_count >= 14,
@@ -182,8 +168,7 @@ fn packet_filter_runs_constructor_scalar_and_dict_series_packet() {
 #[test]
 fn packet_filter_runs_constructor_list_like_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-021", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-021", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-021"));
     assert!(
         report.fixture_count >= 14,
@@ -195,8 +180,7 @@ fn packet_filter_runs_constructor_list_like_packet() {
 #[test]
 fn packet_filter_runs_constructor_shape_taxonomy_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-022", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-022", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-022"));
     assert!(
         report.fixture_count >= 14,
@@ -208,8 +192,7 @@ fn packet_filter_runs_constructor_shape_taxonomy_packet() {
 #[test]
 fn packet_filter_runs_constructor_dtype_kwargs_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-023", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-023", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-023"));
     assert!(
         report.fixture_count >= 14,
@@ -221,8 +204,7 @@ fn packet_filter_runs_constructor_dtype_kwargs_packet() {
 #[test]
 fn packet_filter_runs_constructor_dtype_spec_normalization_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-024", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-024", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-024"));
     assert!(
         report.fixture_count >= 10,
@@ -234,8 +216,7 @@ fn packet_filter_runs_constructor_dtype_spec_normalization_packet() {
 #[test]
 fn packet_filter_runs_dataframe_loc_iloc_multi_axis_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-025", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-025", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-025"));
     assert!(
         report.fixture_count >= 10,
@@ -247,8 +228,7 @@ fn packet_filter_runs_dataframe_loc_iloc_multi_axis_packet() {
 #[test]
 fn packet_filter_runs_dataframe_head_tail_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-026", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-026", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-026"));
     assert!(
         report.fixture_count >= 10,
@@ -260,8 +240,7 @@ fn packet_filter_runs_dataframe_head_tail_packet() {
 #[test]
 fn packet_filter_runs_dataframe_head_tail_negative_n_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-027", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-027", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-027"));
     assert!(
         report.fixture_count >= 10,
@@ -273,8 +252,7 @@ fn packet_filter_runs_dataframe_head_tail_negative_n_packet() {
 #[test]
 fn packet_filter_runs_dataframe_concat_axis1_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-028", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-028", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-028"));
     assert!(
         report.fixture_count >= 10,
@@ -286,8 +264,7 @@ fn packet_filter_runs_dataframe_concat_axis1_packet() {
 #[test]
 fn packet_filter_runs_dataframe_concat_axis1_inner_join_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-029", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-029", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-029"));
     assert!(
         report.fixture_count >= 10,
@@ -299,8 +276,7 @@ fn packet_filter_runs_dataframe_concat_axis1_inner_join_packet() {
 #[test]
 fn packet_filter_runs_dataframe_concat_axis0_inner_join_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-030", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-030", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-030"));
     assert!(
         report.fixture_count >= 10,
@@ -312,8 +288,7 @@ fn packet_filter_runs_dataframe_concat_axis0_inner_join_packet() {
 #[test]
 fn packet_filter_runs_dataframe_concat_axis0_outer_join_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-031", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-031", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-031"));
     assert!(
         report.fixture_count >= 10,
@@ -325,8 +300,7 @@ fn packet_filter_runs_dataframe_concat_axis0_outer_join_packet() {
 #[test]
 fn packet_filter_runs_dataframe_concat_axis0_outer_column_order_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-032", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-032", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-032"));
     assert!(
         report.fixture_count >= 10,
@@ -338,8 +312,7 @@ fn packet_filter_runs_dataframe_concat_axis0_outer_column_order_packet() {
 #[test]
 fn packet_filter_runs_dataframe_merge_composite_key_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-033", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-033", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-033"));
     assert!(
         report.fixture_count >= 3,
@@ -351,8 +324,7 @@ fn packet_filter_runs_dataframe_merge_composite_key_packet() {
 #[test]
 fn packet_filter_runs_dataframe_merge_indicator_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-034", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-034", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-034"));
     assert!(
         report.fixture_count >= 3,
@@ -364,8 +336,7 @@ fn packet_filter_runs_dataframe_merge_indicator_packet() {
 #[test]
 fn packet_filter_runs_dataframe_merge_validate_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-035", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-035", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-035"));
     assert!(
         report.fixture_count >= 4,
@@ -377,8 +348,7 @@ fn packet_filter_runs_dataframe_merge_validate_packet() {
 #[test]
 fn packet_filter_runs_dataframe_merge_suffix_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-036", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-036", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-036"));
     assert!(
         report.fixture_count >= 4,
@@ -390,8 +360,7 @@ fn packet_filter_runs_dataframe_merge_suffix_packet() {
 #[test]
 fn packet_filter_runs_dataframe_merge_sort_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-037", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-037", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-037"));
     assert!(
         report.fixture_count >= 4,
@@ -403,8 +372,7 @@ fn packet_filter_runs_dataframe_merge_sort_packet() {
 #[test]
 fn packet_filter_runs_dataframe_merge_sort_index_alias_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-038", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-038", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-038"));
     assert!(
         report.fixture_count >= 4,
@@ -416,8 +384,7 @@ fn packet_filter_runs_dataframe_merge_sort_index_alias_packet() {
 #[test]
 fn packet_filter_runs_dataframe_merge_cross_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-039", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-039", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-039"));
     assert!(
         report.fixture_count >= 5,
@@ -429,8 +396,7 @@ fn packet_filter_runs_dataframe_merge_cross_packet() {
 #[test]
 fn packet_filter_runs_dataframe_sort_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-040", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-040", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-040"));
     assert!(
         report.fixture_count >= 10,
@@ -442,8 +408,7 @@ fn packet_filter_runs_dataframe_sort_packet() {
 #[test]
 fn packet_filter_runs_series_any_all_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-041", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-041", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-041"));
     assert!(
         report.fixture_count >= 8,
@@ -455,8 +420,7 @@ fn packet_filter_runs_series_any_all_packet() {
 #[test]
 fn packet_filter_runs_series_value_counts_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-042", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-042", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-042"));
     assert!(
         report.fixture_count >= 6,
@@ -468,8 +432,7 @@ fn packet_filter_runs_series_value_counts_packet() {
 #[test]
 fn packet_filter_runs_series_sort_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-043", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-043", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-043"));
     assert!(
         report.fixture_count >= 6,
@@ -481,8 +444,7 @@ fn packet_filter_runs_series_sort_packet() {
 #[test]
 fn packet_filter_runs_series_tail_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-044", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-044", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-044"));
     assert!(
         report.fixture_count >= 6,
@@ -494,8 +456,7 @@ fn packet_filter_runs_series_tail_packet() {
 #[test]
 fn packet_filter_runs_series_isna_notna_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-045", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-045", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-045"));
     assert!(
         report.fixture_count >= 6,
@@ -507,8 +468,7 @@ fn packet_filter_runs_series_isna_notna_packet() {
 #[test]
 fn packet_filter_runs_series_fillna_dropna_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-046", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-046", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-046"));
     assert!(
         report.fixture_count >= 8,
@@ -520,8 +480,7 @@ fn packet_filter_runs_series_fillna_dropna_packet() {
 #[test]
 fn packet_filter_runs_series_count_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-047", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-047", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-047"));
     assert!(
         report.fixture_count >= 4,
@@ -533,8 +492,7 @@ fn packet_filter_runs_series_count_packet() {
 #[test]
 fn packet_filter_runs_series_isnull_notnull_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-048", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-048", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-048"));
     assert!(
         report.fixture_count >= 6,
@@ -546,8 +504,7 @@ fn packet_filter_runs_series_isnull_notnull_packet() {
 #[test]
 fn packet_filter_runs_dataframe_isna_notna_isnull_notnull_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-049", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-049", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-049"));
     assert!(
         report.fixture_count >= 6,
@@ -559,8 +516,7 @@ fn packet_filter_runs_dataframe_isna_notna_isnull_notnull_packet() {
 #[test]
 fn packet_filter_runs_dataframe_fillna_dropna_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-050", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-050", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-050"));
     assert!(
         report.fixture_count >= 8,
@@ -572,8 +528,7 @@ fn packet_filter_runs_dataframe_fillna_dropna_packet() {
 #[test]
 fn packet_filter_runs_dataframe_count_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-051", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-051", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-051"));
     assert!(
         report.fixture_count >= 4,
@@ -585,8 +540,7 @@ fn packet_filter_runs_dataframe_count_packet() {
 #[test]
 fn packet_filter_runs_dataframe_dropna_columns_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-052", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-052", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-052"));
     assert!(
         report.fixture_count >= 4,
@@ -598,8 +552,7 @@ fn packet_filter_runs_dataframe_dropna_columns_packet() {
 #[test]
 fn packet_filter_runs_dataframe_set_reset_index_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-053", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-053", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-053"));
     assert!(
         report.fixture_count >= 7,
@@ -611,8 +564,7 @@ fn packet_filter_runs_dataframe_set_reset_index_packet() {
 #[test]
 fn packet_filter_runs_dataframe_duplicates_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-054", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-054", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-054"));
     assert!(
         report.fixture_count >= 9,
@@ -624,8 +576,7 @@ fn packet_filter_runs_dataframe_duplicates_packet() {
 #[test]
 fn packet_filter_runs_series_arithmetic_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-055", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-055", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-055"));
     assert!(
         report.fixture_count >= 6,
@@ -637,8 +588,7 @@ fn packet_filter_runs_series_arithmetic_packet() {
 #[test]
 fn packet_filter_runs_dataframe_merge_asof_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-056", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-056", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-056"));
     assert!(
         report.fixture_count >= 2,
@@ -650,8 +600,7 @@ fn packet_filter_runs_dataframe_merge_asof_packet() {
 #[test]
 fn packet_filter_runs_dataframe_rank_mode_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-057", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-057", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-057"));
     assert!(
         report.fixture_count >= 7,
@@ -663,8 +612,7 @@ fn packet_filter_runs_dataframe_rank_mode_packet() {
 #[test]
 fn packet_filter_runs_series_diff_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-060", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-060", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-060"));
     assert!(
         report.fixture_count >= 4,
@@ -676,8 +624,7 @@ fn packet_filter_runs_series_diff_packet() {
 #[test]
 fn packet_filter_runs_series_shift_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-061", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-061", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-061"));
     assert!(
         report.fixture_count >= 2,
@@ -689,8 +636,7 @@ fn packet_filter_runs_series_shift_packet() {
 #[test]
 fn packet_filter_runs_series_pct_change_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-062", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-062", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-062"));
     assert!(
         report.fixture_count >= 2,
@@ -702,8 +648,7 @@ fn packet_filter_runs_series_pct_change_packet() {
 #[test]
 fn packet_filter_runs_dataframe_melt_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-063", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-063", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-063"));
     assert!(
         report.fixture_count >= 4,
@@ -715,8 +660,7 @@ fn packet_filter_runs_dataframe_melt_packet() {
 #[test]
 fn packet_filter_runs_combine_first_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-090", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-090", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-090"));
     assert!(
         report.fixture_count >= 4,
@@ -728,8 +672,7 @@ fn packet_filter_runs_combine_first_packet() {
 #[test]
 fn packet_filter_runs_series_asof_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-419", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-419", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-419"));
     assert!(
         report.fixture_count >= 4,
@@ -741,8 +684,7 @@ fn packet_filter_runs_series_asof_packet() {
 #[test]
 fn packet_filter_runs_dataframe_explode_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-420", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-420", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-420"));
     assert!(
         report.fixture_count >= 2,
@@ -754,8 +696,7 @@ fn packet_filter_runs_dataframe_explode_packet() {
 #[test]
 fn packet_filter_runs_series_abs_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-064", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-064", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-064"));
     assert!(
         report.fixture_count >= 3,
@@ -767,8 +708,7 @@ fn packet_filter_runs_series_abs_packet() {
 #[test]
 fn packet_filter_runs_series_round_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-065", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-065", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-065"));
     assert!(
         report.fixture_count >= 3,
@@ -780,8 +720,7 @@ fn packet_filter_runs_series_round_packet() {
 #[test]
 fn packet_filter_runs_series_cumsum_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-066", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-066", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-066"));
     assert!(
         report.fixture_count >= 3,
@@ -793,8 +732,7 @@ fn packet_filter_runs_series_cumsum_packet() {
 #[test]
 fn packet_filter_runs_series_cumprod_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-067", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-067", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-067"));
     assert!(
         report.fixture_count >= 3,
@@ -806,8 +744,7 @@ fn packet_filter_runs_series_cumprod_packet() {
 #[test]
 fn packet_filter_runs_series_cummax_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-068", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-068", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-068"));
     assert!(
         report.fixture_count >= 3,
@@ -819,8 +756,7 @@ fn packet_filter_runs_series_cummax_packet() {
 #[test]
 fn packet_filter_runs_series_cummin_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-069", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-069", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-069"));
     assert!(
         report.fixture_count >= 3,
@@ -832,8 +768,7 @@ fn packet_filter_runs_series_cummin_packet() {
 #[test]
 fn packet_filter_runs_series_nlargest_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-070", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-070", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-070"));
     assert!(
         report.fixture_count >= 3,
@@ -845,8 +780,7 @@ fn packet_filter_runs_series_nlargest_packet() {
 #[test]
 fn packet_filter_runs_series_nsmallest_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-071", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-071", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-071"));
     assert!(
         report.fixture_count >= 3,
@@ -858,8 +792,7 @@ fn packet_filter_runs_series_nsmallest_packet() {
 #[test]
 fn packet_filter_runs_series_between_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-072", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-072", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-072"));
     assert!(
         report.fixture_count >= 5,
@@ -871,8 +804,7 @@ fn packet_filter_runs_series_between_packet() {
 #[test]
 fn packet_filter_runs_dataframe_cumsum_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-073", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-073", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-073"));
     assert!(
         report.fixture_count >= 3,
@@ -884,8 +816,7 @@ fn packet_filter_runs_dataframe_cumsum_packet() {
 #[test]
 fn packet_filter_runs_dataframe_cumprod_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-074", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-074", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-074"));
     assert!(
         report.fixture_count >= 3,
@@ -897,8 +828,7 @@ fn packet_filter_runs_dataframe_cumprod_packet() {
 #[test]
 fn packet_filter_runs_dataframe_cummax_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-075", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-075", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-075"));
     assert!(
         report.fixture_count >= 3,
@@ -910,8 +840,7 @@ fn packet_filter_runs_dataframe_cummax_packet() {
 #[test]
 fn packet_filter_runs_dataframe_cummin_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-076", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-076", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-076"));
     assert!(
         report.fixture_count >= 3,
@@ -923,8 +852,7 @@ fn packet_filter_runs_dataframe_cummin_packet() {
 #[test]
 fn packet_filter_runs_series_repeat_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-077", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-077", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-077"));
     assert!(
         report.fixture_count >= 3,
@@ -936,8 +864,7 @@ fn packet_filter_runs_series_repeat_packet() {
 #[test]
 fn packet_filter_runs_series_xs_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-078", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-078", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-078"));
     assert!(
         report.fixture_count >= 3,
@@ -949,8 +876,7 @@ fn packet_filter_runs_series_xs_packet() {
 #[test]
 fn packet_filter_runs_series_take_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-079", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-079", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-079"));
     assert!(
         report.fixture_count >= 3,
@@ -962,8 +888,7 @@ fn packet_filter_runs_series_take_packet() {
 #[test]
 fn packet_filter_runs_series_bool_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-080", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-080", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-080"));
     assert!(
         report.fixture_count >= 3,
@@ -975,8 +900,7 @@ fn packet_filter_runs_series_bool_packet() {
 #[test]
 fn packet_filter_runs_series_cut_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-081", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-081", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-081"));
     assert!(
         report.fixture_count >= 3,
@@ -988,8 +912,7 @@ fn packet_filter_runs_series_cut_packet() {
 #[test]
 fn packet_filter_runs_series_qcut_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-082", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-082", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-082"));
     assert!(
         report.fixture_count >= 3,
@@ -1001,8 +924,7 @@ fn packet_filter_runs_series_qcut_packet() {
 #[test]
 fn packet_filter_runs_series_to_numeric_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-083", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-083", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-083"));
     assert!(
         report.fixture_count >= 3,
@@ -1014,8 +936,7 @@ fn packet_filter_runs_series_to_numeric_packet() {
 #[test]
 fn packet_filter_runs_series_partition_df_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-084", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-084", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-084"));
     assert!(
         report.fixture_count >= 3,
@@ -1027,8 +948,7 @@ fn packet_filter_runs_series_partition_df_packet() {
 #[test]
 fn packet_filter_runs_series_rpartition_df_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-085", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-085", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-085"));
     assert!(
         report.fixture_count >= 3,
@@ -1040,8 +960,7 @@ fn packet_filter_runs_series_rpartition_df_packet() {
 #[test]
 fn packet_filter_runs_series_extract_df_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-086", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-086", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-086"));
     assert!(
         report.fixture_count >= 4,
@@ -1053,8 +972,7 @@ fn packet_filter_runs_series_extract_df_packet() {
 #[test]
 fn packet_filter_runs_series_extractall_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-087", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-087", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-087"));
     assert!(
         report.fixture_count >= 3,
@@ -1066,8 +984,7 @@ fn packet_filter_runs_series_extractall_packet() {
 #[test]
 fn packet_filter_runs_series_at_time_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-088", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-088", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-088"));
     assert!(
         report.fixture_count >= 3,
@@ -1079,8 +996,7 @@ fn packet_filter_runs_series_at_time_packet() {
 #[test]
 fn packet_filter_runs_series_between_time_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-089", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-089", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-089"));
     assert!(
         report.fixture_count >= 3,
@@ -1092,8 +1008,7 @@ fn packet_filter_runs_series_between_time_packet() {
 #[test]
 fn packet_filter_runs_series_to_datetime_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-091", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-091", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-091"));
     assert!(
         report.fixture_count >= 4,
@@ -1105,8 +1020,7 @@ fn packet_filter_runs_series_to_datetime_packet() {
 #[test]
 fn packet_filter_runs_series_to_timedelta_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-092", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-092", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-092"));
     assert!(
         report.fixture_count >= 3,
@@ -1118,8 +1032,7 @@ fn packet_filter_runs_series_to_timedelta_packet() {
 #[test]
 fn packet_filter_runs_series_to_arrow_round_trip_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-427", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-427", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-427"));
     assert_eq!(report.fixture_count, 1);
     assert!(report.is_green(), "expected report green: {report:?}");
@@ -1128,8 +1041,7 @@ fn packet_filter_runs_series_to_arrow_round_trip_packet() {
 #[test]
 fn packet_filter_runs_series_rolling_min_min_periods_zero_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-428", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-428", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-428"));
     assert_eq!(report.fixture_count, 1);
     assert!(report.is_green(), "expected report green: {report:?}");
@@ -1138,8 +1050,7 @@ fn packet_filter_runs_series_rolling_min_min_periods_zero_packet() {
 #[test]
 fn packet_filter_runs_csv_read_frame_parse_dates_mixed_timezone_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-429", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-429", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-429"));
     assert_eq!(report.fixture_count, 1);
     assert!(report.is_green(), "expected report green: {report:?}");
@@ -1148,8 +1059,7 @@ fn packet_filter_runs_csv_read_frame_parse_dates_mixed_timezone_packet() {
 #[test]
 fn packet_filter_runs_csv_read_frame_parse_dates_combined_columns_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-432", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-432", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-432"));
     assert_eq!(report.fixture_count, 1);
     assert!(report.is_green(), "expected report green: {report:?}");
@@ -1158,8 +1068,7 @@ fn packet_filter_runs_csv_read_frame_parse_dates_combined_columns_packet() {
 #[test]
 fn packet_filter_runs_dataframe_to_json_records_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-433", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-433", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-433"));
     assert_eq!(report.fixture_count, 1);
     assert!(report.is_green(), "expected report green: {report:?}");
@@ -1168,8 +1077,7 @@ fn packet_filter_runs_dataframe_to_json_records_packet() {
 #[test]
 fn packet_filter_runs_series_timedelta_total_seconds_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-093", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-093", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-093"));
     assert!(
         report.fixture_count >= 3,
@@ -1181,8 +1089,7 @@ fn packet_filter_runs_series_timedelta_total_seconds_packet() {
 #[test]
 fn packet_filter_runs_dataframe_asof_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-094", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-094", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-094"));
     assert!(
         report.fixture_count >= 3,
@@ -1194,8 +1101,7 @@ fn packet_filter_runs_dataframe_asof_packet() {
 #[test]
 fn packet_filter_runs_dataframe_at_time_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-095", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-095", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-095"));
     assert!(
         report.fixture_count >= 3,
@@ -1207,8 +1113,7 @@ fn packet_filter_runs_dataframe_at_time_packet() {
 #[test]
 fn packet_filter_runs_dataframe_between_time_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-096", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-096", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-096"));
     assert!(
         report.fixture_count >= 3,
@@ -1220,8 +1125,7 @@ fn packet_filter_runs_dataframe_between_time_packet() {
 #[test]
 fn packet_filter_runs_dataframe_bool_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-097", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-097", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-097"));
     assert!(
         report.fixture_count >= 3,
@@ -1233,8 +1137,7 @@ fn packet_filter_runs_dataframe_bool_packet() {
 #[test]
 fn packet_filter_runs_dataframe_xs_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-098", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-098", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-098"));
     assert!(
         report.fixture_count >= 3,
@@ -1246,8 +1149,7 @@ fn packet_filter_runs_dataframe_xs_packet() {
 #[test]
 fn packet_filter_runs_dataframe_take_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-099", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-099", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-099"));
     assert!(
         report.fixture_count >= 3,
@@ -1259,8 +1161,7 @@ fn packet_filter_runs_dataframe_take_packet() {
 #[test]
 fn packet_filter_runs_dataframe_groupby_idxmin_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-100", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-100", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-100"));
     assert!(
         report.fixture_count >= 3,
@@ -1272,8 +1173,7 @@ fn packet_filter_runs_dataframe_groupby_idxmin_packet() {
 #[test]
 fn packet_filter_runs_dataframe_groupby_idxmax_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-101", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-101", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-101"));
     assert!(
         report.fixture_count >= 3,
@@ -1285,8 +1185,7 @@ fn packet_filter_runs_dataframe_groupby_idxmax_packet() {
 #[test]
 fn packet_filter_runs_dataframe_groupby_any_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-102", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-102", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-102"));
     assert!(
         report.fixture_count >= 3,
@@ -1298,8 +1197,7 @@ fn packet_filter_runs_dataframe_groupby_any_packet() {
 #[test]
 fn packet_filter_runs_dataframe_groupby_all_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-103", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-103", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-103"));
     assert!(
         report.fixture_count >= 3,
@@ -1311,8 +1209,7 @@ fn packet_filter_runs_dataframe_groupby_all_packet() {
 #[test]
 fn packet_filter_runs_dataframe_groupby_get_group_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-104", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-104", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-104"));
     assert!(
         report.fixture_count >= 3,
@@ -1324,8 +1221,7 @@ fn packet_filter_runs_dataframe_groupby_get_group_packet() {
 #[test]
 fn packet_filter_runs_dataframe_groupby_ffill_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-105", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-105", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-105"));
     assert!(
         report.fixture_count >= 3,
@@ -1337,8 +1233,7 @@ fn packet_filter_runs_dataframe_groupby_ffill_packet() {
 #[test]
 fn packet_filter_runs_dataframe_groupby_bfill_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-106", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-106", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-106"));
     assert!(
         report.fixture_count >= 3,
@@ -1350,8 +1245,7 @@ fn packet_filter_runs_dataframe_groupby_bfill_packet() {
 #[test]
 fn packet_filter_runs_dataframe_groupby_sem_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-107", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-107", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-107"));
     assert!(
         report.fixture_count >= 3,
@@ -1363,8 +1257,7 @@ fn packet_filter_runs_dataframe_groupby_sem_packet() {
 #[test]
 fn packet_filter_runs_dataframe_groupby_skew_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-108", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-108", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-108"));
     assert!(
         report.fixture_count >= 3,
@@ -1376,8 +1269,7 @@ fn packet_filter_runs_dataframe_groupby_skew_packet() {
 #[test]
 fn packet_filter_runs_dataframe_groupby_kurtosis_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-109", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-109", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-109"));
     assert!(
         report.fixture_count >= 3,
@@ -1389,8 +1281,7 @@ fn packet_filter_runs_dataframe_groupby_kurtosis_packet() {
 #[test]
 fn packet_filter_runs_dataframe_groupby_ohlc_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-110", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-110", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-110"));
     assert!(
         report.fixture_count >= 3,
@@ -1402,8 +1293,7 @@ fn packet_filter_runs_dataframe_groupby_ohlc_packet() {
 #[test]
 fn packet_filter_runs_dataframe_groupby_cumcount_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-111", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-111", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-111"));
     assert!(
         report.fixture_count >= 3,
@@ -1415,8 +1305,7 @@ fn packet_filter_runs_dataframe_groupby_cumcount_packet() {
 #[test]
 fn packet_filter_runs_dataframe_groupby_ngroup_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-112", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-112", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-112"));
     assert!(
         report.fixture_count >= 3,
@@ -1428,8 +1317,7 @@ fn packet_filter_runs_dataframe_groupby_ngroup_packet() {
 #[test]
 fn packet_filter_runs_dataframe_groupby_sum_observed_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-422", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-422", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-422"));
     assert_eq!(report.fixture_count, 1);
     assert!(report.is_green(), "expected report green: {report:?}");
@@ -1438,8 +1326,7 @@ fn packet_filter_runs_dataframe_groupby_sum_observed_packet() {
 #[test]
 fn packet_filter_runs_dataframe_groupby_agg_multi_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-430", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-430", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-430"));
     assert_eq!(report.fixture_count, 1);
     assert!(report.is_green(), "expected report green: {report:?}");
@@ -1448,8 +1335,7 @@ fn packet_filter_runs_dataframe_groupby_agg_multi_packet() {
 #[test]
 fn packet_filter_runs_series_split_expand_n_padding_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-431", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-431", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-431"));
     assert_eq!(report.fixture_count, 1);
     assert!(report.is_green(), "expected report green: {report:?}");
@@ -1458,8 +1344,7 @@ fn packet_filter_runs_series_split_expand_n_padding_packet() {
 #[test]
 fn packet_filter_runs_dataframe_shift_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-113", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-113", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-113"));
     assert!(
         report.fixture_count >= 3,
@@ -1471,8 +1356,7 @@ fn packet_filter_runs_dataframe_shift_packet() {
 #[test]
 fn packet_filter_runs_dataframe_shift_axis1_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-144", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-144", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-144"));
     assert!(
         report.fixture_count >= 4,
@@ -1484,8 +1368,7 @@ fn packet_filter_runs_dataframe_shift_axis1_packet() {
 #[test]
 fn packet_filter_runs_dataframe_merge_ordered_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-114", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-114", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-114"));
     assert!(
         report.fixture_count >= 3,
@@ -1497,8 +1380,7 @@ fn packet_filter_runs_dataframe_merge_ordered_packet() {
 #[test]
 fn packet_filter_runs_series_mode_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-115", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-115", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-115"));
     assert!(
         report.fixture_count >= 3,
@@ -1510,8 +1392,7 @@ fn packet_filter_runs_series_mode_packet() {
 #[test]
 fn packet_filter_runs_series_rank_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-116", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-116", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-116"));
     assert!(
         report.fixture_count >= 3,
@@ -1523,8 +1404,7 @@ fn packet_filter_runs_series_rank_packet() {
 #[test]
 fn packet_filter_runs_series_describe_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-117", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-117", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-117"));
     assert!(
         report.fixture_count >= 3,
@@ -1536,8 +1416,7 @@ fn packet_filter_runs_series_describe_packet() {
 #[test]
 fn packet_filter_runs_series_duplicated_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-118", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-118", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-118"));
     assert!(
         report.fixture_count >= 3,
@@ -1549,8 +1428,7 @@ fn packet_filter_runs_series_duplicated_packet() {
 #[test]
 fn packet_filter_runs_series_drop_duplicates_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-119", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-119", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-119"));
     assert!(
         report.fixture_count >= 3,
@@ -1562,8 +1440,7 @@ fn packet_filter_runs_series_drop_duplicates_packet() {
 #[test]
 fn packet_filter_runs_series_where_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-120", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-120", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-120"));
     assert!(
         report.fixture_count >= 3,
@@ -1575,8 +1452,7 @@ fn packet_filter_runs_series_where_packet() {
 #[test]
 fn packet_filter_runs_series_mask_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-121", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-121", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-121"));
     assert!(
         report.fixture_count >= 3,
@@ -1588,8 +1464,7 @@ fn packet_filter_runs_series_mask_packet() {
 #[test]
 fn packet_filter_runs_series_replace_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-122", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-122", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-122"));
     assert!(
         report.fixture_count >= 3,
@@ -1601,8 +1476,7 @@ fn packet_filter_runs_series_replace_packet() {
 #[test]
 fn packet_filter_runs_series_update_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-123", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-123", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-123"));
     assert!(
         report.fixture_count >= 3,
@@ -1614,8 +1488,7 @@ fn packet_filter_runs_series_update_packet() {
 #[test]
 fn packet_filter_runs_series_map_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-124", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-124", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-124"));
     assert!(
         report.fixture_count >= 3,
@@ -1627,8 +1500,7 @@ fn packet_filter_runs_series_map_packet() {
 #[test]
 fn packet_filter_runs_series_to_frame_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-125", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-125", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-125"));
     assert!(
         report.fixture_count >= 3,
@@ -1640,8 +1512,7 @@ fn packet_filter_runs_series_to_frame_packet() {
 #[test]
 fn packet_filter_runs_dataframe_eval_query_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-126", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-126", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-126"));
     assert!(
         report.fixture_count >= 5,
@@ -1653,8 +1524,7 @@ fn packet_filter_runs_dataframe_eval_query_packet() {
 #[test]
 fn packet_filter_runs_window_resample_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-127", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-127", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-127"));
     assert!(
         report.fixture_count >= 4,
@@ -1666,8 +1536,7 @@ fn packet_filter_runs_window_resample_packet() {
 #[test]
 fn packet_filter_runs_dataframe_reshape_dummy_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-128", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-128", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-128"));
     assert!(
         report.fixture_count >= 12,
@@ -1679,8 +1548,7 @@ fn packet_filter_runs_dataframe_reshape_dummy_packet() {
 #[test]
 fn packet_filter_runs_io_round_trip_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-129", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-129", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-129"));
     assert!(
         report.fixture_count >= 9,
@@ -1692,8 +1560,7 @@ fn packet_filter_runs_io_round_trip_packet() {
 #[test]
 fn packet_filter_runs_dataframe_numeric_transform_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-130", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-130", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-130"));
     assert!(
         report.fixture_count >= 6,
@@ -1705,8 +1572,7 @@ fn packet_filter_runs_dataframe_numeric_transform_packet() {
 #[test]
 fn packet_filter_runs_dataframe_transpose_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-131", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-131", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-131"));
     assert!(
         report.fixture_count >= 5,
@@ -1718,8 +1584,7 @@ fn packet_filter_runs_dataframe_transpose_packet() {
 #[test]
 fn packet_filter_runs_dataframe_topn_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-132", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-132", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-132"));
     assert!(
         report.fixture_count >= 6,
@@ -1731,8 +1596,7 @@ fn packet_filter_runs_dataframe_topn_packet() {
 #[test]
 fn packet_filter_runs_dataframe_insert_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-133", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-133", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-133"));
     assert!(
         report.fixture_count >= 5,
@@ -1744,8 +1608,7 @@ fn packet_filter_runs_dataframe_insert_packet() {
 #[test]
 fn packet_filter_runs_dataframe_assign_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-134", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-134", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-134"));
     assert!(
         report.fixture_count >= 4,
@@ -1757,8 +1620,7 @@ fn packet_filter_runs_dataframe_assign_packet() {
 #[test]
 fn packet_filter_runs_dataframe_rename_columns_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-135", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-135", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-135"));
     assert!(
         report.fixture_count >= 4,
@@ -1770,8 +1632,7 @@ fn packet_filter_runs_dataframe_rename_columns_packet() {
 #[test]
 fn packet_filter_runs_dataframe_reindex_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-136", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-136", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-136"));
     assert!(
         report.fixture_count >= 4,
@@ -1783,8 +1644,7 @@ fn packet_filter_runs_dataframe_reindex_packet() {
 #[test]
 fn packet_filter_runs_dataframe_reindex_columns_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-137", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-137", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-137"));
     assert!(
         report.fixture_count >= 4,
@@ -1796,8 +1656,7 @@ fn packet_filter_runs_dataframe_reindex_columns_packet() {
 #[test]
 fn packet_filter_runs_dataframe_drop_columns_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-138", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-138", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-138"));
     assert!(
         report.fixture_count >= 4,
@@ -1809,8 +1668,7 @@ fn packet_filter_runs_dataframe_drop_columns_packet() {
 #[test]
 fn packet_filter_runs_dataframe_replace_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-139", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-139", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-139"));
     assert!(
         report.fixture_count >= 4,
@@ -1822,8 +1680,7 @@ fn packet_filter_runs_dataframe_replace_packet() {
 #[test]
 fn packet_filter_runs_dataframe_where_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-140", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-140", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-140"));
     assert!(
         report.fixture_count >= 4,
@@ -1835,8 +1692,7 @@ fn packet_filter_runs_dataframe_where_packet() {
 #[test]
 fn packet_filter_runs_dataframe_mask_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-141", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-141", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-141"));
     assert!(
         report.fixture_count >= 4,
@@ -1848,8 +1704,7 @@ fn packet_filter_runs_dataframe_mask_packet() {
 #[test]
 fn packet_filter_runs_dataframe_where_df_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-142", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-142", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-142"));
     assert!(
         report.fixture_count >= 5,
@@ -1861,8 +1716,7 @@ fn packet_filter_runs_dataframe_where_df_packet() {
 #[test]
 fn packet_filter_runs_dataframe_mask_df_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-143", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-143", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-143"));
     assert!(
         report.fixture_count >= 5,
@@ -1874,8 +1728,7 @@ fn packet_filter_runs_dataframe_mask_df_packet() {
 #[test]
 fn packet_filter_runs_dataframe_describe_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-145", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-145", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-145"));
     assert!(
         report.fixture_count >= 2,
@@ -1887,8 +1740,7 @@ fn packet_filter_runs_dataframe_describe_packet() {
 #[test]
 fn packet_filter_runs_dataframe_idx_extrema_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-148", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-148", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-148"));
     assert!(
         report.fixture_count >= 2,
@@ -1900,8 +1752,7 @@ fn packet_filter_runs_dataframe_idx_extrema_packet() {
 #[test]
 fn packet_filter_runs_dataframe_corr_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-146", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-146", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-146"));
     assert!(
         report.fixture_count >= 3,
@@ -1913,8 +1764,7 @@ fn packet_filter_runs_dataframe_corr_packet() {
 #[test]
 fn packet_filter_runs_dataframe_cov_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-147", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-147", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-147"));
     assert!(
         report.fixture_count >= 2,
@@ -1926,8 +1776,7 @@ fn packet_filter_runs_dataframe_cov_packet() {
 #[test]
 fn packet_filter_runs_dataframe_sem_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-149", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-149", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-149"));
     assert!(
         report.fixture_count >= 1,
@@ -1939,8 +1788,7 @@ fn packet_filter_runs_dataframe_sem_packet() {
 #[test]
 fn packet_filter_runs_dataframe_skew_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-167", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-167", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-167"));
     assert!(
         report.fixture_count >= 2,
@@ -1952,8 +1800,7 @@ fn packet_filter_runs_dataframe_skew_packet() {
 #[test]
 fn packet_filter_runs_dataframe_kurtosis_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-151", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-151", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-151"));
     assert!(
         report.fixture_count >= 1,
@@ -1965,8 +1812,7 @@ fn packet_filter_runs_dataframe_kurtosis_packet() {
 #[test]
 fn packet_filter_runs_dataframe_kurtosis_extreme_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-150", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-150", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-150"));
     assert!(
         report.fixture_count >= 1,
@@ -1978,8 +1824,7 @@ fn packet_filter_runs_dataframe_kurtosis_extreme_packet() {
 #[test]
 fn packet_filter_runs_dataframe_prod_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-168", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-168", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-168"));
     assert!(
         report.fixture_count >= 1,
@@ -1991,8 +1836,7 @@ fn packet_filter_runs_dataframe_prod_packet() {
 #[test]
 fn packet_filter_runs_dataframe_sum_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-152", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-152", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-152"));
     assert!(
         report.fixture_count >= 1,
@@ -2004,8 +1848,7 @@ fn packet_filter_runs_dataframe_sum_packet() {
 #[test]
 fn packet_filter_runs_dataframe_mean_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-153", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-153", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-153"));
     assert!(
         report.fixture_count >= 1,
@@ -2017,8 +1860,7 @@ fn packet_filter_runs_dataframe_mean_packet() {
 #[test]
 fn packet_filter_runs_dataframe_std_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-154", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-154", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-154"));
     assert!(
         report.fixture_count >= 1,
@@ -2030,8 +1872,7 @@ fn packet_filter_runs_dataframe_std_packet() {
 #[test]
 fn packet_filter_runs_dataframe_var_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-155", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-155", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-155"));
     assert!(
         report.fixture_count >= 1,
@@ -2043,8 +1884,7 @@ fn packet_filter_runs_dataframe_var_packet() {
 #[test]
 fn packet_filter_runs_dataframe_min_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-156", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-156", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-156"));
     assert!(
         report.fixture_count >= 1,
@@ -2056,8 +1896,7 @@ fn packet_filter_runs_dataframe_min_packet() {
 #[test]
 fn packet_filter_runs_dataframe_max_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-157", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-157", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-157"));
     assert!(
         report.fixture_count >= 1,
@@ -2069,8 +1908,7 @@ fn packet_filter_runs_dataframe_max_packet() {
 #[test]
 fn packet_filter_runs_dataframe_median_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-158", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-158", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-158"));
     assert!(
         report.fixture_count >= 1,
@@ -2082,8 +1920,7 @@ fn packet_filter_runs_dataframe_median_packet() {
 #[test]
 fn packet_filter_runs_dataframe_any_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-159", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-159", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-159"));
     assert!(
         report.fixture_count >= 1,
@@ -2095,8 +1932,7 @@ fn packet_filter_runs_dataframe_any_packet() {
 #[test]
 fn packet_filter_runs_dataframe_all_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-160", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-160", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-160"));
     assert!(
         report.fixture_count >= 1,
@@ -2108,8 +1944,7 @@ fn packet_filter_runs_dataframe_all_packet() {
 #[test]
 fn packet_filter_runs_dataframe_nunique_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-161", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-161", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-161"));
     assert!(
         report.fixture_count >= 1,
@@ -2121,8 +1956,7 @@ fn packet_filter_runs_dataframe_nunique_packet() {
 #[test]
 fn packet_filter_runs_dataframe_quantile_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-162", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-162", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-162"));
     assert!(
         report.fixture_count >= 1,
@@ -2134,8 +1968,7 @@ fn packet_filter_runs_dataframe_quantile_packet() {
 #[test]
 fn packet_filter_runs_dataframe_value_counts_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-163", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-163", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-163"));
     assert!(
         report.fixture_count >= 1,
@@ -2147,8 +1980,7 @@ fn packet_filter_runs_dataframe_value_counts_packet() {
 #[test]
 fn packet_filter_runs_dataframe_memory_usage_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-164", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-164", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-164"));
     assert!(
         report.fixture_count >= 1,
@@ -2160,8 +1992,7 @@ fn packet_filter_runs_dataframe_memory_usage_packet() {
 #[test]
 fn packet_filter_runs_dataframe_head_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-165", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-165", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-165"));
     assert!(
         report.fixture_count >= 1,
@@ -2173,8 +2004,7 @@ fn packet_filter_runs_dataframe_head_packet() {
 #[test]
 fn packet_filter_runs_dataframe_tail_packet() {
     let cfg = HarnessConfig::default_paths();
-    let report =
-        run_packet_by_id(&cfg, "FP-P2D-166", OracleMode::FixtureExpected).expect("report");
+    let report = run_packet_by_id(&cfg, "FP-P2D-166", OracleMode::FixtureExpected).expect("report");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2D-166"));
     assert!(
         report.fixture_count >= 1,
