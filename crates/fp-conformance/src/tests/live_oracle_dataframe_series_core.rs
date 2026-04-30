@@ -13849,3 +13849,127 @@ fn live_oracle_dataframe_query_compound_filter() {
     .expect("query");
     super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_dataframe_eval_arithmetic() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DF-EVAL-ARITH",
+        "case_id": "dataframe_eval_arithmetic",
+        "mode": "strict",
+        "operation": "dataframe_eval",
+        "oracle_source": "live_legacy_pandas",
+        "expr": "a + b * 2",
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "columns": {
+                "a": [
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "int64", "value": 2 },
+                    { "kind": "int64", "value": 3 }
+                ],
+                "b": [
+                    { "kind": "int64", "value": 10 },
+                    { "kind": "int64", "value": 20 },
+                    { "kind": "int64", "value": 30 }
+                ]
+            },
+            "column_order": ["a", "b"]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping df eval arith test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Series(_)),
+        "expected live oracle series payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
+    let policy = super::RuntimePolicy::strict();
+    let mut ledger = super::EvidenceLedger::new();
+    let result = fp_expr::eval_str(
+        fixture.expr.as_deref().expect("expr"),
+        &frame,
+        &policy,
+        &mut ledger,
+    )
+    .expect("eval");
+    super::compare_series_expected(&result, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_dataframe_eval_comparison() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DF-EVAL-CMP",
+        "case_id": "dataframe_eval_comparison",
+        "mode": "strict",
+        "operation": "dataframe_eval",
+        "oracle_source": "live_legacy_pandas",
+        "expr": "x > y",
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "columns": {
+                "x": [
+                    { "kind": "int64", "value": 5 },
+                    { "kind": "int64", "value": 2 },
+                    { "kind": "int64", "value": 8 }
+                ],
+                "y": [
+                    { "kind": "int64", "value": 3 },
+                    { "kind": "int64", "value": 4 },
+                    { "kind": "int64", "value": 1 }
+                ]
+            },
+            "column_order": ["x", "y"]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping df eval cmp test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Series(_)),
+        "expected live oracle series payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
+    let policy = super::RuntimePolicy::strict();
+    let mut ledger = super::EvidenceLedger::new();
+    let result = fp_expr::eval_str(
+        fixture.expr.as_deref().expect("expr"),
+        &frame,
+        &policy,
+        &mut ledger,
+    )
+    .expect("eval");
+    super::compare_series_expected(&result, &expected).expect("pandas parity");
+}
