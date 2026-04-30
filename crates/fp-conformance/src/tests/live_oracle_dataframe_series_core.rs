@@ -12632,3 +12632,75 @@ fn live_oracle_dataframe_explode_comma_ignore_index() {
         .expect("explode");
     super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_dataframe_crosstab_basic() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DF-CROSSTAB",
+        "case_id": "dataframe_crosstab_basic",
+        "mode": "strict",
+        "operation": "dataframe_crosstab",
+        "oracle_source": "live_legacy_pandas",
+        "left": {
+            "name": "row",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 4 },
+                { "kind": "int64", "value": 5 }
+            ],
+            "values": [
+                { "kind": "utf8", "value": "a" },
+                { "kind": "utf8", "value": "a" },
+                { "kind": "utf8", "value": "b" },
+                { "kind": "utf8", "value": "b" },
+                { "kind": "utf8", "value": "a" },
+                { "kind": "utf8", "value": "b" }
+            ]
+        },
+        "right": {
+            "name": "col",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 4 },
+                { "kind": "int64", "value": 5 }
+            ],
+            "values": [
+                { "kind": "utf8", "value": "x" },
+                { "kind": "utf8", "value": "y" },
+                { "kind": "utf8", "value": "x" },
+                { "kind": "utf8", "value": "x" },
+                { "kind": "utf8", "value": "x" },
+                { "kind": "utf8", "value": "y" }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping df crosstab basic test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Frame(_)),
+        "expected live oracle frame payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Frame(expected_frame) = expected else {
+        return;
+    };
+
+    let left = super::build_series(fixture.left.as_ref().expect("left")).expect("left");
+    let right = super::build_series(fixture.right.as_ref().expect("right")).expect("right");
+    let result = fp_frame::DataFrame::crosstab(&left, &right).expect("crosstab");
+    super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
+}
