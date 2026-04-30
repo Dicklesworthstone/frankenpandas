@@ -13591,3 +13591,122 @@ fn live_oracle_dataframe_mask_with_fill_value() {
         .expect("mask");
     super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_dataframe_nlargest_n_3() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DF-NLARGEST",
+        "case_id": "dataframe_nlargest_n_3",
+        "mode": "strict",
+        "operation": "dataframe_nlargest",
+        "oracle_source": "live_legacy_pandas",
+        "nlargest_n": 3,
+        "sort_column": "score",
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 4 }
+            ],
+            "columns": {
+                "name": [
+                    { "kind": "utf8", "value": "alice" },
+                    { "kind": "utf8", "value": "bob" },
+                    { "kind": "utf8", "value": "carol" },
+                    { "kind": "utf8", "value": "dave" },
+                    { "kind": "utf8", "value": "eve" }
+                ],
+                "score": [
+                    { "kind": "float64", "value": 75.0 },
+                    { "kind": "float64", "value": 90.0 },
+                    { "kind": "float64", "value": 60.0 },
+                    { "kind": "float64", "value": 95.0 },
+                    { "kind": "float64", "value": 80.0 }
+                ]
+            },
+            "column_order": ["name", "score"]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping df nlargest n=3 test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Frame(_)),
+        "expected live oracle frame payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Frame(expected_frame) = expected else {
+        return;
+    };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
+    let result = frame.nlargest(3, "score").expect("nlargest");
+    super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_dataframe_nsmallest_n_2() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DF-NSMALLEST",
+        "case_id": "dataframe_nsmallest_n_2",
+        "mode": "strict",
+        "operation": "dataframe_nsmallest",
+        "oracle_source": "live_legacy_pandas",
+        "nlargest_n": 2,
+        "sort_column": "price",
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 }
+            ],
+            "columns": {
+                "item": [
+                    { "kind": "utf8", "value": "apple" },
+                    { "kind": "utf8", "value": "banana" },
+                    { "kind": "utf8", "value": "cherry" },
+                    { "kind": "utf8", "value": "date" }
+                ],
+                "price": [
+                    { "kind": "float64", "value": 2.50 },
+                    { "kind": "float64", "value": 0.99 },
+                    { "kind": "float64", "value": 5.00 },
+                    { "kind": "float64", "value": 1.50 }
+                ]
+            },
+            "column_order": ["item", "price"]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping df nsmallest n=2 test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Frame(_)),
+        "expected live oracle frame payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Frame(expected_frame) = expected else {
+        return;
+    };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
+    let result = frame.nsmallest(2, "price").expect("nsmallest");
+    super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
+}
