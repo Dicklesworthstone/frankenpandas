@@ -14729,3 +14729,108 @@ fn live_oracle_series_expanding_quantile() {
         .expect("expanding quantile");
     super::compare_series_expected(&result, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_series_loc_subset_string_index() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-SLOC",
+        "case_id": "series_loc_subset_string_index",
+        "mode": "strict",
+        "operation": "series_loc",
+        "oracle_source": "live_legacy_pandas",
+        "loc_labels": [
+            { "kind": "utf8", "value": "b" },
+            { "kind": "utf8", "value": "d" }
+        ],
+        "left": {
+            "name": "vals",
+            "index": [
+                { "kind": "utf8", "value": "a" },
+                { "kind": "utf8", "value": "b" },
+                { "kind": "utf8", "value": "c" },
+                { "kind": "utf8", "value": "d" }
+            ],
+            "values": [
+                { "kind": "int64", "value": 10 },
+                { "kind": "int64", "value": 20 },
+                { "kind": "int64", "value": 30 },
+                { "kind": "int64", "value": 40 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping series_loc test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Series(_)),
+        "expected live oracle series payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let labels = fixture.loc_labels.as_ref().expect("loc_labels");
+    let result = series.loc(labels).expect("series loc");
+    super::compare_series_expected(&result, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_series_iloc_positions() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-SILOC",
+        "case_id": "series_iloc_positions",
+        "mode": "strict",
+        "operation": "series_iloc",
+        "oracle_source": "live_legacy_pandas",
+        "iloc_positions": [0, 2, 4],
+        "left": {
+            "name": "vals",
+            "index": [
+                { "kind": "int64", "value": 10 },
+                { "kind": "int64", "value": 11 },
+                { "kind": "int64", "value": 12 },
+                { "kind": "int64", "value": 13 },
+                { "kind": "int64", "value": 14 }
+            ],
+            "values": [
+                { "kind": "float64", "value": 1.5 },
+                { "kind": "float64", "value": 2.5 },
+                { "kind": "float64", "value": 3.5 },
+                { "kind": "float64", "value": 4.5 },
+                { "kind": "float64", "value": 5.5 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping series_iloc test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Series(_)),
+        "expected live oracle series payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let positions = fixture.iloc_positions.as_ref().expect("iloc_positions");
+    let result = series.iloc(positions).expect("series iloc");
+    super::compare_series_expected(&result, &expected).expect("pandas parity");
+}
