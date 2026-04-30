@@ -12522,3 +12522,113 @@ fn live_oracle_dataframe_pivot_basic() {
     let result = frame.pivot("row", "col", "val").expect("pivot");
     super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_dataframe_explode_pipe_keep_index() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DF-EXPLODE-PIPE",
+        "case_id": "dataframe_explode_pipe_keep_index",
+        "mode": "strict",
+        "operation": "dataframe_explode",
+        "oracle_source": "live_legacy_pandas",
+        "explode_column": "tags",
+        "string_sep": "|",
+        "ignore_index": false,
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 }
+            ],
+            "columns": {
+                "id": [
+                    { "kind": "utf8", "value": "row0" },
+                    { "kind": "utf8", "value": "row1" }
+                ],
+                "tags": [
+                    { "kind": "utf8", "value": "a|b|c" },
+                    { "kind": "utf8", "value": "x|y" }
+                ]
+            },
+            "column_order": ["id", "tags"]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping df explode keep test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Frame(_)),
+        "expected live oracle frame payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Frame(expected_frame) = expected else {
+        return;
+    };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
+    let result = frame
+        .explode_with_ignore_index("tags", "|", false)
+        .expect("explode");
+    super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_dataframe_explode_comma_ignore_index() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DF-EXPLODE-COMMA",
+        "case_id": "dataframe_explode_comma_ignore_index",
+        "mode": "strict",
+        "operation": "dataframe_explode",
+        "oracle_source": "live_legacy_pandas",
+        "explode_column": "items",
+        "string_sep": ",",
+        "ignore_index": true,
+        "frame": {
+            "index": [
+                { "kind": "utf8", "value": "alpha" },
+                { "kind": "utf8", "value": "beta" }
+            ],
+            "columns": {
+                "label": [
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "int64", "value": 2 }
+                ],
+                "items": [
+                    { "kind": "utf8", "value": "x,y" },
+                    { "kind": "utf8", "value": "z" }
+                ]
+            },
+            "column_order": ["label", "items"]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping df explode ignore test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Frame(_)),
+        "expected live oracle frame payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Frame(expected_frame) = expected else {
+        return;
+    };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
+    let result = frame
+        .explode_with_ignore_index("items", ",", true)
+        .expect("explode");
+    super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
+}
