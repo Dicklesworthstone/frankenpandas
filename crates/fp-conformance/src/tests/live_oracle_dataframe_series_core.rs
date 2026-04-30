@@ -14524,3 +14524,103 @@ fn live_oracle_series_rolling_var_window_3() {
     let result = series.rolling(3, None).var().expect("rolling var");
     super::compare_series_expected(&result, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_series_expanding_std() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-EXP-STD",
+        "case_id": "series_expanding_std",
+        "mode": "strict",
+        "operation": "series_expanding_std",
+        "oracle_source": "live_legacy_pandas",
+        "left": {
+            "name": "vals",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 4 }
+            ],
+            "values": [
+                { "kind": "float64", "value": 1.0 },
+                { "kind": "float64", "value": 3.0 },
+                { "kind": "float64", "value": 5.0 },
+                { "kind": "float64", "value": 7.0 },
+                { "kind": "float64", "value": 9.0 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping expanding_std test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Series(_)),
+        "expected live oracle series payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let result = series.expanding(None).std().expect("expanding std");
+    super::compare_series_expected(&result, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_series_expanding_var() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-EXP-VAR",
+        "case_id": "series_expanding_var",
+        "mode": "strict",
+        "operation": "series_expanding_var",
+        "oracle_source": "live_legacy_pandas",
+        "left": {
+            "name": "vals",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 4 }
+            ],
+            "values": [
+                { "kind": "float64", "value": 2.0 },
+                { "kind": "float64", "value": 4.0 },
+                { "kind": "float64", "value": 6.0 },
+                { "kind": "float64", "value": 8.0 },
+                { "kind": "float64", "value": 10.0 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping expanding_var test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Series(_)),
+        "expected live oracle series payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let result = series.expanding(None).var().expect("expanding var");
+    super::compare_series_expected(&result, &expected).expect("pandas parity");
+}
