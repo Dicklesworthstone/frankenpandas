@@ -11214,3 +11214,221 @@ fn live_oracle_dataframe_drop_duplicates_keep_none() {
         .expect("drop_duplicates");
     super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_dataframe_sort_index_ascending() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DF-SORTIDX-ASC",
+        "case_id": "dataframe_sort_index_ascending",
+        "mode": "strict",
+        "operation": "dataframe_sort_index",
+        "oracle_source": "live_legacy_pandas",
+        "sort_ascending": true,
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 0 }
+            ],
+            "columns": {
+                "x": [
+                    { "kind": "int64", "value": 30 },
+                    { "kind": "int64", "value": 10 },
+                    { "kind": "int64", "value": 20 },
+                    { "kind": "int64", "value": 0 }
+                ]
+            },
+            "column_order": ["x"]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping df sort_index asc test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Frame(_)),
+        "expected live oracle frame payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Frame(expected_frame) = expected else {
+        return;
+    };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
+    let result = frame.sort_index(true).expect("sort_index");
+    super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_dataframe_sort_index_descending() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DF-SORTIDX-DESC",
+        "case_id": "dataframe_sort_index_descending",
+        "mode": "strict",
+        "operation": "dataframe_sort_index",
+        "oracle_source": "live_legacy_pandas",
+        "sort_ascending": false,
+        "frame": {
+            "index": [
+                { "kind": "utf8", "value": "b" },
+                { "kind": "utf8", "value": "a" },
+                { "kind": "utf8", "value": "d" },
+                { "kind": "utf8", "value": "c" }
+            ],
+            "columns": {
+                "v": [
+                    { "kind": "int64", "value": 2 },
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "int64", "value": 4 },
+                    { "kind": "int64", "value": 3 }
+                ]
+            },
+            "column_order": ["v"]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping df sort_index desc test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Frame(_)),
+        "expected live oracle frame payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Frame(expected_frame) = expected else {
+        return;
+    };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
+    let result = frame.sort_index(false).expect("sort_index");
+    super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_dataframe_sort_values_ascending() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DF-SORTVALS-ASC",
+        "case_id": "dataframe_sort_values_ascending",
+        "mode": "strict",
+        "operation": "dataframe_sort_values",
+        "oracle_source": "live_legacy_pandas",
+        "sort_ascending": true,
+        "sort_column": "score",
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 }
+            ],
+            "columns": {
+                "name": [
+                    { "kind": "utf8", "value": "alice" },
+                    { "kind": "utf8", "value": "bob" },
+                    { "kind": "utf8", "value": "carol" },
+                    { "kind": "utf8", "value": "dave" }
+                ],
+                "score": [
+                    { "kind": "int64", "value": 30 },
+                    { "kind": "int64", "value": 10 },
+                    { "kind": "int64", "value": 40 },
+                    { "kind": "int64", "value": 20 }
+                ]
+            },
+            "column_order": ["name", "score"]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping df sort_values asc test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Frame(_)),
+        "expected live oracle frame payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Frame(expected_frame) = expected else {
+        return;
+    };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
+    let result = frame.sort_values("score", true).expect("sort_values");
+    super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_dataframe_sort_values_descending() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DF-SORTVALS-DESC",
+        "case_id": "dataframe_sort_values_descending",
+        "mode": "strict",
+        "operation": "dataframe_sort_values",
+        "oracle_source": "live_legacy_pandas",
+        "sort_ascending": false,
+        "sort_column": "score",
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 }
+            ],
+            "columns": {
+                "name": [
+                    { "kind": "utf8", "value": "alice" },
+                    { "kind": "utf8", "value": "bob" },
+                    { "kind": "utf8", "value": "carol" },
+                    { "kind": "utf8", "value": "dave" }
+                ],
+                "score": [
+                    { "kind": "int64", "value": 30 },
+                    { "kind": "int64", "value": 10 },
+                    { "kind": "int64", "value": 40 },
+                    { "kind": "int64", "value": 20 }
+                ]
+            },
+            "column_order": ["name", "score"]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping df sort_values desc test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Frame(_)),
+        "expected live oracle frame payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Frame(expected_frame) = expected else {
+        return;
+    };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
+    let result = frame.sort_values("score", false).expect("sort_values");
+    super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
+}
