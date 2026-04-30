@@ -13435,3 +13435,159 @@ fn live_oracle_dataframe_dropna_columns_no_nulls() {
     let result = frame.dropna_columns().expect("dropna_columns");
     super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_dataframe_where_with_fill_value() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DF-WHERE",
+        "case_id": "dataframe_where_with_fill_value",
+        "mode": "strict",
+        "operation": "dataframe_where",
+        "oracle_source": "live_legacy_pandas",
+        "fill_value": { "kind": "float64", "value": -1.0 },
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "columns": {
+                "a": [
+                    { "kind": "float64", "value": 1.0 },
+                    { "kind": "float64", "value": 2.0 },
+                    { "kind": "float64", "value": 3.0 }
+                ],
+                "b": [
+                    { "kind": "float64", "value": 10.0 },
+                    { "kind": "float64", "value": 20.0 },
+                    { "kind": "float64", "value": 30.0 }
+                ]
+            },
+            "column_order": ["a", "b"]
+        },
+        "frame_right": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "columns": {
+                "a": [
+                    { "kind": "bool", "value": true },
+                    { "kind": "bool", "value": false },
+                    { "kind": "bool", "value": true }
+                ],
+                "b": [
+                    { "kind": "bool", "value": false },
+                    { "kind": "bool", "value": true },
+                    { "kind": "bool", "value": true }
+                ]
+            },
+            "column_order": ["a", "b"]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping df where fill test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Frame(_)),
+        "expected live oracle frame payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Frame(expected_frame) = expected else {
+        return;
+    };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
+    let cond = super::build_dataframe(fixture.frame_right.as_ref().expect("frame_right"))
+        .expect("cond frame");
+    let result = frame
+        .where_cond(&cond, Some(&fp_types::Scalar::Float64(-1.0)))
+        .expect("where");
+    super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_dataframe_mask_with_fill_value() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DF-MASK",
+        "case_id": "dataframe_mask_with_fill_value",
+        "mode": "strict",
+        "operation": "dataframe_mask",
+        "oracle_source": "live_legacy_pandas",
+        "fill_value": { "kind": "float64", "value": -99.0 },
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "columns": {
+                "a": [
+                    { "kind": "float64", "value": 1.0 },
+                    { "kind": "float64", "value": 2.0 },
+                    { "kind": "float64", "value": 3.0 }
+                ],
+                "b": [
+                    { "kind": "float64", "value": 10.0 },
+                    { "kind": "float64", "value": 20.0 },
+                    { "kind": "float64", "value": 30.0 }
+                ]
+            },
+            "column_order": ["a", "b"]
+        },
+        "frame_right": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "columns": {
+                "a": [
+                    { "kind": "bool", "value": true },
+                    { "kind": "bool", "value": false },
+                    { "kind": "bool", "value": false }
+                ],
+                "b": [
+                    { "kind": "bool", "value": false },
+                    { "kind": "bool", "value": false },
+                    { "kind": "bool", "value": true }
+                ]
+            },
+            "column_order": ["a", "b"]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping df mask fill test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Frame(_)),
+        "expected live oracle frame payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Frame(expected_frame) = expected else {
+        return;
+    };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
+    let cond = super::build_dataframe(fixture.frame_right.as_ref().expect("frame_right"))
+        .expect("cond frame");
+    let result = frame
+        .mask(&cond, Some(&fp_types::Scalar::Float64(-99.0)))
+        .expect("mask");
+    super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
+}
