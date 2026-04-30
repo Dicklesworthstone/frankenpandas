@@ -13156,3 +13156,62 @@ fn live_oracle_dataframe_quantile_median() {
     let result = frame.quantile(0.5).expect("quantile");
     super::compare_series_expected(&result, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_dataframe_value_counts_basic() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DF-VC",
+        "case_id": "dataframe_value_counts_basic",
+        "mode": "strict",
+        "operation": "dataframe_value_counts",
+        "oracle_source": "live_legacy_pandas",
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 4 }
+            ],
+            "columns": {
+                "color": [
+                    { "kind": "utf8", "value": "red" },
+                    { "kind": "utf8", "value": "blue" },
+                    { "kind": "utf8", "value": "red" },
+                    { "kind": "utf8", "value": "red" },
+                    { "kind": "utf8", "value": "blue" }
+                ],
+                "size": [
+                    { "kind": "utf8", "value": "S" },
+                    { "kind": "utf8", "value": "M" },
+                    { "kind": "utf8", "value": "S" },
+                    { "kind": "utf8", "value": "L" },
+                    { "kind": "utf8", "value": "M" }
+                ]
+            },
+            "column_order": ["color", "size"]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping df value_counts basic test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Series(_)),
+        "expected live oracle series payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
+    let result = frame.value_counts().expect("value_counts");
+    super::compare_series_expected(&result, &expected).expect("pandas parity");
+}
