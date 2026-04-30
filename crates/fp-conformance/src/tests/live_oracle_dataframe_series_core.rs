@@ -11663,3 +11663,141 @@ fn live_oracle_dataframe_rename_columns_multiple() {
         .expect("rename_columns");
     super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_dataframe_assign_new_column() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DF-ASSIGN-NEW",
+        "case_id": "dataframe_assign_new_column",
+        "mode": "strict",
+        "operation": "dataframe_assign",
+        "oracle_source": "live_legacy_pandas",
+        "assignments": [
+            {
+                "name": "c",
+                "values": [
+                    { "kind": "int64", "value": 100 },
+                    { "kind": "int64", "value": 200 },
+                    { "kind": "int64", "value": 300 }
+                ]
+            }
+        ],
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "columns": {
+                "a": [
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "int64", "value": 2 },
+                    { "kind": "int64", "value": 3 }
+                ],
+                "b": [
+                    { "kind": "int64", "value": 10 },
+                    { "kind": "int64", "value": 20 },
+                    { "kind": "int64", "value": 30 }
+                ]
+            },
+            "column_order": ["a", "b"]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping df assign new test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Frame(_)),
+        "expected live oracle frame payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Frame(expected_frame) = expected else {
+        return;
+    };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
+    let new_col = fp_columnar::Column::from_values(vec![
+        fp_types::Scalar::Int64(100),
+        fp_types::Scalar::Int64(200),
+        fp_types::Scalar::Int64(300),
+    ])
+    .expect("column");
+    let result = frame.assign(vec![("c", new_col)]).expect("assign");
+    super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_dataframe_assign_overwrite_column() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DF-ASSIGN-OVERWRITE",
+        "case_id": "dataframe_assign_overwrite_column",
+        "mode": "strict",
+        "operation": "dataframe_assign",
+        "oracle_source": "live_legacy_pandas",
+        "assignments": [
+            {
+                "name": "a",
+                "values": [
+                    { "kind": "int64", "value": -1 },
+                    { "kind": "int64", "value": -2 },
+                    { "kind": "int64", "value": -3 }
+                ]
+            }
+        ],
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "columns": {
+                "a": [
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "int64", "value": 2 },
+                    { "kind": "int64", "value": 3 }
+                ],
+                "b": [
+                    { "kind": "utf8", "value": "x" },
+                    { "kind": "utf8", "value": "y" },
+                    { "kind": "utf8", "value": "z" }
+                ]
+            },
+            "column_order": ["a", "b"]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping df assign overwrite test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Frame(_)),
+        "expected live oracle frame payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Frame(expected_frame) = expected else {
+        return;
+    };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
+    let new_col = fp_columnar::Column::from_values(vec![
+        fp_types::Scalar::Int64(-1),
+        fp_types::Scalar::Int64(-2),
+        fp_types::Scalar::Int64(-3),
+    ])
+    .expect("column");
+    let result = frame.assign(vec![("a", new_col)]).expect("assign");
+    super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
+}
