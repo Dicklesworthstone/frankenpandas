@@ -14133,3 +14133,106 @@ fn live_oracle_dataframe_clip_lower_only() {
     let result = frame.clip(Some(0.0), None).expect("clip");
     super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_dataframe_astype_int_to_float() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DF-ASTYPE-FLOAT",
+        "case_id": "dataframe_astype_int_to_float",
+        "mode": "strict",
+        "operation": "dataframe_astype",
+        "oracle_source": "live_legacy_pandas",
+        "constructor_dtype": "float64",
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "columns": {
+                "a": [
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "int64", "value": 2 },
+                    { "kind": "int64", "value": 3 }
+                ],
+                "b": [
+                    { "kind": "int64", "value": 10 },
+                    { "kind": "int64", "value": 20 },
+                    { "kind": "int64", "value": 30 }
+                ]
+            },
+            "column_order": ["a", "b"]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping df astype int->float test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Frame(_)),
+        "expected live oracle frame payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Frame(expected_frame) = expected else {
+        return;
+    };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
+    let result = frame.astype(fp_types::DType::Float64).expect("astype");
+    super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_dataframe_astype_float_to_int() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DF-ASTYPE-INT",
+        "case_id": "dataframe_astype_float_to_int",
+        "mode": "strict",
+        "operation": "dataframe_astype",
+        "oracle_source": "live_legacy_pandas",
+        "constructor_dtype": "int64",
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "columns": {
+                "x": [
+                    { "kind": "float64", "value": 1.7 },
+                    { "kind": "float64", "value": 2.3 },
+                    { "kind": "float64", "value": 3.0 }
+                ]
+            },
+            "column_order": ["x"]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping df astype float->int test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Frame(_)),
+        "expected live oracle frame payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Frame(expected_frame) = expected else {
+        return;
+    };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
+    let result = frame.astype(fp_types::DType::Int64).expect("astype");
+    super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
+}
