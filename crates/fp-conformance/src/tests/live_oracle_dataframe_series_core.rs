@@ -12704,3 +12704,60 @@ fn live_oracle_dataframe_crosstab_basic() {
     let result = fp_frame::DataFrame::crosstab(&left, &right).expect("crosstab");
     super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_dataframe_get_dummies_specific_column() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DF-DUMMIES",
+        "case_id": "dataframe_get_dummies_specific_column",
+        "mode": "strict",
+        "operation": "dataframe_get_dummies",
+        "oracle_source": "live_legacy_pandas",
+        "dummy_columns": ["color"],
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 }
+            ],
+            "columns": {
+                "id": [
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "int64", "value": 2 },
+                    { "kind": "int64", "value": 3 },
+                    { "kind": "int64", "value": 4 }
+                ],
+                "color": [
+                    { "kind": "utf8", "value": "red" },
+                    { "kind": "utf8", "value": "blue" },
+                    { "kind": "utf8", "value": "red" },
+                    { "kind": "utf8", "value": "green" }
+                ]
+            },
+            "column_order": ["id", "color"]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping df get_dummies specific test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Frame(_)),
+        "expected live oracle frame payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Frame(expected_frame) = expected else {
+        return;
+    };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
+    let result = frame.get_dummies(&["color"]).expect("get_dummies");
+    super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
+}
