@@ -12042,3 +12042,101 @@ fn live_oracle_dataframe_set_index_drop_false() {
     let result = frame.set_index("key", false).expect("set_index");
     super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_dataframe_reset_index_drop_false() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DF-RESETIDX-KEEP",
+        "case_id": "dataframe_reset_index_drop_false",
+        "mode": "strict",
+        "operation": "dataframe_reset_index",
+        "oracle_source": "live_legacy_pandas",
+        "reset_index_drop": false,
+        "frame": {
+            "index": [
+                { "kind": "utf8", "value": "alpha" },
+                { "kind": "utf8", "value": "beta" },
+                { "kind": "utf8", "value": "gamma" }
+            ],
+            "columns": {
+                "value": [
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "int64", "value": 2 },
+                    { "kind": "int64", "value": 3 }
+                ]
+            },
+            "column_order": ["value"]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping df reset_index keep test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Frame(_)),
+        "expected live oracle frame payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Frame(expected_frame) = expected else {
+        return;
+    };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
+    let result = frame.reset_index(false).expect("reset_index");
+    super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_dataframe_reset_index_drop_true() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DF-RESETIDX-DROP",
+        "case_id": "dataframe_reset_index_drop_true",
+        "mode": "strict",
+        "operation": "dataframe_reset_index",
+        "oracle_source": "live_legacy_pandas",
+        "reset_index_drop": true,
+        "frame": {
+            "index": [
+                { "kind": "utf8", "value": "alpha" },
+                { "kind": "utf8", "value": "beta" },
+                { "kind": "utf8", "value": "gamma" }
+            ],
+            "columns": {
+                "value": [
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "int64", "value": 2 },
+                    { "kind": "int64", "value": 3 }
+                ]
+            },
+            "column_order": ["value"]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping df reset_index drop test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Frame(_)),
+        "expected live oracle frame payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Frame(expected_frame) = expected else {
+        return;
+    };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
+    let result = frame.reset_index(true).expect("reset_index");
+    super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
+}
