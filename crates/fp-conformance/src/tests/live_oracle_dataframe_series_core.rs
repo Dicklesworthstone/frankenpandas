@@ -13710,3 +13710,142 @@ fn live_oracle_dataframe_nsmallest_n_2() {
     let result = frame.nsmallest(2, "price").expect("nsmallest");
     super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_dataframe_query_simple_filter() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DF-QUERY",
+        "case_id": "dataframe_query_simple_filter",
+        "mode": "strict",
+        "operation": "dataframe_query",
+        "oracle_source": "live_legacy_pandas",
+        "expr": "score > 70",
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 4 }
+            ],
+            "columns": {
+                "name": [
+                    { "kind": "utf8", "value": "alice" },
+                    { "kind": "utf8", "value": "bob" },
+                    { "kind": "utf8", "value": "carol" },
+                    { "kind": "utf8", "value": "dave" },
+                    { "kind": "utf8", "value": "eve" }
+                ],
+                "score": [
+                    { "kind": "int64", "value": 75 },
+                    { "kind": "int64", "value": 90 },
+                    { "kind": "int64", "value": 60 },
+                    { "kind": "int64", "value": 95 },
+                    { "kind": "int64", "value": 50 }
+                ]
+            },
+            "column_order": ["name", "score"]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping df query simple test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Frame(_)),
+        "expected live oracle frame payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Frame(expected_frame) = expected else {
+        return;
+    };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
+    let policy = super::RuntimePolicy::strict();
+    let mut ledger = super::EvidenceLedger::new();
+    let result = fp_expr::query_str(
+        fixture.expr.as_deref().expect("expr"),
+        &frame,
+        &policy,
+        &mut ledger,
+    )
+    .expect("query");
+    super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_dataframe_query_compound_filter() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DF-QUERY-COMPOUND",
+        "case_id": "dataframe_query_compound_filter",
+        "mode": "strict",
+        "operation": "dataframe_query",
+        "oracle_source": "live_legacy_pandas",
+        "expr": "score >= 80 and active == 1",
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 }
+            ],
+            "columns": {
+                "name": [
+                    { "kind": "utf8", "value": "a" },
+                    { "kind": "utf8", "value": "b" },
+                    { "kind": "utf8", "value": "c" },
+                    { "kind": "utf8", "value": "d" }
+                ],
+                "score": [
+                    { "kind": "int64", "value": 85 },
+                    { "kind": "int64", "value": 90 },
+                    { "kind": "int64", "value": 70 },
+                    { "kind": "int64", "value": 95 }
+                ],
+                "active": [
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "int64", "value": 0 },
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "int64", "value": 1 }
+                ]
+            },
+            "column_order": ["name", "score", "active"]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping df query compound test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Frame(_)),
+        "expected live oracle frame payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Frame(expected_frame) = expected else {
+        return;
+    };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
+    let policy = super::RuntimePolicy::strict();
+    let mut ledger = super::EvidenceLedger::new();
+    let result = fp_expr::query_str(
+        fixture.expr.as_deref().expect("expr"),
+        &frame,
+        &policy,
+        &mut ledger,
+    )
+    .expect("query");
+    super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
+}
