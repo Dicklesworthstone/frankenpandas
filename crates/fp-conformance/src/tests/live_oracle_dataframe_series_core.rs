@@ -10980,3 +10980,114 @@ fn live_oracle_dataframe_nunique_with_nulls() {
     let result = frame.nunique().expect("nunique");
     super::compare_series_expected(&result, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_dataframe_duplicated_basic_first() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DF-DUP-FIRST",
+        "case_id": "dataframe_duplicated_basic_first",
+        "mode": "strict",
+        "operation": "dataframe_duplicated",
+        "oracle_source": "live_legacy_pandas",
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 4 }
+            ],
+            "columns": {
+                "a": [
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "int64", "value": 2 },
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "int64", "value": 3 },
+                    { "kind": "int64", "value": 2 }
+                ],
+                "b": [
+                    { "kind": "utf8", "value": "x" },
+                    { "kind": "utf8", "value": "y" },
+                    { "kind": "utf8", "value": "x" },
+                    { "kind": "utf8", "value": "z" },
+                    { "kind": "utf8", "value": "y" }
+                ]
+            },
+            "column_order": ["a", "b"]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping df duplicated first test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Series(_)),
+        "expected live oracle series payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
+    let result = frame
+        .duplicated(None, super::DuplicateKeep::First)
+        .expect("duplicated");
+    super::compare_series_expected(&result, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_dataframe_duplicated_no_dups() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DF-DUP-NONE",
+        "case_id": "dataframe_duplicated_no_dups",
+        "mode": "strict",
+        "operation": "dataframe_duplicated",
+        "oracle_source": "live_legacy_pandas",
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "columns": {
+                "a": [
+                    { "kind": "int64", "value": 10 },
+                    { "kind": "int64", "value": 20 },
+                    { "kind": "int64", "value": 30 }
+                ]
+            },
+            "column_order": ["a"]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping df duplicated no-dups test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Series(_)),
+        "expected live oracle series payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
+    let result = frame
+        .duplicated(None, super::DuplicateKeep::First)
+        .expect("duplicated");
+    super::compare_series_expected(&result, &expected).expect("pandas parity");
+}
