@@ -13215,3 +13215,115 @@ fn live_oracle_dataframe_value_counts_basic() {
     let result = frame.value_counts().expect("value_counts");
     super::compare_series_expected(&result, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_dataframe_corr_pearson_default() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DF-CORR",
+        "case_id": "dataframe_corr_pearson_default",
+        "mode": "strict",
+        "operation": "dataframe_corr",
+        "oracle_source": "live_legacy_pandas",
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 }
+            ],
+            "columns": {
+                "a": [
+                    { "kind": "float64", "value": 1.0 },
+                    { "kind": "float64", "value": 2.0 },
+                    { "kind": "float64", "value": 3.0 },
+                    { "kind": "float64", "value": 4.0 }
+                ],
+                "b": [
+                    { "kind": "float64", "value": 2.0 },
+                    { "kind": "float64", "value": 4.0 },
+                    { "kind": "float64", "value": 6.0 },
+                    { "kind": "float64", "value": 8.0 }
+                ]
+            },
+            "column_order": ["a", "b"]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping df corr default test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Frame(_)),
+        "expected live oracle frame payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Frame(expected_frame) = expected else {
+        return;
+    };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
+    let result = frame.corr_with_numeric_only(false).expect("corr");
+    super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_dataframe_cov_default() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DF-COV",
+        "case_id": "dataframe_cov_default",
+        "mode": "strict",
+        "operation": "dataframe_cov",
+        "oracle_source": "live_legacy_pandas",
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 }
+            ],
+            "columns": {
+                "x": [
+                    { "kind": "float64", "value": 1.0 },
+                    { "kind": "float64", "value": 2.0 },
+                    { "kind": "float64", "value": 3.0 },
+                    { "kind": "float64", "value": 4.0 }
+                ],
+                "y": [
+                    { "kind": "float64", "value": 4.0 },
+                    { "kind": "float64", "value": 5.0 },
+                    { "kind": "float64", "value": 6.0 },
+                    { "kind": "float64", "value": 7.0 }
+                ]
+            },
+            "column_order": ["x", "y"]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping df cov default test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Frame(_)),
+        "expected live oracle frame payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Frame(expected_frame) = expected else {
+        return;
+    };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
+    let result = frame.cov().expect("cov");
+    super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
+}
