@@ -9283,3 +9283,178 @@ fn live_oracle_series_to_numeric_already_numeric() {
     let result = fp_frame::to_numeric(&series).expect("to_numeric");
     super::compare_series_expected(&result, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_series_join_inner_overlap() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-JOIN-INNER",
+        "case_id": "series_join_inner_overlap",
+        "mode": "strict",
+        "operation": "series_join",
+        "oracle_source": "live_legacy_pandas",
+        "join_type": "inner",
+        "left": {
+            "name": "left",
+            "index": [
+                { "kind": "utf8", "value": "a" },
+                { "kind": "utf8", "value": "b" },
+                { "kind": "utf8", "value": "c" }
+            ],
+            "values": [
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 }
+            ]
+        },
+        "right": {
+            "name": "right",
+            "index": [
+                { "kind": "utf8", "value": "b" },
+                { "kind": "utf8", "value": "c" },
+                { "kind": "utf8", "value": "d" }
+            ],
+            "values": [
+                { "kind": "int64", "value": 20 },
+                { "kind": "int64", "value": 30 },
+                { "kind": "int64", "value": 40 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping series_join inner test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Join(_)),
+        "expected live oracle join payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Join(expected_join) = expected else {
+        return;
+    };
+
+    let left = super::build_series(fixture.left.as_ref().expect("left")).expect("left series");
+    let right = super::build_series(fixture.right.as_ref().expect("right")).expect("right series");
+    let joined = fp_join::join_series(&left, &right, fp_join::JoinType::Inner).expect("join");
+    super::compare_join_expected(&joined, &expected_join).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_series_join_left_with_missing_right() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-JOIN-LEFT",
+        "case_id": "series_join_left_with_missing_right",
+        "mode": "strict",
+        "operation": "series_join",
+        "oracle_source": "live_legacy_pandas",
+        "join_type": "left",
+        "left": {
+            "name": "left",
+            "index": [
+                { "kind": "utf8", "value": "a" },
+                { "kind": "utf8", "value": "b" },
+                { "kind": "utf8", "value": "c" }
+            ],
+            "values": [
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 }
+            ]
+        },
+        "right": {
+            "name": "right",
+            "index": [
+                { "kind": "utf8", "value": "b" }
+            ],
+            "values": [
+                { "kind": "int64", "value": 20 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping series_join left test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Join(_)),
+        "expected live oracle join payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Join(expected_join) = expected else {
+        return;
+    };
+
+    let left = super::build_series(fixture.left.as_ref().expect("left")).expect("left series");
+    let right = super::build_series(fixture.right.as_ref().expect("right")).expect("right series");
+    let joined = fp_join::join_series(&left, &right, fp_join::JoinType::Left).expect("join");
+    super::compare_join_expected(&joined, &expected_join).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_series_join_outer_disjoint() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-JOIN-OUTER",
+        "case_id": "series_join_outer_disjoint",
+        "mode": "strict",
+        "operation": "series_join",
+        "oracle_source": "live_legacy_pandas",
+        "join_type": "outer",
+        "left": {
+            "name": "left",
+            "index": [
+                { "kind": "utf8", "value": "a" },
+                { "kind": "utf8", "value": "b" }
+            ],
+            "values": [
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ]
+        },
+        "right": {
+            "name": "right",
+            "index": [
+                { "kind": "utf8", "value": "c" },
+                { "kind": "utf8", "value": "d" }
+            ],
+            "values": [
+                { "kind": "int64", "value": 30 },
+                { "kind": "int64", "value": 40 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping series_join outer test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Join(_)),
+        "expected live oracle join payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Join(expected_join) = expected else {
+        return;
+    };
+
+    let left = super::build_series(fixture.left.as_ref().expect("left")).expect("left series");
+    let right = super::build_series(fixture.right.as_ref().expect("right")).expect("right series");
+    let joined = fp_join::join_series(&left, &right, fp_join::JoinType::Outer).expect("join");
+    super::compare_join_expected(&joined, &expected_join).expect("pandas parity");
+}
