@@ -14026,3 +14026,110 @@ fn live_oracle_dataframe_abs_basic() {
     let result = frame.abs().expect("abs");
     super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_dataframe_clip_both_bounds() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DF-CLIP-BOTH",
+        "case_id": "dataframe_clip_both_bounds",
+        "mode": "strict",
+        "operation": "dataframe_clip",
+        "oracle_source": "live_legacy_pandas",
+        "clip_lower": 0.0,
+        "clip_upper": 10.0,
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 }
+            ],
+            "columns": {
+                "a": [
+                    { "kind": "float64", "value": -5.0 },
+                    { "kind": "float64", "value": 3.0 },
+                    { "kind": "float64", "value": 15.0 },
+                    { "kind": "float64", "value": 7.0 }
+                ],
+                "b": [
+                    { "kind": "float64", "value": 100.0 },
+                    { "kind": "float64", "value": -1.0 },
+                    { "kind": "float64", "value": 5.0 },
+                    { "kind": "float64", "value": 0.5 }
+                ]
+            },
+            "column_order": ["a", "b"]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping df clip both test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Frame(_)),
+        "expected live oracle frame payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Frame(expected_frame) = expected else {
+        return;
+    };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
+    let result = frame.clip(Some(0.0), Some(10.0)).expect("clip");
+    super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_dataframe_clip_lower_only() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DF-CLIP-LOWER",
+        "case_id": "dataframe_clip_lower_only",
+        "mode": "strict",
+        "operation": "dataframe_clip",
+        "oracle_source": "live_legacy_pandas",
+        "clip_lower": 0.0,
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "columns": {
+                "x": [
+                    { "kind": "float64", "value": -2.5 },
+                    { "kind": "float64", "value": 3.5 },
+                    { "kind": "float64", "value": -1.0 }
+                ]
+            },
+            "column_order": ["x"]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping df clip lower test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Frame(_)),
+        "expected live oracle frame payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Frame(expected_frame) = expected else {
+        return;
+    };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
+    let result = frame.clip(Some(0.0), None).expect("clip");
+    super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
+}
