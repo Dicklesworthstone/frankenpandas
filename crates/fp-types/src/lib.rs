@@ -2021,7 +2021,7 @@ mod tests {
         // Each primitive maps to its canonical Scalar variant.
         assert_eq!(Scalar::from(true), Scalar::Bool(true));
         assert_eq!(Scalar::from(42i64), Scalar::Int64(42));
-        assert_eq!(Scalar::from(3.14f64), Scalar::Float64(3.14));
+        assert_eq!(Scalar::from(1.5f64), Scalar::Float64(1.5));
         assert_eq!(Scalar::from("hi"), Scalar::Utf8("hi".to_owned()));
         assert_eq!(
             Scalar::from(String::from("world")),
