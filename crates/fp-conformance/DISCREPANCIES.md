@@ -77,14 +77,6 @@
 - **Tests affected:** `dataframe_groupby_apply`, `dataframe_groupby_apply_scalar_returns_series_indexed_by_keys`, `dataframe_groupby_apply_series_unions_sparse_result_columns`, `dataframe_groupby_apply_series_stacked_preserves_variable_labels`.
 - **Review date:** 2026-04-25
 
-### DISC-013: Series + Series union alignment does not sort the result index
-- **Reference:** Pandas `Series.add(other)` (and `series + other` operator) on differently-indexed Series performs an outer-join alignment that returns a sorted result index by default.
-- **Our impl:** RESOLVED - unique-label Series arithmetic now uses a sorted outer union for `+` / `-` / `*` / `/` and fill-value arithmetic, while preserving the duplicate-aware cross-product path tracked separately by DISC-014.
-- **Impact:** The `FP-P2C-001 series_add_alignment_union_strict` fallback fixture has been refreshed to pandas 2.2.3 output: result index `[1, 2, 3]`, values `[NaN, NaN, 34.0]`.
-- **Resolution:** FIXED in br-frankenpandas-cod1d13 by routing unique-label Series arithmetic through sorted union alignment in fp-frame instead of changing the generic fp-index discovery-order helper.
-- **Tests affected:** `series_add_aligns_on_union_index`, `series_add_fill_sorts_unique_outer_union_index`, `FP-P2C-001/series_add_alignment_union_strict`.
-- **Review date:** 2026-04-28
-
 ### DISC-014: Series + Series duplicate-label arithmetic doesn't promote Int64 to Float64
 - **Reference:** Pandas `Series + Series` with duplicate labels on either side performs cross-product alignment that can introduce NaN for the pairings with no match. Pandas promotes the result to `Float64` to accommodate the NaN even when both sources are pure `Int64` and the actual numeric result fits in `Int64`.
 - **Our impl:** Our cross-product alignment preserves `Int64` when no NaN is actually generated (the duplicate-label paired values all match). This is the inverse of DISC-011: there pandas keeps Int64 (extension dtype) where we promote to Float64; here pandas promotes to Float64 where we keep Int64. Both stem from the absence of a nullable extension Int64 dtype on our side.
@@ -121,6 +113,14 @@
 - **Resolution:** ACCEPTED - parity achieved and covered by live-oracle plus fixture-backed tests
 - **Tests affected:** `live_oracle_series_constructor_mixed_utf8_numeric_reports_object_values`, `live_oracle_dataframe_from_series_mixed_utf8_numeric_matches_object_values`, `series_constructor_utf8_numeric_object_strict`, `dataframe_from_series_utf8_numeric_object_strict`
 - **Review date:** 2026-04-15
+
+### DISC-013: Series + Series union alignment does not sort the result index
+- **Reference:** Pandas `Series.add(other)` (and `series + other` operator) on differently-indexed Series performs an outer-join alignment that returns a sorted result index by default.
+- **Our impl:** RESOLVED - unique-label Series arithmetic now uses a sorted outer union for `+` / `-` / `*` / `/` and fill-value arithmetic, while preserving the duplicate-aware cross-product path tracked separately by DISC-014.
+- **Impact:** The `FP-P2C-001 series_add_alignment_union_strict` fallback fixture has been refreshed to pandas 2.2.3 output: result index `[1, 2, 3]`, values `[NaN, NaN, 34.0]`.
+- **Resolution:** FIXED in br-frankenpandas-cod1d13 by routing unique-label Series arithmetic through sorted union alignment in fp-frame instead of changing the generic fp-index discovery-order helper. NB: the listed strict test still fails today, but for a different root cause (DISC-011 nullable-Int64 dtype promotion); the sort-order issue this entry tracked is no longer present.
+- **Tests affected:** `series_add_aligns_on_union_index`, `series_add_fill_sorts_unique_outer_union_index`, `FP-P2C-001/series_add_alignment_union_strict`.
+- **Review date:** 2026-04-28
 
 ## Rules
 
