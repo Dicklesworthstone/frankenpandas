@@ -5513,7 +5513,9 @@ fn live_oracle_series_fillna_basic() {
     };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
-    let result = series.fillna(&fp_types::Scalar::Float64(0.0)).expect("fillna");
+    let result = series
+        .fillna(&fp_types::Scalar::Float64(0.0))
+        .expect("fillna");
     super::compare_series_expected(&result, &expected).expect("pandas parity");
 }
 
@@ -5568,7 +5570,9 @@ fn live_oracle_series_fillna_no_nulls() {
     };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
-    let result = series.fillna(&fp_types::Scalar::Float64(99.0)).expect("fillna");
+    let result = series
+        .fillna(&fp_types::Scalar::Float64(99.0))
+        .expect("fillna");
     super::compare_series_expected(&result, &expected).expect("pandas parity");
 }
 
@@ -5623,7 +5627,9 @@ fn live_oracle_series_fillna_all_nulls() {
     };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
-    let result = series.fillna(&fp_types::Scalar::Float64(-1.0)).expect("fillna");
+    let result = series
+        .fillna(&fp_types::Scalar::Float64(-1.0))
+        .expect("fillna");
     super::compare_series_expected(&result, &expected).expect("pandas parity");
 }
 
@@ -7232,7 +7238,10 @@ fn live_oracle_series_any_with_truthy_value() {
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.any().expect("any");
-    assert_eq!(actual, expected_bool, "series_any: actual={actual}, expected={expected_bool}");
+    assert_eq!(
+        actual, expected_bool,
+        "series_any: actual={actual}, expected={expected_bool}"
+    );
 }
 
 #[test]
@@ -7278,7 +7287,10 @@ fn live_oracle_series_any_all_zeros() {
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.any().expect("any");
-    assert_eq!(actual, expected_bool, "series_any: actual={actual}, expected={expected_bool}");
+    assert_eq!(
+        actual, expected_bool,
+        "series_any: actual={actual}, expected={expected_bool}"
+    );
 }
 
 #[test]
@@ -7322,7 +7334,10 @@ fn live_oracle_series_any_with_nulls_only() {
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.any().expect("any");
-    assert_eq!(actual, expected_bool, "series_any: actual={actual}, expected={expected_bool}");
+    assert_eq!(
+        actual, expected_bool,
+        "series_any: actual={actual}, expected={expected_bool}"
+    );
 }
 
 #[test]
@@ -7368,7 +7383,10 @@ fn live_oracle_series_all_with_truthy_values() {
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.all().expect("all");
-    assert_eq!(actual, expected_bool, "series_all: actual={actual}, expected={expected_bool}");
+    assert_eq!(
+        actual, expected_bool,
+        "series_all: actual={actual}, expected={expected_bool}"
+    );
 }
 
 #[test]
@@ -7414,7 +7432,10 @@ fn live_oracle_series_all_with_zero_value() {
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.all().expect("all");
-    assert_eq!(actual, expected_bool, "series_all: actual={actual}, expected={expected_bool}");
+    assert_eq!(
+        actual, expected_bool,
+        "series_all: actual={actual}, expected={expected_bool}"
+    );
 }
 
 #[test]
@@ -7462,7 +7483,10 @@ fn live_oracle_series_all_with_nulls_skipped() {
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.all().expect("all");
-    assert_eq!(actual, expected_bool, "series_all: actual={actual}, expected={expected_bool}");
+    assert_eq!(
+        actual, expected_bool,
+        "series_all: actual={actual}, expected={expected_bool}"
+    );
 }
 
 #[test]
@@ -7610,9 +7634,7 @@ fn live_oracle_series_sort_values_with_nulls_last() {
     };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
-    let result = series
-        .sort_values_na(true, "last")
-        .expect("sort_values_na");
+    let result = series.sort_values_na(true, "last").expect("sort_values_na");
     super::compare_series_expected(&result, &expected).expect("pandas parity");
 }
 

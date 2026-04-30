@@ -9495,8 +9495,7 @@ fn run_fixture_operation(
                     }
                 }
                 _ => Err(
-                    "expected_series or expected_error is required for series_factorize"
-                        .to_owned(),
+                    "expected_series or expected_error is required for series_factorize".to_owned(),
                 ),
             }
         }

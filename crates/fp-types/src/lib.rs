@@ -2084,8 +2084,7 @@ mod tests {
 
     #[test]
     fn sparse_dtype_normalizes_fill_value_to_value_dtype() {
-        let dtype =
-            SparseDType::new(DType::Float64, Scalar::Int64(0)).expect("fill should cast");
+        let dtype = SparseDType::new(DType::Float64, Scalar::Int64(0)).expect("fill should cast");
 
         assert_eq!(dtype.value_dtype, DType::Float64);
         assert_eq!(dtype.fill_value, Scalar::Float64(0.0));
@@ -3081,7 +3080,10 @@ mod tests {
         // Ordinal axis is signed — pre-epoch periods are valid.
         let start = Period::new(-3, PeriodFreq::Annual);
         let r = period_range(start, 5);
-        assert_eq!(r.iter().map(|p| p.ordinal).collect::<Vec<_>>(), vec![-3, -2, -1, 0, 1]);
+        assert_eq!(
+            r.iter().map(|p| p.ordinal).collect::<Vec<_>>(),
+            vec![-3, -2, -1, 0, 1]
+        );
     }
 
     #[test]
@@ -3230,7 +3232,10 @@ mod tests {
     #[test]
     fn timedelta_sub_subtracts_non_nat() {
         let one_hour = Timedelta::NANOS_PER_HOUR;
-        assert_eq!(Timedelta::sub(one_hour, Timedelta::NANOS_PER_MIN), one_hour - Timedelta::NANOS_PER_MIN);
+        assert_eq!(
+            Timedelta::sub(one_hour, Timedelta::NANOS_PER_MIN),
+            one_hour - Timedelta::NANOS_PER_MIN
+        );
     }
 
     #[test]
@@ -3262,7 +3267,10 @@ mod tests {
     #[test]
     fn timedelta_mul_scalar_scales() {
         let three_hours = Timedelta::NANOS_PER_HOUR * 3;
-        assert_eq!(Timedelta::mul_scalar(Timedelta::NANOS_PER_HOUR, 3), three_hours);
+        assert_eq!(
+            Timedelta::mul_scalar(Timedelta::NANOS_PER_HOUR, 3),
+            three_hours
+        );
         assert_eq!(Timedelta::mul_scalar(100, 0), 0);
         assert_eq!(Timedelta::mul_scalar(100, -2), -200);
     }
@@ -3360,7 +3368,11 @@ mod tests {
         // NaT Timestamp + anything = NaT.
         assert!(Timestamp::nat().add_timedelta(100).is_nat());
         // Timestamp + NaT Timedelta = NaT.
-        assert!(Timestamp::from_nanos(0).add_timedelta(Timedelta::NAT).is_nat());
+        assert!(
+            Timestamp::from_nanos(0)
+                .add_timedelta(Timedelta::NAT)
+                .is_nat()
+        );
     }
 
     #[test]
@@ -3440,7 +3452,8 @@ mod tests {
         // 12:34:56 → floor by 1H → 12:00:00
         let h = Timedelta::NANOS_PER_HOUR;
         let twelve_h = h * 12;
-        let twelve_thirty_four = twelve_h + Timedelta::NANOS_PER_MIN * 34 + Timedelta::NANOS_PER_SEC * 56;
+        let twelve_thirty_four =
+            twelve_h + Timedelta::NANOS_PER_MIN * 34 + Timedelta::NANOS_PER_SEC * 56;
         let ts = Timestamp::from_nanos(twelve_thirty_four);
         let floored = ts.floor_to(h);
         assert_eq!(floored.nanos, twelve_h);
@@ -3470,7 +3483,8 @@ mod tests {
         let h = Timedelta::NANOS_PER_HOUR;
         let twelve_h = h * 12;
         let thirteen_h = h * 13;
-        let twelve_thirty_four = twelve_h + Timedelta::NANOS_PER_MIN * 34 + Timedelta::NANOS_PER_SEC * 56;
+        let twelve_thirty_four =
+            twelve_h + Timedelta::NANOS_PER_MIN * 34 + Timedelta::NANOS_PER_SEC * 56;
         let ts = Timestamp::from_nanos(twelve_thirty_four);
         assert_eq!(ts.ceil_to(h).nanos, thirteen_h);
     }
@@ -3488,12 +3502,14 @@ mod tests {
         // 12:30:01 (one second past the half-hour): round to 1H → 13:00:00.
         let h = Timedelta::NANOS_PER_HOUR;
         let twelve_h = h * 12;
-        let twelve_thirty_one_sec = twelve_h + Timedelta::NANOS_PER_MIN * 30 + Timedelta::NANOS_PER_SEC;
+        let twelve_thirty_one_sec =
+            twelve_h + Timedelta::NANOS_PER_MIN * 30 + Timedelta::NANOS_PER_SEC;
         let ts = Timestamp::from_nanos(twelve_thirty_one_sec);
         assert_eq!(ts.round_to(h).nanos, h * 13);
 
         // 12:29:59 (one second before half): round to 1H → 12:00:00.
-        let twelve_twenty_nine_sec = twelve_h + Timedelta::NANOS_PER_MIN * 29 + Timedelta::NANOS_PER_SEC * 59;
+        let twelve_twenty_nine_sec =
+            twelve_h + Timedelta::NANOS_PER_MIN * 29 + Timedelta::NANOS_PER_SEC * 59;
         let ts = Timestamp::from_nanos(twelve_twenty_nine_sec);
         assert_eq!(ts.round_to(h).nanos, twelve_h);
     }
@@ -3549,9 +3565,8 @@ mod tests {
     fn timestamp_floor_to_unit_h_rounds_to_hour() {
         let h = Timedelta::NANOS_PER_HOUR;
         let twelve_h = h * 12;
-        let twelve_thirty_four = twelve_h
-            + Timedelta::NANOS_PER_MIN * 34
-            + Timedelta::NANOS_PER_SEC * 56;
+        let twelve_thirty_four =
+            twelve_h + Timedelta::NANOS_PER_MIN * 34 + Timedelta::NANOS_PER_SEC * 56;
         let ts = Timestamp::from_nanos(twelve_thirty_four);
         assert_eq!(ts.floor_to_unit("H").nanos, twelve_h);
         assert_eq!(ts.floor_to_unit("h").nanos, twelve_h);
@@ -3576,9 +3591,8 @@ mod tests {
     fn timestamp_round_to_unit_min_rounds_to_minute() {
         // 12:34:31 → round to 1 minute → 12:35:00.
         let m = Timedelta::NANOS_PER_MIN;
-        let twelve_thirty_four_thirty_one = Timedelta::NANOS_PER_HOUR * 12
-            + m * 34
-            + Timedelta::NANOS_PER_SEC * 31;
+        let twelve_thirty_four_thirty_one =
+            Timedelta::NANOS_PER_HOUR * 12 + m * 34 + Timedelta::NANOS_PER_SEC * 31;
         let ts = Timestamp::from_nanos(twelve_thirty_four_thirty_one);
         let expected = Timedelta::NANOS_PER_HOUR * 12 + m * 35;
         assert_eq!(ts.round_to_unit("min").nanos, expected);
@@ -3613,13 +3627,34 @@ mod tests {
     #[test]
     fn timedelta_unit_to_nanos_is_now_public_and_matches_pandas_aliases() {
         // Public surface check: pandas alias core set.
-        assert_eq!(Timedelta::unit_to_nanos("W"), Some(Timedelta::NANOS_PER_WEEK));
-        assert_eq!(Timedelta::unit_to_nanos("D"), Some(Timedelta::NANOS_PER_DAY));
-        assert_eq!(Timedelta::unit_to_nanos("H"), Some(Timedelta::NANOS_PER_HOUR));
-        assert_eq!(Timedelta::unit_to_nanos("min"), Some(Timedelta::NANOS_PER_MIN));
-        assert_eq!(Timedelta::unit_to_nanos("s"), Some(Timedelta::NANOS_PER_SEC));
-        assert_eq!(Timedelta::unit_to_nanos("ms"), Some(Timedelta::NANOS_PER_MILLI));
-        assert_eq!(Timedelta::unit_to_nanos("us"), Some(Timedelta::NANOS_PER_MICRO));
+        assert_eq!(
+            Timedelta::unit_to_nanos("W"),
+            Some(Timedelta::NANOS_PER_WEEK)
+        );
+        assert_eq!(
+            Timedelta::unit_to_nanos("D"),
+            Some(Timedelta::NANOS_PER_DAY)
+        );
+        assert_eq!(
+            Timedelta::unit_to_nanos("H"),
+            Some(Timedelta::NANOS_PER_HOUR)
+        );
+        assert_eq!(
+            Timedelta::unit_to_nanos("min"),
+            Some(Timedelta::NANOS_PER_MIN)
+        );
+        assert_eq!(
+            Timedelta::unit_to_nanos("s"),
+            Some(Timedelta::NANOS_PER_SEC)
+        );
+        assert_eq!(
+            Timedelta::unit_to_nanos("ms"),
+            Some(Timedelta::NANOS_PER_MILLI)
+        );
+        assert_eq!(
+            Timedelta::unit_to_nanos("us"),
+            Some(Timedelta::NANOS_PER_MICRO)
+        );
         assert_eq!(Timedelta::unit_to_nanos("ns"), Some(1));
         // Empty string → days (pandas default).
         assert_eq!(Timedelta::unit_to_nanos(""), Some(Timedelta::NANOS_PER_DAY));
