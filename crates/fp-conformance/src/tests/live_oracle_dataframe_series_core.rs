@@ -12457,3 +12457,68 @@ fn live_oracle_dataframe_melt_with_var_value_names() {
         .expect("melt");
     super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_dataframe_pivot_basic() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DF-PIVOT",
+        "case_id": "dataframe_pivot_basic",
+        "mode": "strict",
+        "operation": "dataframe_pivot",
+        "oracle_source": "live_legacy_pandas",
+        "pivot_index": "row",
+        "pivot_columns": "col",
+        "pivot_values": ["val"],
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 }
+            ],
+            "columns": {
+                "row": [
+                    { "kind": "utf8", "value": "r1" },
+                    { "kind": "utf8", "value": "r1" },
+                    { "kind": "utf8", "value": "r2" },
+                    { "kind": "utf8", "value": "r2" }
+                ],
+                "col": [
+                    { "kind": "utf8", "value": "c1" },
+                    { "kind": "utf8", "value": "c2" },
+                    { "kind": "utf8", "value": "c1" },
+                    { "kind": "utf8", "value": "c2" }
+                ],
+                "val": [
+                    { "kind": "int64", "value": 11 },
+                    { "kind": "int64", "value": 12 },
+                    { "kind": "int64", "value": 21 },
+                    { "kind": "int64", "value": 22 }
+                ]
+            },
+            "column_order": ["row", "col", "val"]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping df pivot basic test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Frame(_)),
+        "expected live oracle frame payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Frame(expected_frame) = expected else {
+        return;
+    };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
+    let result = frame.pivot("row", "col", "val").expect("pivot");
+    super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
+}
