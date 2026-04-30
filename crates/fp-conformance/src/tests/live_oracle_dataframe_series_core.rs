@@ -5139,8 +5139,8 @@ fn live_oracle_series_astype_float_to_string() {
                 { "kind": "int64", "value": 1 }
             ],
             "values": [
-                { "kind": "float64", "value": 3.14159 },
-                { "kind": "float64", "value": -2.718 }
+                { "kind": "float64", "value": 1.5 },
+                { "kind": "float64", "value": -4.25 }
             ]
         },
         "dtype": "str"
