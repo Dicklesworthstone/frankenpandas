@@ -15039,3 +15039,95 @@ fn live_oracle_series_extract_df_two_groups() {
     let actual = super::execute_dataframe_fixture_operation(&fixture).expect("extract_df");
     super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_series_partition_df_dot_separator() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-PARTDF",
+        "case_id": "series_partition_df_dot_separator",
+        "mode": "strict",
+        "operation": "series_partition_df",
+        "oracle_source": "live_legacy_pandas",
+        "string_sep": ".",
+        "left": {
+            "name": "host",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "values": [
+                { "kind": "utf8", "value": "www.example.com" },
+                { "kind": "utf8", "value": "api.test.org" },
+                { "kind": "utf8", "value": "localhost" }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping series_partition_df test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Frame(_)),
+        "expected live oracle frame payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Frame(expected) = expected else {
+        return;
+    };
+
+    let actual = super::execute_dataframe_fixture_operation(&fixture).expect("partition_df");
+    super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_series_rpartition_df_slash_separator() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-RPARTDF",
+        "case_id": "series_rpartition_df_slash_separator",
+        "mode": "strict",
+        "operation": "series_rpartition_df",
+        "oracle_source": "live_legacy_pandas",
+        "string_sep": "/",
+        "left": {
+            "name": "path",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "values": [
+                { "kind": "utf8", "value": "/usr/local/bin" },
+                { "kind": "utf8", "value": "a/b" },
+                { "kind": "utf8", "value": "rootless" }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping series_rpartition_df test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Frame(_)),
+        "expected live oracle frame payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Frame(expected) = expected else {
+        return;
+    };
+
+    let actual = super::execute_dataframe_fixture_operation(&fixture).expect("rpartition_df");
+    super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
+}
