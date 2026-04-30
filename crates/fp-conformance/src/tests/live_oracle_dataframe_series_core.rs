@@ -13097,3 +13097,62 @@ fn live_oracle_dataframe_sem_basic() {
     let result = frame.sem_agg().expect("sem");
     super::compare_series_expected(&result, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_dataframe_quantile_median() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DF-QUANTILE",
+        "case_id": "dataframe_quantile_median",
+        "mode": "strict",
+        "operation": "dataframe_quantile",
+        "oracle_source": "live_legacy_pandas",
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 4 }
+            ],
+            "columns": {
+                "x": [
+                    { "kind": "float64", "value": 1.0 },
+                    { "kind": "float64", "value": 2.0 },
+                    { "kind": "float64", "value": 3.0 },
+                    { "kind": "float64", "value": 4.0 },
+                    { "kind": "float64", "value": 5.0 }
+                ],
+                "y": [
+                    { "kind": "float64", "value": 10.0 },
+                    { "kind": "float64", "value": 20.0 },
+                    { "kind": "float64", "value": 30.0 },
+                    { "kind": "float64", "value": 40.0 },
+                    { "kind": "float64", "value": 50.0 }
+                ]
+            },
+            "column_order": ["x", "y"]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping df quantile median test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Series(_)),
+        "expected live oracle series payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
+    let result = frame.quantile(0.5).expect("quantile");
+    super::compare_series_expected(&result, &expected).expect("pandas parity");
+}
