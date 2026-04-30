@@ -12761,3 +12761,109 @@ fn live_oracle_dataframe_get_dummies_specific_column() {
     let result = frame.get_dummies(&["color"]).expect("get_dummies");
     super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_dataframe_idxmin_basic() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DF-IDXMIN",
+        "case_id": "dataframe_idxmin_basic",
+        "mode": "strict",
+        "operation": "dataframe_idxmin",
+        "oracle_source": "live_legacy_pandas",
+        "frame": {
+            "index": [
+                { "kind": "utf8", "value": "r0" },
+                { "kind": "utf8", "value": "r1" },
+                { "kind": "utf8", "value": "r2" }
+            ],
+            "columns": {
+                "x": [
+                    { "kind": "float64", "value": 5.0 },
+                    { "kind": "float64", "value": 1.0 },
+                    { "kind": "float64", "value": 3.0 }
+                ],
+                "y": [
+                    { "kind": "float64", "value": 0.5 },
+                    { "kind": "float64", "value": 9.0 },
+                    { "kind": "float64", "value": 2.0 }
+                ]
+            },
+            "column_order": ["x", "y"]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping df idxmin basic test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Series(_)),
+        "expected live oracle series payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
+    let result = frame.idxmin().expect("idxmin");
+    super::compare_series_expected(&result, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_dataframe_idxmax_basic() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DF-IDXMAX",
+        "case_id": "dataframe_idxmax_basic",
+        "mode": "strict",
+        "operation": "dataframe_idxmax",
+        "oracle_source": "live_legacy_pandas",
+        "frame": {
+            "index": [
+                { "kind": "utf8", "value": "r0" },
+                { "kind": "utf8", "value": "r1" },
+                { "kind": "utf8", "value": "r2" }
+            ],
+            "columns": {
+                "x": [
+                    { "kind": "float64", "value": 5.0 },
+                    { "kind": "float64", "value": 1.0 },
+                    { "kind": "float64", "value": 3.0 }
+                ],
+                "y": [
+                    { "kind": "float64", "value": 0.5 },
+                    { "kind": "float64", "value": 9.0 },
+                    { "kind": "float64", "value": 2.0 }
+                ]
+            },
+            "column_order": ["x", "y"]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping df idxmax basic test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Series(_)),
+        "expected live oracle series payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
+    let result = frame.idxmax().expect("idxmax");
+    super::compare_series_expected(&result, &expected).expect("pandas parity");
+}
