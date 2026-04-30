@@ -9458,3 +9458,159 @@ fn live_oracle_series_join_outer_disjoint() {
     let joined = fp_join::join_series(&left, &right, fp_join::JoinType::Outer).expect("join");
     super::compare_join_expected(&joined, &expected_join).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_dataframe_isna_basic() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DF-ISNA",
+        "case_id": "dataframe_isna_basic",
+        "mode": "strict",
+        "operation": "dataframe_isna",
+        "oracle_source": "live_legacy_pandas",
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "columns": {
+                "a": [
+                    { "kind": "float64", "value": 1.0 },
+                    { "kind": "null", "value": "null" },
+                    { "kind": "float64", "value": 3.0 }
+                ],
+                "b": [
+                    { "kind": "null", "value": "null" },
+                    { "kind": "int64", "value": 5 },
+                    { "kind": "int64", "value": 6 }
+                ]
+            },
+            "column_order": ["a", "b"]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping df isna basic test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Frame(_)),
+        "expected live oracle frame payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Frame(expected_frame) = expected else {
+        return;
+    };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
+    let result = frame.isna().expect("isna");
+    super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_dataframe_notna_basic() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DF-NOTNA",
+        "case_id": "dataframe_notna_basic",
+        "mode": "strict",
+        "operation": "dataframe_notna",
+        "oracle_source": "live_legacy_pandas",
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "columns": {
+                "a": [
+                    { "kind": "float64", "value": 1.0 },
+                    { "kind": "null", "value": "null" },
+                    { "kind": "float64", "value": 3.0 }
+                ],
+                "b": [
+                    { "kind": "null", "value": "null" },
+                    { "kind": "int64", "value": 5 },
+                    { "kind": "int64", "value": 6 }
+                ]
+            },
+            "column_order": ["a", "b"]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping df notna basic test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Frame(_)),
+        "expected live oracle frame payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Frame(expected_frame) = expected else {
+        return;
+    };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
+    let result = frame.notna().expect("notna");
+    super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_dataframe_isna_no_nulls() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DF-ISNA-NONULLS",
+        "case_id": "dataframe_isna_no_nulls",
+        "mode": "strict",
+        "operation": "dataframe_isna",
+        "oracle_source": "live_legacy_pandas",
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 }
+            ],
+            "columns": {
+                "x": [
+                    { "kind": "int64", "value": 10 },
+                    { "kind": "int64", "value": 20 }
+                ],
+                "y": [
+                    { "kind": "float64", "value": 1.5 },
+                    { "kind": "float64", "value": 2.5 }
+                ]
+            },
+            "column_order": ["x", "y"]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping df isna no-nulls test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Frame(_)),
+        "expected live oracle frame payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Frame(expected_frame) = expected else {
+        return;
+    };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
+    let result = frame.isna().expect("isna");
+    super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
+}
