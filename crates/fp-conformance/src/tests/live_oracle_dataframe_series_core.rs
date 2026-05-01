@@ -29805,3 +29805,59 @@ fn live_oracle_dataframe_compare_with_custom_result_names() {
     let actual = left.compare_with_result_names(&right, ("before", "after")).expect("compare");
     super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_dataframe_asof_intermediate_label() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DFASOF-MID",
+        "case_id": "dataframe_asof_intermediate_label",
+        "mode": "strict",
+        "operation": "dataframe_asof",
+        "oracle_source": "live_legacy_pandas",
+        "asof_label": { "kind": "int64", "value": 6 },
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 5 },
+                { "kind": "int64", "value": 7 },
+                { "kind": "int64", "value": 9 }
+            ],
+            "column_order": ["a", "b"],
+            "columns": {
+                "a": [
+                    { "kind": "float64", "value": 10.0 },
+                    { "kind": "float64", "value": 30.0 },
+                    { "kind": "float64", "value": 50.0 },
+                    { "kind": "float64", "value": 70.0 },
+                    { "kind": "float64", "value": 90.0 }
+                ],
+                "b": [
+                    { "kind": "float64", "value": 100.0 },
+                    { "kind": "float64", "value": 300.0 },
+                    { "kind": "float64", "value": 500.0 },
+                    { "kind": "float64", "value": 700.0 },
+                    { "kind": "float64", "value": 900.0 }
+                ]
+            }
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping df asof intermediate: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
+    let super::ResolvedExpected::Series(expected) = expected else { return; };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
+    let label = fixture.asof_label.as_ref().expect("asof_label");
+    let actual = frame.asof(label, None).expect("dataframe asof");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
