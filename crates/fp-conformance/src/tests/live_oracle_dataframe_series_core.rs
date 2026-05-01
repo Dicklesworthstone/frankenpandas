@@ -22953,3 +22953,66 @@ fn live_oracle_series_argsort_strings_ascending() {
     let actual = series.argsort(true).expect("argsort strings");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_dataframe_get_dummies_two_columns() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DFGETDUMMIES",
+        "case_id": "dataframe_get_dummies_two_columns",
+        "mode": "strict",
+        "operation": "dataframe_get_dummies",
+        "oracle_source": "live_legacy_pandas",
+        "dummy_columns": ["color", "shape"],
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "column_order": ["color", "shape", "count"],
+            "columns": {
+                "color": [
+                    { "kind": "utf8", "value": "red" },
+                    { "kind": "utf8", "value": "blue" },
+                    { "kind": "utf8", "value": "red" }
+                ],
+                "shape": [
+                    { "kind": "utf8", "value": "circle" },
+                    { "kind": "utf8", "value": "square" },
+                    { "kind": "utf8", "value": "circle" }
+                ],
+                "count": [
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "int64", "value": 2 },
+                    { "kind": "int64", "value": 3 }
+                ]
+            }
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!(
+            "live pandas unavailable; skipping dataframe_get_dummies two_columns: {message}"
+        );
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Frame(_)),
+        "expected live oracle frame payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Frame(expected) = expected else {
+        return;
+    };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
+    let cols = fixture.dummy_columns.as_ref().expect("dummy_columns");
+    let col_refs: Vec<&str> = cols.iter().map(String::as_str).collect();
+    let actual = frame.get_dummies(&col_refs).expect("get_dummies two cols");
+    super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
+}
