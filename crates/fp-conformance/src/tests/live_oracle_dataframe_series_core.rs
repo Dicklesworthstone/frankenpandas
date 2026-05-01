@@ -27109,3 +27109,58 @@ fn live_oracle_dataframe_groupby_rolling_var_basic() {
     let result = frame.groupby(&["k"]).expect("groupby").rolling(3).var().expect("rolling var");
     super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_dataframe_corr_kendall_method() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DFCORR-KENDALL",
+        "case_id": "dataframe_corr_kendall_method",
+        "mode": "strict",
+        "operation": "dataframe_corr",
+        "oracle_source": "live_legacy_pandas",
+        "corr_method": "kendall",
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 4 }
+            ],
+            "column_order": ["a", "b"],
+            "columns": {
+                "a": [
+                    { "kind": "float64", "value": 1.0 },
+                    { "kind": "float64", "value": 2.0 },
+                    { "kind": "float64", "value": 3.0 },
+                    { "kind": "float64", "value": 4.0 },
+                    { "kind": "float64", "value": 5.0 }
+                ],
+                "b": [
+                    { "kind": "float64", "value": 5.0 },
+                    { "kind": "float64", "value": 4.0 },
+                    { "kind": "float64", "value": 3.0 },
+                    { "kind": "float64", "value": 2.0 },
+                    { "kind": "float64", "value": 1.0 }
+                ]
+            }
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping dataframe_corr kendall: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
+    let super::ResolvedExpected::Frame(expected) = expected else { return; };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
+    let actual = frame.corr_method_with_numeric_only("kendall", false).expect("corr kendall");
+    super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
+}
