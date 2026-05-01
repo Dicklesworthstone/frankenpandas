@@ -33279,3 +33279,135 @@ fn live_oracle_dataframe_resample_sum_daily() {
     let actual = frame.resample(fixture.resample_freq.as_deref().expect("resample_freq")).sum().expect("resample sum");
     super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_series_resample_sum_daily() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-SRES-SUM",
+        "case_id": "series_resample_sum_daily",
+        "mode": "strict",
+        "operation": "series_resample_sum",
+        "oracle_source": "live_legacy_pandas",
+        "resample_freq": "D",
+        "left": {
+            "name": "vals",
+            "index": [
+                { "kind": "utf8", "value": "2024-01-01 09:00:00" },
+                { "kind": "utf8", "value": "2024-01-01 18:00:00" },
+                { "kind": "utf8", "value": "2024-01-02 12:00:00" },
+                { "kind": "utf8", "value": "2024-01-03 06:00:00" }
+            ],
+            "values": [
+                { "kind": "float64", "value": 1.0 },
+                { "kind": "float64", "value": 2.0 },
+                { "kind": "float64", "value": 3.0 },
+                { "kind": "float64", "value": 4.0 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping series resample sum: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
+    let super::ResolvedExpected::Series(expected) = expected else { return; };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let actual = series.resample(fixture.resample_freq.as_deref().expect("resample_freq")).sum().expect("resample sum");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_series_resample_mean_daily() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-SRES-MEAN",
+        "case_id": "series_resample_mean_daily",
+        "mode": "strict",
+        "operation": "series_resample_mean",
+        "oracle_source": "live_legacy_pandas",
+        "resample_freq": "D",
+        "left": {
+            "name": "vals",
+            "index": [
+                { "kind": "utf8", "value": "2024-01-01 09:00:00" },
+                { "kind": "utf8", "value": "2024-01-01 18:00:00" },
+                { "kind": "utf8", "value": "2024-01-02 12:00:00" },
+                { "kind": "utf8", "value": "2024-01-03 06:00:00" }
+            ],
+            "values": [
+                { "kind": "float64", "value": 1.0 },
+                { "kind": "float64", "value": 2.0 },
+                { "kind": "float64", "value": 3.0 },
+                { "kind": "float64", "value": 4.0 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping series resample mean: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
+    let super::ResolvedExpected::Series(expected) = expected else { return; };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let actual = series.resample(fixture.resample_freq.as_deref().expect("resample_freq")).mean().expect("resample mean");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_series_resample_count_daily() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-SRES-CNT",
+        "case_id": "series_resample_count_daily",
+        "mode": "strict",
+        "operation": "series_resample_count",
+        "oracle_source": "live_legacy_pandas",
+        "resample_freq": "D",
+        "left": {
+            "name": "vals",
+            "index": [
+                { "kind": "utf8", "value": "2024-01-01 09:00:00" },
+                { "kind": "utf8", "value": "2024-01-01 18:00:00" },
+                { "kind": "utf8", "value": "2024-01-02 12:00:00" },
+                { "kind": "utf8", "value": "2024-01-03 06:00:00" }
+            ],
+            "values": [
+                { "kind": "float64", "value": 1.0 },
+                { "kind": "float64", "value": 2.0 },
+                { "kind": "float64", "value": 3.0 },
+                { "kind": "float64", "value": 4.0 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping series resample count: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
+    let super::ResolvedExpected::Series(expected) = expected else { return; };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let actual = series.resample(fixture.resample_freq.as_deref().expect("resample_freq")).count().expect("resample count");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
