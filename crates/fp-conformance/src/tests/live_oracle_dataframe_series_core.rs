@@ -18675,13 +18675,13 @@ fn live_oracle_series_filter_bool_mask() {
 }
 
 #[test]
-fn live_oracle_series_filter_all_true() {
+fn live_oracle_series_filter_all_true_oracle() {
     let mut cfg = super::HarnessConfig::default_paths();
     cfg.allow_system_pandas_fallback = false;
 
     let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
         "packet_id": "FP-P2D-LIVE-SFILTER-ALLTRUE",
-        "case_id": "series_filter_all_true",
+        "case_id": "series_filter_all_true_oracle",
         "mode": "strict",
         "operation": "series_filter",
         "oracle_source": "live_legacy_pandas",
