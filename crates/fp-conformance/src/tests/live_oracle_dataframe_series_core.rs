@@ -18605,3 +18605,133 @@ fn live_oracle_dataframe_cumprod_int() {
     let actual = frame.cumprod().expect("cumprod");
     super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_series_filter_bool_mask() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-SFILTER",
+        "case_id": "series_filter_bool_mask",
+        "mode": "strict",
+        "operation": "series_filter",
+        "oracle_source": "live_legacy_pandas",
+        "left": {
+            "name": "vals",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 4 }
+            ],
+            "values": [
+                { "kind": "int64", "value": 10 },
+                { "kind": "int64", "value": 20 },
+                { "kind": "int64", "value": 30 },
+                { "kind": "int64", "value": 40 },
+                { "kind": "int64", "value": 50 }
+            ]
+        },
+        "right": {
+            "name": "mask",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 4 }
+            ],
+            "values": [
+                { "kind": "bool", "value": true },
+                { "kind": "bool", "value": false },
+                { "kind": "bool", "value": true },
+                { "kind": "bool", "value": false },
+                { "kind": "bool", "value": true }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping series_filter test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Series(_)),
+        "expected live oracle series payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
+
+    let data = super::build_series(fixture.left.as_ref().expect("left")).expect("data");
+    let mask = super::build_series(fixture.right.as_ref().expect("right")).expect("mask");
+    let actual = data.filter(&mask).expect("series filter");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_series_filter_all_true() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-SFILTER-ALLTRUE",
+        "case_id": "series_filter_all_true",
+        "mode": "strict",
+        "operation": "series_filter",
+        "oracle_source": "live_legacy_pandas",
+        "left": {
+            "name": "vals",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "values": [
+                { "kind": "float64", "value": 1.5 },
+                { "kind": "float64", "value": 2.5 },
+                { "kind": "float64", "value": 3.5 }
+            ]
+        },
+        "right": {
+            "name": "mask",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "values": [
+                { "kind": "bool", "value": true },
+                { "kind": "bool", "value": true },
+                { "kind": "bool", "value": true }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!(
+            "live pandas unavailable; skipping series_filter all_true test: {message}"
+        );
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Series(_)),
+        "expected live oracle series payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
+
+    let data = super::build_series(fixture.left.as_ref().expect("left")).expect("data");
+    let mask = super::build_series(fixture.right.as_ref().expect("right")).expect("mask");
+    let actual = data.filter(&mask).expect("series filter");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
