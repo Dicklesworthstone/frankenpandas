@@ -20034,3 +20034,85 @@ fn live_oracle_series_str_split_regex_get_first() {
         .expect("str split_regex_get");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_index_has_duplicates_with_dups() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-IDXHASDUPS",
+        "case_id": "index_has_duplicates_with_dups",
+        "mode": "strict",
+        "operation": "index_has_duplicates",
+        "oracle_source": "live_legacy_pandas",
+        "index": [
+            { "kind": "int64", "value": 1 },
+            { "kind": "int64", "value": 2 },
+            { "kind": "int64", "value": 2 },
+            { "kind": "int64", "value": 3 }
+        ]
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!(
+            "live pandas unavailable; skipping index_has_duplicates test: {message}"
+        );
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    let expected_bool = match expected {
+        super::ResolvedExpected::Bool(b) => b,
+        other => panic!("expected Bool oracle payload, got {other:?}"),
+    };
+
+    let index = fixture.index.as_ref().expect("index");
+    let actual = super::Index::new(index.clone()).has_duplicates();
+    assert_eq!(
+        actual, expected_bool,
+        "has_duplicates actual={actual} expected={expected_bool}"
+    );
+}
+
+#[test]
+fn live_oracle_index_is_monotonic_increasing_yes() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-IDXMONOINC",
+        "case_id": "index_is_monotonic_increasing_yes",
+        "mode": "strict",
+        "operation": "index_is_monotonic_increasing",
+        "oracle_source": "live_legacy_pandas",
+        "index": [
+            { "kind": "int64", "value": 1 },
+            { "kind": "int64", "value": 2 },
+            { "kind": "int64", "value": 5 },
+            { "kind": "int64", "value": 7 }
+        ]
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!(
+            "live pandas unavailable; skipping index_is_monotonic_increasing test: {message}"
+        );
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    let expected_bool = match expected {
+        super::ResolvedExpected::Bool(b) => b,
+        other => panic!("expected Bool oracle payload, got {other:?}"),
+    };
+
+    let index = fixture.index.as_ref().expect("index");
+    let actual = super::Index::new(index.clone()).is_monotonic_increasing();
+    assert_eq!(
+        actual, expected_bool,
+        "is_monotonic_increasing actual={actual} expected={expected_bool}"
+    );
+}
