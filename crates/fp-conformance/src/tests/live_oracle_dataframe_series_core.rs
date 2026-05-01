@@ -27164,3 +27164,72 @@ fn live_oracle_dataframe_corr_kendall_method() {
     let actual = frame.corr_method_with_numeric_only("kendall", false).expect("corr kendall");
     super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_dataframe_crosstab_normalize_columns() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DFCROSSTABNORM-COL",
+        "case_id": "dataframe_crosstab_normalize_columns",
+        "mode": "strict",
+        "operation": "dataframe_crosstab_normalize",
+        "oracle_source": "live_legacy_pandas",
+        "crosstab_normalize": "columns",
+        "left": {
+            "name": "row",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 4 }
+            ],
+            "values": [
+                { "kind": "utf8", "value": "A" },
+                { "kind": "utf8", "value": "A" },
+                { "kind": "utf8", "value": "B" },
+                { "kind": "utf8", "value": "B" },
+                { "kind": "utf8", "value": "A" }
+            ]
+        },
+        "right": {
+            "name": "col",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 4 }
+            ],
+            "values": [
+                { "kind": "utf8", "value": "X" },
+                { "kind": "utf8", "value": "Y" },
+                { "kind": "utf8", "value": "X" },
+                { "kind": "utf8", "value": "Y" },
+                { "kind": "utf8", "value": "X" }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping crosstab normalize columns: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
+    let super::ResolvedExpected::Frame(expected) = expected else { return; };
+
+    let left = super::build_series(fixture.left.as_ref().expect("left")).expect("left");
+    let right = super::build_series(fixture.right.as_ref().expect("right")).expect("right");
+    let actual = super::DataFrame::crosstab_normalize(
+        &left,
+        &right,
+        fixture.crosstab_normalize.as_deref().expect("normalize"),
+    )
+    .expect("crosstab_normalize");
+    super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
+}
