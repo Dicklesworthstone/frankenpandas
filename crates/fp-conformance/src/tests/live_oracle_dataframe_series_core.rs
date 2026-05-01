@@ -26067,3 +26067,168 @@ fn live_oracle_dataframe_groupby_any_basic() {
     let result = frame.groupby(&["k"]).expect("groupby").any().expect("any");
     super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_dataframe_groupby_all_basic() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DF-GBALL",
+        "case_id": "dataframe_groupby_all_basic",
+        "mode": "strict",
+        "operation": "dataframe_groupby_all",
+        "oracle_source": "live_legacy_pandas",
+        "groupby_columns": ["k"],
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 4 }
+            ],
+            "column_order": ["k", "v"],
+            "columns": {
+                "k": [
+                    { "kind": "utf8", "value": "a" },
+                    { "kind": "utf8", "value": "a" },
+                    { "kind": "utf8", "value": "b" },
+                    { "kind": "utf8", "value": "b" },
+                    { "kind": "utf8", "value": "c" }
+                ],
+                "v": [
+                    { "kind": "bool", "value": true },
+                    { "kind": "bool", "value": true },
+                    { "kind": "bool", "value": true },
+                    { "kind": "bool", "value": false },
+                    { "kind": "bool", "value": true }
+                ]
+            }
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping df groupby all: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
+    let super::ResolvedExpected::Frame(expected_frame) = expected else { return; };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
+    let result = frame.groupby(&["k"]).expect("groupby").all().expect("all");
+    super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_dataframe_groupby_idxmin_basic() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DF-GBIDXMIN",
+        "case_id": "dataframe_groupby_idxmin_basic",
+        "mode": "strict",
+        "operation": "dataframe_groupby_idxmin",
+        "oracle_source": "live_legacy_pandas",
+        "groupby_columns": ["k"],
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 10 },
+                { "kind": "int64", "value": 11 },
+                { "kind": "int64", "value": 12 },
+                { "kind": "int64", "value": 13 },
+                { "kind": "int64", "value": 14 }
+            ],
+            "column_order": ["k", "v"],
+            "columns": {
+                "k": [
+                    { "kind": "utf8", "value": "a" },
+                    { "kind": "utf8", "value": "a" },
+                    { "kind": "utf8", "value": "b" },
+                    { "kind": "utf8", "value": "a" },
+                    { "kind": "utf8", "value": "b" }
+                ],
+                "v": [
+                    { "kind": "int64", "value": 30 },
+                    { "kind": "int64", "value": 10 },
+                    { "kind": "int64", "value": 50 },
+                    { "kind": "int64", "value": 20 },
+                    { "kind": "int64", "value": 40 }
+                ]
+            }
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping df groupby idxmin: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
+    let super::ResolvedExpected::Frame(expected_frame) = expected else { return; };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
+    let result = frame.groupby(&["k"]).expect("groupby").idxmin().expect("idxmin");
+    super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_dataframe_groupby_idxmax_basic() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DF-GBIDXMAX",
+        "case_id": "dataframe_groupby_idxmax_basic",
+        "mode": "strict",
+        "operation": "dataframe_groupby_idxmax",
+        "oracle_source": "live_legacy_pandas",
+        "groupby_columns": ["k"],
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 10 },
+                { "kind": "int64", "value": 11 },
+                { "kind": "int64", "value": 12 },
+                { "kind": "int64", "value": 13 },
+                { "kind": "int64", "value": 14 }
+            ],
+            "column_order": ["k", "v"],
+            "columns": {
+                "k": [
+                    { "kind": "utf8", "value": "a" },
+                    { "kind": "utf8", "value": "a" },
+                    { "kind": "utf8", "value": "b" },
+                    { "kind": "utf8", "value": "a" },
+                    { "kind": "utf8", "value": "b" }
+                ],
+                "v": [
+                    { "kind": "int64", "value": 30 },
+                    { "kind": "int64", "value": 10 },
+                    { "kind": "int64", "value": 50 },
+                    { "kind": "int64", "value": 20 },
+                    { "kind": "int64", "value": 40 }
+                ]
+            }
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping df groupby idxmax: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
+    let super::ResolvedExpected::Frame(expected_frame) = expected else { return; };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
+    let result = frame.groupby(&["k"]).expect("groupby").idxmax().expect("idxmax");
+    super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
+}
