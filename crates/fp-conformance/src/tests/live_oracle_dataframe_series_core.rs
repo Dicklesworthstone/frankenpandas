@@ -21440,3 +21440,63 @@ fn live_oracle_dataframe_resample_mean_weekly() {
         .expect("resample mean");
     super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_dataframe_rank_axis0_average() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DFRANK-AXIS0",
+        "case_id": "dataframe_rank_axis0_average",
+        "mode": "strict",
+        "operation": "dataframe_rank",
+        "oracle_source": "live_legacy_pandas",
+        "rank_method": "average",
+        "rank_na_option": "keep",
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 }
+            ],
+            "column_order": ["a", "b"],
+            "columns": {
+                "a": [
+                    { "kind": "float64", "value": 5.0 },
+                    { "kind": "float64", "value": 3.0 },
+                    { "kind": "float64", "value": 5.0 },
+                    { "kind": "float64", "value": 1.0 }
+                ],
+                "b": [
+                    { "kind": "float64", "value": 10.0 },
+                    { "kind": "float64", "value": 5.0 },
+                    { "kind": "float64", "value": 7.5 },
+                    { "kind": "float64", "value": 7.5 }
+                ]
+            }
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping dataframe_rank axis=0 test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Frame(_)),
+        "expected live oracle frame payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Frame(expected) = expected else {
+        return;
+    };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
+    let actual = frame
+        .rank_with_pct("average", true, "keep", false)
+        .expect("rank axis=0");
+    super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
+}
