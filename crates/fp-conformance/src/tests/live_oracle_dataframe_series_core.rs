@@ -30867,3 +30867,117 @@ fn live_oracle_series_sub_with_nulls() {
     let result = left.sub_with_policy(&right, &policy, &mut ledger).expect("sub");
     super::compare_series_expected(&result, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_series_mul_with_nulls() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-SMUL-NULLS",
+        "case_id": "series_mul_with_nulls",
+        "mode": "strict",
+        "operation": "series_mul",
+        "oracle_source": "live_legacy_pandas",
+        "left": {
+            "name": "left",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "values": [
+                { "kind": "float64", "value": 5.0 },
+                { "kind": "null", "value": "na_n" },
+                { "kind": "float64", "value": 7.0 }
+            ]
+        },
+        "right": {
+            "name": "right",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "values": [
+                { "kind": "float64", "value": 2.0 },
+                { "kind": "float64", "value": 3.0 },
+                { "kind": "null", "value": "na_n" }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping series mul nulls: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
+    let super::ResolvedExpected::Series(expected) = expected else { return; };
+
+    let left = super::build_series(fixture.left.as_ref().expect("left")).expect("left");
+    let right = super::build_series(fixture.right.as_ref().expect("right")).expect("right");
+    let policy = super::RuntimePolicy::strict();
+    let mut ledger = super::EvidenceLedger::new();
+    let result = left.mul_with_policy(&right, &policy, &mut ledger).expect("mul");
+    super::compare_series_expected(&result, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_series_div_with_nulls() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-SDIV-NULLS",
+        "case_id": "series_div_with_nulls",
+        "mode": "strict",
+        "operation": "series_div",
+        "oracle_source": "live_legacy_pandas",
+        "left": {
+            "name": "left",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "values": [
+                { "kind": "float64", "value": 100.0 },
+                { "kind": "null", "value": "na_n" },
+                { "kind": "float64", "value": 30.0 }
+            ]
+        },
+        "right": {
+            "name": "right",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "values": [
+                { "kind": "float64", "value": 4.0 },
+                { "kind": "float64", "value": 5.0 },
+                { "kind": "null", "value": "na_n" }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping series div nulls: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
+    let super::ResolvedExpected::Series(expected) = expected else { return; };
+
+    let left = super::build_series(fixture.left.as_ref().expect("left")).expect("left");
+    let right = super::build_series(fixture.right.as_ref().expect("right")).expect("right");
+    let policy = super::RuntimePolicy::strict();
+    let mut ledger = super::EvidenceLedger::new();
+    let result = left.div_with_policy(&right, &policy, &mut ledger).expect("div");
+    super::compare_series_expected(&result, &expected).expect("pandas parity");
+}
