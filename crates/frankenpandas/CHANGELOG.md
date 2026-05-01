@@ -1,0 +1,362 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+## [0.1.0](https://github.com/Dicklesworthstone/frankenpandas/releases/tag/frankenpandas-v0.1.0) - 2026-05-01
+
+### <!-- 0 -->Added
+
+- *(io)* add indexed SQL query options (frankenpandas-fd90)
+- *(frankenpandas)* expose interval_range_by_periods/step (fd90.271 / br-jmqjv)
+- *(frankenpandas)* expose DataFrameDictAxisLabels + index_to_frame/series (fd90.270 / br-auszv)
+- *(frankenpandas)* expose AACE alignment fns + bdate_range (fd90.269 / br-aywnz)
+- *(frankenpandas)* expose fp-expr evaluator surface (fd90.268 / br-dies4)
+- *(frankenpandas)* expose AggFunc + GroupByOptions (fd90.267 / br-f3nrr)
+- *(frankenpandas)* expose advanced merge/join variants (fd90.266 / br-a3cbk)
+- *(frankenpandas)* expose remaining fp-runtime types (fd90.265 / br-aqre9)
+- *(frankenpandas)* expose Series-level Arrow interop (fd90.264 / br-5x2tp)
+- *(frankenpandas)* expose Timestamp/Timedelta/Period/Interval helpers (fd90.263 / br-g7k6o)
+- *(frankenpandas)* expose fp-types helpers (fd90.262 / br-xd0en)
+- *(frankenpandas)* expose pandas-parity date_range/timedelta_range (fd90.261 / br-4h1dm)
+- *(frankenpandas)* expose 5 index-cols reader variants (fd90.260 / br-h9tbf)
+- *(frankenpandas)* expose 15 window/accessor/groupby types (fd90.259 / br-zcwd0)
+- *(frankenpandas)* expose DataFrameDictResult + variants (fd90.258 / br-xh821)
+- *(frankenpandas)* round out SQL reader prelude surface (fd90.244 / br-7rtan)
+- *(frankenpandas)* expose multi-sheet Excel readers (fd90.243 / br-nku4k)
+- *(fp-frame)* add pandas-parity df.min/max/std/var/etc. methods (fd90.233 / br-he7yj)
+- *(frankenpandas)* add ArithmeticOp + ComparisonOp to prelude (fd90.222 / br-hgymw)
+- *(frankenpandas)* expose Bayesian Runtime inspection types (fd90.221 / br-a179t)
+- *(frankenpandas)* add SqlInsertMethod to prelude (fd90.220 / br-75rs3)
+- *(frankenpandas)* expose CsvOnBadLines enum (fd90.219 / br-7g91v)
+- *(frankenpandas)* expose timedelta + tz options surface (fd90.218 / br-w2g5c)
+- *(frankenpandas)* expose merge_asof options + JoinExecutionOptions (fd90.217 / br-89h08)
+- *(frankenpandas)* expose CSV/Excel write_*_with_options surface (fd90.216 / br-jy9vq)
+- *(frankenpandas)* add read_csv_with_options_path to prelude (fd90.215 / br-4ns5p)
+- *(frankenpandas)* add ToDatetimeOptions + ToDatetimeOrigin to prelude (fd90.211 / br-wfgld)
+- *(frankenpandas)* add read_sql_with_options to prelude (fd90.210 / br-qq7xq)
+- *(frankenpandas)* add write_sql_with_options to prelude (fd90.209 / br-kyelf)
+- *(frankenpandas)* add 7 module-level helpers to prelude (fd90.208 / br-aj46r)
+- *(frankenpandas)* add ExcelReadOptions + read_csv_with_options to prelude (fd90.207 / br-o4ots)
+- *(frankenpandas)* add 4 SQL helpers to the prelude (fd90.206 / br-5197l)
+- *(frankenpandas)* complete README serialization round-trip (fd90.205 / br-wca9p)
+- *(frankenpandas)* add ValidityMask to the prelude (fd90.203 / br-mn03v)
+- *(frankenpandas)* add 7 README-documented error types to prelude (fd90.202 / br-yujr6)
+- *(fp-frame)* add DataFrameResample::first/last (fd90.200 / br-kzmxd)
+- *(frankenpandas)* expand prelude with cut/qcut + to_datetime variants (br-ertxq / fd90.144)
+- *(frankenpandas)* expand prelude with merge family (br-dghe4 / fd90.143)
+- *(frankenpandas)* expand prelude to cover all 8 IO formats (br-8zd49 / fd90.142)
+- *(frankenpandas)* expand prelude with 5 concat variants (br-hyyqx / fd90.141)
+- *(fp-frame)* add where_mask_df_other to mirror mask_df_other (br-df9v7 / fd90.138)
+- *(frankenpandas)* re-export rusqlite under sql-sqlite feature (br-r34z9 / fd90.130)
+- *(frankenpandas)* re-export TypeError + GroupByError (br-9fsqn / fd90.129)
+- *(frankenpandas)* re-export DuplicateKeep + ConcatJoin + DropNaHow (br-rdmu2 / fd90.128)
+- *(frankenpandas)* re-export MergeExecutionOptions + MergeValidateMode (br-r1k24 / fd90.127)
+- *(frankenpandas)* re-export 23 fp_types::nan* primitives at top level + prelude (br-q554z / fd90.126)
+- *(frankenpandas)* expand prelude with path-based IO + add Path import to Recipes (br-m3zib / fd90.125)
+- *(frankenpandas)* expand prelude to cover README Quick Start (br-pg29m / fd90.121)
+- *(fp-io)* SqlInspector::reflect_table for bundled table metadata (br-76mw / fd90.40)
+- *(fp-io)* SqlInspector wrapper for unified introspection API (br-szs9 / fd90.38)
+- *(fp-io)* SqlConnection::table_comment for backend-agnostic comment introspection (br-yu3w / fd90.32)
+- *(fp-io)* SqlConnection::list_unique_constraints + tighten list_indexes (br-sh4v / fd90.31)
+- *(fp-io)* SqlConnection::list_views for backend-agnostic view discovery (br-gm3r / fd90.30)
+- *(fp-io)* SqlConnection::list_foreign_keys for backend-agnostic FK introspection (br-uht8 / fd90.29)
+- *(fp-io)* SqlConnection::list_indexes for backend-agnostic index introspection (br-bgv9 / fd90.28)
+- *(fp-io)* SqlConnection::max_identifier_length capability probe (br-cs81 / fd90.26)
+- *(fp-io)* SqlConnection::primary_key_columns derived helper (br-uw3y / fd90.25)
+- *(fp-io)* SqlConnection::server_version for backend version probing (br-e23k / fd90.24)
+- *(fp-io)* SqlConnection::truncate_table for fast table reset (br-phum / fd90.23)
+- *(fp-io)* SqlConnection::list_schemas for backend-agnostic schema discovery (br-lxhi / fd90.22)
+- *(fp-io)* SqlConnection::table_schema for backend-agnostic column introspection (br-w43q / fd90.21)
+- *(fp-io)* SqlConnection::list_tables for backend-agnostic table discovery (br-vhq2 / fd90.20)
+- *(fp-io)* add SQL table option index reads (frankenpandas-fd90.8)
+- *(fp-io)* add SQL table read options (frankenpandas-fd90.7)
+- *(fp-io)* add SQL table projection index chunks (frankenpandas-fd90.6)
+- *(fp-io)* add optioned indexed SQL chunks (frankenpandas-fd90.5)
+- *(fp-io)* add indexed SQL chunk reads (frankenpandas-fd90.4)
+- *(fp-io)* add read_sql_table column chunks (frankenpandas-fd90.3)
+- *(fp-io)* add read_sql_table chunks (frankenpandas-fd90.2)
+- *(fp-io)* add read_sql_query chunk aliases (frankenpandas-fd90.1)
+- *(fp-io)* add SQL chunked reads (frankenpandas-1e2i)
+- *(io)* gate sqlite sql backend (br-frankenpandas-fd90)
+- *(sql)* add generic SQL connection foundation (br-frankenpandas-fd90)
+- *(fp-frame)* land row_multiindex DataFrame field (br-frankenpandas-1zzp.1)
+- add Series.reset_index DataFrame parity (br-52lj)
+- *(fp-io)* add SQL write index parity (frankenpandas-t7wn)
+- *(fp-io)* add SQL parse_dates parity (frankenpandas-xfrv)
+- *(fp-frame)* add to_markdown tablefmt options (frankenpandas-ot0k)
+- add top-level frankenpandas facade crate with unified public API (frankenpandas-nsf)
+- *(conformance)* add --python-bin CLI flag and join benchmark binary
+- *(phase2c)* expand compat-closure evidence packs FP-P2C-006 through FP-P2C-011
+- *(workspace)* add fp-frankentui crate scaffold and update workspace dependencies
+
+### <!-- 1 -->Fixed
+
+- *(fp-frame)* preserve column_order on serde round-trip (fd90.196 / br-1d1gm)
+- *(test)* adjust readme_groupby_aggregation_matrix to actual agg_list dispatch surface
+- *(frankenpandas)* forward tracing + asupersync features (br-ii9u / fd90.59)
+- *(frankenpandas)* forward fp-io sql-* features to umbrella (br-l6nr / fd90.58)
+- *(docs)* fix misaligned right-side borders in all 3 ASCII art diagrams
+- *(frankenpandas)* add error types and NullKind/Column to facade API
+
+### <!-- 3 -->Changed
+
+- *(fp-frame)* convert where_mask_df_other to delegator over where_cond_df (br-a2sck / fd90.139)
+
+### <!-- 4 -->Documentation
+
+- *(README)* refresh DISC-013 status now that it lives in Resolved
+- *(readme)* fix divergence count - 14 documented, 4 cause failures
+- *(readme)* use new Scalar From .into() ergonomics in Quick Start + case_when
+- *(readme)* replace fictional compute_ratio_column with inline expression (br-cz3gf / fd90.180)
+- *(readme)* fix df.dtypes() return type + missing ? (br-jff4r / fd90.175)
+- *(readme)* fix astype-to-Utf8 example — to-Utf8 cast unsupported (br-um5fl / fd90.174)
+- *(readme)* fix select_dtypes(strs) → select_dtypes_by_name (br-rb1gy / fd90.170)
+- *(readme)* fix df.column(name)? — column returns Option (br-sjeh1 / fd90.169)
+- *(readme)* replace fictional compute_weight(i) with inline expression (br-vc9cp / fd90.162)
+- *(readme)* bump fp-frame test count 1,433 → 1,434 (br-126io / fd90.151)
+- *(readme)* fix grossly stale FP-P2D packet range/count (br-78ttq / fd90.149)
+- *(readme)* correct FAQ Column memory claim — Vec<Scalar>, not typed arrays (br-z2o49 / fd90.148)
+- *(readme)* replace dead DuplicateIndexUnsupported with real FrameError wrappers (br-hb9xg / fd90.140)
+- *(readme)* note merge_asof returns MergedDataFrame in recipe (br-x8r65 / fd90.137)
+- *(readme)* fix where_mask_df / mask_df arg types (br-fjiep / fd90.136)
+- *(readme)* correct SeriesGroupBy method list (br-l51hq / fd90.135)
+- *(readme)* fix pipe chain — query returns ExprError, not FrameError (br-uukfh / fd90.134)
+- *(readme)* replace phantom join/aggregation-specific variant claims (br-unvl4 / fd90.133)
+- *(readme)* fix phantom ExprError::UnknownColumn variant (br-ouqtz / fd90.132)
+- *(readme)* fix ColumnError row — wrong casing + phantom variant (br-r4ar5 / fd90.131)
+- *(readme)* show LengthMismatch as struct variant in error table (br-4r5t5 / fd90.124)
+- *(readme)* supply periods arg to df.pct_change() (br-derlf / fd90.123)
+- *(readme)* supply args to df.duplicated()/drop_duplicates() (br-kernh / fd90.122)
+- *(readme)* wrap melt var_name/value_name in Some() (br-k1b4n / fd90.120)
+- *(readme)* fix df.xs("string") — needs &IndexLabel (br-pizo3 / fd90.119)
+- *(readme)* fix df.crosstab(str, str) — associated fn on &Series (br-xdolc / fd90.118)
+- *(readme)* fix iloc(i64) → iloc(&[i64]) + add ? to head/tail (br-qhlg6 / fd90.117)
+- *(readme)* fix index.drop_duplicates(keep) wrong fn + bogus ? (br-uj2np / fd90.116)
+- *(readme)* fix sample/sample_weights signatures (br-gdrz5 / fd90.115)
+- *(readme)* add missing margins:bool to pivot_table_with_margins[_name] (br-rzdtb / fd90.114)
+- *(readme)* fix merge_with_options signature/struct/return type (br-nnjnl / fd90.113)
+- *(readme)* fix df.clip + df.replace signatures (br-b7yru / fd90.112)
+- *(readme)* replace non-existent Series::constant with from_values pattern (br-5vg7r / fd90.111)
+- *(readme)* fix scores.ge(&Scalar) — should be ge_scalar (br-jxwwk / fd90.110)
+- *(readme)* add missing inclusive arg to series.between() example (br-luqdy / fd90.109)
+- *(readme)* add missing name arg to apply_row example (br-0j4xa / fd90.108)
+- *(readme)* fix df.transform() example to match real signatures (br-7135r / fd90.107)
+- *(readme)* correct squeeze return-type chain (br-szafc / fd90.106)
+- *(readme)* fix df.loc(str) + df.loc_rows() example to match real signature (br-cco1r / fd90.105)
+- *(readme)* fix non-existent dropna_with_thresh API name (br-dsnz4 / fd90.104)
+- *(readme)* expand NanOps section to actual 19+4 primitives (br-0xxdr / fd90.103)
+- *(readme)* correct DataFrameIoExt format coverage 'all'→'7 of 8' (br-rm2mv / fd90.102)
+- *(readme)* correct MissingIndexColumn arity in IoError row (br-f7sjm / fd90.101)
+- *(readme)* reconcile architecture diagram with '12 crates' headline (br-i8gsh / fd90.100)
+- *(readme)* correct AG-13 attribution + lookup path for unsorted (br-i9rhv / fd90.99)
+- *(readme)* fix 5x OnceCell→OnceLock terminology mismatch (br-uvb40 / fd90.98)
+- *(readme)* extend GroupBy decision tree to show all 3 paths (br-qmthc / fd90.97)
+- *(readme)* add row_multiindex + column_multiindex to DataFrame ASCII tree (br-gnzcw / fd90.96)
+- *(readme)* correct Series pseudo-code to match real struct (br-u73po / fd90.95)
+- *(readme)* correct DType::Categorical existence claim (br-agabe / fd90.94)
+- *(readme)* fix optimization technique count 14→15 (br-1teu1 / fd90.93)
+- *(readme)* sync crate-tree LOC + pub fn counts (br-ps8bh / fd90.92)
+- *(readme)* replace stale 'all green' conformance claim w/ honest disclosure (br-jow1v / fd90.91)
+- *(readme)* sync test count badge 1500+ → 3200+ (br-5zni / fd90.90)
+- *(readme)* sync 7→8 IO format count for Arrow IPC stream (br-ym7n / fd90.89)
+- *(readme)* sync Data Model enum lists with current fp-types/fp-index (br-2chb)
+- *(README)* add Round 1 to performance optimization table (br-zxh3 / fd90.87)
+- *(README)* update adversarial test count + bullet coverage (br-sjvn / fd90.86)
+- *(README)* sync FAQ test count to 3,200+ (br-1nnd / fd90.85)
+- *(README)* add Cargo features section reflecting umbrella forwarding (br-2wb6 / fd90.84)
+- *(README)* clarify DataFrame output method count (br-qs9u / fd90.83)
+- *(README)* link to DISCREPANCIES.md for known-failure root causes (br-w69a / fd90.82)
+- *(README)* correct method count + soften 'all green' claim (br-wgth / fd90.75)
+- *(README)* refresh test count table (br-d565 / fd90.74)
+- *(README)* correct SQL feature claims (br-iew1 / fd90.73)
+- *(workspace)* enable rustdoc::broken_intra_doc_links on all crates (br-ddy4 / fd90.71)
+- surface Arrow IPC stream as 8th IO format (br-frankenpandas-zbz5)
+- per-crate README.md for each fp-* crate (br-frankenpandas-kw5q)
+- close row MultiIndex epic (br-frankenpandas-1zzp)
+- align conformance claim to actual 430+ packets / 1249 fixtures (br-frankenpandas-zgqj)
+- scope SQL parity claim to SQLite-only (br-frankenpandas-m3e8)
+- link row MultiIndex roadmap to epic (br-frankenpandas-0yz7)
+- split MultiIndex capability into Row vs Column (br-frankenpandas-0yz7)
+- qualify drop-in positioning until PyO3 ships (br-frankenpandas-diic)
+- rustfmt pass and new API surface across fp-index, fp-io, fp-join, fp-frame, fp-expr, and frankenpandas
+- expand README to 1574 lines, de-slopify all AI writing artifacts
+- expand README to 1440+ lines with missing data, coercion, element-wise ops, selection, introspection
+- expand README to 1200+ lines with optimization catalog, error architecture, constructors, merge options
+- expand README to 1000+ lines with recipes, deep dives, roadmap
+- expand README with deep technical content (+300 lines)
+- complete README.md rewrite reflecting current project state
+- update README with project status and architecture overview
+
+### <!-- 5 -->Testing
+
+- *(readme)* clear facade clippy blockers
+- *(readme)* Interval inspection methods (fd90.71)
+- *(readme)* Timedelta::from_unit + Period::cmp_same_freq + TimedeltaComponents fields
+- *(readme)* Timestamp arithmetic (add/sub/floor/ceil/round + unit variants)
+- *(readme)* Series cumulative + diff/shift/pct_change value asserts
+- *(readme)* MultiIndex methods (is_lexsorted/get_tuple/take/isin/duplicated/has_duplicates/is_unique)
+- *(readme)* Index naming/rename/unique methods
+- *(readme)* rolling/expanding/ewm value assertions on small input
+- *(readme)* NanOps numeric value assertions on [1,2,NaN,4,5]
+- *(readme)* DataFrame scalar reductions return-Series value asserts
+- *(readme)* Series scalar reductions (sum/mean/min/max/std/var/median)
+- *(readme)* sequential op result assertions (cumsum/prod/min/max/diff/shift/pct_change)
+- *(readme)* DataFrame + Series .head/.tail with positive + negative N
+- *(readme)* Index manipulation methods (insert/delete/take/repeat/append)
+- *(readme)* Index set operations (intersection/union/difference/symmetric_difference)
+- *(readme)* DataFrame.at + .iat scalar access coverage
+- *(readme)* Scalar inspection + semantic comparison methods
+- *(readme)* PeriodFreq::parse/::alias round-trip across 9 variants
+- *(readme)* Display impls (Scalar/Interval/IntervalClosed/Timestamp/PeriodFreq/Timedelta::format)
+- *(readme)* SqlColumnSchema declared_type/autoincrement/default_value/comment
+- *(readme)* RuntimePolicy fields + EvidenceLedger multi-record path
+- *(readme)* GalaxyBrainCard + DecisionRecord field-level coverage
+- *(readme)* SqlReflectedTable lookup methods coverage
+- *(readme)* JoinedSeries field-level functional coverage
+- *(readme)* module-level null/dtype helpers functional coverage
+- *(readme)* to_timedelta_with_unit functional coverage
+- *(readme)* to_datetime_with_format/unit/options functional coverage
+- *(readme)* ColumnError variant triggers (LengthMismatch / DTypeMismatch)
+- *(readme)* FrameError variant triggers (LengthMismatch via Series + DataFrame ctor)
+- *(readme)* ExprError variant triggers (UnknownSeries / UnknownLocal / ParseError)
+- *(readme)* IoError variant triggers (CSV failure modes)
+- *(readme)* TypeError variant triggers (Lossy/InvalidBool/IncompatibleDtypes)
+- *(readme)* pin DType + NullKind + CategoricalMetadata serde shapes
+- *(readme)* pin IndexLabel + ValidityMask serde JSON shapes
+- *(readme)* pin Scalar serde JSON tagged-enum shape
+- *(readme)* DType variant coverage (Null/Categorical/Timedelta64/Sparse)
+- *(readme)* IndexLabel variant coverage (Utf8 / Datetime64 / Timedelta64)
+- *(readme)* NullKind::NaT + IntervalClosed::Both/Neither variants
+- *(readme)* AlignMode + DateOffset + date_range/bdate_range coverage
+- *(readme)* RuntimeMode::Hardened + DecisionAction::Repair + IssueKind::JoinCardinality
+- *(readme)* CsvOnBadLines + ToTimedeltaErrors variant coverage
+- *(readme)* minor enum variant coverage (Asof / DuplicateKeep / ConcatJoin)
+- *(readme)* JoinType + MergeValidateMode variant coverage
+- *(readme)* SqlIfExists::Append + SqlInsertMethod::Multi coverage
+- *(readme)* JsonOrient round-trip across all 5 variants
+- *(readme)* non-default ExcelReadOptions / ExcelWriteOptions coverage
+- *(readme)* non-default CsvWriteOptions coverage
+- *(readme)* non-default CsvReadOptions coverage
+- *(readme)* JSON / JSONL / Feather bytes round-trip coverage
+- *(readme)* Parquet + Excel bytes round-trip coverage
+- *(readme)* Arrow IPC stream round-trip coverage
+- *(readme)* functional coverage for SqlQueryResult + SqlIndexedChunkIterator
+- *(readme)* functional round-trip for fd90.16 helpers
+- *(readme)* functional round-trip for fd90.15 helpers
+- *(readme)* functional round-trip for fd90.14 pandas helpers
+- extend prelude_completeness_compile_guard with fd90.10-16 promotions
+- *(readme)* silence clippy::too_many_arguments on prelude compile guards
+- *(readme)* cover Series Arrow interop + promote to prelude
+- *(readme)* cover module-level SQL helpers + promote to prelude
+- *(readme)* cover SqlInspector remaining 10 methods + promote inspect to prelude
+- *(readme)* cover SqlInspector views/schemas/columns/indexes/FKs/UCs/PKs/reflect_table
+- *(readme)* cover DataFrameIoExt to_* + SqlInspector (fd90.290 / br-67lca)
+- *(readme)* cover SQL options-bearing read/write fns (fd90.289 / br-a7vp7)
+- *(readme)* cover read_sql_chunks iterator (fd90.288 / br-qi51x)
+- test(readme) + feat: cover advanced merge variants + add to prelude (fd90.287 / br-1bmlf)
+- *(readme)* cover merge_asof_with_options (fd90.286 / br-4obu0)
+- *(readme)* cover DataFrameResample.agg + .prod (fd90.285 / br-dcyqq)
+- *(readme)* complete DataFrame-level window coverage (fd90.284 / br-i8oz6)
+- *(readme)* complete Series Expanding + Ewm coverage (fd90.283 / br-4iare)
+- *(readme)* cover remaining Rolling methods (fd90.282 / br-fpaih)
+- *(readme)* cover remaining Resample methods (fd90.281 / br-flgml)
+- *(readme)* cover Series.at_time + Series.between_time (fd90.280 / br-yxga1)
+- *(readme)* cover 14 more DatetimeAccessor methods (fd90.279 / br-nepzd)
+- *(readme)* cover Series.sample + Series.argsort (fd90.278 / br-auovz)
+- *(readme)* cover astype_safe / bool_ / columns_index/multiindex (fd90.277 / br-s0xvz)
+- *(readme)* cover combine variants + compare_with_result_names (fd90.276 / br-ukwnb)
+- *(readme)* cover assign / apply_fn / applymap_na_action / apply_rows (fd90.275 / br-jhjdn)
+- *(readme)* cover Series.from_categorical_codes (fd90.274 / br-uo9sk)
+- test(readme) + feat: cover align/asof/clip + add AlignMode (fd90.273 / br-6y8kh)
+- *(readme)* cover Sparse Series + SparseAccessor (fd90.272 / br-lcmf8)
+- test(readme) + feat: cover join_series + expose JoinedSeries (fd90.257 / br-gc74l)
+- *(readme)* cover concat_series helpers (fd90.256 / br-30lpu)
+- *(readme)* cover 13 Column inspection methods (fd90.255 / br-bvouu)
+- *(readme)* cover 14 ValidityMask methods (fd90.254 / br-nkfcu)
+- *(readme)* cover 10 Index methods (fd90.253 / br-xkda0)
+- *(readme)* cover pivot / pivot_table_with_dropna / pivot_table_aggfunc_dict (fd90.252 / br-yvj86)
+- *(readme)* cover set_axis + DataFrame.copy (fd90.251 / br-3662n)
+- *(readme)* integration test for Bayesian Runtime Policy (fd90.250 / br-6crfb)
+- *(readme)* cover Series.shift/diff/pct_change/rank (fd90.249 / br-tblla)
+- *(readme)* cover 13 more StringAccessor methods (fd90.248 / br-4zyhp)
+- *(readme)* cover 17 more StringAccessor methods (fd90.247 / br-15vsk)
+- *(readme)* cover 6 advanced GroupBy methods (fd90.246 / br-lcuy2)
+- *(readme)* cover DataFrame.with_column / drop_columns / rename_columns (fd90.245 / br-d8vyf)
+- *(readme)* cover DataFrame.eval_with_locals (fd90.242 / br-2xx3h)
+- *(readme)* cover Series combine/filter/xs + df level methods (fd90.241 / br-q4u6n)
+- *(readme)* cover Series indexing + utility methods (fd90.240 / br-a5842)
+- *(readme)* cover Series introspection methods (fd90.239 / br-gcb5b)
+- *(readme)* cover reindex/truncate/insert across Series + DataFrame (fd90.238 / br-5ax53)
+- *(readme)* cover clip / where_cond / mask / Series.rename (fd90.237 / br-0jjgw)
+- *(readme)* cover Series.unique/duplicated + round (fd90.236 / br-ea7vd)
+- *(readme)* cover Series.apply / map / map_func (fd90.235 / br-vgj04)
+- *(readme)* cover drop/pop column-removal methods (fd90.234 / br-wqylo)
+- *(readme)* cover DataFrame direct reductions (fd90.232 / br-gfki6)
+- *(readme)* cover Series statistical + inspection methods (fd90.231 / br-vhr55)
+- *(readme)* cover Series scalar reductions + cumulative ops (fd90.230 / br-rprx9)
+- *(readme)* cover 4 value_counts variants (fd90.229 / br-ulfpm)
+- *(readme)* cover Series binary arithmetic (fd90.228 / br-yugij)
+- *(readme)* cover 5 missing _df_fill arithmetic variants (fd90.227 / br-yzsks)
+- *(readme)* cover sub_scalar + 4 missing arithmetic _df methods (fd90.226 / br-be8c2)
+- *(readme)* cover all 6 DataFrame scalar comparison shortcuts (fd90.225 / br-h950j)
+- *(readme)* cover all 6 Series scalar comparison shortcuts (fd90.224 / br-52lru)
+- *(readme)* cover compare_scalar / binary_numeric (fd90.223 / br-o3lff)
+- *(readme)* cover squeeze/iat/at/lookup (fd90.214 / br-33pap)
+- *(readme)* cover Missing Data extras (fd90.213 / br-80q21)
+- *(readme)* cover GroupBy.rolling/resample (fd90.212 / br-ehhks)
+- *(frankenpandas)* extend prelude compile guard for fd90.182-203 (fd90.204 / br-cj8ys)
+- *(readme)* extend MultiIndex coverage + expose MultiIndexOrIndex (fd90.201 / br-w8156)
+- *(readme)* cover full Window Operations matrix (fd90.199 / br-9fk38)
+- *(readme)* cover SeriesGroupBy rank + rank_with_pct (fd90.198 / br-971fn)
+- *(readme)* cover remaining 7 GroupBy group-level ops (fd90.197 / br-i8dqf)
+- *(readme)* cover all 9 .cat() methods in categorical test (fd90.195 / br-o6qo4)
+- *(readme)* integration test for String Accessor (fd90.194 / br-8i9lh)
+- *(readme)* integration test for Reshaping section (fd90.193 / br-tc3g2)
+- *(readme)* integration test for DataFrame Constructors (fd90.192 / br-fzj18)
+- *(readme)* integration test for NanOps section (fd90.191 / br-1r7zz)
+- *(readme)* integration test for Describe + Correlation/Covariance (fd90.190 / br-gdbwk)
+- *(readme)* integration test for DataFrame Output Formats (fd90.189 / br-f6vzb)
+- *(readme)* integration test for Module-Level Functions (fd90.188 / br-g1sox)
+- *(readme)* integration test for Selection and Indexing (fd90.187 / br-sy8p4)
+- *(readme)* integration test for Column Manipulation (fd90.186 / br-ein1y)
+- *(readme)* integration test for Advanced Selection Methods (fd90.185 / br-q208a)
+- *(readme)* integration test for Replacement section (fd90.184 / br-y01i5)
+- *(readme)* readme_apply_and_transform_compiles_and_runs (fd90.181 / frankenpandas-0kypg)
+- *(readme)* readme_groupby_aggregation_matrix_compiles_and_runs (fd90.179 / frankenpandas-zl3fl)
+- *(readme)* readme_time_series_operations_compiles_and_runs (fd90.178 / frankenpandas-9t5qk)
+- *(frankenpandas)* add SeriesGroupBy integration test (br-fn5x1 / fd90.177)
+- *(frankenpandas)* add DataFrame Introspection integration test (br-mle2r / fd90.176)
+- *(frankenpandas)* add Type Coercion integration test (br-bplco / fd90.173)
+- *(frankenpandas)* add Missing Data Handling test + fix README dropna_with_threshold arity (br-jl1go / fd90.172)
+- *(frankenpandas)* add Element-Wise Operations integration test (br-itlgm / fd90.171)
+- *(frankenpandas)* add Concat: Full Options integration test (br-824wa / fd90.168)
+- *(frankenpandas)* add Pivot Tables integration test (br-1gb1j / fd90.167)
+- *(frankenpandas)* add Sorting integration test (br-50ng9 / fd90.166)
+- *(frankenpandas)* add Window Operations README integration test (fd90.165 / frankenpandas-4ak09)
+- *(frankenpandas)* add Duplicate Handling integration test (br-96fna / fd90.164)
+- *(frankenpandas)* add Random Sampling integration test (br-zgnmz / fd90.163)
+- *(frankenpandas)* add Merge-Asof recipe integration test (br-20fg8 / fd90.161)
+- *(frankenpandas)* add Financial Data Pipeline integration test (br-z1615 / fd90.160)
+- *(frankenpandas)* add Categorical Analysis integration test (br-q0foo / fd90.159)
+- *(frankenpandas)* add MultiIndex Operations integration test (br-v33s4 / fd90.158)
+- *(frankenpandas)* add expression-driven analysis integration test (br-oyhpp / fd90.157)
+- *(frankenpandas)* add merge_with_options integration test (br-6zn1l / fd90.156)
+- *(frankenpandas)* add prelude_completeness_compile_guard (br-6nexq / fd90.155)
+- *(frankenpandas)* activate ,ignore doctests now that prelude is complete (br-exgd0 / fd90.150)
+- *(frankenpandas)* lock in README Quick Example via integration test (br-we6ql / fd90.146)
+
+### Licensing
+
+- adopt MIT + OpenAI/Anthropic rider across workspace and crates
+
+### Prelude
+
+- promote DateRangeError / TimedeltaRangeError / cast_scalar_owned / read_csv_with_index_cols
+- promote SparseDType, AggFunc, GroupByOptions, index_to_frame/series
+- promote 11 fp-types pandas-equivalent helpers
+- promote 9 SQL schema/iterator return types
