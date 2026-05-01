@@ -2440,6 +2440,38 @@ fn fuzz_json_io_bytes_accepts_jsonl_with_nulls_seed_fixture() {
 }
 
 #[test]
+fn fuzz_json_io_bytes_accepts_values_orient_seed_fixture() {
+    let seed = include_bytes!(
+        "../../fixtures/adversarial/fuzz_corpus/fuzz_json_io/values_orient_seed.json"
+    );
+    fuzz_json_io_bytes(seed).expect("values orient seed should parse");
+}
+
+#[test]
+fn fuzz_json_io_bytes_accepts_jsonl_mixed_types_seed_fixture() {
+    let seed = include_bytes!(
+        "../../fixtures/adversarial/fuzz_corpus/fuzz_json_io/jsonl_mixed_types_seed.jsonl"
+    );
+    fuzz_json_io_bytes(seed).expect("jsonl mixed types seed should parse");
+}
+
+#[test]
+fn fuzz_json_io_bytes_accepts_records_unicode_seed_fixture() {
+    let seed = include_bytes!(
+        "../../fixtures/adversarial/fuzz_corpus/fuzz_json_io/records_unicode_seed.json"
+    );
+    fuzz_json_io_bytes(seed).expect("records unicode seed should parse");
+}
+
+#[test]
+fn fuzz_json_io_bytes_accepts_records_with_negatives_seed_fixture() {
+    let seed = include_bytes!(
+        "../../fixtures/adversarial/fuzz_corpus/fuzz_json_io/records_with_negatives_seed.json"
+    );
+    fuzz_json_io_bytes(seed).expect("records with negatives seed should parse");
+}
+
+#[test]
 fn fuzz_json_io_bytes_replays_committed_corpus_seeds() {
     let corpus: &[(&str, &[u8])] = &[
         (
