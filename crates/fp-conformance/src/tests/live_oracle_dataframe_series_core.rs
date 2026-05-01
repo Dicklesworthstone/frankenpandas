@@ -20116,3 +20116,122 @@ fn live_oracle_index_is_monotonic_increasing_yes() {
         "is_monotonic_increasing actual={actual} expected={expected_bool}"
     );
 }
+
+#[test]
+fn live_oracle_series_concat_two_disjoint() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-SCONCAT",
+        "case_id": "series_concat_two_disjoint",
+        "mode": "strict",
+        "operation": "series_concat",
+        "oracle_source": "live_legacy_pandas",
+        "left": {
+            "name": "vals",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "values": [
+                { "kind": "int64", "value": 10 },
+                { "kind": "int64", "value": 20 },
+                { "kind": "int64", "value": 30 }
+            ]
+        },
+        "right": {
+            "name": "vals",
+            "index": [
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 4 },
+                { "kind": "int64", "value": 5 }
+            ],
+            "values": [
+                { "kind": "int64", "value": 40 },
+                { "kind": "int64", "value": 50 },
+                { "kind": "int64", "value": 60 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping series_concat test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Series(_)),
+        "expected live oracle series payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
+
+    let left = super::build_series(fixture.left.as_ref().expect("left")).expect("left");
+    let right = super::build_series(fixture.right.as_ref().expect("right")).expect("right");
+    let actual = super::concat_series(&[&left, &right]).expect("concat series");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_series_combine_first_with_overlapping_nulls() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-SCOMBINEFIRST",
+        "case_id": "series_combine_first_with_overlapping_nulls",
+        "mode": "strict",
+        "operation": "series_combine_first",
+        "oracle_source": "live_legacy_pandas",
+        "left": {
+            "name": "vals",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "values": [
+                { "kind": "int64", "value": 10 },
+                { "kind": "null", "value": "null" },
+                { "kind": "int64", "value": 30 }
+            ]
+        },
+        "right": {
+            "name": "vals",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "values": [
+                { "kind": "int64", "value": 100 },
+                { "kind": "int64", "value": 200 },
+                { "kind": "int64", "value": 300 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping series_combine_first test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Series(_)),
+        "expected live oracle series payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
+
+    let actual = super::execute_series_combine_first_fixture_operation(&fixture)
+        .expect("series combine_first");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
