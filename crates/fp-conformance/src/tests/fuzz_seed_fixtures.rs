@@ -3574,3 +3574,9 @@ fn fuzz_rolling_window_bytes_accepts_seed_empty_seed() {
         include_bytes!("../../fixtures/adversarial/fuzz_corpus/rolling_window/seed-empty.bin");
     fuzz_rolling_window_bytes(seed).expect("seed-empty rolling_window should pass invariants");
 }
+
+#[test]
+fn fuzz_semantic_eq_bytes_accepts_seed_empty_in_corpus() {
+    let seed = include_bytes!("../../fixtures/adversarial/fuzz_corpus/semantic_eq/seed-empty.bin");
+    fuzz_semantic_eq_bytes(seed).expect("seed-empty in semantic_eq corpus should pass invariants");
+}
