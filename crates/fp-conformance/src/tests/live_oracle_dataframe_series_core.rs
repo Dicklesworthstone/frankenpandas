@@ -17494,3 +17494,133 @@ fn live_oracle_dataframe_between_time_midday() {
         .expect("between_time");
     super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_series_add_aligned() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-SERIES-ADD",
+        "case_id": "series_add_aligned",
+        "mode": "strict",
+        "operation": "series_add",
+        "oracle_source": "live_legacy_pandas",
+        "left": {
+            "name": "left",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "values": [
+                { "kind": "float64", "value": 10.0 },
+                { "kind": "float64", "value": 20.0 },
+                { "kind": "float64", "value": 30.0 }
+            ]
+        },
+        "right": {
+            "name": "right",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "values": [
+                { "kind": "float64", "value": 1.0 },
+                { "kind": "float64", "value": 2.0 },
+                { "kind": "float64", "value": 3.0 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping series_add aligned test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Series(_)),
+        "expected live oracle series payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
+
+    let left = super::build_series(fixture.left.as_ref().expect("left")).expect("left");
+    let right = super::build_series(fixture.right.as_ref().expect("right")).expect("right");
+    let policy = super::RuntimePolicy::strict();
+    let mut ledger = super::EvidenceLedger::new();
+    let result = left
+        .add_with_policy(&right, &policy, &mut ledger)
+        .expect("add");
+    super::compare_series_expected(&result, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_series_add_misaligned() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-SERIES-ADD-MISALIGN",
+        "case_id": "series_add_misaligned",
+        "mode": "strict",
+        "operation": "series_add",
+        "oracle_source": "live_legacy_pandas",
+        "left": {
+            "name": "left",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "values": [
+                { "kind": "float64", "value": 10.0 },
+                { "kind": "float64", "value": 20.0 },
+                { "kind": "float64", "value": 30.0 }
+            ]
+        },
+        "right": {
+            "name": "right",
+            "index": [
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 }
+            ],
+            "values": [
+                { "kind": "float64", "value": 100.0 },
+                { "kind": "float64", "value": 200.0 },
+                { "kind": "float64", "value": 300.0 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!(
+            "live pandas unavailable; skipping series_add misaligned test: {message}"
+        );
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Series(_)),
+        "expected live oracle series payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
+
+    let left = super::build_series(fixture.left.as_ref().expect("left")).expect("left");
+    let right = super::build_series(fixture.right.as_ref().expect("right")).expect("right");
+    let policy = super::RuntimePolicy::strict();
+    let mut ledger = super::EvidenceLedger::new();
+    let result = left
+        .add_with_policy(&right, &policy, &mut ledger)
+        .expect("add misaligned");
+    super::compare_series_expected(&result, &expected).expect("pandas parity");
+}
