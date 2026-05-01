@@ -22181,3 +22181,69 @@ fn live_oracle_series_argmax_skipna_false_with_null() {
         }
     }
 }
+
+#[test]
+fn live_oracle_dataframe_nlargest_keep_last() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DFNLARGEST-LAST",
+        "case_id": "dataframe_nlargest_keep_last",
+        "mode": "strict",
+        "operation": "dataframe_nlargest",
+        "oracle_source": "live_legacy_pandas",
+        "nlargest_n": 3,
+        "sort_column": "a",
+        "keep": "last",
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 4 }
+            ],
+            "column_order": ["a", "b"],
+            "columns": {
+                "a": [
+                    { "kind": "int64", "value": 5 },
+                    { "kind": "int64", "value": 5 },
+                    { "kind": "int64", "value": 3 },
+                    { "kind": "int64", "value": 7 },
+                    { "kind": "int64", "value": 7 }
+                ],
+                "b": [
+                    { "kind": "utf8", "value": "v" },
+                    { "kind": "utf8", "value": "w" },
+                    { "kind": "utf8", "value": "x" },
+                    { "kind": "utf8", "value": "y" },
+                    { "kind": "utf8", "value": "z" }
+                ]
+            }
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!(
+            "live pandas unavailable; skipping dataframe_nlargest keep=last: {message}"
+        );
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Frame(_)),
+        "expected live oracle frame payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Frame(expected) = expected else {
+        return;
+    };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
+    let actual = frame
+        .nlargest_keep(3, "a", "last")
+        .expect("nlargest keep=last");
+    super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
+}
