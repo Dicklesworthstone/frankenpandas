@@ -23545,3 +23545,59 @@ fn live_oracle_dataframe_value_counts_two_columns() {
     let actual = frame.value_counts().expect("value_counts");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_dataframe_take_axis0_basic() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DFTAKE",
+        "case_id": "dataframe_take_axis0_basic",
+        "mode": "strict",
+        "operation": "dataframe_take",
+        "oracle_source": "live_legacy_pandas",
+        "take_indices": [2, 0, 1],
+        "take_axis": 0,
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 100 },
+                { "kind": "int64", "value": 200 },
+                { "kind": "int64", "value": 300 }
+            ],
+            "column_order": ["a", "b"],
+            "columns": {
+                "a": [
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "int64", "value": 2 },
+                    { "kind": "int64", "value": 3 }
+                ],
+                "b": [
+                    { "kind": "float64", "value": 1.5 },
+                    { "kind": "float64", "value": 2.5 },
+                    { "kind": "float64", "value": 3.5 }
+                ]
+            }
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping dataframe_take axis0: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Frame(_)),
+        "expected live oracle frame payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Frame(expected) = expected else {
+        return;
+    };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
+    let indices = fixture.take_indices.as_ref().expect("take_indices");
+    let actual = frame.take(indices, 0).expect("take");
+    super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
+}
