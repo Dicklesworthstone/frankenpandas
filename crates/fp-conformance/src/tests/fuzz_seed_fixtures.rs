@@ -3131,3 +3131,54 @@ fn fuzz_semantic_eq_bytes_accepts_utf8_same_seed() {
     let seed = include_bytes!("../../fixtures/adversarial/fuzz_corpus/semantic_eq/utf8_same.bin");
     fuzz_semantic_eq_bytes(seed).expect("utf8_same seed should hold");
 }
+
+#[test]
+fn fuzz_parse_expr_bytes_accepts_arith_multi_seed() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/parse_expr/arith_multi.txt");
+    fuzz_parse_expr_bytes(seed).expect("arith_multi seed should parse");
+}
+
+#[test]
+fn fuzz_parse_expr_bytes_accepts_bool_or_seed() {
+    let seed = include_bytes!("../../fixtures/adversarial/fuzz_corpus/parse_expr/bool_or.txt");
+    fuzz_parse_expr_bytes(seed).expect("bool_or seed should parse");
+}
+
+#[test]
+fn fuzz_parse_expr_bytes_accepts_cmp_lte_seed() {
+    let seed = include_bytes!("../../fixtures/adversarial/fuzz_corpus/parse_expr/cmp_lte.txt");
+    fuzz_parse_expr_bytes(seed).expect("cmp_lte seed should parse");
+}
+
+#[test]
+fn fuzz_parse_expr_bytes_accepts_cmp_neq_seed() {
+    let seed = include_bytes!("../../fixtures/adversarial/fuzz_corpus/parse_expr/cmp_neq.txt");
+    fuzz_parse_expr_bytes(seed).expect("cmp_neq seed should parse");
+}
+
+#[test]
+fn fuzz_parse_expr_bytes_accepts_col_underscore_seed() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/parse_expr/col_underscore.txt");
+    fuzz_parse_expr_bytes(seed).expect("col_underscore seed should parse");
+}
+
+#[test]
+fn fuzz_parse_expr_bytes_accepts_lit_int_seed() {
+    let seed = include_bytes!("../../fixtures/adversarial/fuzz_corpus/parse_expr/lit_int.txt");
+    fuzz_parse_expr_bytes(seed).expect("lit_int seed should parse");
+}
+
+#[test]
+fn fuzz_parse_expr_bytes_accepts_lit_neg_seed() {
+    let seed = include_bytes!("../../fixtures/adversarial/fuzz_corpus/parse_expr/lit_neg.txt");
+    fuzz_parse_expr_bytes(seed).expect("lit_neg seed should parse");
+}
+
+#[test]
+fn fuzz_parse_expr_bytes_accepts_nested_paren_seed() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/parse_expr/nested_paren.txt");
+    fuzz_parse_expr_bytes(seed).expect("nested_paren seed should parse");
+}
