@@ -23016,3 +23016,79 @@ fn live_oracle_dataframe_get_dummies_two_columns() {
     let actual = frame.get_dummies(&col_refs).expect("get_dummies two cols");
     super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_dataframe_melt_with_value_vars_subset() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DFMELT-SUBSET",
+        "case_id": "dataframe_melt_with_value_vars_subset",
+        "mode": "strict",
+        "operation": "dataframe_melt",
+        "oracle_source": "live_legacy_pandas",
+        "melt_id_vars": ["id"],
+        "melt_value_vars": ["a", "c"],
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 }
+            ],
+            "column_order": ["id", "a", "b", "c"],
+            "columns": {
+                "id": [
+                    { "kind": "utf8", "value": "x" },
+                    { "kind": "utf8", "value": "y" }
+                ],
+                "a": [
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "int64", "value": 2 }
+                ],
+                "b": [
+                    { "kind": "int64", "value": 10 },
+                    { "kind": "int64", "value": 20 }
+                ],
+                "c": [
+                    { "kind": "int64", "value": 100 },
+                    { "kind": "int64", "value": 200 }
+                ]
+            }
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping dataframe_melt subset: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Frame(_)),
+        "expected live oracle frame payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Frame(expected) = expected else {
+        return;
+    };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
+    let id_vars: Vec<&str> = fixture
+        .melt_id_vars
+        .as_ref()
+        .expect("melt_id_vars")
+        .iter()
+        .map(String::as_str)
+        .collect();
+    let value_vars: Vec<&str> = fixture
+        .melt_value_vars
+        .as_ref()
+        .expect("melt_value_vars")
+        .iter()
+        .map(String::as_str)
+        .collect();
+    let actual = frame
+        .melt(&id_vars, &value_vars, None, None)
+        .expect("melt subset");
+    super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
+}
