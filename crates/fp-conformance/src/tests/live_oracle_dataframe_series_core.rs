@@ -29645,3 +29645,99 @@ fn live_oracle_series_str_replace_capture_group() {
     let actual = series.str().replace("([0-9]+)", "<\\1>").expect("replace capture");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_dataframe_explode_space_separator() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DF-EXPLODE-SP",
+        "case_id": "dataframe_explode_space_separator",
+        "mode": "strict",
+        "operation": "dataframe_explode",
+        "oracle_source": "live_legacy_pandas",
+        "explode_column": "words",
+        "string_sep": " ",
+        "ignore_index": false,
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 }
+            ],
+            "column_order": ["id", "words"],
+            "columns": {
+                "id": [
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "int64", "value": 2 }
+                ],
+                "words": [
+                    { "kind": "utf8", "value": "alpha beta gamma" },
+                    { "kind": "utf8", "value": "delta epsilon" }
+                ]
+            }
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping df explode space: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
+    let super::ResolvedExpected::Frame(expected) = expected else { return; };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
+    let actual = frame.explode_with_ignore_index("words", " ", false).expect("explode");
+    super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_dataframe_explode_colon_ignore_index() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DF-EXPLODE-COL",
+        "case_id": "dataframe_explode_colon_ignore_index",
+        "mode": "strict",
+        "operation": "dataframe_explode",
+        "oracle_source": "live_legacy_pandas",
+        "explode_column": "items",
+        "string_sep": ":",
+        "ignore_index": true,
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 5 },
+                { "kind": "int64", "value": 6 }
+            ],
+            "column_order": ["id", "items"],
+            "columns": {
+                "id": [
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "int64", "value": 2 }
+                ],
+                "items": [
+                    { "kind": "utf8", "value": "a:b:c" },
+                    { "kind": "utf8", "value": "x:y" }
+                ]
+            }
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping df explode colon: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
+    let super::ResolvedExpected::Frame(expected) = expected else { return; };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
+    let actual = frame.explode_with_ignore_index("items", ":", true).expect("explode");
+    super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
+}
