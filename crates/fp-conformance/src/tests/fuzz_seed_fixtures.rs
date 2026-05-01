@@ -2839,6 +2839,70 @@ fn fuzz_dataframe_merge_bytes_accepts_left_all_matched() {
 }
 
 #[test]
+fn fuzz_parse_expr_bytes_accepts_arith_add_seed() {
+    let seed = include_bytes!("../../fixtures/adversarial/fuzz_corpus/parse_expr/arith_add.txt");
+    fuzz_parse_expr_bytes(seed).expect("arith_add seed should parse");
+}
+
+#[test]
+fn fuzz_parse_expr_bytes_accepts_arith_chain_seed() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/parse_expr/arith_chain.txt");
+    fuzz_parse_expr_bytes(seed).expect("arith_chain seed should parse");
+}
+
+#[test]
+fn fuzz_parse_expr_bytes_accepts_arith_complex_seed() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/parse_expr/arith_complex.txt");
+    fuzz_parse_expr_bytes(seed).expect("arith_complex seed should parse");
+}
+
+#[test]
+fn fuzz_parse_expr_bytes_accepts_bool_and_seed() {
+    let seed = include_bytes!("../../fixtures/adversarial/fuzz_corpus/parse_expr/bool_and.txt");
+    fuzz_parse_expr_bytes(seed).expect("bool_and seed should parse");
+}
+
+#[test]
+fn fuzz_parse_expr_bytes_accepts_bool_combined_seed() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/parse_expr/bool_combined.txt");
+    fuzz_parse_expr_bytes(seed).expect("bool_combined seed should parse");
+}
+
+#[test]
+fn fuzz_parse_expr_bytes_accepts_bool_not_seed() {
+    let seed = include_bytes!("../../fixtures/adversarial/fuzz_corpus/parse_expr/bool_not.txt");
+    fuzz_parse_expr_bytes(seed).expect("bool_not seed should parse");
+}
+
+#[test]
+fn fuzz_parse_expr_bytes_accepts_cmp_eq_seed() {
+    let seed = include_bytes!("../../fixtures/adversarial/fuzz_corpus/parse_expr/cmp_eq.txt");
+    fuzz_parse_expr_bytes(seed).expect("cmp_eq seed should parse");
+}
+
+#[test]
+fn fuzz_parse_expr_bytes_accepts_cmp_gt_seed() {
+    let seed = include_bytes!("../../fixtures/adversarial/fuzz_corpus/parse_expr/cmp_gt.txt");
+    fuzz_parse_expr_bytes(seed).expect("cmp_gt seed should parse");
+}
+
+#[test]
+fn fuzz_parse_expr_bytes_accepts_deeply_nested_seed() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/parse_expr/deeply_nested.txt");
+    fuzz_parse_expr_bytes(seed).expect("deeply_nested seed should parse");
+}
+
+#[test]
+fn fuzz_parse_expr_bytes_accepts_lit_float_seed() {
+    let seed = include_bytes!("../../fixtures/adversarial/fuzz_corpus/parse_expr/lit_float.txt");
+    fuzz_parse_expr_bytes(seed).expect("lit_float seed should parse");
+}
+
+#[test]
 fn fuzz_parse_expr_bytes_replays_committed_corpus_seeds() {
     let seeds: &[(&str, &[u8])] = &[
         (
