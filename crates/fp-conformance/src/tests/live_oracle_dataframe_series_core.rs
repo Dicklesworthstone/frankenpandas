@@ -33557,3 +33557,89 @@ fn live_oracle_series_str_isdigit_with_unicode() {
     let actual = series.str().isdigit().expect("isdigit");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_series_str_replace_with_empty() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-STRREP-EMPTY",
+        "case_id": "series_str_replace_with_empty",
+        "mode": "strict",
+        "operation": "series_str_replace",
+        "oracle_source": "live_legacy_pandas",
+        "regex_pattern": "[aeiou]",
+        "replace_value": "",
+        "left": {
+            "name": "txt",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "values": [
+                { "kind": "utf8", "value": "hello world" },
+                { "kind": "utf8", "value": "rhythm" },
+                { "kind": "utf8", "value": "audio" }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping str replace empty: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
+    let super::ResolvedExpected::Series(expected) = expected else { return; };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let actual = series.str().replace("[aeiou]", "").expect("replace empty");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_series_str_replace_with_unicode() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-STRREP-UNI",
+        "case_id": "series_str_replace_with_unicode",
+        "mode": "strict",
+        "operation": "series_str_replace",
+        "oracle_source": "live_legacy_pandas",
+        "regex_pattern": "café",
+        "replace_value": "COFFEE",
+        "left": {
+            "name": "txt",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "values": [
+                { "kind": "utf8", "value": "I love café" },
+                { "kind": "utf8", "value": "no match here" },
+                { "kind": "utf8", "value": "two cafés" }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping str replace unicode: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
+    let super::ResolvedExpected::Series(expected) = expected else { return; };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let actual = series.str().replace("café", "COFFEE").expect("replace unicode");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
