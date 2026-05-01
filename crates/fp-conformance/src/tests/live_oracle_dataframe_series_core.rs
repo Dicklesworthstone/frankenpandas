@@ -32426,3 +32426,89 @@ fn live_oracle_dataframe_pivot_table_min() {
     let result = frame.pivot_table("val", "row", "col", "min").expect("pivot_table");
     super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_series_str_translate_no_match() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-STRTRANS-NM",
+        "case_id": "series_str_translate_no_match",
+        "mode": "strict",
+        "operation": "series_str_translate",
+        "oracle_source": "live_legacy_pandas",
+        "str_translate_from": "xyz",
+        "str_translate_to": "ABC",
+        "left": {
+            "name": "txt",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "values": [
+                { "kind": "utf8", "value": "abc" },
+                { "kind": "utf8", "value": "hello world" },
+                { "kind": "utf8", "value": "test" }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping str translate no_match: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
+    let super::ResolvedExpected::Series(expected) = expected else { return; };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let actual = series.str().translate("xyz", "ABC").expect("translate");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_series_str_translate_partial_match() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-STRTRANS-PART",
+        "case_id": "series_str_translate_partial_match",
+        "mode": "strict",
+        "operation": "series_str_translate",
+        "oracle_source": "live_legacy_pandas",
+        "str_translate_from": "aeiou",
+        "str_translate_to": "AEIOU",
+        "left": {
+            "name": "txt",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "values": [
+                { "kind": "utf8", "value": "hello world" },
+                { "kind": "utf8", "value": "rhythm" },
+                { "kind": "utf8", "value": "audio" }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping str translate partial: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
+    let super::ResolvedExpected::Series(expected) = expected else { return; };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let actual = series.str().translate("aeiou", "AEIOU").expect("translate");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
