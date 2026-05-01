@@ -1662,6 +1662,67 @@ fn fuzz_series_add_bytes_accepts_duplicate_cross_product_seed() {
 }
 
 #[test]
+fn fuzz_series_add_bytes_accepts_float_plus_inf_seed() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/series_add/float_plus_inf.bin");
+    fuzz_series_add_bytes(seed).expect("float+inf seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_series_add_bytes_accepts_float_plus_neginf_seed() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/series_add/float_plus_neginf.bin");
+    fuzz_series_add_bytes(seed).expect("float+-inf seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_series_add_bytes_accepts_float_plus_nanfloat_seed() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/series_add/float_plus_nanfloat.bin");
+    fuzz_series_add_bytes(seed).expect("float+NaN seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_series_add_bytes_accepts_zero_plus_negzero_seed() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/series_add/zero_plus_negzero.bin");
+    fuzz_series_add_bytes(seed).expect("zero+negzero seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_series_add_bytes_accepts_null_plus_int_seed() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/series_add/null_plus_int.bin");
+    fuzz_series_add_bytes(seed).expect("null+int seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_series_add_bytes_accepts_nan_plus_int_seed() {
+    let seed = include_bytes!("../../fixtures/adversarial/fuzz_corpus/series_add/nan_plus_int.bin");
+    fuzz_series_add_bytes(seed).expect("nan+int seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_series_add_bytes_accepts_int_plus_float_seed() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/series_add/int_plus_float.bin");
+    fuzz_series_add_bytes(seed).expect("int+float seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_series_add_bytes_accepts_neg_int_values_seed() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/series_add/neg_int_values.bin");
+    fuzz_series_add_bytes(seed).expect("neg_int seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_series_add_bytes_accepts_seed_empty_seed() {
+    let seed = include_bytes!("../../fixtures/adversarial/fuzz_corpus/series_add/seed-empty.bin");
+    fuzz_series_add_bytes(seed).expect("empty seed should satisfy invariants");
+}
+
+#[test]
 fn fuzz_series_add_bytes_accepts_missing_alignment_seed() {
     let seed = include_bytes!(
         "../../fixtures/adversarial/fuzz_corpus/series_add/missing_alignment_seed.bin"
