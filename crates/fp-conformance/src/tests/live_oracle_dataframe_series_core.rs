@@ -30131,3 +30131,99 @@ fn live_oracle_dataframe_round_negative_decimals() {
     let actual = frame.round(-1).expect("round");
     super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_dataframe_abs_with_negatives() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DFABS-NEG",
+        "case_id": "dataframe_abs_with_negatives",
+        "mode": "strict",
+        "operation": "dataframe_abs",
+        "oracle_source": "live_legacy_pandas",
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "column_order": ["a", "b"],
+            "columns": {
+                "a": [
+                    { "kind": "int64", "value": -10 },
+                    { "kind": "int64", "value": 0 },
+                    { "kind": "int64", "value": -25 }
+                ],
+                "b": [
+                    { "kind": "float64", "value": -1.5 },
+                    { "kind": "float64", "value": 2.5 },
+                    { "kind": "float64", "value": -3.75 }
+                ]
+            }
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping df abs neg: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
+    let super::ResolvedExpected::Frame(expected) = expected else { return; };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
+    let actual = frame.abs().expect("abs");
+    super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_dataframe_abs_with_nulls() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DFABS-NULLS",
+        "case_id": "dataframe_abs_with_nulls",
+        "mode": "strict",
+        "operation": "dataframe_abs",
+        "oracle_source": "live_legacy_pandas",
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "column_order": ["a", "b"],
+            "columns": {
+                "a": [
+                    { "kind": "float64", "value": -10.0 },
+                    { "kind": "null", "value": "na_n" },
+                    { "kind": "float64", "value": -25.0 }
+                ],
+                "b": [
+                    { "kind": "float64", "value": -1.5 },
+                    { "kind": "float64", "value": 2.5 },
+                    { "kind": "null", "value": "na_n" }
+                ]
+            }
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping df abs nulls: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
+    let super::ResolvedExpected::Frame(expected) = expected else { return; };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
+    let actual = frame.abs().expect("abs");
+    super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
+}
