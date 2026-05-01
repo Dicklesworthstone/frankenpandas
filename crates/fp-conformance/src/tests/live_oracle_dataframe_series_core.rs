@@ -15666,3 +15666,115 @@ fn live_oracle_series_str_normalize_nfc() {
         .expect("str normalize");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_series_value_counts_normalize() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-VC-NORM",
+        "case_id": "series_value_counts_normalize",
+        "mode": "strict",
+        "operation": "series_value_counts",
+        "oracle_source": "live_legacy_pandas",
+        "value_counts_normalize": true,
+        "left": {
+            "name": "fruits",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 4 }
+            ],
+            "values": [
+                { "kind": "utf8", "value": "apple" },
+                { "kind": "utf8", "value": "banana" },
+                { "kind": "utf8", "value": "apple" },
+                { "kind": "utf8", "value": "cherry" },
+                { "kind": "utf8", "value": "apple" }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!(
+            "live pandas unavailable; skipping series_value_counts normalize test: {message}"
+        );
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Series(_)),
+        "expected live oracle series payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let actual = series
+        .value_counts_with_options(true, true, false, true)
+        .expect("value_counts normalize");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_series_value_counts_ascending() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-VC-ASC",
+        "case_id": "series_value_counts_ascending",
+        "mode": "strict",
+        "operation": "series_value_counts",
+        "oracle_source": "live_legacy_pandas",
+        "sort_ascending": true,
+        "left": {
+            "name": "tags",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 4 },
+                { "kind": "int64", "value": 5 }
+            ],
+            "values": [
+                { "kind": "utf8", "value": "x" },
+                { "kind": "utf8", "value": "y" },
+                { "kind": "utf8", "value": "x" },
+                { "kind": "utf8", "value": "y" },
+                { "kind": "utf8", "value": "z" },
+                { "kind": "utf8", "value": "x" }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!(
+            "live pandas unavailable; skipping series_value_counts ascending test: {message}"
+        );
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Series(_)),
+        "expected live oracle series payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let actual = series
+        .value_counts_with_options(false, true, true, true)
+        .expect("value_counts ascending");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
