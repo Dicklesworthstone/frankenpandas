@@ -22075,3 +22075,109 @@ fn live_oracle_dataframe_clip_with_nulls() {
         .expect("clip with nulls");
     super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_series_argmin_skipna_false_with_null() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-SARGMIN-SKIPNA-F",
+        "case_id": "series_argmin_skipna_false_with_null",
+        "mode": "strict",
+        "operation": "series_argmin",
+        "oracle_source": "live_legacy_pandas",
+        "argmin_skipna": false,
+        "left": {
+            "name": "vals",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 }
+            ],
+            "values": [
+                { "kind": "float64", "value": 5.0 },
+                { "kind": "null", "value": "null" },
+                { "kind": "float64", "value": 1.0 },
+                { "kind": "float64", "value": 3.0 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping series_argmin skipna=false: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let argmin_result = series.argmin_skipna(false);
+    match (&expected, argmin_result) {
+        (super::ResolvedExpected::Scalar(expected_scalar), Ok(idx)) => {
+            let actual = super::Scalar::Int64(idx);
+            super::compare_scalar(&actual, expected_scalar, "series_argmin_skipna_false")
+                .expect("pandas parity");
+        }
+        (super::ResolvedExpected::ErrorAny | super::ResolvedExpected::ErrorContains(_), Err(_)) => {
+        }
+        (other_expected, other_actual) => {
+            panic!("argmin skipna=false outcome mismatch: actual={other_actual:?} expected={other_expected:?}")
+        }
+    }
+}
+
+#[test]
+fn live_oracle_series_argmax_skipna_false_with_null() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-SARGMAX-SKIPNA-F",
+        "case_id": "series_argmax_skipna_false_with_null",
+        "mode": "strict",
+        "operation": "series_argmax",
+        "oracle_source": "live_legacy_pandas",
+        "argmax_skipna": false,
+        "left": {
+            "name": "vals",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 }
+            ],
+            "values": [
+                { "kind": "float64", "value": 5.0 },
+                { "kind": "null", "value": "null" },
+                { "kind": "float64", "value": 9.0 },
+                { "kind": "float64", "value": 3.0 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping series_argmax skipna=false: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let argmax_result = series.argmax_skipna(false);
+    match (&expected, argmax_result) {
+        (super::ResolvedExpected::Scalar(expected_scalar), Ok(idx)) => {
+            let actual = super::Scalar::Int64(idx);
+            super::compare_scalar(&actual, expected_scalar, "series_argmax_skipna_false")
+                .expect("pandas parity");
+        }
+        (super::ResolvedExpected::ErrorAny | super::ResolvedExpected::ErrorContains(_), Err(_)) => {
+        }
+        (other_expected, other_actual) => {
+            panic!("argmax skipna=false outcome mismatch: actual={other_actual:?} expected={other_expected:?}")
+        }
+    }
+}
