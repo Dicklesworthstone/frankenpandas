@@ -33179,3 +33179,55 @@ fn live_oracle_dataframe_at_time_evening() {
     let actual = frame.at_time(fixture.time_value.as_deref().expect("time_value")).expect("at_time");
     super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_dataframe_between_time_evening() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DFBTWTIME-EVE",
+        "case_id": "dataframe_between_time_evening",
+        "mode": "strict",
+        "operation": "dataframe_between_time",
+        "oracle_source": "live_legacy_pandas",
+        "start_time": "18:00:00",
+        "end_time": "23:00:00",
+        "frame": {
+            "index": [
+                { "kind": "utf8", "value": "2024-01-01 09:00:00" },
+                { "kind": "utf8", "value": "2024-01-01 17:00:00" },
+                { "kind": "utf8", "value": "2024-01-01 19:30:00" },
+                { "kind": "utf8", "value": "2024-01-01 22:00:00" },
+                { "kind": "utf8", "value": "2024-01-02 02:00:00" }
+            ],
+            "column_order": ["a"],
+            "columns": {
+                "a": [
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "int64", "value": 2 },
+                    { "kind": "int64", "value": 3 },
+                    { "kind": "int64", "value": 4 },
+                    { "kind": "int64", "value": 5 }
+                ]
+            }
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping df between_time evening: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
+    let super::ResolvedExpected::Frame(expected) = expected else { return; };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
+    let actual = frame.between_time(
+        fixture.start_time.as_deref().expect("start_time"),
+        fixture.end_time.as_deref().expect("end_time"),
+    ).expect("between_time");
+    super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
+}
