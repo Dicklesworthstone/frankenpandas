@@ -1421,6 +1421,50 @@ fn fuzz_scalar_cast_bytes_accepts_bool_to_str_seed() {
 }
 
 #[test]
+fn fuzz_scalar_cast_bytes_accepts_utf8_to_int_seed() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/scalar_cast/utf8_to_int.bin");
+    fuzz_scalar_cast_bytes(seed).expect("utf8->int seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_scalar_cast_bytes_accepts_nat_to_int_seed() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/scalar_cast/nat_to_int.bin");
+    fuzz_scalar_cast_bytes(seed).expect("nat->int seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_scalar_cast_bytes_accepts_bool_false_to_int_seed() {
+    let seed = include_bytes!(
+        "../../fixtures/adversarial/fuzz_corpus/scalar_cast/bool_false_to_int.bin"
+    );
+    fuzz_scalar_cast_bytes(seed).expect("bool false->int seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_scalar_cast_bytes_accepts_neg_inf_to_str_seed() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/scalar_cast/neg_inf_to_str.bin");
+    fuzz_scalar_cast_bytes(seed).expect("neg_inf->str seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_scalar_cast_bytes_accepts_int_max_to_str_seed() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/scalar_cast/int_max_to_str.bin");
+    fuzz_scalar_cast_bytes(seed).expect("int_max->str seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_scalar_cast_bytes_accepts_empty_utf8_to_int_seed() {
+    let seed = include_bytes!(
+        "../../fixtures/adversarial/fuzz_corpus/scalar_cast/empty_utf8_to_int.bin"
+    );
+    fuzz_scalar_cast_bytes(seed).expect("empty utf8->int seed should satisfy invariants");
+}
+
+#[test]
 fn fuzz_scalar_cast_bytes_replays_committed_corpus_seeds() {
     let corpus: &[(&str, &[u8])] = &[
         (
