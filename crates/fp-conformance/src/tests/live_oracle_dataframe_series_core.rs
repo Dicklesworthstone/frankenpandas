@@ -18427,3 +18427,69 @@ fn live_oracle_series_str_contains_any_two_patterns() {
     let actual = series.str().contains_any(&pats).expect("str contains_any");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_series_map_int_to_string() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-SMAP",
+        "case_id": "series_map_int_to_string",
+        "mode": "strict",
+        "operation": "series_map",
+        "oracle_source": "live_legacy_pandas",
+        "replace_to_find": [
+            { "kind": "int64", "value": 1 },
+            { "kind": "int64", "value": 2 },
+            { "kind": "int64", "value": 3 }
+        ],
+        "replace_to_value": [
+            { "kind": "utf8", "value": "one" },
+            { "kind": "utf8", "value": "two" },
+            { "kind": "utf8", "value": "three" }
+        ],
+        "left": {
+            "name": "vals",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 }
+            ],
+            "values": [
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 99 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping series_map test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Series(_)),
+        "expected live oracle series payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let mapping: Vec<(super::Scalar, super::Scalar)> = fixture
+        .replace_to_find
+        .as_ref()
+        .expect("replace_to_find")
+        .iter()
+        .zip(fixture.replace_to_value.as_ref().expect("replace_to_value").iter())
+        .map(|(f, v)| (f.clone(), v.clone()))
+        .collect();
+    let actual = series.map(&mapping).expect("series map");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
