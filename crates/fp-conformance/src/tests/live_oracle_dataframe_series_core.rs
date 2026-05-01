@@ -33089,3 +33089,47 @@ fn live_oracle_series_to_datetime_unit_minutes() {
     ).expect("to_datetime");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_series_str_split_count_pipe_separator() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-STRSPCNT-PIPE",
+        "case_id": "series_str_split_count_pipe_separator",
+        "mode": "strict",
+        "operation": "series_str_split_count",
+        "oracle_source": "live_legacy_pandas",
+        "str_split_pat": "|",
+        "left": {
+            "name": "txt",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 }
+            ],
+            "values": [
+                { "kind": "utf8", "value": "a|b|c|d|e" },
+                { "kind": "utf8", "value": "single" },
+                { "kind": "utf8", "value": "" },
+                { "kind": "utf8", "value": "x|y" }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping str split_count pipe: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
+    let super::ResolvedExpected::Series(expected) = expected else { return; };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let actual = series.str().split_count("|").expect("split_count");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
