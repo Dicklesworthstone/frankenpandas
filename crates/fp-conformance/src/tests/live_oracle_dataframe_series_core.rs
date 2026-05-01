@@ -21685,3 +21685,97 @@ fn live_oracle_dataframe_set_index_verify_integrity_unique() {
         .expect("set_index verify_integrity");
     super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_series_shift_zero_periods() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-SSHIFT-ZERO",
+        "case_id": "series_shift_zero_periods",
+        "mode": "strict",
+        "operation": "series_shift",
+        "oracle_source": "live_legacy_pandas",
+        "shift_periods": 0,
+        "left": {
+            "name": "vals",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "values": [
+                { "kind": "float64", "value": 1.0 },
+                { "kind": "float64", "value": 2.0 },
+                { "kind": "float64", "value": 3.0 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping series_shift zero test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Series(_)),
+        "expected live oracle series payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let actual = series.shift(0).expect("shift 0");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_series_shift_periods_larger_than_length() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-SSHIFT-LARGE",
+        "case_id": "series_shift_periods_larger_than_length",
+        "mode": "strict",
+        "operation": "series_shift",
+        "oracle_source": "live_legacy_pandas",
+        "shift_periods": 5,
+        "left": {
+            "name": "vals",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "values": [
+                { "kind": "float64", "value": 10.0 },
+                { "kind": "float64", "value": 20.0 },
+                { "kind": "float64", "value": 30.0 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping series_shift large test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Series(_)),
+        "expected live oracle series payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let actual = series.shift(5).expect("shift large");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
