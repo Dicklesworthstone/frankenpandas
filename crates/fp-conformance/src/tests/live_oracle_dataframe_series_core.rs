@@ -25546,3 +25546,141 @@ fn live_oracle_dataframe_cov_with_nulls() {
     let result = frame.cov().expect("cov");
     super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_dataframe_pivot_table_mean() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DF-PIVOTTBL-MEAN",
+        "case_id": "dataframe_pivot_table_mean",
+        "mode": "strict",
+        "operation": "dataframe_pivot_table",
+        "oracle_source": "live_legacy_pandas",
+        "pivot_index": "row",
+        "pivot_columns": "col",
+        "pivot_values": ["val"],
+        "pivot_aggfunc": "mean",
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 4 },
+                { "kind": "int64", "value": 5 }
+            ],
+            "column_order": ["row", "col", "val"],
+            "columns": {
+                "row": [
+                    { "kind": "utf8", "value": "r1" },
+                    { "kind": "utf8", "value": "r1" },
+                    { "kind": "utf8", "value": "r1" },
+                    { "kind": "utf8", "value": "r2" },
+                    { "kind": "utf8", "value": "r2" },
+                    { "kind": "utf8", "value": "r2" }
+                ],
+                "col": [
+                    { "kind": "utf8", "value": "c1" },
+                    { "kind": "utf8", "value": "c1" },
+                    { "kind": "utf8", "value": "c2" },
+                    { "kind": "utf8", "value": "c1" },
+                    { "kind": "utf8", "value": "c2" },
+                    { "kind": "utf8", "value": "c2" }
+                ],
+                "val": [
+                    { "kind": "float64", "value": 1.0 },
+                    { "kind": "float64", "value": 3.0 },
+                    { "kind": "float64", "value": 5.0 },
+                    { "kind": "float64", "value": 2.0 },
+                    { "kind": "float64", "value": 4.0 },
+                    { "kind": "float64", "value": 6.0 }
+                ]
+            }
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping pivot_table mean: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
+    let super::ResolvedExpected::Frame(expected_frame) = expected else { return; };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
+    let result = frame.pivot_table("val", "row", "col", "mean").expect("pivot_table");
+    super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_dataframe_pivot_table_sum() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DF-PIVOTTBL-SUM",
+        "case_id": "dataframe_pivot_table_sum",
+        "mode": "strict",
+        "operation": "dataframe_pivot_table",
+        "oracle_source": "live_legacy_pandas",
+        "pivot_index": "row",
+        "pivot_columns": "col",
+        "pivot_values": ["val"],
+        "pivot_aggfunc": "sum",
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 4 },
+                { "kind": "int64", "value": 5 }
+            ],
+            "column_order": ["row", "col", "val"],
+            "columns": {
+                "row": [
+                    { "kind": "utf8", "value": "r1" },
+                    { "kind": "utf8", "value": "r1" },
+                    { "kind": "utf8", "value": "r1" },
+                    { "kind": "utf8", "value": "r2" },
+                    { "kind": "utf8", "value": "r2" },
+                    { "kind": "utf8", "value": "r2" }
+                ],
+                "col": [
+                    { "kind": "utf8", "value": "c1" },
+                    { "kind": "utf8", "value": "c1" },
+                    { "kind": "utf8", "value": "c2" },
+                    { "kind": "utf8", "value": "c1" },
+                    { "kind": "utf8", "value": "c2" },
+                    { "kind": "utf8", "value": "c2" }
+                ],
+                "val": [
+                    { "kind": "float64", "value": 1.0 },
+                    { "kind": "float64", "value": 3.0 },
+                    { "kind": "float64", "value": 5.0 },
+                    { "kind": "float64", "value": 2.0 },
+                    { "kind": "float64", "value": 4.0 },
+                    { "kind": "float64", "value": 6.0 }
+                ]
+            }
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping pivot_table sum: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
+    let super::ResolvedExpected::Frame(expected_frame) = expected else { return; };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
+    let result = frame.pivot_table("val", "row", "col", "sum").expect("pivot_table");
+    super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
+}
