@@ -31489,3 +31489,46 @@ fn live_oracle_series_str_count_complex_pattern() {
     let actual = series.str().count("[0-9]{2,}").expect("count");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_series_str_split_regex_get_index_2() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-STRSPLREG-2",
+        "case_id": "series_str_split_regex_get_index_2",
+        "mode": "strict",
+        "operation": "series_str_split_regex_get",
+        "oracle_source": "live_legacy_pandas",
+        "regex_pattern": "[\\s,;]+",
+        "str_split_n": 2,
+        "left": {
+            "name": "txt",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "values": [
+                { "kind": "utf8", "value": "alpha;beta gamma,delta" },
+                { "kind": "utf8", "value": "single" },
+                { "kind": "utf8", "value": "x y z" }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping str split_regex_get index 2: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
+    let super::ResolvedExpected::Series(expected) = expected else { return; };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let actual = series.str().split_regex_get("[\\s,;]+", 2).expect("split_regex_get");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
