@@ -32063,3 +32063,52 @@ fn live_oracle_series_to_arrow_round_trip_bool() {
     .expect("series_from_arrow_array");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_dataframe_to_json_records_with_floats() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DFTOJSON-FLOAT",
+        "case_id": "dataframe_to_json_records_with_floats",
+        "mode": "strict",
+        "operation": "dataframe_to_json_records",
+        "oracle_source": "live_legacy_pandas",
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "column_order": ["a", "b"],
+            "columns": {
+                "a": [
+                    { "kind": "float64", "value": 1.5 },
+                    { "kind": "float64", "value": 2.5 },
+                    { "kind": "float64", "value": 3.5 }
+                ],
+                "b": [
+                    { "kind": "int64", "value": 100 },
+                    { "kind": "int64", "value": 200 },
+                    { "kind": "int64", "value": 300 }
+                ]
+            }
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping df to_json floats: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Scalar(_)));
+    let super::ResolvedExpected::Scalar(expected) = expected else { return; };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
+    let json = frame.to_json("records").expect("to_json");
+    let actual = super::Scalar::Utf8(json);
+    super::compare_scalar(&actual, &expected, "dataframe_to_json_records").expect("pandas parity");
+}
