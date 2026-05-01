@@ -31273,3 +31273,51 @@ fn live_oracle_dataframe_notnull_with_three_nulls() {
     let result = frame.notnull().expect("notnull");
     super::compare_dataframe_expected(&result, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_series_value_counts_dropna_false() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-VC-DROPNA-F",
+        "case_id": "series_value_counts_dropna_false",
+        "mode": "strict",
+        "operation": "series_value_counts",
+        "oracle_source": "live_legacy_pandas",
+        "value_counts_dropna": false,
+        "left": {
+            "name": "fruits",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 4 },
+                { "kind": "int64", "value": 5 }
+            ],
+            "values": [
+                { "kind": "utf8", "value": "apple" },
+                { "kind": "utf8", "value": "banana" },
+                { "kind": "null", "value": "null" },
+                { "kind": "utf8", "value": "apple" },
+                { "kind": "null", "value": "null" },
+                { "kind": "utf8", "value": "banana" }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping value_counts dropna=false: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
+    let super::ResolvedExpected::Series(expected) = expected else { return; };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let actual = series.value_counts_with_options(false, true, false, false).expect("value_counts dropna=false");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
