@@ -20823,3 +20823,106 @@ fn live_oracle_series_to_arrow_round_trip_string() {
     .expect("series_from_arrow_array");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_series_to_timedelta_strings() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-STOTD",
+        "case_id": "series_to_timedelta_strings",
+        "mode": "strict",
+        "operation": "series_to_timedelta",
+        "oracle_source": "live_legacy_pandas",
+        "left": {
+            "name": "td",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "values": [
+                { "kind": "utf8", "value": "1 day" },
+                { "kind": "utf8", "value": "2 hours" },
+                { "kind": "utf8", "value": "30 minutes" }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping series_to_timedelta test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Series(_)),
+        "expected live oracle series payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let actual = fp_frame::to_timedelta(&series).expect("to_timedelta");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_series_to_datetime_unit_milliseconds() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-STODT-MS",
+        "case_id": "series_to_datetime_unit_milliseconds",
+        "mode": "strict",
+        "operation": "series_to_datetime",
+        "oracle_source": "live_legacy_pandas",
+        "datetime_unit": "ms",
+        "left": {
+            "name": "ts",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "values": [
+                { "kind": "int64", "value": 1000 },
+                { "kind": "int64", "value": 60000 },
+                { "kind": "int64", "value": 3600000 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping series_to_datetime test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Series(_)),
+        "expected live oracle series payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let actual = fp_frame::to_datetime_with_options(
+        &series,
+        fp_frame::ToDatetimeOptions {
+            format: None,
+            unit: fixture.datetime_unit.as_deref(),
+            utc: false,
+            origin: None,
+            infer_mixed_timezone: true,
+        },
+    )
+    .expect("to_datetime");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
