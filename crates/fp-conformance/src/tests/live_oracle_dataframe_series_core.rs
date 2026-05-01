@@ -17272,3 +17272,107 @@ fn live_oracle_dataframe_memory_usage_with_index() {
         .expect("memory_usage");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_dataframe_round_decimals_2() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DFROUND",
+        "case_id": "dataframe_round_decimals_2",
+        "mode": "strict",
+        "operation": "dataframe_round",
+        "oracle_source": "live_legacy_pandas",
+        "round_decimals": 2,
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "column_order": ["a", "b"],
+            "columns": {
+                "a": [
+                    { "kind": "float64", "value": 1.23456 },
+                    { "kind": "float64", "value": 2.71828 },
+                    { "kind": "float64", "value": -1.55555 }
+                ],
+                "b": [
+                    { "kind": "float64", "value": 100.987 },
+                    { "kind": "float64", "value": 0.001 },
+                    { "kind": "float64", "value": 99.9999 }
+                ]
+            }
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping dataframe_round test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Frame(_)),
+        "expected live oracle frame payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Frame(expected) = expected else {
+        return;
+    };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
+    let actual = frame
+        .round(fixture.round_decimals.unwrap_or(0))
+        .expect("round");
+    super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_dataframe_stack_basic() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DFSTACK",
+        "case_id": "dataframe_stack_basic",
+        "mode": "strict",
+        "operation": "dataframe_stack",
+        "oracle_source": "live_legacy_pandas",
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 }
+            ],
+            "column_order": ["a", "b"],
+            "columns": {
+                "a": [
+                    { "kind": "int64", "value": 10 },
+                    { "kind": "int64", "value": 20 }
+                ],
+                "b": [
+                    { "kind": "int64", "value": 30 },
+                    { "kind": "int64", "value": 40 }
+                ]
+            }
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping dataframe_stack test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
+    let actual = frame.stack().expect("stack");
+    match expected {
+        super::ResolvedExpected::Frame(expected) => {
+            super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
+        }
+        other => panic!("expected Frame oracle payload, got {other:?}"),
+    }
+}
