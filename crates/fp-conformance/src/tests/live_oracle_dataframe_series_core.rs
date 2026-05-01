@@ -24195,3 +24195,58 @@ fn live_oracle_dataframe_mode_int_columns() {
     let actual = frame.mode().expect("mode");
     super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_dataframe_replace_int_to_null() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DFREPLACE-NULL",
+        "case_id": "dataframe_replace_int_to_null",
+        "mode": "strict",
+        "operation": "dataframe_replace",
+        "oracle_source": "live_legacy_pandas",
+        "replace_to_find": [
+            { "kind": "int64", "value": 99 }
+        ],
+        "replace_to_value": [
+            { "kind": "null", "value": "null" }
+        ],
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 }
+            ],
+            "column_order": ["a"],
+            "columns": {
+                "a": [
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "int64", "value": 99 },
+                    { "kind": "int64", "value": 3 },
+                    { "kind": "int64", "value": 99 }
+                ]
+            }
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping dataframe_replace null: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Frame(_)),
+        "expected live oracle frame payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Frame(expected) = expected else {
+        return;
+    };
+
+    let actual = super::execute_dataframe_fixture_operation(&fixture).expect("replace null");
+    super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
+}
