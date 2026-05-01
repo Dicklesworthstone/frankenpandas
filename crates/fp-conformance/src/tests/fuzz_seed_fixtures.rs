@@ -3543,3 +3543,27 @@ fn fuzz_series_add_bytes_accepts_string_idx_labels_seed() {
     );
     fuzz_series_add_bytes(seed).expect("string_idx_labels seed should satisfy invariants");
 }
+
+#[test]
+fn fuzz_parse_expr_bytes_accepts_empty_seed() {
+    let seed = include_bytes!("../../fixtures/adversarial/fuzz_corpus/parse_expr/empty");
+    fuzz_parse_expr_bytes(seed).expect("empty seed should pass invariants");
+}
+
+#[test]
+fn fuzz_parse_expr_bytes_accepts_paren_cmp_seed() {
+    let seed = include_bytes!("../../fixtures/adversarial/fuzz_corpus/parse_expr/paren_cmp");
+    fuzz_parse_expr_bytes(seed).expect("paren_cmp seed should pass invariants");
+}
+
+#[test]
+fn fuzz_parse_expr_bytes_accepts_simple_expr_seed() {
+    let seed = include_bytes!("../../fixtures/adversarial/fuzz_corpus/parse_expr/simple_expr");
+    fuzz_parse_expr_bytes(seed).expect("simple_expr seed should pass invariants");
+}
+
+#[test]
+fn fuzz_parse_expr_bytes_accepts_valid_ident_seed() {
+    let seed = include_bytes!("../../fixtures/adversarial/fuzz_corpus/parse_expr/valid_ident");
+    fuzz_parse_expr_bytes(seed).expect("valid_ident seed should pass invariants");
+}
