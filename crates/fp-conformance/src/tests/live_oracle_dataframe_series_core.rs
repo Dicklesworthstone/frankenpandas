@@ -19545,3 +19545,125 @@ fn live_oracle_series_str_endswith_suffix() {
         .expect("str endswith");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_series_str_startswith_any_prefixes() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-STARTSWITHANY",
+        "case_id": "series_str_startswith_any_prefixes",
+        "mode": "strict",
+        "operation": "series_str_startswith_any",
+        "oracle_source": "live_legacy_pandas",
+        "str_patterns": ["http://", "https://"],
+        "left": {
+            "name": "url",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 }
+            ],
+            "values": [
+                { "kind": "utf8", "value": "http://example.com" },
+                { "kind": "utf8", "value": "https://secure.io" },
+                { "kind": "utf8", "value": "ftp://files.org" },
+                { "kind": "utf8", "value": "" }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!(
+            "live pandas unavailable; skipping series_str_startswith_any test: {message}"
+        );
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Series(_)),
+        "expected live oracle series payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let pats: Vec<&str> = fixture
+        .str_patterns
+        .as_ref()
+        .expect("str_patterns")
+        .iter()
+        .map(String::as_str)
+        .collect();
+    let actual = series
+        .str()
+        .startswith_any(&pats)
+        .expect("str startswith_any");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_series_str_endswith_any_extensions() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-ENDSWITHANY",
+        "case_id": "series_str_endswith_any_extensions",
+        "mode": "strict",
+        "operation": "series_str_endswith_any",
+        "oracle_source": "live_legacy_pandas",
+        "str_patterns": [".csv", ".json"],
+        "left": {
+            "name": "filename",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 }
+            ],
+            "values": [
+                { "kind": "utf8", "value": "data.csv" },
+                { "kind": "utf8", "value": "config.json" },
+                { "kind": "utf8", "value": "report.txt" },
+                { "kind": "utf8", "value": "logs.csv" }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!(
+            "live pandas unavailable; skipping series_str_endswith_any test: {message}"
+        );
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Series(_)),
+        "expected live oracle series payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let pats: Vec<&str> = fixture
+        .str_patterns
+        .as_ref()
+        .expect("str_patterns")
+        .iter()
+        .map(String::as_str)
+        .collect();
+    let actual = series
+        .str()
+        .endswith_any(&pats)
+        .expect("str endswith_any");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
