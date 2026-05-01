@@ -31177,3 +31177,99 @@ fn live_oracle_series_categorical_from_codes_basic() {
     let actual = categorical.cat().expect("cat").to_values().expect("to_values");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_dataframe_isnull_with_three_nulls() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DF-ISNULL-EXT",
+        "case_id": "dataframe_isnull_with_three_nulls",
+        "mode": "strict",
+        "operation": "dataframe_isnull",
+        "oracle_source": "live_legacy_pandas",
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "column_order": ["a", "b"],
+            "columns": {
+                "a": [
+                    { "kind": "float64", "value": 1.0 },
+                    { "kind": "null", "value": "na_n" },
+                    { "kind": "float64", "value": 3.0 }
+                ],
+                "b": [
+                    { "kind": "null", "value": "na_n" },
+                    { "kind": "float64", "value": 2.5 },
+                    { "kind": "null", "value": "na_n" }
+                ]
+            }
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping isnull extended: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
+    let super::ResolvedExpected::Frame(expected) = expected else { return; };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
+    let result = frame.isnull().expect("isnull");
+    super::compare_dataframe_expected(&result, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_dataframe_notnull_with_three_nulls() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DF-NOTNULL-EXT",
+        "case_id": "dataframe_notnull_with_three_nulls",
+        "mode": "strict",
+        "operation": "dataframe_notnull",
+        "oracle_source": "live_legacy_pandas",
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "column_order": ["a", "b"],
+            "columns": {
+                "a": [
+                    { "kind": "float64", "value": 1.0 },
+                    { "kind": "null", "value": "na_n" },
+                    { "kind": "float64", "value": 3.0 }
+                ],
+                "b": [
+                    { "kind": "null", "value": "na_n" },
+                    { "kind": "float64", "value": 2.5 },
+                    { "kind": "null", "value": "na_n" }
+                ]
+            }
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping notnull extended: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
+    let super::ResolvedExpected::Frame(expected) = expected else { return; };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
+    let result = frame.notnull().expect("notnull");
+    super::compare_dataframe_expected(&result, &expected).expect("pandas parity");
+}
