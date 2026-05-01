@@ -16437,3 +16437,113 @@ fn live_oracle_series_str_rfind_substring() {
         .expect("str rfind");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_series_str_expandtabs_size4() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-EXPANDTABS",
+        "case_id": "series_str_expandtabs_size4",
+        "mode": "strict",
+        "operation": "series_str_expandtabs",
+        "oracle_source": "live_legacy_pandas",
+        "str_expandtabs_size": 4,
+        "left": {
+            "name": "txt",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "values": [
+                { "kind": "utf8", "value": "a\tb\tc" },
+                { "kind": "utf8", "value": "no tabs" },
+                { "kind": "utf8", "value": "x\ty" }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping series_str_expandtabs test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Series(_)),
+        "expected live oracle series payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let actual = series
+        .str()
+        .expandtabs(fixture.str_expandtabs_size.unwrap_or(8))
+        .expect("str expandtabs");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_series_str_index_of_substring() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-STRINDEXOF",
+        "case_id": "series_str_index_of_substring",
+        "mode": "strict",
+        "operation": "series_str_index_of",
+        "oracle_source": "live_legacy_pandas",
+        "str_sub": "cat",
+        "left": {
+            "name": "txt",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "values": [
+                { "kind": "utf8", "value": "concatenate" },
+                { "kind": "utf8", "value": "the cat sat" },
+                { "kind": "utf8", "value": "no animals here" }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!(
+            "live pandas unavailable; skipping series_str_index_of test: {message}"
+        );
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    let outcome = match &expected {
+        super::ResolvedExpected::Series(_) | super::ResolvedExpected::ErrorAny => {}
+        super::ResolvedExpected::ErrorContains(_) => {}
+        _ => panic!("unexpected oracle expected payload: {expected:?}"),
+    };
+    let _ = outcome;
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let actual = series
+        .str()
+        .index_of(fixture.str_sub.as_deref().expect("str_sub"));
+    match (actual, expected) {
+        (Ok(actual_series), super::ResolvedExpected::Series(expected_series)) => {
+            super::compare_series_expected(&actual_series, &expected_series)
+                .expect("pandas parity");
+        }
+        (Err(_), super::ResolvedExpected::ErrorAny | super::ResolvedExpected::ErrorContains(_)) => {
+        }
+        (actual_outcome, expected_outcome) => panic!(
+            "outcome mismatch: actual={actual_outcome:?} expected={expected_outcome:?}"
+        ),
+    }
+}
