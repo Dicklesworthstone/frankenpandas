@@ -1106,6 +1106,62 @@ fn fuzz_dataframe_eval_bytes_replays_committed_corpus_seeds() {
 }
 
 #[test]
+fn fuzz_query_str_bytes_accepts_arith_cmp_seed_fixture() {
+    let seed = include_bytes!("../../fixtures/adversarial/fuzz_corpus/query_str/arith_cmp.bin");
+    fuzz_query_str_bytes(seed).expect("arith_cmp query seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_query_str_bytes_accepts_arith_mul_cmp_seed_fixture() {
+    let seed = include_bytes!(
+        "../../fixtures/adversarial/fuzz_corpus/query_str/arith_mul_cmp.bin"
+    );
+    fuzz_query_str_bytes(seed).expect("arith_mul_cmp query seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_query_str_bytes_accepts_arith_sub_cmp_seed_fixture() {
+    let seed = include_bytes!(
+        "../../fixtures/adversarial/fuzz_corpus/query_str/arith_sub_cmp.bin"
+    );
+    fuzz_query_str_bytes(seed).expect("arith_sub_cmp query seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_query_str_bytes_accepts_bool_and_seed_fixture() {
+    let seed = include_bytes!("../../fixtures/adversarial/fuzz_corpus/query_str/bool_and.bin");
+    fuzz_query_str_bytes(seed).expect("bool_and query seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_query_str_bytes_accepts_bool_not_seed_fixture() {
+    let seed = include_bytes!("../../fixtures/adversarial/fuzz_corpus/query_str/bool_not.bin");
+    fuzz_query_str_bytes(seed).expect("bool_not query seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_query_str_bytes_accepts_bool_or_seed_fixture() {
+    let seed = include_bytes!("../../fixtures/adversarial/fuzz_corpus/query_str/bool_or.bin");
+    fuzz_query_str_bytes(seed).expect("bool_or query seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_query_str_bytes_accepts_bool_paren_and_seed_fixture() {
+    let seed = include_bytes!(
+        "../../fixtures/adversarial/fuzz_corpus/query_str/bool_paren_and.bin"
+    );
+    fuzz_query_str_bytes(seed).expect("bool_paren_and query seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_query_str_bytes_accepts_bool_paren_or_seed_fixture() {
+    let seed = include_bytes!(
+        "../../fixtures/adversarial/fuzz_corpus/query_str/bool_paren_or.bin"
+    );
+    fuzz_query_str_bytes(seed).expect("bool_paren_or query seed should satisfy invariants");
+}
+
+#[test]
 fn fuzz_query_str_bytes_replays_committed_corpus_seeds() {
     let seeds: &[(&str, &[u8])] = &[
         (
