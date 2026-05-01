@@ -15242,3 +15242,107 @@ fn live_oracle_series_qcut_four_quantiles() {
         super::qcut(&series, fixture.qcut_quantiles.expect("qcut_quantiles")).expect("series qcut");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_series_repeat_uniform() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-REPEAT",
+        "case_id": "series_repeat_uniform",
+        "mode": "strict",
+        "operation": "series_repeat",
+        "oracle_source": "live_legacy_pandas",
+        "repeat_n": 3,
+        "left": {
+            "name": "vals",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "values": [
+                { "kind": "int64", "value": 7 },
+                { "kind": "int64", "value": 8 },
+                { "kind": "int64", "value": 9 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping series_repeat test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Series(_)),
+        "expected live oracle series payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let counts = vec![3usize; series.len()];
+    let actual = series.repeat_by(&counts).expect("repeat");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_series_repeat_per_element() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-REPEAT-MIXED",
+        "case_id": "series_repeat_per_element",
+        "mode": "strict",
+        "operation": "series_repeat",
+        "oracle_source": "live_legacy_pandas",
+        "repeat_counts": [0, 2, 1, 3],
+        "left": {
+            "name": "letters",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 }
+            ],
+            "values": [
+                { "kind": "utf8", "value": "a" },
+                { "kind": "utf8", "value": "b" },
+                { "kind": "utf8", "value": "c" },
+                { "kind": "utf8", "value": "d" }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping series_repeat per-element test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Series(_)),
+        "expected live oracle series payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let counts: Vec<usize> = fixture
+        .repeat_counts
+        .as_ref()
+        .expect("repeat_counts")
+        .iter()
+        .map(|c| usize::try_from(*c).expect("non-negative"))
+        .collect();
+    let actual = series.repeat_by(&counts).expect("repeat");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
