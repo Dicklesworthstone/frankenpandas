@@ -22905,3 +22905,51 @@ fn live_oracle_nan_var_basic() {
     let actual = super::nanvar(&left.values, 1);
     super::compare_scalar(&actual, &expected, "nan_var").expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_series_argsort_strings_ascending() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-SARGSORT-STR",
+        "case_id": "series_argsort_strings_ascending",
+        "mode": "strict",
+        "operation": "series_argsort",
+        "oracle_source": "live_legacy_pandas",
+        "left": {
+            "name": "vals",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 }
+            ],
+            "values": [
+                { "kind": "utf8", "value": "banana" },
+                { "kind": "utf8", "value": "apple" },
+                { "kind": "utf8", "value": "cherry" },
+                { "kind": "utf8", "value": "apricot" }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping series_argsort strings: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Series(_)),
+        "expected live oracle series payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let actual = series.argsort(true).expect("argsort strings");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
