@@ -3471,3 +3471,75 @@ fn fuzz_query_str_bytes_accepts_null_frame_seed_fixture() {
     let seed = include_bytes!("../../fixtures/adversarial/fuzz_corpus/query_str/null_frame.bin");
     fuzz_query_str_bytes(seed).expect("null_frame seed should satisfy invariants");
 }
+
+#[test]
+fn fuzz_series_add_bytes_accepts_all_nans_left_seed() {
+    let seed = include_bytes!(
+        "../../fixtures/adversarial/fuzz_corpus/series_add/all_nans_left.bin"
+    );
+    fuzz_series_add_bytes(seed).expect("all_nans_left seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_series_add_bytes_accepts_all_nulls_left_seed() {
+    let seed = include_bytes!(
+        "../../fixtures/adversarial/fuzz_corpus/series_add/all_nulls_left.bin"
+    );
+    fuzz_series_add_bytes(seed).expect("all_nulls_left seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_series_add_bytes_accepts_dup_labels_same_seed() {
+    let seed = include_bytes!(
+        "../../fixtures/adversarial/fuzz_corpus/series_add/dup_labels_same.bin"
+    );
+    fuzz_series_add_bytes(seed).expect("dup_labels_same seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_series_add_bytes_accepts_large_plus_small_seed() {
+    let seed = include_bytes!(
+        "../../fixtures/adversarial/fuzz_corpus/series_add/large_plus_small.bin"
+    );
+    fuzz_series_add_bytes(seed).expect("large_plus_small seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_series_add_bytes_accepts_mixed_types_both_seed() {
+    let seed = include_bytes!(
+        "../../fixtures/adversarial/fuzz_corpus/series_add/mixed_types_both.bin"
+    );
+    fuzz_series_add_bytes(seed).expect("mixed_types_both seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_series_add_bytes_accepts_multi_overlap_nulls_seed() {
+    let seed = include_bytes!(
+        "../../fixtures/adversarial/fuzz_corpus/series_add/multi_overlap_nulls.bin"
+    );
+    fuzz_series_add_bytes(seed).expect("multi_overlap_nulls seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_series_add_bytes_accepts_single_diff_idx_int_seed() {
+    let seed = include_bytes!(
+        "../../fixtures/adversarial/fuzz_corpus/series_add/single_diff_idx_int.bin"
+    );
+    fuzz_series_add_bytes(seed).expect("single_diff_idx_int seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_series_add_bytes_accepts_single_same_idx_int_seed() {
+    let seed = include_bytes!(
+        "../../fixtures/adversarial/fuzz_corpus/series_add/single_same_idx_int.bin"
+    );
+    fuzz_series_add_bytes(seed).expect("single_same_idx_int seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_series_add_bytes_accepts_string_idx_labels_seed() {
+    let seed = include_bytes!(
+        "../../fixtures/adversarial/fuzz_corpus/series_add/string_idx_labels.bin"
+    );
+    fuzz_series_add_bytes(seed).expect("string_idx_labels seed should satisfy invariants");
+}
