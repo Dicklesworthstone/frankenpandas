@@ -3244,3 +3244,73 @@ fn fuzz_query_str_bytes_accepts_float_cmp_seed_fixture() {
     let seed = include_bytes!("../../fixtures/adversarial/fuzz_corpus/query_str/float_cmp.bin");
     fuzz_query_str_bytes(seed).expect("float_cmp seed should satisfy invariants");
 }
+
+#[test]
+fn fuzz_dataframe_eval_bytes_accepts_cmp_gte_seed_fixture() {
+    let seed = include_bytes!("../../fixtures/adversarial/fuzz_corpus/dataframe_eval/cmp_gte.bin");
+    fuzz_dataframe_eval_bytes(seed).expect("cmp_gte eval seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_dataframe_eval_bytes_accepts_cmp_lt_seed_fixture() {
+    let seed = include_bytes!("../../fixtures/adversarial/fuzz_corpus/dataframe_eval/cmp_lt.bin");
+    fuzz_dataframe_eval_bytes(seed).expect("cmp_lt eval seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_dataframe_eval_bytes_accepts_cmp_lte_seed_fixture() {
+    let seed = include_bytes!("../../fixtures/adversarial/fuzz_corpus/dataframe_eval/cmp_lte.bin");
+    fuzz_dataframe_eval_bytes(seed).expect("cmp_lte eval seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_dataframe_eval_bytes_accepts_cmp_neq_seed_fixture() {
+    let seed = include_bytes!("../../fixtures/adversarial/fuzz_corpus/dataframe_eval/cmp_neq.bin");
+    fuzz_dataframe_eval_bytes(seed).expect("cmp_neq eval seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_dataframe_eval_bytes_accepts_col_plus_literal_seed_fixture() {
+    let seed = include_bytes!(
+        "../../fixtures/adversarial/fuzz_corpus/dataframe_eval/col_plus_literal.bin"
+    );
+    fuzz_dataframe_eval_bytes(seed)
+        .expect("col_plus_literal eval seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_dataframe_eval_bytes_accepts_col_times_literal_seed_fixture() {
+    let seed = include_bytes!(
+        "../../fixtures/adversarial/fuzz_corpus/dataframe_eval/col_times_literal.bin"
+    );
+    fuzz_dataframe_eval_bytes(seed)
+        .expect("col_times_literal eval seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_dataframe_eval_bytes_accepts_floor_div_seed_fixture() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/dataframe_eval/floor_div.bin");
+    fuzz_dataframe_eval_bytes(seed).expect("floor_div eval seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_dataframe_eval_bytes_accepts_modulo_seed_fixture() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/dataframe_eval/modulo.bin");
+    fuzz_dataframe_eval_bytes(seed).expect("modulo eval seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_dataframe_eval_bytes_accepts_pow_square_seed_fixture() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/dataframe_eval/pow_square.bin");
+    fuzz_dataframe_eval_bytes(seed).expect("pow_square eval seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_dataframe_eval_bytes_accepts_unary_neg_seed_fixture() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/dataframe_eval/unary_neg.bin");
+    fuzz_dataframe_eval_bytes(seed).expect("unary_neg eval seed should satisfy invariants");
+}
