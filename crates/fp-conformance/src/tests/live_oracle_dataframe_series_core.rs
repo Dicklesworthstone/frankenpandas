@@ -26354,3 +26354,173 @@ fn live_oracle_dataframe_groupby_skew_basic() {
     let result = frame.groupby(&["k"]).expect("groupby").skew().expect("skew");
     super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_dataframe_groupby_kurtosis_basic() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DF-GBKURT",
+        "case_id": "dataframe_groupby_kurtosis_basic",
+        "mode": "strict",
+        "operation": "dataframe_groupby_kurtosis",
+        "oracle_source": "live_legacy_pandas",
+        "groupby_columns": ["k"],
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 4 },
+                { "kind": "int64", "value": 5 },
+                { "kind": "int64", "value": 6 },
+                { "kind": "int64", "value": 7 },
+                { "kind": "int64", "value": 8 },
+                { "kind": "int64", "value": 9 }
+            ],
+            "column_order": ["k", "v"],
+            "columns": {
+                "k": [
+                    { "kind": "utf8", "value": "a" },
+                    { "kind": "utf8", "value": "a" },
+                    { "kind": "utf8", "value": "a" },
+                    { "kind": "utf8", "value": "a" },
+                    { "kind": "utf8", "value": "a" },
+                    { "kind": "utf8", "value": "b" },
+                    { "kind": "utf8", "value": "b" },
+                    { "kind": "utf8", "value": "b" },
+                    { "kind": "utf8", "value": "b" },
+                    { "kind": "utf8", "value": "b" }
+                ],
+                "v": [
+                    { "kind": "float64", "value": 1.0 },
+                    { "kind": "float64", "value": 2.0 },
+                    { "kind": "float64", "value": 3.0 },
+                    { "kind": "float64", "value": 4.0 },
+                    { "kind": "float64", "value": 5.0 },
+                    { "kind": "float64", "value": 1.0 },
+                    { "kind": "float64", "value": 1.0 },
+                    { "kind": "float64", "value": 5.0 },
+                    { "kind": "float64", "value": 9.0 },
+                    { "kind": "float64", "value": 9.0 }
+                ]
+            }
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping df groupby kurtosis: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
+    let super::ResolvedExpected::Frame(expected_frame) = expected else { return; };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
+    let result = frame.groupby(&["k"]).expect("groupby").kurtosis().expect("kurtosis");
+    super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_dataframe_groupby_cumcount_basic() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DF-GBCUMCT",
+        "case_id": "dataframe_groupby_cumcount_basic",
+        "mode": "strict",
+        "operation": "dataframe_groupby_cumcount",
+        "oracle_source": "live_legacy_pandas",
+        "groupby_columns": ["k"],
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 4 },
+                { "kind": "int64", "value": 5 }
+            ],
+            "column_order": ["k"],
+            "columns": {
+                "k": [
+                    { "kind": "utf8", "value": "a" },
+                    { "kind": "utf8", "value": "b" },
+                    { "kind": "utf8", "value": "a" },
+                    { "kind": "utf8", "value": "b" },
+                    { "kind": "utf8", "value": "a" },
+                    { "kind": "utf8", "value": "c" }
+                ]
+            }
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping df groupby cumcount: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
+    let super::ResolvedExpected::Series(expected) = expected else { return; };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
+    let result = frame.groupby(&["k"]).expect("groupby").cumcount().expect("cumcount");
+    super::compare_series_expected(&result, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_dataframe_groupby_ngroup_basic() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DF-GBNGRP",
+        "case_id": "dataframe_groupby_ngroup_basic",
+        "mode": "strict",
+        "operation": "dataframe_groupby_ngroup",
+        "oracle_source": "live_legacy_pandas",
+        "groupby_columns": ["k"],
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 4 },
+                { "kind": "int64", "value": 5 }
+            ],
+            "column_order": ["k"],
+            "columns": {
+                "k": [
+                    { "kind": "utf8", "value": "a" },
+                    { "kind": "utf8", "value": "b" },
+                    { "kind": "utf8", "value": "a" },
+                    { "kind": "utf8", "value": "b" },
+                    { "kind": "utf8", "value": "a" },
+                    { "kind": "utf8", "value": "c" }
+                ]
+            }
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping df groupby ngroup: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
+    let super::ResolvedExpected::Series(expected) = expected else { return; };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
+    let result = frame.groupby(&["k"]).expect("groupby").ngroup().expect("ngroup");
+    super::compare_series_expected(&result, &expected).expect("pandas parity");
+}
