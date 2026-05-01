@@ -31588,3 +31588,85 @@ fn live_oracle_dataframe_drop_duplicates_with_subset() {
     let result = frame.drop_duplicates(Some(&subset), super::DuplicateKeep::First, false).expect("drop_duplicates");
     super::compare_dataframe_expected(&result, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_series_any_with_floats_and_zeros() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-ANY-FLOATS",
+        "case_id": "series_any_with_floats_and_zeros",
+        "mode": "strict",
+        "operation": "series_any",
+        "oracle_source": "live_legacy_pandas",
+        "left": {
+            "name": "vals",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "values": [
+                { "kind": "float64", "value": 0.0 },
+                { "kind": "float64", "value": 0.0 },
+                { "kind": "float64", "value": 1.5 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping any floats: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Bool(_)));
+    let super::ResolvedExpected::Bool(expected_bool) = expected else { return; };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let actual = series.any().expect("any");
+    assert_eq!(actual, expected_bool, "series_any floats");
+}
+
+#[test]
+fn live_oracle_series_all_with_floats_and_zeros() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-ALL-FLOATS",
+        "case_id": "series_all_with_floats_and_zeros",
+        "mode": "strict",
+        "operation": "series_all",
+        "oracle_source": "live_legacy_pandas",
+        "left": {
+            "name": "vals",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "values": [
+                { "kind": "float64", "value": 1.5 },
+                { "kind": "float64", "value": 2.5 },
+                { "kind": "float64", "value": 3.5 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping all floats: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Bool(_)));
+    let super::ResolvedExpected::Bool(expected_bool) = expected else { return; };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let actual = series.all().expect("all");
+    assert_eq!(actual, expected_bool, "series_all floats");
+}
