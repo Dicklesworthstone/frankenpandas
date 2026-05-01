@@ -29248,3 +29248,103 @@ fn live_oracle_dataframe_fillna_with_string() {
     let result = frame.fillna(fixture.fill_value.as_ref().expect("fill_value")).expect("fillna");
     super::compare_dataframe_expected(&result, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_series_cut_five_bins() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-CUT-5",
+        "case_id": "series_cut_five_bins",
+        "mode": "strict",
+        "operation": "series_cut",
+        "oracle_source": "live_legacy_pandas",
+        "cut_bins": 5,
+        "left": {
+            "name": "vals",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 4 },
+                { "kind": "int64", "value": 5 },
+                { "kind": "int64", "value": 6 },
+                { "kind": "int64", "value": 7 }
+            ],
+            "values": [
+                { "kind": "float64", "value": 0.0 },
+                { "kind": "float64", "value": 5.0 },
+                { "kind": "float64", "value": 10.0 },
+                { "kind": "float64", "value": 15.0 },
+                { "kind": "float64", "value": 20.0 },
+                { "kind": "float64", "value": 25.0 },
+                { "kind": "float64", "value": 30.0 },
+                { "kind": "float64", "value": 35.0 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping cut 5 bins: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
+    let super::ResolvedExpected::Series(expected) = expected else { return; };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let actual = fp_frame::cut(&series, 5).expect("cut");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_series_qcut_two_quantiles() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-QCUT-2",
+        "case_id": "series_qcut_two_quantiles",
+        "mode": "strict",
+        "operation": "series_qcut",
+        "oracle_source": "live_legacy_pandas",
+        "qcut_quantiles": 2,
+        "left": {
+            "name": "vals",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 4 },
+                { "kind": "int64", "value": 5 }
+            ],
+            "values": [
+                { "kind": "float64", "value": 1.0 },
+                { "kind": "float64", "value": 2.0 },
+                { "kind": "float64", "value": 3.0 },
+                { "kind": "float64", "value": 4.0 },
+                { "kind": "float64", "value": 5.0 },
+                { "kind": "float64", "value": 6.0 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping qcut 2 quantiles: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
+    let super::ResolvedExpected::Series(expected) = expected else { return; };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let actual = fp_frame::qcut(&series, 2).expect("qcut");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
