@@ -27476,3 +27476,101 @@ fn live_oracle_series_ewm_mean_alpha_05() {
     let actual = series.ewm(None, Some(0.5)).mean().expect("ewm mean alpha");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_series_rolling_mean_window_3_centered() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-ROLL-MEAN-CTR",
+        "case_id": "series_rolling_mean_window_3_centered",
+        "mode": "strict",
+        "operation": "series_rolling_mean",
+        "oracle_source": "live_legacy_pandas",
+        "window_size": 3,
+        "window_center": true,
+        "left": {
+            "name": "vals",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 4 },
+                { "kind": "int64", "value": 5 }
+            ],
+            "values": [
+                { "kind": "float64", "value": 1.0 },
+                { "kind": "float64", "value": 2.0 },
+                { "kind": "float64", "value": 3.0 },
+                { "kind": "float64", "value": 4.0 },
+                { "kind": "float64", "value": 5.0 },
+                { "kind": "float64", "value": 6.0 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping rolling_mean center: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
+    let super::ResolvedExpected::Series(expected) = expected else { return; };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let result = series.rolling_with_center(3, None, true).mean().expect("rolling mean centered");
+    super::compare_series_expected(&result, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_series_rolling_sum_min_periods_2() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-ROLL-SUM-MP2",
+        "case_id": "series_rolling_sum_min_periods_2",
+        "mode": "strict",
+        "operation": "series_rolling_sum",
+        "oracle_source": "live_legacy_pandas",
+        "window_size": 4,
+        "min_periods": 2,
+        "left": {
+            "name": "vals",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 4 },
+                { "kind": "int64", "value": 5 }
+            ],
+            "values": [
+                { "kind": "float64", "value": 1.0 },
+                { "kind": "float64", "value": 2.0 },
+                { "kind": "float64", "value": 3.0 },
+                { "kind": "float64", "value": 4.0 },
+                { "kind": "float64", "value": 5.0 },
+                { "kind": "float64", "value": 6.0 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping rolling_sum min_periods: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
+    let super::ResolvedExpected::Series(expected) = expected else { return; };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let result = series.rolling(4, Some(2)).sum().expect("rolling sum");
+    super::compare_series_expected(&result, &expected).expect("pandas parity");
+}
