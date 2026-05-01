@@ -32112,3 +32112,87 @@ fn live_oracle_dataframe_to_json_records_with_floats() {
     let actual = super::Scalar::Utf8(json);
     super::compare_scalar(&actual, &expected, "dataframe_to_json_records").expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_series_abs_with_nulls() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-SABS-NULLS",
+        "case_id": "series_abs_with_nulls",
+        "mode": "strict",
+        "operation": "series_abs",
+        "oracle_source": "live_legacy_pandas",
+        "left": {
+            "name": "vals",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 }
+            ],
+            "values": [
+                { "kind": "float64", "value": -10.0 },
+                { "kind": "null", "value": "na_n" },
+                { "kind": "float64", "value": -5.5 },
+                { "kind": "float64", "value": 7.5 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping series abs nulls: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
+    let super::ResolvedExpected::Series(expected) = expected else { return; };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let actual = series.abs().expect("abs");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_series_abs_extreme_values() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-SABS-EXTREME",
+        "case_id": "series_abs_extreme_values",
+        "mode": "strict",
+        "operation": "series_abs",
+        "oracle_source": "live_legacy_pandas",
+        "left": {
+            "name": "vals",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "values": [
+                { "kind": "int64", "value": -2147483647_i64 },
+                { "kind": "int64", "value": 0_i64 },
+                { "kind": "int64", "value": 2147483647_i64 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping series abs extreme: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
+    let super::ResolvedExpected::Series(expected) = expected else { return; };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let actual = series.abs().expect("abs");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
