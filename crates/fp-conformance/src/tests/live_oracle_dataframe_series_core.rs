@@ -25822,3 +25822,135 @@ fn live_oracle_dataframe_merge_left_basic() {
     let result = super::DataFrame::new(merged.index, merged.columns).expect("frame");
     super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_dataframe_merge_outer_basic() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DF-MERGE-OUTER",
+        "case_id": "dataframe_merge_outer_basic",
+        "mode": "strict",
+        "operation": "dataframe_merge",
+        "oracle_source": "live_legacy_pandas",
+        "join_type": "outer",
+        "merge_on": "id",
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 }
+            ],
+            "column_order": ["id", "left_v"],
+            "columns": {
+                "id": [
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "int64", "value": 2 }
+                ],
+                "left_v": [
+                    { "kind": "int64", "value": 11 },
+                    { "kind": "int64", "value": 22 }
+                ]
+            }
+        },
+        "frame_right": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 }
+            ],
+            "column_order": ["id", "right_v"],
+            "columns": {
+                "id": [
+                    { "kind": "int64", "value": 2 },
+                    { "kind": "int64", "value": 3 }
+                ],
+                "right_v": [
+                    { "kind": "int64", "value": 220 },
+                    { "kind": "int64", "value": 330 }
+                ]
+            }
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping merge outer: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
+    let super::ResolvedExpected::Frame(expected_frame) = expected else { return; };
+
+    let left = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("left");
+    let right = super::build_dataframe(fixture.frame_right.as_ref().expect("frame_right")).expect("right");
+    let merged = super::merge_dataframes(&left, &right, "id", super::JoinType::Outer).expect("merge outer");
+    let result = super::DataFrame::new(merged.index, merged.columns).expect("frame");
+    super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_dataframe_merge_right_basic() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DF-MERGE-RIGHT",
+        "case_id": "dataframe_merge_right_basic",
+        "mode": "strict",
+        "operation": "dataframe_merge",
+        "oracle_source": "live_legacy_pandas",
+        "join_type": "right",
+        "merge_on": "id",
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 }
+            ],
+            "column_order": ["id", "left_v"],
+            "columns": {
+                "id": [
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "int64", "value": 2 }
+                ],
+                "left_v": [
+                    { "kind": "int64", "value": 11 },
+                    { "kind": "int64", "value": 22 }
+                ]
+            }
+        },
+        "frame_right": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 }
+            ],
+            "column_order": ["id", "right_v"],
+            "columns": {
+                "id": [
+                    { "kind": "int64", "value": 2 },
+                    { "kind": "int64", "value": 3 }
+                ],
+                "right_v": [
+                    { "kind": "int64", "value": 220 },
+                    { "kind": "int64", "value": 330 }
+                ]
+            }
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping merge right: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
+    let super::ResolvedExpected::Frame(expected_frame) = expected else { return; };
+
+    let left = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("left");
+    let right = super::build_dataframe(fixture.frame_right.as_ref().expect("frame_right")).expect("right");
+    let merged = super::merge_dataframes(&left, &right, "id", super::JoinType::Right).expect("merge right");
+    let result = super::DataFrame::new(merged.index, merged.columns).expect("frame");
+    super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
+}
