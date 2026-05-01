@@ -29150,3 +29150,101 @@ fn live_oracle_dataframe_duplicated_keep_false() {
     let actual = frame.duplicated(None, super::DuplicateKeep::None).expect("duplicated keep=none");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_dataframe_fillna_with_int() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DF-FILLNA-INT",
+        "case_id": "dataframe_fillna_with_int",
+        "mode": "strict",
+        "operation": "dataframe_fillna",
+        "oracle_source": "live_legacy_pandas",
+        "fill_value": { "kind": "int64", "value": -999 },
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "column_order": ["a", "b"],
+            "columns": {
+                "a": [
+                    { "kind": "float64", "value": 1.0 },
+                    { "kind": "null", "value": "na_n" },
+                    { "kind": "float64", "value": 3.0 }
+                ],
+                "b": [
+                    { "kind": "null", "value": "na_n" },
+                    { "kind": "float64", "value": 20.0 },
+                    { "kind": "float64", "value": 30.0 }
+                ]
+            }
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping fillna int: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
+    let super::ResolvedExpected::Frame(expected) = expected else { return; };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
+    let result = frame.fillna(fixture.fill_value.as_ref().expect("fill_value")).expect("fillna");
+    super::compare_dataframe_expected(&result, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_dataframe_fillna_with_string() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DF-FILLNA-STR",
+        "case_id": "dataframe_fillna_with_string",
+        "mode": "strict",
+        "operation": "dataframe_fillna",
+        "oracle_source": "live_legacy_pandas",
+        "fill_value": { "kind": "utf8", "value": "MISSING" },
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "column_order": ["a", "b"],
+            "columns": {
+                "a": [
+                    { "kind": "utf8", "value": "x" },
+                    { "kind": "null", "value": "null" },
+                    { "kind": "utf8", "value": "y" }
+                ],
+                "b": [
+                    { "kind": "null", "value": "null" },
+                    { "kind": "utf8", "value": "p" },
+                    { "kind": "utf8", "value": "q" }
+                ]
+            }
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping fillna string: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
+    let super::ResolvedExpected::Frame(expected) = expected else { return; };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
+    let result = frame.fillna(fixture.fill_value.as_ref().expect("fill_value")).expect("fillna");
+    super::compare_dataframe_expected(&result, &expected).expect("pandas parity");
+}
