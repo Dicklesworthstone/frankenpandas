@@ -1308,6 +1308,42 @@ fn fuzz_common_dtype_bytes_accepts_incompatible_seed() {
 }
 
 #[test]
+fn fuzz_common_dtype_bytes_accepts_null_null_seed() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/common_dtype/null_null_seed.bin");
+    fuzz_common_dtype_bytes(seed).expect("null+null seed should preserve symmetry");
+}
+
+#[test]
+fn fuzz_common_dtype_bytes_accepts_bool_bool_seed() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/common_dtype/bool_bool_seed.bin");
+    fuzz_common_dtype_bytes(seed).expect("bool+bool seed should preserve symmetry");
+}
+
+#[test]
+fn fuzz_common_dtype_bytes_accepts_bool_float_seed() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/common_dtype/bool_float_seed.bin");
+    fuzz_common_dtype_bytes(seed).expect("bool+float seed should preserve symmetry");
+}
+
+#[test]
+fn fuzz_common_dtype_bytes_accepts_float_utf8_incompatible_seed() {
+    let seed = include_bytes!(
+        "../../fixtures/adversarial/fuzz_corpus/common_dtype/float_utf8_incompatible_seed.bin"
+    );
+    fuzz_common_dtype_bytes(seed).expect("float+utf8 incompat seed should preserve symmetry");
+}
+
+#[test]
+fn fuzz_common_dtype_bytes_accepts_null_int_seed() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/common_dtype/null_int_seed.bin");
+    fuzz_common_dtype_bytes(seed).expect("null+int seed should preserve symmetry");
+}
+
+#[test]
 fn fuzz_common_dtype_bytes_replays_committed_corpus_seeds() {
     let corpus: &[(&str, &[u8])] = &[
         (
