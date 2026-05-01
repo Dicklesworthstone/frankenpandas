@@ -24711,3 +24711,58 @@ fn live_oracle_series_fillna_string_with_default() {
     let actual = series.fillna(fill).expect("fillna string");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_series_asof_intermediate_label() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-SASOF-INTER",
+        "case_id": "series_asof_intermediate_label",
+        "mode": "strict",
+        "operation": "series_asof",
+        "oracle_source": "live_legacy_pandas",
+        "asof_label": { "kind": "int64", "value": 6 },
+        "left": {
+            "name": "vals",
+            "index": [
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 5 },
+                { "kind": "int64", "value": 7 },
+                { "kind": "int64", "value": 9 }
+            ],
+            "values": [
+                { "kind": "float64", "value": 10.0 },
+                { "kind": "float64", "value": 30.0 },
+                { "kind": "float64", "value": 50.0 },
+                { "kind": "float64", "value": 70.0 },
+                { "kind": "float64", "value": 90.0 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping series_asof intermediate: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Scalar(_)),
+        "expected live oracle scalar payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Scalar(expected) = expected else {
+        return;
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let label = fixture.asof_label.as_ref().expect("asof_label");
+    let actual = series
+        .asof(label)
+        .cloned()
+        .unwrap_or_else(|| super::series_asof_missing_scalar(&series));
+    super::compare_scalar(&actual, &expected, "series_asof").expect("pandas parity");
+}
