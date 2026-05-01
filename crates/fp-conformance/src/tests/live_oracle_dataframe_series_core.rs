@@ -24322,3 +24322,60 @@ fn live_oracle_dataframe_combine_first_numeric_overlap() {
     let actual = left.combine_first(&right).expect("combine_first");
     super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_series_unique_strings() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-SUNIQUE-STR",
+        "case_id": "series_unique_strings",
+        "mode": "strict",
+        "operation": "series_unique",
+        "oracle_source": "live_legacy_pandas",
+        "left": {
+            "name": "fruits",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 4 },
+                { "kind": "int64", "value": 5 }
+            ],
+            "values": [
+                { "kind": "utf8", "value": "apple" },
+                { "kind": "utf8", "value": "banana" },
+                { "kind": "utf8", "value": "apple" },
+                { "kind": "utf8", "value": "cherry" },
+                { "kind": "utf8", "value": "banana" },
+                { "kind": "utf8", "value": "apple" }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping series_unique strings: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Series(_)),
+        "expected live oracle series payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let unique_values = series.unique();
+    let labels: Vec<super::IndexLabel> = (0..unique_values.len())
+        .map(|i| super::IndexLabel::Int64(i as i64))
+        .collect();
+    let actual = super::Series::from_values(series.name().to_owned(), labels, unique_values)
+        .expect("series unique strings");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
