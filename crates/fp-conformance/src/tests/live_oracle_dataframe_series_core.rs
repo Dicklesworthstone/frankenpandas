@@ -30033,3 +30033,101 @@ fn live_oracle_dataframe_reindex_with_int_labels() {
     let actual = frame.reindex(labels).expect("reindex");
     super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_dataframe_round_decimals_0() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DFROUND-0",
+        "case_id": "dataframe_round_decimals_0",
+        "mode": "strict",
+        "operation": "dataframe_round",
+        "oracle_source": "live_legacy_pandas",
+        "round_decimals": 0,
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "column_order": ["a", "b"],
+            "columns": {
+                "a": [
+                    { "kind": "float64", "value": 1.6 },
+                    { "kind": "float64", "value": 2.4 },
+                    { "kind": "float64", "value": -1.5 }
+                ],
+                "b": [
+                    { "kind": "float64", "value": 100.9 },
+                    { "kind": "float64", "value": 0.5 },
+                    { "kind": "float64", "value": 99.9 }
+                ]
+            }
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping round 0: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
+    let super::ResolvedExpected::Frame(expected) = expected else { return; };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
+    let actual = frame.round(0).expect("round");
+    super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_dataframe_round_negative_decimals() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DFROUND-NEG",
+        "case_id": "dataframe_round_negative_decimals",
+        "mode": "strict",
+        "operation": "dataframe_round",
+        "oracle_source": "live_legacy_pandas",
+        "round_decimals": -1,
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "column_order": ["a", "b"],
+            "columns": {
+                "a": [
+                    { "kind": "float64", "value": 123.456 },
+                    { "kind": "float64", "value": 256.789 },
+                    { "kind": "float64", "value": 87.5 }
+                ],
+                "b": [
+                    { "kind": "float64", "value": 1234.0 },
+                    { "kind": "float64", "value": 5678.0 },
+                    { "kind": "float64", "value": 90.0 }
+                ]
+            }
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping round negative: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
+    let super::ResolvedExpected::Frame(expected) = expected else { return; };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
+    let actual = frame.round(-1).expect("round");
+    super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
+}
