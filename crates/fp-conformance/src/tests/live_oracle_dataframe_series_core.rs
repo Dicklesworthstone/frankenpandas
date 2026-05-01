@@ -26814,3 +26814,180 @@ fn live_oracle_dataframe_groupby_rolling_sum_window_2() {
     let result = frame.groupby(&["k"]).expect("groupby").rolling(2).sum().expect("rolling sum");
     super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_dataframe_groupby_rolling_min_basic() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DF-GBROLLMIN",
+        "case_id": "dataframe_groupby_rolling_min_basic",
+        "mode": "strict",
+        "operation": "dataframe_groupby_rolling_min",
+        "oracle_source": "live_legacy_pandas",
+        "groupby_columns": ["k"],
+        "window_size": 2,
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 4 },
+                { "kind": "int64", "value": 5 }
+            ],
+            "column_order": ["k", "v"],
+            "columns": {
+                "k": [
+                    { "kind": "utf8", "value": "a" },
+                    { "kind": "utf8", "value": "a" },
+                    { "kind": "utf8", "value": "a" },
+                    { "kind": "utf8", "value": "b" },
+                    { "kind": "utf8", "value": "b" },
+                    { "kind": "utf8", "value": "b" }
+                ],
+                "v": [
+                    { "kind": "float64", "value": 5.0 },
+                    { "kind": "float64", "value": 1.0 },
+                    { "kind": "float64", "value": 3.0 },
+                    { "kind": "float64", "value": 30.0 },
+                    { "kind": "float64", "value": 10.0 },
+                    { "kind": "float64", "value": 20.0 }
+                ]
+            }
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping df groupby rolling min: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
+    let super::ResolvedExpected::Frame(expected_frame) = expected else { return; };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
+    let result = frame.groupby(&["k"]).expect("groupby").rolling(2).min().expect("rolling min");
+    super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_dataframe_groupby_rolling_max_basic() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DF-GBROLLMAX",
+        "case_id": "dataframe_groupby_rolling_max_basic",
+        "mode": "strict",
+        "operation": "dataframe_groupby_rolling_max",
+        "oracle_source": "live_legacy_pandas",
+        "groupby_columns": ["k"],
+        "window_size": 2,
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 4 },
+                { "kind": "int64", "value": 5 }
+            ],
+            "column_order": ["k", "v"],
+            "columns": {
+                "k": [
+                    { "kind": "utf8", "value": "a" },
+                    { "kind": "utf8", "value": "a" },
+                    { "kind": "utf8", "value": "a" },
+                    { "kind": "utf8", "value": "b" },
+                    { "kind": "utf8", "value": "b" },
+                    { "kind": "utf8", "value": "b" }
+                ],
+                "v": [
+                    { "kind": "float64", "value": 5.0 },
+                    { "kind": "float64", "value": 1.0 },
+                    { "kind": "float64", "value": 3.0 },
+                    { "kind": "float64", "value": 30.0 },
+                    { "kind": "float64", "value": 10.0 },
+                    { "kind": "float64", "value": 20.0 }
+                ]
+            }
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping df groupby rolling max: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
+    let super::ResolvedExpected::Frame(expected_frame) = expected else { return; };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
+    let result = frame.groupby(&["k"]).expect("groupby").rolling(2).max().expect("rolling max");
+    super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_dataframe_groupby_rolling_count_basic() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DF-GBROLLCNT",
+        "case_id": "dataframe_groupby_rolling_count_basic",
+        "mode": "strict",
+        "operation": "dataframe_groupby_rolling_count",
+        "oracle_source": "live_legacy_pandas",
+        "groupby_columns": ["k"],
+        "window_size": 2,
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 4 },
+                { "kind": "int64", "value": 5 }
+            ],
+            "column_order": ["k", "v"],
+            "columns": {
+                "k": [
+                    { "kind": "utf8", "value": "a" },
+                    { "kind": "utf8", "value": "a" },
+                    { "kind": "utf8", "value": "a" },
+                    { "kind": "utf8", "value": "b" },
+                    { "kind": "utf8", "value": "b" },
+                    { "kind": "utf8", "value": "b" }
+                ],
+                "v": [
+                    { "kind": "float64", "value": 1.0 },
+                    { "kind": "null", "value": "na_n" },
+                    { "kind": "float64", "value": 3.0 },
+                    { "kind": "float64", "value": 10.0 },
+                    { "kind": "float64", "value": 20.0 },
+                    { "kind": "null", "value": "na_n" }
+                ]
+            }
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping df groupby rolling count: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
+    let super::ResolvedExpected::Frame(expected_frame) = expected else { return; };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
+    let result = frame.groupby(&["k"]).expect("groupby").rolling(2).count().expect("rolling count");
+    super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
+}
