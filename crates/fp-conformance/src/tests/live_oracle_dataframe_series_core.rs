@@ -30630,3 +30630,42 @@ fn live_oracle_series_str_wrap_long_width() {
     let actual = series.str().wrap_with_drop_whitespace(50, true).expect("wrap");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_series_str_expandtabs_default_size_8() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-STREXPAND-8",
+        "case_id": "series_str_expandtabs_default_size_8",
+        "mode": "strict",
+        "operation": "series_str_expandtabs",
+        "oracle_source": "live_legacy_pandas",
+        "left": {
+            "name": "txt",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 }
+            ],
+            "values": [
+                { "kind": "utf8", "value": "a\tb" },
+                { "kind": "utf8", "value": "x\ty\tz" }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping str expandtabs default: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
+    let super::ResolvedExpected::Series(expected) = expected else { return; };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let actual = series.str().expandtabs(8).expect("expandtabs default");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
