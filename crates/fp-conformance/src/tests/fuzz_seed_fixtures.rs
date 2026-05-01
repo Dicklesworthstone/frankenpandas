@@ -113,6 +113,46 @@ fn fuzz_csv_parse_bytes_accepts_many_columns_seed_fixture() {
 }
 
 #[test]
+fn fuzz_csv_parse_bytes_accepts_quoted_comma_in_value_seed_fixture() {
+    let seed = include_bytes!(
+        "../../fixtures/adversarial/fuzz_corpus/csv_parse/quoted_comma_in_value_seed.csv"
+    );
+    fuzz_csv_parse_bytes(seed).expect("quoted comma csv fuzz seed should parse");
+}
+
+#[test]
+fn fuzz_csv_parse_bytes_accepts_trailing_empty_field_seed_fixture() {
+    let seed = include_bytes!(
+        "../../fixtures/adversarial/fuzz_corpus/csv_parse/trailing_empty_field_seed.csv"
+    );
+    fuzz_csv_parse_bytes(seed).expect("trailing empty field csv fuzz seed should parse");
+}
+
+#[test]
+fn fuzz_csv_parse_bytes_accepts_single_quote_in_value_seed_fixture() {
+    let seed = include_bytes!(
+        "../../fixtures/adversarial/fuzz_corpus/csv_parse/single_quote_in_value_seed.csv"
+    );
+    fuzz_csv_parse_bytes(seed).expect("single-quote csv fuzz seed should parse");
+}
+
+#[test]
+fn fuzz_csv_parse_bytes_accepts_all_empty_cells_seed_fixture() {
+    let seed = include_bytes!(
+        "../../fixtures/adversarial/fuzz_corpus/csv_parse/all_empty_cells_seed.csv"
+    );
+    fuzz_csv_parse_bytes(seed).expect("all-empty-cells csv fuzz seed should parse");
+}
+
+#[test]
+fn fuzz_csv_parse_bytes_accepts_single_int_column_seed_fixture() {
+    let seed = include_bytes!(
+        "../../fixtures/adversarial/fuzz_corpus/csv_parse/single_int_column_seed.csv"
+    );
+    fuzz_csv_parse_bytes(seed).expect("single-int-column csv fuzz seed should parse");
+}
+
+#[test]
 fn fuzz_excel_io_bytes_accepts_valid_seed_fixture() {
     let seed =
         include_bytes!("../../fixtures/adversarial/fuzz_corpus/excel_io/simple_valid_seed.xlsx");
