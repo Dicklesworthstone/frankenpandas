@@ -31729,3 +31729,124 @@ fn live_oracle_series_div_misaligned() {
     let result = left.div_with_policy(&right, &policy, &mut ledger).expect("div");
     super::compare_series_expected(&result, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_dataframe_query_or_filter() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DF-QUERY-OR",
+        "case_id": "dataframe_query_or_filter",
+        "mode": "strict",
+        "operation": "dataframe_query",
+        "oracle_source": "live_legacy_pandas",
+        "expr": "score < 50 or score > 90",
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 4 }
+            ],
+            "column_order": ["name", "score"],
+            "columns": {
+                "name": [
+                    { "kind": "utf8", "value": "alice" },
+                    { "kind": "utf8", "value": "bob" },
+                    { "kind": "utf8", "value": "carol" },
+                    { "kind": "utf8", "value": "dave" },
+                    { "kind": "utf8", "value": "eve" }
+                ],
+                "score": [
+                    { "kind": "int64", "value": 75 },
+                    { "kind": "int64", "value": 95 },
+                    { "kind": "int64", "value": 60 },
+                    { "kind": "int64", "value": 30 },
+                    { "kind": "int64", "value": 50 }
+                ]
+            }
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping df query OR: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
+    let super::ResolvedExpected::Frame(expected_frame) = expected else { return; };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
+    let policy = super::RuntimePolicy::strict();
+    let mut ledger = super::EvidenceLedger::new();
+    let result = fp_expr::query_str(
+        fixture.expr.as_deref().expect("expr"),
+        &frame,
+        &policy,
+        &mut ledger,
+    ).expect("query");
+    super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_dataframe_query_string_equality() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DF-QUERY-STREQ",
+        "case_id": "dataframe_query_string_equality",
+        "mode": "strict",
+        "operation": "dataframe_query",
+        "oracle_source": "live_legacy_pandas",
+        "expr": "category == 'A'",
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 }
+            ],
+            "column_order": ["category", "value"],
+            "columns": {
+                "category": [
+                    { "kind": "utf8", "value": "A" },
+                    { "kind": "utf8", "value": "B" },
+                    { "kind": "utf8", "value": "A" },
+                    { "kind": "utf8", "value": "C" }
+                ],
+                "value": [
+                    { "kind": "int64", "value": 10 },
+                    { "kind": "int64", "value": 20 },
+                    { "kind": "int64", "value": 30 },
+                    { "kind": "int64", "value": 40 }
+                ]
+            }
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping df query string eq: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
+    let super::ResolvedExpected::Frame(expected_frame) = expected else { return; };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
+    let policy = super::RuntimePolicy::strict();
+    let mut ledger = super::EvidenceLedger::new();
+    let result = fp_expr::query_str(
+        fixture.expr.as_deref().expect("expr"),
+        &frame,
+        &policy,
+        &mut ledger,
+    ).expect("query");
+    super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
+}
