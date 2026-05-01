@@ -19441,3 +19441,107 @@ fn live_oracle_series_str_replace_pattern() {
         .expect("str replace");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_series_str_startswith_prefix() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-STRSTARTSWITH",
+        "case_id": "series_str_startswith_prefix",
+        "mode": "strict",
+        "operation": "series_str_startswith",
+        "oracle_source": "live_legacy_pandas",
+        "regex_pattern": "abc",
+        "left": {
+            "name": "txt",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 }
+            ],
+            "values": [
+                { "kind": "utf8", "value": "abcdef" },
+                { "kind": "utf8", "value": "no abc here" },
+                { "kind": "utf8", "value": "abcXYZ" },
+                { "kind": "utf8", "value": "" }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping series_str_startswith test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Series(_)),
+        "expected live oracle series payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let actual = series
+        .str()
+        .startswith(fixture.regex_pattern.as_deref().expect("regex_pattern"))
+        .expect("str startswith");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_series_str_endswith_suffix() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-STRENDSWITH",
+        "case_id": "series_str_endswith_suffix",
+        "mode": "strict",
+        "operation": "series_str_endswith",
+        "oracle_source": "live_legacy_pandas",
+        "regex_pattern": ".txt",
+        "left": {
+            "name": "txt",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 }
+            ],
+            "values": [
+                { "kind": "utf8", "value": "file.txt" },
+                { "kind": "utf8", "value": "data.csv" },
+                { "kind": "utf8", "value": "config.txt" },
+                { "kind": "utf8", "value": "" }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping series_str_endswith test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Series(_)),
+        "expected live oracle series payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let actual = series
+        .str()
+        .endswith(fixture.regex_pattern.as_deref().expect("regex_pattern"))
+        .expect("str endswith");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
