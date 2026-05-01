@@ -31117,3 +31117,63 @@ fn live_oracle_series_head_negative_n() {
     let result = series.head(-2).expect("head -2");
     super::compare_series_expected(&result, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_series_categorical_from_codes_basic() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-CAT-FROMCODES",
+        "case_id": "series_categorical_from_codes_basic",
+        "mode": "strict",
+        "operation": "series_categorical_from_codes",
+        "oracle_source": "live_legacy_pandas",
+        "categorical_categories": [
+            { "kind": "utf8", "value": "low" },
+            { "kind": "utf8", "value": "med" },
+            { "kind": "utf8", "value": "high" }
+        ],
+        "categorical_ordered": false,
+        "left": {
+            "name": "codes",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 }
+            ],
+            "values": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 1 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping categorical: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
+    let super::ResolvedExpected::Series(expected) = expected else { return; };
+
+    let left = fixture.left.as_ref().expect("left");
+    let codes: Vec<i64> = left
+        .values
+        .iter()
+        .filter_map(|v| match v {
+            fp_types::Scalar::Int64(c) => Some(*c),
+            _ => None,
+        })
+        .collect();
+    let categories = fixture.categorical_categories.clone().expect("categorical_categories");
+    let categorical = super::Series::from_categorical_codes(left.name.clone(), codes, categories, false)
+        .expect("from_categorical_codes");
+    let actual = categorical.cat().expect("cat").to_values().expect("to_values");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
