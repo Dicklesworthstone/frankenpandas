@@ -22457,3 +22457,109 @@ fn live_oracle_series_constructor_float_basic() {
     let actual = super::build_series(fixture.left.as_ref().expect("left")).expect("constructor");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_fill_na_int_with_zero() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-FILL-NA",
+        "case_id": "fill_na_int_with_zero",
+        "mode": "strict",
+        "operation": "fill_na",
+        "oracle_source": "live_legacy_pandas",
+        "fill_value": { "kind": "int64", "value": 0 },
+        "left": {
+            "name": "vals",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 }
+            ],
+            "values": [
+                { "kind": "int64", "value": 1 },
+                { "kind": "null", "value": "null" },
+                { "kind": "int64", "value": 3 },
+                { "kind": "null", "value": "null" }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping fill_na: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Series(_)),
+        "expected live oracle series payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
+
+    let left = fixture.left.as_ref().expect("left");
+    let fill = fixture.fill_value.as_ref().expect("fill_value");
+    let actual_values = super::fill_na(&left.values, fill);
+    assert_eq!(
+        actual_values, expected.values,
+        "fill_na values mismatch: actual={actual_values:?}, expected={:?}",
+        expected.values
+    );
+}
+
+#[test]
+fn live_oracle_drop_na_basic() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DROP-NA",
+        "case_id": "drop_na_basic",
+        "mode": "strict",
+        "operation": "drop_na",
+        "oracle_source": "live_legacy_pandas",
+        "left": {
+            "name": "vals",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 }
+            ],
+            "values": [
+                { "kind": "int64", "value": 1 },
+                { "kind": "null", "value": "null" },
+                { "kind": "int64", "value": 3 },
+                { "kind": "null", "value": "null" }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping drop_na: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Series(_)),
+        "expected live oracle series payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
+
+    let left = fixture.left.as_ref().expect("left");
+    let actual_values = super::dropna(&left.values);
+    assert_eq!(
+        actual_values, expected.values,
+        "drop_na values mismatch: actual={actual_values:?}, expected={:?}",
+        expected.values
+    );
+}
