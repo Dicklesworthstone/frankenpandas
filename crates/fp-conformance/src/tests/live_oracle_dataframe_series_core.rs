@@ -33231,3 +33231,51 @@ fn live_oracle_dataframe_between_time_evening() {
     ).expect("between_time");
     super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_dataframe_resample_sum_daily() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DFRES-DAILY",
+        "case_id": "dataframe_resample_sum_daily",
+        "mode": "strict",
+        "operation": "dataframe_resample_sum",
+        "oracle_source": "live_legacy_pandas",
+        "resample_freq": "D",
+        "frame": {
+            "index": [
+                { "kind": "utf8", "value": "2024-01-01 09:00:00" },
+                { "kind": "utf8", "value": "2024-01-01 18:00:00" },
+                { "kind": "utf8", "value": "2024-01-02 12:00:00" },
+                { "kind": "utf8", "value": "2024-01-03 06:00:00" },
+                { "kind": "utf8", "value": "2024-01-03 18:00:00" }
+            ],
+            "column_order": ["val"],
+            "columns": {
+                "val": [
+                    { "kind": "float64", "value": 1.0 },
+                    { "kind": "float64", "value": 2.0 },
+                    { "kind": "float64", "value": 3.0 },
+                    { "kind": "float64", "value": 4.0 },
+                    { "kind": "float64", "value": 5.0 }
+                ]
+            }
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping df resample daily: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
+    let super::ResolvedExpected::Frame(expected) = expected else { return; };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
+    let actual = frame.resample(fixture.resample_freq.as_deref().expect("resample_freq")).sum().expect("resample sum");
+    super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
+}
