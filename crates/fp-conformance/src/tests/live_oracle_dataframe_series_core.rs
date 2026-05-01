@@ -28989,3 +28989,112 @@ fn live_oracle_dataframe_shift_axis0_periods_2() {
     let result = frame.shift(2).expect("shift periods=2");
     super::compare_dataframe_expected(&result, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_dataframe_iloc_single_row() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DFILOC-SINGLE",
+        "case_id": "dataframe_iloc_single_row",
+        "mode": "strict",
+        "operation": "dataframe_iloc",
+        "oracle_source": "live_legacy_pandas",
+        "iloc_positions": [1],
+        "column_order": ["a", "b"],
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "column_order": ["a", "b"],
+            "columns": {
+                "a": [
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "int64", "value": 2 },
+                    { "kind": "int64", "value": 3 }
+                ],
+                "b": [
+                    { "kind": "int64", "value": 10 },
+                    { "kind": "int64", "value": 20 },
+                    { "kind": "int64", "value": 30 }
+                ]
+            }
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping iloc single row: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
+    let super::ResolvedExpected::Frame(expected) = expected else { return; };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
+    let positions = fixture.iloc_positions.as_ref().expect("iloc_positions");
+    let actual = frame
+        .iloc_with_columns(positions, fixture.column_order.as_deref())
+        .expect("dataframe iloc");
+    super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_dataframe_iloc_reverse_positions() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DFILOC-REV",
+        "case_id": "dataframe_iloc_reverse_positions",
+        "mode": "strict",
+        "operation": "dataframe_iloc",
+        "oracle_source": "live_legacy_pandas",
+        "iloc_positions": [3, 2, 1, 0],
+        "column_order": ["a", "b"],
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 }
+            ],
+            "column_order": ["a", "b"],
+            "columns": {
+                "a": [
+                    { "kind": "int64", "value": 10 },
+                    { "kind": "int64", "value": 20 },
+                    { "kind": "int64", "value": 30 },
+                    { "kind": "int64", "value": 40 }
+                ],
+                "b": [
+                    { "kind": "int64", "value": 100 },
+                    { "kind": "int64", "value": 200 },
+                    { "kind": "int64", "value": 300 },
+                    { "kind": "int64", "value": 400 }
+                ]
+            }
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping iloc reverse: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
+    let super::ResolvedExpected::Frame(expected) = expected else { return; };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
+    let positions = fixture.iloc_positions.as_ref().expect("iloc_positions");
+    let actual = frame
+        .iloc_with_columns(positions, fixture.column_order.as_deref())
+        .expect("dataframe iloc");
+    super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
+}
