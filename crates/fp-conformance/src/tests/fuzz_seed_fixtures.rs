@@ -3093,3 +3093,41 @@ fn fuzz_parse_expr_bytes_replays_committed_corpus_seeds() {
         fuzz_parse_expr_bytes(seed).unwrap_or_else(|err| panic!("seed {name} failed: {err}"));
     }
 }
+
+#[test]
+fn fuzz_semantic_eq_bytes_accepts_bool_diff_seed() {
+    let seed = include_bytes!("../../fixtures/adversarial/fuzz_corpus/semantic_eq/bool_diff.bin");
+    fuzz_semantic_eq_bytes(seed).expect("bool_diff seed should hold");
+}
+
+#[test]
+fn fuzz_semantic_eq_bytes_accepts_float_vs_bool_seed() {
+    let seed = include_bytes!(
+        "../../fixtures/adversarial/fuzz_corpus/semantic_eq/float_vs_bool.bin"
+    );
+    fuzz_semantic_eq_bytes(seed).expect("float_vs_bool seed should hold");
+}
+
+#[test]
+fn fuzz_semantic_eq_bytes_accepts_float_zero_seed() {
+    let seed = include_bytes!("../../fixtures/adversarial/fuzz_corpus/semantic_eq/float_zero.bin");
+    fuzz_semantic_eq_bytes(seed).expect("float_zero seed should hold");
+}
+
+#[test]
+fn fuzz_semantic_eq_bytes_accepts_int_zero_seed() {
+    let seed = include_bytes!("../../fixtures/adversarial/fuzz_corpus/semantic_eq/int_zero.bin");
+    fuzz_semantic_eq_bytes(seed).expect("int_zero seed should hold");
+}
+
+#[test]
+fn fuzz_semantic_eq_bytes_accepts_null_nat_seed() {
+    let seed = include_bytes!("../../fixtures/adversarial/fuzz_corpus/semantic_eq/null_nat.bin");
+    fuzz_semantic_eq_bytes(seed).expect("null_nat seed should hold");
+}
+
+#[test]
+fn fuzz_semantic_eq_bytes_accepts_utf8_same_seed() {
+    let seed = include_bytes!("../../fixtures/adversarial/fuzz_corpus/semantic_eq/utf8_same.bin");
+    fuzz_semantic_eq_bytes(seed).expect("utf8_same seed should hold");
+}
