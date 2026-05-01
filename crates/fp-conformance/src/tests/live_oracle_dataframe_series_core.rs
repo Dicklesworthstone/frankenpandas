@@ -18215,3 +18215,105 @@ fn live_oracle_series_str_isdecimal_mix() {
     let actual = series.str().isdecimal().expect("str isdecimal");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_series_str_istitle_mix() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-STRISTITLE",
+        "case_id": "series_str_istitle_mix",
+        "mode": "strict",
+        "operation": "series_str_istitle",
+        "oracle_source": "live_legacy_pandas",
+        "left": {
+            "name": "txt",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 }
+            ],
+            "values": [
+                { "kind": "utf8", "value": "Hello World" },
+                { "kind": "utf8", "value": "hello world" },
+                { "kind": "utf8", "value": "HELLO WORLD" },
+                { "kind": "utf8", "value": "Mixed Case Title" }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping series_str_istitle test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Series(_)),
+        "expected live oracle series payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let actual = series.str().istitle().expect("str istitle");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_series_str_findall_digits() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-STRFINDALL",
+        "case_id": "series_str_findall_digits",
+        "mode": "strict",
+        "operation": "series_str_findall",
+        "oracle_source": "live_legacy_pandas",
+        "regex_pattern": "[0-9]+",
+        "str_findall_sep": ",",
+        "left": {
+            "name": "txt",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "values": [
+                { "kind": "utf8", "value": "abc 123 def 456" },
+                { "kind": "utf8", "value": "789xyz" },
+                { "kind": "utf8", "value": "no digits here" }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping series_str_findall test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Series(_)),
+        "expected live oracle series payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let actual = series
+        .str()
+        .findall(
+            fixture.regex_pattern.as_deref().expect("regex_pattern"),
+            fixture.str_findall_sep.as_deref().expect("str_findall_sep"),
+        )
+        .expect("str findall");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
