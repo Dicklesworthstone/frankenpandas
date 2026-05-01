@@ -17376,3 +17376,121 @@ fn live_oracle_dataframe_stack_basic() {
         other => panic!("expected Frame oracle payload, got {other:?}"),
     }
 }
+
+#[test]
+fn live_oracle_dataframe_at_time_morning() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DFATTIME",
+        "case_id": "dataframe_at_time_morning",
+        "mode": "strict",
+        "operation": "dataframe_at_time",
+        "oracle_source": "live_legacy_pandas",
+        "time_value": "09:00:00",
+        "frame": {
+            "index": [
+                { "kind": "utf8", "value": "2024-01-01 09:00:00" },
+                { "kind": "utf8", "value": "2024-01-01 12:00:00" },
+                { "kind": "utf8", "value": "2024-01-02 09:00:00" },
+                { "kind": "utf8", "value": "2024-01-02 18:00:00" }
+            ],
+            "column_order": ["a", "b"],
+            "columns": {
+                "a": [
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "int64", "value": 2 },
+                    { "kind": "int64", "value": 3 },
+                    { "kind": "int64", "value": 4 }
+                ],
+                "b": [
+                    { "kind": "float64", "value": 10.0 },
+                    { "kind": "float64", "value": 20.0 },
+                    { "kind": "float64", "value": 30.0 },
+                    { "kind": "float64", "value": 40.0 }
+                ]
+            }
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping dataframe_at_time test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Frame(_)),
+        "expected live oracle frame payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Frame(expected) = expected else {
+        return;
+    };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
+    let actual = frame
+        .at_time(fixture.time_value.as_deref().expect("time_value"))
+        .expect("at_time");
+    super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_dataframe_between_time_midday() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DFBTWTIME",
+        "case_id": "dataframe_between_time_midday",
+        "mode": "strict",
+        "operation": "dataframe_between_time",
+        "oracle_source": "live_legacy_pandas",
+        "start_time": "10:00:00",
+        "end_time": "16:00:00",
+        "frame": {
+            "index": [
+                { "kind": "utf8", "value": "2024-01-01 09:00:00" },
+                { "kind": "utf8", "value": "2024-01-01 12:00:00" },
+                { "kind": "utf8", "value": "2024-01-01 14:30:00" },
+                { "kind": "utf8", "value": "2024-01-01 17:00:00" }
+            ],
+            "column_order": ["a"],
+            "columns": {
+                "a": [
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "int64", "value": 2 },
+                    { "kind": "int64", "value": 3 },
+                    { "kind": "int64", "value": 4 }
+                ]
+            }
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!(
+            "live pandas unavailable; skipping dataframe_between_time test: {message}"
+        );
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Frame(_)),
+        "expected live oracle frame payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Frame(expected) = expected else {
+        return;
+    };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
+    let actual = frame
+        .between_time(
+            fixture.start_time.as_deref().expect("start_time"),
+            fixture.end_time.as_deref().expect("end_time"),
+        )
+        .expect("between_time");
+    super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
+}
