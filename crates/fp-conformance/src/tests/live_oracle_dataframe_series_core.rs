@@ -19819,3 +19819,111 @@ fn live_oracle_series_str_split_get_index_1() {
         .expect("str split_get");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_series_str_split_count_basic() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-STRSPLITCOUNT",
+        "case_id": "series_str_split_count_basic",
+        "mode": "strict",
+        "operation": "series_str_split_count",
+        "oracle_source": "live_legacy_pandas",
+        "str_split_pat": ",",
+        "left": {
+            "name": "txt",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "values": [
+                { "kind": "utf8", "value": "a,b,c,d" },
+                { "kind": "utf8", "value": "single" },
+                { "kind": "utf8", "value": "x,y" }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!(
+            "live pandas unavailable; skipping series_str_split_count test: {message}"
+        );
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Series(_)),
+        "expected live oracle series payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let actual = series
+        .str()
+        .split_count(fixture.str_split_pat.as_deref().expect("str_split_pat"))
+        .expect("str split_count");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_series_str_rsplit_get_index_0() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-STRRSPLITGET",
+        "case_id": "series_str_rsplit_get_index_0",
+        "mode": "strict",
+        "operation": "series_str_rsplit_get",
+        "oracle_source": "live_legacy_pandas",
+        "str_split_pat": "/",
+        "str_split_n": 0,
+        "left": {
+            "name": "path",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "values": [
+                { "kind": "utf8", "value": "/usr/local/bin/ls" },
+                { "kind": "utf8", "value": "single_file" },
+                { "kind": "utf8", "value": "a/b" }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!(
+            "live pandas unavailable; skipping series_str_rsplit_get test: {message}"
+        );
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Series(_)),
+        "expected live oracle series payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let actual = series
+        .str()
+        .rsplit_get(
+            fixture.str_split_pat.as_deref().expect("str_split_pat"),
+            fixture.str_split_n.expect("str_split_n"),
+        )
+        .expect("str rsplit_get");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
