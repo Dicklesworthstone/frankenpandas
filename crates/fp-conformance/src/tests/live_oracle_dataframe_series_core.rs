@@ -32987,3 +32987,105 @@ fn live_oracle_series_to_timedelta_with_seconds() {
     let actual = fp_frame::to_timedelta(&series).expect("to_timedelta");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_series_to_datetime_unit_microseconds() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-STODT-US",
+        "case_id": "series_to_datetime_unit_microseconds",
+        "mode": "strict",
+        "operation": "series_to_datetime",
+        "oracle_source": "live_legacy_pandas",
+        "datetime_unit": "us",
+        "left": {
+            "name": "ts",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "values": [
+                { "kind": "int64", "value": 1000000_i64 },
+                { "kind": "int64", "value": 60000000_i64 },
+                { "kind": "int64", "value": 3600000000_i64 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping to_datetime us: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
+    let super::ResolvedExpected::Series(expected) = expected else { return; };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let actual = fp_frame::to_datetime_with_options(
+        &series,
+        fp_frame::ToDatetimeOptions {
+            format: None,
+            unit: fixture.datetime_unit.as_deref(),
+            utc: false,
+            origin: None,
+            infer_mixed_timezone: true,
+        },
+    ).expect("to_datetime");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_series_to_datetime_unit_minutes() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-STODT-MIN",
+        "case_id": "series_to_datetime_unit_minutes",
+        "mode": "strict",
+        "operation": "series_to_datetime",
+        "oracle_source": "live_legacy_pandas",
+        "datetime_unit": "m",
+        "left": {
+            "name": "ts",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "values": [
+                { "kind": "int64", "value": 60 },
+                { "kind": "int64", "value": 120 },
+                { "kind": "int64", "value": 1440 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping to_datetime min: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
+    let super::ResolvedExpected::Series(expected) = expected else { return; };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let actual = fp_frame::to_datetime_with_options(
+        &series,
+        fp_frame::ToDatetimeOptions {
+            format: None,
+            unit: fixture.datetime_unit.as_deref(),
+            utc: false,
+            origin: None,
+            infer_mixed_timezone: true,
+        },
+    ).expect("to_datetime");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
