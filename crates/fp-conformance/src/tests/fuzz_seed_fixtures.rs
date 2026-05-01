@@ -914,6 +914,60 @@ fn fuzz_dataframe_eval_bytes_accepts_simple_numeric_expression() {
 }
 
 #[test]
+fn fuzz_dataframe_eval_bytes_accepts_arith_add_seed_fixture() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/dataframe_eval/arith_add.bin");
+    fuzz_dataframe_eval_bytes(seed).expect("arith_add eval seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_dataframe_eval_bytes_accepts_arith_chain_seed_fixture() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/dataframe_eval/arith_chain.bin");
+    fuzz_dataframe_eval_bytes(seed).expect("arith_chain eval seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_dataframe_eval_bytes_accepts_arith_div_seed_fixture() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/dataframe_eval/arith_div.bin");
+    fuzz_dataframe_eval_bytes(seed).expect("arith_div eval seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_dataframe_eval_bytes_accepts_arith_mul_seed_fixture() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/dataframe_eval/arith_mul.bin");
+    fuzz_dataframe_eval_bytes(seed).expect("arith_mul eval seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_dataframe_eval_bytes_accepts_arith_paren_seed_fixture() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/dataframe_eval/arith_paren.bin");
+    fuzz_dataframe_eval_bytes(seed).expect("arith_paren eval seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_dataframe_eval_bytes_accepts_arith_sub_seed_fixture() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/dataframe_eval/arith_sub.bin");
+    fuzz_dataframe_eval_bytes(seed).expect("arith_sub eval seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_dataframe_eval_bytes_accepts_cmp_eq_seed_fixture() {
+    let seed = include_bytes!("../../fixtures/adversarial/fuzz_corpus/dataframe_eval/cmp_eq.bin");
+    fuzz_dataframe_eval_bytes(seed).expect("cmp_eq eval seed should satisfy invariants");
+}
+
+#[test]
+fn fuzz_dataframe_eval_bytes_accepts_cmp_gt_seed_fixture() {
+    let seed = include_bytes!("../../fixtures/adversarial/fuzz_corpus/dataframe_eval/cmp_gt.bin");
+    fuzz_dataframe_eval_bytes(seed).expect("cmp_gt eval seed should satisfy invariants");
+}
+
+#[test]
 fn fuzz_dataframe_eval_bytes_replays_committed_corpus_seeds() {
     let seeds: &[(&str, &[u8])] = &[
         (
