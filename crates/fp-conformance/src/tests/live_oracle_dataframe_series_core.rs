@@ -29741,3 +29741,67 @@ fn live_oracle_dataframe_explode_colon_ignore_index() {
     let actual = frame.explode_with_ignore_index("items", ":", true).expect("explode");
     super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_dataframe_compare_with_custom_result_names() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DFCOMPARE-NAMES",
+        "case_id": "dataframe_compare_with_custom_result_names",
+        "mode": "strict",
+        "operation": "dataframe_compare",
+        "oracle_source": "live_legacy_pandas",
+        "compare_result_names": ["before", "after"],
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 }
+            ],
+            "column_order": ["a", "b"],
+            "columns": {
+                "a": [
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "int64", "value": 2 }
+                ],
+                "b": [
+                    { "kind": "int64", "value": 10 },
+                    { "kind": "int64", "value": 20 }
+                ]
+            }
+        },
+        "frame_right": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 }
+            ],
+            "column_order": ["a", "b"],
+            "columns": {
+                "a": [
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "int64", "value": 99 }
+                ],
+                "b": [
+                    { "kind": "int64", "value": 10 },
+                    { "kind": "int64", "value": 20 }
+                ]
+            }
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping compare custom names: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
+    let super::ResolvedExpected::Frame(expected) = expected else { return; };
+
+    let left = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("left");
+    let right = super::build_dataframe(fixture.frame_right.as_ref().expect("frame_right")).expect("right");
+    let actual = left.compare_with_result_names(&right, ("before", "after")).expect("compare");
+    super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
+}
