@@ -25072,3 +25072,175 @@ fn live_oracle_series_str_len_with_unicode_and_empty() {
     let actual = series.str().len().expect("str len");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_series_str_isalnum_mix() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-STRISALNUM",
+        "case_id": "series_str_isalnum_mix",
+        "mode": "strict",
+        "operation": "series_str_isalnum",
+        "oracle_source": "live_legacy_pandas",
+        "left": {
+            "name": "txt",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 }
+            ],
+            "values": [
+                { "kind": "utf8", "value": "abc123" },
+                { "kind": "utf8", "value": "abc def" },
+                { "kind": "utf8", "value": "" },
+                { "kind": "utf8", "value": "x1" }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping str isalnum: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
+    let super::ResolvedExpected::Series(expected) = expected else { return; };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let actual = series.str().isalnum().expect("isalnum");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_series_str_isnumeric_mix() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-STRISNUM",
+        "case_id": "series_str_isnumeric_mix",
+        "mode": "strict",
+        "operation": "series_str_isnumeric",
+        "oracle_source": "live_legacy_pandas",
+        "left": {
+            "name": "txt",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 }
+            ],
+            "values": [
+                { "kind": "utf8", "value": "123" },
+                { "kind": "utf8", "value": "abc" },
+                { "kind": "utf8", "value": "12.5" },
+                { "kind": "utf8", "value": "" }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping str isnumeric: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
+    let super::ResolvedExpected::Series(expected) = expected else { return; };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let actual = series.str().isnumeric().expect("isnumeric");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_series_str_islower_mix() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-STRISLOWER",
+        "case_id": "series_str_islower_mix",
+        "mode": "strict",
+        "operation": "series_str_islower",
+        "oracle_source": "live_legacy_pandas",
+        "left": {
+            "name": "txt",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 }
+            ],
+            "values": [
+                { "kind": "utf8", "value": "abc" },
+                { "kind": "utf8", "value": "ABC" },
+                { "kind": "utf8", "value": "Abc" },
+                { "kind": "utf8", "value": "abc 123" }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping str islower: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
+    let super::ResolvedExpected::Series(expected) = expected else { return; };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let actual = series.str().islower().expect("islower");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_series_str_isupper_mix() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-STRISUPPER",
+        "case_id": "series_str_isupper_mix",
+        "mode": "strict",
+        "operation": "series_str_isupper",
+        "oracle_source": "live_legacy_pandas",
+        "left": {
+            "name": "txt",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 }
+            ],
+            "values": [
+                { "kind": "utf8", "value": "ABC" },
+                { "kind": "utf8", "value": "abc" },
+                { "kind": "utf8", "value": "Abc" },
+                { "kind": "utf8", "value": "ABC 123" }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping str isupper: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
+    let super::ResolvedExpected::Series(expected) = expected else { return; };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let actual = series.str().isupper().expect("isupper");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
