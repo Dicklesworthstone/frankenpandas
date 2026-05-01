@@ -23368,3 +23368,67 @@ fn live_oracle_dataframe_count_mixed_types() {
     let actual = frame.count().expect("count");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_dataframe_corr_pearson_min_periods_3() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DFCORR-MINPER",
+        "case_id": "dataframe_corr_pearson_min_periods_3",
+        "mode": "strict",
+        "operation": "dataframe_corr",
+        "oracle_source": "live_legacy_pandas",
+        "corr_min_periods": 3,
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 4 }
+            ],
+            "column_order": ["a", "b"],
+            "columns": {
+                "a": [
+                    { "kind": "float64", "value": 1.0 },
+                    { "kind": "float64", "value": 2.0 },
+                    { "kind": "null", "value": "null" },
+                    { "kind": "float64", "value": 4.0 },
+                    { "kind": "float64", "value": 5.0 }
+                ],
+                "b": [
+                    { "kind": "float64", "value": 5.0 },
+                    { "kind": "float64", "value": 6.0 },
+                    { "kind": "float64", "value": 7.0 },
+                    { "kind": "float64", "value": 8.0 },
+                    { "kind": "float64", "value": 9.0 }
+                ]
+            }
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!(
+            "live pandas unavailable; skipping dataframe_corr min_periods: {message}"
+        );
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Frame(_)),
+        "expected live oracle frame payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Frame(expected) = expected else {
+        return;
+    };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
+    let actual = frame
+        .corr_min_periods_with_numeric_only(3, false)
+        .expect("corr min_periods");
+    super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
+}
