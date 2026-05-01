@@ -21621,3 +21621,67 @@ fn live_oracle_dataframe_duplicated_with_subset() {
         .expect("duplicated with subset");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_dataframe_set_index_verify_integrity_unique() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DFSETIDX-VERIFY",
+        "case_id": "dataframe_set_index_verify_integrity_unique",
+        "mode": "strict",
+        "operation": "dataframe_set_index",
+        "oracle_source": "live_legacy_pandas",
+        "set_index_column": "key",
+        "set_index_drop": true,
+        "set_index_verify_integrity": true,
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "column_order": ["key", "val"],
+            "columns": {
+                "key": [
+                    { "kind": "utf8", "value": "a" },
+                    { "kind": "utf8", "value": "b" },
+                    { "kind": "utf8", "value": "c" }
+                ],
+                "val": [
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "int64", "value": 2 },
+                    { "kind": "int64", "value": 3 }
+                ]
+            }
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!(
+            "live pandas unavailable; skipping dataframe_set_index verify_integrity test: {message}"
+        );
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Frame(_)),
+        "expected live oracle frame payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Frame(expected) = expected else {
+        return;
+    };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
+    let actual = frame
+        .set_index_with_verify_integrity(
+            fixture.set_index_column.as_deref().expect("set_index_column"),
+            fixture.set_index_drop.expect("set_index_drop"),
+            fixture.set_index_verify_integrity.unwrap_or(false),
+        )
+        .expect("set_index verify_integrity");
+    super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
+}
