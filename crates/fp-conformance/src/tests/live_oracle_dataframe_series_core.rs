@@ -24250,3 +24250,75 @@ fn live_oracle_dataframe_replace_int_to_null() {
     let actual = super::execute_dataframe_fixture_operation(&fixture).expect("replace null");
     super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_dataframe_combine_first_numeric_overlap() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DFCOMBINEFIRST-NUM",
+        "case_id": "dataframe_combine_first_numeric_overlap",
+        "mode": "strict",
+        "operation": "dataframe_combine_first",
+        "oracle_source": "live_legacy_pandas",
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "column_order": ["a"],
+            "columns": {
+                "a": [
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "null", "value": "null" },
+                    { "kind": "int64", "value": 3 }
+                ]
+            }
+        },
+        "frame_right": {
+            "index": [
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 }
+            ],
+            "column_order": ["a", "b"],
+            "columns": {
+                "a": [
+                    { "kind": "int64", "value": 99 },
+                    { "kind": "int64", "value": 100 },
+                    { "kind": "int64", "value": 200 }
+                ],
+                "b": [
+                    { "kind": "float64", "value": 1.5 },
+                    { "kind": "float64", "value": 2.5 },
+                    { "kind": "float64", "value": 3.5 }
+                ]
+            }
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!(
+            "live pandas unavailable; skipping dataframe_combine_first numeric: {message}"
+        );
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Frame(_)),
+        "expected live oracle frame payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Frame(expected) = expected else {
+        return;
+    };
+
+    let left = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("left");
+    let right =
+        super::build_dataframe(fixture.frame_right.as_ref().expect("frame_right")).expect("right");
+    let actual = left.combine_first(&right).expect("combine_first");
+    super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
+}
