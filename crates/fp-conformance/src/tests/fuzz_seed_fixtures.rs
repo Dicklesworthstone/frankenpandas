@@ -3567,3 +3567,10 @@ fn fuzz_parse_expr_bytes_accepts_valid_ident_seed() {
     let seed = include_bytes!("../../fixtures/adversarial/fuzz_corpus/parse_expr/valid_ident");
     fuzz_parse_expr_bytes(seed).expect("valid_ident seed should pass invariants");
 }
+
+#[test]
+fn fuzz_rolling_window_bytes_accepts_seed_empty_seed() {
+    let seed =
+        include_bytes!("../../fixtures/adversarial/fuzz_corpus/rolling_window/seed-empty.bin");
+    fuzz_rolling_window_bytes(seed).expect("seed-empty rolling_window should pass invariants");
+}
