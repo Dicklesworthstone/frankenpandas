@@ -28883,3 +28883,109 @@ fn live_oracle_dataframe_shift_axis0_periods_1() {
     let result = frame.shift(1).expect("shift");
     super::compare_dataframe_expected(&result, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_dataframe_pct_change_axis0_periods_1() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DFPCT-AX0",
+        "case_id": "dataframe_pct_change_axis0_periods_1",
+        "mode": "strict",
+        "operation": "dataframe_pct_change",
+        "oracle_source": "live_legacy_pandas",
+        "shift_periods": 1,
+        "shift_axis": 0,
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 }
+            ],
+            "column_order": ["a", "b"],
+            "columns": {
+                "a": [
+                    { "kind": "float64", "value": 1.0 },
+                    { "kind": "float64", "value": 2.0 },
+                    { "kind": "float64", "value": 4.0 },
+                    { "kind": "float64", "value": 8.0 }
+                ],
+                "b": [
+                    { "kind": "float64", "value": 10.0 },
+                    { "kind": "float64", "value": 15.0 },
+                    { "kind": "float64", "value": 22.5 },
+                    { "kind": "float64", "value": 33.75 }
+                ]
+            }
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping pct_change axis=0: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
+    let super::ResolvedExpected::Frame(expected) = expected else { return; };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
+    let result = frame.pct_change(1).expect("pct_change");
+    super::compare_dataframe_expected(&result, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_dataframe_shift_axis0_periods_2() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DFSHIFT-AX0-P2",
+        "case_id": "dataframe_shift_axis0_periods_2",
+        "mode": "strict",
+        "operation": "dataframe_shift",
+        "oracle_source": "live_legacy_pandas",
+        "shift_periods": 2,
+        "shift_axis": 0,
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 }
+            ],
+            "column_order": ["a", "b"],
+            "columns": {
+                "a": [
+                    { "kind": "float64", "value": 1.0 },
+                    { "kind": "float64", "value": 2.0 },
+                    { "kind": "float64", "value": 3.0 },
+                    { "kind": "float64", "value": 4.0 }
+                ],
+                "b": [
+                    { "kind": "float64", "value": 10.0 },
+                    { "kind": "float64", "value": 20.0 },
+                    { "kind": "float64", "value": 30.0 },
+                    { "kind": "float64", "value": 40.0 }
+                ]
+            }
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping shift axis=0 periods=2: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
+    let super::ResolvedExpected::Frame(expected) = expected else { return; };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
+    let result = frame.shift(2).expect("shift periods=2");
+    super::compare_dataframe_expected(&result, &expected).expect("pandas parity");
+}
