@@ -33643,3 +33643,87 @@ fn live_oracle_series_str_replace_with_unicode() {
     let actual = series.str().replace("café", "COFFEE").expect("replace unicode");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_series_str_removeprefix_no_match() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-RMVPRE-NM",
+        "case_id": "series_str_removeprefix_no_match",
+        "mode": "strict",
+        "operation": "series_str_removeprefix",
+        "oracle_source": "live_legacy_pandas",
+        "str_prefix": "xyz",
+        "left": {
+            "name": "txt",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "values": [
+                { "kind": "utf8", "value": "abc" },
+                { "kind": "utf8", "value": "hello" },
+                { "kind": "utf8", "value": "xyz_match" }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping str removeprefix no match: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
+    let super::ResolvedExpected::Series(expected) = expected else { return; };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let actual = series.str().removeprefix("xyz").expect("removeprefix");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_series_str_removesuffix_unicode() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-RMVSUF-UNI",
+        "case_id": "series_str_removesuffix_unicode",
+        "mode": "strict",
+        "operation": "series_str_removesuffix",
+        "oracle_source": "live_legacy_pandas",
+        "str_suffix": "é",
+        "left": {
+            "name": "txt",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "values": [
+                { "kind": "utf8", "value": "café" },
+                { "kind": "utf8", "value": "hello" },
+                { "kind": "utf8", "value": "soufflé" }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping str removesuffix unicode: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
+    let super::ResolvedExpected::Series(expected) = expected else { return; };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let actual = series.str().removesuffix("é").expect("removesuffix");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
