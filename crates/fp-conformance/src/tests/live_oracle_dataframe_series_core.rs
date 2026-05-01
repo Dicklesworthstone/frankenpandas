@@ -24136,3 +24136,62 @@ fn live_oracle_dataframe_insert_middle() {
     let actual = super::execute_dataframe_fixture_operation(&fixture).expect("insert");
     super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_dataframe_mode_int_columns() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DFMODE-INT",
+        "case_id": "dataframe_mode_int_columns",
+        "mode": "strict",
+        "operation": "dataframe_mode",
+        "oracle_source": "live_legacy_pandas",
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 4 }
+            ],
+            "column_order": ["a", "b"],
+            "columns": {
+                "a": [
+                    { "kind": "int64", "value": 5 },
+                    { "kind": "int64", "value": 5 },
+                    { "kind": "int64", "value": 7 },
+                    { "kind": "int64", "value": 5 },
+                    { "kind": "int64", "value": 9 }
+                ],
+                "b": [
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "int64", "value": 2 },
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "int64", "value": 3 },
+                    { "kind": "int64", "value": 4 }
+                ]
+            }
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping dataframe_mode int: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Frame(_)),
+        "expected live oracle frame payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Frame(expected) = expected else {
+        return;
+    };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
+    let actual = frame.mode().expect("mode");
+    super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
+}
