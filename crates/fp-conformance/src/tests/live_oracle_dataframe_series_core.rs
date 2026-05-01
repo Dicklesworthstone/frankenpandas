@@ -21102,3 +21102,115 @@ fn live_oracle_dataframe_pct_change_periods_1() {
     let actual = frame.pct_change(1).expect("pct_change");
     super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_dataframe_reindex_subset() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DFREINDEX",
+        "case_id": "dataframe_reindex_subset",
+        "mode": "strict",
+        "operation": "dataframe_reindex",
+        "oracle_source": "live_legacy_pandas",
+        "reindex_labels": [
+            { "kind": "int64", "value": 0 },
+            { "kind": "int64", "value": 2 },
+            { "kind": "int64", "value": 4 }
+        ],
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "column_order": ["a"],
+            "columns": {
+                "a": [
+                    { "kind": "int64", "value": 10 },
+                    { "kind": "int64", "value": 20 },
+                    { "kind": "int64", "value": 30 }
+                ]
+            }
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping dataframe_reindex test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Frame(_)),
+        "expected live oracle frame payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Frame(expected) = expected else {
+        return;
+    };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
+    let labels = fixture.reindex_labels.as_ref().expect("reindex_labels").clone();
+    let actual = frame.reindex(labels).expect("reindex");
+    super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_dataframe_reindex_columns_with_new() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DFREINDEXCOLS",
+        "case_id": "dataframe_reindex_columns_with_new",
+        "mode": "strict",
+        "operation": "dataframe_reindex_columns",
+        "oracle_source": "live_legacy_pandas",
+        "reindex_columns": ["a", "c", "b"],
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 }
+            ],
+            "column_order": ["a", "b"],
+            "columns": {
+                "a": [
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "int64", "value": 2 }
+                ],
+                "b": [
+                    { "kind": "float64", "value": 1.5 },
+                    { "kind": "float64", "value": 2.5 }
+                ]
+            }
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!(
+            "live pandas unavailable; skipping dataframe_reindex_columns test: {message}"
+        );
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Frame(_)),
+        "expected live oracle frame payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Frame(expected) = expected else {
+        return;
+    };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
+    let cols = fixture
+        .reindex_columns
+        .as_ref()
+        .expect("reindex_columns");
+    let col_refs: Vec<&str> = cols.iter().map(String::as_str).collect();
+    let actual = frame.reindex_columns(&col_refs).expect("reindex_columns");
+    super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
+}
