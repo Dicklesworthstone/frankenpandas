@@ -15346,3 +15346,111 @@ fn live_oracle_series_repeat_per_element() {
     let actual = series.repeat_by(&counts).expect("repeat");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_series_at_time_morning() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-ATTIME",
+        "case_id": "series_at_time_morning",
+        "mode": "strict",
+        "operation": "series_at_time",
+        "oracle_source": "live_legacy_pandas",
+        "time_value": "09:00:00",
+        "left": {
+            "name": "events",
+            "index": [
+                { "kind": "utf8", "value": "2024-01-01 09:00:00" },
+                { "kind": "utf8", "value": "2024-01-01 12:00:00" },
+                { "kind": "utf8", "value": "2024-01-02 09:00:00" },
+                { "kind": "utf8", "value": "2024-01-02 18:00:00" }
+            ],
+            "values": [
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 4 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping series_at_time test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Series(_)),
+        "expected live oracle series payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let actual = series
+        .at_time(fixture.time_value.as_deref().expect("time_value"))
+        .expect("at_time");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_series_between_time_morning_afternoon() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-BTWTIME",
+        "case_id": "series_between_time_morning_afternoon",
+        "mode": "strict",
+        "operation": "series_between_time",
+        "oracle_source": "live_legacy_pandas",
+        "start_time": "09:00:00",
+        "end_time": "15:00:00",
+        "left": {
+            "name": "events",
+            "index": [
+                { "kind": "utf8", "value": "2024-01-01 08:00:00" },
+                { "kind": "utf8", "value": "2024-01-01 09:30:00" },
+                { "kind": "utf8", "value": "2024-01-01 12:00:00" },
+                { "kind": "utf8", "value": "2024-01-01 16:00:00" },
+                { "kind": "utf8", "value": "2024-01-02 14:00:00" }
+            ],
+            "values": [
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 4 },
+                { "kind": "int64", "value": 5 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping series_between_time test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Series(_)),
+        "expected live oracle series payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let actual = series
+        .between_time(
+            fixture.start_time.as_deref().expect("start_time"),
+            fixture.end_time.as_deref().expect("end_time"),
+        )
+        .expect("between_time");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
