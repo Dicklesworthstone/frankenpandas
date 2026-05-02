@@ -36829,3 +36829,45 @@ fn live_oracle_series_update_with_strings() {
     let actual = series.update(&other).expect("series update");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_series_str_split_count_unicode_separator() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-STRSPCNT-UNI",
+        "case_id": "series_str_split_count_unicode_separator",
+        "mode": "strict",
+        "operation": "series_str_split_count",
+        "oracle_source": "live_legacy_pandas",
+        "str_split_pat": "é",
+        "left": {
+            "name": "txt",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "values": [
+                { "kind": "utf8", "value": "céeé" },
+                { "kind": "utf8", "value": "abc" },
+                { "kind": "utf8", "value": "éaéeéié" }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping str split_count unicode: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
+    let super::ResolvedExpected::Series(expected) = expected else { return; };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let actual = series.str().split_count("é").expect("split_count");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
