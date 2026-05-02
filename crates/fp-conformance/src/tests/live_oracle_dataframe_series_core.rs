@@ -36143,3 +36143,61 @@ fn live_oracle_dataframe_value_counts_three_columns() {
     let actual = frame.value_counts().expect("value_counts");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_dataframe_corr_numeric_only_true() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DFCORR-NUMONLY",
+        "case_id": "dataframe_corr_numeric_only_true",
+        "mode": "strict",
+        "operation": "dataframe_corr",
+        "oracle_source": "live_legacy_pandas",
+        "corr_numeric_only": true,
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 }
+            ],
+            "column_order": ["a", "b", "name"],
+            "columns": {
+                "a": [
+                    { "kind": "float64", "value": 1.0 },
+                    { "kind": "float64", "value": 2.0 },
+                    { "kind": "float64", "value": 3.0 },
+                    { "kind": "float64", "value": 4.0 }
+                ],
+                "b": [
+                    { "kind": "float64", "value": 4.0 },
+                    { "kind": "float64", "value": 3.0 },
+                    { "kind": "float64", "value": 2.0 },
+                    { "kind": "float64", "value": 1.0 }
+                ],
+                "name": [
+                    { "kind": "utf8", "value": "x" },
+                    { "kind": "utf8", "value": "y" },
+                    { "kind": "utf8", "value": "z" },
+                    { "kind": "utf8", "value": "w" }
+                ]
+            }
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping corr numeric_only: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
+    let super::ResolvedExpected::Frame(expected) = expected else { return; };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
+    let actual = frame.corr_with_numeric_only(true).expect("corr numeric_only");
+    super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
+}
