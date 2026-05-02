@@ -38964,3 +38964,50 @@ fn live_oracle_series_rolling_std_min_periods_2() {
     let result = series.rolling(4, Some(2)).std().expect("rolling std mp2");
     super::compare_series_expected(&result, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_series_searchsorted_strings() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-SEARCHSORTED-STR",
+        "case_id": "series_searchsorted_strings",
+        "mode": "strict",
+        "operation": "series_searchsorted",
+        "oracle_source": "live_legacy_pandas",
+        "searchsorted_value": { "kind": "utf8", "value": "c" },
+        "searchsorted_side": "left",
+        "left": {
+            "name": "sorted_letters",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 }
+            ],
+            "values": [
+                { "kind": "utf8", "value": "a" },
+                { "kind": "utf8", "value": "b" },
+                { "kind": "utf8", "value": "d" },
+                { "kind": "utf8", "value": "e" }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping searchsorted strings: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Scalar(_)));
+    let super::ResolvedExpected::Scalar(expected) = expected else { return; };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let needle = fixture.searchsorted_value.as_ref().expect("needle");
+    let pos = series.searchsorted(needle, "left").expect("searchsorted");
+    let actual = super::Scalar::Int64(pos as i64);
+    super::compare_scalar(&actual, &expected, "series_searchsorted").expect("pandas parity");
+}
