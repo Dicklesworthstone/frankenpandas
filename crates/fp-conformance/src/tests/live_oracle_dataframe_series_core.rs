@@ -37905,3 +37905,47 @@ fn live_oracle_series_str_rjust_narrow_width() {
     let actual = series.str().rjust(3, '.').expect("rjust");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_series_str_zfill_width10() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-STRZFILL-10",
+        "case_id": "series_str_zfill_width10",
+        "mode": "strict",
+        "operation": "series_str_zfill",
+        "oracle_source": "live_legacy_pandas",
+        "str_width": 10,
+        "left": {
+            "name": "txt",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 }
+            ],
+            "values": [
+                { "kind": "utf8", "value": "1" },
+                { "kind": "utf8", "value": "12345" },
+                { "kind": "utf8", "value": "1234567890" },
+                { "kind": "utf8", "value": "" }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping str zfill 10: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
+    let super::ResolvedExpected::Series(expected) = expected else { return; };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let actual = series.str().zfill(10).expect("zfill");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
