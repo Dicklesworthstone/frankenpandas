@@ -37675,3 +37675,52 @@ fn live_oracle_groupby_last_with_float_values() {
     let result = fp_groupby::groupby_last(&keys, &values, options, &policy, &mut ledger).expect("groupby_last");
     super::compare_series_expected(&result, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_dataframe_transpose_strings() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DFTRP-STR",
+        "case_id": "dataframe_transpose_strings",
+        "mode": "strict",
+        "operation": "dataframe_transpose",
+        "oracle_source": "live_legacy_pandas",
+        "frame": {
+            "index": [
+                { "kind": "utf8", "value": "row1" },
+                { "kind": "utf8", "value": "row2" }
+            ],
+            "column_order": ["x", "y", "z"],
+            "columns": {
+                "x": [
+                    { "kind": "utf8", "value": "alpha" },
+                    { "kind": "utf8", "value": "beta" }
+                ],
+                "y": [
+                    { "kind": "utf8", "value": "gamma" },
+                    { "kind": "utf8", "value": "delta" }
+                ],
+                "z": [
+                    { "kind": "utf8", "value": "epsilon" },
+                    { "kind": "utf8", "value": "zeta" }
+                ]
+            }
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping df transpose strings: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
+    let super::ResolvedExpected::Frame(expected_frame) = expected else { return; };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
+    let result = frame.transpose().expect("transpose");
+    super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
+}
