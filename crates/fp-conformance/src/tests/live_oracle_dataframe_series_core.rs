@@ -34039,3 +34039,91 @@ fn live_oracle_series_round_int_values() {
     let actual = series.round(1).expect("round");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_series_diff_int_values() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-SDIFF-INT",
+        "case_id": "series_diff_int_values",
+        "mode": "strict",
+        "operation": "series_diff",
+        "oracle_source": "live_legacy_pandas",
+        "diff_periods": 1,
+        "left": {
+            "name": "vals",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 }
+            ],
+            "values": [
+                { "kind": "int64", "value": 10 },
+                { "kind": "int64", "value": 25 },
+                { "kind": "int64", "value": 45 },
+                { "kind": "int64", "value": 70 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping diff int values: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
+    let super::ResolvedExpected::Series(expected) = expected else { return; };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let result = series.diff(1).expect("diff");
+    super::compare_series_expected(&result, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_series_diff_with_negatives() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-SDIFF-NEG",
+        "case_id": "series_diff_with_negatives",
+        "mode": "strict",
+        "operation": "series_diff",
+        "oracle_source": "live_legacy_pandas",
+        "diff_periods": 1,
+        "left": {
+            "name": "vals",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 }
+            ],
+            "values": [
+                { "kind": "float64", "value": -10.0 },
+                { "kind": "float64", "value": -5.0 },
+                { "kind": "float64", "value": 0.0 },
+                { "kind": "float64", "value": 5.0 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping diff negatives: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
+    let super::ResolvedExpected::Series(expected) = expected else { return; };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let result = series.diff(1).expect("diff");
+    super::compare_series_expected(&result, &expected).expect("pandas parity");
+}
