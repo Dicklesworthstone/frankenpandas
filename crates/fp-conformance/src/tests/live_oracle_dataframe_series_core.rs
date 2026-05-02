@@ -37724,3 +37724,55 @@ fn live_oracle_dataframe_transpose_strings() {
     let result = frame.transpose().expect("transpose");
     super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_dataframe_stack_three_columns_with_strings() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DFSTACK-3STR",
+        "case_id": "dataframe_stack_three_columns_with_strings",
+        "mode": "strict",
+        "operation": "dataframe_stack",
+        "oracle_source": "live_legacy_pandas",
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 }
+            ],
+            "column_order": ["x", "y", "z"],
+            "columns": {
+                "x": [
+                    { "kind": "utf8", "value": "alpha" },
+                    { "kind": "utf8", "value": "beta" }
+                ],
+                "y": [
+                    { "kind": "utf8", "value": "gamma" },
+                    { "kind": "utf8", "value": "delta" }
+                ],
+                "z": [
+                    { "kind": "utf8", "value": "epsilon" },
+                    { "kind": "utf8", "value": "zeta" }
+                ]
+            }
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping df stack 3 strings: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
+    let actual = frame.stack().expect("stack");
+    match expected {
+        super::ResolvedExpected::Frame(expected) => {
+            super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
+        }
+        other => panic!("expected Frame oracle payload, got {other:?}"),
+    }
+}
