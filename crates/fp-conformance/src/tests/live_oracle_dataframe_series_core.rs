@@ -35975,3 +35975,62 @@ fn live_oracle_dataframe_replace_string_three_pairs() {
     let result = frame.replace(&replacements).expect("replace");
     super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_dataframe_get_dummies_three_columns() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DFGD-3C",
+        "case_id": "dataframe_get_dummies_three_columns",
+        "mode": "strict",
+        "operation": "dataframe_get_dummies",
+        "oracle_source": "live_legacy_pandas",
+        "dummy_columns": ["a", "b", "c"],
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "column_order": ["a", "b", "c", "value"],
+            "columns": {
+                "a": [
+                    { "kind": "utf8", "value": "x" },
+                    { "kind": "utf8", "value": "y" },
+                    { "kind": "utf8", "value": "x" }
+                ],
+                "b": [
+                    { "kind": "utf8", "value": "p" },
+                    { "kind": "utf8", "value": "q" },
+                    { "kind": "utf8", "value": "p" }
+                ],
+                "c": [
+                    { "kind": "utf8", "value": "i" },
+                    { "kind": "utf8", "value": "j" },
+                    { "kind": "utf8", "value": "i" }
+                ],
+                "value": [
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "int64", "value": 2 },
+                    { "kind": "int64", "value": 3 }
+                ]
+            }
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping df get_dummies 3col: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
+    let super::ResolvedExpected::Frame(expected_frame) = expected else { return; };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
+    let result = frame.get_dummies(&["a", "b", "c"]).expect("get_dummies");
+    super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
+}
