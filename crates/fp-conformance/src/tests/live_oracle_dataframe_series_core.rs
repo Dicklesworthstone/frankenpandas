@@ -35614,3 +35614,53 @@ fn live_oracle_dataframe_rename_columns_with_unicode() {
     let result = frame.rename_columns(&[("a", "alpha_é"), ("b", "über")]).expect("rename");
     super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_dataframe_set_index_with_string_column() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DFSETIDX-STR",
+        "case_id": "dataframe_set_index_with_string_column",
+        "mode": "strict",
+        "operation": "dataframe_set_index",
+        "oracle_source": "live_legacy_pandas",
+        "set_index_column": "name",
+        "set_index_drop": true,
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "column_order": ["name", "score"],
+            "columns": {
+                "name": [
+                    { "kind": "utf8", "value": "alice" },
+                    { "kind": "utf8", "value": "bob" },
+                    { "kind": "utf8", "value": "carol" }
+                ],
+                "score": [
+                    { "kind": "int64", "value": 90 },
+                    { "kind": "int64", "value": 85 },
+                    { "kind": "int64", "value": 95 }
+                ]
+            }
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping set_index string: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
+    let super::ResolvedExpected::Frame(expected) = expected else { return; };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
+    let actual = frame.set_index_with_verify_integrity("name", true, false).expect("set_index");
+    super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
+}
