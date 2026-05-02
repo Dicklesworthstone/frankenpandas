@@ -38208,3 +38208,97 @@ fn live_oracle_series_rank_descending() {
     let actual = series.rank("average", false, "keep").expect("rank desc");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_series_rank_na_top() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-RANK-NA-TOP",
+        "case_id": "series_rank_na_top",
+        "mode": "strict",
+        "operation": "series_rank",
+        "oracle_source": "live_legacy_pandas",
+        "rank_method": "average",
+        "rank_na_option": "top",
+        "left": {
+            "name": "vals",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 4 }
+            ],
+            "values": [
+                { "kind": "float64", "value": 5.0 },
+                { "kind": "null", "value": "na_n" },
+                { "kind": "float64", "value": 3.0 },
+                { "kind": "null", "value": "na_n" },
+                { "kind": "float64", "value": 7.0 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping rank na_top: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
+    let super::ResolvedExpected::Series(expected) = expected else { return; };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let actual = series.rank("average", true, "top").expect("rank na_top");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_series_rank_na_bottom() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-RANK-NA-BOT",
+        "case_id": "series_rank_na_bottom",
+        "mode": "strict",
+        "operation": "series_rank",
+        "oracle_source": "live_legacy_pandas",
+        "rank_method": "average",
+        "rank_na_option": "bottom",
+        "left": {
+            "name": "vals",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 4 }
+            ],
+            "values": [
+                { "kind": "float64", "value": 5.0 },
+                { "kind": "null", "value": "na_n" },
+                { "kind": "float64", "value": 3.0 },
+                { "kind": "null", "value": "na_n" },
+                { "kind": "float64", "value": 7.0 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping rank na_bottom: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
+    let super::ResolvedExpected::Series(expected) = expected else { return; };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let actual = series.rank("average", true, "bottom").expect("rank na_bottom");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
