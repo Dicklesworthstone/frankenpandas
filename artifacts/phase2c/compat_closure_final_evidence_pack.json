@@ -1,5 +1,5 @@
 {
-  "generated_unix_ms": 1777213948522,
+  "generated_unix_ms": 1777691730007,
   "suite_id": "COMPAT-CLOSURE-I",
   "coverage_report": {
     "suite_id": "COMPAT-CLOSURE-E",
@@ -29,20 +29,23 @@
     "coverage_floor_percent": 100,
     "achieved_percent": 100
   },
-  "strict_zero_drift": true,
+  "strict_zero_drift": false,
   "hardened_allowlisted_total": 2,
   "packets": [
     {
       "packet_id": "FP-P2C-001",
-      "parity_green": true,
-      "gate_pass": true,
-      "strict_critical_drift_count": 0,
-      "strict_zero_drift": true,
+      "parity_green": false,
+      "gate_pass": false,
+      "strict_critical_drift_count": 1,
+      "strict_zero_drift": false,
       "hardened_allowlisted_count": 2,
       "sidecar_integrity_ok": true,
       "decode_proof_recovered": true,
       "risk_notes": [
-        "hardened allowlisted divergence count=2"
+        "hardened allowlisted divergence count=2",
+        "parity gate failed: failed=1 but gate requires 0; strict_failed=1 exceeds critical_drift_budget=0; strict failure percent 100.000% exceeds 0.100%",
+        "parity report not green (passed=1 failed=1)",
+        "strict-mode critical drift count=1"
       ]
     }
   ],
@@ -85,11 +88,11 @@
       "artifacts/phase2c/COMPAT_CLOSURE_FINAL_EVIDENCE_PACK.md": "sha256:1555e8b27779af70f96526fab0704774a3bcf4a1eb2289c4c9d382c2404a0e1e",
       "artifacts/phase2c/COMPAT_CLOSURE_OPTIMIZATION_ISOMORPHISM_EVIDENCE.md": "sha256:412148e2e72ae91df4ecef5d48457f425fe89cc55159bc45b9058271fc379bcf",
       "artifacts/phase2c/COMPAT_CLOSURE_TEST_LOGGING_EVIDENCE.md": "sha256:3c043387f7048cc0139753af0e9428d165d26c1e446afd381021a756be48b7d7",
-      "artifacts/phase2c/FP-P2C-001/parity_gate_result.json": "sha256:399b3a292dcdf042c533b6d359a90b02d85d38f4a682647108b9f7d7272f1a1b",
-      "artifacts/phase2c/FP-P2C-001/parity_mismatch_corpus.json": "sha256:dcdeca1387618fb84b2e690b13182a033bf2d8dc5923bee48e9cdf204884c276",
-      "artifacts/phase2c/FP-P2C-001/parity_report.decode_proof.json": "sha256:a9c4703362883362f42a8792bb4e415a9086c7791e4a2a95a1ee389090fe2ca8",
-      "artifacts/phase2c/FP-P2C-001/parity_report.json": "sha256:82665f7e5bb01392f5656e5c87c945f10d6970d895b957c6eab9718f51a745b4",
-      "artifacts/phase2c/FP-P2C-001/parity_report.raptorq.json": "sha256:4fc3f1155480b44e8365fea883be2f744e7cfacd5d88e4d6f4eed80ee0c9137e",
+      "artifacts/phase2c/FP-P2C-001/parity_gate_result.json": "sha256:57cd6f4958a01ab63d6aa1d302b1a1d6dcd7fa9fa0f7bc5c8d1340fedaa5a05f",
+      "artifacts/phase2c/FP-P2C-001/parity_mismatch_corpus.json": "sha256:828310beafd3e870c7df3ce09495ac039da1ace723d459b3ebd2b67b3e85b437",
+      "artifacts/phase2c/FP-P2C-001/parity_report.decode_proof.json": "sha256:ae8f87390c4d8fb90b4fb8bb08fc002f40914523434fcb7a4d5e3479c3fdb1d8",
+      "artifacts/phase2c/FP-P2C-001/parity_report.json": "sha256:98174370cc40e29c93cc1b9a602514a74e91f3ded8e95480952d1988822ca976",
+      "artifacts/phase2c/FP-P2C-001/parity_report.raptorq.json": "sha256:ef76c32f9358fe8b404ddeb1974de81d64823c252c4917ae2b483788c82a9b4d",
       "artifacts/phase2c/PERFORMANCE_BASELINES.md": "sha256:7ca200a0e40f0c0ab3e9f13c9df3b1bde2ce8aeea88c06e7d917310d290b5199"
     }
   },
@@ -100,8 +103,11 @@
     "RaptorQ sidecar + decode-proof integrity checks remain enforced"
   ],
   "risk_note_update": [
-    "hardened allowlisted divergence count=2"
+    "hardened allowlisted divergence count=2",
+    "parity gate failed: failed=1 but gate requires 0; strict_failed=1 exceeds critical_drift_budget=0; strict failure percent 100.000% exceeds 0.100%",
+    "parity report not green (passed=1 failed=1)",
+    "strict-mode critical drift count=1"
   ],
-  "all_checks_passed": true,
-  "attestation_signature": "sha256:4f1182b6b12d34dfcf83450042f8ca99fda7ed790d60198315f1da19238ad1ca"
+  "all_checks_passed": false,
+  "attestation_signature": "sha256:c476238bfeadf40dc5dc6884797a75251497f2a125053be15738915217b26f98"
 }
