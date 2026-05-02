@@ -38727,3 +38727,93 @@ fn live_oracle_series_between_inclusive_right() {
         .expect("between right");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_series_astype_string_to_int() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-ASTYPE-STR-TO-INT",
+        "case_id": "series_astype_string_to_int",
+        "mode": "strict",
+        "operation": "series_astype",
+        "oracle_source": "live_legacy_pandas",
+        "left": {
+            "name": "nums",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "values": [
+                { "kind": "utf8", "value": "10" },
+                { "kind": "utf8", "value": "20" },
+                { "kind": "utf8", "value": "30" }
+            ]
+        },
+        "dtype": "int64"
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping astype string-to-int: {message}");
+        return;
+    }
+    let expected = match expected_result {
+        Ok(expected) => expected,
+        Err(_) => return,
+    };
+    assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
+    let super::ResolvedExpected::Series(expected) = expected else { return; };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let result = series.astype(fp_types::DType::Int64).expect("astype int64");
+    super::compare_series_expected(&result, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_series_astype_bool_to_string() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-ASTYPE-BOOL-TO-STR",
+        "case_id": "series_astype_bool_to_string",
+        "mode": "strict",
+        "operation": "series_astype",
+        "oracle_source": "live_legacy_pandas",
+        "left": {
+            "name": "flags",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "values": [
+                { "kind": "bool", "value": true },
+                { "kind": "bool", "value": false },
+                { "kind": "bool", "value": true }
+            ]
+        },
+        "dtype": "string"
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping astype bool-to-string: {message}");
+        return;
+    }
+    let expected = match expected_result {
+        Ok(expected) => expected,
+        Err(_) => return,
+    };
+    assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
+    let super::ResolvedExpected::Series(expected) = expected else { return; };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let result = series.astype(fp_types::DType::Utf8).expect("astype string");
+    super::compare_series_expected(&result, &expected).expect("pandas parity");
+}
