@@ -37201,3 +37201,135 @@ fn live_oracle_groupby_last_with_string_keys() {
     let result = fp_groupby::groupby_last(&keys, &values, options, &policy, &mut ledger).expect("groupby_last");
     super::compare_series_expected(&result, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_groupby_sum_with_float_values() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-GBSUM-FL",
+        "case_id": "groupby_sum_with_float_values",
+        "mode": "strict",
+        "operation": "groupby_sum",
+        "oracle_source": "live_legacy_pandas",
+        "left": {
+            "name": "key",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 4 }
+            ],
+            "values": [
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 1 }
+            ]
+        },
+        "right": {
+            "name": "val",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 4 }
+            ],
+            "values": [
+                { "kind": "float64", "value": 1.5 },
+                { "kind": "float64", "value": 2.5 },
+                { "kind": "float64", "value": 3.5 },
+                { "kind": "float64", "value": 4.5 },
+                { "kind": "float64", "value": 5.5 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping groupby_sum floats: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
+    let super::ResolvedExpected::Series(expected) = expected else { return; };
+
+    let keys = super::build_series(fixture.left.as_ref().expect("left")).expect("keys");
+    let values = super::build_series(fixture.right.as_ref().expect("right")).expect("values");
+    let options = fp_groupby::GroupByOptions::default();
+    let policy = super::RuntimePolicy::strict();
+    let mut ledger = super::EvidenceLedger::new();
+    let result = fp_groupby::groupby_sum(&keys, &values, options, &policy, &mut ledger).expect("groupby_sum");
+    super::compare_series_expected(&result, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_groupby_mean_with_float_values() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-GBMEAN-FL",
+        "case_id": "groupby_mean_with_float_values",
+        "mode": "strict",
+        "operation": "groupby_mean",
+        "oracle_source": "live_legacy_pandas",
+        "left": {
+            "name": "key",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 4 }
+            ],
+            "values": [
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 1 }
+            ]
+        },
+        "right": {
+            "name": "val",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 4 }
+            ],
+            "values": [
+                { "kind": "float64", "value": 1.5 },
+                { "kind": "float64", "value": 2.5 },
+                { "kind": "float64", "value": 3.5 },
+                { "kind": "float64", "value": 4.5 },
+                { "kind": "float64", "value": 5.5 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping groupby_mean floats: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
+    let super::ResolvedExpected::Series(expected) = expected else { return; };
+
+    let keys = super::build_series(fixture.left.as_ref().expect("left")).expect("keys");
+    let values = super::build_series(fixture.right.as_ref().expect("right")).expect("values");
+    let options = fp_groupby::GroupByOptions::default();
+    let policy = super::RuntimePolicy::strict();
+    let mut ledger = super::EvidenceLedger::new();
+    let result = fp_groupby::groupby_mean(&keys, &values, options, &policy, &mut ledger).expect("groupby_mean");
+    super::compare_series_expected(&result, &expected).expect("pandas parity");
+}
