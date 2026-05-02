@@ -34171,3 +34171,105 @@ fn live_oracle_series_shift_with_strings() {
     let actual = series.shift(1).expect("shift");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_series_combine_first_int_data() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-SCMBF-INT",
+        "case_id": "series_combine_first_int_data",
+        "mode": "strict",
+        "operation": "series_combine_first",
+        "oracle_source": "live_legacy_pandas",
+        "left": {
+            "name": "primary",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "values": [
+                { "kind": "int64", "value": 10 },
+                { "kind": "null", "value": "null" },
+                { "kind": "int64", "value": 30 }
+            ]
+        },
+        "right": {
+            "name": "fallback",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "values": [
+                { "kind": "int64", "value": 100 },
+                { "kind": "int64", "value": 200 },
+                { "kind": "int64", "value": 300 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping combine_first int: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
+    let super::ResolvedExpected::Series(expected) = expected else { return; };
+
+    let actual = super::execute_series_combine_first_fixture_operation(&fixture).expect("actual series");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_series_combine_first_disjoint_indices() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-SCMBF-DISJ",
+        "case_id": "series_combine_first_disjoint_indices",
+        "mode": "strict",
+        "operation": "series_combine_first",
+        "oracle_source": "live_legacy_pandas",
+        "left": {
+            "name": "primary",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 }
+            ],
+            "values": [
+                { "kind": "float64", "value": 1.5 },
+                { "kind": "float64", "value": 2.5 }
+            ]
+        },
+        "right": {
+            "name": "fallback",
+            "index": [
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 }
+            ],
+            "values": [
+                { "kind": "float64", "value": 30.0 },
+                { "kind": "float64", "value": 40.0 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping combine_first disjoint: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
+    let super::ResolvedExpected::Series(expected) = expected else { return; };
+
+    let actual = super::execute_series_combine_first_fixture_operation(&fixture).expect("actual series");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
