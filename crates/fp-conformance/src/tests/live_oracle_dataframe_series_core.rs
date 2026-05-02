@@ -35565,3 +35565,52 @@ fn live_oracle_dataframe_insert_at_end() {
     let actual = super::execute_dataframe_fixture_operation(&fixture).expect("insert");
     super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_dataframe_rename_columns_with_unicode() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DFRN-UNI",
+        "case_id": "dataframe_rename_columns_with_unicode",
+        "mode": "strict",
+        "operation": "dataframe_rename_columns",
+        "oracle_source": "live_legacy_pandas",
+        "rename_columns": [
+            { "from": "a", "to": "alpha_é" },
+            { "from": "b", "to": "über" }
+        ],
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 }
+            ],
+            "column_order": ["a", "b"],
+            "columns": {
+                "a": [
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "int64", "value": 2 }
+                ],
+                "b": [
+                    { "kind": "int64", "value": 10 },
+                    { "kind": "int64", "value": 20 }
+                ]
+            }
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping rename unicode: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
+    let super::ResolvedExpected::Frame(expected_frame) = expected else { return; };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
+    let result = frame.rename_columns(&[("a", "alpha_é"), ("b", "über")]).expect("rename");
+    super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
+}
