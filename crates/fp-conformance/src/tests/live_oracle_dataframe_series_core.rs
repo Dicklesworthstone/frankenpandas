@@ -35912,3 +35912,66 @@ fn live_oracle_dataframe_loc_with_unicode_labels() {
     let actual = frame.loc_with_columns(labels, fixture.column_order.as_deref()).expect("loc");
     super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_dataframe_replace_string_three_pairs() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DFREP-STR3",
+        "case_id": "dataframe_replace_string_three_pairs",
+        "mode": "strict",
+        "operation": "dataframe_replace",
+        "oracle_source": "live_legacy_pandas",
+        "replace_to_find": [
+            { "kind": "utf8", "value": "x" },
+            { "kind": "utf8", "value": "y" },
+            { "kind": "utf8", "value": "z" }
+        ],
+        "replace_to_value": [
+            { "kind": "utf8", "value": "X" },
+            { "kind": "utf8", "value": "Y" },
+            { "kind": "utf8", "value": "Z" }
+        ],
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "column_order": ["a", "b"],
+            "columns": {
+                "a": [
+                    { "kind": "utf8", "value": "x" },
+                    { "kind": "utf8", "value": "y" },
+                    { "kind": "utf8", "value": "z" }
+                ],
+                "b": [
+                    { "kind": "utf8", "value": "abc" },
+                    { "kind": "utf8", "value": "x" },
+                    { "kind": "utf8", "value": "y" }
+                ]
+            }
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping df replace 3 pairs: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
+    let super::ResolvedExpected::Frame(expected_frame) = expected else { return; };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
+    let replacements = vec![
+        (fp_types::Scalar::Utf8("x".to_string()), fp_types::Scalar::Utf8("X".to_string())),
+        (fp_types::Scalar::Utf8("y".to_string()), fp_types::Scalar::Utf8("Y".to_string())),
+        (fp_types::Scalar::Utf8("z".to_string()), fp_types::Scalar::Utf8("Z".to_string())),
+    ];
+    let result = frame.replace(&replacements).expect("replace");
+    super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
+}
