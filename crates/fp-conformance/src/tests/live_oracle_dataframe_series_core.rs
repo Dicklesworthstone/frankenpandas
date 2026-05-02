@@ -38515,3 +38515,107 @@ fn live_oracle_series_asof_string_index() {
         .unwrap_or_else(|| super::series_asof_missing_scalar(&series));
     super::compare_scalar(&actual, &expected, "series_asof").expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_series_autocorr_lag2() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-AUTOCORR-LAG2",
+        "case_id": "series_autocorr_lag2",
+        "mode": "strict",
+        "operation": "series_autocorr",
+        "oracle_source": "live_legacy_pandas",
+        "autocorr_lag": 2,
+        "left": {
+            "name": "vals",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 4 },
+                { "kind": "int64", "value": 5 },
+                { "kind": "int64", "value": 6 }
+            ],
+            "values": [
+                { "kind": "float64", "value": 1.0 },
+                { "kind": "float64", "value": 2.0 },
+                { "kind": "float64", "value": 4.0 },
+                { "kind": "float64", "value": 8.0 },
+                { "kind": "float64", "value": 16.0 },
+                { "kind": "float64", "value": 32.0 },
+                { "kind": "float64", "value": 64.0 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping autocorr lag2: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Scalar(_)));
+    let super::ResolvedExpected::Scalar(expected) = expected else { return; };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let value = series.autocorr(2).expect("autocorr lag2");
+    let actual = super::float_result_scalar(value);
+    super::compare_scalar(&actual, &expected, "series_autocorr").expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_series_autocorr_lag3() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-AUTOCORR-LAG3",
+        "case_id": "series_autocorr_lag3",
+        "mode": "strict",
+        "operation": "series_autocorr",
+        "oracle_source": "live_legacy_pandas",
+        "autocorr_lag": 3,
+        "left": {
+            "name": "vals",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 4 },
+                { "kind": "int64", "value": 5 },
+                { "kind": "int64", "value": 6 },
+                { "kind": "int64", "value": 7 }
+            ],
+            "values": [
+                { "kind": "float64", "value": 1.0 },
+                { "kind": "float64", "value": 3.0 },
+                { "kind": "float64", "value": 2.0 },
+                { "kind": "float64", "value": 5.0 },
+                { "kind": "float64", "value": 4.0 },
+                { "kind": "float64", "value": 7.0 },
+                { "kind": "float64", "value": 6.0 },
+                { "kind": "float64", "value": 9.0 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping autocorr lag3: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Scalar(_)));
+    let super::ResolvedExpected::Scalar(expected) = expected else { return; };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let value = series.autocorr(3).expect("autocorr lag3");
+    let actual = super::float_result_scalar(value);
+    super::compare_scalar(&actual, &expected, "series_autocorr").expect("pandas parity");
+}
