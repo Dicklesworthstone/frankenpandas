@@ -36078,3 +36078,68 @@ fn live_oracle_series_str_get_dummies_semicolon() {
     let result = series.str().get_dummies(";").expect("get_dummies");
     super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_dataframe_value_counts_three_columns() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DFVC-3COL",
+        "case_id": "dataframe_value_counts_three_columns",
+        "mode": "strict",
+        "operation": "dataframe_value_counts",
+        "oracle_source": "live_legacy_pandas",
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 4 },
+                { "kind": "int64", "value": 5 }
+            ],
+            "column_order": ["a", "b", "c"],
+            "columns": {
+                "a": [
+                    { "kind": "utf8", "value": "x" },
+                    { "kind": "utf8", "value": "x" },
+                    { "kind": "utf8", "value": "y" },
+                    { "kind": "utf8", "value": "y" },
+                    { "kind": "utf8", "value": "x" },
+                    { "kind": "utf8", "value": "y" }
+                ],
+                "b": [
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "int64", "value": 2 },
+                    { "kind": "int64", "value": 2 },
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "int64", "value": 2 }
+                ],
+                "c": [
+                    { "kind": "utf8", "value": "p" },
+                    { "kind": "utf8", "value": "p" },
+                    { "kind": "utf8", "value": "q" },
+                    { "kind": "utf8", "value": "q" },
+                    { "kind": "utf8", "value": "p" },
+                    { "kind": "utf8", "value": "r" }
+                ]
+            }
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping df value_counts 3col: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
+    let super::ResolvedExpected::Series(expected) = expected else { return; };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
+    let actual = frame.value_counts().expect("value_counts");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
