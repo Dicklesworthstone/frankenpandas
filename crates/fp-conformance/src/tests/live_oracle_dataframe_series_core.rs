@@ -38619,3 +38619,111 @@ fn live_oracle_series_autocorr_lag3() {
     let actual = super::float_result_scalar(value);
     super::compare_scalar(&actual, &expected, "series_autocorr").expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_series_between_inclusive_left() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-BETWEEN-LEFT",
+        "case_id": "series_between_inclusive_left",
+        "mode": "strict",
+        "operation": "series_between",
+        "oracle_source": "live_legacy_pandas",
+        "between_left": { "kind": "float64", "value": 2.0 },
+        "between_right": { "kind": "float64", "value": 4.0 },
+        "between_inclusive": "left",
+        "left": {
+            "name": "test_series",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 4 }
+            ],
+            "values": [
+                { "kind": "float64", "value": 1.0 },
+                { "kind": "float64", "value": 2.0 },
+                { "kind": "float64", "value": 3.0 },
+                { "kind": "float64", "value": 4.0 },
+                { "kind": "float64", "value": 5.0 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping between left: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
+    let super::ResolvedExpected::Series(expected) = expected else { return; };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let actual = series
+        .between(
+            &super::Scalar::Float64(2.0),
+            &super::Scalar::Float64(4.0),
+            "left",
+        )
+        .expect("between left");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_series_between_inclusive_right() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-BETWEEN-RIGHT",
+        "case_id": "series_between_inclusive_right",
+        "mode": "strict",
+        "operation": "series_between",
+        "oracle_source": "live_legacy_pandas",
+        "between_left": { "kind": "float64", "value": 2.0 },
+        "between_right": { "kind": "float64", "value": 4.0 },
+        "between_inclusive": "right",
+        "left": {
+            "name": "test_series",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 4 }
+            ],
+            "values": [
+                { "kind": "float64", "value": 1.0 },
+                { "kind": "float64", "value": 2.0 },
+                { "kind": "float64", "value": 3.0 },
+                { "kind": "float64", "value": 4.0 },
+                { "kind": "float64", "value": 5.0 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping between right: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
+    let super::ResolvedExpected::Series(expected) = expected else { return; };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let actual = series
+        .between(
+            &super::Scalar::Float64(2.0),
+            &super::Scalar::Float64(4.0),
+            "right",
+        )
+        .expect("between right");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
