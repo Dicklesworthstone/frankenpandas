@@ -36634,3 +36634,54 @@ fn live_oracle_series_str_decode_basic() {
     let actual = series.str().decode("utf-8").expect("decode");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_series_concat_with_strings() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-SCONCAT-STR",
+        "case_id": "series_concat_with_strings",
+        "mode": "strict",
+        "operation": "series_concat",
+        "oracle_source": "live_legacy_pandas",
+        "left": {
+            "name": "vals",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 }
+            ],
+            "values": [
+                { "kind": "utf8", "value": "alpha" },
+                { "kind": "utf8", "value": "beta" }
+            ]
+        },
+        "right": {
+            "name": "vals",
+            "index": [
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 }
+            ],
+            "values": [
+                { "kind": "utf8", "value": "gamma" },
+                { "kind": "utf8", "value": "delta" }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping series concat strings: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
+    let super::ResolvedExpected::Series(expected) = expected else { return; };
+
+    let left = super::build_series(fixture.left.as_ref().expect("left")).expect("left");
+    let right = super::build_series(fixture.right.as_ref().expect("right")).expect("right");
+    let actual = super::concat_series(&[&left, &right]).expect("concat_series");
+    super::compare_series_expected(&actual, &expected).expect("pandas parity");
+}
