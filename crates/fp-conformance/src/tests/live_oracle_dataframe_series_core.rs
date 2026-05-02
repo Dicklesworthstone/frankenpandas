@@ -35399,3 +35399,61 @@ fn live_oracle_series_str_isspace_with_tabs_newlines() {
     let actual = series.str().isspace().expect("isspace");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_dataframe_drop_columns_three() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DFDC-3",
+        "case_id": "dataframe_drop_columns_three",
+        "mode": "strict",
+        "operation": "dataframe_drop_columns",
+        "oracle_source": "live_legacy_pandas",
+        "drop_columns": ["a", "c", "d"],
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 }
+            ],
+            "column_order": ["a", "b", "c", "d", "e"],
+            "columns": {
+                "a": [
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "int64", "value": 2 }
+                ],
+                "b": [
+                    { "kind": "utf8", "value": "x" },
+                    { "kind": "utf8", "value": "y" }
+                ],
+                "c": [
+                    { "kind": "float64", "value": 1.0 },
+                    { "kind": "float64", "value": 2.0 }
+                ],
+                "d": [
+                    { "kind": "int64", "value": 100 },
+                    { "kind": "int64", "value": 200 }
+                ],
+                "e": [
+                    { "kind": "utf8", "value": "p" },
+                    { "kind": "utf8", "value": "q" }
+                ]
+            }
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping df drop_columns 3: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
+    let super::ResolvedExpected::Frame(expected_frame) = expected else { return; };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
+    let result = frame.drop_columns(&["a", "c", "d"]).expect("drop_columns");
+    super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
+}
