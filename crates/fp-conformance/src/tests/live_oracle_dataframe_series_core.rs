@@ -37949,3 +37949,44 @@ fn live_oracle_series_str_zfill_width10() {
     let actual = series.str().zfill(10).expect("zfill");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_series_partition_df_at_sign() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-PARTDF-AT",
+        "case_id": "series_partition_df_at_sign",
+        "mode": "strict",
+        "operation": "series_partition_df",
+        "oracle_source": "live_legacy_pandas",
+        "string_sep": "@",
+        "left": {
+            "name": "email",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 }
+            ],
+            "values": [
+                { "kind": "utf8", "value": "alice@example.com" },
+                { "kind": "utf8", "value": "bob@test.org" },
+                { "kind": "utf8", "value": "no_at_sign" }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping partition_df at: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
+    let super::ResolvedExpected::Frame(expected) = expected else { return; };
+
+    let actual = super::execute_dataframe_fixture_operation(&fixture).expect("partition_df");
+    super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
+}
