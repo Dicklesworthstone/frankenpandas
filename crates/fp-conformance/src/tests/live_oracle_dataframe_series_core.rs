@@ -34470,3 +34470,91 @@ fn live_oracle_series_argsort_floats_with_ties() {
     let actual = series.argsort(true).expect("argsort");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_series_idxmin_with_int_index() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-SIDXMIN-INT",
+        "case_id": "series_idxmin_with_int_index",
+        "mode": "strict",
+        "operation": "series_idxmin",
+        "oracle_source": "live_legacy_pandas",
+        "left": {
+            "name": "vals",
+            "index": [
+                { "kind": "int64", "value": 10 },
+                { "kind": "int64", "value": 11 },
+                { "kind": "int64", "value": 12 },
+                { "kind": "int64", "value": 13 }
+            ],
+            "values": [
+                { "kind": "float64", "value": 5.0 },
+                { "kind": "float64", "value": 1.0 },
+                { "kind": "float64", "value": 3.0 },
+                { "kind": "float64", "value": 7.0 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping idxmin int idx: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Scalar(_)));
+    let super::ResolvedExpected::Scalar(expected) = expected else { return; };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let label = series.idxmin().expect("idxmin");
+    let actual = super::index_label_to_scalar(&label);
+    super::compare_scalar(&actual, &expected, "series_idxmin").expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_series_idxmax_with_int_index() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-SIDXMAX-INT",
+        "case_id": "series_idxmax_with_int_index",
+        "mode": "strict",
+        "operation": "series_idxmax",
+        "oracle_source": "live_legacy_pandas",
+        "left": {
+            "name": "vals",
+            "index": [
+                { "kind": "int64", "value": 10 },
+                { "kind": "int64", "value": 11 },
+                { "kind": "int64", "value": 12 },
+                { "kind": "int64", "value": 13 }
+            ],
+            "values": [
+                { "kind": "float64", "value": 5.0 },
+                { "kind": "float64", "value": 1.0 },
+                { "kind": "float64", "value": 3.0 },
+                { "kind": "float64", "value": 7.0 }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping idxmax int idx: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Scalar(_)));
+    let super::ResolvedExpected::Scalar(expected) = expected else { return; };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let label = series.idxmax().expect("idxmax");
+    let actual = super::index_label_to_scalar(&label);
+    super::compare_scalar(&actual, &expected, "series_idxmax").expect("pandas parity");
+}
