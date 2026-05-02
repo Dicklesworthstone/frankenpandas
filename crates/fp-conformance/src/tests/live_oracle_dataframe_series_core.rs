@@ -34558,3 +34558,50 @@ fn live_oracle_series_idxmax_with_int_index() {
     let actual = super::index_label_to_scalar(&label);
     super::compare_scalar(&actual, &expected, "series_idxmax").expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_series_count_strings_with_nulls() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-COUNT-STR",
+        "case_id": "series_count_strings_with_nulls",
+        "mode": "strict",
+        "operation": "series_count",
+        "oracle_source": "live_legacy_pandas",
+        "left": {
+            "name": "vals",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 4 },
+                { "kind": "int64", "value": 5 }
+            ],
+            "values": [
+                { "kind": "utf8", "value": "alpha" },
+                { "kind": "null", "value": "null" },
+                { "kind": "utf8", "value": "beta" },
+                { "kind": "null", "value": "null" },
+                { "kind": "utf8", "value": "gamma" },
+                { "kind": "utf8", "value": "delta" }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping count strings nulls: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Scalar(_)));
+    let super::ResolvedExpected::Scalar(expected) = expected else { return; };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let actual = fp_types::Scalar::Int64(series.count() as i64);
+    super::compare_scalar(&actual, &expected, "series_count").expect("pandas parity");
+}
