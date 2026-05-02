@@ -35664,3 +35664,56 @@ fn live_oracle_dataframe_set_index_with_string_column() {
     let actual = frame.set_index_with_verify_integrity("name", true, false).expect("set_index");
     super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_dataframe_sort_values_strings() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DFSV-STR",
+        "case_id": "dataframe_sort_values_strings",
+        "mode": "strict",
+        "operation": "dataframe_sort_values",
+        "oracle_source": "live_legacy_pandas",
+        "sort_ascending": true,
+        "sort_column": "name",
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 }
+            ],
+            "column_order": ["name", "id"],
+            "columns": {
+                "name": [
+                    { "kind": "utf8", "value": "carol" },
+                    { "kind": "utf8", "value": "alice" },
+                    { "kind": "utf8", "value": "bob" },
+                    { "kind": "utf8", "value": "dave" }
+                ],
+                "id": [
+                    { "kind": "int64", "value": 1 },
+                    { "kind": "int64", "value": 2 },
+                    { "kind": "int64", "value": 3 },
+                    { "kind": "int64", "value": 4 }
+                ]
+            }
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping sort_values strings: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
+    let super::ResolvedExpected::Frame(expected_frame) = expected else { return; };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
+    let result = frame.sort_values("name", true).expect("sort_values");
+    super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
+}
