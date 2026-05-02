@@ -36034,3 +36034,47 @@ fn live_oracle_dataframe_get_dummies_three_columns() {
     let result = frame.get_dummies(&["a", "b", "c"]).expect("get_dummies");
     super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_series_str_get_dummies_semicolon() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-STRGD-SEMI",
+        "case_id": "series_str_get_dummies_semicolon",
+        "mode": "strict",
+        "operation": "series_str_get_dummies",
+        "oracle_source": "live_legacy_pandas",
+        "string_sep": ";",
+        "left": {
+            "name": "tags",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 }
+            ],
+            "values": [
+                { "kind": "utf8", "value": "x;y;z" },
+                { "kind": "utf8", "value": "y" },
+                { "kind": "utf8", "value": "x;z" },
+                { "kind": "utf8", "value": "" }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping get_dummies semicolon: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
+    let super::ResolvedExpected::Frame(expected_frame) = expected else { return; };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let result = series.str().get_dummies(";").expect("get_dummies");
+    super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
+}
