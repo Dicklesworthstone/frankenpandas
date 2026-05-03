@@ -12533,6 +12533,33 @@ mod tests {
 
     #[cfg(feature = "sql-sqlite")]
     #[test]
+    fn sql_empty_filtered_query_preserves_declared_dtypes() {
+        let conn = make_sql_test_conn();
+        conn.execute_batch(
+            "CREATE TABLE filtered_empty (i INTEGER, r REAL, t TEXT);
+             INSERT INTO filtered_empty VALUES (1, 1.25, 'kept');",
+        )
+        .unwrap();
+
+        let frame = read_sql_with_options(
+            &conn,
+            "SELECT i, r, t FROM filtered_empty WHERE i > ?",
+            &SqlReadOptions {
+                params: Some(vec![Scalar::Int64(10)]),
+                ..SqlReadOptions::default()
+            },
+        )
+        .expect("empty filtered query must preserve cursor dtype hints");
+
+        assert_eq!(frame.index().len(), 0);
+        assert_eq!(frame.column_names(), vec!["i", "r", "t"]);
+        assert_eq!(frame.column("i").unwrap().dtype(), DType::Int64);
+        assert_eq!(frame.column("r").unwrap().dtype(), DType::Float64);
+        assert_eq!(frame.column("t").unwrap().dtype(), DType::Utf8);
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
     fn sql_extension_trait() {
         let frame = make_test_dataframe();
         let conn = make_sql_test_conn();
