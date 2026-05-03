@@ -18910,6 +18910,72 @@ impl DataFrame {
         Self::new_with_column_order(self.index.clone(), columns, column_order)
     }
 
+    /// Filter the DataFrame by column-label patterns.
+    ///
+    /// Matches `pd.DataFrame.filter(items=None, like=None, regex=None, axis=1)`
+    /// (column-axis filter). Exactly one of `items`, `like`, or `regex` must
+    /// be `Some`; the others must be `None`. Per br-frankenpandas-nk54a.
+    ///
+    /// - `items: Some(list)`: keep columns whose names appear in `list`,
+    ///   in `list` order. Missing names are silently dropped (matches pandas).
+    /// - `like: Some(substr)`: keep columns whose names contain `substr`.
+    /// - `regex: Some(pattern)`: keep columns whose names match the regex.
+    ///
+    /// Row-axis filtering (axis=0) is deferred — fp-index doesn't yet
+    /// expose label-pattern matching for index labels (tracked under the
+    /// MultiIndex / DatetimeIndex epics).
+    pub fn filter(
+        &self,
+        items: Option<&[&str]>,
+        like: Option<&str>,
+        regex: Option<&str>,
+    ) -> Result<Self, FrameError> {
+        let arg_count = [items.is_some(), like.is_some(), regex.is_some()]
+            .iter()
+            .filter(|x| **x)
+            .count();
+        if arg_count != 1 {
+            return Err(FrameError::CompatibilityRejected(
+                "filter: exactly one of items, like, regex must be Some".to_owned(),
+            ));
+        }
+
+        let kept_in_order: Vec<String> = if let Some(items) = items {
+            items
+                .iter()
+                .filter(|name| self.columns.contains_key(**name))
+                .map(|name| (*name).to_owned())
+                .collect()
+        } else if let Some(like) = like {
+            self.column_order
+                .iter()
+                .filter(|name| name.contains(like))
+                .cloned()
+                .collect()
+        } else {
+            let pattern = regex.expect("regex Some checked above");
+            let re = regex::Regex::new(pattern).map_err(|e| {
+                FrameError::CompatibilityRejected(format!("filter regex invalid: {e}"))
+            })?;
+            self.column_order
+                .iter()
+                .filter(|name| re.is_match(name))
+                .cloned()
+                .collect()
+        };
+
+        let kept_set: std::collections::HashSet<&str> =
+            kept_in_order.iter().map(|s| s.as_str()).collect();
+        let mut columns = BTreeMap::new();
+        for name in &self.column_order {
+            if kept_set.contains(name.as_str()) {
+                let col = self.columns.get(name).expect("column in order must exist");
+                columns.insert(name.clone(), col.clone());
+            }
+        }
+        Self::new_with_column_order(self.index.clone(), columns, kept_in_order)
+    }
+
     /// Rename columns using a mapping.
     ///
     /// Matches `df.rename(columns={'old': 'new'})`.
@@ -19659,6 +19725,16 @@ impl DataFrame {
         }
 
         Self::new_with_column_order(self.index.clone(), new_columns, self.column_order.clone())
+    }
+
+    /// pandas-named alias for [`Self::where_cond`]. Matches `df.where(cond, other)`.
+    ///
+    /// Per br-frankenpandas-nk54a. `where` would conflict with the Rust
+    /// keyword in `where` clauses if used as an identifier in some
+    /// contexts, but it's not a reserved identifier — the inherent
+    /// method works directly. Provided as a pandas-faithful alias.
+    pub fn r#where(&self, cond: &Self, other: Option<&Scalar>) -> Result<Self, FrameError> {
+        self.where_cond(cond, other)
     }
 
     /// Replace values where `cond` is True with `other`.
@@ -20718,6 +20794,18 @@ impl DataFrame {
             column_multiindex: self.column_multiindex.clone(),
             row_multiindex: self.row_multiindex.clone(),
         })
+    }
+
+    /// pandas-2.1+ alias for [`Self::applymap`]. Matches `df.map(func)`.
+    ///
+    /// Per br-frankenpandas-nk54a. pandas 2.1 deprecated `applymap` in
+    /// favor of `map`; this alias supports the new spelling so users
+    /// migrating from pandas 2.x don't need to rename.
+    pub fn map<F>(&self, func: F) -> Result<Self, FrameError>
+    where
+        F: Fn(&Scalar) -> Scalar,
+    {
+        self.applymap(func)
     }
 
     /// Apply a function element-wise, skipping missing values.
@@ -68061,5 +68149,132 @@ mod tests {
         // The two outputs must differ; without_idx should be shorter or
         // at least not contain the trailing per-row index labels.
         assert_ne!(with_idx, without_idx);
+    }
+
+    // ── DataFrame eval/query/filter/map/where alias suite (br-frankenpandas-nk54a) ─
+
+    fn nk54a_df() -> DataFrame {
+        let cols = vec![
+            (
+                "a".to_owned(),
+                Column::new(
+                    DType::Int64,
+                    vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+                )
+                .unwrap(),
+            ),
+            (
+                "b".to_owned(),
+                Column::new(
+                    DType::Int64,
+                    vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                )
+                .unwrap(),
+            ),
+            (
+                "secret".to_owned(),
+                Column::new(
+                    DType::Utf8,
+                    vec![
+                        Scalar::Utf8("x".into()),
+                        Scalar::Utf8("y".into()),
+                        Scalar::Utf8("z".into()),
+                    ],
+                )
+                .unwrap(),
+            ),
+        ];
+        let mut map = BTreeMap::new();
+        let order: Vec<String> = cols.iter().map(|(n, _)| n.clone()).collect();
+        for (n, c) in cols {
+            map.insert(n, c);
+        }
+        DataFrame::new_with_column_order(
+            Index::new(vec![0_i64.into(), 1_i64.into(), 2_i64.into()]),
+            map,
+            order,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn dataframe_map_aliases_applymap() {
+        let df = nk54a_df();
+        let inc = |s: &Scalar| match s {
+            Scalar::Int64(v) => Scalar::Int64(v + 1),
+            other => other.clone(),
+        };
+        let via_map = df.map(inc).unwrap();
+        let via_applymap = df.applymap(inc).unwrap();
+        for col in df.column_names() {
+            assert_eq!(
+                via_map.column(col).unwrap().values(),
+                via_applymap.column(col).unwrap().values(),
+                "column {col} differs"
+            );
+        }
+    }
+
+    #[test]
+    fn dataframe_where_aliases_where_cond() {
+        let df = nk54a_df();
+        let cond = nk54a_df()
+            .map(|s| match s {
+                Scalar::Int64(v) => Scalar::Bool(*v >= 20),
+                _ => Scalar::Bool(true),
+            })
+            .unwrap();
+        let via_where = df.r#where(&cond, Some(&Scalar::Int64(-1))).unwrap();
+        let via_where_cond = df.where_cond(&cond, Some(&Scalar::Int64(-1))).unwrap();
+        for col in df.column_names() {
+            assert_eq!(
+                via_where.column(col).unwrap().values(),
+                via_where_cond.column(col).unwrap().values(),
+                "column {col} differs"
+            );
+        }
+    }
+
+    #[test]
+    fn dataframe_filter_items_keeps_listed_columns_in_order() {
+        let df = nk54a_df();
+        let out = df.filter(Some(&["b", "a"]), None, None).unwrap();
+        assert_eq!(out.column_names(), vec!["b", "a"]);
+        assert!(out.column("secret").is_none());
+        // "missing" silently dropped
+        let out2 = df.filter(Some(&["b", "no_such", "a"]), None, None).unwrap();
+        assert_eq!(out2.column_names(), vec!["b", "a"]);
+    }
+
+    #[test]
+    fn dataframe_filter_like_keeps_substring_matches() {
+        let df = nk54a_df();
+        let out = df.filter(None, Some("ec"), None).unwrap();
+        assert_eq!(out.column_names(), vec!["secret"]);
+    }
+
+    #[test]
+    fn dataframe_filter_regex_keeps_pattern_matches() {
+        let df = nk54a_df();
+        // Match single-letter column names
+        let out = df.filter(None, None, Some(r"^[a-z]$")).unwrap();
+        assert_eq!(out.column_names(), vec!["a", "b"]);
+        let out2 = df.filter(None, None, Some(r"^sec")).unwrap();
+        assert_eq!(out2.column_names(), vec!["secret"]);
+    }
+
+    #[test]
+    fn dataframe_filter_rejects_zero_or_multiple_args() {
+        let df = nk54a_df();
+        let err = df
+            .filter(None, None, None)
+            .expect_err("zero-arg must reject");
+        assert!(
+            matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("exactly one"))
+        );
+        let err2 = df
+            .filter(Some(&["a"]), Some("a"), None)
+            .expect_err("multi-arg must reject");
+        assert!(matches!(err2, FrameError::CompatibilityRejected(_)));
     }
 }

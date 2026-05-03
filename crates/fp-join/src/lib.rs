@@ -1304,6 +1304,19 @@ pub trait DataFrameMergeExt {
         how: JoinType,
     ) -> Result<MergedDataFrame, JoinError>;
 
+    /// pandas-named alias for [`Self::join_on_index`]. Matches
+    /// `pd.DataFrame.join(other, how=...)` directly. Per br-frankenpandas-nk54a.
+    ///
+    /// Default impl delegates to `join_on_index`. Implementors that already
+    /// have an optimized index-based join can leave this default.
+    fn join(
+        &self,
+        other: &fp_frame::DataFrame,
+        how: JoinType,
+    ) -> Result<MergedDataFrame, JoinError> {
+        self.join_on_index(other, how)
+    }
+
     /// Perform an asof merge (nearest-match join) on a sorted key column.
     ///
     /// Matches `pd.merge_asof(left, right, on=key)`. Both DataFrames must
@@ -4767,5 +4780,68 @@ mod tests {
             super::JoinError::Frame(fp_frame::FrameError::CompatibilityRejected(message))
                 if message.contains("unknown fill_method")
         ));
+    }
+
+    // ── join() pandas-named alias (br-frankenpandas-nk54a) ──────────────
+
+    #[test]
+    fn dataframe_join_aliases_join_on_index() {
+        use std::collections::BTreeMap;
+
+        use fp_columnar::Column;
+        use fp_frame::DataFrame;
+        use fp_index::Index;
+        use fp_types::{DType, Scalar};
+
+        use super::DataFrameMergeExt;
+
+        fn build(name1: &str, name2: &str, vals1: &[i64], vals2: &[i64]) -> DataFrame {
+            let mut cols = BTreeMap::new();
+            cols.insert(
+                name1.to_owned(),
+                Column::new(
+                    DType::Int64,
+                    vals1.iter().map(|v| Scalar::Int64(*v)).collect(),
+                )
+                .unwrap(),
+            );
+            cols.insert(
+                name2.to_owned(),
+                Column::new(
+                    DType::Int64,
+                    vals2.iter().map(|v| Scalar::Int64(*v)).collect(),
+                )
+                .unwrap(),
+            );
+            DataFrame::new_with_column_order(
+                Index::new(
+                    (0..vals1.len() as i64)
+                        .map(fp_index::IndexLabel::Int64)
+                        .collect(),
+                ),
+                cols,
+                vec![name1.to_owned(), name2.to_owned()],
+            )
+            .unwrap()
+        }
+
+        let left = build("a", "b", &[10, 20, 30], &[1, 2, 3]);
+        let right = build("c", "d", &[100, 200, 300], &[7, 8, 9]);
+
+        let via_join = left.join(&right, super::JoinType::Inner).unwrap();
+        let via_join_on_index = left.join_on_index(&right, super::JoinType::Inner).unwrap();
+
+        // Both produce the same MergedDataFrame shape & values.
+        let join_keys: Vec<&String> = via_join.columns.keys().collect();
+        let idx_keys: Vec<&String> = via_join_on_index.columns.keys().collect();
+        assert_eq!(join_keys, idx_keys);
+        assert_eq!(via_join.index, via_join_on_index.index);
+        for k in via_join.columns.keys() {
+            assert_eq!(
+                via_join.columns.get(k).unwrap().values(),
+                via_join_on_index.columns.get(k).unwrap().values(),
+                "column {k} differs"
+            );
+        }
     }
 }
