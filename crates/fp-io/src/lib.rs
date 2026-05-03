@@ -4360,6 +4360,7 @@ pub trait SqlConnection {
     /// `supports_schemas() == false`.
     fn truncate_table(&self, table_name: &str, schema: Option<&str>) -> Result<(), IoError> {
         validate_sql_table_name(table_name)?;
+        validate_sql_table_ref_identifier_lengths(self, table_name, schema)?;
         let qualified = match schema {
             Some(s) if self.supports_schemas() => {
                 validate_sql_schema_name(s)?;
@@ -5061,6 +5062,32 @@ fn validate_sql_identifier_length(
     Ok(())
 }
 
+fn validate_sql_table_ref_identifier_lengths<C: SqlConnection + ?Sized>(
+    conn: &C,
+    table_name: &str,
+    schema: Option<&str>,
+) -> Result<(), IoError> {
+    let max = conn.max_identifier_length();
+    validate_sql_identifier_length(table_name, max, "table")?;
+    if let Some(s) = schema {
+        validate_sql_identifier_length(s, max, "schema")?;
+    }
+    Ok(())
+}
+
+fn validate_sql_column_identifier_lengths<C, I, S>(conn: &C, names: I) -> Result<(), IoError>
+where
+    C: SqlConnection + ?Sized,
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let max = conn.max_identifier_length();
+    for name in names {
+        validate_sql_identifier_length(name.as_ref(), max, "column")?;
+    }
+    Ok(())
+}
+
 fn sql_select_all_query<C: SqlConnection>(conn: &C, table_name: &str) -> Result<String, IoError> {
     sql_select_all_query_in_schema(conn, table_name, None)
 }
@@ -5079,6 +5106,7 @@ fn sql_select_all_query_in_schema<C: SqlConnection>(
     schema: Option<&str>,
 ) -> Result<String, IoError> {
     validate_sql_table_name(table_name)?;
+    validate_sql_table_ref_identifier_lengths(conn, table_name, schema)?;
     let qualified = match schema {
         Some(s) if conn.supports_schemas() => {
             validate_sql_schema_name(s)?;
@@ -5128,6 +5156,8 @@ fn sql_select_columns_query_in_schema<C: SqlConnection>(
     for name in columns {
         validate_sql_column_name(name)?;
     }
+    validate_sql_table_ref_identifier_lengths(conn, table_name, schema)?;
+    validate_sql_column_identifier_lengths(conn, columns)?;
 
     let qualified = match schema {
         Some(s) if conn.supports_schemas() => {
@@ -5184,6 +5214,7 @@ fn sql_create_table_query_in_schema<C: SqlConnection>(
     column_defs: &[String],
 ) -> Result<String, IoError> {
     validate_sql_table_name(table_name)?;
+    validate_sql_table_ref_identifier_lengths(conn, table_name, schema)?;
     let qualified = match schema {
         Some(s) if conn.supports_schemas() => {
             validate_sql_schema_name(s)?;
@@ -5222,6 +5253,8 @@ fn sql_insert_rows_query_in_schema<C: SqlConnection>(
     column_names: &[String],
 ) -> Result<String, IoError> {
     validate_sql_table_name(table_name)?;
+    validate_sql_table_ref_identifier_lengths(conn, table_name, schema)?;
+    validate_sql_column_identifier_lengths(conn, column_names.iter())?;
     let qualified = match schema {
         Some(s) if conn.supports_schemas() => {
             validate_sql_schema_name(s)?;
@@ -5269,6 +5302,8 @@ fn sql_multi_row_insert_query_in_schema<C: SqlConnection>(
             "multi-row insert requires at least one row and one column".to_owned(),
         ));
     }
+    validate_sql_table_ref_identifier_lengths(conn, table_name, schema)?;
+    validate_sql_column_identifier_lengths(conn, column_names.iter())?;
     let qualified = match schema {
         Some(s) if conn.supports_schemas() => {
             validate_sql_schema_name(s)?;
@@ -5320,6 +5355,7 @@ fn sql_drop_table_query_in_schema<C: SqlConnection>(
     schema: Option<&str>,
 ) -> Result<String, IoError> {
     validate_sql_table_name(table_name)?;
+    validate_sql_table_ref_identifier_lengths(conn, table_name, schema)?;
     let qualified = match schema {
         Some(s) if conn.supports_schemas() => {
             validate_sql_schema_name(s)?;
@@ -20172,6 +20208,65 @@ mod tests {
         )
         .expect_err("mssql 129 over cap");
         assert!(matches!(err, IoError::Sql(msg) if msg.contains("128")));
+    }
+
+    #[test]
+    fn fd90_12_query_builders_enforce_identifier_length_caps() {
+        fn assert_length_error(err: IoError, kind: &str) {
+            assert!(
+                matches!(&err, IoError::Sql(msg)
+                    if msg.contains(kind)
+                        && msg.contains("63")
+                        && msg.contains("backend identifier limit")),
+                "expected SQL identifier-length error for {kind}, got {err:?}"
+            );
+        }
+
+        let conn = AnsiSchemaConn;
+        let over_cap = "a".repeat(64);
+        let cols = vec![over_cap.clone()];
+        let defs = vec!["id BIGINT".to_owned()];
+
+        assert_length_error(
+            super::sql_select_all_query_in_schema(&conn, &over_cap, None)
+                .expect_err("SELECT * table over cap"),
+            "table",
+        );
+        assert_length_error(
+            super::sql_select_all_query_in_schema(&conn, "events", Some(&over_cap))
+                .expect_err("SELECT * schema over cap"),
+            "schema",
+        );
+        assert_length_error(
+            super::sql_select_columns_query_in_schema(&conn, "events", None, &[over_cap.as_str()])
+                .expect_err("SELECT column over cap"),
+            "column",
+        );
+        assert_length_error(
+            super::sql_create_table_query_in_schema(&conn, &over_cap, None, &defs)
+                .expect_err("CREATE table over cap"),
+            "table",
+        );
+        assert_length_error(
+            super::sql_insert_rows_query_in_schema(&conn, "events", None, &cols)
+                .expect_err("INSERT column over cap"),
+            "column",
+        );
+        assert_length_error(
+            super::sql_multi_row_insert_query_in_schema(&conn, "events", None, &cols, 1)
+                .expect_err("multi-row INSERT column over cap"),
+            "column",
+        );
+        assert_length_error(
+            super::sql_drop_table_query_in_schema(&conn, &over_cap, None)
+                .expect_err("DROP table over cap"),
+            "table",
+        );
+        assert_length_error(
+            super::SqlConnection::truncate_table(&conn, &over_cap, None)
+                .expect_err("TRUNCATE fallback table over cap"),
+            "table",
+        );
     }
 
     #[test]
