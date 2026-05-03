@@ -6282,6 +6282,50 @@ impl Series {
         }
     }
 
+    // ── pandas-named string-output IO methods (br-frankenpandas-m785r) ─
+    //
+    // pandas `Series.to_string()`, `to_markdown()`, and `to_latex()` all
+    // produce string output (not file/IO). They're the formatter half of
+    // the `to_X` surface; the file-IO half (`to_excel`, `to_feather`,
+    // etc.) is Phase B (deferred — see frankenpandas-vqjc0 for missing
+    // formats and frankenpandas-rjs51 for the DataFrame counterpart that
+    // landed in commit d4b83b8). Implementation strategy: delegate to the
+    // existing DataFrame counterpart via `self.to_frame(None)?` — pandas
+    // does the same internally.
+
+    /// Render the Series as a tabular string. Matches `pd.Series.to_string()`.
+    ///
+    /// Default (no truncation) form. The `include_index` parameter mirrors
+    /// the DataFrame counterpart and lets callers omit the index column.
+    pub fn to_string_repr_full(&self, include_index: bool) -> Result<String, FrameError> {
+        Ok(self.to_frame(None)?.to_string_table(include_index))
+    }
+
+    /// Render the Series as a Markdown table. Matches
+    /// `pd.Series.to_markdown(tablefmt=None)` (Phase A). `include_index`
+    /// mirrors the DataFrame counterpart; `tablefmt` is forwarded to the
+    /// DataFrame impl which currently supports the pandas defaults.
+    pub fn to_markdown(
+        &self,
+        include_index: bool,
+        tablefmt: Option<&str>,
+    ) -> Result<String, FrameError> {
+        self.to_frame(None)?.to_markdown(include_index, tablefmt)
+    }
+
+    /// Render the Series as a LaTeX `tabular` block. Matches
+    /// `pd.Series.to_latex()` (Phase A — no escaping/styling options yet).
+    pub fn to_latex(&self, include_index: bool) -> Result<String, FrameError> {
+        Ok(self.to_frame(None)?.to_latex(include_index))
+    }
+
+    /// Render the Series as an HTML `<table>` block. Matches
+    /// `pd.Series.to_html()` (Phase A). Delegates to the DataFrame
+    /// counterpart with a single-column frame.
+    pub fn to_html(&self, include_index: bool) -> Result<String, FrameError> {
+        Ok(self.to_frame(None)?.to_html(include_index))
+    }
+
     /// Boolean mask indicating duplicate values.
     ///
     /// Matches `pd.Series.duplicated(keep='first')`.
@@ -67954,5 +67998,68 @@ mod tests {
             Scalar::Null(_) => {}
             other => panic!("unexpected value: {other:?}"),
         }
+    }
+
+    // ── Series.to_X formatter wrappers (br-frankenpandas-m785r) ──────
+
+    fn m785r_series() -> Series {
+        Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn series_to_string_repr_full_matches_dataframe_to_string_table() {
+        let s = m785r_series();
+        let out = s.to_string_repr_full(true).unwrap();
+        let frame = s.to_frame(None).unwrap();
+        let expected = frame.to_string_table(true);
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn series_to_markdown_delegates_to_dataframe() {
+        let s = m785r_series();
+        let out = s.to_markdown(true, None).unwrap();
+        let expected = s.to_frame(None).unwrap().to_markdown(true, None).unwrap();
+        assert_eq!(out, expected);
+        // Sanity: looks like a markdown table.
+        assert!(out.contains("|"));
+        assert!(out.contains("vals"));
+    }
+
+    #[test]
+    fn series_to_latex_delegates_to_dataframe() {
+        let s = m785r_series();
+        let out = s.to_latex(true).unwrap();
+        let expected = s.to_frame(None).unwrap().to_latex(true);
+        assert_eq!(out, expected);
+        // Sanity: looks like a LaTeX tabular block.
+        assert!(out.contains("\\begin{tabular}"));
+        assert!(out.contains("\\end{tabular}"));
+    }
+
+    #[test]
+    fn series_to_html_delegates_to_dataframe() {
+        let s = m785r_series();
+        let out = s.to_html(true).unwrap();
+        let expected = s.to_frame(None).unwrap().to_html(true);
+        assert_eq!(out, expected);
+        // Sanity: looks like an HTML table.
+        assert!(out.contains("<table"));
+        assert!(out.contains("</table>"));
+    }
+
+    #[test]
+    fn series_to_string_repr_full_without_index_omits_label_column() {
+        let s = m785r_series();
+        let with_idx = s.to_string_repr_full(true).unwrap();
+        let without_idx = s.to_string_repr_full(false).unwrap();
+        // The two outputs must differ; without_idx should be shorter or
+        // at least not contain the trailing per-row index labels.
+        assert_ne!(with_idx, without_idx);
     }
 }
