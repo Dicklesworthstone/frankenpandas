@@ -15782,7 +15782,10 @@ fn live_oracle_series_value_counts_ascending() {
 #[test]
 fn live_oracle_series_autocorr_lag1() {
     let mut cfg = super::HarnessConfig::default_paths();
-    cfg.allow_system_pandas_fallback = false;
+    // System pandas fallback enabled so this test actually validates against
+    // pip-installed pandas in CI/rch when legacy_pandas_code/pandas is absent.
+    // See br-frankenpandas-gdz7u for the wider review of pass-by-skip tests.
+    cfg.allow_system_pandas_fallback = true;
 
     let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
         "packet_id": "FP-P2D-LIVE-AUTOCORR",
@@ -38519,7 +38522,10 @@ fn live_oracle_series_asof_string_index() {
 #[test]
 fn live_oracle_series_autocorr_lag2() {
     let mut cfg = super::HarnessConfig::default_paths();
-    cfg.allow_system_pandas_fallback = false;
+    // System pandas fallback enabled so this test actually validates against
+    // pip-installed pandas in CI/rch when legacy_pandas_code/pandas is absent.
+    // See br-frankenpandas-gdz7u for the wider review of pass-by-skip tests.
+    cfg.allow_system_pandas_fallback = true;
 
     let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
         "packet_id": "FP-P2D-LIVE-AUTOCORR-LAG2",
@@ -38570,7 +38576,8 @@ fn live_oracle_series_autocorr_lag2() {
 #[test]
 fn live_oracle_series_autocorr_lag3() {
     let mut cfg = super::HarnessConfig::default_paths();
-    cfg.allow_system_pandas_fallback = false;
+    // System pandas fallback enabled (see lag2 sibling for rationale).
+    cfg.allow_system_pandas_fallback = true;
 
     let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
         "packet_id": "FP-P2D-LIVE-AUTOCORR-LAG3",

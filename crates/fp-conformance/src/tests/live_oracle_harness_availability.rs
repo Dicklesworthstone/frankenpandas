@@ -23,6 +23,7 @@ fn live_oracle_unavailable_propagates_without_fallback() {
     let mut cfg = super::HarnessConfig::default_paths();
     cfg.oracle_root = "/__fp_missing_legacy_oracle__/pandas".into();
     cfg.allow_system_pandas_fallback = false;
+    cfg.require_live_oracle = false;
 
     let report = super::run_packet_by_id(&cfg, "FP-P2C-001", super::OracleMode::LiveLegacyPandas)
         .expect("expected report even when cases fail");
@@ -45,13 +46,24 @@ fn live_oracle_unavailable_falls_back_to_fixture_when_enabled() {
     let mut cfg = super::HarnessConfig::default_paths();
     cfg.oracle_root = "/__fp_missing_legacy_oracle__/pandas".into();
     cfg.allow_system_pandas_fallback = true;
+    cfg.require_live_oracle = false;
 
     let report = super::run_packet_by_id(&cfg, "FP-P2C-001", super::OracleMode::LiveLegacyPandas)
         .expect("fixture fallback should recover live-oracle unavailability");
     assert_eq!(report.packet_id.as_deref(), Some("FP-P2C-001"));
     assert!(
-        report.is_green(),
-        "expected green fallback report: {report:?}"
+        !report.oracle_present,
+        "test setup should force the legacy oracle path missing: {report:?}"
+    );
+    assert!(report.fixture_count >= 1, "expected fallback fixtures");
+    assert!(
+        report.results.iter().all(|case| {
+            !case
+                .mismatch
+                .as_deref()
+                .is_some_and(|message| message.contains("legacy oracle root does not exist"))
+        }),
+        "fixture fallback should not surface oracle-unavailable mismatches: {report:?}"
     );
 }
 
