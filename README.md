@@ -147,7 +147,7 @@ frankenpandas/
 | **Arrow IPC stream** | `read_ipc_stream_bytes` | `write_ipc_stream_bytes` | Yes | Yes | Streaming wire format (forward-only; pipes + zero-copy interchange) |
 | **SQL** | `read_sql` / `read_sql_table` / `read_sql_chunks` | `write_sql` | N/A | `SqlConnection` trait; SQLite backend by default | `SqlReadOptions` (params, parse_dates, coerce_float, dtype, schema, columns, index_col), `SqlWriteOptions` (if_exists, index, index_label, schema, dtype, method, chunksize), `SqlInspector` for `SQLAlchemy.Inspector`-shaped introspection (tables / views / schemas / columns / indexes / FKs / UCs / reflect_table / reflect_all_tables) |
 
-CSV, JSON, JSONL, Parquet, Excel, Feather, and SQL are accessible through `DataFrameIoExt` trait methods on `DataFrame` (e.g. `df.to_parquet(path)?`, `df.to_sql(&conn, "table", &opts)?`). The Arrow IPC stream format is reachable through the standalone `read_ipc_stream_bytes` / `write_ipc_stream_bytes` functions — no extension method is exposed for it on `DataFrameIoExt`.
+CSV, JSON, JSONL, Parquet, Excel, Feather, and SQL are accessible through `DataFrameIoExt` trait methods on `DataFrame` (e.g. `df.to_excel(path)?`, `df.to_feather(path)?`, `df.to_parquet(path)?`, `df.to_sql(&conn, "table", &opts)?`). The Arrow IPC stream format is reachable through the standalone `read_ipc_stream_bytes` / `write_ipc_stream_bytes` functions — no extension method is exposed for it on `DataFrameIoExt`.
 
 ## Installation
 
@@ -525,7 +525,7 @@ let row = df.xs(&"2024-01-15".into())?;
 
 ### DataFrame Output Formats
 
-12 inline output methods for different consumption contexts (plus 11 file / bytes writers via the [`DataFrameIoExt`](crates/fp-io/src/lib.rs) extension trait — `to_parquet`, `to_parquet_bytes`, `to_csv_file`, `to_json_file`, `to_excel_file`, `to_excel_bytes`, `to_jsonl_file`, `to_feather_file`, `to_feather_bytes`, `to_sql`, `to_sql_with_options`):
+12 inline output methods for different consumption contexts (plus 14 file / bytes / string writers via the [`DataFrameIoExt`](crates/fp-io/src/lib.rs) extension trait — `to_parquet`, `to_parquet_bytes`, `to_csv_file`, `to_csv_string`, `to_json_file`, `to_excel`, `to_excel_file`, `to_excel_bytes`, `to_jsonl_file`, `to_feather`, `to_feather_file`, `to_feather_bytes`, `to_sql`, `to_sql_with_options`):
 
 | Method | pandas Equivalent | Format |
 |--------|-------------------|--------|

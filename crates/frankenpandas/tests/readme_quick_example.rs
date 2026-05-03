@@ -103,6 +103,22 @@ fn readme_quick_start_round_trip_through_sqlite() -> Result<(), Box<dyn std::err
     let _bytes_parquet = by_ticker.to_parquet_bytes()?;
     let _bytes_feather = by_ticker.to_feather_bytes()?;
     let _bytes_excel = by_ticker.to_excel_bytes()?;
+    let plain_table = by_ticker.to_string();
+    assert!(!plain_table.is_empty());
+    let dir = std::env::temp_dir();
+    let stem = format!("frankenpandas_rjs51_{}", std::process::id());
+    let excel_path = dir.join(format!("{stem}.xlsx"));
+    let feather_path = dir.join(format!("{stem}.feather"));
+    let parquet_path = dir.join(format!("{stem}.parquet"));
+    by_ticker.to_excel(&excel_path)?;
+    by_ticker.to_feather(&feather_path)?;
+    by_ticker.to_parquet(&parquet_path)?;
+    assert!(std::fs::metadata(&excel_path)?.len() > 0);
+    assert!(std::fs::metadata(&feather_path)?.len() > 0);
+    assert!(std::fs::metadata(&parquet_path)?.len() > 0);
+    std::fs::remove_file(&excel_path).ok();
+    std::fs::remove_file(&feather_path).ok();
+    std::fs::remove_file(&parquet_path).ok();
     // DataFrame.to_sql + to_sql_with_options trait methods.
     by_ticker.to_sql(&conn, "via_trait", SqlIfExists::Replace)?;
     by_ticker.to_sql_with_options(&conn, "via_trait_opts", &write_opts)?;

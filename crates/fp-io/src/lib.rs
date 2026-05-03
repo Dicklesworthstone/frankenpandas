@@ -7040,6 +7040,11 @@ pub trait DataFrameIoExt {
     /// Matches `pd.DataFrame.to_csv(path)`.
     fn to_csv_file(&self, path: &Path) -> Result<(), IoError>;
 
+    /// Serialize this DataFrame to a CSV string.
+    ///
+    /// Matches `pd.DataFrame.to_csv()` with no path.
+    fn to_csv_string(&self) -> Result<String, IoError>;
+
     /// Write this DataFrame to a JSON file.
     ///
     /// Matches `pd.DataFrame.to_json(path)`.
@@ -7048,6 +7053,11 @@ pub trait DataFrameIoExt {
     /// Write this DataFrame to an Excel (.xlsx) file.
     ///
     /// Matches `pd.DataFrame.to_excel(path)`.
+    fn to_excel(&self, path: &Path) -> Result<(), IoError>;
+
+    /// Write this DataFrame to an Excel (.xlsx) file.
+    ///
+    /// Explicit file-suffixed form of [`DataFrameIoExt::to_excel`].
     fn to_excel_file(&self, path: &Path) -> Result<(), IoError>;
 
     /// Serialize this DataFrame to Excel (.xlsx) bytes in memory.
@@ -7061,6 +7071,11 @@ pub trait DataFrameIoExt {
     /// Write this DataFrame to an Arrow IPC (Feather v2) file.
     ///
     /// Matches `pd.DataFrame.to_feather(path)`.
+    fn to_feather(&self, path: &Path) -> Result<(), IoError>;
+
+    /// Write this DataFrame to an Arrow IPC (Feather v2) file.
+    ///
+    /// Explicit file-suffixed form of [`DataFrameIoExt::to_feather`].
     fn to_feather_file(&self, path: &Path) -> Result<(), IoError>;
 
     /// Serialize this DataFrame to Arrow IPC (Feather v2) bytes.
@@ -7098,12 +7113,20 @@ impl DataFrameIoExt for DataFrame {
         write_csv(self, path)
     }
 
+    fn to_csv_string(&self) -> Result<String, IoError> {
+        write_csv_string(self)
+    }
+
     fn to_json_file(&self, path: &Path, orient: JsonOrient) -> Result<(), IoError> {
         write_json(self, path, orient)
     }
 
-    fn to_excel_file(&self, path: &Path) -> Result<(), IoError> {
+    fn to_excel(&self, path: &Path) -> Result<(), IoError> {
         write_excel(self, path)
+    }
+
+    fn to_excel_file(&self, path: &Path) -> Result<(), IoError> {
+        self.to_excel(path)
     }
 
     fn to_excel_bytes(&self) -> Result<Vec<u8>, IoError> {
@@ -7114,8 +7137,12 @@ impl DataFrameIoExt for DataFrame {
         write_jsonl(self, path)
     }
 
-    fn to_feather_file(&self, path: &Path) -> Result<(), IoError> {
+    fn to_feather(&self, path: &Path) -> Result<(), IoError> {
         write_feather(self, path)
+    }
+
+    fn to_feather_file(&self, path: &Path) -> Result<(), IoError> {
+        self.to_feather(path)
     }
 
     fn to_feather_bytes(&self) -> Result<Vec<u8>, IoError> {
@@ -8602,6 +8629,50 @@ mod tests {
             ],
         )
         .unwrap()
+    }
+
+    #[test]
+    fn dataframe_io_ext_pandas_named_aliases_cover_supported_writers() {
+        use super::DataFrameIoExt;
+
+        let frame = make_test_dataframe();
+        let csv = frame.to_csv_string().expect("csv string");
+        assert_eq!(csv, super::write_csv_string(&frame).expect("free csv"));
+
+        let dir = std::env::temp_dir();
+        let stem = format!("fp_io_dataframe_io_ext_{}", std::process::id());
+        let excel_path = dir.join(format!("{stem}.xlsx"));
+        let feather_path = dir.join(format!("{stem}.feather"));
+        let parquet_path = dir.join(format!("{stem}.parquet"));
+
+        frame.to_excel(&excel_path).expect("to_excel alias");
+        frame.to_feather(&feather_path).expect("to_feather alias");
+        frame.to_parquet(&parquet_path).expect("to_parquet alias");
+
+        assert!(
+            std::fs::metadata(&excel_path)
+                .expect("excel metadata")
+                .len()
+                > 0
+        );
+        assert_eq!(
+            super::read_feather(&feather_path)
+                .expect("read feather")
+                .index()
+                .len(),
+            frame.index().len()
+        );
+        assert_eq!(
+            super::read_parquet(&parquet_path)
+                .expect("read parquet")
+                .index()
+                .len(),
+            frame.index().len()
+        );
+
+        std::fs::remove_file(&excel_path).ok();
+        std::fs::remove_file(&feather_path).ok();
+        std::fs::remove_file(&parquet_path).ok();
     }
 
     fn make_row_multiindex_test_dataframe() -> DataFrame {
