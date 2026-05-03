@@ -21844,6 +21844,14 @@ impl DataFrame {
                 col.dtype()
             ));
         }
+        let memory_usage = index_memory_usage_bytes(&self.index)
+            + self
+                .column_order
+                .iter()
+                .map(|name| column_memory_usage_bytes(&self.columns[name]))
+                .sum::<usize>();
+        lines.push(String::new());
+        lines.push(format!("Memory usage: {memory_usage} bytes"));
         lines.join("\n")
     }
 
@@ -41396,6 +41404,7 @@ mod tests {
         assert!(info.contains("2 rows"));
         assert!(info.contains("1 columns"));
         assert!(info.contains("Float64"));
+        assert!(info.contains("Memory usage: 32 bytes"));
     }
 
     // ── stack/unstack tests ──
