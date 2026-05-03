@@ -8740,6 +8740,132 @@ impl Ewm<'_> {
             out,
         )
     }
+
+    // ── pandas API parity additions (br-frankenpandas-mvynk) ─────────
+    //
+    // pandas.ExponentialMovingWindow exposes 11 methods; this impl had
+    // 6 (mean, sum, std, var, cov, corr). Adding the remaining 5:
+    // - agg / aggregate (callable / str / list dispatch — mirrors Rolling.agg)
+    // - online (compute-on-the-fly streaming variant)
+    // - exclusions (introspection — pandas internal frozenset of excluded cols)
+    // - ndim (introspection — dimensionality of underlying object)
+
+    /// Apply one or more aggregation functions and return a DataFrame
+    /// keyed by function name. Matches `series.ewm(span=...).agg(['mean', 'sum'])`.
+    /// Per br-frankenpandas-mvynk.
+    pub fn agg(&self, funcs: &[&str]) -> Result<DataFrame, FrameError> {
+        let mut result_cols = BTreeMap::new();
+        let mut col_order = Vec::new();
+        for &func in funcs {
+            let result = match func {
+                "mean" => self.mean()?,
+                "sum" => self.sum()?,
+                "std" => self.std()?,
+                "var" => self.var()?,
+                _ => {
+                    return Err(FrameError::CompatibilityRejected(format!(
+                        "ewm.agg: unsupported function '{func}' (supported: mean, sum, std, var)"
+                    )));
+                }
+            };
+            result_cols.insert(func.to_string(), result.column().clone());
+            col_order.push(func.to_string());
+        }
+        Ok(DataFrame {
+            columns: result_cols,
+            column_order: col_order,
+            index: self.series.index().clone(),
+            column_multiindex: None,
+            row_multiindex: None,
+        })
+    }
+
+    /// pandas alias for [`Self::agg`]. Matches `ewm.aggregate([...])`.
+    pub fn aggregate(&self, funcs: &[&str]) -> Result<DataFrame, FrameError> {
+        self.agg(funcs)
+    }
+
+    /// Begin an online (streaming) EWM accumulation.
+    ///
+    /// Matches `series.ewm(span=...).online()` (pandas 1.4+). Returns
+    /// an [`OnlineEwm`] that maintains running mean state across
+    /// incremental `update(value)` calls without re-scanning the input
+    /// each time. Per br-frankenpandas-mvynk.
+    #[must_use]
+    pub fn online(&self) -> OnlineEwm {
+        OnlineEwm {
+            alpha: self.alpha,
+            ewm: f64::NAN,
+            nobs: 0,
+        }
+    }
+
+    /// Frozenset-style label set of columns excluded from this window.
+    ///
+    /// Matches `pd.api.indexers.BaseIndexer.exclusions` / `EWM.exclusions`.
+    /// EWM on a Series has no excluded columns; returns an empty Vec.
+    /// Per br-frankenpandas-mvynk.
+    #[must_use]
+    pub fn exclusions(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Number of dimensions of the underlying object. Series-EWM is 1.
+    ///
+    /// Matches `pd.ExponentialMovingWindow.ndim`. Per br-frankenpandas-mvynk.
+    #[must_use]
+    pub fn ndim(&self) -> usize {
+        1
+    }
+}
+
+/// Streaming EWM accumulator. Returned by [`Ewm::online`].
+///
+/// Maintains running mean state across incremental [`OnlineEwm::update`]
+/// calls. Initial state has `nobs=0`; the first `update(x)` seeds the
+/// mean with `x`. Subsequent updates apply the standard EWM recursion
+/// `m_t = alpha * x_t + (1 - alpha) * m_{t-1}`. NaN inputs are skipped
+/// (don't advance state); the accumulator returns `None` until at least
+/// one non-NaN observation has been seen.
+///
+/// Per br-frankenpandas-mvynk.
+#[derive(Debug, Clone)]
+pub struct OnlineEwm {
+    alpha: f64,
+    ewm: f64,
+    nobs: usize,
+}
+
+impl OnlineEwm {
+    /// Feed one value into the running EWM. Returns the current mean
+    /// estimate after the update, or `None` if `value.is_nan()` and no
+    /// prior observation exists.
+    pub fn update(&mut self, value: f64) -> Option<f64> {
+        if value.is_nan() {
+            return if self.nobs == 0 { None } else { Some(self.ewm) };
+        }
+        if self.nobs == 0 {
+            self.ewm = value;
+            self.nobs = 1;
+        } else {
+            self.ewm = self.alpha * value + (1.0 - self.alpha) * self.ewm;
+            self.nobs += 1;
+        }
+        Some(self.ewm)
+    }
+
+    /// Current running mean estimate. Returns `None` until the first
+    /// non-NaN observation has been seen.
+    #[must_use]
+    pub fn current(&self) -> Option<f64> {
+        if self.nobs == 0 { None } else { Some(self.ewm) }
+    }
+
+    /// Number of non-NaN observations consumed so far.
+    #[must_use]
+    pub fn nobs(&self) -> usize {
+        self.nobs
+    }
 }
 
 /// Time-based resampling view over a Series.
@@ -68276,5 +68402,127 @@ mod tests {
             .filter(Some(&["a"]), Some("a"), None)
             .expect_err("multi-arg must reject");
         assert!(matches!(err2, FrameError::CompatibilityRejected(_)));
+    }
+
+    // ── Ewm.agg / online / exclusions / ndim (br-frankenpandas-mvynk) ─
+
+    fn mvynk_series() -> Series {
+        Series::from_values(
+            "v",
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+            ],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(4.0),
+                Scalar::Float64(5.0),
+            ],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn ewm_agg_returns_dataframe_keyed_by_func_name() {
+        let s = mvynk_series();
+        let out = s.ewm(None, Some(0.5)).agg(&["mean", "sum"]).unwrap();
+        assert_eq!(out.column_names(), vec!["mean", "sum"]);
+        // Sanity: mean column matches Ewm::mean()
+        let mean_col = s.ewm(None, Some(0.5)).mean().unwrap();
+        assert_eq!(out.column("mean").unwrap().values(), mean_col.values());
+    }
+
+    #[test]
+    fn ewm_aggregate_aliases_agg() {
+        let s = mvynk_series();
+        let a = s.ewm(None, Some(0.5)).agg(&["mean"]).unwrap();
+        let b = s.ewm(None, Some(0.5)).aggregate(&["mean"]).unwrap();
+        assert_eq!(
+            a.column("mean").unwrap().values(),
+            b.column("mean").unwrap().values()
+        );
+    }
+
+    #[test]
+    fn ewm_agg_rejects_unsupported_function() {
+        let s = mvynk_series();
+        let err = s
+            .ewm(None, Some(0.5))
+            .agg(&["mean", "no_such_op"])
+            .unwrap_err();
+        assert!(matches!(err, FrameError::CompatibilityRejected(msg)
+                if msg.contains("ewm.agg") && msg.contains("no_such_op")));
+    }
+
+    #[test]
+    fn ewm_online_streams_match_eager_mean() {
+        let s = mvynk_series();
+        let eager = s.ewm(None, Some(0.5)).mean().unwrap();
+        let mut online = s.ewm(None, Some(0.5)).online();
+        let mut produced = Vec::new();
+        for v in s.column().values() {
+            let f = match v {
+                Scalar::Float64(f) => *f,
+                _ => f64::NAN,
+            };
+            produced.push(online.update(f));
+        }
+        // produced[i] should match eager.values()[i] (Float64) per element.
+        for (i, opt) in produced.iter().enumerate() {
+            let eager_v = match &eager.values()[i] {
+                Scalar::Float64(f) => *f,
+                Scalar::Null(_) => f64::NAN,
+                other => panic!("unexpected eager value: {other:?}"),
+            };
+            let online_v = opt.unwrap_or(f64::NAN);
+            assert!(
+                (eager_v - online_v).abs() < 1e-12 || (eager_v.is_nan() && online_v.is_nan()),
+                "mismatch at i={i}: eager={eager_v}, online={online_v}"
+            );
+        }
+        // After consuming 5 non-NaN values, nobs == 5.
+        assert_eq!(online.nobs(), 5);
+        assert!(online.current().is_some());
+    }
+
+    #[test]
+    fn ewm_online_skips_nan_inputs() {
+        let mut online = mvynk_series().ewm(None, Some(0.5)).online();
+        // First non-NaN seeds the mean.
+        assert_eq!(online.update(10.0).unwrap(), 10.0);
+        // NaN doesn't advance.
+        let after_nan = online.update(f64::NAN).unwrap();
+        assert_eq!(after_nan, 10.0);
+        assert_eq!(online.nobs(), 1);
+        // Second non-NaN: standard recursion.
+        let after_two = online.update(20.0).unwrap();
+        // alpha=0.5: 0.5*20 + 0.5*10 = 15.0
+        assert!((after_two - 15.0).abs() < 1e-12);
+        assert_eq!(online.nobs(), 2);
+    }
+
+    #[test]
+    fn ewm_online_returns_none_before_first_observation() {
+        let mut online = mvynk_series().ewm(None, Some(0.5)).online();
+        assert!(online.update(f64::NAN).is_none());
+        assert!(online.current().is_none());
+        assert_eq!(online.nobs(), 0);
+    }
+
+    #[test]
+    fn ewm_exclusions_is_empty_for_series_window() {
+        let s = mvynk_series();
+        assert!(s.ewm(None, Some(0.5)).exclusions().is_empty());
+    }
+
+    #[test]
+    fn ewm_ndim_is_1_for_series_window() {
+        let s = mvynk_series();
+        assert_eq!(s.ewm(None, Some(0.5)).ndim(), 1);
     }
 }
