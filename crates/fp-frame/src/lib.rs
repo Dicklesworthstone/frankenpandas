@@ -15698,6 +15698,96 @@ pub struct DataFrame {
     column_multiindex: Option<fp_index::MultiIndex>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum DataFrameArithmeticOperand<'a> {
+    DataFrame(&'a DataFrame),
+    Scalar(f64),
+}
+
+impl<'a> From<&'a DataFrame> for DataFrameArithmeticOperand<'a> {
+    fn from(value: &'a DataFrame) -> Self {
+        Self::DataFrame(value)
+    }
+}
+
+impl<'a> From<f64> for DataFrameArithmeticOperand<'a> {
+    fn from(value: f64) -> Self {
+        Self::Scalar(value)
+    }
+}
+
+impl<'a> From<i64> for DataFrameArithmeticOperand<'a> {
+    fn from(value: i64) -> Self {
+        Self::Scalar(value as f64)
+    }
+}
+
+impl<'a> From<i32> for DataFrameArithmeticOperand<'a> {
+    fn from(value: i32) -> Self {
+        Self::Scalar(value as f64)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum DataFrameComparisonOperand<'a> {
+    DataFrame(&'a DataFrame),
+    Scalar(Scalar),
+}
+
+impl<'a> From<&'a DataFrame> for DataFrameComparisonOperand<'a> {
+    fn from(value: &'a DataFrame) -> Self {
+        Self::DataFrame(value)
+    }
+}
+
+impl<'a> From<Scalar> for DataFrameComparisonOperand<'a> {
+    fn from(value: Scalar) -> Self {
+        Self::Scalar(value)
+    }
+}
+
+impl<'a> From<&Scalar> for DataFrameComparisonOperand<'a> {
+    fn from(value: &Scalar) -> Self {
+        Self::Scalar(value.clone())
+    }
+}
+
+impl<'a> From<f64> for DataFrameComparisonOperand<'a> {
+    fn from(value: f64) -> Self {
+        Self::Scalar(Scalar::Float64(value))
+    }
+}
+
+impl<'a> From<i64> for DataFrameComparisonOperand<'a> {
+    fn from(value: i64) -> Self {
+        Self::Scalar(Scalar::Int64(value))
+    }
+}
+
+impl<'a> From<i32> for DataFrameComparisonOperand<'a> {
+    fn from(value: i32) -> Self {
+        Self::Scalar(Scalar::Int64(i64::from(value)))
+    }
+}
+
+impl<'a> From<bool> for DataFrameComparisonOperand<'a> {
+    fn from(value: bool) -> Self {
+        Self::Scalar(Scalar::Bool(value))
+    }
+}
+
+impl<'a> From<&'a str> for DataFrameComparisonOperand<'a> {
+    fn from(value: &'a str) -> Self {
+        Self::Scalar(Scalar::Utf8(value.to_owned()))
+    }
+}
+
+impl<'a> From<String> for DataFrameComparisonOperand<'a> {
+    fn from(value: String) -> Self {
+        Self::Scalar(Scalar::Utf8(value))
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DropNaHow {
     Any,
@@ -25444,6 +25534,208 @@ impl DataFrame {
         self.apply_scalar_op(value, |a, b| a % b)
     }
 
+    /// Add another DataFrame or scalar with pandas' canonical method name.
+    ///
+    /// Matches `pd.DataFrame.add(other)` for DataFrame and scalar operands.
+    pub fn add<'a, O>(&self, other: O) -> Result<Self, FrameError>
+    where
+        O: Into<DataFrameArithmeticOperand<'a>>,
+    {
+        match other.into() {
+            DataFrameArithmeticOperand::DataFrame(frame) => self.add_df(frame),
+            DataFrameArithmeticOperand::Scalar(value) => self.add_scalar(value),
+        }
+    }
+
+    /// Subtract another DataFrame or scalar with pandas' canonical method name.
+    pub fn sub<'a, O>(&self, other: O) -> Result<Self, FrameError>
+    where
+        O: Into<DataFrameArithmeticOperand<'a>>,
+    {
+        match other.into() {
+            DataFrameArithmeticOperand::DataFrame(frame) => self.sub_df(frame),
+            DataFrameArithmeticOperand::Scalar(value) => self.sub_scalar(value),
+        }
+    }
+
+    /// Alias for [`DataFrame::sub`].
+    pub fn subtract<'a, O>(&self, other: O) -> Result<Self, FrameError>
+    where
+        O: Into<DataFrameArithmeticOperand<'a>>,
+    {
+        self.sub(other)
+    }
+
+    /// Multiply by another DataFrame or scalar with pandas' canonical method name.
+    pub fn mul<'a, O>(&self, other: O) -> Result<Self, FrameError>
+    where
+        O: Into<DataFrameArithmeticOperand<'a>>,
+    {
+        match other.into() {
+            DataFrameArithmeticOperand::DataFrame(frame) => self.mul_df(frame),
+            DataFrameArithmeticOperand::Scalar(value) => self.mul_scalar(value),
+        }
+    }
+
+    /// Alias for [`DataFrame::mul`].
+    pub fn multiply<'a, O>(&self, other: O) -> Result<Self, FrameError>
+    where
+        O: Into<DataFrameArithmeticOperand<'a>>,
+    {
+        self.mul(other)
+    }
+
+    /// Divide by another DataFrame or scalar with pandas' canonical method name.
+    pub fn div<'a, O>(&self, other: O) -> Result<Self, FrameError>
+    where
+        O: Into<DataFrameArithmeticOperand<'a>>,
+    {
+        match other.into() {
+            DataFrameArithmeticOperand::DataFrame(frame) => self.div_df(frame),
+            DataFrameArithmeticOperand::Scalar(value) => self.div_scalar(value),
+        }
+    }
+
+    /// Alias for [`DataFrame::div`].
+    pub fn divide<'a, O>(&self, other: O) -> Result<Self, FrameError>
+    where
+        O: Into<DataFrameArithmeticOperand<'a>>,
+    {
+        self.div(other)
+    }
+
+    /// Alias for [`DataFrame::div`].
+    pub fn truediv<'a, O>(&self, other: O) -> Result<Self, FrameError>
+    where
+        O: Into<DataFrameArithmeticOperand<'a>>,
+    {
+        self.div(other)
+    }
+
+    /// Floor-divide by another DataFrame or scalar.
+    pub fn floordiv<'a, O>(&self, other: O) -> Result<Self, FrameError>
+    where
+        O: Into<DataFrameArithmeticOperand<'a>>,
+    {
+        match other.into() {
+            DataFrameArithmeticOperand::DataFrame(frame) => self.floordiv_df(frame),
+            DataFrameArithmeticOperand::Scalar(value) => self.floordiv_scalar(value),
+        }
+    }
+
+    /// Modulo by another DataFrame or scalar.
+    ///
+    /// Rust callers use the raw identifier form: `df.r#mod(other)`.
+    pub fn r#mod<'a, O>(&self, other: O) -> Result<Self, FrameError>
+    where
+        O: Into<DataFrameArithmeticOperand<'a>>,
+    {
+        match other.into() {
+            DataFrameArithmeticOperand::DataFrame(frame) => self.mod_df(frame),
+            DataFrameArithmeticOperand::Scalar(value) => self.mod_scalar(value),
+        }
+    }
+
+    /// Raise to the power of another DataFrame or scalar.
+    pub fn pow<'a, O>(&self, other: O) -> Result<Self, FrameError>
+    where
+        O: Into<DataFrameArithmeticOperand<'a>>,
+    {
+        match other.into() {
+            DataFrameArithmeticOperand::DataFrame(frame) => self.pow_df(frame),
+            DataFrameArithmeticOperand::Scalar(value) => self.pow_scalar(value),
+        }
+    }
+
+    /// Reverse add: `other + self`.
+    pub fn radd<'a, O>(&self, other: O) -> Result<Self, FrameError>
+    where
+        O: Into<DataFrameArithmeticOperand<'a>>,
+    {
+        match other.into() {
+            DataFrameArithmeticOperand::DataFrame(frame) => frame.add_df(self),
+            DataFrameArithmeticOperand::Scalar(value) => self.add_scalar(value),
+        }
+    }
+
+    /// Reverse subtract: `other - self`.
+    pub fn rsub<'a, O>(&self, other: O) -> Result<Self, FrameError>
+    where
+        O: Into<DataFrameArithmeticOperand<'a>>,
+    {
+        match other.into() {
+            DataFrameArithmeticOperand::DataFrame(frame) => frame.sub_df(self),
+            DataFrameArithmeticOperand::Scalar(value) => self.apply_scalar_op(value, |a, b| b - a),
+        }
+    }
+
+    /// Reverse multiply: `other * self`.
+    pub fn rmul<'a, O>(&self, other: O) -> Result<Self, FrameError>
+    where
+        O: Into<DataFrameArithmeticOperand<'a>>,
+    {
+        match other.into() {
+            DataFrameArithmeticOperand::DataFrame(frame) => frame.mul_df(self),
+            DataFrameArithmeticOperand::Scalar(value) => self.mul_scalar(value),
+        }
+    }
+
+    /// Reverse true division: `other / self`.
+    pub fn rdiv<'a, O>(&self, other: O) -> Result<Self, FrameError>
+    where
+        O: Into<DataFrameArithmeticOperand<'a>>,
+    {
+        match other.into() {
+            DataFrameArithmeticOperand::DataFrame(frame) => frame.div_df(self),
+            DataFrameArithmeticOperand::Scalar(value) => self.apply_scalar_op(value, |a, b| b / a),
+        }
+    }
+
+    /// Alias for [`DataFrame::rdiv`].
+    pub fn rtruediv<'a, O>(&self, other: O) -> Result<Self, FrameError>
+    where
+        O: Into<DataFrameArithmeticOperand<'a>>,
+    {
+        self.rdiv(other)
+    }
+
+    /// Reverse floor division: `other // self`.
+    pub fn rfloordiv<'a, O>(&self, other: O) -> Result<Self, FrameError>
+    where
+        O: Into<DataFrameArithmeticOperand<'a>>,
+    {
+        match other.into() {
+            DataFrameArithmeticOperand::DataFrame(frame) => frame.floordiv_df(self),
+            DataFrameArithmeticOperand::Scalar(value) => {
+                self.apply_scalar_op(value, |a, b| (b / a).floor())
+            }
+        }
+    }
+
+    /// Reverse modulo: `other % self`.
+    pub fn rmod<'a, O>(&self, other: O) -> Result<Self, FrameError>
+    where
+        O: Into<DataFrameArithmeticOperand<'a>>,
+    {
+        match other.into() {
+            DataFrameArithmeticOperand::DataFrame(frame) => frame.mod_df(self),
+            DataFrameArithmeticOperand::Scalar(value) => self.apply_scalar_op(value, |a, b| b % a),
+        }
+    }
+
+    /// Reverse power: `other ** self`.
+    pub fn rpow<'a, O>(&self, other: O) -> Result<Self, FrameError>
+    where
+        O: Into<DataFrameArithmeticOperand<'a>>,
+    {
+        match other.into() {
+            DataFrameArithmeticOperand::DataFrame(frame) => frame.pow_df(self),
+            DataFrameArithmeticOperand::Scalar(value) => {
+                self.apply_scalar_op(value, |a, b| b.powf(a))
+            }
+        }
+    }
+
     // ── DataFrame-to-DataFrame arithmetic ──
 
     /// Internal: apply a binary operation between two DataFrames element-wise.
@@ -25842,6 +26134,84 @@ impl DataFrame {
     /// Element-wise `<= scalar` for all columns.
     pub fn le_scalar_df(&self, scalar: &Scalar) -> Result<Self, FrameError> {
         self.compare_scalar_df(scalar, ComparisonOp::Le)
+    }
+
+    /// Element-wise equality with another DataFrame or scalar.
+    ///
+    /// Matches `pd.DataFrame.eq(other)`.
+    pub fn eq<'a, O>(&self, other: O) -> Result<Self, FrameError>
+    where
+        O: Into<DataFrameComparisonOperand<'a>>,
+    {
+        match other.into() {
+            DataFrameComparisonOperand::DataFrame(frame) => self.eq_df(frame),
+            DataFrameComparisonOperand::Scalar(scalar) => self.eq_scalar_df(&scalar),
+        }
+    }
+
+    /// Element-wise inequality with another DataFrame or scalar.
+    ///
+    /// Matches `pd.DataFrame.ne(other)`.
+    pub fn ne<'a, O>(&self, other: O) -> Result<Self, FrameError>
+    where
+        O: Into<DataFrameComparisonOperand<'a>>,
+    {
+        match other.into() {
+            DataFrameComparisonOperand::DataFrame(frame) => self.ne_df(frame),
+            DataFrameComparisonOperand::Scalar(scalar) => self.ne_scalar_df(&scalar),
+        }
+    }
+
+    /// Element-wise greater-than comparison with another DataFrame or scalar.
+    ///
+    /// Matches `pd.DataFrame.gt(other)`.
+    pub fn gt<'a, O>(&self, other: O) -> Result<Self, FrameError>
+    where
+        O: Into<DataFrameComparisonOperand<'a>>,
+    {
+        match other.into() {
+            DataFrameComparisonOperand::DataFrame(frame) => self.gt_df(frame),
+            DataFrameComparisonOperand::Scalar(scalar) => self.gt_scalar_df(&scalar),
+        }
+    }
+
+    /// Element-wise greater-or-equal comparison with another DataFrame or scalar.
+    ///
+    /// Matches `pd.DataFrame.ge(other)`.
+    pub fn ge<'a, O>(&self, other: O) -> Result<Self, FrameError>
+    where
+        O: Into<DataFrameComparisonOperand<'a>>,
+    {
+        match other.into() {
+            DataFrameComparisonOperand::DataFrame(frame) => self.ge_df(frame),
+            DataFrameComparisonOperand::Scalar(scalar) => self.ge_scalar_df(&scalar),
+        }
+    }
+
+    /// Element-wise less-than comparison with another DataFrame or scalar.
+    ///
+    /// Matches `pd.DataFrame.lt(other)`.
+    pub fn lt<'a, O>(&self, other: O) -> Result<Self, FrameError>
+    where
+        O: Into<DataFrameComparisonOperand<'a>>,
+    {
+        match other.into() {
+            DataFrameComparisonOperand::DataFrame(frame) => self.lt_df(frame),
+            DataFrameComparisonOperand::Scalar(scalar) => self.lt_scalar_df(&scalar),
+        }
+    }
+
+    /// Element-wise less-or-equal comparison with another DataFrame or scalar.
+    ///
+    /// Matches `pd.DataFrame.le(other)`.
+    pub fn le<'a, O>(&self, other: O) -> Result<Self, FrameError>
+    where
+        O: Into<DataFrameComparisonOperand<'a>>,
+    {
+        match other.into() {
+            DataFrameComparisonOperand::DataFrame(frame) => self.le_df(frame),
+            DataFrameComparisonOperand::Scalar(scalar) => self.le_scalar_df(&scalar),
+        }
     }
 
     // ── get_dummies (one-hot encoding) ──
@@ -54917,6 +55287,88 @@ mod tests {
         assert_eq!(result.columns()["x"].values()[1], Scalar::Float64(1.0));
     }
 
+    #[test]
+    fn df_pandas_named_arithmetic_aliases_delegate_to_existing_ops() {
+        let left = DataFrame::from_dict(
+            &["x"],
+            vec![("x", vec![Scalar::Float64(8.0), Scalar::Float64(12.0)])],
+        )
+        .unwrap();
+        let right = DataFrame::from_dict(
+            &["x"],
+            vec![("x", vec![Scalar::Float64(2.0), Scalar::Float64(3.0)])],
+        )
+        .unwrap();
+
+        assert_eq!(left.add(&right).unwrap(), left.add_df(&right).unwrap());
+        assert_eq!(left.sub(&right).unwrap(), left.sub_df(&right).unwrap());
+        assert_eq!(left.subtract(&right).unwrap(), left.sub_df(&right).unwrap());
+        assert_eq!(left.mul(&right).unwrap(), left.mul_df(&right).unwrap());
+        assert_eq!(left.multiply(&right).unwrap(), left.mul_df(&right).unwrap());
+        assert_eq!(left.div(&right).unwrap(), left.div_df(&right).unwrap());
+        assert_eq!(left.divide(&right).unwrap(), left.div_df(&right).unwrap());
+        assert_eq!(left.truediv(&right).unwrap(), left.div_df(&right).unwrap());
+        assert_eq!(
+            left.floordiv(&right).unwrap(),
+            left.floordiv_df(&right).unwrap()
+        );
+        assert_eq!(left.r#mod(&right).unwrap(), left.mod_df(&right).unwrap());
+        assert_eq!(left.pow(&right).unwrap(), left.pow_df(&right).unwrap());
+
+        assert_eq!(left.radd(&right).unwrap(), right.add_df(&left).unwrap());
+        assert_eq!(left.rsub(&right).unwrap(), right.sub_df(&left).unwrap());
+        assert_eq!(left.rmul(&right).unwrap(), right.mul_df(&left).unwrap());
+        assert_eq!(left.rdiv(&right).unwrap(), right.div_df(&left).unwrap());
+        assert_eq!(left.rtruediv(&right).unwrap(), right.div_df(&left).unwrap());
+        assert_eq!(
+            left.rfloordiv(&right).unwrap(),
+            right.floordiv_df(&left).unwrap()
+        );
+        assert_eq!(left.rmod(&right).unwrap(), right.mod_df(&left).unwrap());
+        assert_eq!(left.rpow(&right).unwrap(), right.pow_df(&left).unwrap());
+    }
+
+    #[test]
+    fn df_pandas_named_arithmetic_aliases_accept_scalars() {
+        let df = DataFrame::from_dict(
+            &["x"],
+            vec![("x", vec![Scalar::Float64(2.0), Scalar::Float64(4.0)])],
+        )
+        .unwrap();
+
+        assert_eq!(df.add(3.0).unwrap(), df.add_scalar(3.0).unwrap());
+        assert_eq!(df.sub(3.0).unwrap(), df.sub_scalar(3.0).unwrap());
+        assert_eq!(df.subtract(3.0).unwrap(), df.sub_scalar(3.0).unwrap());
+        assert_eq!(df.mul(3.0).unwrap(), df.mul_scalar(3.0).unwrap());
+        assert_eq!(df.multiply(3.0).unwrap(), df.mul_scalar(3.0).unwrap());
+        assert_eq!(df.div(2.0).unwrap(), df.div_scalar(2.0).unwrap());
+        assert_eq!(df.divide(2.0).unwrap(), df.div_scalar(2.0).unwrap());
+        assert_eq!(df.truediv(2.0).unwrap(), df.div_scalar(2.0).unwrap());
+        assert_eq!(df.floordiv(3.0).unwrap(), df.floordiv_scalar(3.0).unwrap());
+        assert_eq!(df.r#mod(3.0).unwrap(), df.mod_scalar(3.0).unwrap());
+        assert_eq!(df.pow(3.0).unwrap(), df.pow_scalar(3.0).unwrap());
+
+        let rsub = df.rsub(10.0).unwrap();
+        assert_eq!(rsub.columns()["x"].values()[0], Scalar::Float64(8.0));
+        assert_eq!(rsub.columns()["x"].values()[1], Scalar::Float64(6.0));
+
+        let rdiv = df.rdiv(8.0).unwrap();
+        assert_eq!(rdiv.columns()["x"].values()[0], Scalar::Float64(4.0));
+        assert_eq!(rdiv.columns()["x"].values()[1], Scalar::Float64(2.0));
+
+        let rfloordiv = df.rfloordiv(9.0).unwrap();
+        assert_eq!(rfloordiv.columns()["x"].values()[0], Scalar::Float64(4.0));
+        assert_eq!(rfloordiv.columns()["x"].values()[1], Scalar::Float64(2.0));
+
+        let rmod = df.rmod(9.0).unwrap();
+        assert_eq!(rmod.columns()["x"].values()[0], Scalar::Float64(1.0));
+        assert_eq!(rmod.columns()["x"].values()[1], Scalar::Float64(1.0));
+
+        let rpow = df.rpow(2.0).unwrap();
+        assert_eq!(rpow.columns()["x"].values()[0], Scalar::Float64(4.0));
+        assert_eq!(rpow.columns()["x"].values()[1], Scalar::Float64(16.0));
+    }
+
     // ── Batch 12: Series duplicated/drop_duplicates/compare/reindex_like ──
 
     #[test]
@@ -56670,6 +57122,58 @@ mod tests {
         assert_eq!(result.columns["a"].values()[1], Scalar::Bool(false));
         assert_eq!(result.columns["b"].values()[0], Scalar::Bool(true));
         assert_eq!(result.columns["b"].values()[1], Scalar::Bool(true));
+    }
+
+    #[test]
+    fn df_pandas_named_comparison_aliases_accept_frames_and_scalars() {
+        let left = DataFrame::from_dict(
+            &["x"],
+            vec![(
+                "x",
+                vec![Scalar::Int64(5), Scalar::Int64(3), Scalar::Int64(3)],
+            )],
+        )
+        .unwrap();
+        let right = DataFrame::from_dict(
+            &["x"],
+            vec![(
+                "x",
+                vec![Scalar::Int64(3), Scalar::Int64(5), Scalar::Int64(3)],
+            )],
+        )
+        .unwrap();
+
+        assert_eq!(left.eq(&right).unwrap(), left.eq_df(&right).unwrap());
+        assert_eq!(left.ne(&right).unwrap(), left.ne_df(&right).unwrap());
+        assert_eq!(left.gt(&right).unwrap(), left.gt_df(&right).unwrap());
+        assert_eq!(left.ge(&right).unwrap(), left.ge_df(&right).unwrap());
+        assert_eq!(left.lt(&right).unwrap(), left.lt_df(&right).unwrap());
+        assert_eq!(left.le(&right).unwrap(), left.le_df(&right).unwrap());
+
+        assert_eq!(
+            left.eq(Scalar::Int64(3)).unwrap(),
+            left.eq_scalar_df(&Scalar::Int64(3)).unwrap()
+        );
+        assert_eq!(
+            left.ne(Scalar::Int64(3)).unwrap(),
+            left.ne_scalar_df(&Scalar::Int64(3)).unwrap()
+        );
+        assert_eq!(
+            left.gt(3).unwrap(),
+            left.gt_scalar_df(&Scalar::Int64(3)).unwrap()
+        );
+        assert_eq!(
+            left.ge(3).unwrap(),
+            left.ge_scalar_df(&Scalar::Int64(3)).unwrap()
+        );
+        assert_eq!(
+            left.lt(3).unwrap(),
+            left.lt_scalar_df(&Scalar::Int64(3)).unwrap()
+        );
+        assert_eq!(
+            left.le(3).unwrap(),
+            left.le_scalar_df(&Scalar::Int64(3)).unwrap()
+        );
     }
 
     #[test]

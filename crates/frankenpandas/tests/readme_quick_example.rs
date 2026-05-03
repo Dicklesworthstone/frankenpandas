@@ -1353,6 +1353,15 @@ fn readme_element_wise_operations_compiles_and_runs() -> Result<(), Box<dyn std:
     let _ = df.pow_scalar(2.0)?;
     let _ = df.mod_scalar(10.0)?;
     let _ = df.floordiv_scalar(3.0)?;
+    let _ = df.add(100.0)?;
+    let _ = df.subtract(5.0)?;
+    let _ = df.multiply(2.0)?;
+    let _ = df.divide(2.0)?;
+    let _ = df.truediv(2.0)?;
+    let _ = df.floordiv(3.0)?;
+    let _ = df.r#mod(10.0)?;
+    let _ = df.rsub(100.0)?;
+    let _ = df.rtruediv(100.0)?;
 
     // DataFrame-to-DataFrame (aligned). fd90.226 added the 4 missing.
     let df2 = read_csv_str("a,b\n5,1\n10,2\n15,3\n20,4")?;
@@ -1363,6 +1372,25 @@ fn readme_element_wise_operations_compiles_and_runs() -> Result<(), Box<dyn std:
     let _ = df.pow_df(&df2)?;
     let _ = df.mod_df(&df2)?;
     let _ = df.floordiv_df(&df2)?;
+    let _ = df.add(&df2)?;
+    let _ = df.sub(&df2)?;
+    let _ = df.mul(&df2)?;
+    let _ = df.div(&df2)?;
+    let _ = df.radd(&df2)?;
+    let _ = df.rsub(&df2)?;
+    let _ = df.rmul(&df2)?;
+    let _ = df.rdiv(&df2)?;
+    let _ = df.rfloordiv(&df2)?;
+    let _ = df.rmod(&df2)?;
+    let _ = df.rpow(&df2)?;
+    let _ = df.eq(&df2)?;
+    let _ = df.ne(&df2)?;
+    let _ = df.lt(&df2)?;
+    let _ = df.gt(&df2)?;
+    let _ = df.le(&df2)?;
+    let _ = df.ge(&df2)?;
+    let _ = df.eq(10)?;
+    let _ = df.ne(10)?;
 
     // With fill value — fd90.227 added the other 5 _df_fill variants.
     let _ = df.add_df_fill(&df2, 0.0)?;
