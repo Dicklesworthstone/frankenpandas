@@ -2458,6 +2458,30 @@ impl MultiIndex {
         &self.names
     }
 
+    /// Number of entries, matching `pd.MultiIndex.size`.
+    #[must_use]
+    pub fn size(&self) -> usize {
+        self.len()
+    }
+
+    /// Shape of this one-dimensional index, matching `pd.MultiIndex.shape`.
+    #[must_use]
+    pub fn shape(&self) -> (usize,) {
+        (self.len(),)
+    }
+
+    /// Number of dimensions, matching `pd.MultiIndex.ndim`.
+    #[must_use]
+    pub fn ndim(&self) -> usize {
+        1
+    }
+
+    /// Alias for `is_empty`, matching the pandas `.empty` property.
+    #[must_use]
+    pub fn empty(&self) -> bool {
+        self.is_empty()
+    }
+
     /// Set the names for all levels.
     #[must_use]
     pub fn set_names(mut self, names: Vec<Option<String>>) -> Self {
@@ -2465,6 +2489,215 @@ impl MultiIndex {
         self.names = names;
         self.names.resize(self.nlevels(), None);
         self
+    }
+
+    fn shared_names(&self, other: &Self) -> Vec<Option<String>> {
+        self.names
+            .iter()
+            .zip(&other.names)
+            .map(
+                |(left, right)| {
+                    if left == right { left.clone() } else { None }
+                },
+            )
+            .collect()
+    }
+
+    fn ensure_same_nlevels(&self, other: &Self) -> Result<(), IndexError> {
+        if self.nlevels() != other.nlevels() {
+            return Err(IndexError::LengthMismatch {
+                expected: self.nlevels(),
+                actual: other.nlevels(),
+                context: "MultiIndex level count mismatch".to_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    fn tuple_at(&self, row: usize) -> Vec<IndexLabel> {
+        self.levels.iter().map(|level| level[row].clone()).collect()
+    }
+
+    fn take_existing_positions(&self, positions: &[usize]) -> Self {
+        let levels = self
+            .levels
+            .iter()
+            .map(|level| {
+                positions
+                    .iter()
+                    .map(|&position| level[position].clone())
+                    .collect()
+            })
+            .collect();
+        Self {
+            levels,
+            names: self.names.clone(),
+        }
+    }
+
+    fn from_tuples_with_names(
+        tuples: Vec<Vec<IndexLabel>>,
+        names: Vec<Option<String>>,
+    ) -> Result<Self, IndexError> {
+        Ok(Self::from_tuples(tuples)?.set_names(names))
+    }
+
+    /// Unique labels for each level, preserving first-seen order.
+    ///
+    /// Matches `pd.MultiIndex.levels`. Missing labels are excluded from the
+    /// level catalog and receive `-1` in `codes()`.
+    #[must_use]
+    pub fn levels(&self) -> Vec<Index> {
+        self.levels
+            .iter()
+            .enumerate()
+            .map(|(level_idx, level)| {
+                let mut seen = HashMap::<&IndexLabel, ()>::new();
+                let labels = level
+                    .iter()
+                    .filter(|label| !label.is_missing() && seen.insert(label, ()).is_none())
+                    .cloned()
+                    .collect();
+                let mut index = Index::new(labels);
+                if let Some(name) = self.names.get(level_idx).and_then(|name| name.as_ref()) {
+                    index = index.set_name(name);
+                }
+                index
+            })
+            .collect()
+    }
+
+    /// Integer level codes for each row, matching `pd.MultiIndex.codes`.
+    ///
+    /// Missing labels receive code `-1`; all other labels are encoded by their
+    /// first-seen position in the corresponding `levels()` entry.
+    #[must_use]
+    pub fn codes(&self) -> Vec<Vec<isize>> {
+        self.levels
+            .iter()
+            .map(|level| {
+                let mut positions = HashMap::<IndexLabel, isize>::new();
+                let mut next_code = 0_isize;
+                level
+                    .iter()
+                    .map(|label| {
+                        if label.is_missing() {
+                            -1
+                        } else if let Some(code) = positions.get(label) {
+                            *code
+                        } else {
+                            let code = next_code;
+                            positions.insert(label.clone(), code);
+                            next_code += 1;
+                            code
+                        }
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Cardinality of each level, matching `pd.MultiIndex.levshape`.
+    #[must_use]
+    pub fn levshape(&self) -> Vec<usize> {
+        self.levels().iter().map(Index::len).collect()
+    }
+
+    /// Materialize every composite key as an owned tuple.
+    ///
+    /// Matches `pd.MultiIndex.to_list()` / `tolist()`.
+    #[must_use]
+    pub fn to_list(&self) -> Vec<Vec<IndexLabel>> {
+        (0..self.len()).map(|row| self.tuple_at(row)).collect()
+    }
+
+    /// Alias for `to_list`, matching `pd.MultiIndex.tolist()`.
+    #[must_use]
+    pub fn tolist(&self) -> Vec<Vec<IndexLabel>> {
+        self.to_list()
+    }
+
+    /// Object-array-shaped materialization, matching `pd.MultiIndex.to_numpy`.
+    #[must_use]
+    pub fn to_numpy(&self) -> Vec<Vec<IndexLabel>> {
+        self.to_list()
+    }
+
+    /// Alias for `to_numpy`, matching `pd.MultiIndex.values`.
+    #[must_use]
+    pub fn values(&self) -> Vec<Vec<IndexLabel>> {
+        self.to_numpy()
+    }
+
+    /// Alias for `to_numpy`, matching `pd.MultiIndex.array`.
+    #[must_use]
+    pub fn array(&self) -> Vec<Vec<IndexLabel>> {
+        self.to_numpy()
+    }
+
+    /// Alias for `to_numpy`, matching `pd.MultiIndex.ravel()`.
+    #[must_use]
+    pub fn ravel(&self) -> Vec<Vec<IndexLabel>> {
+        self.to_numpy()
+    }
+
+    /// Stringify each tuple in row order, matching `pd.MultiIndex.format()`.
+    #[must_use]
+    pub fn format(&self) -> Vec<String> {
+        self.to_list()
+            .into_iter()
+            .map(|tuple| {
+                let parts: Vec<String> = tuple.into_iter().map(|label| label.to_string()).collect();
+                format!("({})", parts.join(", "))
+            })
+            .collect()
+    }
+
+    /// Approximate memory footprint of all level labels and codes.
+    ///
+    /// `deep=false` counts fixed-width labels and `String` headers; `deep=true`
+    /// additionally counts string bytes, mirroring `Index::memory_usage`.
+    #[must_use]
+    pub fn memory_usage(&self, deep: bool) -> usize {
+        self.levels
+            .iter()
+            .flatten()
+            .map(|label| match label {
+                IndexLabel::Int64(_) | IndexLabel::Timedelta64(_) | IndexLabel::Datetime64(_) => 8,
+                IndexLabel::Utf8(value) => {
+                    if deep {
+                        std::mem::size_of::<String>() + value.len()
+                    } else {
+                        std::mem::size_of::<String>()
+                    }
+                }
+            })
+            .sum::<usize>()
+            + self.nlevels() * self.len() * std::mem::size_of::<isize>()
+    }
+
+    /// Shallow memory footprint, matching `pd.MultiIndex.nbytes`.
+    #[must_use]
+    pub fn nbytes(&self) -> usize {
+        self.memory_usage(false)
+    }
+
+    /// Compare row tuples only, matching `pd.MultiIndex.equals`.
+    #[must_use]
+    pub fn equals(&self, other: &Self) -> bool {
+        self.levels == other.levels
+    }
+
+    /// Compare row tuples and level names, matching `pd.MultiIndex.identical`.
+    #[must_use]
+    pub fn identical(&self, other: &Self) -> bool {
+        self.equals(other) && self.names == other.names
+    }
+
+    /// Compare unique level catalogs, matching `pd.MultiIndex.equal_levels`.
+    #[must_use]
+    pub fn equal_levels(&self, other: &Self) -> bool {
+        self.levels() == other.levels()
     }
 
     /// Get the labels for a specific level.
@@ -2793,6 +3026,173 @@ impl MultiIndex {
     #[must_use]
     pub fn has_duplicates(&self) -> bool {
         !self.is_unique()
+    }
+
+    /// Drop duplicated tuples with pandas' default `keep='first'`.
+    #[must_use]
+    pub fn drop_duplicates(&self) -> Self {
+        self.drop_duplicates_keep(DuplicateKeep::First)
+    }
+
+    /// Drop duplicated tuples with explicit keep behavior.
+    #[must_use]
+    pub fn drop_duplicates_keep(&self, keep: DuplicateKeep) -> Self {
+        let duplicated = self.duplicated(keep);
+        let positions: Vec<usize> = duplicated
+            .iter()
+            .enumerate()
+            .filter_map(|(position, is_duplicated)| (!is_duplicated).then_some(position))
+            .collect();
+        self.take_existing_positions(&positions)
+    }
+
+    /// Append another MultiIndex to this one.
+    ///
+    /// Matches `pd.MultiIndex.append(other)` for equal-level indexes.
+    pub fn append(&self, other: &Self) -> Result<Self, IndexError> {
+        self.ensure_same_nlevels(other)?;
+        let mut levels = Vec::with_capacity(self.nlevels());
+        for level_idx in 0..self.nlevels() {
+            let mut level = self.levels[level_idx].clone();
+            level.extend(other.levels[level_idx].iter().cloned());
+            levels.push(level);
+        }
+        Ok(Self {
+            levels,
+            names: self.shared_names(other),
+        })
+    }
+
+    /// Repeat each tuple `repeats` times, matching `pd.MultiIndex.repeat`.
+    #[must_use]
+    pub fn repeat(&self, repeats: usize) -> Self {
+        if repeats == 1 {
+            return self.clone();
+        }
+        let mut levels = Vec::with_capacity(self.nlevels());
+        for level in &self.levels {
+            let mut repeated = Vec::with_capacity(level.len() * repeats);
+            for label in level {
+                for _ in 0..repeats {
+                    repeated.push(label.clone());
+                }
+            }
+            levels.push(repeated);
+        }
+        Self {
+            levels,
+            names: self.names.clone(),
+        }
+    }
+
+    /// Drop tuples containing any missing level label.
+    ///
+    /// Matches `pd.MultiIndex.dropna(how='any')`, which is pandas' default.
+    #[must_use]
+    pub fn dropna(&self) -> Self {
+        self.dropna_any()
+    }
+
+    /// Drop tuples containing any missing level label.
+    #[must_use]
+    pub fn dropna_any(&self) -> Self {
+        let positions: Vec<usize> = (0..self.len())
+            .filter(|&row| self.levels.iter().all(|level| !level[row].is_missing()))
+            .collect();
+        self.take_existing_positions(&positions)
+    }
+
+    /// Drop tuples whose level labels are all missing.
+    #[must_use]
+    pub fn dropna_all(&self) -> Self {
+        let positions: Vec<usize> = (0..self.len())
+            .filter(|&row| !self.levels.iter().all(|level| level[row].is_missing()))
+            .collect();
+        self.take_existing_positions(&positions)
+    }
+
+    /// Tuple intersection preserving left order and de-duplicating results.
+    pub fn intersection(&self, other: &Self) -> Result<Self, IndexError> {
+        self.ensure_same_nlevels(other)?;
+        let other_keys: HashMap<Vec<IndexLabel>, ()> = other
+            .to_list()
+            .into_iter()
+            .map(|tuple| (tuple, ()))
+            .collect();
+        let mut seen = HashMap::<Vec<IndexLabel>, ()>::new();
+        let tuples = self
+            .to_list()
+            .into_iter()
+            .filter(|tuple| {
+                other_keys.contains_key(tuple) && seen.insert(tuple.clone(), ()).is_none()
+            })
+            .collect();
+        Self::from_tuples_with_names(tuples, self.shared_names(other))
+    }
+
+    /// Tuple union preserving first-seen order from `self` then `other`.
+    pub fn union(&self, other: &Self) -> Result<Self, IndexError> {
+        self.ensure_same_nlevels(other)?;
+        let mut seen = HashMap::<Vec<IndexLabel>, ()>::new();
+        let mut tuples = Vec::with_capacity(self.len() + other.len());
+        for tuple in self.to_list().into_iter().chain(other.to_list()) {
+            if seen.insert(tuple.clone(), ()).is_none() {
+                tuples.push(tuple);
+            }
+        }
+        Self::from_tuples_with_names(tuples, self.shared_names(other))
+    }
+
+    /// Alias for `union`, matching the flat `Index::union_with` naming.
+    pub fn union_with(&self, other: &Self) -> Result<Self, IndexError> {
+        self.union(other)
+    }
+
+    /// Tuple difference preserving left order and de-duplicating results.
+    pub fn difference(&self, other: &Self) -> Result<Self, IndexError> {
+        self.ensure_same_nlevels(other)?;
+        let other_keys: HashMap<Vec<IndexLabel>, ()> = other
+            .to_list()
+            .into_iter()
+            .map(|tuple| (tuple, ()))
+            .collect();
+        let mut seen = HashMap::<Vec<IndexLabel>, ()>::new();
+        let tuples = self
+            .to_list()
+            .into_iter()
+            .filter(|tuple| {
+                !other_keys.contains_key(tuple) && seen.insert(tuple.clone(), ()).is_none()
+            })
+            .collect();
+        Self::from_tuples_with_names(tuples, self.shared_names(other))
+    }
+
+    /// Tuple symmetric difference preserving first-seen order.
+    pub fn symmetric_difference(&self, other: &Self) -> Result<Self, IndexError> {
+        self.ensure_same_nlevels(other)?;
+        let self_keys: HashMap<Vec<IndexLabel>, ()> = self
+            .to_list()
+            .into_iter()
+            .map(|tuple| (tuple, ()))
+            .collect();
+        let other_keys: HashMap<Vec<IndexLabel>, ()> = other
+            .to_list()
+            .into_iter()
+            .map(|tuple| (tuple, ()))
+            .collect();
+        let mut seen = HashMap::<Vec<IndexLabel>, ()>::new();
+        let mut tuples = Vec::new();
+        for tuple in self.to_list() {
+            if !other_keys.contains_key(&tuple) && seen.insert(tuple.clone(), ()).is_none() {
+                tuples.push(tuple);
+            }
+        }
+        for tuple in other.to_list() {
+            if !self_keys.contains_key(&tuple) && seen.insert(tuple.clone(), ()).is_none() {
+                tuples.push(tuple);
+            }
+        }
+        Self::from_tuples_with_names(tuples, self.shared_names(other))
     }
 
     /// Per-row membership test against a set of tuples.
@@ -5065,6 +5465,83 @@ mod tests {
     }
 
     #[test]
+    fn multi_index_metadata_shape_and_tuple_materialization() {
+        let mi = MultiIndex::from_tuples(vec![
+            vec!["a".into(), 1_i64.into()],
+            vec!["a".into(), 2_i64.into()],
+            vec!["b".into(), 1_i64.into()],
+        ])
+        .unwrap()
+        .set_names(vec![Some("letter".into()), Some("number".into())]);
+
+        let tuples = vec![
+            vec![IndexLabel::Utf8("a".into()), IndexLabel::Int64(1)],
+            vec![IndexLabel::Utf8("a".into()), IndexLabel::Int64(2)],
+            vec![IndexLabel::Utf8("b".into()), IndexLabel::Int64(1)],
+        ];
+        assert_eq!(mi.size(), 3);
+        assert_eq!(mi.shape(), (3,));
+        assert_eq!(mi.ndim(), 1);
+        assert!(!mi.empty());
+        assert_eq!(mi.to_list(), tuples);
+        assert_eq!(mi.tolist(), mi.to_list());
+        assert_eq!(mi.to_numpy(), mi.to_list());
+        assert_eq!(mi.values(), mi.to_list());
+        assert_eq!(mi.array(), mi.to_list());
+        assert_eq!(mi.ravel(), mi.to_list());
+        assert_eq!(mi.format(), vec!["(a, 1)", "(a, 2)", "(b, 1)"]);
+    }
+
+    #[test]
+    fn multi_index_levels_codes_and_levshape_exclude_missing_labels() {
+        let mi = MultiIndex::from_tuples(vec![
+            vec!["a".into(), 1_i64.into()],
+            vec![IndexLabel::Datetime64(i64::MIN), 2_i64.into()],
+            vec!["a".into(), 1_i64.into()],
+        ])
+        .unwrap()
+        .set_names(vec![Some("letter".into()), Some("number".into())]);
+
+        let levels = mi.levels();
+        assert_eq!(levels[0].labels(), &[IndexLabel::Utf8("a".into())]);
+        assert_eq!(levels[0].name(), Some("letter"));
+        assert_eq!(
+            levels[1].labels(),
+            &[IndexLabel::Int64(1), IndexLabel::Int64(2)]
+        );
+        assert_eq!(levels[1].name(), Some("number"));
+        assert_eq!(mi.codes(), vec![vec![0, -1, 0], vec![0, 1, 0]]);
+        assert_eq!(mi.levshape(), vec![1, 2]);
+        assert!(mi.memory_usage(false) <= mi.memory_usage(true));
+        assert_eq!(mi.nbytes(), mi.memory_usage(false));
+    }
+
+    #[test]
+    fn multi_index_equals_identical_and_equal_levels_match_pandas_names() {
+        let left = MultiIndex::from_tuples(vec![
+            vec!["a".into(), 1_i64.into()],
+            vec!["b".into(), 2_i64.into()],
+        ])
+        .unwrap()
+        .set_names(vec![Some("letter".into()), Some("number".into())]);
+        let renamed = left
+            .clone()
+            .set_names(vec![Some("letter".into()), Some("other".into())]);
+        let reordered = MultiIndex::from_tuples(vec![
+            vec!["b".into(), 2_i64.into()],
+            vec!["a".into(), 1_i64.into()],
+        ])
+        .unwrap()
+        .set_names(vec![Some("letter".into()), Some("number".into())]);
+
+        assert!(left.equals(&renamed));
+        assert!(!left.identical(&renamed));
+        assert!(left.equal_levels(&renamed));
+        assert!(!left.equals(&reordered));
+        assert!(!left.equal_levels(&reordered));
+    }
+
+    #[test]
     fn multi_index_to_flat_index() {
         let mi = MultiIndex::from_tuples(vec![
             vec!["a".into(), 1_i64.into()],
@@ -5374,6 +5851,111 @@ mod tests {
         let mi = MultiIndex::from_tuples(Vec::new()).unwrap();
         assert_eq!(mi.duplicated(DuplicateKeep::First), Vec::<bool>::new());
         assert!(mi.is_unique());
+    }
+
+    #[test]
+    fn multi_index_drop_duplicates_append_repeat_and_dropna() {
+        let left = MultiIndex::from_tuples(vec![
+            vec!["a".into(), 1_i64.into()],
+            vec!["a".into(), 1_i64.into()],
+            vec!["b".into(), 2_i64.into()],
+            vec![IndexLabel::Datetime64(i64::MIN), 3_i64.into()],
+            vec![
+                IndexLabel::Datetime64(i64::MIN),
+                IndexLabel::Timedelta64(Timedelta::NAT),
+            ],
+        ])
+        .unwrap()
+        .set_names(vec![Some("letter".into()), Some("number".into())]);
+
+        assert_eq!(
+            left.drop_duplicates().to_list(),
+            vec![
+                vec![IndexLabel::Utf8("a".into()), IndexLabel::Int64(1)],
+                vec![IndexLabel::Utf8("b".into()), IndexLabel::Int64(2)],
+                vec![IndexLabel::Datetime64(i64::MIN), IndexLabel::Int64(3)],
+                vec![
+                    IndexLabel::Datetime64(i64::MIN),
+                    IndexLabel::Timedelta64(Timedelta::NAT),
+                ],
+            ]
+        );
+        assert_eq!(
+            left.dropna().to_list(),
+            vec![
+                vec![IndexLabel::Utf8("a".into()), IndexLabel::Int64(1)],
+                vec![IndexLabel::Utf8("a".into()), IndexLabel::Int64(1)],
+                vec![IndexLabel::Utf8("b".into()), IndexLabel::Int64(2)],
+            ]
+        );
+        assert_eq!(left.dropna_all().len(), 4);
+
+        let right = MultiIndex::from_tuples(vec![vec!["c".into(), 3_i64.into()]])
+            .unwrap()
+            .set_names(vec![Some("letter".into()), Some("other".into())]);
+        let appended = left.append(&right).unwrap();
+        assert_eq!(appended.len(), 6);
+        assert_eq!(appended.names(), &[Some("letter".into()), None]);
+
+        let repeated = right.repeat(2);
+        assert_eq!(
+            repeated.to_list(),
+            vec![
+                vec![IndexLabel::Utf8("c".into()), IndexLabel::Int64(3)],
+                vec![IndexLabel::Utf8("c".into()), IndexLabel::Int64(3)],
+            ]
+        );
+        assert_eq!(right.repeat(0).len(), 0);
+    }
+
+    #[test]
+    fn multi_index_tuple_set_ops_preserve_order_and_shared_names() {
+        let left = MultiIndex::from_tuples(vec![
+            vec!["a".into(), 1_i64.into()],
+            vec!["a".into(), 2_i64.into()],
+            vec!["b".into(), 1_i64.into()],
+            vec!["a".into(), 1_i64.into()],
+        ])
+        .unwrap()
+        .set_names(vec![Some("letter".into()), Some("number".into())]);
+        let right = MultiIndex::from_tuples(vec![
+            vec!["a".into(), 2_i64.into()],
+            vec!["c".into(), 3_i64.into()],
+        ])
+        .unwrap()
+        .set_names(vec![Some("letter".into()), Some("other".into())]);
+
+        let intersection = left.intersection(&right).unwrap();
+        assert_eq!(
+            intersection.to_list(),
+            vec![vec![IndexLabel::Utf8("a".into()), IndexLabel::Int64(2)]]
+        );
+        assert_eq!(intersection.names(), &[Some("letter".into()), None]);
+
+        assert_eq!(
+            left.union(&right).unwrap().to_list(),
+            vec![
+                vec![IndexLabel::Utf8("a".into()), IndexLabel::Int64(1)],
+                vec![IndexLabel::Utf8("a".into()), IndexLabel::Int64(2)],
+                vec![IndexLabel::Utf8("b".into()), IndexLabel::Int64(1)],
+                vec![IndexLabel::Utf8("c".into()), IndexLabel::Int64(3)],
+            ]
+        );
+        assert_eq!(
+            left.difference(&right).unwrap().to_list(),
+            vec![
+                vec![IndexLabel::Utf8("a".into()), IndexLabel::Int64(1)],
+                vec![IndexLabel::Utf8("b".into()), IndexLabel::Int64(1)],
+            ]
+        );
+        assert_eq!(
+            left.symmetric_difference(&right).unwrap().to_list(),
+            vec![
+                vec![IndexLabel::Utf8("a".into()), IndexLabel::Int64(1)],
+                vec![IndexLabel::Utf8("b".into()), IndexLabel::Int64(1)],
+                vec![IndexLabel::Utf8("c".into()), IndexLabel::Int64(3)],
+            ]
+        );
     }
 
     #[test]
