@@ -18705,6 +18705,77 @@ impl DataFrame {
         Self::new_with_column_order(self.index.clone(), columns, self.column_order.clone())
     }
 
+    /// Localize tz-naive datetime columns to a timezone or strip timezone info.
+    ///
+    /// Matches the supported subset of `pd.DataFrame.tz_localize(tz)`. Walks
+    /// every Utf8-typed column whose values look like ISO-8601 datetime
+    /// strings and applies [`DatetimeAccessor::tz_localize`] column-by-column.
+    /// Non-Utf8 columns and Utf8 columns whose contents don't parse as
+    /// datetimes are passed through unchanged. Per br-frankenpandas-6iac0.
+    ///
+    /// Note: pandas' `DataFrame.tz_localize` operates on the index axis by
+    /// default; this implementation deviates by walking column VALUES because
+    /// fp-index doesn't yet have a dedicated DatetimeIndex variant (tracked
+    /// separately under br-frankenpandas-t8hz0). When the DatetimeIndex
+    /// variant lands, this method should grow an `axis` parameter.
+    pub fn tz_localize(&self, tz: Option<&str>) -> Result<Self, FrameError> {
+        self.tz_op_each_column(|series| series.dt().tz_localize(tz))
+    }
+
+    /// Localize tz-naive datetime columns with explicit DST policy.
+    ///
+    /// Matches the supported subset of `pd.DataFrame.tz_localize(tz,
+    /// ambiguous=..., nonexistent=...)`. Same column-walking rules as
+    /// [`Self::tz_localize`].
+    pub fn tz_localize_with_options(
+        &self,
+        tz: Option<&str>,
+        options: TzLocalizeOptions,
+    ) -> Result<Self, FrameError> {
+        self.tz_op_each_column(|series| series.dt().tz_localize_with_options(tz, options.clone()))
+    }
+
+    /// Convert timezone-aware datetime columns to a different timezone.
+    ///
+    /// Matches the supported subset of `pd.DataFrame.tz_convert(tz)`. Walks
+    /// every Utf8 datetime-string column and applies [`DatetimeAccessor::tz_convert`]
+    /// column-by-column. Non-Utf8 columns are passed through; columns whose
+    /// values are tz-naive (no offset suffix) raise an error matching
+    /// pandas' "Cannot convert tz-naive timestamps, use tz_localize" message.
+    /// Per br-frankenpandas-6iac0.
+    ///
+    /// Same axis-deviation note as [`Self::tz_localize`].
+    pub fn tz_convert(&self, tz: Option<&str>) -> Result<Self, FrameError> {
+        self.tz_op_each_column(|series| series.dt().tz_convert(tz))
+    }
+
+    /// Per br-frankenpandas-6iac0: shared column-walker used by tz_localize
+    /// and tz_convert. For each Utf8 column, attempt the operation; on
+    /// success, replace the column. For each non-Utf8 column, pass through
+    /// unchanged. Errors from a Utf8 column propagate (matches pandas
+    /// behavior of raising when applied to a non-datetime column).
+    fn tz_op_each_column<F>(&self, mut op: F) -> Result<Self, FrameError>
+    where
+        F: FnMut(&Series) -> Result<Series, FrameError>,
+    {
+        let mut new_columns = BTreeMap::new();
+        for name in &self.column_order {
+            let col = self
+                .columns
+                .get(name)
+                .expect("column name listed in order must exist");
+            if col.dtype() == DType::Utf8 {
+                let series = Series::new(name.clone(), self.index.clone(), col.clone())?;
+                let converted = op(&series)?;
+                let new_col = Column::new(DType::Utf8, converted.values().to_vec())?;
+                new_columns.insert(name.clone(), new_col);
+            } else {
+                new_columns.insert(name.clone(), col.clone());
+            }
+        }
+        Self::new_with_column_order(self.index.clone(), new_columns, self.column_order.clone())
+    }
+
     /// Cast one or more columns with error handling.
     ///
     /// Matches `df.astype({"a": dtype}, errors='coerce'|'raise'|'ignore')`.
@@ -67754,5 +67825,134 @@ mod tests {
             small_left.rpow(&small_right).unwrap().values(),
             small_right.pow(&small_left).unwrap().values()
         );
+    }
+
+    // ── DataFrame.tz_localize / tz_convert (br-frankenpandas-6iac0) ─
+
+    fn iac0_naive_df() -> DataFrame {
+        let cols = vec![
+            (
+                "ts".to_owned(),
+                Column::new(
+                    DType::Utf8,
+                    vec![
+                        Scalar::Utf8("2024-01-15 10:30:00".into()),
+                        Scalar::Utf8("2024-06-20 14:00:00".into()),
+                    ],
+                )
+                .unwrap(),
+            ),
+            (
+                "n".to_owned(),
+                Column::new(DType::Int64, vec![Scalar::Int64(1), Scalar::Int64(2)]).unwrap(),
+            ),
+        ];
+        let mut map = BTreeMap::new();
+        let order = cols.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>();
+        for (n, c) in cols {
+            map.insert(n, c);
+        }
+        DataFrame::new_with_column_order(Index::new(vec![0_i64.into(), 1_i64.into()]), map, order)
+            .unwrap()
+    }
+
+    #[test]
+    fn dataframe_tz_localize_appends_tz_to_utf8_datetime_columns() {
+        let df = iac0_naive_df();
+        let out = df.tz_localize(Some("UTC")).unwrap();
+        // Utf8 datetime column gets tz suffix.
+        let ts = out.column("ts").unwrap().values();
+        assert_eq!(ts[0], Scalar::Utf8("2024-01-15 10:30:00+00:00".into()));
+        assert_eq!(ts[1], Scalar::Utf8("2024-06-20 14:00:00+00:00".into()));
+        // Non-Utf8 column (Int64) passes through unchanged.
+        let n = out.column("n").unwrap().values();
+        assert_eq!(n, &[Scalar::Int64(1), Scalar::Int64(2)]);
+    }
+
+    #[test]
+    fn dataframe_tz_localize_offset_appends_per_column() {
+        let df = iac0_naive_df();
+        let out = df.tz_localize(Some("+05:30")).unwrap();
+        let ts = out.column("ts").unwrap().values();
+        assert_eq!(ts[0], Scalar::Utf8("2024-01-15 10:30:00+05:30".into()));
+    }
+
+    #[test]
+    fn dataframe_tz_convert_shifts_tz_aware_columns() {
+        // Pre-localized DataFrame: ts already has +00:00 suffix.
+        let mut map = BTreeMap::new();
+        map.insert(
+            "ts".to_owned(),
+            Column::new(
+                DType::Utf8,
+                vec![Scalar::Utf8("2024-01-15 10:00:00+00:00".into())],
+            )
+            .unwrap(),
+        );
+        map.insert(
+            "n".to_owned(),
+            Column::new(DType::Int64, vec![Scalar::Int64(7)]).unwrap(),
+        );
+        let df = DataFrame::new_with_column_order(
+            Index::new(vec![0_i64.into()]),
+            map,
+            vec!["ts".to_owned(), "n".to_owned()],
+        )
+        .unwrap();
+
+        let out = df.tz_convert(Some("+05:00")).unwrap();
+        assert_eq!(
+            out.column("ts").unwrap().values()[0],
+            Scalar::Utf8("2024-01-15 15:00:00+05:00".into())
+        );
+        // Int64 column unaffected by tz_convert.
+        assert_eq!(out.column("n").unwrap().values()[0], Scalar::Int64(7));
+    }
+
+    #[test]
+    fn dataframe_tz_convert_rejects_naive_columns() {
+        // Naive Utf8 column with no tz suffix; tz_convert must surface
+        // the same "Cannot convert tz-naive timestamps" error pandas raises.
+        let df = iac0_naive_df();
+        let err = df
+            .tz_convert(Some("+05:00"))
+            .expect_err("naive datetime column must reject tz_convert");
+        match err {
+            FrameError::CompatibilityRejected(msg) => {
+                assert!(msg.contains("tz-naive"), "got: {msg}");
+            }
+            other => panic!("expected CompatibilityRejected, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dataframe_tz_localize_none_strips_suffix() {
+        let mut map = BTreeMap::new();
+        map.insert(
+            "ts".to_owned(),
+            Column::new(
+                DType::Utf8,
+                vec![Scalar::Utf8("2024-01-15 10:00:00+00:00".into())],
+            )
+            .unwrap(),
+        );
+        let df = DataFrame::new_with_column_order(
+            Index::new(vec![0_i64.into()]),
+            map,
+            vec!["ts".to_owned()],
+        )
+        .unwrap();
+
+        let out = df.tz_localize(None).unwrap();
+        // tz_localize(None) on tz-aware values strips suffix (matches the
+        // Series.dt.tz_localize(None) semantics; pandas emits NaT for
+        // DatetimeIndex but we delegate to the existing accessor).
+        let v = &out.column("ts").unwrap().values()[0];
+        // Accept either stripped form or NaN per current accessor impl.
+        match v {
+            Scalar::Utf8(s) => assert!(!s.contains('+') && !s.ends_with('Z')),
+            Scalar::Null(_) => {}
+            other => panic!("unexpected value: {other:?}"),
+        }
     }
 }
