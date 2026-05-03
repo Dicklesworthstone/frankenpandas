@@ -1192,12 +1192,16 @@ let means = by_region.mean()?;
 let stds  = by_region.std()?;
 let meds  = by_region.median()?;
 let prods = by_region.prod()?;
+let unique = by_region.nunique()?;
+let running = by_region.cumsum()?;
+let first_rows = by_region.head(2)?;
+let group_a = by_region.get_group("A")?;
 
 // Multiple aggregations at once
-let multi = by_region.agg(&["sum", "mean", "count"])?;  // Returns DataFrame
+let multi = by_region.agg(&["sum", "mean", "count", "nunique"])?;  // Returns DataFrame
 ```
 
-`SeriesGroupBy` supports: `sum`, `mean`, `count`, `min`, `max`, `std`, `var`, `median`, `first`, `last`, `prod`, `size`, `rank`, `rank_with_pct`, and `agg` (multi-function). Higher-order aggregations (`sem`, `skew`, `kurtosis`, `value_counts`) are exposed at the DataFrame-level GroupBy and on `Series` directly — see the GroupBy aggregation matrix above.
+`SeriesGroupBy` supports: `sum`, `mean`, `count`, `min`, `max`, `std`, `var`, `median`, `first`, `last`, `prod`, `size`, `any`, `all`, `nunique`, `idxmin`, `idxmax`, `rank`, `rank_with_pct`, `cumcount`, `ngroup`, `cumsum`, `cumprod`, `cummin`, `cummax`, `shift`, `diff`, `pct_change`, `head`, `tail`, `nth`, `get_group`, `keys`, `groups`, `indices`, `ngroups`, `ndim`, `dtype`, `is_monotonic_increasing`, `is_monotonic_decreasing`, and `agg` (multi-function). Higher-order aggregations (`sem`, `skew`, `kurtosis`, `value_counts`) are exposed at the DataFrame-level GroupBy and on `Series` directly — see the GroupBy aggregation matrix above.
 
 ## Sorting
 

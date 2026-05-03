@@ -9490,6 +9490,101 @@ impl SeriesGroupBy<'_> {
         (order, order_keys, groups)
     }
 
+    fn take_positions(&self, positions: &[usize]) -> Result<Series, FrameError> {
+        let labels: Vec<IndexLabel> = positions
+            .iter()
+            .map(|&idx| self.series.index.labels()[idx].clone())
+            .collect();
+        let values: Vec<Scalar> = positions
+            .iter()
+            .map(|&idx| self.series.column.values()[idx].clone())
+            .collect();
+        Series::from_values(self.series.name(), labels, values)
+    }
+
+    fn transform_groups<F>(&self, func: F) -> Result<Series, FrameError>
+    where
+        F: Fn(&[Scalar]) -> Vec<Scalar>,
+    {
+        let (_order, order_keys, groups) = self.build_groups();
+        let mut out = vec![Scalar::Null(NullKind::NaN); self.series.len()];
+
+        for key in &order_keys {
+            let indices = &groups[key];
+            let group_vals: Vec<Scalar> = indices
+                .iter()
+                .map(|&idx| self.series.column.values()[idx].clone())
+                .collect();
+            let transformed = func(&group_vals);
+            for (local_idx, &series_idx) in indices.iter().enumerate() {
+                if let Some(value) = transformed.get(local_idx) {
+                    out[series_idx] = value.clone();
+                }
+            }
+        }
+
+        Series::from_values(self.series.name(), self.series.index.labels().to_vec(), out)
+    }
+
+    fn agg_scalar<F>(&self, name: &str, func: F) -> Result<Series, FrameError>
+    where
+        F: Fn(&[usize]) -> Scalar,
+    {
+        let (order, order_keys, groups) = self.build_groups();
+        let mut labels = Vec::with_capacity(order_keys.len());
+        let mut values = Vec::with_capacity(order_keys.len());
+
+        for (i, key) in order_keys.iter().enumerate() {
+            labels.push(order[i].clone());
+            values.push(func(&groups[key]));
+        }
+
+        Series::from_values(name, labels, values)
+    }
+
+    /// Group labels in first-seen order.
+    #[must_use]
+    pub fn keys(&self) -> Vec<IndexLabel> {
+        let (order, _, _) = self.build_groups();
+        order
+    }
+
+    /// Mapping from group labels to source row positions.
+    #[must_use]
+    pub fn indices(&self) -> HashMap<IndexLabel, Vec<usize>> {
+        let (order, order_keys, groups) = self.build_groups();
+        order
+            .into_iter()
+            .zip(order_keys)
+            .map(|(label, key)| (label, groups[&key].clone()))
+            .collect()
+    }
+
+    /// Alias for `indices`, matching pandas' `groups` property shape.
+    #[must_use]
+    pub fn groups(&self) -> HashMap<IndexLabel, Vec<usize>> {
+        self.indices()
+    }
+
+    /// Number of groups.
+    #[must_use]
+    pub fn ngroups(&self) -> usize {
+        let (_, order_keys, _) = self.build_groups();
+        order_keys.len()
+    }
+
+    /// Grouped object dimensionality.
+    #[must_use]
+    pub fn ndim(&self) -> usize {
+        1
+    }
+
+    /// DType of the grouped values.
+    #[must_use]
+    pub fn dtype(&self) -> DType {
+        self.series.dtype()
+    }
+
     /// Apply an aggregation that reduces each group to a single f64 value.
     fn agg_numeric<F>(&self, func: F, name: &str) -> Result<Series, FrameError>
     where
@@ -9566,6 +9661,113 @@ impl SeriesGroupBy<'_> {
             |nums| nums.iter().copied().fold(f64::NEG_INFINITY, f64::max),
             self.series.name(),
         )
+    }
+
+    /// Whether any non-missing value is truthy in each group.
+    pub fn any(&self) -> Result<Series, FrameError> {
+        self.agg_scalar(self.series.name(), |indices| {
+            Scalar::Bool(indices.iter().any(|&idx| {
+                let value = &self.series.column.values()[idx];
+                !value.is_missing() && Series::scalar_truthy(value)
+            }))
+        })
+    }
+
+    /// Whether all non-missing values are truthy in each group.
+    pub fn all(&self) -> Result<Series, FrameError> {
+        self.agg_scalar(self.series.name(), |indices| {
+            Scalar::Bool(indices.iter().all(|&idx| {
+                let value = &self.series.column.values()[idx];
+                value.is_missing() || Series::scalar_truthy(value)
+            }))
+        })
+    }
+
+    /// Number of unique non-missing values in each group.
+    pub fn nunique(&self) -> Result<Series, FrameError> {
+        self.agg_scalar(self.series.name(), |indices| {
+            let mut seen = HashSet::new();
+            for &idx in indices {
+                if let Some(key) = scalar_key_skip_missing(&self.series.column.values()[idx]) {
+                    seen.insert(key);
+                }
+            }
+            Scalar::Int64(seen.len() as i64)
+        })
+    }
+
+    /// Original index label of the minimum value in each group.
+    pub fn idxmin(&self) -> Result<Series, FrameError> {
+        self.agg_scalar(self.series.name(), |indices| {
+            let mut best_idx: Option<usize> = None;
+            let mut best_val = f64::INFINITY;
+            for &idx in indices {
+                let value = &self.series.column.values()[idx];
+                if value.is_missing() {
+                    continue;
+                }
+                if let Ok(v) = value.to_f64()
+                    && v < best_val
+                {
+                    best_val = v;
+                    best_idx = Some(idx);
+                }
+            }
+            best_idx.map_or(Scalar::Null(NullKind::NaN), |idx| {
+                Scalar::Utf8(self.series.index.labels()[idx].to_string())
+            })
+        })
+    }
+
+    /// Original index label of the maximum value in each group.
+    pub fn idxmax(&self) -> Result<Series, FrameError> {
+        self.agg_scalar(self.series.name(), |indices| {
+            let mut best_idx: Option<usize> = None;
+            let mut best_val = f64::NEG_INFINITY;
+            for &idx in indices {
+                let value = &self.series.column.values()[idx];
+                if value.is_missing() {
+                    continue;
+                }
+                if let Ok(v) = value.to_f64()
+                    && v > best_val
+                {
+                    best_val = v;
+                    best_idx = Some(idx);
+                }
+            }
+            best_idx.map_or(Scalar::Null(NullKind::NaN), |idx| {
+                Scalar::Utf8(self.series.index.labels()[idx].to_string())
+            })
+        })
+    }
+
+    /// Per-group monotonic-increasing predicate.
+    pub fn is_monotonic_increasing(&self) -> Result<Series, FrameError> {
+        self.agg_scalar(self.series.name(), |indices| {
+            let ok = indices.windows(2).all(|pair| {
+                compare_scalars_with_na_last(
+                    &self.series.column.values()[pair[0]],
+                    &self.series.column.values()[pair[1]],
+                    true,
+                ) != Ordering::Greater
+            });
+            Scalar::Bool(ok)
+        })
+    }
+
+    /// Per-group monotonic-decreasing predicate.
+    pub fn is_monotonic_decreasing(&self) -> Result<Series, FrameError> {
+        self.agg_scalar(self.series.name(), |indices| {
+            let ok = indices.windows(2).all(|pair| {
+                compare_scalars_with_na_last(
+                    &self.series.column.values()[pair[0]],
+                    &self.series.column.values()[pair[1]],
+                    true,
+                ) != Ordering::Less
+            });
+            Scalar::Bool(ok)
+        })
     }
 
     /// Rank values within each group.
@@ -9685,6 +9887,253 @@ impl SeriesGroupBy<'_> {
         self.agg_numeric(|nums| nums.iter().product(), self.series.name())
     }
 
+    /// Assign within-group cumulative count (0-based).
+    pub fn cumcount(&self) -> Result<Series, FrameError> {
+        self.cumcount_with_ascending(true)
+    }
+
+    /// Assign within-group cumulative count (0-based) with explicit direction.
+    pub fn cumcount_with_ascending(&self, ascending: bool) -> Result<Series, FrameError> {
+        let (_order, order_keys, groups) = self.build_groups();
+        let mut out = vec![Scalar::Int64(0); self.series.len()];
+
+        for key in &order_keys {
+            let indices = &groups[key];
+            let group_len = indices.len() as i64;
+            for (count, &idx) in indices.iter().enumerate() {
+                let value = if ascending {
+                    count as i64
+                } else {
+                    group_len - count as i64 - 1
+                };
+                out[idx] = Scalar::Int64(value);
+            }
+        }
+
+        Series::from_values("cumcount", self.series.index.labels().to_vec(), out)
+    }
+
+    /// Assign ordinal group number to each source row.
+    pub fn ngroup(&self) -> Result<Series, FrameError> {
+        self.ngroup_with_ascending(true)
+    }
+
+    /// Assign ordinal group number with explicit direction.
+    pub fn ngroup_with_ascending(&self, ascending: bool) -> Result<Series, FrameError> {
+        let (_order, order_keys, groups) = self.build_groups();
+        let mut out = vec![Scalar::Null(NullKind::NaN); self.series.len()];
+        let group_count = order_keys.len() as i64;
+
+        for (group_num, key) in order_keys.iter().enumerate() {
+            let value = if ascending {
+                group_num as i64
+            } else {
+                group_count - 1 - group_num as i64
+            };
+            for &idx in &groups[key] {
+                out[idx] = Scalar::Int64(value);
+            }
+        }
+
+        Series::from_values("ngroup", self.series.index.labels().to_vec(), out)
+    }
+
+    /// GroupBy cumulative sum.
+    pub fn cumsum(&self) -> Result<Series, FrameError> {
+        self.transform_groups(|vals| {
+            let mut acc = 0.0_f64;
+            vals.iter()
+                .map(|value| {
+                    if value.is_missing() {
+                        Scalar::Null(NullKind::NaN)
+                    } else if let Ok(v) = value.to_f64() {
+                        acc += v;
+                        Scalar::Float64(acc)
+                    } else {
+                        Scalar::Null(NullKind::NaN)
+                    }
+                })
+                .collect()
+        })
+    }
+
+    /// GroupBy cumulative product.
+    pub fn cumprod(&self) -> Result<Series, FrameError> {
+        self.transform_groups(|vals| {
+            let mut acc = 1.0_f64;
+            vals.iter()
+                .map(|value| {
+                    if value.is_missing() {
+                        Scalar::Null(NullKind::NaN)
+                    } else if let Ok(v) = value.to_f64() {
+                        acc *= v;
+                        Scalar::Float64(acc)
+                    } else {
+                        Scalar::Null(NullKind::NaN)
+                    }
+                })
+                .collect()
+        })
+    }
+
+    /// GroupBy cumulative minimum.
+    pub fn cummin(&self) -> Result<Series, FrameError> {
+        self.transform_groups(|vals| {
+            let mut acc = f64::INFINITY;
+            vals.iter()
+                .map(|value| {
+                    if value.is_missing() {
+                        Scalar::Null(NullKind::NaN)
+                    } else if let Ok(v) = value.to_f64() {
+                        if v < acc {
+                            acc = v;
+                        }
+                        Scalar::Float64(acc)
+                    } else {
+                        Scalar::Null(NullKind::NaN)
+                    }
+                })
+                .collect()
+        })
+    }
+
+    /// GroupBy cumulative maximum.
+    pub fn cummax(&self) -> Result<Series, FrameError> {
+        self.transform_groups(|vals| {
+            let mut acc = f64::NEG_INFINITY;
+            vals.iter()
+                .map(|value| {
+                    if value.is_missing() {
+                        Scalar::Null(NullKind::NaN)
+                    } else if let Ok(v) = value.to_f64() {
+                        if v > acc {
+                            acc = v;
+                        }
+                        Scalar::Float64(acc)
+                    } else {
+                        Scalar::Null(NullKind::NaN)
+                    }
+                })
+                .collect()
+        })
+    }
+
+    /// GroupBy shift within each group.
+    pub fn shift(&self, periods: i64) -> Result<Series, FrameError> {
+        self.transform_groups(|vals| {
+            let n = vals.len();
+            let mut out = vec![Scalar::Null(NullKind::NaN); n];
+            for (idx, slot) in out.iter_mut().enumerate() {
+                let src = idx as i64 - periods;
+                if src >= 0 && (src as usize) < n {
+                    *slot = vals[src as usize].clone();
+                }
+            }
+            out
+        })
+    }
+
+    /// GroupBy difference within each group.
+    pub fn diff(&self, periods: usize) -> Result<Series, FrameError> {
+        self.transform_groups(|vals| {
+            vals.iter()
+                .enumerate()
+                .map(|(idx, value)| {
+                    if idx < periods {
+                        return Scalar::Null(NullKind::NaN);
+                    }
+                    let previous = &vals[idx - periods];
+                    if value.is_missing() || previous.is_missing() {
+                        return Scalar::Null(NullKind::NaN);
+                    }
+                    if let (Ok(current), Ok(prev)) = (value.to_f64(), previous.to_f64()) {
+                        Scalar::Float64(current - prev)
+                    } else {
+                        Scalar::Null(NullKind::NaN)
+                    }
+                })
+                .collect()
+        })
+    }
+
+    /// GroupBy percentage change within each group.
+    pub fn pct_change(&self, periods: usize) -> Result<Series, FrameError> {
+        self.transform_groups(|vals| {
+            vals.iter()
+                .enumerate()
+                .map(|(idx, value)| {
+                    if idx < periods {
+                        return Scalar::Null(NullKind::NaN);
+                    }
+                    let previous = &vals[idx - periods];
+                    if value.is_missing() || previous.is_missing() {
+                        return Scalar::Null(NullKind::NaN);
+                    }
+                    if let (Ok(current), Ok(prev)) = (value.to_f64(), previous.to_f64()) {
+                        if prev.abs() < f64::EPSILON {
+                            Scalar::Null(NullKind::NaN)
+                        } else {
+                            Scalar::Float64((current - prev) / prev)
+                        }
+                    } else {
+                        Scalar::Null(NullKind::NaN)
+                    }
+                })
+                .collect()
+        })
+    }
+
+    /// Select first `n` rows per group, preserving original row order.
+    pub fn head(&self, n: usize) -> Result<Series, FrameError> {
+        let (_order, _order_keys, groups) = self.build_groups();
+        let mut positions = Vec::new();
+        for indices in groups.values() {
+            positions.extend_from_slice(&indices[..indices.len().min(n)]);
+        }
+        positions.sort_unstable();
+        self.take_positions(&positions)
+    }
+
+    /// Select last `n` rows per group, preserving original row order.
+    pub fn tail(&self, n: usize) -> Result<Series, FrameError> {
+        let (_order, _order_keys, groups) = self.build_groups();
+        let mut positions = Vec::new();
+        for indices in groups.values() {
+            let start = indices.len().saturating_sub(n);
+            positions.extend_from_slice(&indices[start..]);
+        }
+        positions.sort_unstable();
+        self.take_positions(&positions)
+    }
+
+    /// Select the nth row from each group. Negative `n` counts from the end.
+    pub fn nth(&self, n: i64) -> Result<Series, FrameError> {
+        let (_order, order_keys, groups) = self.build_groups();
+        let mut positions = Vec::new();
+        for key in &order_keys {
+            let indices = &groups[key];
+            let len = indices.len() as i64;
+            let pos = if n >= 0 { n } else { len + n };
+            if pos >= 0 && pos < len {
+                positions.push(indices[pos as usize]);
+            }
+        }
+        self.take_positions(&positions)
+    }
+
+    /// Retrieve a single group by its display label.
+    pub fn get_group(&self, name: &str) -> Result<Series, FrameError> {
+        let (order, order_keys, groups) = self.build_groups();
+        for (label, key) in order.iter().zip(order_keys.iter()) {
+            if label.to_string() == name || format!("{label:?}") == name {
+                return self.take_positions(&groups[key]);
+            }
+        }
+        Err(FrameError::CompatibilityRejected(format!(
+            "group '{name}' not found"
+        )))
+    }
+
     /// First value of each group.
     pub fn first(&self) -> Result<Series, FrameError> {
         let (order, order_keys, groups) = self.build_groups();
@@ -9746,6 +10195,11 @@ impl SeriesGroupBy<'_> {
                 "last" => self.last()?,
                 "size" => self.size()?,
                 "prod" => self.prod()?,
+                "any" => self.any()?,
+                "all" => self.all()?,
+                "nunique" => self.nunique()?,
+                "idxmin" => self.idxmin()?,
+                "idxmax" => self.idxmax()?,
                 _ => {
                     return Err(FrameError::CompatibilityRejected(format!(
                         "SeriesGroupBy.agg: unsupported function '{func}'"
@@ -59728,6 +60182,285 @@ mod tests {
         let counts = gb.count().unwrap();
         assert_eq!(counts.column().values()[0], Scalar::Int64(2));
         assert_eq!(counts.column().values()[1], Scalar::Int64(2));
+    }
+
+    #[test]
+    fn test_series_groupby_reductions_and_introspection() {
+        let values = Series::from_values(
+            "flag",
+            vec![
+                10_i64.into(),
+                11_i64.into(),
+                12_i64.into(),
+                13_i64.into(),
+                14_i64.into(),
+            ],
+            vec![
+                Scalar::Int64(1),
+                Scalar::Int64(0),
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+                Scalar::Int64(4),
+            ],
+        )
+        .unwrap();
+        let groups = Series::from_values(
+            "grp",
+            vec![
+                10_i64.into(),
+                11_i64.into(),
+                12_i64.into(),
+                13_i64.into(),
+                14_i64.into(),
+            ],
+            vec![
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("b".into()),
+            ],
+        )
+        .unwrap();
+        let gb = values.groupby(&groups).unwrap();
+
+        assert_eq!(
+            gb.keys(),
+            vec![IndexLabel::Utf8("a".into()), IndexLabel::Utf8("b".into())]
+        );
+        assert_eq!(gb.ngroups(), 2);
+        assert_eq!(gb.ndim(), 1);
+        assert_eq!(gb.dtype(), DType::Int64);
+        assert_eq!(
+            gb.indices().get(&IndexLabel::Utf8("a".into())),
+            Some(&vec![0, 1])
+        );
+        assert_eq!(
+            gb.groups().get(&IndexLabel::Utf8("b".into())),
+            Some(&vec![2, 3, 4])
+        );
+
+        assert_eq!(
+            gb.any().unwrap().column().values(),
+            &[Scalar::Bool(true), Scalar::Bool(true)]
+        );
+        assert_eq!(
+            gb.all().unwrap().column().values(),
+            &[Scalar::Bool(false), Scalar::Bool(true)]
+        );
+        assert_eq!(
+            gb.nunique().unwrap().column().values(),
+            &[Scalar::Int64(2), Scalar::Int64(3)]
+        );
+        assert_eq!(
+            gb.idxmin().unwrap().column().values(),
+            &[Scalar::Utf8("11".into()), Scalar::Utf8("12".into())]
+        );
+        assert_eq!(
+            gb.idxmax().unwrap().column().values(),
+            &[Scalar::Utf8("10".into()), Scalar::Utf8("14".into())]
+        );
+        assert_eq!(
+            gb.is_monotonic_increasing().unwrap().column().values(),
+            &[Scalar::Bool(false), Scalar::Bool(true)]
+        );
+        assert_eq!(
+            gb.is_monotonic_decreasing().unwrap().column().values(),
+            &[Scalar::Bool(true), Scalar::Bool(false)]
+        );
+    }
+
+    #[test]
+    fn test_series_groupby_transforms_slicing_and_get_group() {
+        let values = Series::from_values(
+            "data",
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+                5_i64.into(),
+            ],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(10.0),
+                Scalar::Float64(20.0),
+                Scalar::Float64(40.0),
+            ],
+        )
+        .unwrap();
+        let groups = Series::from_values(
+            "grp",
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+                5_i64.into(),
+            ],
+            vec![
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("b".into()),
+            ],
+        )
+        .unwrap();
+        let gb = values.groupby(&groups).unwrap();
+
+        assert_eq!(
+            gb.cumcount().unwrap().column().values(),
+            &[
+                Scalar::Int64(0),
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(0),
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+            ]
+        );
+        assert_eq!(
+            gb.ngroup().unwrap().column().values(),
+            &[
+                Scalar::Int64(0),
+                Scalar::Int64(0),
+                Scalar::Int64(0),
+                Scalar::Int64(1),
+                Scalar::Int64(1),
+                Scalar::Int64(1),
+            ]
+        );
+        assert_eq!(
+            gb.cumsum().unwrap().column().values(),
+            &[
+                Scalar::Float64(1.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(6.0),
+                Scalar::Float64(10.0),
+                Scalar::Float64(30.0),
+                Scalar::Float64(70.0),
+            ]
+        );
+        assert_eq!(
+            gb.cumprod().unwrap().column().values(),
+            &[
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(6.0),
+                Scalar::Float64(10.0),
+                Scalar::Float64(200.0),
+                Scalar::Float64(8000.0),
+            ]
+        );
+        assert_eq!(
+            gb.cummin().unwrap().column().values(),
+            &[
+                Scalar::Float64(1.0),
+                Scalar::Float64(1.0),
+                Scalar::Float64(1.0),
+                Scalar::Float64(10.0),
+                Scalar::Float64(10.0),
+                Scalar::Float64(10.0),
+            ]
+        );
+        assert_eq!(
+            gb.cummax().unwrap().column().values(),
+            &[
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(10.0),
+                Scalar::Float64(20.0),
+                Scalar::Float64(40.0),
+            ]
+        );
+        assert_eq!(
+            gb.shift(1).unwrap().column().values(),
+            &[
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(10.0),
+                Scalar::Float64(20.0),
+            ]
+        );
+        assert_eq!(
+            gb.diff(1).unwrap().column().values(),
+            &[
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(1.0),
+                Scalar::Float64(1.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(10.0),
+                Scalar::Float64(20.0),
+            ]
+        );
+        assert_eq!(
+            gb.pct_change(1).unwrap().column().values(),
+            &[
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(1.0),
+                Scalar::Float64(0.5),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(1.0),
+                Scalar::Float64(1.0),
+            ]
+        );
+
+        let head = gb.head(1).unwrap();
+        assert_eq!(
+            head.index().labels(),
+            &[IndexLabel::Int64(0), IndexLabel::Int64(3)]
+        );
+        assert_eq!(
+            head.column().values(),
+            &[Scalar::Float64(1.0), Scalar::Float64(10.0)]
+        );
+
+        let tail = gb.tail(1).unwrap();
+        assert_eq!(
+            tail.index().labels(),
+            &[IndexLabel::Int64(2), IndexLabel::Int64(5)]
+        );
+        assert_eq!(
+            tail.column().values(),
+            &[Scalar::Float64(3.0), Scalar::Float64(40.0)]
+        );
+
+        let nth = gb.nth(1).unwrap();
+        assert_eq!(
+            nth.index().labels(),
+            &[IndexLabel::Int64(1), IndexLabel::Int64(4)]
+        );
+        assert_eq!(
+            nth.column().values(),
+            &[Scalar::Float64(2.0), Scalar::Float64(20.0)]
+        );
+
+        let group = gb.get_group("a").unwrap();
+        assert_eq!(
+            group.index().labels(),
+            &[
+                IndexLabel::Int64(0),
+                IndexLabel::Int64(1),
+                IndexLabel::Int64(2)
+            ]
+        );
+        assert_eq!(
+            group.column().values(),
+            &[
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+            ]
+        );
     }
 
     #[test]

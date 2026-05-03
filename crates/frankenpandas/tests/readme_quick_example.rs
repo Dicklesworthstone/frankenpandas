@@ -1984,9 +1984,8 @@ fn readme_dataframe_introspection_compiles_and_runs() -> Result<(), Box<dyn std:
 
 /// README SeriesGroupBy (lines 1177-1190).
 ///
-/// Imports prelude only. Locks in fd90.135's method-list correction
-/// (removed phantom sem/skew/kurtosis/value_counts; the actual
-/// SeriesGroupBy surface is the 15 methods this test exercises).
+/// Imports prelude only. Locks in the documented SeriesGroupBy surface
+/// through the public facade.
 #[test]
 fn readme_series_groupby_compiles_and_runs() -> Result<(), Box<dyn std::error::Error>> {
     let labels: Vec<IndexLabel> = (0..6i64).map(IndexLabel::Int64).collect();
@@ -2035,17 +2034,44 @@ fn readme_series_groupby_compiles_and_runs() -> Result<(), Box<dyn std::error::E
     let _ = by_region.first()?;
     let _ = by_region.last()?;
     let _ = by_region.size()?;
+    let _ = by_region.any()?;
+    let _ = by_region.all()?;
+    let _ = by_region.nunique()?;
+    let _ = by_region.idxmin()?;
+    let _ = by_region.idxmax()?;
 
     // Multi-aggregation returns a DataFrame.
-    let multi = by_region.agg(&["sum", "mean", "count"])?;
+    let multi = by_region.agg(&["sum", "mean", "count", "nunique", "idxmax"])?;
     assert_eq!(multi.index().len(), 2);
 
-    // fd90.198: rank + rank_with_pct (the last 2 of the 15 SeriesGroupBy
-    // methods enumerated at README line 1200).
+    // Row-preserving transform surface.
     let ranks = by_region.rank("average", true, "keep")?;
     assert_eq!(ranks.len(), 6); // 1 rank per input row, not per group
     let pct_ranks = by_region.rank_with_pct("average", true, "keep", true)?;
     assert_eq!(pct_ranks.len(), 6);
+    assert_eq!(by_region.cumcount()?.len(), 6);
+    assert_eq!(by_region.ngroup()?.len(), 6);
+    assert_eq!(by_region.cumsum()?.len(), 6);
+    assert_eq!(by_region.cumprod()?.len(), 6);
+    assert_eq!(by_region.cummin()?.len(), 6);
+    assert_eq!(by_region.cummax()?.len(), 6);
+    assert_eq!(by_region.shift(1)?.len(), 6);
+    assert_eq!(by_region.diff(1)?.len(), 6);
+    assert_eq!(by_region.pct_change(1)?.len(), 6);
+
+    // Slicing and group introspection surface.
+    assert_eq!(by_region.head(1)?.len(), 2);
+    assert_eq!(by_region.tail(1)?.len(), 2);
+    assert_eq!(by_region.nth(1)?.len(), 2);
+    assert_eq!(by_region.get_group("A")?.len(), 3);
+    assert_eq!(by_region.keys().len(), 2);
+    assert_eq!(by_region.indices().len(), 2);
+    assert_eq!(by_region.groups().len(), 2);
+    assert_eq!(by_region.ngroups(), 2);
+    assert_eq!(by_region.ndim(), 1);
+    assert_eq!(by_region.dtype(), DType::Float64);
+    assert_eq!(by_region.is_monotonic_increasing()?.len(), 2);
+    assert_eq!(by_region.is_monotonic_decreasing()?.len(), 2);
     Ok(())
 }
 
