@@ -5445,6 +5445,18 @@ pub fn read_sql_chunks_with_options<C: SqlConnection>(
             "read_sql chunksize must be greater than zero".to_owned(),
         ));
     }
+    // Per br-frankenpandas-i8kja: this entrypoint returns SqlChunkIterator
+    // with no index promotion. Honoring options.index_col would silently
+    // diverge from the full-frame read_sql_with_options sibling (which
+    // does promote). Reject to surface the mismatch — callers should use
+    // read_sql_chunks_with_options_and_index_col when index_col is set.
+    if options.index_col.is_some() {
+        return Err(IoError::Sql(
+            "options.index_col is set but this entrypoint returns SqlChunkIterator without \
+             index promotion; use read_sql_chunks_with_options_and_index_col to honor index_col"
+                .to_owned(),
+        ));
+    }
 
     let (headers, columns) = sql_query_to_columns(conn, query, options)?;
     Ok(SqlChunkIterator {
@@ -5467,7 +5479,14 @@ pub fn read_sql_chunks_with_options_and_index_col<C: SqlConnection>(
     index_col: Option<&str>,
     chunk_size: usize,
 ) -> Result<SqlIndexedChunkIterator, IoError> {
-    let inner = read_sql_chunks_with_options(conn, query, options, chunk_size)?;
+    // The plain chunk reader rejects options.index_col (see i8kja); clear
+    // it before delegating so the indexed sibling is the canonical
+    // honor-index_col entrypoint regardless of which slot the caller used.
+    let cleared = SqlReadOptions {
+        index_col: None,
+        ..options.clone()
+    };
+    let inner = read_sql_chunks_with_options(conn, query, &cleared, chunk_size)?;
     sql_indexed_chunks(inner, index_col.or(options.index_col.as_deref()))
 }
 
@@ -6228,6 +6247,20 @@ pub fn read_sql_table_chunks_with_options<C: SqlConnection>(
     options: &SqlReadOptions,
     chunk_size: usize,
 ) -> Result<SqlChunkIterator, IoError> {
+    // Per br-frankenpandas-i8kja: this entrypoint returns the
+    // un-indexed SqlChunkIterator. Honoring options.index_col would
+    // silently diverge from the full-frame read_sql_table_with_options
+    // sibling (which does promote). Reject to surface the mismatch —
+    // callers should use read_sql_table_chunks_with_options_and_index_col
+    // when index_col is set.
+    if options.index_col.is_some() {
+        return Err(IoError::Sql(
+            "options.index_col is set but this entrypoint returns SqlChunkIterator without \
+             index promotion; use read_sql_table_chunks_with_options_and_index_col to honor \
+             index_col"
+                .to_owned(),
+        ));
+    }
     let query = match options.columns.as_deref() {
         Some(cols) => {
             let refs: Vec<&str> = cols.iter().map(String::as_str).collect();
@@ -6251,7 +6284,14 @@ pub fn read_sql_table_chunks_with_options_and_index_col<C: SqlConnection>(
 ) -> Result<SqlIndexedChunkIterator, IoError> {
     let effective_index_col = index_col.or(options.index_col.as_deref());
     let query = sql_table_read_query_for_options(conn, table_name, options, effective_index_col)?;
-    let inner = read_sql_chunks_with_options(conn, &query, options, chunk_size)?;
+    // The plain chunk reader rejects options.index_col (see i8kja); clear
+    // it before delegating so chunked-with-options remains a sibling of
+    // the full-frame path regardless of which slot the caller used.
+    let cleared = SqlReadOptions {
+        index_col: None,
+        ..options.clone()
+    };
+    let inner = read_sql_chunks_with_options(conn, &query, &cleared, chunk_size)?;
     sql_indexed_chunks(inner, effective_index_col)
 }
 
