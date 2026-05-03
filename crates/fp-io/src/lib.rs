@@ -5752,6 +5752,83 @@ pub fn sql_max_identifier_length<C: SqlConnection>(conn: &C) -> Option<usize> {
     conn.max_identifier_length()
 }
 
+/// Backend capability summary exposed through `SqlInspector`.
+///
+/// The per-field values come from `SqlConnection` probes so concrete
+/// backends can report their native ceilings without forcing callers to
+/// branch on the connection type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqlBackendCaps {
+    pub dialect_name: &'static str,
+    pub server_version: Option<String>,
+    pub supports_returning: bool,
+    pub supports_schemas: bool,
+    pub max_param_count: Option<usize>,
+    pub max_identifier_length: Option<usize>,
+}
+
+impl SqlBackendCaps {
+    /// Maximum rows in one parameter-bound INSERT for `column_count`.
+    ///
+    /// Returns `None` when the backend has no known parameter ceiling, or
+    /// when `column_count` is zero and therefore no parameter-derived row
+    /// ceiling can be computed.
+    #[must_use]
+    pub fn max_insert_rows(&self, column_count: usize) -> Option<usize> {
+        sql_max_insert_rows_for_columns(self.max_param_count, column_count)
+    }
+}
+
+/// Maximum bound parameters supported by the SQL backend, if known.
+#[must_use]
+pub fn sql_max_param_count<C: SqlConnection>(conn: &C) -> Option<usize> {
+    conn.max_param_count()
+}
+
+/// Whether the SQL backend supports native `INSERT ... RETURNING`.
+#[must_use]
+pub fn sql_supports_returning<C: SqlConnection>(conn: &C) -> bool {
+    conn.supports_returning()
+}
+
+/// Whether the SQL backend exposes schema-qualified namespaces.
+#[must_use]
+pub fn sql_supports_schemas<C: SqlConnection>(conn: &C) -> bool {
+    conn.supports_schemas()
+}
+
+/// Maximum INSERT rows for `column_count`, derived from the backend's
+/// bound-parameter ceiling.
+///
+/// A return value of `Some(0)` means the requested column count exceeds
+/// the backend's total bind-parameter cap.
+#[must_use]
+pub fn sql_max_insert_rows<C: SqlConnection>(conn: &C, column_count: usize) -> Option<usize> {
+    sql_max_insert_rows_for_columns(conn.max_param_count(), column_count)
+}
+
+fn sql_max_insert_rows_for_columns(
+    max_param_count: Option<usize>,
+    column_count: usize,
+) -> Option<usize> {
+    if column_count == 0 {
+        return None;
+    }
+    max_param_count.map(|max| max / column_count)
+}
+
+/// Gather the backend capability probes into one typed bundle.
+pub fn sql_backend_caps<C: SqlConnection>(conn: &C) -> Result<SqlBackendCaps, IoError> {
+    Ok(SqlBackendCaps {
+        dialect_name: conn.dialect_name(),
+        server_version: conn.server_version()?,
+        supports_returning: conn.supports_returning(),
+        supports_schemas: conn.supports_schemas(),
+        max_param_count: conn.max_param_count(),
+        max_identifier_length: conn.max_identifier_length(),
+    })
+}
+
 /// Backend-agnostic introspection facade matching the
 /// `SQLAlchemy.Inspector` shape.
 ///
@@ -5871,6 +5948,36 @@ impl<'a, C: SqlConnection> SqlInspector<'a, C> {
     #[must_use]
     pub fn max_identifier_length(&self) -> Option<usize> {
         self.conn.max_identifier_length()
+    }
+
+    /// Maximum bound parameters supported by this backend, if known.
+    #[must_use]
+    pub fn max_param_count(&self) -> Option<usize> {
+        self.conn.max_param_count()
+    }
+
+    /// Maximum INSERT rows for `column_count`, derived from the backend's
+    /// bound-parameter ceiling.
+    #[must_use]
+    pub fn max_insert_rows(&self, column_count: usize) -> Option<usize> {
+        sql_max_insert_rows_for_columns(self.conn.max_param_count(), column_count)
+    }
+
+    /// Whether this backend supports native `INSERT ... RETURNING`.
+    #[must_use]
+    pub fn supports_returning(&self) -> bool {
+        self.conn.supports_returning()
+    }
+
+    /// Whether this backend exposes schema-qualified namespaces.
+    #[must_use]
+    pub fn supports_schemas(&self) -> bool {
+        self.conn.supports_schemas()
+    }
+
+    /// Gather backend capability probes into one typed bundle.
+    pub fn backend_caps(&self) -> Result<SqlBackendCaps, IoError> {
+        sql_backend_caps(self.conn)
     }
 
     /// Backend dialect name (`"sqlite"`, `"postgresql"`, etc.).
@@ -9000,12 +9107,14 @@ mod tests {
     // SQLite-backed tests. The read_sql_* row-materialization free fns
     // are only exercised inside SQLite-backed tests (cfg-gated below).
     use super::{
-        SqlColumnSchema, SqlForeignKeySchema, SqlIfExists, SqlIndexSchema, SqlInsertMethod,
-        SqlInspector, SqlQueryResult, SqlReadOptions, SqlReflectedTable, SqlTableSchema,
-        SqlUniqueConstraintSchema, SqlWriteOptions, list_sql_foreign_keys, list_sql_indexes,
-        list_sql_schemas, list_sql_tables, list_sql_unique_constraints, list_sql_views,
-        sql_max_identifier_length, sql_primary_key_columns, sql_server_version, sql_table_comment,
-        sql_table_schema, truncate_sql_table, write_sql, write_sql_with_options,
+        SqlBackendCaps, SqlColumnSchema, SqlForeignKeySchema, SqlIfExists, SqlIndexSchema,
+        SqlInsertMethod, SqlInspector, SqlQueryResult, SqlReadOptions, SqlReflectedTable,
+        SqlTableSchema, SqlUniqueConstraintSchema, SqlWriteOptions, list_sql_foreign_keys,
+        list_sql_indexes, list_sql_schemas, list_sql_tables, list_sql_unique_constraints,
+        list_sql_views, sql_backend_caps, sql_max_identifier_length, sql_max_insert_rows,
+        sql_max_param_count, sql_primary_key_columns, sql_server_version, sql_supports_returning,
+        sql_supports_schemas, sql_table_comment, sql_table_schema, truncate_sql_table, write_sql,
+        write_sql_with_options,
     };
     #[cfg(feature = "sql-sqlite")]
     use super::{
@@ -14887,6 +14996,103 @@ mod tests {
             }
         }
         assert_eq!(sql_max_identifier_length(&MsSqlLikeStub), Some(128));
+    }
+
+    // ── sql backend capability probes / SqlInspector caps
+    //    (frankenpandas-fd90.10) ───────────────────────────────────────────
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn sql_backend_caps_sqlite_reports_param_and_row_caps() {
+        let conn = make_sql_test_conn();
+        let caps = sql_backend_caps(&conn).unwrap();
+
+        assert_eq!(caps.dialect_name, "sqlite");
+        assert!(
+            caps.server_version
+                .as_deref()
+                .is_some_and(|v| v.starts_with("3."))
+        );
+        assert!(caps.supports_returning);
+        assert!(!caps.supports_schemas);
+        assert_eq!(caps.max_param_count, Some(32766));
+        assert_eq!(caps.max_identifier_length, None);
+        assert_eq!(caps.max_insert_rows(3), Some(10922));
+        assert_eq!(caps.max_insert_rows(0), None);
+        assert_eq!(sql_max_param_count(&conn), Some(32766));
+        assert_eq!(sql_max_insert_rows(&conn, 4), Some(8191));
+        assert!(sql_supports_returning(&conn));
+        assert!(!sql_supports_schemas(&conn));
+    }
+
+    #[test]
+    fn sql_inspector_backend_caps_pg_like_stub_reports_limits() {
+        struct PgLikeCaps;
+        impl super::SqlConnection for PgLikeCaps {
+            fn query(&self, _q: &str, _p: &[Scalar]) -> Result<SqlQueryResult, IoError> {
+                Ok(SqlQueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                })
+            }
+            fn execute_batch(&self, _sql: &str) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn table_exists(&self, _name: &str) -> Result<bool, IoError> {
+                Ok(false)
+            }
+            fn insert_rows(&self, _sql: &str, _rows: &[Vec<Scalar>]) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn dtype_sql(&self, _dtype: DType) -> &'static str {
+                "TEXT"
+            }
+            fn index_dtype_sql(&self, _index: &Index) -> &'static str {
+                "TEXT"
+            }
+            fn dialect_name(&self) -> &'static str {
+                "postgresql"
+            }
+            fn server_version(&self) -> Result<Option<String>, IoError> {
+                Ok(Some("16.3".to_owned()))
+            }
+            fn supports_returning(&self) -> bool {
+                true
+            }
+            fn supports_schemas(&self) -> bool {
+                true
+            }
+            fn max_param_count(&self) -> Option<usize> {
+                Some(65535)
+            }
+            fn max_identifier_length(&self) -> Option<usize> {
+                Some(63)
+            }
+        }
+
+        let conn = PgLikeCaps;
+        let inspector = SqlInspector::new(&conn);
+        let caps = inspector.backend_caps().unwrap();
+
+        assert_eq!(inspector.dialect_name(), "postgresql");
+        assert_eq!(inspector.server_version().unwrap().as_deref(), Some("16.3"));
+        assert!(inspector.supports_returning());
+        assert!(inspector.supports_schemas());
+        assert_eq!(inspector.max_param_count(), Some(65535));
+        assert_eq!(inspector.max_identifier_length(), Some(63));
+        assert_eq!(inspector.max_insert_rows(4), Some(16383));
+        assert_eq!(caps.max_insert_rows(4), Some(16383));
+        assert_eq!(
+            caps,
+            SqlBackendCaps {
+                dialect_name: "postgresql",
+                server_version: Some("16.3".to_owned()),
+                supports_returning: true,
+                supports_schemas: true,
+                max_param_count: Some(65535),
+                max_identifier_length: Some(63),
+            }
+        );
     }
 
     // ── write_sql identifier-length validation (br-9ynk / fd90.27) ────────
