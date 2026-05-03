@@ -97,7 +97,21 @@ def setup_pandas(args: argparse.Namespace):
             )
 
     legacy_root = os.path.abspath(args.legacy_root)
+    legacy_root_real = os.path.realpath(legacy_root)
     candidate_parent = os.path.dirname(legacy_root)
+
+    def module_is_from_legacy_root(pd_mod: Any) -> bool:
+        module_file = getattr(pd_mod, "__file__", None)
+        if not module_file:
+            return False
+        try:
+            return (
+                os.path.commonpath([os.path.realpath(module_file), legacy_root_real])
+                == legacy_root_real
+            )
+        except ValueError:
+            return False
+
     if os.path.isdir(candidate_parent):
         sys.path.insert(0, candidate_parent)
 
@@ -105,6 +119,12 @@ def setup_pandas(args: argparse.Namespace):
         import pandas as pd  # type: ignore
 
         validate_pandas_module(pd)
+        if args.strict_legacy and not module_is_from_legacy_root(pd):
+            module_file = getattr(pd, "__file__", "<unknown>")
+            raise OracleError(
+                "strict legacy pandas import resolved outside legacy root: "
+                f"{module_file} (expected under {legacy_root})"
+            )
         return pd
     except Exception as exc:
         if args.strict_legacy and not args.allow_system_pandas_fallback:

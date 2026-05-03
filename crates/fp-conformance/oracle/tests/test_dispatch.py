@@ -6,6 +6,9 @@ contract stays green as handlers evolve.
 """
 from __future__ import annotations
 
+import sys
+from types import SimpleNamespace
+
 import pytest
 
 
@@ -67,3 +70,31 @@ def test_series_add_requires_both_sides(oracle, pd):
     }
     with pytest.raises(oracle.OracleError):
         oracle.dispatch(pd, payload)
+
+
+def test_setup_pandas_strict_legacy_rejects_system_import(oracle, tmp_path):
+    args = SimpleNamespace(
+        legacy_root=str(tmp_path / "pandas"),
+        strict_legacy=True,
+        allow_system_pandas_fallback=False,
+    )
+    original_path = list(sys.path)
+    try:
+        with pytest.raises(oracle.OracleError, match="outside legacy root"):
+            oracle.setup_pandas(args)
+    finally:
+        sys.path[:] = original_path
+
+
+def test_setup_pandas_strict_legacy_allows_system_fallback(oracle, tmp_path):
+    args = SimpleNamespace(
+        legacy_root=str(tmp_path / "pandas"),
+        strict_legacy=True,
+        allow_system_pandas_fallback=True,
+    )
+    original_path = list(sys.path)
+    try:
+        pd = oracle.setup_pandas(args)
+    finally:
+        sys.path[:] = original_path
+    assert hasattr(pd, "Series")
