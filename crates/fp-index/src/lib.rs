@@ -1847,8 +1847,8 @@ impl Index {
         if periods == 0 {
             return out;
         }
-        for position in periods..self.len() {
-            out[position] = match (&self.labels[position], &self.labels[position - periods]) {
+        for (position, slot) in out.iter_mut().enumerate().skip(periods) {
+            *slot = match (&self.labels[position], &self.labels[position - periods]) {
                 (IndexLabel::Int64(current), IndexLabel::Int64(previous)) => {
                     current.checked_sub(*previous).map(IndexLabel::Int64)
                 }
