@@ -5294,6 +5294,14 @@ pub fn read_sql_query_chunks_with_options<C: SqlConnection>(
     options: &SqlReadOptions,
     chunk_size: usize,
 ) -> Result<SqlChunkIterator, IoError> {
+    if options.index_col.is_some() {
+        return Err(IoError::Sql(
+            "options.index_col is set but this entrypoint returns SqlChunkIterator without \
+             index promotion; use read_sql_query_chunks_with_options_and_index_col to honor \
+             index_col"
+                .to_owned(),
+        ));
+    }
     read_sql_chunks_with_options(conn, query, options, chunk_size)
 }
 
@@ -6329,15 +6337,18 @@ pub fn read_sql_table_columns<C: SqlConnection>(
 ///
 /// Matches the supported subset of
 /// `pd.read_sql_table(table, con, columns=[...], index_col=...)`. When
-/// `index_col` is set it must be included in `columns`; the promoted column is
-/// removed from the data columns after projection.
+/// `index_col` is set and is not already in `columns`, it is auto-projected
+/// into the underlying SELECT (matching pandas SQLTable.read which does the
+/// same before set_index). The promoted column is removed from the data
+/// columns after projection. Per br-frankenpandas-6n0uz.
 pub fn read_sql_table_columns_with_index_col<C: SqlConnection>(
     conn: &C,
     table_name: &str,
     columns: &[&str],
     index_col: Option<&str>,
 ) -> Result<DataFrame, IoError> {
-    let frame = read_sql_table_columns(conn, table_name, columns)?;
+    let projection = projection_with_index_col(columns, index_col)?;
+    let frame = read_sql_table_columns(conn, table_name, &projection)?;
     apply_sql_index_col(frame, index_col)
 }
 
@@ -6364,8 +6375,9 @@ pub fn read_sql_table_columns_chunks<C: SqlConnection>(
 ///
 /// Matches the supported subset of
 /// `pd.read_sql_table(table, con, columns=[...], index_col=..., chunksize=...)`.
-/// When `index_col` is set it must be included in `columns`; the promoted
-/// column is removed from each chunk after projection.
+/// When `index_col` is set and is not already in `columns`, it is auto-projected
+/// into the underlying SELECT (matching pandas SQLTable.read). The promoted
+/// column is removed from each chunk after projection. Per br-frankenpandas-6n0uz.
 pub fn read_sql_table_columns_chunks_with_index_col<C: SqlConnection>(
     conn: &C,
     table_name: &str,
@@ -6373,8 +6385,33 @@ pub fn read_sql_table_columns_chunks_with_index_col<C: SqlConnection>(
     index_col: Option<&str>,
     chunk_size: usize,
 ) -> Result<SqlIndexedChunkIterator, IoError> {
-    let inner = read_sql_table_columns_chunks(conn, table_name, columns, chunk_size)?;
+    let projection = projection_with_index_col(columns, index_col)?;
+    let inner = read_sql_table_columns_chunks(conn, table_name, &projection, chunk_size)?;
     sql_indexed_chunks(inner, index_col)
+}
+
+/// Per br-frankenpandas-6n0uz: helper that prepends `index_col` to a
+/// `columns` projection list if it isn't already present. Mirrors the
+/// inline logic in `sql_table_read_query_for_options` (fd90.76) so the
+/// columns-list and options-based read paths agree on the auto-include
+/// rule while preserving the public `index_col=""` and empty-projection
+/// error contracts.
+fn projection_with_index_col<'a>(
+    columns: &'a [&'a str],
+    index_col: Option<&'a str>,
+) -> Result<Vec<&'a str>, IoError> {
+    match index_col {
+        Some("") => Err(IoError::Sql(
+            "index_col: empty string is not a valid column name".to_owned(),
+        )),
+        Some(name) if !columns.is_empty() && !columns.contains(&name) => {
+            let mut out = Vec::with_capacity(columns.len() + 1);
+            out.push(name);
+            out.extend_from_slice(columns);
+            Ok(out)
+        }
+        _ => Ok(columns.to_vec()),
+    }
 }
 
 /// Write a DataFrame to a SQL table.
@@ -9405,6 +9442,109 @@ mod tests {
         assert!(result.column("ints").is_none());
     }
 
+    // br-frankenpandas-6n0uz: when index_col is set but NOT in columns,
+    // pandas auto-projects it into the SELECT (then drops it from data
+    // columns after promotion). Mirrors fd90.76's behavior on the
+    // options-based reader.
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn sql_read_table_columns_with_index_col_auto_projects_when_absent() {
+        let frame = make_test_dataframe();
+        let conn = make_sql_test_conn();
+        write_sql(&frame, &conn, "auto_proj_tbl", SqlIfExists::Fail).expect("write");
+
+        // index_col "ints" is NOT in columns — must be auto-projected, then
+        // promoted to the index, then removed from the data columns.
+        let result =
+            read_sql_table_columns_with_index_col(&conn, "auto_proj_tbl", &["names"], Some("ints"))
+                .expect("auto-project index_col");
+
+        assert_eq!(result.index().name(), Some("ints"));
+        assert_eq!(
+            result.index().labels(),
+            &[
+                IndexLabel::Int64(10),
+                IndexLabel::Int64(20),
+                IndexLabel::Int64(30)
+            ]
+        );
+        assert_eq!(result.column_names(), vec!["names"]);
+        assert!(result.column("ints").is_none());
+        assert_eq!(
+            result.column("names").unwrap().values(),
+            &[
+                Scalar::Utf8("alice".to_owned()),
+                Scalar::Utf8("bob".to_owned()),
+                Scalar::Utf8("carol".to_owned())
+            ]
+        );
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn sql_read_table_columns_chunks_with_index_col_auto_projects_when_absent() {
+        let frame = make_test_dataframe();
+        let conn = make_sql_test_conn();
+        write_sql(&frame, &conn, "auto_proj_chunks_tbl", SqlIfExists::Fail).expect("write");
+
+        // index_col "ints" is NOT in columns — must be auto-projected per
+        // chunk and dropped from each chunk's data columns.
+        let chunks = read_sql_table_columns_chunks_with_index_col(
+            &conn,
+            "auto_proj_chunks_tbl",
+            &["names"],
+            Some("ints"),
+            2,
+        )
+        .expect("auto-project chunks")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("all chunks");
+
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].index().name(), Some("ints"));
+        assert_eq!(
+            chunks[0].index().labels(),
+            &[IndexLabel::Int64(10), IndexLabel::Int64(20)]
+        );
+        assert_eq!(chunks[0].column_names(), vec!["names"]);
+        assert!(chunks[0].column("ints").is_none());
+        assert_eq!(
+            chunks[0].column("names").unwrap().values(),
+            &[
+                Scalar::Utf8("alice".to_owned()),
+                Scalar::Utf8("bob".to_owned())
+            ]
+        );
+        assert_eq!(chunks[1].index().labels(), &[IndexLabel::Int64(30)]);
+        assert_eq!(chunks[1].column_names(), vec!["names"]);
+        assert!(chunks[1].column("ints").is_none());
+    }
+
+    // br-frankenpandas-6n0uz: idempotency check — when index_col IS already
+    // in columns, the auto-project helper must not duplicate it. Same final
+    // result as the original explicit-include test, but proves the helper's
+    // dedupe path.
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn sql_read_table_columns_with_index_col_no_duplication_when_listed() {
+        let frame = make_test_dataframe();
+        let conn = make_sql_test_conn();
+        write_sql(&frame, &conn, "no_dup_tbl", SqlIfExists::Fail).expect("write");
+
+        // index_col "ints" IS in columns — must NOT be duplicated in SELECT.
+        let result = read_sql_table_columns_with_index_col(
+            &conn,
+            "no_dup_tbl",
+            &["names", "ints"],
+            Some("ints"),
+        )
+        .expect("explicit include + index_col");
+
+        assert_eq!(result.index().name(), Some("ints"));
+        assert_eq!(result.column_names(), vec!["names"]);
+        assert!(result.column("ints").is_none());
+    }
+
     #[cfg(feature = "sql-sqlite")]
     #[test]
     fn sql_read_table_columns_with_index_col_none_keeps_projection_and_range_index() {
@@ -9480,16 +9620,6 @@ mod tests {
         let frame = make_test_dataframe();
         let conn = make_sql_test_conn();
         write_sql(&frame, &conn, "proj_index_error_tbl", SqlIfExists::Fail).expect("write");
-
-        let missing = read_sql_table_columns_chunks_with_index_col(
-            &conn,
-            "proj_index_error_tbl",
-            &["names"],
-            Some("ints"),
-            1,
-        )
-        .expect_err("missing index_col should error during iterator construction");
-        assert!(matches!(missing, IoError::Sql(msg) if msg.contains("index_col")));
 
         let empty = read_sql_table_columns_chunks_with_index_col(
             &conn,
@@ -10858,8 +10988,6 @@ mod tests {
             "expected typed error pointing to the _and_index_col variant, got: {err:?}"
         );
 
-        // Same options on the query-chunks delegator (which forwards to the
-        // foundation): error propagates unchanged.
         let err = read_sql_query_chunks_with_options(
             &conn,
             "SELECT * FROM i8kja_query_chunks_reject",
@@ -10870,7 +10998,10 @@ mod tests {
             2,
         )
         .expect_err("query delegator should propagate the rejection");
-        assert!(matches!(&err, IoError::Sql(_)));
+        assert!(
+            matches!(&err, IoError::Sql(msg) if msg.contains("index_col") && msg.contains("read_sql_query_chunks_with_options_and_index_col")),
+            "expected query-specific _and_index_col suggestion, got: {err:?}"
+        );
     }
 
     #[cfg(feature = "sql-sqlite")]
