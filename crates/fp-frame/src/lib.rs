@@ -119,6 +119,12 @@ pub enum FrameError {
     Index(#[from] IndexError),
 }
 
+fn plotting_deferred(method: &str) -> FrameError {
+    FrameError::CompatibilityRejected(format!(
+        "{method}: plotting is in scope but deferred; planned integration target is plotters or charming"
+    ))
+}
+
 fn normalize_describe_percentiles(percentiles: &[f64]) -> Result<Vec<f64>, FrameError> {
     let mut normalized = Vec::with_capacity(percentiles.len() + 1);
 
@@ -1353,6 +1359,22 @@ impl Series {
     ) -> Result<Self, FrameError> {
         let (labels, values): (Vec<_>, Vec<_>) = data.into_iter().collect();
         Self::from_values(name, labels, values)
+    }
+
+    /// Deferred pandas-style plotting hook.
+    ///
+    /// Matches `pd.Series.plot()` as an explicit in-scope but unimplemented
+    /// API surface.
+    pub fn plot(&self) -> Result<(), FrameError> {
+        Err(plotting_deferred("Series.plot"))
+    }
+
+    /// Deferred pandas-style histogram hook.
+    ///
+    /// Matches `pd.Series.hist()` as an explicit in-scope but unimplemented
+    /// API surface.
+    pub fn hist(&self) -> Result<(), FrameError> {
+        Err(plotting_deferred("Series.hist"))
     }
 
     /// Pretty-print the Series as a string table.
@@ -9849,6 +9871,22 @@ impl SeriesGroupBy<'_> {
         self.indices()
     }
 
+    /// Deferred pandas-style grouped plotting hook.
+    ///
+    /// Matches `pd.Series.groupby(...).plot()` as an explicit in-scope but
+    /// unimplemented API surface.
+    pub fn plot(&self) -> Result<(), FrameError> {
+        Err(plotting_deferred("SeriesGroupBy.plot"))
+    }
+
+    /// Deferred pandas-style grouped histogram hook.
+    ///
+    /// Matches `pd.Series.groupby(...).hist()` as an explicit in-scope but
+    /// unimplemented API surface.
+    pub fn hist(&self) -> Result<(), FrameError> {
+        Err(plotting_deferred("SeriesGroupBy.hist"))
+    }
+
     /// Number of groups.
     #[must_use]
     pub fn ngroups(&self) -> usize {
@@ -16590,6 +16628,30 @@ impl DataFrame {
     ) -> Result<Self, FrameError> {
         let column_order = columns.keys().cloned().collect();
         Self::new_with_axes(index, Some(row_multiindex), columns, column_order, None)
+    }
+
+    /// Deferred pandas-style plotting hook.
+    ///
+    /// Matches `pd.DataFrame.plot()` as an explicit in-scope but unimplemented
+    /// API surface.
+    pub fn plot(&self) -> Result<(), FrameError> {
+        Err(plotting_deferred("DataFrame.plot"))
+    }
+
+    /// Deferred pandas-style histogram hook.
+    ///
+    /// Matches `pd.DataFrame.hist()` as an explicit in-scope but unimplemented
+    /// API surface.
+    pub fn hist(&self) -> Result<(), FrameError> {
+        Err(plotting_deferred("DataFrame.hist"))
+    }
+
+    /// Deferred pandas-style boxplot hook.
+    ///
+    /// Matches `pd.DataFrame.boxplot()` as an explicit in-scope but
+    /// unimplemented API surface.
+    pub fn boxplot(&self) -> Result<(), FrameError> {
+        Err(plotting_deferred("DataFrame.boxplot"))
     }
 
     /// AG-05: Pre-compute N-way union index across all series first, then
@@ -28698,6 +28760,30 @@ impl DataFrameGroupBy<'_> {
         }
 
         self.format_output(result_cols, col_order, labels, &group_order, &groups)
+    }
+
+    /// Deferred pandas-style grouped plotting hook.
+    ///
+    /// Matches `pd.DataFrame.groupby(...).plot()` as an explicit in-scope but
+    /// unimplemented API surface.
+    pub fn plot(&self) -> Result<(), FrameError> {
+        Err(plotting_deferred("DataFrameGroupBy.plot"))
+    }
+
+    /// Deferred pandas-style grouped histogram hook.
+    ///
+    /// Matches `pd.DataFrame.groupby(...).hist()` as an explicit in-scope but
+    /// unimplemented API surface.
+    pub fn hist(&self) -> Result<(), FrameError> {
+        Err(plotting_deferred("DataFrameGroupBy.hist"))
+    }
+
+    /// Deferred pandas-style grouped boxplot hook.
+    ///
+    /// Matches `pd.DataFrame.groupby(...).boxplot()` as an explicit in-scope
+    /// but unimplemented API surface.
+    pub fn boxplot(&self) -> Result<(), FrameError> {
+        Err(plotting_deferred("DataFrameGroupBy.boxplot"))
     }
 
     /// GroupBy any (returns True if any value is truthy per group).
@@ -67464,6 +67550,59 @@ mod tests {
             Scalar::Utf8("2024-01-15 10:30:00".into())
         );
         assert!(result.values()[1].is_missing());
+    }
+
+    // ── Deferred plotting stubs (frankenpandas-hci9o) ────────────────
+
+    fn assert_plotting_deferred(result: Result<(), FrameError>, method: &str) {
+        let err = result.expect_err("plotting method should be explicitly deferred");
+        assert!(matches!(err, FrameError::CompatibilityRejected(msg)
+            if msg.contains(method)
+                && msg.contains("plotting is in scope but deferred")
+                && msg.contains("plotters")
+                && msg.contains("charming")));
+    }
+
+    #[test]
+    fn dataframe_plotting_methods_are_explicitly_deferred() {
+        let df = nk54a_df();
+        assert_plotting_deferred(df.plot(), "DataFrame.plot");
+        assert_plotting_deferred(df.hist(), "DataFrame.hist");
+        assert_plotting_deferred(df.boxplot(), "DataFrame.boxplot");
+    }
+
+    #[test]
+    fn series_plotting_methods_are_explicitly_deferred() {
+        let series = m785r_series();
+        assert_plotting_deferred(series.plot(), "Series.plot");
+        assert_plotting_deferred(series.hist(), "Series.hist");
+    }
+
+    #[test]
+    fn dataframe_groupby_plotting_methods_are_explicitly_deferred() {
+        let df = nk54a_df();
+        let grouped = df.groupby(&["secret"]).unwrap();
+        assert_plotting_deferred(grouped.plot(), "DataFrameGroupBy.plot");
+        assert_plotting_deferred(grouped.hist(), "DataFrameGroupBy.hist");
+        assert_plotting_deferred(grouped.boxplot(), "DataFrameGroupBy.boxplot");
+    }
+
+    #[test]
+    fn series_groupby_plotting_methods_are_explicitly_deferred() {
+        let series = m785r_series();
+        let by = Series::from_values(
+            "group",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+            ],
+        )
+        .unwrap();
+        let grouped = series.groupby(&by).unwrap();
+        assert_plotting_deferred(grouped.plot(), "SeriesGroupBy.plot");
+        assert_plotting_deferred(grouped.hist(), "SeriesGroupBy.hist");
     }
 
     // ── agg_named tests ──
