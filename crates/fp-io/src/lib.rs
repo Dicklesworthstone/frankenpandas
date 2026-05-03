@@ -6100,7 +6100,13 @@ pub fn read_sql_table_chunks_with_options<C: SqlConnection>(
     options: &SqlReadOptions,
     chunk_size: usize,
 ) -> Result<SqlChunkIterator, IoError> {
-    let query = sql_select_all_query_in_schema(conn, table_name, options.schema.as_deref())?;
+    let query = match options.columns.as_deref() {
+        Some(cols) => {
+            let refs: Vec<&str> = cols.iter().map(String::as_str).collect();
+            sql_select_columns_query_in_schema(conn, table_name, options.schema.as_deref(), &refs)?
+        }
+        None => sql_select_all_query_in_schema(conn, table_name, options.schema.as_deref())?,
+    };
     read_sql_chunks_with_options(conn, &query, options, chunk_size)
 }
 
@@ -16584,6 +16590,51 @@ mod tests {
             frame.column("ts").unwrap().values()[0],
             Scalar::Utf8("2024-01-15 00:00:00".to_owned())
         );
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn read_sql_table_chunks_with_options_columns_projects_before_chunking() {
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE TABLE chunk_projection (id INTEGER, name TEXT, hidden REAL);",
+        )
+        .unwrap();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "INSERT INTO chunk_projection VALUES \
+                (1, 'a', 10.0), \
+                (2, 'b', 20.0), \
+                (3, 'c', 30.0);",
+        )
+        .unwrap();
+
+        let chunks: Vec<DataFrame> = read_sql_table_chunks_with_options(
+            &conn,
+            "chunk_projection",
+            &SqlReadOptions {
+                columns: Some(vec!["name".to_owned(), "id".to_owned()]),
+                ..Default::default()
+            },
+            2,
+        )
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].column_names(), vec!["name", "id"]);
+        assert_eq!(chunks[1].column_names(), vec!["name", "id"]);
+        assert_eq!(
+            chunks[0].column("name").unwrap().values(),
+            &[Scalar::Utf8("a".into()), Scalar::Utf8("b".into())]
+        );
+        assert_eq!(
+            chunks[1].column("id").unwrap().values(),
+            &[Scalar::Int64(3)]
+        );
+        assert!(chunks[0].column("hidden").is_none());
     }
 
     // ── SqlColumnSchema::comment (br-cfld / fd90.35) ─────────────────────
