@@ -909,6 +909,36 @@ impl Index {
         ))
     }
 
+    /// Convert labels to a pandas dtype string.
+    ///
+    /// Matches `pd.Index.astype(dtype)` for the generic dtype names this crate
+    /// can represent directly.
+    pub fn astype(&self, dtype: &str) -> Result<Self, IndexError> {
+        match dtype {
+            "int" | "int64" => Ok(self.astype_int()),
+            "str" | "string" | "object" => Ok(self.astype_str()),
+            "datetime64[ns]" => {
+                ensure_index_kind(
+                    self,
+                    |label| matches!(label, IndexLabel::Datetime64(_)),
+                    "DatetimeIndex",
+                )?;
+                Ok(self.clone())
+            }
+            "timedelta64[ns]" => {
+                ensure_index_kind(
+                    self,
+                    |label| matches!(label, IndexLabel::Timedelta64(_)),
+                    "TimedeltaIndex",
+                )?;
+                Ok(self.clone())
+            }
+            other => Err(IndexError::InvalidArgument(format!(
+                "unsupported Index.astype dtype {other:?}"
+            ))),
+        }
+    }
+
     /// Equality check against another Index.
     ///
     /// Matches `pd.Index.equals(other)`. Returns true iff `other` has
@@ -1324,6 +1354,568 @@ impl Index {
                 })
                 .collect(),
         ))
+    }
+
+    /// Alias for `union_with`, matching `pd.Index.union`.
+    #[must_use]
+    pub fn union(&self, other: &Self) -> Self {
+        self.union_with(other)
+    }
+
+    /// Alias for `sort_values`, matching `pd.Index.sort`.
+    #[must_use]
+    pub fn sort(&self) -> Self {
+        self.sort_values()
+    }
+
+    /// Sort labels and return the positional indexer used for the sort.
+    ///
+    /// Matches the flat-index shape of `pd.Index.sortlevel()`.
+    #[must_use]
+    pub fn sortlevel(&self) -> (Self, Vec<usize>) {
+        let order = self.argsort();
+        (self.take(&order), order)
+    }
+
+    /// Alias for `drop_labels`, matching `pd.Index.drop`.
+    #[must_use]
+    pub fn drop(&self, labels_to_drop: &[IndexLabel]) -> Self {
+        self.drop_labels(labels_to_drop)
+    }
+
+    /// Clone this index, matching `pd.Index.copy`.
+    #[must_use]
+    pub fn copy(&self) -> Self {
+        self.clone()
+    }
+
+    /// Alias for `where_cond`, matching `pd.Index.where`.
+    #[must_use]
+    pub fn where_(&self, cond: &[bool], other: &IndexLabel) -> Self {
+        self.where_cond(cond, other)
+    }
+
+    /// Alias for `to_list`, matching `pd.Index.tolist`.
+    #[must_use]
+    pub fn tolist(&self) -> Vec<IndexLabel> {
+        self.to_list()
+    }
+
+    /// Object-array-shaped materialization, matching `pd.Index.to_numpy`.
+    #[must_use]
+    pub fn to_numpy(&self) -> Vec<IndexLabel> {
+        self.to_list()
+    }
+
+    /// Alias for `to_numpy`, matching `pd.Index.array`.
+    #[must_use]
+    pub fn array(&self) -> Vec<IndexLabel> {
+        self.to_numpy()
+    }
+
+    /// Alias for `to_numpy`, matching `pd.Index.values`.
+    #[must_use]
+    pub fn values(&self) -> Vec<IndexLabel> {
+        self.to_numpy()
+    }
+
+    /// Alias for `to_numpy`, matching `pd.Index.ravel`.
+    #[must_use]
+    pub fn ravel(&self) -> Vec<IndexLabel> {
+        self.to_numpy()
+    }
+
+    /// Return a shallow clone view, matching `pd.Index.view` for this
+    /// immutable Rust representation.
+    #[must_use]
+    pub fn view(&self) -> Self {
+        self.clone()
+    }
+
+    /// Flat-index transpose is identity, matching `pd.Index.transpose`.
+    #[must_use]
+    pub fn transpose(&self) -> Self {
+        self.clone()
+    }
+
+    /// Alias for `transpose`, matching `pd.Index.T`.
+    #[allow(non_snake_case)]
+    #[must_use]
+    pub fn T(&self) -> Self {
+        self.transpose()
+    }
+
+    /// One-column row materialization, matching the flat-index shape of
+    /// `pd.Index.to_frame(index=False)`.
+    #[must_use]
+    pub fn to_frame(&self) -> Vec<Vec<IndexLabel>> {
+        self.labels
+            .iter()
+            .map(|label| vec![label.clone()])
+            .collect()
+    }
+
+    /// Series-shaped materialization using the index labels as both index and
+    /// values until `fp-frame` owns the richer return type.
+    #[must_use]
+    pub fn to_series(&self) -> Vec<(IndexLabel, IndexLabel)> {
+        self.labels
+            .iter()
+            .map(|label| (label.clone(), label.clone()))
+            .collect()
+    }
+
+    /// Pandas dtype string for this flat index.
+    #[must_use]
+    pub fn dtype(&self) -> &'static str {
+        match self.inferred_type() {
+            "integer" => "int64",
+            "string" => "object",
+            "timedelta64" => "timedelta64[ns]",
+            "datetime64" => "datetime64[ns]",
+            "empty" | "mixed" => "object",
+            _ => "object",
+        }
+    }
+
+    /// One-element dtype list, matching the `.dtypes` accessor shape used by
+    /// pandas containers.
+    #[must_use]
+    pub fn dtypes(&self) -> Vec<&'static str> {
+        vec![self.dtype()]
+    }
+
+    /// Infer object labels without changing the current typed representation.
+    #[must_use]
+    pub fn infer_objects(&self) -> Self {
+        self.clone()
+    }
+
+    /// Whether this index's dtype can hold integer labels.
+    #[must_use]
+    pub fn holds_integer(&self) -> bool {
+        self.is_integer()
+    }
+
+    /// Pandas-style inferred-type string for the label values.
+    #[must_use]
+    pub fn inferred_type(&self) -> &'static str {
+        if self.labels.is_empty() {
+            return "empty";
+        }
+        let mut non_missing = self.labels.iter().filter(|label| !label.is_missing());
+        let Some(first) = non_missing.next() else {
+            return "empty";
+        };
+        let same_kind = |label: &IndexLabel| {
+            matches!(
+                (first, label),
+                (IndexLabel::Int64(_), IndexLabel::Int64(_))
+                    | (IndexLabel::Utf8(_), IndexLabel::Utf8(_))
+                    | (IndexLabel::Timedelta64(_), IndexLabel::Timedelta64(_))
+                    | (IndexLabel::Datetime64(_), IndexLabel::Datetime64(_))
+            )
+        };
+        if !non_missing.all(same_kind) {
+            return "mixed";
+        }
+        match first {
+            IndexLabel::Int64(_) => "integer",
+            IndexLabel::Utf8(_) => "string",
+            IndexLabel::Timedelta64(_) => "timedelta64",
+            IndexLabel::Datetime64(_) => "datetime64",
+        }
+    }
+
+    /// Whether this index contains missing labels, matching `pd.Index.hasnans`.
+    #[must_use]
+    pub fn hasnans(&self) -> bool {
+        self.labels.iter().any(IndexLabel::is_missing)
+    }
+
+    /// Number of dimensions, matching `pd.Index.ndim`.
+    #[must_use]
+    pub fn ndim(&self) -> usize {
+        1
+    }
+
+    /// One-dimensional shape, matching `pd.Index.shape`.
+    #[must_use]
+    pub fn shape(&self) -> (usize,) {
+        (self.len(),)
+    }
+
+    /// Number of entries, matching `pd.Index.size`.
+    #[must_use]
+    pub fn size(&self) -> usize {
+        self.len()
+    }
+
+    /// Shallow byte footprint, matching `pd.Index.nbytes`.
+    #[must_use]
+    pub fn nbytes(&self) -> usize {
+        self.memory_usage(false)
+    }
+
+    /// Alias for `is_empty`, matching the pandas `.empty` property.
+    #[must_use]
+    pub fn empty(&self) -> bool {
+        self.is_empty()
+    }
+
+    /// Return the single contained label.
+    ///
+    /// Matches `pd.Index.item()`, which rejects indexes with length other than
+    /// one.
+    pub fn item(&self) -> Result<IndexLabel, IndexError> {
+        if self.len() == 1 {
+            Ok(self.labels[0].clone())
+        } else {
+            Err(IndexError::InvalidArgument(format!(
+                "item requires exactly one label, got {}",
+                self.len()
+            )))
+        }
+    }
+
+    /// Identity check, matching `pd.Index.is_`.
+    #[must_use]
+    pub fn is_(&self, other: &Self) -> bool {
+        std::ptr::eq(self, other)
+    }
+
+    /// Whether all non-missing labels are booleans.
+    #[must_use]
+    pub fn is_boolean(&self) -> bool {
+        false
+    }
+
+    /// Whether this generic index is categorical.
+    #[must_use]
+    pub fn is_categorical(&self) -> bool {
+        false
+    }
+
+    /// Whether all non-missing labels are floating-point.
+    #[must_use]
+    pub fn is_floating(&self) -> bool {
+        false
+    }
+
+    /// Whether all non-missing labels are Int64 labels.
+    #[must_use]
+    pub fn is_integer(&self) -> bool {
+        !self.labels.is_empty()
+            && self
+                .labels
+                .iter()
+                .filter(|label| !label.is_missing())
+                .all(|label| matches!(label, IndexLabel::Int64(_)))
+    }
+
+    /// Whether this generic index is interval-typed.
+    #[must_use]
+    pub fn is_interval(&self) -> bool {
+        false
+    }
+
+    /// Whether all non-missing labels are numeric.
+    #[must_use]
+    pub fn is_numeric(&self) -> bool {
+        self.is_integer()
+    }
+
+    /// Whether this index is object-backed.
+    #[must_use]
+    pub fn is_object(&self) -> bool {
+        matches!(self.dtype(), "object")
+    }
+
+    /// Alias for `isna`, matching `pd.Index.isnull`.
+    #[must_use]
+    pub fn isnull(&self) -> Vec<bool> {
+        self.isna()
+    }
+
+    /// Alias for `notna`, matching `pd.Index.notnull`.
+    #[must_use]
+    pub fn notnull(&self) -> Vec<bool> {
+        self.notna()
+    }
+
+    /// Factorize labels into integer codes and unique labels.
+    ///
+    /// Missing labels receive code `-1`; non-missing labels preserve first-seen
+    /// order in the returned uniques index.
+    #[must_use]
+    pub fn factorize(&self) -> (Vec<isize>, Self) {
+        let mut positions = HashMap::<IndexLabel, isize>::new();
+        let mut uniques = Vec::<IndexLabel>::new();
+        let mut codes = Vec::with_capacity(self.labels.len());
+        for label in &self.labels {
+            if label.is_missing() {
+                codes.push(-1);
+            } else if let Some(code) = positions.get(label) {
+                codes.push(*code);
+            } else {
+                let code = isize::try_from(uniques.len()).unwrap_or(isize::MAX);
+                positions.insert(label.clone(), code);
+                uniques.push(label.clone());
+                codes.push(code);
+            }
+        }
+        (codes, self.propagate_name(Self::new(uniques)))
+    }
+
+    /// Alias for `get_indexer`, matching `pd.Index.get_indexer_for`.
+    #[must_use]
+    pub fn get_indexer_for(&self, target: &Self) -> Vec<Option<usize>> {
+        self.get_indexer(target)
+    }
+
+    /// Expand duplicate matches while indexing a target index.
+    ///
+    /// Matches `pd.Index.get_indexer_non_unique(target)` shape: every matching
+    /// source position is emitted for each target label, and missing target
+    /// ordinal positions are returned separately.
+    #[must_use]
+    pub fn get_indexer_non_unique(&self, target: &Self) -> (Vec<isize>, Vec<usize>) {
+        let mut positions = HashMap::<IndexLabel, Vec<usize>>::new();
+        for (position, label) in self.labels.iter().enumerate() {
+            positions.entry(label.clone()).or_default().push(position);
+        }
+
+        let mut indexer = Vec::new();
+        let mut missing = Vec::new();
+        for (target_position, label) in target.labels.iter().enumerate() {
+            if let Some(source_positions) = positions.get(label) {
+                indexer.extend(
+                    source_positions
+                        .iter()
+                        .map(|position| isize::try_from(*position).unwrap_or(isize::MAX)),
+                );
+            } else {
+                indexer.push(-1);
+                missing.push(target_position);
+            }
+        }
+        (indexer, missing)
+    }
+
+    /// Get labels for a level. Flat indexes only accept level 0.
+    pub fn get_level_values(&self, level: usize) -> Result<Self, IndexError> {
+        if level == 0 {
+            Ok(self.clone())
+        } else {
+            Err(IndexError::OutOfBounds {
+                position: level,
+                length: 1,
+            })
+        }
+    }
+
+    /// Bound for a label slice, matching `pd.Index.get_slice_bound`.
+    pub fn get_slice_bound(&self, label: &IndexLabel, side: &str) -> Result<usize, IndexError> {
+        self.searchsorted(label, side)
+    }
+
+    /// Return `(start, stop)` bounds for a label slice. Stop is exclusive.
+    pub fn slice_locs(
+        &self,
+        start: Option<&IndexLabel>,
+        end: Option<&IndexLabel>,
+    ) -> Result<(usize, usize), IndexError> {
+        let start = match start {
+            Some(label) => self.get_slice_bound(label, "left")?,
+            None => 0,
+        };
+        let end = match end {
+            Some(label) => self.get_slice_bound(label, "right")?,
+            None => self.len(),
+        };
+        Ok(if end < start {
+            (start, start)
+        } else {
+            (start, end)
+        })
+    }
+
+    /// Alias for `slice_locs`, matching `pd.Index.slice_indexer`.
+    pub fn slice_indexer(
+        &self,
+        start: Option<&IndexLabel>,
+        end: Option<&IndexLabel>,
+    ) -> Result<(usize, usize), IndexError> {
+        self.slice_locs(start, end)
+    }
+
+    /// Reindex to a target index, returning the target and source positions.
+    #[must_use]
+    pub fn reindex(&self, target: &Self) -> (Self, Vec<Option<usize>>) {
+        (target.clone(), self.get_indexer(target))
+    }
+
+    /// Flat-index `droplevel` is invalid because it would remove the only
+    /// level.
+    pub fn droplevel(&self, level: usize) -> Result<Self, IndexError> {
+        if level == 0 {
+            Err(IndexError::InvalidArgument(
+                "cannot remove the only level from a flat Index".to_owned(),
+            ))
+        } else {
+            Err(IndexError::OutOfBounds {
+                position: level,
+                length: 1,
+            })
+        }
+    }
+
+    /// Rounding is a no-op for current discrete flat index labels.
+    #[must_use]
+    pub fn round(&self) -> Self {
+        self.clone()
+    }
+
+    /// String accessor for Utf8 labels, matching `pd.Index.str`.
+    #[must_use]
+    pub fn r#str(&self) -> IndexStringAccessor<'_> {
+        IndexStringAccessor { index: self }
+    }
+
+    /// Group label positions by label value, matching `pd.Index.groupby`.
+    #[must_use]
+    pub fn groupby(&self) -> HashMap<IndexLabel, Vec<usize>> {
+        let mut groups = HashMap::<IndexLabel, Vec<usize>>::new();
+        for (position, label) in self.labels.iter().enumerate() {
+            groups.entry(label.clone()).or_default().push(position);
+        }
+        groups
+    }
+
+    /// Join two flat indexes using pandas-style join modes.
+    pub fn join(&self, other: &Self, how: &str) -> Result<Self, IndexError> {
+        match how {
+            "left" => Ok(self.clone()),
+            "right" => Ok(other.clone()),
+            "inner" => Ok(self.intersection(other)),
+            "outer" => Ok(self.union_with(other)),
+            other => Err(IndexError::InvalidArgument(format!(
+                "join: how must be 'left', 'right', 'inner', or 'outer', got {other:?}"
+            ))),
+        }
+    }
+
+    /// Locate nearest preceding-or-equal positions for each target label.
+    ///
+    /// Matches `pd.Index.asof_locs(where, mask)` for monotonic flat indexes.
+    #[must_use]
+    pub fn asof_locs(&self, where_index: &Self, mask: Option<&[bool]>) -> Vec<Option<usize>> {
+        where_index
+            .labels
+            .iter()
+            .map(|key| {
+                let mut best = None;
+                for (position, label) in self.labels.iter().enumerate() {
+                    if mask
+                        .and_then(|values| values.get(position))
+                        .is_some_and(|include| !include)
+                    {
+                        continue;
+                    }
+                    if label.is_missing() {
+                        continue;
+                    }
+                    if label.cmp(key).is_le() {
+                        best = Some(position);
+                    } else {
+                        break;
+                    }
+                }
+                best
+            })
+            .collect()
+    }
+
+    /// Positional first differences for comparable scalar index labels.
+    ///
+    /// Int64 and Timedelta64 labels produce same-kind differences. Datetime64
+    /// labels produce Timedelta64 deltas. Unsupported label combinations and
+    /// overflow return `None` for that position.
+    #[must_use]
+    pub fn diff(&self, periods: usize) -> Vec<Option<IndexLabel>> {
+        let mut out = vec![None; self.len()];
+        if periods == 0 {
+            return out;
+        }
+        for position in periods..self.len() {
+            out[position] = match (&self.labels[position], &self.labels[position - periods]) {
+                (IndexLabel::Int64(current), IndexLabel::Int64(previous)) => {
+                    current.checked_sub(*previous).map(IndexLabel::Int64)
+                }
+                (IndexLabel::Timedelta64(current), IndexLabel::Timedelta64(previous))
+                    if *current != Timedelta::NAT && *previous != Timedelta::NAT =>
+                {
+                    current.checked_sub(*previous).map(IndexLabel::Timedelta64)
+                }
+                (IndexLabel::Datetime64(current), IndexLabel::Datetime64(previous))
+                    if *current != i64::MIN && *previous != i64::MIN =>
+                {
+                    current.checked_sub(*previous).map(IndexLabel::Timedelta64)
+                }
+                _ => None,
+            };
+        }
+        out
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct IndexStringAccessor<'a> {
+    index: &'a Index,
+}
+
+impl IndexStringAccessor<'_> {
+    fn map_utf8<T>(&self, func: impl Fn(&str) -> T) -> Vec<Option<T>> {
+        self.index
+            .labels()
+            .iter()
+            .map(|label| match label {
+                IndexLabel::Utf8(value) => Some(func(value)),
+                IndexLabel::Int64(_) | IndexLabel::Timedelta64(_) | IndexLabel::Datetime64(_) => {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// Lowercase string labels.
+    #[must_use]
+    pub fn lower(&self) -> Vec<Option<String>> {
+        self.map_utf8(str::to_lowercase)
+    }
+
+    /// Uppercase string labels.
+    #[must_use]
+    pub fn upper(&self) -> Vec<Option<String>> {
+        self.map_utf8(str::to_uppercase)
+    }
+
+    /// Substring membership for string labels.
+    #[must_use]
+    pub fn contains(&self, needle: &str) -> Vec<Option<bool>> {
+        self.map_utf8(|value| value.contains(needle))
+    }
+
+    /// String length for string labels.
+    #[must_use]
+    pub fn len(&self) -> Vec<Option<usize>> {
+        self.map_utf8(str::len)
+    }
+
+    /// String emptiness for string labels.
+    #[must_use]
+    pub fn is_empty(&self) -> Vec<Option<bool>> {
+        self.map_utf8(str::is_empty)
     }
 }
 
@@ -5749,6 +6341,226 @@ mod tests {
         assert_eq!(result.labels()[0], IndexLabel::Utf8("a".into()));
         assert_eq!(result.labels()[1], IndexLabel::Utf8("X".into()));
         assert_eq!(result.labels()[2], IndexLabel::Utf8("c".into()));
+    }
+
+    #[test]
+    fn index_a31qh_conversion_aliases_materialize_labels() {
+        let idx = Index::new(vec!["a".into(), "b".into()]).set_name("key");
+        let labels = vec![IndexLabel::from("a"), IndexLabel::from("b")];
+
+        assert_eq!(idx.tolist(), labels);
+        assert_eq!(idx.to_numpy(), labels);
+        assert_eq!(idx.array(), labels);
+        assert_eq!(idx.values(), labels);
+        assert_eq!(idx.ravel(), labels);
+        assert_eq!(idx.view(), idx);
+        assert_eq!(idx.transpose(), idx);
+        assert_eq!(idx.T(), idx);
+        assert_eq!(
+            idx.to_frame(),
+            vec![vec![IndexLabel::from("a")], vec![IndexLabel::from("b")]]
+        );
+        assert_eq!(
+            idx.to_series(),
+            vec![
+                (IndexLabel::from("a"), IndexLabel::from("a")),
+                (IndexLabel::from("b"), IndexLabel::from("b")),
+            ]
+        );
+    }
+
+    #[test]
+    fn index_a31qh_dtype_metadata_and_type_checks() {
+        let ints = Index::from_i64(vec![1, 2, 3]);
+        assert_eq!(ints.dtype(), "int64");
+        assert_eq!(ints.dtypes(), vec!["int64"]);
+        assert_eq!(ints.inferred_type(), "integer");
+        assert!(ints.holds_integer());
+        assert!(ints.is_integer());
+        assert!(ints.is_numeric());
+        assert!(!ints.is_object());
+        assert_eq!(ints.ndim(), 1);
+        assert_eq!(ints.shape(), (3,));
+        assert_eq!(ints.size(), 3);
+        assert_eq!(ints.nbytes(), ints.memory_usage(false));
+        assert!(!ints.empty());
+        assert_eq!(
+            Index::from_i64(vec![42]).item().unwrap(),
+            IndexLabel::Int64(42)
+        );
+        assert!(ints.item().is_err());
+
+        let mixed = Index::new(vec![
+            IndexLabel::Int64(1),
+            IndexLabel::Utf8("x".into()),
+            IndexLabel::Datetime64(i64::MIN),
+        ]);
+        assert_eq!(mixed.dtype(), "object");
+        assert_eq!(mixed.inferred_type(), "mixed");
+        assert!(mixed.is_object());
+        assert!(mixed.hasnans());
+        assert_eq!(mixed.isnull(), mixed.isna());
+        assert_eq!(mixed.notnull(), mixed.notna());
+        assert!(!mixed.is_boolean());
+        assert!(!mixed.is_categorical());
+        assert!(!mixed.is_floating());
+        assert!(!mixed.is_interval());
+        assert_eq!(mixed.infer_objects(), mixed);
+        assert!(ints.is_(&ints));
+        assert!(!ints.is_(&Index::from_i64(vec![1, 2, 3])));
+    }
+
+    #[test]
+    fn index_a31qh_factorize_reindex_and_non_unique_indexer() {
+        let idx = Index::new(vec![
+            IndexLabel::Utf8("a".into()),
+            IndexLabel::Utf8("b".into()),
+            IndexLabel::Utf8("a".into()),
+            IndexLabel::Datetime64(i64::MIN),
+        ])
+        .set_name("letters");
+
+        let (codes, uniques) = idx.factorize();
+        assert_eq!(codes, vec![0, 1, 0, -1]);
+        assert_eq!(
+            uniques.labels(),
+            &[IndexLabel::from("a"), IndexLabel::from("b")]
+        );
+        assert_eq!(uniques.name(), Some("letters"));
+
+        let target = Index::new(vec![
+            IndexLabel::Utf8("a".into()),
+            IndexLabel::Utf8("z".into()),
+            IndexLabel::Utf8("b".into()),
+        ]);
+        assert_eq!(idx.get_indexer_for(&target), vec![Some(0), None, Some(1)]);
+        assert_eq!(
+            idx.get_indexer_non_unique(&target),
+            (vec![0, 2, -1, 1], vec![1])
+        );
+
+        let (reindexed, positions) = idx.reindex(&target);
+        assert_eq!(reindexed, target);
+        assert_eq!(positions, vec![Some(0), None, Some(1)]);
+    }
+
+    #[test]
+    fn index_a31qh_set_sort_slice_and_level_aliases() {
+        let idx = Index::from_i64(vec![3, 1, 2]).set_name("n");
+        let sorted = idx.sort();
+        assert_eq!(
+            sorted.labels(),
+            &[
+                IndexLabel::Int64(1),
+                IndexLabel::Int64(2),
+                IndexLabel::Int64(3),
+            ]
+        );
+        let (sortlevel, order) = idx.sortlevel();
+        assert_eq!(sortlevel, sorted);
+        assert_eq!(order, vec![1, 2, 0]);
+
+        let other = Index::from_i64(vec![2, 4]);
+        assert_eq!(idx.union(&other), idx.union_with(&other));
+        assert_eq!(
+            idx.drop(&[IndexLabel::Int64(1)]),
+            idx.drop_labels(&[IndexLabel::Int64(1)])
+        );
+        assert_eq!(idx.copy(), idx);
+        assert_eq!(
+            idx.where_(&[true, false, true], &IndexLabel::Int64(0))
+                .labels()[1],
+            IndexLabel::Int64(0)
+        );
+        assert_eq!(idx.get_level_values(0).unwrap(), idx);
+        assert!(idx.get_level_values(1).is_err());
+        assert!(idx.droplevel(0).is_err());
+
+        let sorted_lookup = Index::from_i64(vec![1, 2, 2, 4]);
+        assert_eq!(
+            sorted_lookup
+                .get_slice_bound(&IndexLabel::Int64(2), "left")
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            sorted_lookup
+                .slice_locs(Some(&IndexLabel::Int64(2)), Some(&IndexLabel::Int64(4)))
+                .unwrap(),
+            (1, 4)
+        );
+        assert_eq!(
+            sorted_lookup
+                .slice_indexer(Some(&IndexLabel::Int64(2)), Some(&IndexLabel::Int64(2)))
+                .unwrap(),
+            (1, 3)
+        );
+    }
+
+    #[test]
+    fn index_a31qh_astype_str_groupby_join_asof_and_diff() {
+        let idx = Index::new(vec![
+            IndexLabel::Utf8("Alpha".into()),
+            IndexLabel::Utf8("beta".into()),
+            IndexLabel::Int64(7),
+        ]);
+        assert_eq!(
+            idx.r#str().lower(),
+            vec![Some("alpha".to_owned()), Some("beta".to_owned()), None]
+        );
+        assert_eq!(
+            idx.r#str().upper(),
+            vec![Some("ALPHA".to_owned()), Some("BETA".to_owned()), None]
+        );
+        assert_eq!(
+            idx.r#str().contains("ta"),
+            vec![Some(false), Some(true), None]
+        );
+        assert_eq!(idx.r#str().len(), vec![Some(5), Some(4), None]);
+        assert_eq!(idx.r#str().is_empty(), vec![Some(false), Some(false), None]);
+        assert!(idx.astype("object").is_ok());
+        assert!(idx.astype("float64").is_err());
+
+        let grouped = Index::new(vec!["a".into(), "b".into(), "a".into()]).groupby();
+        assert_eq!(grouped[&IndexLabel::from("a")], vec![0, 2]);
+        assert_eq!(grouped[&IndexLabel::from("b")], vec![1]);
+
+        let left = Index::from_i64(vec![1, 2, 3]);
+        let right = Index::from_i64(vec![2, 4]);
+        assert_eq!(
+            left.join(&right, "inner").unwrap(),
+            left.intersection(&right)
+        );
+        assert_eq!(left.join(&right, "outer").unwrap(), left.union_with(&right));
+        assert_eq!(left.join(&right, "left").unwrap(), left);
+        assert_eq!(left.join(&right, "right").unwrap(), right);
+        assert!(left.join(&right, "sideways").is_err());
+
+        let sorted = Index::from_i64(vec![1, 3, 5, 7]);
+        let probes = Index::from_i64(vec![0, 3, 4, 8]);
+        assert_eq!(
+            sorted.asof_locs(&probes, None),
+            vec![None, Some(1), Some(1), Some(3)]
+        );
+        assert_eq!(
+            sorted.asof_locs(&probes, Some(&[true, false, true, true])),
+            vec![None, Some(0), Some(0), Some(3)]
+        );
+
+        assert_eq!(
+            sorted.diff(1),
+            vec![
+                None,
+                Some(IndexLabel::Int64(2)),
+                Some(IndexLabel::Int64(2)),
+                Some(IndexLabel::Int64(2)),
+            ]
+        );
+        let datetimes = Index::from_datetime64(vec![10, 25]);
+        assert_eq!(
+            datetimes.diff(1),
+            vec![None, Some(IndexLabel::Timedelta64(15))]
+        );
     }
 
     // ── Index name tests ────────────────────────────────────────────
