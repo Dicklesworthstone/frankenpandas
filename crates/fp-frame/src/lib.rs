@@ -69257,6 +69257,63 @@ mod tests {
         assert!(matches!(err2, FrameError::CompatibilityRejected(_)));
     }
 
+    // ── DataFrame metadata and accessor aliases (frankenpandas-qn0bj) ──
+
+    #[test]
+    fn dataframe_qn0bj_metadata_aliases_cover_t_values_product_and_get() {
+        let df = nk54a_df();
+        assert_eq!(df.T().unwrap(), df.transpose().unwrap());
+        assert_eq!(df.product().unwrap().values(), df.prod().unwrap().values());
+
+        let values = df.values();
+        assert_eq!(values.len(), 3);
+        assert_eq!(values[0][0], Scalar::Int64(10));
+        assert_eq!(values[0][2], Scalar::Utf8("x".into()));
+
+        let found = df.get("a").unwrap().expect("column a should exist");
+        assert_eq!(found.values(), &[Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)]);
+        assert!(df.get("missing").unwrap().is_none());
+
+        let default = Series::from_values(
+            "fallback",
+            vec![0_i64.into()],
+            vec![Scalar::Utf8("default".into())],
+        )
+        .unwrap();
+        let fallback = df.get_or("missing", default.clone()).unwrap();
+        assert_eq!(fallback, default);
+    }
+
+    #[test]
+    fn dataframe_qn0bj_attrs_flags_style_sparse_and_bool() {
+        let bool_df =
+            DataFrame::from_dict(&["flag"], vec![("flag", vec![Scalar::Bool(true)])]).unwrap();
+        assert!(bool_df.bool_().unwrap());
+        assert!(bool_df.attrs().is_empty());
+        assert!(bool_df.flags().allows_duplicate_labels());
+        assert_eq!(bool_df.set_flags(None).unwrap(), bool_df);
+        assert_eq!(bool_df.set_flags(Some(false)).unwrap(), bool_df);
+        assert_eq!(bool_df.style().dataframe(), &bool_df);
+        assert_eq!(bool_df.sparse().dataframe(), &bool_df);
+
+        let err = nk54a_df().bool_().unwrap_err();
+        assert!(matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("exactly one element")));
+    }
+
+    #[test]
+    fn dataframe_qn0bj_set_flags_rejects_duplicate_labels_when_disallowed() {
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            "x".to_owned(),
+            Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2)]).unwrap(),
+        );
+        let df =
+            DataFrame::new(Index::new(vec![0_i64.into(), 0_i64.into()]), columns).unwrap();
+
+        let err = df.set_flags(Some(false)).unwrap_err();
+        assert!(matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("duplicate labels")));
+    }
+
     // ── Ewm.agg / online / exclusions / ndim (br-frankenpandas-mvynk) ─
 
     fn mvynk_series() -> Series {
