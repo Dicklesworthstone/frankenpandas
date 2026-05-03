@@ -3805,47 +3805,184 @@ pub struct SqlForeignKeySchema {
 }
 
 /// Iterator over DataFrame chunks produced by a SQL query.
-#[derive(Debug, Clone)]
-pub struct SqlChunkIterator {
-    headers: Vec<String>,
-    columns: Vec<Vec<Scalar>>,
-    chunk_size: usize,
-    next_row: usize,
+pub struct SqlChunkIterator<'conn> {
+    state: SqlChunkIteratorState<'conn>,
 }
 
-impl Iterator for SqlChunkIterator {
+enum SqlChunkIteratorState<'conn> {
+    Materialized {
+        headers: Vec<String>,
+        columns: Vec<Vec<Scalar>>,
+        chunk_size: usize,
+        next_row: usize,
+    },
+    Paged {
+        conn: &'conn dyn SqlConnection,
+        query: String,
+        options: SqlReadOptions,
+        headers: Vec<String>,
+        chunk_size: usize,
+        next_offset: usize,
+        finished: bool,
+    },
+}
+
+impl std::fmt::Debug for SqlChunkIterator<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.state {
+            SqlChunkIteratorState::Materialized {
+                headers,
+                columns,
+                chunk_size,
+                next_row,
+            } => f
+                .debug_struct("SqlChunkIterator")
+                .field("mode", &"materialized")
+                .field("headers", headers)
+                .field("row_count", &columns.first().map_or(0, Vec::len))
+                .field("chunk_size", chunk_size)
+                .field("next_row", next_row)
+                .finish(),
+            SqlChunkIteratorState::Paged {
+                query,
+                headers,
+                chunk_size,
+                next_offset,
+                finished,
+                ..
+            } => f
+                .debug_struct("SqlChunkIterator")
+                .field("mode", &"paged")
+                .field("query", query)
+                .field("headers", headers)
+                .field("chunk_size", chunk_size)
+                .field("next_offset", next_offset)
+                .field("finished", finished)
+                .finish(),
+        }
+    }
+}
+
+impl<'conn> SqlChunkIterator<'conn> {
+    fn materialized(headers: Vec<String>, columns: Vec<Vec<Scalar>>, chunk_size: usize) -> Self {
+        Self {
+            state: SqlChunkIteratorState::Materialized {
+                headers,
+                columns,
+                chunk_size,
+                next_row: 0,
+            },
+        }
+    }
+
+    fn paged<C: SqlConnection + 'conn>(
+        conn: &'conn C,
+        query: &str,
+        options: &SqlReadOptions,
+        chunk_size: usize,
+    ) -> Result<Self, IoError> {
+        let headers = sql_paged_query_headers(conn, query, options)?;
+        Ok(Self {
+            state: SqlChunkIteratorState::Paged {
+                conn,
+                query: sql_trim_chunk_source(query)?.to_owned(),
+                options: options.clone(),
+                headers,
+                chunk_size,
+                next_offset: 0,
+                finished: false,
+            },
+        })
+    }
+
+    fn headers(&self) -> &[String] {
+        match &self.state {
+            SqlChunkIteratorState::Materialized { headers, .. }
+            | SqlChunkIteratorState::Paged { headers, .. } => headers,
+        }
+    }
+}
+
+impl Iterator for SqlChunkIterator<'_> {
     type Item = Result<DataFrame, IoError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let row_count = self.columns.first().map_or(0, Vec::len);
-        if self.next_row >= row_count {
-            return None;
+        match &mut self.state {
+            SqlChunkIteratorState::Materialized {
+                headers,
+                columns,
+                chunk_size,
+                next_row,
+            } => {
+                let row_count = columns.first().map_or(0, Vec::len);
+                if *next_row >= row_count {
+                    return None;
+                }
+
+                let start = *next_row;
+                let end = start.saturating_add(*chunk_size).min(row_count);
+                *next_row = end;
+
+                let chunk_columns = columns
+                    .iter()
+                    .map(|column| column[start..end].to_vec())
+                    .collect();
+                Some(dataframe_from_sql_columns(headers.clone(), chunk_columns))
+            }
+            SqlChunkIteratorState::Paged {
+                conn,
+                query,
+                options,
+                chunk_size,
+                next_offset,
+                finished,
+                ..
+            } => {
+                if *finished {
+                    return None;
+                }
+
+                let page =
+                    sql_query_to_columns_paged(*conn, query, options, *chunk_size, *next_offset);
+                Some(match page {
+                    Ok((headers, columns)) => {
+                        let row_count = columns.first().map_or(0, Vec::len);
+                        if row_count == 0 {
+                            *finished = true;
+                            return None;
+                        }
+                        if row_count < *chunk_size {
+                            *finished = true;
+                        }
+                        *next_offset = next_offset.saturating_add(row_count);
+                        dataframe_from_sql_columns(headers, columns)
+                    }
+                    Err(err) => {
+                        *finished = true;
+                        Err(err)
+                    }
+                })
+            }
         }
-
-        let start = self.next_row;
-        let end = start.saturating_add(self.chunk_size).min(row_count);
-        self.next_row = end;
-
-        let chunk_columns = self
-            .columns
-            .iter()
-            .map(|column| column[start..end].to_vec())
-            .collect();
-        Some(dataframe_from_sql_columns(
-            self.headers.clone(),
-            chunk_columns,
-        ))
     }
 }
 
 /// Iterator over SQL DataFrame chunks with optional per-chunk index promotion.
-#[derive(Debug, Clone)]
-pub struct SqlIndexedChunkIterator {
-    inner: SqlChunkIterator,
+pub struct SqlIndexedChunkIterator<'conn> {
+    inner: SqlChunkIterator<'conn>,
     index_col: Option<String>,
 }
 
-impl Iterator for SqlIndexedChunkIterator {
+impl std::fmt::Debug for SqlIndexedChunkIterator<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SqlIndexedChunkIterator")
+            .field("inner", &self.inner)
+            .field("index_col", &self.index_col)
+            .finish()
+    }
+}
+
+impl Iterator for SqlIndexedChunkIterator<'_> {
     type Item = Result<DataFrame, IoError>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -3858,17 +3995,17 @@ impl Iterator for SqlIndexedChunkIterator {
     }
 }
 
-fn sql_indexed_chunks(
-    inner: SqlChunkIterator,
+fn sql_indexed_chunks<'conn>(
+    inner: SqlChunkIterator<'conn>,
     index_col: Option<&str>,
-) -> Result<SqlIndexedChunkIterator, IoError> {
+) -> Result<SqlIndexedChunkIterator<'conn>, IoError> {
     if let Some(col_name) = index_col {
         if col_name.is_empty() {
             return Err(IoError::Sql(
                 "index_col: empty string is not a valid column name".to_owned(),
             ));
         }
-        if !inner.headers.iter().any(|header| header == col_name) {
+        if !inner.headers().iter().any(|header| header == col_name) {
             return Err(IoError::Sql(format!(
                 "index_col {col_name:?} not present in result columns"
             )));
@@ -3883,6 +4020,14 @@ fn sql_indexed_chunks(
 /// Minimal SQL connection surface needed by FrankenPandas SQL IO.
 pub trait SqlConnection {
     fn query(&self, query: &str, params: &[Scalar]) -> Result<SqlQueryResult, IoError>;
+
+    /// Whether `read_sql_chunks*` may page this backend with a bounded
+    /// `LIMIT`/`OFFSET` wrapper instead of materializing the whole result
+    /// before the first chunk. Defaults to `false` so lightweight test
+    /// doubles and custom backends keep the legacy behavior until they opt in.
+    fn supports_paged_sql_chunks(&self) -> bool {
+        false
+    }
 
     fn execute_batch(&self, sql: &str) -> Result<(), IoError>;
 
@@ -4338,6 +4483,10 @@ impl SqlConnection for rusqlite::Connection {
             columns,
             rows: out_rows,
         })
+    }
+
+    fn supports_paged_sql_chunks(&self) -> bool {
+        true
     }
 
     fn execute_batch(&self, sql: &str) -> Result<(), IoError> {
@@ -5200,6 +5349,19 @@ pub fn read_sql_with_options<C: SqlConnection>(
     query: &str,
     options: &SqlReadOptions,
 ) -> Result<DataFrame, IoError> {
+    // Per br-frankenpandas-t1777: query readers take a raw SELECT written
+    // by the caller, so options.columns has no effect. Silently ignoring
+    // diverged from the table-reader sibling. Reject to surface the
+    // mismatch — callers should embed the column list in the SELECT, or
+    // use read_sql_table_with_options to generate the projection.
+    if options.columns.is_some() {
+        return Err(IoError::Sql(
+            "options.columns is meaningful only for table readers; embed the column list in \
+             the SELECT or use read_sql_table_with_options to generate the projection from a \
+             table name"
+                .to_owned(),
+        ));
+    }
     let (headers, columns) = sql_query_to_columns(conn, query, options)?;
     let frame = dataframe_from_sql_columns(headers, columns)?;
     apply_sql_index_col(frame, options.index_col.as_deref())
@@ -5263,11 +5425,11 @@ pub fn read_sql_query_with_options_and_index_col<C: SqlConnection>(
 /// Read the result of a SQL query as an iterator of DataFrame chunks.
 ///
 /// Matches the supported subset of `pd.read_sql_query(sql, con, chunksize=...)`.
-pub fn read_sql_query_chunks<C: SqlConnection>(
-    conn: &C,
+pub fn read_sql_query_chunks<'conn, C: SqlConnection + 'conn>(
+    conn: &'conn C,
     query: &str,
     chunk_size: usize,
-) -> Result<SqlChunkIterator, IoError> {
+) -> Result<SqlChunkIterator<'conn>, IoError> {
     read_sql_chunks(conn, query, chunk_size)
 }
 
@@ -5275,12 +5437,12 @@ pub fn read_sql_query_chunks<C: SqlConnection>(
 ///
 /// Matches the supported subset of
 /// `pd.read_sql_query(sql, con, index_col=..., chunksize=...)`.
-pub fn read_sql_query_chunks_with_index_col<C: SqlConnection>(
-    conn: &C,
+pub fn read_sql_query_chunks_with_index_col<'conn, C: SqlConnection + 'conn>(
+    conn: &'conn C,
     query: &str,
     index_col: Option<&str>,
     chunk_size: usize,
-) -> Result<SqlIndexedChunkIterator, IoError> {
+) -> Result<SqlIndexedChunkIterator<'conn>, IoError> {
     read_sql_chunks_with_index_col(conn, query, index_col, chunk_size)
 }
 
@@ -5288,12 +5450,12 @@ pub fn read_sql_query_chunks_with_index_col<C: SqlConnection>(
 ///
 /// Matches the supported subset of
 /// `pd.read_sql_query(sql, con, params=[...], parse_dates=..., coerce_float=..., chunksize=...)`.
-pub fn read_sql_query_chunks_with_options<C: SqlConnection>(
-    conn: &C,
+pub fn read_sql_query_chunks_with_options<'conn, C: SqlConnection + 'conn>(
+    conn: &'conn C,
     query: &str,
     options: &SqlReadOptions,
     chunk_size: usize,
-) -> Result<SqlChunkIterator, IoError> {
+) -> Result<SqlChunkIterator<'conn>, IoError> {
     if options.index_col.is_some() {
         return Err(IoError::Sql(
             "options.index_col is set but this entrypoint returns SqlChunkIterator without \
@@ -5309,13 +5471,13 @@ pub fn read_sql_query_chunks_with_options<C: SqlConnection>(
 ///
 /// Matches the supported subset of
 /// `pd.read_sql_query(sql, con, params=[...], parse_dates=..., coerce_float=..., index_col=..., chunksize=...)`.
-pub fn read_sql_query_chunks_with_options_and_index_col<C: SqlConnection>(
-    conn: &C,
+pub fn read_sql_query_chunks_with_options_and_index_col<'conn, C: SqlConnection + 'conn>(
+    conn: &'conn C,
     query: &str,
     options: &SqlReadOptions,
     index_col: Option<&str>,
     chunk_size: usize,
-) -> Result<SqlIndexedChunkIterator, IoError> {
+) -> Result<SqlIndexedChunkIterator<'conn>, IoError> {
     read_sql_chunks_with_options_and_index_col(conn, query, options, index_col, chunk_size)
 }
 
@@ -5330,7 +5492,74 @@ pub fn read_sql_query_with_index_col<C: SqlConnection>(
     read_sql_with_index_col(conn, query, index_col)
 }
 
-fn sql_query_to_columns<C: SqlConnection>(
+fn sql_trim_chunk_source(query: &str) -> Result<&str, IoError> {
+    let trimmed = query.trim().trim_end_matches(';').trim();
+    if trimmed.is_empty() {
+        Err(IoError::Sql("read_sql query must be non-empty".to_owned()))
+    } else {
+        Ok(trimmed)
+    }
+}
+
+fn sql_paged_query<C: SqlConnection + ?Sized>(
+    conn: &C,
+    query: &str,
+    base_param_count: usize,
+) -> Result<String, IoError> {
+    let source = sql_trim_chunk_source(query)?;
+    let limit_marker = conn.parameter_marker(base_param_count + 1);
+    let offset_marker = conn.parameter_marker(base_param_count + 2);
+    Ok(format!(
+        "SELECT * FROM ({source}) AS frankenpandas_sql_chunk_source \
+         LIMIT {limit_marker} OFFSET {offset_marker}"
+    ))
+}
+
+fn sql_paged_options(
+    options: &SqlReadOptions,
+    limit: usize,
+    offset: usize,
+) -> Result<SqlReadOptions, IoError> {
+    let limit = i64::try_from(limit)
+        .map_err(|_| IoError::Sql("read_sql chunksize exceeds i64 range".to_owned()))?;
+    let offset = i64::try_from(offset)
+        .map_err(|_| IoError::Sql("read_sql chunk offset exceeds i64 range".to_owned()))?;
+    let mut params = options.params.clone().unwrap_or_default();
+    params.push(Scalar::Int64(limit));
+    params.push(Scalar::Int64(offset));
+    Ok(SqlReadOptions {
+        params: Some(params),
+        ..options.clone()
+    })
+}
+
+fn sql_paged_query_headers<C: SqlConnection + ?Sized>(
+    conn: &C,
+    query: &str,
+    options: &SqlReadOptions,
+) -> Result<Vec<String>, IoError> {
+    let base_param_count = options.params.as_ref().map_or(0, Vec::len);
+    let paged_query = sql_paged_query(conn, query, base_param_count)?;
+    let paged_options = sql_paged_options(options, 0, 0)?;
+    let result = conn.query(&paged_query, paged_options.params.as_deref().unwrap_or(&[]))?;
+    reject_duplicate_headers(&result.columns)?;
+    Ok(result.columns)
+}
+
+fn sql_query_to_columns_paged<C: SqlConnection + ?Sized>(
+    conn: &C,
+    query: &str,
+    options: &SqlReadOptions,
+    chunk_size: usize,
+    offset: usize,
+) -> Result<(Vec<String>, Vec<Vec<Scalar>>), IoError> {
+    let base_param_count = options.params.as_ref().map_or(0, Vec::len);
+    let paged_query = sql_paged_query(conn, query, base_param_count)?;
+    let paged_options = sql_paged_options(options, chunk_size, offset)?;
+    sql_query_to_columns(conn, &paged_query, &paged_options)
+}
+
+fn sql_query_to_columns<C: SqlConnection + ?Sized>(
     conn: &C,
     query: &str,
     options: &SqlReadOptions,
@@ -5429,25 +5658,27 @@ fn dataframe_from_sql_columns(
 /// Matches the supported subset of `pd.read_sql(sql, con, chunksize=...)`.
 /// Each chunk receives a fresh zero-based RangeIndex, matching pandas'
 /// SQLite chunk iterator behavior.
-pub fn read_sql_chunks<C: SqlConnection>(
-    conn: &C,
+pub fn read_sql_chunks<'conn, C: SqlConnection + 'conn>(
+    conn: &'conn C,
     query: &str,
     chunk_size: usize,
-) -> Result<SqlChunkIterator, IoError> {
+) -> Result<SqlChunkIterator<'conn>, IoError> {
     read_sql_chunks_with_options(conn, query, &SqlReadOptions::default(), chunk_size)
 }
 
 /// Read a SQL query result as DataFrame chunks with read-time options.
 ///
-/// `params`, `parse_dates`, and `coerce_float` are applied before chunking so
-/// chunked reads match the corresponding full-frame `read_sql_with_options`
-/// result when concatenated row-wise.
-pub fn read_sql_chunks_with_options<C: SqlConnection>(
-    conn: &C,
+/// Backends that opt into `supports_paged_sql_chunks` are queried one bounded
+/// page at a time through a `LIMIT`/`OFFSET` wrapper so the iterator does not
+/// hold the full result set in memory. Other backends keep the legacy
+/// materialized fallback until they provide a native chunk strategy. `params`,
+/// `parse_dates`, `coerce_float`, and `dtype` are applied to each yielded page.
+pub fn read_sql_chunks_with_options<'conn, C: SqlConnection + 'conn>(
+    conn: &'conn C,
     query: &str,
     options: &SqlReadOptions,
     chunk_size: usize,
-) -> Result<SqlChunkIterator, IoError> {
+) -> Result<SqlChunkIterator<'conn>, IoError> {
     if chunk_size == 0 {
         return Err(IoError::Sql(
             "read_sql chunksize must be greater than zero".to_owned(),
@@ -5465,28 +5696,53 @@ pub fn read_sql_chunks_with_options<C: SqlConnection>(
                 .to_owned(),
         ));
     }
+    // Per br-frankenpandas-t1777: query readers take a raw SELECT written
+    // by the caller, so options.columns has no effect (the projection is
+    // already in the query string). Silently ignoring would diverge from
+    // the table-reader sibling (which honors columns to build the SELECT).
+    // Reject to surface the mismatch — callers should embed the column
+    // list in the SELECT, or use read_sql_table_chunks_with_options when
+    // generating the SELECT from a table name.
+    if options.columns.is_some() {
+        return Err(IoError::Sql(
+            "options.columns is meaningful only for table readers; embed the column list in \
+             the SELECT or use read_sql_table_chunks_with_options to generate the projection \
+             from a table name"
+                .to_owned(),
+        ));
+    }
+
+    if conn.supports_paged_sql_chunks() {
+        return SqlChunkIterator::paged(conn, query, options, chunk_size);
+    }
 
     let (headers, columns) = sql_query_to_columns(conn, query, options)?;
-    Ok(SqlChunkIterator {
-        headers,
-        columns,
-        chunk_size,
-        next_row: 0,
-    })
+    Ok(SqlChunkIterator::materialized(headers, columns, chunk_size))
 }
 
 /// Read a SQL query result as DataFrame chunks with read-time options and optional index promotion.
 ///
-/// `params`, `parse_dates`, and `coerce_float` are applied before chunking and
-/// before index promotion so indexed chunk output matches the corresponding
-/// full-frame `read_sql_with_options` result when concatenated row-wise.
-pub fn read_sql_chunks_with_options_and_index_col<C: SqlConnection>(
-    conn: &C,
+/// `params`, `parse_dates`, `coerce_float`, and `dtype` are applied to each
+/// yielded page before optional index promotion.
+pub fn read_sql_chunks_with_options_and_index_col<'conn, C: SqlConnection + 'conn>(
+    conn: &'conn C,
     query: &str,
     options: &SqlReadOptions,
     index_col: Option<&str>,
     chunk_size: usize,
-) -> Result<SqlIndexedChunkIterator, IoError> {
+) -> Result<SqlIndexedChunkIterator<'conn>, IoError> {
+    // Per br-frankenpandas-t1777: query readers can't apply options.columns
+    // (caller writes the SELECT). Reject for consistency with the plain
+    // chunk reader's rejection — the indexed sibling shouldn't be a
+    // backdoor.
+    if options.columns.is_some() {
+        return Err(IoError::Sql(
+            "options.columns is meaningful only for table readers; embed the column list in \
+             the SELECT or use read_sql_table_chunks_with_options_and_index_col to generate \
+             the projection from a table name"
+                .to_owned(),
+        ));
+    }
     // The plain chunk reader rejects options.index_col (see i8kja); clear
     // it before delegating so the indexed sibling is the canonical
     // honor-index_col entrypoint regardless of which slot the caller used.
@@ -5501,12 +5757,12 @@ pub fn read_sql_chunks_with_options_and_index_col<C: SqlConnection>(
 /// Read a SQL query result as DataFrame chunks with optional index promotion.
 ///
 /// Matches the supported subset of `pd.read_sql(sql, con, index_col=..., chunksize=...)`.
-pub fn read_sql_chunks_with_index_col<C: SqlConnection>(
-    conn: &C,
+pub fn read_sql_chunks_with_index_col<'conn, C: SqlConnection + 'conn>(
+    conn: &'conn C,
     query: &str,
     index_col: Option<&str>,
     chunk_size: usize,
-) -> Result<SqlIndexedChunkIterator, IoError> {
+) -> Result<SqlIndexedChunkIterator<'conn>, IoError> {
     let inner = read_sql_chunks(conn, query, chunk_size)?;
     sql_indexed_chunks(inner, index_col)
 }
@@ -6179,7 +6435,15 @@ pub fn read_sql_table_with_options<C: SqlConnection>(
 ) -> Result<DataFrame, IoError> {
     let query =
         sql_table_read_query_for_options(conn, table_name, options, options.index_col.as_deref())?;
-    read_sql_with_options(conn, &query, options)
+    // Per br-frankenpandas-t1777: the query reader rejects options.columns
+    // (the SELECT is already projected here). Clear before delegating so
+    // the table reader stays the canonical honor-columns entrypoint
+    // regardless of which slot the caller used.
+    let cleared = SqlReadOptions {
+        columns: None,
+        ..options.clone()
+    };
+    read_sql_with_options(conn, &query, &cleared)
 }
 
 fn sql_table_read_query_for_options<C: SqlConnection>(
@@ -6223,11 +6487,17 @@ pub fn read_sql_table_with_options_and_index_col<C: SqlConnection>(
     // always wins over `options.index_col`. Avoid double-promotion by
     // clearing the option-struct copy when the explicit arg is set.
     if let Some(col_name) = index_col {
+        // Build the SELECT projection from the ORIGINAL options (so
+        // options.columns is honored when present). Per br-frankenpandas-t1777,
+        // also strip options.columns before passing to the query reader
+        // (which now rejects the field; the SELECT already projects the
+        // columns we wanted).
+        let query = sql_table_read_query_for_options(conn, table_name, options, Some(col_name))?;
         let cleared = SqlReadOptions {
             index_col: None,
+            columns: None,
             ..options.clone()
         };
-        let query = sql_table_read_query_for_options(conn, table_name, &cleared, Some(col_name))?;
         let frame = read_sql_with_options(conn, &query, &cleared)?;
         return apply_sql_index_col(frame, Some(col_name));
     }
@@ -6237,11 +6507,11 @@ pub fn read_sql_table_with_options_and_index_col<C: SqlConnection>(
 /// Read an entire SQL table as an iterator of DataFrame chunks.
 ///
 /// Matches the supported subset of `pd.read_sql_table(table_name, con, chunksize=...)`.
-pub fn read_sql_table_chunks<C: SqlConnection>(
-    conn: &C,
+pub fn read_sql_table_chunks<'conn, C: SqlConnection + 'conn>(
+    conn: &'conn C,
     table_name: &str,
     chunk_size: usize,
-) -> Result<SqlChunkIterator, IoError> {
+) -> Result<SqlChunkIterator<'conn>, IoError> {
     read_sql_chunks(conn, &sql_select_all_query(conn, table_name)?, chunk_size)
 }
 
@@ -6249,12 +6519,12 @@ pub fn read_sql_table_chunks<C: SqlConnection>(
 ///
 /// Matches the supported subset of
 /// `pd.read_sql_table(table_name, con, parse_dates=..., coerce_float=..., chunksize=...)`.
-pub fn read_sql_table_chunks_with_options<C: SqlConnection>(
-    conn: &C,
+pub fn read_sql_table_chunks_with_options<'conn, C: SqlConnection + 'conn>(
+    conn: &'conn C,
     table_name: &str,
     options: &SqlReadOptions,
     chunk_size: usize,
-) -> Result<SqlChunkIterator, IoError> {
+) -> Result<SqlChunkIterator<'conn>, IoError> {
     // Per br-frankenpandas-i8kja: this entrypoint returns the
     // un-indexed SqlChunkIterator. Honoring options.index_col would
     // silently diverge from the full-frame read_sql_table_with_options
@@ -6276,27 +6546,35 @@ pub fn read_sql_table_chunks_with_options<C: SqlConnection>(
         }
         None => sql_select_all_query_in_schema(conn, table_name, options.schema.as_deref())?,
     };
-    read_sql_chunks_with_options(conn, &query, options, chunk_size)
+    // Per br-frankenpandas-t1777: query reader rejects options.columns
+    // (the SELECT is already projected here). Clear before delegating.
+    let cleared = SqlReadOptions {
+        columns: None,
+        ..options.clone()
+    };
+    read_sql_chunks_with_options(conn, &query, &cleared, chunk_size)
 }
 
 /// Read an entire SQL table as chunks with read-time options and optional index promotion.
 ///
 /// Matches the supported subset of
 /// `pd.read_sql_table(table_name, con, parse_dates=..., coerce_float=..., index_col=..., chunksize=...)`.
-pub fn read_sql_table_chunks_with_options_and_index_col<C: SqlConnection>(
-    conn: &C,
+pub fn read_sql_table_chunks_with_options_and_index_col<'conn, C: SqlConnection + 'conn>(
+    conn: &'conn C,
     table_name: &str,
     options: &SqlReadOptions,
     index_col: Option<&str>,
     chunk_size: usize,
-) -> Result<SqlIndexedChunkIterator, IoError> {
+) -> Result<SqlIndexedChunkIterator<'conn>, IoError> {
     let effective_index_col = index_col.or(options.index_col.as_deref());
     let query = sql_table_read_query_for_options(conn, table_name, options, effective_index_col)?;
-    // The plain chunk reader rejects options.index_col (see i8kja); clear
-    // it before delegating so chunked-with-options remains a sibling of
-    // the full-frame path regardless of which slot the caller used.
+    // The plain chunk reader rejects options.index_col (see i8kja) and
+    // options.columns (see t1777); clear both before delegating so
+    // chunked-with-options remains a sibling of the full-frame path
+    // regardless of which slots the caller populated.
     let cleared = SqlReadOptions {
         index_col: None,
+        columns: None,
         ..options.clone()
     };
     let inner = read_sql_chunks_with_options(conn, &query, &cleared, chunk_size)?;
@@ -6307,12 +6585,12 @@ pub fn read_sql_table_chunks_with_options_and_index_col<C: SqlConnection>(
 ///
 /// Matches the supported subset of
 /// `pd.read_sql_table(table_name, con, index_col=..., chunksize=...)`.
-pub fn read_sql_table_chunks_with_index_col<C: SqlConnection>(
-    conn: &C,
+pub fn read_sql_table_chunks_with_index_col<'conn, C: SqlConnection + 'conn>(
+    conn: &'conn C,
     table_name: &str,
     index_col: Option<&str>,
     chunk_size: usize,
-) -> Result<SqlIndexedChunkIterator, IoError> {
+) -> Result<SqlIndexedChunkIterator<'conn>, IoError> {
     let inner = read_sql_table_chunks(conn, table_name, chunk_size)?;
     sql_indexed_chunks(inner, index_col)
 }
@@ -6358,12 +6636,12 @@ pub fn read_sql_table_columns_with_index_col<C: SqlConnection>(
 /// `pd.read_sql_table(table, con, columns=[...], chunksize=...)`. The named
 /// columns are emitted in the requested order and each chunk receives a fresh
 /// zero-based RangeIndex.
-pub fn read_sql_table_columns_chunks<C: SqlConnection>(
-    conn: &C,
+pub fn read_sql_table_columns_chunks<'conn, C: SqlConnection + 'conn>(
+    conn: &'conn C,
     table_name: &str,
     columns: &[&str],
     chunk_size: usize,
-) -> Result<SqlChunkIterator, IoError> {
+) -> Result<SqlChunkIterator<'conn>, IoError> {
     read_sql_chunks(
         conn,
         &sql_select_columns_query(conn, table_name, columns)?,
@@ -6378,13 +6656,13 @@ pub fn read_sql_table_columns_chunks<C: SqlConnection>(
 /// When `index_col` is set and is not already in `columns`, it is auto-projected
 /// into the underlying SELECT (matching pandas SQLTable.read). The promoted
 /// column is removed from each chunk after projection. Per br-frankenpandas-6n0uz.
-pub fn read_sql_table_columns_chunks_with_index_col<C: SqlConnection>(
-    conn: &C,
+pub fn read_sql_table_columns_chunks_with_index_col<'conn, C: SqlConnection + 'conn>(
+    conn: &'conn C,
     table_name: &str,
     columns: &[&str],
     index_col: Option<&str>,
     chunk_size: usize,
-) -> Result<SqlIndexedChunkIterator, IoError> {
+) -> Result<SqlIndexedChunkIterator<'conn>, IoError> {
     let projection = projection_with_index_col(columns, index_col)?;
     let inner = read_sql_table_columns_chunks(conn, table_name, &projection, chunk_size)?;
     sql_indexed_chunks(inner, index_col)
@@ -10338,6 +10616,135 @@ mod tests {
         );
     }
 
+    #[test]
+    fn sql_read_chunks_uses_paged_queries_when_backend_opts_in() {
+        use std::cell::RefCell;
+
+        struct PagedChunksConn {
+            queries: RefCell<Vec<(String, Vec<Scalar>)>>,
+            rows: Vec<Vec<Scalar>>,
+        }
+
+        impl PagedChunksConn {
+            fn page_bounds(params: &[Scalar]) -> (usize, usize) {
+                let [
+                    Scalar::Int64(1),
+                    Scalar::Int64(limit),
+                    Scalar::Int64(offset),
+                ] = params
+                else {
+                    assert_eq!(
+                        params,
+                        &[Scalar::Int64(1), Scalar::Int64(0), Scalar::Int64(0),],
+                        "expected original param plus LIMIT/OFFSET params"
+                    );
+                    return (0, 0);
+                };
+                (
+                    usize::try_from(*limit).expect("non-negative limit"),
+                    usize::try_from(*offset).expect("non-negative offset"),
+                )
+            }
+        }
+
+        impl super::SqlConnection for PagedChunksConn {
+            fn query(&self, query: &str, params: &[Scalar]) -> Result<SqlQueryResult, IoError> {
+                self.queries
+                    .borrow_mut()
+                    .push((query.to_owned(), params.to_vec()));
+                assert!(
+                    query.contains("frankenpandas_sql_chunk_source")
+                        && query.contains("LIMIT ? OFFSET ?"),
+                    "paged chunk path should wrap the caller query with LIMIT/OFFSET, got {query}"
+                );
+
+                let (limit, offset) = Self::page_bounds(params);
+                let rows = self.rows.iter().skip(offset).take(limit).cloned().collect();
+                Ok(SqlQueryResult {
+                    columns: vec!["id".to_owned(), "name".to_owned()],
+                    rows,
+                })
+            }
+
+            fn supports_paged_sql_chunks(&self) -> bool {
+                true
+            }
+
+            fn execute_batch(&self, _sql: &str) -> Result<(), IoError> {
+                Ok(())
+            }
+
+            fn table_exists(&self, _table_name: &str) -> Result<bool, IoError> {
+                Ok(false)
+            }
+
+            fn insert_rows(&self, _insert_sql: &str, _rows: &[Vec<Scalar>]) -> Result<(), IoError> {
+                Ok(())
+            }
+
+            fn dtype_sql(&self, _dtype: DType) -> &'static str {
+                "TEXT"
+            }
+
+            fn index_dtype_sql(&self, _index: &Index) -> &'static str {
+                "TEXT"
+            }
+        }
+
+        let conn = PagedChunksConn {
+            queries: RefCell::new(Vec::new()),
+            rows: vec![
+                vec![Scalar::Int64(1), Scalar::Utf8("a".to_owned())],
+                vec![Scalar::Int64(2), Scalar::Utf8("b".to_owned())],
+                vec![Scalar::Int64(3), Scalar::Utf8("c".to_owned())],
+                vec![Scalar::Int64(4), Scalar::Utf8("d".to_owned())],
+                vec![Scalar::Int64(5), Scalar::Utf8("e".to_owned())],
+            ],
+        };
+
+        let chunks = read_sql_chunks_with_options(
+            &conn,
+            "SELECT id, name FROM paged_source WHERE keep = ? ORDER BY id;",
+            &SqlReadOptions {
+                params: Some(vec![Scalar::Int64(1)]),
+                ..SqlReadOptions::default()
+            },
+            2,
+        )
+        .expect("paged chunk iterator")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("all chunks");
+
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(
+            chunks[0].column("id").unwrap().values(),
+            &[Scalar::Int64(1), Scalar::Int64(2)]
+        );
+        assert_eq!(
+            chunks[1].column("id").unwrap().values(),
+            &[Scalar::Int64(3), Scalar::Int64(4)]
+        );
+        assert_eq!(
+            chunks[2].column("name").unwrap().values(),
+            &[Scalar::Utf8("e".to_owned())]
+        );
+
+        let queries = conn.queries.borrow();
+        let expected_params = vec![
+            vec![Scalar::Int64(1), Scalar::Int64(0), Scalar::Int64(0)],
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(0)],
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(2)],
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(4)],
+        ];
+        assert_eq!(
+            queries
+                .iter()
+                .map(|(_, params)| params.clone())
+                .collect::<Vec<_>>(),
+            expected_params
+        );
+    }
+
     #[cfg(feature = "sql-sqlite")]
     #[test]
     fn sql_read_query_chunks_with_options_and_index_col_applies_options_before_indexing() {
@@ -11002,6 +11409,199 @@ mod tests {
             matches!(&err, IoError::Sql(msg) if msg.contains("index_col") && msg.contains("read_sql_query_chunks_with_options_and_index_col")),
             "expected query-specific _and_index_col suggestion, got: {err:?}"
         );
+    }
+
+    // br-frankenpandas-t1777: query readers can't apply options.columns
+    // (caller writes the SELECT, projection is fixed). Silently ignoring
+    // diverged from the table-reader sibling. All 7 query-reader entry
+    // points (3 foundations + 4 delegators) must reject options.columns
+    // with a typed error pointing to the appropriate table reader.
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn read_sql_with_options_rejects_options_columns_across_query_entrypoints() {
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE TABLE t1777_query_cols_reject (id INTEGER, val TEXT);",
+        )
+        .unwrap();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "INSERT INTO t1777_query_cols_reject VALUES (1, 'a'), (2, 'b');",
+        )
+        .unwrap();
+
+        fn assert_columns_rejection(err: &IoError, expected_sibling: &str) {
+            assert!(
+                matches!(err, IoError::Sql(msg)
+                    if msg.contains("options.columns") && msg.contains(expected_sibling)),
+                "expected options.columns error pointing to `{expected_sibling}`, got: {err:?}"
+            );
+        }
+
+        let opts_with_cols = || SqlReadOptions {
+            columns: Some(vec!["id".to_owned()]),
+            ..Default::default()
+        };
+
+        // 1. read_sql_with_options (foundation, full-frame)
+        let err = read_sql_with_options(
+            &conn,
+            "SELECT id, val FROM t1777_query_cols_reject",
+            &opts_with_cols(),
+        )
+        .expect_err("read_sql_with_options must reject options.columns");
+        assert_columns_rejection(&err, "read_sql_table_with_options");
+
+        // 2. read_sql_chunks_with_options (foundation, chunked)
+        let err = read_sql_chunks_with_options(
+            &conn,
+            "SELECT id, val FROM t1777_query_cols_reject",
+            &opts_with_cols(),
+            2,
+        )
+        .expect_err("read_sql_chunks_with_options must reject options.columns");
+        assert_columns_rejection(&err, "read_sql_table_chunks_with_options");
+
+        // 3. read_sql_chunks_with_options_and_index_col (foundation, indexed chunked)
+        let err = read_sql_chunks_with_options_and_index_col(
+            &conn,
+            "SELECT id, val FROM t1777_query_cols_reject",
+            &opts_with_cols(),
+            Some("id"),
+            2,
+        )
+        .expect_err("indexed chunks must reject options.columns");
+        assert_columns_rejection(&err, "read_sql_table_chunks_with_options_and_index_col");
+
+        // 4. read_sql_query_with_options (delegator → read_sql_with_options)
+        let err = read_sql_query_with_options(
+            &conn,
+            "SELECT id, val FROM t1777_query_cols_reject",
+            &opts_with_cols(),
+        )
+        .expect_err("read_sql_query_with_options must propagate the rejection");
+        assert_columns_rejection(&err, "read_sql_table_with_options");
+
+        // 5. read_sql_query_with_options_and_index_col (delegator)
+        let err = read_sql_query_with_options_and_index_col(
+            &conn,
+            "SELECT id, val FROM t1777_query_cols_reject",
+            &opts_with_cols(),
+            Some("id"),
+        )
+        .expect_err("indexed query reader must reject options.columns");
+        assert_columns_rejection(&err, "read_sql_table_with_options");
+
+        // 6. read_sql_query_chunks_with_options (delegator → read_sql_chunks_with_options)
+        let err = read_sql_query_chunks_with_options(
+            &conn,
+            "SELECT id, val FROM t1777_query_cols_reject",
+            &opts_with_cols(),
+            2,
+        )
+        .expect_err("query chunks delegator must reject options.columns");
+        assert_columns_rejection(&err, "read_sql_table_chunks_with_options");
+
+        // 7. read_sql_query_chunks_with_options_and_index_col (delegator)
+        let err = read_sql_query_chunks_with_options_and_index_col(
+            &conn,
+            "SELECT id, val FROM t1777_query_cols_reject",
+            &opts_with_cols(),
+            Some("id"),
+            2,
+        )
+        .expect_err("indexed query chunks delegator must reject options.columns");
+        assert_columns_rejection(&err, "read_sql_table_chunks_with_options_and_index_col");
+    }
+
+    // br-frankenpandas-t1777: table readers must continue to honor
+    // options.columns (proves the cleared-options pass-through to the
+    // query foundation didn't accidentally break the columns projection).
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn read_sql_table_with_options_still_honors_options_columns_after_t1777() {
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE TABLE t1777_table_cols_honor (id INTEGER, val TEXT, secret TEXT);",
+        )
+        .unwrap();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "INSERT INTO t1777_table_cols_honor VALUES (1, 'a', 'x'), (2, 'b', 'y');",
+        )
+        .unwrap();
+
+        // Full-frame table reader with columns should project `id, val`
+        // and drop `secret`.
+        let frame = read_sql_table_with_options(
+            &conn,
+            "t1777_table_cols_honor",
+            &SqlReadOptions {
+                columns: Some(vec!["id".to_owned(), "val".to_owned()]),
+                ..Default::default()
+            },
+        )
+        .expect("table reader honors options.columns");
+        assert_eq!(frame.column_names(), vec!["id", "val"]);
+        assert!(frame.column("secret").is_none());
+
+        // Chunked table reader, same behavior per chunk.
+        let chunks: Vec<DataFrame> = read_sql_table_chunks_with_options(
+            &conn,
+            "t1777_table_cols_honor",
+            &SqlReadOptions {
+                columns: Some(vec!["id".to_owned(), "val".to_owned()]),
+                ..Default::default()
+            },
+            1,
+        )
+        .expect("chunked table reader honors options.columns")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("all chunks");
+        assert_eq!(chunks.len(), 2);
+        for c in &chunks {
+            assert_eq!(c.column_names(), vec!["id", "val"]);
+            assert!(c.column("secret").is_none());
+        }
+
+        // Indexed full-frame table reader: columns + index_col compose.
+        let frame = read_sql_table_with_options_and_index_col(
+            &conn,
+            "t1777_table_cols_honor",
+            &SqlReadOptions {
+                columns: Some(vec!["val".to_owned()]),
+                ..Default::default()
+            },
+            Some("id"),
+        )
+        .expect("indexed table reader honors options.columns");
+        assert_eq!(frame.index().name(), Some("id"));
+        assert_eq!(frame.column_names(), vec!["val"]);
+        assert!(frame.column("id").is_none());
+        assert!(frame.column("secret").is_none());
+
+        // Indexed chunked table reader.
+        let chunks: Vec<DataFrame> = read_sql_table_chunks_with_options_and_index_col(
+            &conn,
+            "t1777_table_cols_honor",
+            &SqlReadOptions {
+                columns: Some(vec!["val".to_owned()]),
+                ..Default::default()
+            },
+            Some("id"),
+            1,
+        )
+        .expect("indexed chunked table reader honors options.columns")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("all chunks");
+        assert_eq!(chunks.len(), 2);
+        for c in &chunks {
+            assert_eq!(c.column_names(), vec!["val"]);
+            assert!(c.column("id").is_none());
+            assert!(c.column("secret").is_none());
+        }
     }
 
     #[cfg(feature = "sql-sqlite")]

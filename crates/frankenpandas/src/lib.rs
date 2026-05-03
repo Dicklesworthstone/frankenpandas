@@ -16,75 +16,100 @@
 
 // ── Core types ──────────────────────────────────────────────────────────
 
-pub use fp_types::{DType, NullKind, Scalar, SparseDType, TypeError};
-pub use fp_types::{
-    cast_scalar, cast_scalar_owned, common_dtype, count_na, dropna, fill_na, infer_dtype, isna,
-    isnull, notna, notnull,
-};
-// fd90.263: pandas-equivalent helper types for Datetime64/Timedelta64/Period/Interval
-// scalar variants. Users typically interact via Scalar::Timedelta64(nanos) etc., but
-// the helper types are needed for richer parsing / manipulation.
-pub use fp_types::{
-    Interval, IntervalClosed, Period, PeriodFreq, Timedelta, TimedeltaComponents, TimedeltaError,
-    Timestamp, period_range,
-    // fd90.271: pandas pd.interval_range equivalents (Vec<Interval> generators).
-    interval_range_by_periods, interval_range_by_step,
-};
-
-// NanOps: null-skipping aggregation primitives (matches README's NanOps section).
-pub use fp_types::{
-    nanall, nanany, nanargmax, nanargmin, nancount, nancummax, nancummin, nancumprod, nancumsum,
-    nankurt, nanmax, nanmean, nanmedian, nanmin, nannunique, nanprod, nanptp, nanquantile, nansem,
-    nanskew, nanstd, nansum, nanvar,
-};
-
 pub use fp_columnar::{ArithmeticOp, Column, ColumnError, ComparisonOp, ValidityMask};
-
-pub use fp_index::{
-    AlignMode, AlignmentPlan, DuplicateKeep, Index, IndexError, IndexLabel, MultiAlignmentPlan,
-    MultiIndex, MultiIndexOrIndex,
-    // fd90.261: pandas-parity date/timedelta range constructors + helpers.
-    DateOffset, DateRangeError, TimedeltaRangeError, apply_date_offset,
-    apply_date_offset_to_nanos, date_range, infer_freq, timedelta_range,
-    // fd90.269: AACE Pipeline alignment fns + bdate_range + datetime utils.
-    align, align_inner, align_left, align_union, bdate_range, format_datetime_ns,
-    infer_freq_from_nanos, infer_freq_from_timestamps, leapfrog_intersection, leapfrog_union,
-    multi_way_align, validate_alignment_plan,
+// ── Expression engine ───────────────────────────────────────────────────
+pub use fp_expr::{
+    DataFrameExprExt, Delta, EvalContext, Expr, ExprError, MaterializedView, SeriesRef, eval_str,
+    eval_str_with_locals, evaluate, evaluate_on_dataframe, evaluate_on_dataframe_with_locals,
 };
-
 pub use fp_frame::{
-    CategoricalAccessor, CategoricalMetadata, ConcatJoin, DataFrame, DataFrameColumnInput,
-    DataFrameDictAxisLabels, DataFrameDictResult, DataFrameDictSplit, DataFrameDictTight,
-    DropNaHow, FrameError, Series, SeriesResetIndexResult, ToDatetimeOptions, ToDatetimeOrigin,
-    ToTimedeltaErrors, ToTimedeltaOptions, TzAmbiguousPolicy, TzLocalizeOptions,
-    TzNonexistentPolicy,
+    CategoricalAccessor,
+    CategoricalMetadata,
+    ConcatJoin,
+    DataFrame,
+    DataFrameColumnInput,
+    DataFrameDictAxisLabels,
+    DataFrameDictResult,
+    DataFrameDictSplit,
+    DataFrameDictTight,
     // fd90.259: window + accessor + groupby return types.
-    DataFrameEwm, DataFrameExpanding, DataFrameGroupBy, DataFrameResample, DataFrameRolling,
-    DatetimeAccessor, Ewm, Expanding, GroupByResample, GroupByRolling, Resample, Rolling,
-    SeriesGroupBy, SparseAccessor, StringAccessor,
+    DataFrameEwm,
+    DataFrameExpanding,
+    DataFrameGroupBy,
+    DataFrameResample,
+    DataFrameRolling,
+    DatetimeAccessor,
+    DropNaHow,
+    Ewm,
+    Expanding,
+    FrameError,
+    GroupByResample,
+    GroupByRolling,
+    Resample,
+    Rolling,
+    Series,
+    SeriesGroupBy,
+    SeriesResetIndexResult,
+    SparseAccessor,
+    StringAccessor,
+    ToDatetimeOptions,
+    ToDatetimeOrigin,
+    ToTimedeltaErrors,
+    ToTimedeltaOptions,
+    TzAmbiguousPolicy,
+    TzLocalizeOptions,
+    TzNonexistentPolicy,
     // fd90.270: Index → DataFrame / Series conversion helpers.
-    index_to_frame, index_to_series,
+    index_to_frame,
+    index_to_series,
 };
-
 // ── Module-level functions (like pd.concat, pd.to_datetime, etc.) ────
-
 pub use fp_frame::{
     concat_dataframes, concat_dataframes_with_axis, concat_dataframes_with_axis_join,
     concat_dataframes_with_ignore_index, concat_dataframes_with_keys, concat_series,
     concat_series_with_ignore_index,
 };
-
-pub use fp_frame::to_numeric;
-pub use fp_frame::{cut, qcut};
 pub use fp_frame::{
-    timedelta_total_seconds, to_timedelta, to_timedelta_with_options, to_timedelta_with_unit,
+    cut, qcut, timedelta_total_seconds, to_datetime, to_datetime_with_format,
+    to_datetime_with_options, to_datetime_with_unit, to_numeric, to_timedelta,
+    to_timedelta_with_options, to_timedelta_with_unit,
 };
-pub use fp_frame::{
-    to_datetime, to_datetime_with_format, to_datetime_with_options, to_datetime_with_unit,
+// ── GroupBy errors ──────────────────────────────────────────────────────
+pub use fp_groupby::{AggFunc, GroupByError, GroupByExecutionOptions, GroupByOptions};
+pub use fp_index::{
+    AlignMode,
+    AlignmentPlan,
+    // fd90.261: pandas-parity date/timedelta range constructors + helpers.
+    DateOffset,
+    DateRangeError,
+    DuplicateKeep,
+    Index,
+    IndexError,
+    IndexLabel,
+    MultiAlignmentPlan,
+    MultiIndex,
+    MultiIndexOrIndex,
+    TimedeltaRangeError,
+    // fd90.269: AACE Pipeline alignment fns + bdate_range + datetime utils.
+    align,
+    align_inner,
+    align_left,
+    align_union,
+    apply_date_offset,
+    apply_date_offset_to_nanos,
+    bdate_range,
+    date_range,
+    format_datetime_ns,
+    infer_freq,
+    infer_freq_from_nanos,
+    infer_freq_from_timestamps,
+    leapfrog_intersection,
+    leapfrog_union,
+    multi_way_align,
+    timedelta_range,
+    validate_alignment_plan,
 };
-
 // ── IO functions ────────────────────────────────────────────────────────
-
 pub use fp_io::{
     // CSV
     CsvOnBadLines,
@@ -107,8 +132,8 @@ pub use fp_io::{
     SqlForeignKeySchema,
     SqlIfExists,
     SqlIndexSchema,
-    SqlInsertMethod,
     SqlIndexedChunkIterator,
+    SqlInsertMethod,
     SqlInspector,
     SqlQueryResult,
     SqlReadOptions,
@@ -123,17 +148,6 @@ pub use fp_io::{
     list_sql_tables,
     list_sql_unique_constraints,
     list_sql_views,
-    sql_backend_caps,
-    sql_max_identifier_length,
-    sql_max_insert_rows,
-    sql_max_param_count,
-    sql_primary_key_columns,
-    sql_server_version,
-    sql_supports_returning,
-    sql_supports_schemas,
-    sql_table_comment,
-    sql_table_schema,
-    truncate_sql_table,
     read_csv,
     read_csv_str,
     read_csv_with_index_cols,
@@ -165,10 +179,6 @@ pub use fp_io::{
     read_sql,
     read_sql_chunks,
     read_sql_chunks_with_index_col,
-    // fd90.260: index-col + table-listing readers.
-    read_sql_table_columns,
-    read_sql_table_with_index_col,
-    read_sql_with_index_col,
     read_sql_chunks_with_options,
     read_sql_chunks_with_options_and_index_col,
     read_sql_query,
@@ -184,12 +194,31 @@ pub use fp_io::{
     read_sql_table_chunks_with_index_col,
     read_sql_table_chunks_with_options,
     read_sql_table_chunks_with_options_and_index_col,
+    // fd90.260: index-col + table-listing readers.
+    read_sql_table_columns,
     read_sql_table_columns_chunks,
     read_sql_table_columns_chunks_with_index_col,
     read_sql_table_columns_with_index_col,
+    read_sql_table_with_index_col,
     read_sql_table_with_options,
     read_sql_table_with_options_and_index_col,
+    read_sql_with_index_col,
     read_sql_with_options,
+    // fd90.264: Series-level Arrow interop (README line 1580 mentions
+    // DataFrame ↔ Arrow RecordBatch; these are the Series counterparts).
+    series_from_arrow_array,
+    series_to_arrow_array,
+    sql_backend_caps,
+    sql_max_identifier_length,
+    sql_max_insert_rows,
+    sql_max_param_count,
+    sql_primary_key_columns,
+    sql_server_version,
+    sql_supports_returning,
+    sql_supports_schemas,
+    sql_table_comment,
+    sql_table_schema,
+    truncate_sql_table,
     write_csv,
     write_csv_string,
     write_csv_string_with_options,
@@ -208,48 +237,67 @@ pub use fp_io::{
     write_parquet_bytes,
     write_sql,
     write_sql_with_options,
-    // fd90.264: Series-level Arrow interop (README line 1580 mentions
-    // DataFrame ↔ Arrow RecordBatch; these are the Series counterparts).
-    series_from_arrow_array,
-    series_to_arrow_array,
 };
-
-// ── Expression engine ───────────────────────────────────────────────────
-
-pub use fp_expr::{
-    DataFrameExprExt, Delta, EvalContext, Expr, ExprError, MaterializedView, SeriesRef,
-    eval_str, eval_str_with_locals, evaluate, evaluate_on_dataframe,
-    evaluate_on_dataframe_with_locals,
-};
-
-// ── GroupBy errors ──────────────────────────────────────────────────────
-
-pub use fp_groupby::{AggFunc, GroupByError, GroupByExecutionOptions, GroupByOptions};
-
 // ── Join/merge ──────────────────────────────────────────────────────────
-
 pub use fp_join::{
     AsofDirection, DataFrameMergeExt, JoinError, JoinExecutionOptions, JoinType, JoinedSeries,
     MergeAsofOptions, MergeExecutionOptions, MergeValidateMode, MergedDataFrame, join_series,
     join_series_with_options, merge_asof, merge_asof_with_options, merge_dataframes,
-    merge_dataframes_on, merge_dataframes_on_with, merge_dataframes_on_with_options,
-    merge_ordered,
+    merge_dataframes_on, merge_dataframes_on_with, merge_dataframes_on_with_options, merge_ordered,
 };
-
-// ── Runtime policy ──────────────────────────────────────────────────────
-
-pub use fp_runtime::{
-    CompatibilityIssue, DecisionAction, DecisionMetrics, DecisionRecord, EvidenceLedger,
-    EvidenceTerm, GalaxyBrainCard, IssueKind, RuntimeMode, RuntimePolicy, decision_to_card,
-    // fd90.265: remaining fp-runtime types (advanced — not in prelude).
-    ConformalGuard, ConformalPredictionSet, DecodeProof, LossMatrix, RaptorQEnvelope,
-    RaptorQMetadata, RuntimeError, ScrubStatus,
-};
-
 // outcome_to_action is gated behind the `asupersync` feature in fp-runtime.
 #[cfg(feature = "asupersync")]
 pub use fp_runtime::outcome_to_action;
-
+// ── Runtime policy ──────────────────────────────────────────────────────
+pub use fp_runtime::{
+    CompatibilityIssue,
+    // fd90.265: remaining fp-runtime types (advanced — not in prelude).
+    ConformalGuard,
+    ConformalPredictionSet,
+    DecisionAction,
+    DecisionMetrics,
+    DecisionRecord,
+    DecodeProof,
+    EvidenceLedger,
+    EvidenceTerm,
+    GalaxyBrainCard,
+    IssueKind,
+    LossMatrix,
+    RaptorQEnvelope,
+    RaptorQMetadata,
+    RuntimeError,
+    RuntimeMode,
+    RuntimePolicy,
+    ScrubStatus,
+    decision_to_card,
+};
+pub use fp_types::{
+    DType, NullKind, Scalar, SparseDType, TypeError, cast_scalar, cast_scalar_owned, common_dtype,
+    count_na, dropna, fill_na, infer_dtype, isna, isnull, notna, notnull,
+};
+// fd90.263: pandas-equivalent helper types for Datetime64/Timedelta64/Period/Interval
+// scalar variants. Users typically interact via Scalar::Timedelta64(nanos) etc., but
+// the helper types are needed for richer parsing / manipulation.
+pub use fp_types::{
+    Interval,
+    IntervalClosed,
+    Period,
+    PeriodFreq,
+    Timedelta,
+    TimedeltaComponents,
+    TimedeltaError,
+    Timestamp,
+    // fd90.271: pandas pd.interval_range equivalents (Vec<Interval> generators).
+    interval_range_by_periods,
+    interval_range_by_step,
+    period_range,
+};
+// NanOps: null-skipping aggregation primitives (matches README's NanOps section).
+pub use fp_types::{
+    nanall, nanany, nanargmax, nanargmin, nancount, nancummax, nancummin, nancumprod, nancumsum,
+    nankurt, nanmax, nanmean, nanmedian, nanmin, nannunique, nanprod, nanptp, nanquantile, nansem,
+    nanskew, nanstd, nansum, nanvar,
+};
 // ── Convenience re-export of the default SQL backend ───────────────────
 //
 // Behind the `sql-sqlite` feature (enabled by default), `rusqlite` is
@@ -278,97 +326,94 @@ pub use rusqlite;
 /// ```
 pub mod prelude {
     pub use crate::{
+        // fd90.15: AggFunc + GroupByOptions / GroupByExecutionOptions
+        // pair with DataFrameGroupBy (in prelude). README documents the
+        // groupby aggregation surface extensively (line 1052+).
+        AggFunc,
         // Core types
         // fd90.273: AlignMode is the parameter type for df.align_on_index().
         AlignMode,
         // fd90.222: ArithmeticOp + ComparisonOp are parameter types for
         // Column.binary_numeric, DataFrame.compare_scalar, etc.
         ArithmeticOp,
+        // Join (types + functions, matches README Recipes + Merge: Advanced Options)
+        AsofDirection,
         CategoricalAccessor,
         CategoricalMetadata,
         Column,
+        // Error types (matches README "Error Architecture" section lines 829-853 —
+        // all 8 typed error enums exposed for pattern matching).
+        ColumnError,
         ComparisonOp,
+        // Runtime — Bayesian decision inspection (README lines 378-403).
+        // fd90.221: expose the types reachable via EvidenceLedger.records().
+        CompatibilityIssue,
         ConcatJoin,
         CsvOnBadLines,
         CsvReadOptions,
         CsvWriteOptions,
         DType,
-        // fd90.15: SparseDType pairs with SparseAccessor (in prelude)
-        // and the Scalar::Sparse workflow. Without this users couldn't
-        // name the dtype after calling sparse().to_dense() etc.
-        SparseDType,
-        ExcelReadOptions,
-        ExcelWriteOptions,
         DataFrame,
         DataFrameColumnInput,
+        // fd90.270: DataFrameDictAxisLabels is the field type of DictTight.columns.
+        DataFrameDictAxisLabels,
         // fd90.258: DataFrameDictResult is the return type of df.to_dict(orient);
         // DictSplit / DictTight are variant payloads.
         DataFrameDictResult,
         DataFrameDictSplit,
         DataFrameDictTight,
-        // fd90.270: DataFrameDictAxisLabels is the field type of DictTight.columns.
-        DataFrameDictAxisLabels,
         // fd90.259: window + groupby + accessor return types.
         DataFrameEwm,
         DataFrameExpanding,
-        DataFrameGroupBy,
-        DataFrameResample,
-        DataFrameRolling,
-        DatetimeAccessor,
-        Ewm,
-        Expanding,
-        GroupByResample,
-        GroupByRolling,
-        Resample,
-        Rolling,
-        SeriesGroupBy,
-        SparseAccessor,
-        StringAccessor,
-        DropNaHow,
-        DuplicateKeep,
         // Traits
         DataFrameExprExt,
+        DataFrameGroupBy,
         DataFrameIoExt,
         DataFrameMergeExt,
-        // Runtime — Bayesian decision inspection (README lines 378-403).
-        // fd90.221: expose the types reachable via EvidenceLedger.records().
-        CompatibilityIssue,
+        DataFrameResample,
+        DataFrameRolling,
+        // fd90.261: pandas-parity date/timedelta range constructors.
+        DateOffset,
+        // fd90.16: error types paired with the date/timedelta range
+        // constructors above. Without these the user can't pattern-
+        // match on Result<_, DateRangeError> from the prelude alone.
+        DateRangeError,
+        DatetimeAccessor,
         DecisionAction,
         DecisionMetrics,
         DecisionRecord,
+        DropNaHow,
+        DuplicateKeep,
         EvidenceLedger,
         EvidenceTerm,
-        GalaxyBrainCard,
-        IssueKind,
-        RuntimeMode,
-        decision_to_card,
-        Index,
-        IndexLabel,
-        // fd90.15: Index → DataFrame/Series conversion helpers (fd90.270).
-        // Pair with Index being in the prelude.
-        index_to_frame,
-        index_to_series,
-        // Error types (matches README "Error Architecture" section lines 829-853 —
-        // all 8 typed error enums exposed for pattern matching).
-        ColumnError,
+        Ewm,
+        ExcelReadOptions,
+        ExcelWriteOptions,
+        Expanding,
         ExprError,
         FrameError,
-        // fd90.15: AggFunc + GroupByOptions / GroupByExecutionOptions
-        // pair with DataFrameGroupBy (in prelude). README documents the
-        // groupby aggregation surface extensively (line 1052+).
-        AggFunc,
-        GroupByOptions,
-        GroupByExecutionOptions,
+        GalaxyBrainCard,
         GroupByError,
+        GroupByExecutionOptions,
+        GroupByOptions,
+        GroupByResample,
+        GroupByRolling,
+        Index,
         IndexError,
+        IndexLabel,
+        // fd90.14: pandas-equivalent helper types for the richer
+        // Scalar::Datetime64 / Timedelta64 / Period / Interval
+        // workflows (fd90.263 / fd90.271). Users typically interact via
+        // Scalar variants, but parsing, inspection, and constructed
+        // ranges need the helper types named.
+        Interval,
+        IntervalClosed,
         IoError,
-        TypeError,
-        // Join (types + functions, matches README Recipes + Merge: Advanced Options)
-        AsofDirection,
+        IssueKind,
         JoinError,
         JoinExecutionOptions,
-        JoinedSeries,
         JoinType,
+        JoinedSeries,
         JsonOrient,
         MergeAsofOptions,
         MergeExecutionOptions,
@@ -377,50 +422,25 @@ pub mod prelude {
         MultiIndex,
         MultiIndexOrIndex,
         NullKind,
+        Period,
+        PeriodFreq,
+        Resample,
+        Rolling,
+        RuntimeMode,
         RuntimePolicy,
         Scalar,
         Series,
+        SeriesGroupBy,
         SeriesResetIndexResult,
-        // fd90.211: ToDatetimeOptions + ToDatetimeOrigin pair with the
-        // to_datetime_with_options function (already in the prelude).
-        ToDatetimeOptions,
-        ToDatetimeOrigin,
-        // fd90.14: pandas-equivalent helper types for the richer
-        // Scalar::Datetime64 / Timedelta64 / Period / Interval
-        // workflows (fd90.263 / fd90.271). Users typically interact via
-        // Scalar variants, but parsing, inspection, and constructed
-        // ranges need the helper types named.
-        Interval,
-        IntervalClosed,
-        Period,
-        PeriodFreq,
-        Timedelta,
-        TimedeltaComponents,
-        TimedeltaError,
-        Timestamp,
-        period_range,
-        interval_range_by_periods,
-        interval_range_by_step,
-        // fd90.218: timedelta + tz option surfaces.
-        ToTimedeltaErrors,
-        ToTimedeltaOptions,
-        TzAmbiguousPolicy,
-        TzLocalizeOptions,
-        TzNonexistentPolicy,
-        // Per-cell null tracking — README has a dedicated subsection
-        // ("ValidityMask: Bitpacked Null Tracking", lines 261-278) and
-        // lists it among types deriving Serialize + Deserialize (line 1567).
-        ValidityMask,
+        SparseAccessor,
+        // fd90.15: SparseDType pairs with SparseAccessor (in prelude)
+        // and the Scalar::Sparse workflow. Without this users couldn't
+        // name the dtype after calling sparse().to_dense() etc.
+        SparseDType,
         // SQL contracts (covers the README Quick Start round-trip).
         // fd90.206: also expose the option/inspector/chunked-read surface
         // documented in the IO Format Support table at line 148.
         SqlBackendCaps,
-        SqlConnection,
-        // fd90.220: SqlInsertMethod is the type of SqlWriteOptions.method.
-        SqlInsertMethod,
-        SqlInspector,
-        SqlReadOptions,
-        SqlWriteOptions,
         // fd90.13: SQL schema/iterator return types. These are the public
         // result types of already-promoted SqlInspector methods (and
         // read_sql_chunks). Users calling inspector.columns() get back
@@ -428,28 +448,87 @@ pub mod prelude {
         // prelude alone. Same paired-surface pattern as fd90.10-12.
         SqlChunkIterator,
         SqlColumnSchema,
+        SqlConnection,
         SqlForeignKeySchema,
+        SqlIfExists,
         SqlIndexSchema,
         SqlIndexedChunkIterator,
+        // fd90.220: SqlInsertMethod is the type of SqlWriteOptions.method.
+        SqlInsertMethod,
+        SqlInspector,
         SqlQueryResult,
+        SqlReadOptions,
         SqlReflectedTable,
         SqlTableSchema,
         SqlUniqueConstraintSchema,
-        // fd90.20: paired producer for SqlIndexedChunkIterator (above).
-        // The other ~17 SQL index_col variants are advanced power-user
-        // surface; just the basic chunks+index_col reader belongs here.
-        read_sql_chunks_with_index_col,
+        SqlWriteOptions,
+        StringAccessor,
+        Timedelta,
+        TimedeltaComponents,
+        TimedeltaError,
+        TimedeltaRangeError,
+        Timestamp,
+        // fd90.211: ToDatetimeOptions + ToDatetimeOrigin pair with the
+        // to_datetime_with_options function (already in the prelude).
+        ToDatetimeOptions,
+        ToDatetimeOrigin,
+        // fd90.218: timedelta + tz option surfaces.
+        ToTimedeltaErrors,
+        ToTimedeltaOptions,
+        TypeError,
+        TzAmbiguousPolicy,
+        TzLocalizeOptions,
+        TzNonexistentPolicy,
+        // Per-cell null tracking — README has a dedicated subsection
+        // ("ValidityMask: Bitpacked Null Tracking", lines 261-278) and
+        // lists it among types deriving Serialize + Deserialize (line 1567).
+        ValidityMask,
+        // fd90.33: apply_date_offset is the primary use-site for
+        // DateOffset (above). Without it in the prelude the user can
+        // name the offset variant but can't apply it from prelude
+        // alone — paired-surface defect.
+        apply_date_offset,
+        // fd90.269: bdate_range pairs with date_range (pandas pd.bdate_range).
+        bdate_range,
+        // fd90.208: pandas-style top-level null checks + dtype helpers.
+        // The README documents these as user-facing (lines 359, 771, 957, 1031).
+        cast_scalar,
+        // fd90.16: cast_scalar_owned pairs with cast_scalar (above) for
+        // owned-input flows where the caller can move rather than borrow.
+        cast_scalar_owned,
+        common_dtype,
+        // Module-level functions (concat + join/merge family)
+        concat_dataframes,
+        concat_dataframes_with_axis,
+        concat_dataframes_with_axis_join,
+        concat_dataframes_with_ignore_index,
+        concat_dataframes_with_keys,
+        concat_series,
+        concat_series_with_ignore_index,
+        // fd90.262: Vec<Scalar> helpers matching pandas' top-level surface.
+        count_na,
+        // IO — datetime/numeric helpers (full module-level fn surface)
+        cut,
+        date_range,
+        decision_to_card,
+        dropna,
+        fill_na,
+        // fd90.15: Index → DataFrame/Series conversion helpers (fd90.270).
+        // Pair with Index being in the prelude.
+        index_to_frame,
+        index_to_series,
+        infer_dtype,
         // fd90.10: inspect() is the documented convenience constructor
         // for SqlInspector (fd90.38 / br-frankenpandas-szs9). It was
         // exported at the crate root but missed prelude promotion —
         // pairs with SqlInspector being in the prelude already.
         inspect,
-        // fd90.12: Series ↔ Arrow array interop. README line 1580
-        // documents Arrow interop as a public surface; fd90.264 added
-        // the Series-level pair. Promote to the prelude alongside the
-        // rest of the IO surface.
-        series_from_arrow_array,
-        series_to_arrow_array,
+        interval_range_by_periods,
+        interval_range_by_step,
+        isna,
+        isnull,
+        join_series,
+        join_series_with_options,
         // fd90.11: module-level SQL helpers (fd90.21-32). Free-function
         // counterparts to SqlInspector methods — paired surface, same
         // semantics. Promote alongside SqlInspector / inspect for
@@ -461,28 +540,6 @@ pub mod prelude {
         list_sql_tables,
         list_sql_unique_constraints,
         list_sql_views,
-        sql_backend_caps,
-        sql_max_identifier_length,
-        sql_max_insert_rows,
-        sql_max_param_count,
-        sql_primary_key_columns,
-        sql_server_version,
-        sql_supports_returning,
-        sql_supports_schemas,
-        sql_table_comment,
-        sql_table_schema,
-        truncate_sql_table,
-        read_sql_chunks,
-        SqlIfExists,
-        // Module-level functions (concat + join/merge family)
-        concat_dataframes,
-        concat_dataframes_with_axis,
-        concat_dataframes_with_axis_join,
-        concat_dataframes_with_ignore_index,
-        concat_dataframes_with_keys,
-        concat_series,
-        concat_series_with_ignore_index,
-        join_series,
         merge_asof,
         merge_asof_with_options,
         merge_dataframes,
@@ -490,7 +547,34 @@ pub mod prelude {
         merge_dataframes_on_with,
         merge_dataframes_on_with_options,
         merge_ordered,
-        join_series_with_options,
+        // NanOps — null-skipping aggregation primitives (matches README NanOps section)
+        nanall,
+        nanany,
+        nanargmax,
+        nanargmin,
+        nancount,
+        nancummax,
+        nancummin,
+        nancumprod,
+        nancumsum,
+        nankurt,
+        nanmax,
+        nanmean,
+        nanmedian,
+        nanmin,
+        nannunique,
+        nanprod,
+        nanptp,
+        nanquantile,
+        nansem,
+        nanskew,
+        nanstd,
+        nansum,
+        nanvar,
+        notna,
+        notnull,
+        period_range,
+        qcut,
         // IO — readers (in-memory + path; covers all 8 documented formats)
         read_csv,
         read_csv_str,
@@ -519,83 +603,47 @@ pub mod prelude {
         read_parquet,
         read_parquet_bytes,
         read_sql,
-        read_sql_table,
-        // fd90.210: read_sql_with_options pairs with SqlReadOptions.
-        read_sql_with_options,
+        read_sql_chunks,
+        // fd90.20: paired producer for SqlIndexedChunkIterator (above).
+        // The other ~17 SQL index_col variants are advanced power-user
+        // surface; just the basic chunks+index_col reader belongs here.
+        read_sql_chunks_with_index_col,
         // fd90.244: round out the SQL reader surface.
         read_sql_query,
         read_sql_query_with_options,
         read_sql_query_with_options_and_index_col,
+        read_sql_table,
         read_sql_table_chunks,
         read_sql_table_with_options,
-        // IO — datetime/numeric helpers (full module-level fn surface)
-        cut,
-        qcut,
+        // fd90.210: read_sql_with_options pairs with SqlReadOptions.
+        read_sql_with_options,
+        // fd90.12: Series ↔ Arrow array interop. README line 1580
+        // documents Arrow interop as a public surface; fd90.264 added
+        // the Series-level pair. Promote to the prelude alongside the
+        // rest of the IO surface.
+        series_from_arrow_array,
+        series_to_arrow_array,
+        sql_backend_caps,
+        sql_max_identifier_length,
+        sql_max_insert_rows,
+        sql_max_param_count,
+        sql_primary_key_columns,
+        sql_server_version,
+        sql_supports_returning,
+        sql_supports_schemas,
+        sql_table_comment,
+        sql_table_schema,
+        timedelta_range,
         timedelta_total_seconds,
         to_datetime,
-        to_timedelta_with_options,
-        to_timedelta_with_unit,
         to_datetime_with_format,
         to_datetime_with_options,
         to_datetime_with_unit,
         to_numeric,
         to_timedelta,
-        // fd90.208: pandas-style top-level null checks + dtype helpers.
-        // The README documents these as user-facing (lines 359, 771, 957, 1031).
-        cast_scalar,
-        // fd90.16: cast_scalar_owned pairs with cast_scalar (above) for
-        // owned-input flows where the caller can move rather than borrow.
-        cast_scalar_owned,
-        common_dtype,
-        // fd90.262: Vec<Scalar> helpers matching pandas' top-level surface.
-        count_na,
-        dropna,
-        fill_na,
-        // fd90.261: pandas-parity date/timedelta range constructors.
-        DateOffset,
-        date_range,
-        timedelta_range,
-        // fd90.269: bdate_range pairs with date_range (pandas pd.bdate_range).
-        bdate_range,
-        // fd90.16: error types paired with the date/timedelta range
-        // constructors above. Without these the user can't pattern-
-        // match on Result<_, DateRangeError> from the prelude alone.
-        DateRangeError,
-        TimedeltaRangeError,
-        // fd90.33: apply_date_offset is the primary use-site for
-        // DateOffset (above). Without it in the prelude the user can
-        // name the offset variant but can't apply it from prelude
-        // alone — paired-surface defect.
-        apply_date_offset,
-        infer_dtype,
-        isna,
-        isnull,
-        notna,
-        notnull,
-        // NanOps — null-skipping aggregation primitives (matches README NanOps section)
-        nanall,
-        nanany,
-        nanargmax,
-        nanargmin,
-        nancount,
-        nancummax,
-        nancummin,
-        nancumprod,
-        nancumsum,
-        nankurt,
-        nanmax,
-        nanmean,
-        nanmedian,
-        nanmin,
-        nannunique,
-        nanprod,
-        nanptp,
-        nanquantile,
-        nansem,
-        nanskew,
-        nanstd,
-        nansum,
-        nanvar,
+        to_timedelta_with_options,
+        to_timedelta_with_unit,
+        truncate_sql_table,
         // IO — writers (in-memory + path + sql; covers all 8 documented formats)
         write_csv,
         write_csv_string,
@@ -613,10 +661,10 @@ pub mod prelude {
         write_jsonl_string,
         write_parquet,
         write_parquet_bytes,
+        write_sql,
         // fd90.209: write_sql_with_options pairs with SqlWriteOptions
         // (which is in the prelude as of fd90.206).
         write_sql_with_options,
-        write_sql,
     };
 }
 
@@ -980,11 +1028,23 @@ mod tests {
 
         // fd90.13: SQL schema/iterator return types — name-check via
         // fn-pointer signatures (no Default impls).
-        let _is_chunk_iter: fn(SqlChunkIterator) -> _ = |x| x;
+        fn chunk_identity<'a>(x: SqlChunkIterator<'a>) -> SqlChunkIterator<'a> {
+            x
+        }
+        fn indexed_chunk_identity<'a>(
+            x: SqlIndexedChunkIterator<'a>,
+        ) -> SqlIndexedChunkIterator<'a> {
+            x
+        }
+
+        let _is_chunk_iter: for<'a> fn(SqlChunkIterator<'a>) -> SqlChunkIterator<'a> =
+            chunk_identity;
         let _is_col_schema: fn(SqlColumnSchema) -> _ = |x| x;
         let _is_fk_schema: fn(SqlForeignKeySchema) -> _ = |x| x;
         let _is_idx_schema: fn(SqlIndexSchema) -> _ = |x| x;
-        let _is_indexed_chunk: fn(SqlIndexedChunkIterator) -> _ = |x| x;
+        let _is_indexed_chunk: for<'a> fn(
+            SqlIndexedChunkIterator<'a>,
+        ) -> SqlIndexedChunkIterator<'a> = indexed_chunk_identity;
         let _is_query_result: fn(SqlQueryResult) -> _ = |x| x;
         let _is_reflected: fn(SqlReflectedTable) -> _ = |x| x;
         let _is_backend_caps: fn(SqlBackendCaps) -> _ = |x| x;

@@ -23,10 +23,9 @@ fn readme_quick_example_compiles_and_runs() -> Result<(), Box<dyn std::error::Er
 
     let adults = df.query("age > 28")?;
 
-    let summary = adults.groupby(&["city"])?.agg_named(&[
-        ("avg_age", "age", "mean"),
-        ("count", "age", "count"),
-    ])?;
+    let summary = adults
+        .groupby(&["city"])?
+        .agg_named(&[("avg_age", "age", "mean"), ("count", "age", "count")])?;
 
     let _json = write_json_string(&summary, JsonOrient::Records)?;
     let _feather = write_feather_bytes(&summary)?;
@@ -49,9 +48,8 @@ fn readme_quick_example_compiles_and_runs() -> Result<(), Box<dyn std::error::Er
 #[cfg(feature = "sql-sqlite")]
 #[test]
 fn readme_quick_start_round_trip_through_sqlite() -> Result<(), Box<dyn std::error::Error>> {
-    let df = read_csv_str(
-        "ticker,price,volume\nAAPL,185.50,1000\nGOOG,140.25,500\nAAPL,186.00,1200",
-    )?;
+    let df =
+        read_csv_str("ticker,price,volume\nAAPL,185.50,1000\nGOOG,140.25,500\nAAPL,186.00,1200")?;
 
     let expensive = df.query("price > 150")?;
     let by_ticker = expensive.groupby(&["ticker"])?.sum()?;
@@ -138,7 +136,10 @@ fn readme_quick_start_round_trip_through_sqlite() -> Result<(), Box<dyn std::err
     // returns an empty Vec (multi-schema backends like PG/MySQL would
     // populate this). Coverage proves the call dispatches and decodes.
     let schemas = inspector.schemas()?;
-    assert!(schemas.is_empty(), "sqlite schemas should be empty: {schemas:?}");
+    assert!(
+        schemas.is_empty(),
+        "sqlite schemas should be empty: {schemas:?}"
+    );
 
     // views() — surfaces the view we just created.
     let views = inspector.views(None)?;
@@ -179,8 +180,9 @@ fn readme_quick_start_round_trip_through_sqlite() -> Result<(), Box<dyn std::err
     // unique_constraints() — composite UC (parent_id, code) on child.
     let child_ucs = inspector.unique_constraints("child", None)?;
     assert!(
-        child_ucs.iter().any(|u| u.columns
-            == vec!["parent_id".to_string(), "code".to_string()]),
+        child_ucs
+            .iter()
+            .any(|u| u.columns == vec!["parent_id".to_string(), "code".to_string()]),
         "ucs: {child_ucs:?}",
     );
 
@@ -202,7 +204,10 @@ fn readme_quick_start_round_trip_through_sqlite() -> Result<(), Box<dyn std::err
 
     // server_version() — rusqlite override returns Some(library version).
     let server_ver = inspector.server_version()?;
-    assert!(server_ver.is_some(), "sqlite server_version: {server_ver:?}");
+    assert!(
+        server_ver.is_some(),
+        "sqlite server_version: {server_ver:?}"
+    );
 
     // max_identifier_length() — Option<usize> probe; SQLite default impl
     // may return None (no documented hard limit). Just exercise the call.
@@ -285,14 +290,14 @@ fn readme_quick_start_round_trip_through_sqlite() -> Result<(), Box<dyn std::err
     let server_ver_via_fn = sql_server_version(&conn)?;
     assert_eq!(server_ver_via_fn, inspector.server_version()?);
 
-    assert_eq!(sql_max_identifier_length(&conn), inspector.max_identifier_length());
+    assert_eq!(
+        sql_max_identifier_length(&conn),
+        inspector.max_identifier_length()
+    );
 
     // truncate_sql_table — DDL-style reset; emits DELETE FROM on SQLite
     // (no native TRUNCATE). Insert a row, truncate, verify empty.
-    conn.execute(
-        "INSERT INTO parent (id, name) VALUES (1, 'doomed')",
-        [],
-    )?;
+    conn.execute("INSERT INTO parent (id, name) VALUES (1, 'doomed')", [])?;
     truncate_sql_table(&conn, "parent", None)?;
     let post_truncate = inspector
         .columns("parent", None)?
@@ -311,7 +316,7 @@ fn readme_quick_start_round_trip_through_sqlite() -> Result<(), Box<dyn std::err
 
     // fd90.20: SqlIndexedChunkIterator — chunked reader with index_col
     // promoting 'id' to the row index. Yields Result<DataFrame, IoError>.
-    let mut indexed_chunks: SqlIndexedChunkIterator = read_sql_chunks_with_index_col(
+    let mut indexed_chunks: SqlIndexedChunkIterator<'_> = read_sql_chunks_with_index_col(
         &conn,
         "SELECT id, name FROM parent ORDER BY id",
         Some("id"),
@@ -353,13 +358,8 @@ fn readme_quick_start_round_trip_through_sqlite() -> Result<(), Box<dyn std::err
 
     // parent.name is TEXT NOT NULL UNIQUE — declared_type "TEXT",
     // not autoincrement.
-    let name_col_full = parent_cols
-        .column("name")
-        .expect("parent.name present");
-    let declared_name = name_col_full
-        .declared_type
-        .as_ref()
-        .expect("TEXT declared");
+    let name_col_full = parent_cols.column("name").expect("parent.name present");
+    let declared_name = name_col_full.declared_type.as_ref().expect("TEXT declared");
     assert!(declared_name.eq_ignore_ascii_case("text"));
     assert!(!name_col_full.autoincrement);
 
@@ -443,7 +443,11 @@ fn readme_merge_with_options_compiles_and_runs() -> Result<(), Box<dyn std::erro
     // fd90.257: module-level join_series / merge_dataframes_on / merge_ordered.
     // join_series — produces a JoinedSeries on overlapping indexes.
     let s_labels: Vec<IndexLabel> = vec![IndexLabel::Int64(0), IndexLabel::Int64(1)];
-    let s_a = Series::from_values("a", s_labels.clone(), vec![Scalar::Int64(1), Scalar::Int64(2)])?;
+    let s_a = Series::from_values(
+        "a",
+        s_labels.clone(),
+        vec![Scalar::Int64(1), Scalar::Int64(2)],
+    )?;
     let s_b = Series::from_values("b", s_labels, vec![Scalar::Int64(10), Scalar::Int64(20)])?;
     let _joined: JoinedSeries = join_series(&s_a, &s_b, JoinType::Inner)?;
 
@@ -483,7 +487,9 @@ fn readme_merge_with_options_compiles_and_runs() -> Result<(), Box<dyn std::erro
 fn readme_expression_driven_analysis_compiles_and_runs() -> Result<(), Box<dyn std::error::Error>> {
     use std::collections::BTreeMap;
 
-    let df = read_csv_str("revenue,cost,price,rating,value\n200,150,40,4.5,150\n100,80,60,3.5,80\n300,250,30,4.7,200")?;
+    let df = read_csv_str(
+        "revenue,cost,price,rating,value\n200,150,40,4.5,150\n100,80,60,3.5,80\n300,250,30,4.7,200",
+    )?;
 
     // Compute new columns with eval — returns Series.
     let profit = df.eval("revenue - cost")?;
@@ -495,18 +501,17 @@ fn readme_expression_driven_analysis_compiles_and_runs() -> Result<(), Box<dyn s
     assert_eq!(hot_deals.index().len(), 2);
 
     // Use local variables in expressions.
-    let locals = BTreeMap::from([
-        ("threshold".to_owned(), Scalar::Float64(100.0)),
-    ]);
+    let locals = BTreeMap::from([("threshold".to_owned(), Scalar::Float64(100.0))]);
     let above = df.query_with_locals("value > @threshold", &locals)?;
     // value>100 → row 0 (150) + row 2 (200). Row 1 (80) drops.
     assert_eq!(above.index().len(), 2);
 
     // fd90.242: eval_with_locals — @local variable references in eval
     // expressions (mirrors query_with_locals at the eval surface).
-    let scaled = df.eval_with_locals("revenue * @scale", &BTreeMap::from([
-        ("scale".to_owned(), Scalar::Float64(0.5)),
-    ]))?;
+    let scaled = df.eval_with_locals(
+        "revenue * @scale",
+        &BTreeMap::from([("scale".to_owned(), Scalar::Float64(0.5))]),
+    )?;
     assert_eq!(scaled.len(), 3);
     Ok(())
 }
@@ -622,7 +627,10 @@ fn readme_categorical_analysis_compiles_and_runs() -> Result<(), Box<dyn std::er
     ])?;
 
     // Materialize back to a flat Series of label strings.
-    let values = renamed.cat().expect("renamed is still categorical").to_values()?;
+    let values = renamed
+        .cat()
+        .expect("renamed is still categorical")
+        .to_values()?;
     assert_eq!(values.len(), 4);
 
     // fd90.195: exercise the remaining .cat() methods documented in the
@@ -691,8 +699,7 @@ fn readme_categorical_analysis_compiles_and_runs() -> Result<(), Box<dyn std::er
 /// - write_jsonl to a path-based output (uses a tempdir so the test cleans up)
 #[test]
 fn readme_financial_data_pipeline_compiles_and_runs() -> Result<(), Box<dyn std::error::Error>> {
-    use std::env;
-    use std::fs;
+    use std::{env, fs};
 
     let trades = read_csv_str(
         "date,ticker,price,volume\n\
@@ -721,9 +728,21 @@ fn readme_financial_data_pipeline_compiles_and_runs() -> Result<(), Box<dyn std:
     // 2 unique tickers (AAPL, GOOG).
     assert_eq!(vwap.index().len(), 2);
     // Three named output columns plus the ticker key.
-    assert!(vwap.column_names().iter().any(|n| n.as_str() == "total_value"));
-    assert!(vwap.column_names().iter().any(|n| n.as_str() == "total_vol"));
-    assert!(vwap.column_names().iter().any(|n| n.as_str() == "trade_count"));
+    assert!(
+        vwap.column_names()
+            .iter()
+            .any(|n| n.as_str() == "total_value")
+    );
+    assert!(
+        vwap.column_names()
+            .iter()
+            .any(|n| n.as_str() == "total_vol")
+    );
+    assert!(
+        vwap.column_names()
+            .iter()
+            .any(|n| n.as_str() == "trade_count")
+    );
 
     // Export for downstream consumption — use a tempdir so the test cleans up.
     let mut out_path = env::temp_dir();
@@ -758,12 +777,7 @@ fn readme_merge_asof_compiles_and_runs() -> Result<(), Box<dyn std::error::Error
     // quotes: 4 quotes at timestamps 5, 15, 25, 35 — none match exactly.
     let quotes = read_csv_str("timestamp,quote\n5,99\n15,150\n25,250\n35,350")?;
 
-    let merged = merge_asof(
-        &trades,
-        &quotes,
-        "timestamp",
-        AsofDirection::Backward,
-    )?;
+    let merged = merge_asof(&trades, &quotes, "timestamp", AsofDirection::Backward)?;
 
     // MergedDataFrame has public index + columns fields. Reconstruct a
     // DataFrame to call methods on it (per fd90.137 docs note).
@@ -774,7 +788,12 @@ fn readme_merge_asof_compiles_and_runs() -> Result<(), Box<dyn std::error::Error
     //   trade 20 → quote at 15 (=150)
     //   trade 30 → quote at 25 (=250)
     assert_eq!(result.index().len(), 3);
-    assert!(result.column_names().iter().any(|n| n.as_str() == "trade_price"));
+    assert!(
+        result
+            .column_names()
+            .iter()
+            .any(|n| n.as_str() == "trade_price")
+    );
     assert!(result.column_names().iter().any(|n| n.as_str() == "quote"));
 
     // fd90.286: merge_asof_with_options — pandas pd.merge_asof(tolerance=...)
@@ -786,13 +805,8 @@ fn readme_merge_asof_compiles_and_runs() -> Result<(), Box<dyn std::error::Error
         tolerance: Some(5.0),
         by: None,
     };
-    let _tuned = merge_asof_with_options(
-        &trades,
-        &quotes,
-        "timestamp",
-        AsofDirection::Backward,
-        opts,
-    )?;
+    let _tuned =
+        merge_asof_with_options(&trades, &quotes, "timestamp", AsofDirection::Backward, opts)?;
     Ok(())
 }
 
@@ -866,7 +880,11 @@ fn readme_duplicate_handling_compiles_and_runs() -> Result<(), Box<dyn std::erro
         .column("v")
         .expect("v column exists")
         .clone();
-    let series = Series::new("v", read_csv_str("v\n10\n20\n10\n30\n20")?.index().clone(), series)?;
+    let series = Series::new(
+        "v",
+        read_csv_str("v\n10\n20\n10\n30\n20")?.index().clone(),
+        series,
+    )?;
     let deduped = series.drop_duplicates()?;
     assert_eq!(deduped.len(), 3); // 10, 20, 30
 
@@ -964,7 +982,9 @@ fn readme_window_operations_compiles_and_runs() -> Result<(), Box<dyn std::error
     let other_series = Series::from_values(
         "other",
         (0..100i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
-        (0..100i64).map(|v| Scalar::Float64((v + 1) as f64)).collect::<Vec<_>>(),
+        (0..100i64)
+            .map(|v| Scalar::Float64((v + 1) as f64))
+            .collect::<Vec<_>>(),
     )?;
     let _ = r.corr(&other_series)?;
     let _ = r.cov(&other_series)?;
@@ -987,7 +1007,9 @@ fn readme_window_operations_compiles_and_runs() -> Result<(), Box<dyn std::error
     let exp_other = Series::from_values(
         "exp_other",
         (0..100i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
-        (0..100i64).map(|v| Scalar::Float64((v + 5) as f64)).collect::<Vec<_>>(),
+        (0..100i64)
+            .map(|v| Scalar::Float64((v + 5) as f64))
+            .collect::<Vec<_>>(),
     )?;
     let _ = e.corr(&exp_other)?;
     let _ = e.cov(&exp_other)?;
@@ -1031,8 +1053,11 @@ fn readme_window_operations_compiles_and_runs() -> Result<(), Box<dyn std::error
     let _ = monthly.var()?;
     let _ = monthly.median()?;
     let _ = monthly.prod()?;
-    let _ = monthly.apply(|vals: &[Scalar]| vals.first().cloned().unwrap_or(Scalar::Null(NullKind::NaN)))?;
-    let _ = monthly.apply_fn(|vals: &[Scalar]| Ok(vals.first().cloned().unwrap_or(Scalar::Null(NullKind::NaN))))?;
+    let _ = monthly
+        .apply(|vals: &[Scalar]| vals.first().cloned().unwrap_or(Scalar::Null(NullKind::NaN)))?;
+    let _ = monthly.apply_fn(|vals: &[Scalar]| {
+        Ok(vals.first().cloned().unwrap_or(Scalar::Null(NullKind::NaN)))
+    })?;
 
     // ── DataFrame versions.
     let df = read_csv_str("a,b\n1,10\n2,20\n3,30\n4,40\n5,50\n6,60\n7,70\n8,80\n9,90\n10,100")?;
@@ -1053,7 +1078,9 @@ fn readme_window_operations_compiles_and_runs() -> Result<(), Box<dyn std::error
     let dr_other = Series::from_values(
         "dr_other",
         (0..10i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
-        (0..10i64).map(|v| Scalar::Float64((v + 1) as f64)).collect::<Vec<_>>(),
+        (0..10i64)
+            .map(|v| Scalar::Float64((v + 1) as f64))
+            .collect::<Vec<_>>(),
     )?;
     let _ = dr.corr_with(&dr_other)?;
     let _ = dr.cov_with(&dr_other)?;
@@ -1082,12 +1109,19 @@ fn readme_window_operations_compiles_and_runs() -> Result<(), Box<dyn std::error
 
     // ── DataFrame Resample — needs datetime-string row index.
     let dt_df = DataFrame::from_dict_with_index(
-        vec![("sales", vec![
-            Scalar::Float64(100.0),
-            Scalar::Float64(200.0),
-            Scalar::Float64(300.0),
-        ])],
-        vec!["2024-01-15".into(), "2024-01-20".into(), "2024-02-10".into()],
+        vec![(
+            "sales",
+            vec![
+                Scalar::Float64(100.0),
+                Scalar::Float64(200.0),
+                Scalar::Float64(300.0),
+            ],
+        )],
+        vec![
+            "2024-01-15".into(),
+            "2024-01-20".into(),
+            "2024-02-10".into(),
+        ],
     )?;
     let drs = dt_df.resample("M");
     let _ = drs.sum()?;
@@ -1182,12 +1216,7 @@ fn readme_pivot_tables_compiles_and_runs() -> Result<(), Box<dyn std::error::Err
     assert_eq!(pt.index().len(), 2); // east + west rows
 
     // Multiple values columns.
-    let pt = df.pivot_table_multi_values(
-        &["revenue", "quantity"],
-        "region",
-        "product",
-        "sum",
-    )?;
+    let pt = df.pivot_table_multi_values(&["revenue", "quantity"], "region", "product", "sum")?;
     assert_eq!(pt.index().len(), 2);
 
     // With margins (subtotals row/col); margins=true.
@@ -1211,12 +1240,7 @@ fn readme_pivot_tables_compiles_and_runs() -> Result<(), Box<dyn std::error::Err
     assert_eq!(pt.index().len(), 2);
 
     // Multiple aggregation functions — emits {col}_{fn} columns.
-    let pt = df.pivot_table_multi_agg(
-        "revenue",
-        "region",
-        "product",
-        &["sum", "mean", "count"],
-    )?;
+    let pt = df.pivot_table_multi_agg("revenue", "region", "product", &["sum", "mean", "count"])?;
     assert_eq!(pt.index().len(), 2);
 
     // fd90.252: pivot (no aggregation) / pivot_table_with_dropna /
@@ -1229,9 +1253,7 @@ fn readme_pivot_tables_compiles_and_runs() -> Result<(), Box<dyn std::error::Err
 
     // pivot_table_with_dropna — explicit dropna toggle (true is the default
     // for plain pivot_table).
-    let pt_drop = df.pivot_table_with_dropna(
-        "revenue", "region", "product", "sum", true,
-    )?;
+    let pt_drop = df.pivot_table_with_dropna("revenue", "region", "product", "sum", true)?;
     assert_eq!(pt_drop.index().len(), 2);
 
     // pivot_table_aggfunc_dict — per-value aggfunc dispatch.
@@ -1289,16 +1311,8 @@ fn readme_concat_full_options_compiles_and_runs() -> Result<(), Box<dyn std::err
     // fd90.256: Series-level concat (module-level helpers).
     let s_labels1: Vec<IndexLabel> = vec![IndexLabel::Int64(0), IndexLabel::Int64(1)];
     let s_labels2: Vec<IndexLabel> = vec![IndexLabel::Int64(2), IndexLabel::Int64(3)];
-    let s1 = Series::from_values(
-        "x",
-        s_labels1,
-        vec![Scalar::Int64(10), Scalar::Int64(20)],
-    )?;
-    let s2 = Series::from_values(
-        "x",
-        s_labels2,
-        vec![Scalar::Int64(30), Scalar::Int64(40)],
-    )?;
+    let s1 = Series::from_values("x", s_labels1, vec![Scalar::Int64(10), Scalar::Int64(20)])?;
+    let s2 = Series::from_values("x", s_labels2, vec![Scalar::Int64(30), Scalar::Int64(40)])?;
     let combined = concat_series(&[&s1, &s2])?;
     assert_eq!(combined.len(), 4);
     let reindexed = concat_series_with_ignore_index(&[&s1, &s2], true)?;
@@ -1390,12 +1404,20 @@ fn readme_element_wise_operations_compiles_and_runs() -> Result<(), Box<dyn std:
     let s_a = Series::from_values(
         "a",
         labels.clone(),
-        vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)],
+        vec![
+            Scalar::Float64(10.0),
+            Scalar::Float64(20.0),
+            Scalar::Float64(30.0),
+        ],
     )?;
     let s_b = Series::from_values(
         "b",
         labels,
-        vec![Scalar::Float64(2.0), Scalar::Float64(4.0), Scalar::Float64(6.0)],
+        vec![
+            Scalar::Float64(2.0),
+            Scalar::Float64(4.0),
+            Scalar::Float64(6.0),
+        ],
     )?;
     let _ = s_a.add(&s_b)?;
     let _ = s_a.sub(&s_b)?;
@@ -1569,10 +1591,7 @@ fn readme_element_wise_operations_compiles_and_runs() -> Result<(), Box<dyn std:
     assert_eq!(s_reindexed.len(), 8); // bigger has 6, padded to 8
 
     // Series.truncate — keep the inclusive interval [before, after].
-    let s_truncated = bigger.truncate(
-        Some(&IndexLabel::Int64(1)),
-        Some(&IndexLabel::Int64(4)),
-    )?;
+    let s_truncated = bigger.truncate(Some(&IndexLabel::Int64(1)), Some(&IndexLabel::Int64(4)))?;
     assert!(s_truncated.len() <= bigger.len());
 
     // DataFrame.reindex — same shape, on the row axis.
@@ -1580,10 +1599,7 @@ fn readme_element_wise_operations_compiles_and_runs() -> Result<(), Box<dyn std:
     assert_eq!(df_reindexed.index().len(), 8);
 
     // DataFrame.truncate — same interval semantics.
-    let df_truncated = df.truncate(
-        Some(&IndexLabel::Int64(1)),
-        Some(&IndexLabel::Int64(2)),
-    )?;
+    let df_truncated = df.truncate(Some(&IndexLabel::Int64(1)), Some(&IndexLabel::Int64(2)))?;
     assert!(df_truncated.index().len() <= df.index().len());
 
     // DataFrame.insert — README line 1146: positional insert.
@@ -1595,10 +1611,7 @@ fn readme_element_wise_operations_compiles_and_runs() -> Result<(), Box<dyn std:
     ])?;
     let with_inserted = df.insert(0, "new_first", new_col)?;
     assert_eq!(
-        with_inserted
-            .column_names()
-            .first()
-            .map(|n| n.as_str()),
+        with_inserted.column_names().first().map(|n| n.as_str()),
         Some("new_first"),
     );
 
@@ -1619,12 +1632,7 @@ fn readme_element_wise_operations_compiles_and_runs() -> Result<(), Box<dyn std:
     );
     // drop_columns — bulk drop (alternative to drop with axis arg).
     let dropped = with_added.drop_columns(&["added"])?;
-    assert!(
-        !dropped
-            .column_names()
-            .iter()
-            .any(|n| n.as_str() == "added")
-    );
+    assert!(!dropped.column_names().iter().any(|n| n.as_str() == "added"));
     // rename_columns — paired renames.
     let renamed_cols = df.rename_columns(&[("a", "alpha"), ("b", "beta")])?;
     assert!(
@@ -1816,10 +1824,7 @@ fn readme_missing_data_handling_compiles_and_runs() -> Result<(), Box<dyn std::e
     let df = read_csv_str("a,b,c\n1,1,1\n2,,2\n3,3,\n,,4\n5,5,5")?;
     let _ = df.dropna()?;
     let _ = df.dropna_with_options(DropNaHow::All, None)?;
-    let _ = df.dropna_with_options(
-        DropNaHow::Any,
-        Some(&["a".into(), "b".into()]),
-    )?;
+    let _ = df.dropna_with_options(DropNaHow::Any, Some(&["a".into(), "b".into()]))?;
     // fd90.104 rename: dropna_with_thresh → dropna_with_threshold (with subset arg).
     let _ = df.dropna_with_threshold(2, None)?;
     let _ = df.dropna_columns()?;
@@ -1972,10 +1977,7 @@ fn readme_dataframe_introspection_compiles_and_runs() -> Result<(), Box<dyn std:
 
     // DataFrame.lookup(&row_labels, &col_names) — Vec<Scalar> at the
     // (row, col) intersections.
-    let lookup_vals = df.lookup(
-        &[IndexLabel::Int64(0), IndexLabel::Int64(1)],
-        &["a", "b"],
-    )?;
+    let lookup_vals = df.lookup(&[IndexLabel::Int64(0), IndexLabel::Int64(1)], &["a", "b"])?;
     assert_eq!(lookup_vals.len(), 2);
     Ok(())
 }
@@ -2074,9 +2076,7 @@ fn readme_time_series_operations_compiles_and_runs() -> Result<(), Box<dyn std::
     )?;
     let df = DataFrame::new(
         Index::new(labels.clone()),
-        std::collections::BTreeMap::from([
-            ("v".to_owned(), val_series.column().clone()),
-        ]),
+        std::collections::BTreeMap::from([("v".to_owned(), val_series.column().clone())]),
     )?;
 
     // at_time / between_time — string-typed time matchers.
@@ -2129,10 +2129,7 @@ fn readme_time_series_operations_compiles_and_runs() -> Result<(), Box<dyn std::
     let _ = dt.to_timestamp()?;
     let _ = dt.to_pydatetime()?;
     // tz_localize_with_options uses TzLocalizeOptions (top-level export).
-    let _ = dt.tz_localize_with_options(
-        Some("America/New_York"),
-        TzLocalizeOptions::default(),
-    )?;
+    let _ = dt.tz_localize_with_options(Some("America/New_York"), TzLocalizeOptions::default())?;
 
     // Timezone operations — tz arg is Option<&str>.
     let _ = date_series.dt().tz_localize(Some("America/New_York"))?;
@@ -2178,8 +2175,8 @@ fn readme_groupby_aggregation_matrix_compiles_and_runs() -> Result<(), Box<dyn s
     // table (sem/skew/kurt|kurtosis) are exposed via direct method calls
     // (.sem(), .skew(), .kurt(), .kurtosis()).
     for fn_name in [
-        "sum", "mean", "count", "min", "max", "std", "var", "median", "first",
-        "last", "nunique", "prod",
+        "sum", "mean", "count", "min", "max", "std", "var", "median", "first", "last", "nunique",
+        "prod",
     ] {
         let _ = gb.agg_list(&[fn_name])?;
     }
@@ -2191,10 +2188,7 @@ fn readme_groupby_aggregation_matrix_compiles_and_runs() -> Result<(), Box<dyn s
     let _ = gb.agg_list(&["sum", "mean", "count"])?;
 
     // agg_named — explicit (out_col, src_col, fn).
-    let named = gb.agg_named(&[
-        ("total_b", "b", "sum"),
-        ("avg_b", "b", "mean"),
-    ])?;
+    let named = gb.agg_named(&[("total_b", "b", "sum"), ("avg_b", "b", "mean")])?;
     assert_eq!(named.index().len(), 2);
 
     // Group-level transforms / ops (line 566).
@@ -2236,8 +2230,24 @@ fn readme_groupby_aggregation_matrix_compiles_and_runs() -> Result<(), Box<dyn s
     // GroupBy.resample("M") — needs a datetime-indexed grouping DataFrame.
     let dt_df = DataFrame::from_dict_with_index(
         vec![
-            ("k", vec![Scalar::Utf8("a".into()), Scalar::Utf8("a".into()), Scalar::Utf8("b".into()), Scalar::Utf8("b".into())]),
-            ("v", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0)]),
+            (
+                "k",
+                vec![
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("b".into()),
+                    Scalar::Utf8("b".into()),
+                ],
+            ),
+            (
+                "v",
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(2.0),
+                    Scalar::Float64(3.0),
+                    Scalar::Float64(4.0),
+                ],
+            ),
         ],
         vec![
             "2024-01-15".into(),
@@ -2323,9 +2333,7 @@ fn readme_apply_and_transform_compiles_and_runs() -> Result<(), Box<dyn std::err
                 .iter()
                 .zip(cost.values())
                 .map(|(r, c)| match (r, c) {
-                    (Scalar::Int64(a), Scalar::Int64(b)) => {
-                        Scalar::Float64(*a as f64 / *b as f64)
-                    }
+                    (Scalar::Int64(a), Scalar::Int64(b)) => Scalar::Float64(*a as f64 / *b as f64),
                     _ => Scalar::Null(NullKind::NaN),
                 })
                 .collect();
@@ -2342,14 +2350,25 @@ fn readme_apply_and_transform_compiles_and_runs() -> Result<(), Box<dyn std::err
 
     // fd90.275: more apply/assign variants.
     // DataFrame.assign — bulk column-add via Vec<(name, Column)>.
-    let new_col = Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3), Scalar::Int64(4)])?;
+    let new_col = Column::from_values(vec![
+        Scalar::Int64(1),
+        Scalar::Int64(2),
+        Scalar::Int64(3),
+        Scalar::Int64(4),
+    ])?;
     let _ = df.assign(vec![("added", new_col)])?;
     // DataFrame.apply_fn(func, axis) — Fn(&[Scalar]) -> Scalar; axis=0 column-wise.
-    let _ = df.apply_fn(|vals: &[Scalar]| vals.first().cloned().unwrap_or(Scalar::Null(NullKind::NaN)), 0)?;
+    let _ = df.apply_fn(
+        |vals: &[Scalar]| vals.first().cloned().unwrap_or(Scalar::Null(NullKind::NaN)),
+        0,
+    )?;
     // DataFrame.applymap_na_action — applymap with na pass-through.
     let _ = df.applymap_na_action(|s: &Scalar| s.clone())?;
     // DataFrame.apply_rows(func, name) — Fn(&[Scalar]) -> Scalar over rows, returns named Series.
-    let _ = df.apply_rows(|row: &[Scalar]| row.first().cloned().unwrap_or(Scalar::Null(NullKind::NaN)), "first_col_per_row")?;
+    let _ = df.apply_rows(
+        |row: &[Scalar]| row.first().cloned().unwrap_or(Scalar::Null(NullKind::NaN)),
+        "first_col_per_row",
+    )?;
 
     // fd90.276: combine variants + compare_with_result_names.
     // Series.combine(other, Fn(&Scalar, &Scalar) -> Scalar) — outer-aligned pairwise.
@@ -2377,10 +2396,12 @@ fn readme_apply_and_transform_compiles_and_runs() -> Result<(), Box<dyn std::err
     // DataFrame.combine — column-pair Fn(&Series, &Series) -> Result<Series, FrameError>.
     let _ = df.combine(
         &df_other,
-        |left: &Series, right: &Series| left.combine(right, |a, b| match (a, b) {
-            (Scalar::Int64(x), Scalar::Int64(y)) => Scalar::Int64(x + y),
-            _ => Scalar::Null(NullKind::NaN),
-        }),
+        |left: &Series, right: &Series| {
+            left.combine(right, |a, b| match (a, b) {
+                (Scalar::Int64(x), Scalar::Int64(y)) => Scalar::Int64(x + y),
+                _ => Scalar::Null(NullKind::NaN),
+            })
+        },
         None,
         false,
     )?;
@@ -2413,11 +2434,7 @@ fn readme_conditional_logic_compiles_and_runs() -> Result<(), Box<dyn std::error
     let phones = Series::from_values(
         "phone",
         phones_labels,
-        vec![
-            "555-1234".into(),
-            "555-9876".into(),
-            "555-0000".into(),
-        ],
+        vec!["555-1234".into(), "555-9876".into(), "555-0000".into()],
     )?;
     let masked = phones.str().replace_regex(r"\d{3}-\d{4}", "***-****")?;
     assert_eq!(masked.len(), 3);
@@ -2427,11 +2444,7 @@ fn readme_conditional_logic_compiles_and_runs() -> Result<(), Box<dyn std::error
     let codes = Series::from_values(
         "code",
         codes_labels,
-        vec![
-            Scalar::Int64(1),
-            Scalar::Int64(2),
-            Scalar::Int64(3),
-        ],
+        vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
     )?;
     let mapping = vec![
         (Scalar::Int64(1), "low".into()),
@@ -2584,13 +2597,23 @@ fn readme_advanced_selection_compiles_and_runs() -> Result<(), Box<dyn std::erro
     let numeric_only = df.select_dtypes(&[DType::Int64, DType::Float64], &[])?;
     assert!(!numeric_only.column_names().is_empty());
     let non_numeric = df.select_dtypes(&[], &[DType::Int64, DType::Float64])?;
-    assert!(non_numeric.column_names().iter().any(|n| n.as_str() == "ticker"));
+    assert!(
+        non_numeric
+            .column_names()
+            .iter()
+            .any(|n| n.as_str() == "ticker")
+    );
 
     // filter_labels — items + regex variants on axis=1.
     let subset = df.filter_labels(Some(&["price", "volume"]), None, None, 1)?;
     assert_eq!(subset.column_names().len(), 2);
     let regex_match = df.filter_labels(None, None, Some("^rev"), 1)?;
-    assert!(regex_match.column_names().iter().any(|n| n.as_str() == "revenue"));
+    assert!(
+        regex_match
+            .column_names()
+            .iter()
+            .any(|n| n.as_str() == "revenue")
+    );
     Ok(())
 }
 
@@ -2657,9 +2680,7 @@ fn readme_column_manipulation_compiles_and_runs() -> Result<(), Box<dyn std::err
                 .iter()
                 .zip(cost.values())
                 .map(|(r, c)| match (r, c) {
-                    (Scalar::Int64(a), Scalar::Int64(b)) => {
-                        Scalar::Float64(*a as f64 / *b as f64)
-                    }
+                    (Scalar::Int64(a), Scalar::Int64(b)) => Scalar::Float64(*a as f64 / *b as f64),
                     _ => Scalar::Null(NullKind::NaN),
                 })
                 .collect();
@@ -2750,12 +2771,7 @@ fn readme_selection_and_indexing_compiles_and_runs() -> Result<(), Box<dyn std::
     // set_index — promote a column to the index (drop=true removes from data).
     let dated = read_csv_str("date,price\n2024-01-01,100\n2024-01-02,105\n2024-01-03,110")?;
     let indexed = dated.set_index("date", true)?;
-    assert!(
-        !indexed
-            .column_names()
-            .iter()
-            .any(|n| n.as_str() == "date")
-    );
+    assert!(!indexed.column_names().iter().any(|n| n.as_str() == "date"));
     assert_eq!(indexed.index().len(), 3);
 
     // reset_index — index → column (drop=false keeps it as a regular column).
@@ -2864,9 +2880,7 @@ fn readme_dataframe_output_formats_compiles_and_runs() -> Result<(), Box<dyn std
     assert!(table.contains("AAPL"));
 
     // to_string_truncated — head/tail with "..." between when over max_rows.
-    let big = read_csv_str(
-        "v\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10",
-    )?;
+    let big = read_csv_str("v\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10")?;
     let truncated = big.to_string_truncated(true, Some(4), None);
     assert!(!truncated.is_empty());
 
@@ -3118,8 +3132,14 @@ fn readme_dataframe_constructors_compiles_and_runs() -> Result<(), Box<dyn std::
     let df_mixed = DataFrame::from_dict_mixed(
         &["a", "b"],
         vec![
-            ("a", DataFrameColumnInput::Values(vec![Scalar::Int64(1), Scalar::Int64(2)])),
-            ("b", DataFrameColumnInput::Scalar(Scalar::Utf8("const".to_owned()))),
+            (
+                "a",
+                DataFrameColumnInput::Values(vec![Scalar::Int64(1), Scalar::Int64(2)]),
+            ),
+            (
+                "b",
+                DataFrameColumnInput::Scalar(Scalar::Utf8("const".to_owned())),
+            ),
         ],
     )?;
     assert_eq!(df_mixed.column_names().len(), 2);
@@ -3234,12 +3254,7 @@ fn readme_reshaping_compiles_and_runs() -> Result<(), Box<dyn std::error::Error>
             .iter()
             .any(|n| n.as_str() == "quarter")
     );
-    assert!(
-        melted
-            .column_names()
-            .iter()
-            .any(|n| n.as_str() == "sales")
-    );
+    assert!(melted.column_names().iter().any(|n| n.as_str() == "sales"));
 
     // stack / unstack — round-trip exercise on a numeric DataFrame.
     let df = read_csv_str("a,b\n1,2\n3,4")?;
@@ -3285,12 +3300,7 @@ fn readme_reshaping_compiles_and_runs() -> Result<(), Box<dyn std::error::Error>
     let cat_df = read_csv_str("color,size,price\nred,S,10\nblue,M,20\nred,L,30")?;
     let dummies = cat_df.get_dummies(&["color", "size"])?;
     // Each unique category becomes a dummy column; "price" is preserved.
-    assert!(
-        dummies
-            .column_names()
-            .iter()
-            .any(|n| n.as_str() == "price")
-    );
+    assert!(dummies.column_names().iter().any(|n| n.as_str() == "price"));
     assert!(dummies.column_names().len() > 1);
 
     // xs — cross-section by IndexLabel (uses From<&str> for IndexLabel).
@@ -3484,11 +3494,8 @@ fn readme_bayesian_runtime_policy_compiles_and_runs() -> Result<(), Box<dyn std:
 
     // Make a decision; ledger captures the trace.
     let mut ledger = EvidenceLedger::new();
-    let action = strict.decide_unknown_feature(
-        "subject_x",
-        "unrecognized join feature",
-        &mut ledger,
-    );
+    let action =
+        strict.decide_unknown_feature("subject_x", "unrecognized join feature", &mut ledger);
     // Strict mode → fail-closed unknown features → Reject.
     assert!(matches!(action, DecisionAction::Reject));
 
@@ -3630,10 +3637,7 @@ fn readme_serialization_compiles_and_runs() -> Result<(), Box<dyn std::error::Er
     }
 
     // IndexLabel round-trip.
-    let labels = vec![
-        IndexLabel::Int64(7),
-        IndexLabel::Utf8("row1".to_owned()),
-    ];
+    let labels = vec![IndexLabel::Int64(7), IndexLabel::Utf8("row1".to_owned())];
     for original in &labels {
         let json = serde_json::to_string(original)?;
         let restored: IndexLabel = serde_json::from_str(&json)?;
@@ -3686,7 +3690,10 @@ fn readme_serialization_compiles_and_runs() -> Result<(), Box<dyn std::error::Er
 
     // fd90.255: Column inspection methods.
     // Column::new(dtype, values) — explicit-dtype constructor.
-    let col_int = Column::new(DType::Int64, vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)])?;
+    let col_int = Column::new(
+        DType::Int64,
+        vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+    )?;
     assert_eq!(col_int.dtype(), DType::Int64);
     assert_eq!(col_int.len(), 3);
     assert!(!col_int.is_empty());
@@ -3751,7 +3758,10 @@ fn readme_serialization_compiles_and_runs() -> Result<(), Box<dyn std::error::Er
     }
 
     // Index round-trip.
-    let idx = Index::new(vec![IndexLabel::Int64(7), IndexLabel::Utf8("row".to_owned())]);
+    let idx = Index::new(vec![
+        IndexLabel::Int64(7),
+        IndexLabel::Utf8("row".to_owned()),
+    ]);
     let idx_json = serde_json::to_string(&idx)?;
     let idx_back: Index = serde_json::from_str(&idx_json)?;
     assert_eq!(idx.len(), idx_back.len());
@@ -3856,7 +3866,10 @@ fn readme_timedelta_period_helpers() -> Result<(), Box<dyn std::error::Error>> {
     // ── Timedelta::from_unit ─────────────────────────────────────
     // 2.5 hours = 9000 seconds = 9000 * NANOS_PER_SEC ns.
     let two_half_hours = Timedelta::from_unit(2.5, "h")?;
-    assert_eq!(two_half_hours, 2 * Timedelta::NANOS_PER_HOUR + 30 * Timedelta::NANOS_PER_MIN);
+    assert_eq!(
+        two_half_hours,
+        2 * Timedelta::NANOS_PER_HOUR + 30 * Timedelta::NANOS_PER_MIN
+    );
     // 1.5 days = 1d + 12h.
     let day_and_half = Timedelta::from_unit(1.5, "D")?;
     assert_eq!(
@@ -4456,9 +4469,7 @@ fn readme_sequential_ops_round_trip() -> Result<(), Box<dyn std::error::Error>> 
 /// the DataFrame/Series level (groupby head/tail was tested).
 #[test]
 fn readme_head_tail_positive_negative_n() -> Result<(), Box<dyn std::error::Error>> {
-    let df = read_csv_str(
-        "v\n10\n20\n30\n40\n50",
-    )?;
+    let df = read_csv_str("v\n10\n20\n30\n40\n50")?;
     assert_eq!(df.index().len(), 5);
 
     // ── DataFrame.head(positive) ────────────────────────────────
@@ -4535,10 +4546,7 @@ fn readme_index_manipulation_methods() -> Result<(), Box<dyn std::error::Error>>
     assert_eq!(deleted.labels()[1], IndexLabel::Int64(30));
 
     // ── append: concat two indexes ──────────────────────────────
-    let other = Index::new(vec![
-        IndexLabel::Int64(40),
-        IndexLabel::Int64(50),
-    ]);
+    let other = Index::new(vec![IndexLabel::Int64(40), IndexLabel::Int64(50)]);
     let appended = base.append(&other);
     assert_eq!(appended.len(), 5);
     assert_eq!(appended.labels()[3], IndexLabel::Int64(40));
@@ -4606,9 +4614,8 @@ fn readme_index_set_operations() -> Result<(), Box<dyn std::error::Error>> {
 /// Series-level versions were tested but DataFrame versions were not.
 #[test]
 fn readme_dataframe_at_iat_scalar_access() -> Result<(), Box<dyn std::error::Error>> {
-    let df = read_csv_str(
-        "ticker,price,volume\nAAPL,185.50,1000\nGOOG,140.25,500\nMSFT,420.00,800",
-    )?;
+    let df =
+        read_csv_str("ticker,price,volume\nAAPL,185.50,1000\nGOOG,140.25,500\nMSFT,420.00,800")?;
 
     // ── DataFrame.at(label, column) ─────────────────────────────
     // Default RangeIndex labels are Int64 0..n.
@@ -4785,10 +4792,7 @@ fn readme_display_impls() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── Timestamp Display ───────────────────────────────────────
     let ts = Timestamp::from_nanos(1_700_000_000_000_000_000);
-    assert_eq!(
-        format!("{ts}"),
-        "Timestamp[1700000000000000000, UTC]"
-    );
+    assert_eq!(format!("{ts}"), "Timestamp[1700000000000000000, UTC]");
     let nat_ts = Timestamp::from_nanos(Timestamp::NAT);
     assert_eq!(format!("{nat_ts}"), "NaT");
 
@@ -4859,28 +4863,26 @@ fn readme_runtime_policy_fields_round_trip() -> Result<(), Box<dyn std::error::E
 /// asserted — a regression in alignment logic would not surface.
 #[test]
 fn readme_joined_series_fields_round_trip() -> Result<(), Box<dyn std::error::Error>> {
-    let labels: Vec<IndexLabel> =
-        vec![IndexLabel::Int64(0), IndexLabel::Int64(1), IndexLabel::Int64(2)];
-    let other_labels: Vec<IndexLabel> =
-        vec![IndexLabel::Int64(1), IndexLabel::Int64(2), IndexLabel::Int64(3)];
+    let labels: Vec<IndexLabel> = vec![
+        IndexLabel::Int64(0),
+        IndexLabel::Int64(1),
+        IndexLabel::Int64(2),
+    ];
+    let other_labels: Vec<IndexLabel> = vec![
+        IndexLabel::Int64(1),
+        IndexLabel::Int64(2),
+        IndexLabel::Int64(3),
+    ];
 
     let s_a = Series::from_values(
         "a",
         labels,
-        vec![
-            Scalar::Int64(10),
-            Scalar::Int64(20),
-            Scalar::Int64(30),
-        ],
+        vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
     )?;
     let s_b = Series::from_values(
         "b",
         other_labels,
-        vec![
-            Scalar::Int64(100),
-            Scalar::Int64(200),
-            Scalar::Int64(300),
-        ],
+        vec![Scalar::Int64(100), Scalar::Int64(200), Scalar::Int64(300)],
     )?;
 
     // Inner join: shared labels {1, 2} → length 2.
@@ -4974,11 +4976,8 @@ fn readme_to_timedelta_with_unit_round_trip() -> Result<(), Box<dyn std::error::
     ));
 
     // Days unit: 1 day = NANOS_PER_DAY.
-    let days_series = Series::from_values(
-        "dur_days",
-        labels,
-        vec![Scalar::Int64(1), Scalar::Int64(7)],
-    )?;
+    let days_series =
+        Series::from_values("dur_days", labels, vec![Scalar::Int64(1), Scalar::Int64(7)])?;
     let day_result = to_timedelta_with_unit(&days_series, "D")?;
     assert!(matches!(
         day_result.values()[0],
@@ -5018,10 +5017,7 @@ fn readme_datetime_helpers_round_trip() -> Result<(), Box<dyn std::error::Error>
     let epoch_series = Series::from_values(
         "epoch",
         labels.clone(),
-        vec![
-            Scalar::Int64(1_700_000_000),
-            Scalar::Int64(1_700_086_400),
-        ],
+        vec![Scalar::Int64(1_700_000_000), Scalar::Int64(1_700_086_400)],
     )?;
     let parsed_unit = to_datetime_with_unit(&epoch_series, "s")?;
     assert_eq!(parsed_unit.len(), 2);
@@ -5046,11 +5042,7 @@ fn readme_datetime_helpers_round_trip() -> Result<(), Box<dyn std::error::Error>
 fn readme_columnerror_variant_triggers() -> Result<(), Box<dyn std::error::Error>> {
     // ── ColumnError::LengthMismatch ─────────────────────────────
     let a = Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2)])?;
-    let b3 = Column::from_values(vec![
-        Scalar::Int64(1),
-        Scalar::Int64(2),
-        Scalar::Int64(3),
-    ])?;
+    let b3 = Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)])?;
     let mismatched = a.binary_numeric(&b3, ArithmeticOp::Add);
     assert!(matches!(
         mismatched,
@@ -5059,10 +5051,7 @@ fn readme_columnerror_variant_triggers() -> Result<(), Box<dyn std::error::Error
 
     // ── ColumnError::DTypeMismatch ──────────────────────────────
     // Column<Int64> + Column<Utf8> has no compatible numeric op.
-    let utf = Column::from_values(vec![
-        Scalar::Utf8("x".into()),
-        Scalar::Utf8("y".into()),
-    ])?;
+    let utf = Column::from_values(vec![Scalar::Utf8("x".into()), Scalar::Utf8("y".into())])?;
     let dtype_mismatch = a.binary_numeric(&utf, ArithmeticOp::Add);
     // The binary_numeric path may surface either ColumnError::DTypeMismatch
     // or a wrapped TypeError. Both indicate the contract was honored.
@@ -5105,11 +5094,7 @@ fn readme_frameerror_variant_triggers() -> Result<(), Box<dyn std::error::Error>
     let mut cols = BTreeMap::new();
     cols.insert(
         "x".to_string(),
-        Column::from_values(vec![
-            Scalar::Int64(1),
-            Scalar::Int64(2),
-            Scalar::Int64(3),
-        ])?,
+        Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)])?,
     );
     let bad_df = DataFrame::new(idx, cols);
     assert!(matches!(
@@ -5261,10 +5246,7 @@ fn readme_dtype_nullkind_catmeta_serde_shape() -> Result<(), Box<dyn std::error:
 
     // ── CategoricalMetadata (default field-name struct) ─────────
     let meta = CategoricalMetadata {
-        categories: vec![
-            Scalar::Utf8("low".into()),
-            Scalar::Utf8("high".into()),
-        ],
+        categories: vec![Scalar::Utf8("low".into()), Scalar::Utf8("high".into())],
         ordered: true,
     };
     let meta_json = serde_json::to_string(&meta)?;
@@ -5298,10 +5280,7 @@ fn readme_indexlabel_validitymask_serde_shape() -> Result<(), Box<dyn std::error
     );
 
     let td_label = serde_json::to_string(&IndexLabel::Timedelta64(86_400_000_000_000))?;
-    assert_eq!(
-        td_label,
-        r#"{"kind":"timedelta64","value":86400000000000}"#
-    );
+    assert_eq!(td_label, r#"{"kind":"timedelta64","value":86400000000000}"#);
 
     // ── ValidityMask ────────────────────────────────────────────
     // Custom Serialize impl emits {"bits": [bool, bool, ...]} —
@@ -5348,10 +5327,7 @@ fn readme_scalar_serde_shape() -> Result<(), Box<dyn std::error::Error>> {
 
     // Timedelta64.
     let td_json = serde_json::to_string(&Scalar::Timedelta64(86_400_000_000_000))?;
-    assert_eq!(
-        td_json,
-        r#"{"kind":"timedelta64","value":86400000000000}"#
-    );
+    assert_eq!(td_json, r#"{"kind":"timedelta64","value":86400000000000}"#);
 
     // Null with NullKind discriminant.
     let null_json = serde_json::to_string(&Scalar::Null(NullKind::NaT))?;
@@ -5481,8 +5457,7 @@ fn readme_arithmetic_comparison_variants_round_trip() -> Result<(), Box<dyn std:
 #[test]
 fn readme_index_label_variants_round_trip() -> Result<(), Box<dyn std::error::Error>> {
     // ── IndexLabel::Utf8 ────────────────────────────────────────
-    let str_labels: Vec<IndexLabel> =
-        vec!["alpha".into(), "beta".into(), "gamma".into()];
+    let str_labels: Vec<IndexLabel> = vec!["alpha".into(), "beta".into(), "gamma".into()];
     let s_utf8 = Series::from_values(
         "tag",
         str_labels.clone(),
@@ -5716,10 +5691,12 @@ fn readme_minor_enum_variants_round_trip() -> Result<(), Box<dyn std::error::Err
     assert_eq!(keep_last.index().len(), 3);
     let last_v = keep_last.column("v").unwrap();
     // For k=3, the last seen value is "f".
-    assert!(last_v
-        .values()
-        .iter()
-        .any(|s| matches!(s, Scalar::Utf8(x) if x == "f")));
+    assert!(
+        last_v
+            .values()
+            .iter()
+            .any(|s| matches!(s, Scalar::Utf8(x) if x == "f"))
+    );
 
     let keep_none = dup_df.drop_duplicates(Some(&["k".to_string()]), DuplicateKeep::None, false)?;
     // None drops ALL rows that had any duplicate. Only k=1 (single row)
@@ -6060,9 +6037,8 @@ fn readme_csv_options_round_trip() -> Result<(), Box<dyn std::error::Error>> {
 /// trip — a regression in any parser would not surface.
 #[test]
 fn readme_json_jsonl_feather_round_trip() -> Result<(), Box<dyn std::error::Error>> {
-    let original = read_csv_str(
-        "ticker,price,volume\nAAPL,185.50,1000\nGOOG,140.25,500\nMSFT,420.00,800",
-    )?;
+    let original =
+        read_csv_str("ticker,price,volume\nAAPL,185.50,1000\nGOOG,140.25,500\nMSFT,420.00,800")?;
 
     // ── JSON (Records orient) round-trip ─────────────────────────
     let json_str = write_json_string(&original, JsonOrient::Records)?;
@@ -6099,9 +6075,8 @@ fn readme_json_jsonl_feather_round_trip() -> Result<(), Box<dyn std::error::Erro
 /// read them back) — a regression in either parser would not be caught.
 #[test]
 fn readme_parquet_excel_round_trip() -> Result<(), Box<dyn std::error::Error>> {
-    let original = read_csv_str(
-        "ticker,price,volume\nAAPL,185.50,1000\nGOOG,140.25,500\nMSFT,420.00,800",
-    )?;
+    let original =
+        read_csv_str("ticker,price,volume\nAAPL,185.50,1000\nGOOG,140.25,500\nMSFT,420.00,800")?;
 
     // ── Parquet round-trip ───────────────────────────────────────
     let pq_bytes = write_parquet_bytes(&original)?;
@@ -6132,9 +6107,8 @@ fn readme_parquet_excel_round_trip() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn readme_ipc_stream_round_trip() -> Result<(), Box<dyn std::error::Error>> {
     // Build a simple DataFrame with mixed numeric columns.
-    let original = read_csv_str(
-        "ticker,price,volume\nAAPL,185.50,1000\nGOOG,140.25,500\nMSFT,420.00,800",
-    )?;
+    let original =
+        read_csv_str("ticker,price,volume\nAAPL,185.50,1000\nGOOG,140.25,500\nMSFT,420.00,800")?;
     assert_eq!(original.index().len(), 3);
 
     // Encode as Arrow IPC stream bytes.
@@ -6354,10 +6328,7 @@ fn readme_pandas_helpers_round_trip() -> Result<(), Box<dyn std::error::Error>> 
 /// (DateRangeError, TimedeltaRangeError, cast_scalar_owned, the two
 /// read_csv_with_index_cols variants).
 #[allow(dead_code)]
-fn fd90_016_paired_helpers_via_prelude(
-    _dre: DateRangeError,
-    _tdre: TimedeltaRangeError,
-) {
+fn fd90_016_paired_helpers_via_prelude(_dre: DateRangeError, _tdre: TimedeltaRangeError) {
     let _ = cast_scalar_owned;
     let _ = read_csv_with_index_cols;
     let _ = read_csv_with_index_cols_path;
@@ -6404,11 +6375,11 @@ fn fd90_014_fp_types_helpers_via_prelude(
 /// coverage in fd90.9 / fd90.10 / fd90.11.
 #[allow(dead_code, clippy::too_many_arguments)]
 fn fd90_013_sql_schema_types_via_prelude(
-    _chunk: SqlChunkIterator,
+    _chunk: SqlChunkIterator<'_>,
     _col: SqlColumnSchema,
     _fk: SqlForeignKeySchema,
     _idx: SqlIndexSchema,
-    _ichunk: SqlIndexedChunkIterator,
+    _ichunk: SqlIndexedChunkIterator<'_>,
     _q: SqlQueryResult,
     _refl: SqlReflectedTable,
     _table: SqlTableSchema,
