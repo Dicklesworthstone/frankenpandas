@@ -10765,6 +10765,114 @@ mod tests {
         assert!(matches!(invalid, IoError::Sql(msg) if msg.contains("invalid table name")));
     }
 
+    // br-frankenpandas-i8kja: read_sql_table_chunks_with_options previously
+    // accepted SqlReadOptions { index_col: Some(...) } and silently dropped
+    // the index_col while the full-frame sibling honored it. Surface the
+    // mismatch with a typed error so callers route to the
+    // `_and_index_col` variant. The plain entrypoint stays
+    // `Result<SqlChunkIterator, _>` for backwards compatibility — the
+    // indexed surface is what carries promotion logic.
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn read_sql_table_chunks_with_options_rejects_options_index_col() {
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE TABLE i8kja_table_chunks_reject (id INTEGER, val TEXT);",
+        )
+        .unwrap();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "INSERT INTO i8kja_table_chunks_reject VALUES (1, 'a'), (2, 'b');",
+        )
+        .unwrap();
+
+        let err = read_sql_table_chunks_with_options(
+            &conn,
+            "i8kja_table_chunks_reject",
+            &SqlReadOptions {
+                index_col: Some("id".to_owned()),
+                ..Default::default()
+            },
+            2,
+        )
+        .expect_err("options.index_col on non-indexed entrypoint must be rejected");
+        assert!(
+            matches!(&err, IoError::Sql(msg) if msg.contains("index_col") && msg.contains("read_sql_table_chunks_with_options_and_index_col")),
+            "expected typed error pointing to the _and_index_col variant, got: {err:?}"
+        );
+
+        // Sanity: same options struct on the indexed sibling honors index_col.
+        let chunks: Vec<DataFrame> = read_sql_table_chunks_with_options_and_index_col(
+            &conn,
+            "i8kja_table_chunks_reject",
+            &SqlReadOptions {
+                index_col: Some("id".to_owned()),
+                ..Default::default()
+            },
+            None,
+            2,
+        )
+        .expect("indexed sibling honors options.index_col")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("all chunks");
+        assert_eq!(chunks.len(), 1);
+        assert!(chunks[0].column("id").is_none());
+        assert_eq!(
+            chunks[0].index().labels(),
+            &[IndexLabel::Int64(1), IndexLabel::Int64(2)]
+        );
+        assert_eq!(
+            chunks[0].column("val").unwrap().values(),
+            &[Scalar::Utf8("a".into()), Scalar::Utf8("b".into())]
+        );
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn read_sql_chunks_with_options_rejects_options_index_col() {
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE TABLE i8kja_query_chunks_reject (id INTEGER, val TEXT);",
+        )
+        .unwrap();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "INSERT INTO i8kja_query_chunks_reject VALUES (1, 'a');",
+        )
+        .unwrap();
+
+        let err = read_sql_chunks_with_options(
+            &conn,
+            "SELECT * FROM i8kja_query_chunks_reject",
+            &SqlReadOptions {
+                index_col: Some("id".to_owned()),
+                ..Default::default()
+            },
+            2,
+        )
+        .expect_err("options.index_col on non-indexed entrypoint must be rejected");
+        assert!(
+            matches!(&err, IoError::Sql(msg) if msg.contains("index_col") && msg.contains("read_sql_chunks_with_options_and_index_col")),
+            "expected typed error pointing to the _and_index_col variant, got: {err:?}"
+        );
+
+        // Same options on the query-chunks delegator (which forwards to the
+        // foundation): error propagates unchanged.
+        let err = read_sql_query_chunks_with_options(
+            &conn,
+            "SELECT * FROM i8kja_query_chunks_reject",
+            &SqlReadOptions {
+                index_col: Some("id".to_owned()),
+                ..Default::default()
+            },
+            2,
+        )
+        .expect_err("query delegator should propagate the rejection");
+        assert!(matches!(&err, IoError::Sql(_)));
+    }
+
     #[cfg(feature = "sql-sqlite")]
     #[test]
     fn sql_read_table_with_options_and_index_col_applies_options_before_indexing() {
