@@ -16527,12 +16527,11 @@ fn live_oracle_series_str_index_of_substring() {
         return;
     }
     let expected = expected_result.expect("live oracle expected");
-    let outcome = match &expected {
+    match &expected {
         super::ResolvedExpected::Series(_) | super::ResolvedExpected::ErrorAny => {}
         super::ResolvedExpected::ErrorContains(_) => {}
         _ => panic!("unexpected oracle expected payload: {expected:?}"),
     };
-    let _ = outcome;
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series
@@ -17298,7 +17297,7 @@ fn live_oracle_dataframe_round_decimals_2() {
             "columns": {
                 "a": [
                     { "kind": "float64", "value": 1.23456 },
-                    { "kind": "float64", "value": 2.71828 },
+                    { "kind": "float64", "value": std::f64::consts::E },
                     { "kind": "float64", "value": -1.55555 }
                 ],
                 "b": [
