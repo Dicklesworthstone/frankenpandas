@@ -1802,6 +1802,99 @@ impl Series {
         self.binary_op_with_policy(other, ArithmeticOp::Pow, policy, ledger)
     }
 
+    // ── pandas-named arithmetic aliases (br-frankenpandas-az1pt) ─────────
+    //
+    // pandas exposes both short (`add`, `sub`, `mul`, `div`) and long
+    // (`add`, `subtract`, `multiply`, `divide`, `truediv`) spellings of
+    // the binary arithmetic methods. Series already had the short forms;
+    // this block adds the long-form aliases plus the right-handed (r*)
+    // variants that flip operand order, plus `r#mod` (matching pandas
+    // `Series.mod` — `mod` is a Rust keyword so the public surface uses
+    // the raw-identifier form `series.r#mod(other)`), plus `product`
+    // (alias of `prod`). Each is a one-line delegation; semantics
+    // (alignment, fill_value, dtype promotion) are inherited from the
+    // already-tested base method.
+
+    /// pandas alias for [`Self::sub`]. Matches `pd.Series.subtract`.
+    pub fn subtract(&self, other: &Self) -> Result<Self, FrameError> {
+        self.sub(other)
+    }
+
+    /// pandas alias for [`Self::mul`]. Matches `pd.Series.multiply`.
+    pub fn multiply(&self, other: &Self) -> Result<Self, FrameError> {
+        self.mul(other)
+    }
+
+    /// pandas alias for [`Self::div`]. Matches `pd.Series.divide`.
+    pub fn divide(&self, other: &Self) -> Result<Self, FrameError> {
+        self.div(other)
+    }
+
+    /// pandas alias for [`Self::div`]. Matches `pd.Series.truediv`
+    /// (true / floating-point division; same as `div` since `div` itself
+    /// promotes to Float64).
+    pub fn truediv(&self, other: &Self) -> Result<Self, FrameError> {
+        self.div(other)
+    }
+
+    /// Element-wise modulo. Matches `pd.Series.mod(other)` / `s1 % s2`.
+    ///
+    /// `mod` is a Rust keyword; the public name uses the raw-identifier
+    /// form. Callers from Rust write `series.r#mod(&other)`. The Python
+    /// FFI surface exposes it as bare `mod`.
+    pub fn r#mod(&self, other: &Self) -> Result<Self, FrameError> {
+        self.modulo(other)
+    }
+
+    /// Right-handed addition: `s1.radd(s2)` ≡ `s2.add(s1)`. Useful for
+    /// reverse operator overloading (`scalar + series`). Matches
+    /// `pd.Series.radd(other)`.
+    pub fn radd(&self, other: &Self) -> Result<Self, FrameError> {
+        other.add(self)
+    }
+
+    /// Right-handed subtraction: `s1.rsub(s2)` ≡ `s2.sub(s1)`. Matches
+    /// `pd.Series.rsub(other)`.
+    pub fn rsub(&self, other: &Self) -> Result<Self, FrameError> {
+        other.sub(self)
+    }
+
+    /// Right-handed multiplication: `s1.rmul(s2)` ≡ `s2.mul(s1)`. Matches
+    /// `pd.Series.rmul(other)`.
+    pub fn rmul(&self, other: &Self) -> Result<Self, FrameError> {
+        other.mul(self)
+    }
+
+    /// Right-handed division: `s1.rdiv(s2)` ≡ `s2.div(s1)`. Matches
+    /// `pd.Series.rdiv(other)`.
+    pub fn rdiv(&self, other: &Self) -> Result<Self, FrameError> {
+        other.div(self)
+    }
+
+    /// Right-handed true division: `s1.rtruediv(s2)` ≡ `s2.div(s1)`.
+    /// Matches `pd.Series.rtruediv(other)`.
+    pub fn rtruediv(&self, other: &Self) -> Result<Self, FrameError> {
+        other.div(self)
+    }
+
+    /// Right-handed floor division: `s1.rfloordiv(s2)` ≡ `s2.floordiv(s1)`.
+    /// Matches `pd.Series.rfloordiv(other)`.
+    pub fn rfloordiv(&self, other: &Self) -> Result<Self, FrameError> {
+        other.floordiv(self)
+    }
+
+    /// Right-handed modulo: `s1.rmod(s2)` ≡ `s2.modulo(s1)`. Matches
+    /// `pd.Series.rmod(other)`.
+    pub fn rmod(&self, other: &Self) -> Result<Self, FrameError> {
+        other.modulo(self)
+    }
+
+    /// Right-handed exponentiation: `s1.rpow(s2)` ≡ `s2.pow(s1)`.
+    /// Matches `pd.Series.rpow(other)`.
+    pub fn rpow(&self, other: &Self) -> Result<Self, FrameError> {
+        other.pow(self)
+    }
+
     /// Element-wise divmod: returns `(self // other, self % other)`.
     ///
     /// Matches `pd.Series.divmod(other)`. The two returned Series share the
@@ -2367,9 +2460,23 @@ impl Series {
         self.comparison_op(other, ComparisonOp::Eq)
     }
 
+    /// pandas method alias for element-wise equality.
+    ///
+    /// Matches `pd.Series.eq(other)`.
+    pub fn eq(&self, other: &Self) -> Result<Self, FrameError> {
+        self.eq_series(other)
+    }
+
     /// Element-wise not-equal. Matches `series != other`.
     pub fn ne_series(&self, other: &Self) -> Result<Self, FrameError> {
         self.comparison_op(other, ComparisonOp::Ne)
+    }
+
+    /// pandas method alias for element-wise inequality.
+    ///
+    /// Matches `pd.Series.ne(other)`.
+    pub fn ne(&self, other: &Self) -> Result<Self, FrameError> {
+        self.ne_series(other)
     }
 
     /// Element-wise greater-or-equal. Matches `series >= other`.
@@ -4250,6 +4357,12 @@ impl Series {
             }
         }
         Ok(Scalar::Float64(product))
+    }
+
+    /// pandas alias for [`Self::prod`]. Matches `pd.Series.product()`.
+    /// Per br-frankenpandas-az1pt.
+    pub fn product(&self) -> Result<Scalar, FrameError> {
+        self.prod()
     }
 
     // ── skipna-aware aggregate variants ─────────────────────────────
@@ -31338,6 +31451,111 @@ mod tests {
         };
         assert!((v0 - 10.0 / 3.0).abs() < 1e-10);
         assert!((v1 - 5.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn series_pandas_arithmetic_aliases_delegate_to_base_ops() {
+        let left = Series::from_values(
+            "left",
+            vec![1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(10), Scalar::Int64(21)],
+        )
+        .unwrap();
+        let right = Series::from_values(
+            "right",
+            vec![1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(3), Scalar::Int64(5)],
+        )
+        .unwrap();
+
+        assert_eq!(
+            left.subtract(&right).unwrap().values(),
+            left.sub(&right).unwrap().values()
+        );
+        assert_eq!(
+            left.multiply(&right).unwrap().values(),
+            left.mul(&right).unwrap().values()
+        );
+        assert_eq!(
+            left.divide(&right).unwrap().values(),
+            left.div(&right).unwrap().values()
+        );
+        assert_eq!(
+            left.truediv(&right).unwrap().values(),
+            left.div(&right).unwrap().values()
+        );
+        assert_eq!(
+            left.r#mod(&right).unwrap().values(),
+            left.modulo(&right).unwrap().values()
+        );
+
+        assert_eq!(
+            left.radd(&right).unwrap().values(),
+            right.add(&left).unwrap().values()
+        );
+        assert_eq!(
+            left.rsub(&right).unwrap().values(),
+            right.sub(&left).unwrap().values()
+        );
+        assert_eq!(
+            left.rmul(&right).unwrap().values(),
+            right.mul(&left).unwrap().values()
+        );
+        assert_eq!(
+            left.rdiv(&right).unwrap().values(),
+            right.div(&left).unwrap().values()
+        );
+        assert_eq!(
+            left.rtruediv(&right).unwrap().values(),
+            right.div(&left).unwrap().values()
+        );
+        assert_eq!(
+            left.rfloordiv(&right).unwrap().values(),
+            right.floordiv(&left).unwrap().values()
+        );
+        assert_eq!(
+            left.rmod(&right).unwrap().values(),
+            right.modulo(&left).unwrap().values()
+        );
+        assert_eq!(
+            left.rpow(&right).unwrap().values(),
+            right.pow(&left).unwrap().values()
+        );
+
+        assert_eq!(left.product().unwrap(), left.prod().unwrap());
+    }
+
+    #[test]
+    fn series_pandas_comparison_aliases_delegate_to_base_ops() {
+        let left = Series::from_values(
+            "left",
+            vec![1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+        )
+        .unwrap();
+        let right = Series::from_values(
+            "right",
+            vec![1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![Scalar::Int64(10), Scalar::Int64(25), Scalar::Int64(30)],
+        )
+        .unwrap();
+
+        assert_eq!(
+            left.eq(&right).unwrap().values(),
+            left.eq_series(&right).unwrap().values()
+        );
+        assert_eq!(
+            left.ne(&right).unwrap().values(),
+            left.ne_series(&right).unwrap().values()
+        );
+        assert_eq!(
+            left.eq(&right).unwrap().values(),
+            &[Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)]
+        );
+        assert_eq!(
+            left.ne(&right).unwrap().values(),
+            &[Scalar::Bool(false), Scalar::Bool(true), Scalar::Bool(false)]
+        );
     }
 
     #[test]
@@ -66891,5 +67109,146 @@ mod tests {
         assert_eq!(matched.values()[0], Scalar::Bool(true));
         assert_eq!(matched.values()[1], Scalar::Bool(true));
         assert_eq!(matched.values()[2], Scalar::Bool(false));
+    }
+
+    // ── pandas arithmetic/r-variant aliases (br-frankenpandas-az1pt) ─
+
+    fn az1pt_pair() -> (Series, Series) {
+        let left = Series::from_values(
+            "a",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+        )
+        .unwrap();
+        let right = Series::from_values(
+            "b",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(2), Scalar::Int64(4), Scalar::Int64(5)],
+        )
+        .unwrap();
+        (left, right)
+    }
+
+    #[test]
+    fn series_subtract_alias_matches_sub() {
+        let (l, r) = az1pt_pair();
+        assert_eq!(
+            l.subtract(&r).unwrap().values(),
+            l.sub(&r).unwrap().values()
+        );
+    }
+
+    #[test]
+    fn series_multiply_alias_matches_mul() {
+        let (l, r) = az1pt_pair();
+        assert_eq!(
+            l.multiply(&r).unwrap().values(),
+            l.mul(&r).unwrap().values()
+        );
+    }
+
+    #[test]
+    fn series_divide_alias_matches_div() {
+        let (l, r) = az1pt_pair();
+        assert_eq!(l.divide(&r).unwrap().values(), l.div(&r).unwrap().values());
+    }
+
+    #[test]
+    fn series_truediv_alias_matches_div() {
+        let (l, r) = az1pt_pair();
+        assert_eq!(l.truediv(&r).unwrap().values(), l.div(&r).unwrap().values());
+    }
+
+    #[test]
+    fn series_mod_raw_ident_alias_matches_modulo() {
+        let (l, r) = az1pt_pair();
+        // `mod` is a Rust keyword; raw-identifier form is the public name.
+        assert_eq!(
+            l.r#mod(&r).unwrap().values(),
+            l.modulo(&r).unwrap().values()
+        );
+    }
+
+    #[test]
+    fn series_product_alias_matches_prod() {
+        let (l, _) = az1pt_pair();
+        assert_eq!(l.product().unwrap(), l.prod().unwrap());
+    }
+
+    #[test]
+    fn series_radd_swaps_operands() {
+        let (l, r) = az1pt_pair();
+        // radd(l,r) == r.add(l). For aligned same-index numeric add it's
+        // commutative, but the impl swaps explicitly per pandas spec.
+        assert_eq!(l.radd(&r).unwrap().values(), r.add(&l).unwrap().values());
+    }
+
+    #[test]
+    fn series_rsub_flips_difference() {
+        let (l, r) = az1pt_pair();
+        // l.rsub(r) == r - l == [2-10, 4-20, 5-30] = [-8, -16, -25]
+        let out = l.rsub(&r).unwrap();
+        assert_eq!(
+            out.values(),
+            &[Scalar::Int64(-8), Scalar::Int64(-16), Scalar::Int64(-25)]
+        );
+    }
+
+    #[test]
+    fn series_rmul_swaps_operands() {
+        let (l, r) = az1pt_pair();
+        assert_eq!(l.rmul(&r).unwrap().values(), r.mul(&l).unwrap().values());
+    }
+
+    #[test]
+    fn series_rdiv_flips_quotient() {
+        let (l, r) = az1pt_pair();
+        // l.rdiv(r) == r / l. Just compare to r.div(l).
+        assert_eq!(l.rdiv(&r).unwrap().values(), r.div(&l).unwrap().values());
+    }
+
+    #[test]
+    fn series_rtruediv_alias_matches_rdiv() {
+        let (l, r) = az1pt_pair();
+        assert_eq!(
+            l.rtruediv(&r).unwrap().values(),
+            l.rdiv(&r).unwrap().values()
+        );
+    }
+
+    #[test]
+    fn series_rfloordiv_flips_floor_div() {
+        let (l, r) = az1pt_pair();
+        assert_eq!(
+            l.rfloordiv(&r).unwrap().values(),
+            r.floordiv(&l).unwrap().values()
+        );
+    }
+
+    #[test]
+    fn series_rmod_flips_modulo() {
+        let (l, r) = az1pt_pair();
+        assert_eq!(l.rmod(&r).unwrap().values(), r.modulo(&l).unwrap().values());
+    }
+
+    #[test]
+    fn series_rpow_flips_pow() {
+        let small_left = Series::from_values(
+            "a",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(2), Scalar::Int64(3)],
+        )
+        .unwrap();
+        let small_right = Series::from_values(
+            "b",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(3), Scalar::Int64(2)],
+        )
+        .unwrap();
+        // l.rpow(r) == r ** l == [3**2, 2**3] = [9, 8]
+        assert_eq!(
+            small_left.rpow(&small_right).unwrap().values(),
+            small_right.pow(&small_left).unwrap().values()
+        );
     }
 }
