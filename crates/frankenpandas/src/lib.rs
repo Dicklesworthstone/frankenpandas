@@ -100,6 +100,7 @@ pub use fp_io::{
     // JSON
     JsonOrient,
     // SQL
+    SqlBackendCaps,
     SqlChunkIterator,
     SqlColumnSchema,
     SqlConnection,
@@ -122,9 +123,14 @@ pub use fp_io::{
     list_sql_tables,
     list_sql_unique_constraints,
     list_sql_views,
+    sql_backend_caps,
     sql_max_identifier_length,
+    sql_max_insert_rows,
+    sql_max_param_count,
     sql_primary_key_columns,
     sql_server_version,
+    sql_supports_returning,
+    sql_supports_schemas,
     sql_table_comment,
     sql_table_schema,
     truncate_sql_table,
@@ -408,6 +414,7 @@ pub mod prelude {
         // SQL contracts (covers the README Quick Start round-trip).
         // fd90.206: also expose the option/inspector/chunked-read surface
         // documented in the IO Format Support table at line 148.
+        SqlBackendCaps,
         SqlConnection,
         // fd90.220: SqlInsertMethod is the type of SqlWriteOptions.method.
         SqlInsertMethod,
@@ -454,9 +461,14 @@ pub mod prelude {
         list_sql_tables,
         list_sql_unique_constraints,
         list_sql_views,
+        sql_backend_caps,
         sql_max_identifier_length,
+        sql_max_insert_rows,
+        sql_max_param_count,
         sql_primary_key_columns,
         sql_server_version,
+        sql_supports_returning,
+        sql_supports_schemas,
         sql_table_comment,
         sql_table_schema,
         truncate_sql_table,
@@ -947,9 +959,14 @@ mod tests {
         let _ = list_sql_tables::<rusqlite::Connection>;
         let _ = list_sql_unique_constraints::<rusqlite::Connection>;
         let _ = list_sql_views::<rusqlite::Connection>;
+        let _ = sql_backend_caps::<rusqlite::Connection>;
         let _ = sql_max_identifier_length::<rusqlite::Connection>;
+        let _ = sql_max_insert_rows::<rusqlite::Connection>;
+        let _ = sql_max_param_count::<rusqlite::Connection>;
         let _ = sql_primary_key_columns::<rusqlite::Connection>;
         let _ = sql_server_version::<rusqlite::Connection>;
+        let _ = sql_supports_returning::<rusqlite::Connection>;
+        let _ = sql_supports_schemas::<rusqlite::Connection>;
         let _ = sql_table_comment::<rusqlite::Connection>;
         let _ = sql_table_schema::<rusqlite::Connection>;
         let _ = truncate_sql_table::<rusqlite::Connection>;
@@ -970,6 +987,7 @@ mod tests {
         let _is_indexed_chunk: fn(SqlIndexedChunkIterator) -> _ = |x| x;
         let _is_query_result: fn(SqlQueryResult) -> _ = |x| x;
         let _is_reflected: fn(SqlReflectedTable) -> _ = |x| x;
+        let _is_backend_caps: fn(SqlBackendCaps) -> _ = |x| x;
         let _is_table_schema: fn(SqlTableSchema) -> _ = |x| x;
         let _is_uc_schema: fn(SqlUniqueConstraintSchema) -> _ = |x| x;
 
