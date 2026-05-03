@@ -6150,16 +6150,36 @@ pub fn read_sql_table_with_options<C: SqlConnection>(
     table_name: &str,
     options: &SqlReadOptions,
 ) -> Result<DataFrame, IoError> {
+    let query =
+        sql_table_read_query_for_options(conn, table_name, options, options.index_col.as_deref())?;
+    read_sql_with_options(conn, &query, options)
+}
+
+fn sql_table_read_query_for_options<C: SqlConnection>(
+    conn: &C,
+    table_name: &str,
+    options: &SqlReadOptions,
+    required_projection_col: Option<&str>,
+) -> Result<String, IoError> {
     // Per br-frankenpandas-d3e9 (fd90.34): when options.columns is
     // Some(list), project only those columns instead of SELECT *.
-    let query = match options.columns.as_deref() {
+    // Per br-frankenpandas-fd90.76: if an index_col will be promoted
+    // after materialization, include it in the generated projection even
+    // when the user did not list it in columns. pandas SQLTable.read does
+    // this before set_index so columns=[...] and index_col=... compose.
+    match options.columns.as_deref() {
         Some(cols) => {
-            let refs: Vec<&str> = cols.iter().map(String::as_str).collect();
-            sql_select_columns_query_in_schema(conn, table_name, options.schema.as_deref(), &refs)?
+            let mut refs: Vec<&str> = Vec::with_capacity(cols.len() + 1);
+            if let Some(index_col) = required_projection_col
+                && !cols.iter().any(|name| name == index_col)
+            {
+                refs.push(index_col);
+            }
+            refs.extend(cols.iter().map(String::as_str));
+            sql_select_columns_query_in_schema(conn, table_name, options.schema.as_deref(), &refs)
         }
-        None => sql_select_all_query_in_schema(conn, table_name, options.schema.as_deref())?,
-    };
-    read_sql_with_options(conn, &query, options)
+        None => sql_select_all_query_in_schema(conn, table_name, options.schema.as_deref()),
+    }
 }
 
 /// Read an entire SQL table with read-time options and optional index promotion.
@@ -6180,7 +6200,8 @@ pub fn read_sql_table_with_options_and_index_col<C: SqlConnection>(
             index_col: None,
             ..options.clone()
         };
-        let frame = read_sql_table_with_options(conn, table_name, &cleared)?;
+        let query = sql_table_read_query_for_options(conn, table_name, &cleared, Some(col_name))?;
+        let frame = read_sql_with_options(conn, &query, &cleared)?;
         return apply_sql_index_col(frame, Some(col_name));
     }
     read_sql_table_with_options(conn, table_name, options)
@@ -6228,8 +6249,10 @@ pub fn read_sql_table_chunks_with_options_and_index_col<C: SqlConnection>(
     index_col: Option<&str>,
     chunk_size: usize,
 ) -> Result<SqlIndexedChunkIterator, IoError> {
-    let inner = read_sql_table_chunks_with_options(conn, table_name, options, chunk_size)?;
-    sql_indexed_chunks(inner, index_col.or(options.index_col.as_deref()))
+    let effective_index_col = index_col.or(options.index_col.as_deref());
+    let query = sql_table_read_query_for_options(conn, table_name, options, effective_index_col)?;
+    let inner = read_sql_chunks_with_options(conn, &query, options, chunk_size)?;
+    sql_indexed_chunks(inner, effective_index_col)
 }
 
 /// Read an entire SQL table as chunks with one column promoted to each chunk's index.
@@ -17232,6 +17255,92 @@ mod tests {
             })
             .collect();
         assert_eq!(labels, vec![5]);
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn read_sql_table_with_options_columns_auto_project_index_col() {
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE TABLE projected_index (id INTEGER, val TEXT, hidden TEXT);",
+        )
+        .unwrap();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "INSERT INTO projected_index VALUES (10, 'a', 'x'), (20, 'b', 'y');",
+        )
+        .unwrap();
+
+        let frame = read_sql_table_with_options(
+            &conn,
+            "projected_index",
+            &SqlReadOptions {
+                columns: Some(vec!["val".to_owned()]),
+                index_col: Some("id".to_owned()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(frame.column_names(), vec!["val"]);
+        assert!(frame.column("id").is_none());
+        assert!(frame.column("hidden").is_none());
+        assert_eq!(
+            frame.index().labels(),
+            &[IndexLabel::Int64(10), IndexLabel::Int64(20)]
+        );
+        assert_eq!(
+            frame.column("val").unwrap().values(),
+            &[Scalar::Utf8("a".into()), Scalar::Utf8("b".into())]
+        );
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn read_sql_table_chunks_with_options_columns_auto_project_index_col() {
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE TABLE projected_index_chunks (id INTEGER, val TEXT, hidden TEXT);",
+        )
+        .unwrap();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "INSERT INTO projected_index_chunks VALUES \
+                (10, 'a', 'x'), \
+                (20, 'b', 'y'), \
+                (30, 'c', 'z');",
+        )
+        .unwrap();
+
+        let chunks: Vec<DataFrame> = read_sql_table_chunks_with_options_and_index_col(
+            &conn,
+            "projected_index_chunks",
+            &SqlReadOptions {
+                columns: Some(vec!["val".to_owned()]),
+                ..Default::default()
+            },
+            Some("id"),
+            2,
+        )
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].column_names(), vec!["val"]);
+        assert!(chunks[0].column("id").is_none());
+        assert!(chunks[0].column("hidden").is_none());
+        assert_eq!(
+            chunks[0].index().labels(),
+            &[IndexLabel::Int64(10), IndexLabel::Int64(20)]
+        );
+        assert_eq!(chunks[1].index().labels(), &[IndexLabel::Int64(30)]);
+        assert_eq!(
+            chunks[1].column("val").unwrap().values(),
+            &[Scalar::Utf8("c".into())]
+        );
     }
 
     #[cfg(feature = "sql-sqlite")]
