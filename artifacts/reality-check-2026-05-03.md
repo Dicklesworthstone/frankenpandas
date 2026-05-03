@@ -205,3 +205,23 @@ AGENTS.md states: "FrankenPandas targets ABSOLUTE AND TOTAL feature and function
 | `frankenpandas-0qo9c` | P2 | SqlQueryResult column-dtype hints (cross-listed from review-mode `ex8ec`) |
 
 **18 beads** filed; **3 critical** (P1) tagged for the largest gaps (SeriesGroupBy, MultiIndex, Index variants).
+
+---
+
+## Per-Row Coverage Beads (filed in T2 follow-up)
+
+Per orchestrator request: one bead per coverage-matrix row where coverage < 70%, titled `[reality-check] expand <area> coverage`.
+
+| Row | Coverage | Bead | Priority |
+|---|---|---|---|
+| DataFrame | 65% | `frankenpandas-gd11l` | P2 |
+| SeriesGroupBy | 20% | `frankenpandas-nt65g` | P1 |
+| ExponentialMovingWindow | 55% | `frankenpandas-mvynk` | P2 |
+| Resampler | 33% | `frankenpandas-k0ytm` | P2 |
+| Index | 48% | `frankenpandas-b8fwu` | P2 |
+| MultiIndex | 19% | `frankenpandas-1q5v6` | P1 |
+| Index variants (5) | 0% | `frankenpandas-k2l3y` | P1 |
+
+**7 new umbrella beads**. Cross-link to per-area sub-beads filed in the original pass (i8wen / az1pt / rjs51 / etc.) so the matrix-row beads serve as parent / class-coverage trackers and the original beads track per-area work-units.
+
+Rows excluded (coverage ≥ 70%): Series (70%), DataFrameGroupBy (71%), Rolling (75%), Expanding (70%).
