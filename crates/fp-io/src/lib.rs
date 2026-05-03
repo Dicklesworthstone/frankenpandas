@@ -16843,6 +16843,92 @@ mod tests {
         assert!(chunks[0].column("hidden").is_none());
     }
 
+    #[test]
+    fn read_sql_table_chunks_with_options_schema_projects_before_chunking() {
+        use std::cell::RefCell;
+
+        struct MultiSchemaProjectedChunks {
+            queries: RefCell<Vec<String>>,
+        }
+
+        impl super::SqlConnection for MultiSchemaProjectedChunks {
+            fn query(&self, query: &str, _params: &[Scalar]) -> Result<SqlQueryResult, IoError> {
+                self.queries.borrow_mut().push(query.to_owned());
+                Ok(SqlQueryResult {
+                    columns: vec!["name".to_owned(), "id".to_owned()],
+                    rows: vec![
+                        vec![Scalar::Utf8("a".to_owned()), Scalar::Int64(1)],
+                        vec![Scalar::Utf8("b".to_owned()), Scalar::Int64(2)],
+                        vec![Scalar::Utf8("c".to_owned()), Scalar::Int64(3)],
+                    ],
+                })
+            }
+
+            fn execute_batch(&self, _sql: &str) -> Result<(), IoError> {
+                Ok(())
+            }
+
+            fn table_exists(&self, _name: &str) -> Result<bool, IoError> {
+                Ok(false)
+            }
+
+            fn insert_rows(&self, _sql: &str, _rows: &[Vec<Scalar>]) -> Result<(), IoError> {
+                Ok(())
+            }
+
+            fn dtype_sql(&self, _dtype: DType) -> &'static str {
+                "TEXT"
+            }
+
+            fn index_dtype_sql(&self, _index: &Index) -> &'static str {
+                "TEXT"
+            }
+
+            fn supports_schemas(&self) -> bool {
+                true
+            }
+        }
+
+        let conn = MultiSchemaProjectedChunks {
+            queries: RefCell::new(Vec::new()),
+        };
+
+        let chunks: Vec<DataFrame> = super::read_sql_table_chunks_with_options(
+            &conn,
+            "events",
+            &SqlReadOptions {
+                schema: Some("analytics".to_owned()),
+                columns: Some(vec!["name".to_owned(), "id".to_owned()]),
+                ..Default::default()
+            },
+            2,
+        )
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+        assert_eq!(
+            conn.queries.borrow().as_slice(),
+            &["SELECT \"name\", \"id\" FROM \"analytics\".\"events\"".to_owned()]
+        );
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].column_names(), vec!["name", "id"]);
+        assert_eq!(chunks[1].column_names(), vec!["name", "id"]);
+        assert_eq!(
+            chunks[0].index().labels(),
+            &[IndexLabel::Int64(0), IndexLabel::Int64(1)]
+        );
+        assert_eq!(chunks[1].index().labels(), &[IndexLabel::Int64(0)]);
+        assert_eq!(
+            chunks[0].column("name").unwrap().values(),
+            &[Scalar::Utf8("a".into()), Scalar::Utf8("b".into())]
+        );
+        assert_eq!(
+            chunks[1].column("id").unwrap().values(),
+            &[Scalar::Int64(3)]
+        );
+    }
+
     // ── SqlColumnSchema::comment (br-cfld / fd90.35) ─────────────────────
 
     #[cfg(feature = "sql-sqlite")]
