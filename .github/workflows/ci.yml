@@ -104,6 +104,7 @@ jobs:
       TMPDIR: ${{ github.workspace }}/.tmp
       FP_PYTHON_BIN: python
       FP_REQUIRE_LIVE_ORACLE: "1"
+      FP_ALLOW_SYSTEM_PANDAS_FALLBACK: "1"
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -155,6 +156,7 @@ jobs:
       TMPDIR: ${{ github.workspace }}/.tmp
       FP_PYTHON_BIN: python
       FP_REQUIRE_LIVE_ORACLE: "1"
+      FP_ALLOW_SYSTEM_PANDAS_FALLBACK: "1"
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -212,6 +214,7 @@ jobs:
       TMPDIR: ${{ github.workspace }}/.tmp
       FP_PYTHON_BIN: python
       FP_REQUIRE_LIVE_ORACLE: "1"
+      FP_ALLOW_SYSTEM_PANDAS_FALLBACK: "1"
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -254,6 +257,7 @@ jobs:
             --pipeline full \
             --no-fail-fast \
             --no-verify-sidecars \
+            --allow-system-pandas-fallback \
             --json-out artifacts/ci/gate_forensics.json
 
       - name: Upload gate forensics artifact

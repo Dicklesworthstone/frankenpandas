@@ -68,3 +68,24 @@ fn ci_workflow_uploads_live_oracle_report_artifact() {
         "expected CI artifact upload for live_oracle_report.json"
     );
 }
+
+#[test]
+fn ci_workflow_requires_live_oracle_system_pandas_fallback() {
+    let root = repo_root();
+    let ci = fs::read_to_string(root.join(".github/workflows/ci.yml")).expect("read ci");
+    let require_count = ci.matches("FP_REQUIRE_LIVE_ORACLE: \"1\"").count();
+    let fallback_count = ci.matches("FP_ALLOW_SYSTEM_PANDAS_FALLBACK: \"1\"").count();
+
+    assert!(
+        require_count >= 3,
+        "expected all CI test/conformance/gate jobs to require live oracle, found {require_count}"
+    );
+    assert!(
+        fallback_count >= 3,
+        "expected all CI test/conformance/gate jobs to allow system pandas fallback, found {fallback_count}"
+    );
+    assert!(
+        ci.contains("--allow-system-pandas-fallback"),
+        "expected fp-ci-gates to opt into system pandas fallback"
+    );
+}
