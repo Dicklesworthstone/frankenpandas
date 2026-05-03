@@ -75,7 +75,7 @@
 
 use std::{collections::HashMap, fmt, sync::OnceLock};
 
-use fp_types::{Scalar, Timedelta};
+use fp_types::{Period, PeriodFreq, Scalar, Timedelta};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -1324,6 +1324,497 @@ impl Index {
                 })
                 .collect(),
         ))
+    }
+}
+
+fn datetime_from_nanos(nanos: i64) -> Option<chrono::DateTime<chrono::Utc>> {
+    if nanos == i64::MIN {
+        return None;
+    }
+    let secs = nanos.div_euclid(1_000_000_000);
+    let subsec_nanos = nanos.rem_euclid(1_000_000_000) as u32;
+    chrono::DateTime::from_timestamp(secs, subsec_nanos)
+}
+
+fn map_datetime_labels<T, F>(labels: &[IndexLabel], func: F) -> Vec<Option<T>>
+where
+    F: Fn(chrono::DateTime<chrono::Utc>) -> T,
+{
+    labels
+        .iter()
+        .map(|label| match label {
+            IndexLabel::Datetime64(nanos) => datetime_from_nanos(*nanos).map(&func),
+            IndexLabel::Int64(_) | IndexLabel::Utf8(_) | IndexLabel::Timedelta64(_) => None,
+        })
+        .collect()
+}
+
+fn map_timedelta_labels<T, F>(labels: &[IndexLabel], func: F) -> Vec<Option<T>>
+where
+    F: Fn(i64) -> T,
+{
+    labels
+        .iter()
+        .map(|label| match label {
+            IndexLabel::Timedelta64(nanos) if *nanos != Timedelta::NAT => Some(func(*nanos)),
+            IndexLabel::Int64(_)
+            | IndexLabel::Utf8(_)
+            | IndexLabel::Timedelta64(_)
+            | IndexLabel::Datetime64(_) => None,
+        })
+        .collect()
+}
+
+fn ensure_index_kind(
+    index: &Index,
+    predicate: impl Fn(&IndexLabel) -> bool,
+    kind: &str,
+) -> Result<(), IndexError> {
+    if index.labels().iter().all(predicate) {
+        Ok(())
+    } else {
+        Err(IndexError::InvalidArgument(format!(
+            "{kind} requires homogeneous {kind} labels"
+        )))
+    }
+}
+
+/// Public pandas-style datetime index wrapper.
+///
+/// The canonical storage remains [`Index`] with `Datetime64` labels so existing
+/// DataFrame/Series alignment code keeps one representation. This wrapper adds
+/// the type-level public surface pandas users expect (`DatetimeIndex`) and a
+/// small first slice of datetime accessors.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DatetimeIndex {
+    index: Index,
+}
+
+impl DatetimeIndex {
+    #[must_use]
+    pub fn new(nanos: Vec<i64>) -> Self {
+        Self {
+            index: Index::from_datetime64(nanos),
+        }
+    }
+
+    pub fn from_index(index: Index) -> Result<Self, IndexError> {
+        ensure_index_kind(
+            &index,
+            |label| matches!(label, IndexLabel::Datetime64(_)),
+            "DatetimeIndex",
+        )?;
+        Ok(Self { index })
+    }
+
+    #[must_use]
+    pub fn as_index(&self) -> &Index {
+        &self.index
+    }
+
+    #[must_use]
+    pub fn into_index(self) -> Index {
+        self.index
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.index.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.index.is_empty()
+    }
+
+    #[must_use]
+    pub fn name(&self) -> Option<&str> {
+        self.index.name()
+    }
+
+    #[must_use]
+    pub fn set_name(&self, name: &str) -> Self {
+        Self {
+            index: self.index.set_name(name),
+        }
+    }
+
+    #[must_use]
+    pub fn nanos(&self) -> Vec<Option<i64>> {
+        self.index
+            .labels()
+            .iter()
+            .map(|label| match label {
+                IndexLabel::Datetime64(nanos) if *nanos != i64::MIN => Some(*nanos),
+                IndexLabel::Int64(_)
+                | IndexLabel::Utf8(_)
+                | IndexLabel::Timedelta64(_)
+                | IndexLabel::Datetime64(_) => None,
+            })
+            .collect()
+    }
+
+    #[must_use]
+    pub fn year(&self) -> Vec<Option<i32>> {
+        use chrono::Datelike;
+        map_datetime_labels(self.index.labels(), |dt| dt.year())
+    }
+
+    #[must_use]
+    pub fn month(&self) -> Vec<Option<u32>> {
+        use chrono::Datelike;
+        map_datetime_labels(self.index.labels(), |dt| dt.month())
+    }
+
+    #[must_use]
+    pub fn day(&self) -> Vec<Option<u32>> {
+        use chrono::Datelike;
+        map_datetime_labels(self.index.labels(), |dt| dt.day())
+    }
+}
+
+/// Public pandas-style timedelta index wrapper.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimedeltaIndex {
+    index: Index,
+}
+
+impl TimedeltaIndex {
+    #[must_use]
+    pub fn new(nanos: Vec<i64>) -> Self {
+        Self {
+            index: Index::from_timedelta64(nanos),
+        }
+    }
+
+    pub fn from_index(index: Index) -> Result<Self, IndexError> {
+        ensure_index_kind(
+            &index,
+            |label| matches!(label, IndexLabel::Timedelta64(_)),
+            "TimedeltaIndex",
+        )?;
+        Ok(Self { index })
+    }
+
+    #[must_use]
+    pub fn as_index(&self) -> &Index {
+        &self.index
+    }
+
+    #[must_use]
+    pub fn into_index(self) -> Index {
+        self.index
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.index.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.index.is_empty()
+    }
+
+    #[must_use]
+    pub fn name(&self) -> Option<&str> {
+        self.index.name()
+    }
+
+    #[must_use]
+    pub fn set_name(&self, name: &str) -> Self {
+        Self {
+            index: self.index.set_name(name),
+        }
+    }
+
+    #[must_use]
+    pub fn nanos(&self) -> Vec<Option<i64>> {
+        map_timedelta_labels(self.index.labels(), |nanos| nanos)
+    }
+
+    #[must_use]
+    pub fn days(&self) -> Vec<Option<i64>> {
+        map_timedelta_labels(self.index.labels(), |nanos| {
+            nanos.div_euclid(Timedelta::NANOS_PER_DAY)
+        })
+    }
+
+    #[must_use]
+    pub fn seconds(&self) -> Vec<Option<i64>> {
+        map_timedelta_labels(self.index.labels(), |nanos| {
+            nanos.rem_euclid(Timedelta::NANOS_PER_DAY) / Timedelta::NANOS_PER_SEC
+        })
+    }
+
+    #[must_use]
+    pub fn total_seconds(&self) -> Vec<Option<f64>> {
+        map_timedelta_labels(self.index.labels(), Timedelta::total_seconds)
+    }
+}
+
+/// Public pandas-style period index wrapper.
+///
+/// `Period` already lives in `fp-types`; this wrapper gives callers a typed
+/// index container while DataFrame integration can still materialize through
+/// string labels until a dedicated Period `IndexLabel` variant lands.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeriodIndex {
+    values: Vec<Period>,
+    name: Option<String>,
+}
+
+impl PeriodIndex {
+    #[must_use]
+    pub fn new(values: Vec<Period>) -> Self {
+        Self { values, name: None }
+    }
+
+    #[must_use]
+    pub fn from_range(start: Period, periods: usize) -> Self {
+        Self::new(fp_types::period_range(start, periods))
+    }
+
+    #[must_use]
+    pub fn values(&self) -> &[Period] {
+        &self.values
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
+
+    #[must_use]
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
+    #[must_use]
+    pub fn set_name(&self, name: &str) -> Self {
+        let mut out = self.clone();
+        out.name = Some(name.to_owned());
+        out
+    }
+
+    #[must_use]
+    pub fn freq(&self) -> Option<PeriodFreq> {
+        self.values.first().map(|period| period.freq)
+    }
+
+    #[must_use]
+    pub fn to_index(&self) -> Index {
+        Index::from_utf8(self.values.iter().map(Period::to_string).collect())
+            .set_names(self.name.as_deref())
+    }
+}
+
+/// Public pandas-style range index wrapper.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RangeIndex {
+    start: i64,
+    stop: i64,
+    step: i64,
+    name: Option<String>,
+}
+
+impl RangeIndex {
+    pub fn new(start: i64, stop: i64, step: i64) -> Result<Self, IndexError> {
+        if step == 0 {
+            return Err(IndexError::InvalidArgument(
+                "RangeIndex step must be non-zero".to_owned(),
+            ));
+        }
+        Ok(Self {
+            start,
+            stop,
+            step,
+            name: None,
+        })
+    }
+
+    pub fn from_len(len: usize) -> Result<Self, IndexError> {
+        let stop = i64::try_from(len).map_err(|_| {
+            IndexError::InvalidArgument("RangeIndex length exceeds i64 range".to_owned())
+        })?;
+        Self::new(0, stop, 1)
+    }
+
+    #[must_use]
+    pub const fn start(&self) -> i64 {
+        self.start
+    }
+
+    #[must_use]
+    pub const fn stop(&self) -> i64 {
+        self.stop
+    }
+
+    #[must_use]
+    pub const fn step(&self) -> i64 {
+        self.step
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        let start = i128::from(self.start);
+        let stop = i128::from(self.stop);
+        let step = i128::from(self.step);
+        let len = if step > 0 {
+            if start >= stop {
+                0
+            } else {
+                (stop - start + step - 1) / step
+            }
+        } else if start <= stop {
+            0
+        } else {
+            let positive_step = -step;
+            (start - stop + positive_step - 1) / positive_step
+        };
+        usize::try_from(len).unwrap_or(usize::MAX)
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    #[must_use]
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
+    #[must_use]
+    pub fn set_name(&self, name: &str) -> Self {
+        let mut out = self.clone();
+        out.name = Some(name.to_owned());
+        out
+    }
+
+    #[must_use]
+    pub fn to_index(&self) -> Index {
+        Index::from_range(self.start, self.stop, self.step).set_names(self.name.as_deref())
+    }
+
+    #[must_use]
+    pub fn values(&self) -> Vec<i64> {
+        self.to_index()
+            .labels()
+            .iter()
+            .filter_map(|label| match label {
+                IndexLabel::Int64(value) => Some(*value),
+                IndexLabel::Utf8(_) | IndexLabel::Timedelta64(_) | IndexLabel::Datetime64(_) => {
+                    None
+                }
+            })
+            .collect()
+    }
+}
+
+/// Public pandas-style categorical index wrapper.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CategoricalIndex {
+    labels: Vec<String>,
+    categories: Vec<String>,
+    ordered: bool,
+    name: Option<String>,
+}
+
+impl CategoricalIndex {
+    #[must_use]
+    pub fn from_values(labels: Vec<String>, ordered: bool) -> Self {
+        let mut categories = Vec::<String>::new();
+        for label in &labels {
+            if !categories.contains(label) {
+                categories.push(label.clone());
+            }
+        }
+        Self {
+            labels,
+            categories,
+            ordered,
+            name: None,
+        }
+    }
+
+    pub fn with_categories(
+        labels: Vec<String>,
+        categories: Vec<String>,
+        ordered: bool,
+    ) -> Result<Self, IndexError> {
+        for label in &labels {
+            if !categories.contains(label) {
+                return Err(IndexError::InvalidArgument(format!(
+                    "CategoricalIndex label {label:?} is not present in categories"
+                )));
+            }
+        }
+        Ok(Self {
+            labels,
+            categories,
+            ordered,
+            name: None,
+        })
+    }
+
+    #[must_use]
+    pub fn labels(&self) -> &[String] {
+        &self.labels
+    }
+
+    #[must_use]
+    pub fn categories(&self) -> &[String] {
+        &self.categories
+    }
+
+    #[must_use]
+    pub fn ordered(&self) -> bool {
+        self.ordered
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.labels.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.labels.is_empty()
+    }
+
+    #[must_use]
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
+    #[must_use]
+    pub fn set_name(&self, name: &str) -> Self {
+        let mut out = self.clone();
+        out.name = Some(name.to_owned());
+        out
+    }
+
+    #[must_use]
+    pub fn codes(&self) -> Vec<Option<usize>> {
+        self.labels
+            .iter()
+            .map(|label| {
+                self.categories
+                    .iter()
+                    .position(|category| category == label)
+            })
+            .collect()
+    }
+
+    #[must_use]
+    pub fn to_index(&self) -> Index {
+        Index::from_utf8(self.labels.clone()).set_names(self.name.as_deref())
     }
 }
 
@@ -3480,10 +3971,11 @@ pub enum MultiIndexOrIndex {
 
 #[cfg(test)]
 mod tests {
-    use fp_types::{Scalar, Timedelta};
+    use fp_types::{Period, PeriodFreq, Scalar, Timedelta};
 
     use super::{
-        DateOffset, Index, IndexLabel, MultiIndex, align_union, apply_date_offset, bdate_range,
+        CategoricalIndex, DateOffset, DatetimeIndex, Index, IndexLabel, MultiIndex, PeriodIndex,
+        RangeIndex, TimedeltaIndex, align_union, apply_date_offset, bdate_range,
         infer_freq_from_timestamps, validate_alignment_plan,
     };
 
@@ -3608,6 +4100,57 @@ mod tests {
 
         let fresh_index = Index::new(vec!["a".into(), "a".into(), "b".into()]);
         assert_eq!(index_with_cache, fresh_index);
+    }
+
+    #[test]
+    fn index_variant_wrappers_expose_public_type_surface() {
+        let range = RangeIndex::new(1, 7, 2).unwrap().set_name("row");
+        assert_eq!(range.values(), vec![1, 3, 5]);
+        assert_eq!(range.len(), 3);
+        assert_eq!(range.to_index().name(), Some("row"));
+        assert!(RangeIndex::new(0, 5, 0).is_err());
+
+        let dt = DatetimeIndex::new(vec![1_706_918_400_000_000_000, i64::MIN]);
+        assert_eq!(dt.year(), vec![Some(2024), None]);
+        assert_eq!(dt.month(), vec![Some(2), None]);
+        assert_eq!(dt.day(), vec![Some(3), None]);
+        assert!(DatetimeIndex::from_index(Index::from_i64(vec![1])).is_err());
+
+        let td = TimedeltaIndex::new(vec![90_061_000_000_000, Timedelta::NAT]);
+        assert_eq!(td.days(), vec![Some(1), None]);
+        assert_eq!(td.seconds(), vec![Some(3661), None]);
+        assert_eq!(td.total_seconds(), vec![Some(90061.0), None]);
+
+        let period =
+            PeriodIndex::from_range(Period::new(10, PeriodFreq::Monthly), 3).set_name("period");
+        assert_eq!(period.freq(), Some(PeriodFreq::Monthly));
+        assert_eq!(
+            period.values(),
+            &[
+                Period::new(10, PeriodFreq::Monthly),
+                Period::new(11, PeriodFreq::Monthly),
+                Period::new(12, PeriodFreq::Monthly),
+            ]
+        );
+        assert_eq!(period.to_index().name(), Some("period"));
+
+        let categorical = CategoricalIndex::from_values(
+            vec!["low".to_owned(), "high".to_owned(), "low".to_owned()],
+            true,
+        )
+        .set_name("priority");
+        assert_eq!(categorical.categories(), &["low", "high"]);
+        assert_eq!(categorical.codes(), vec![Some(0), Some(1), Some(0)]);
+        assert!(categorical.ordered());
+        assert_eq!(categorical.to_index().name(), Some("priority"));
+        assert!(
+            CategoricalIndex::with_categories(
+                vec!["missing".to_owned()],
+                vec!["known".to_owned()],
+                false,
+            )
+            .is_err()
+        );
     }
 
     // === AG-13: Adaptive Index Backend Tests ===

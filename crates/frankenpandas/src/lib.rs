@@ -79,9 +79,11 @@ pub use fp_groupby::{AggFunc, GroupByError, GroupByExecutionOptions, GroupByOpti
 pub use fp_index::{
     AlignMode,
     AlignmentPlan,
+    CategoricalIndex,
     // fd90.261: pandas-parity date/timedelta range constructors + helpers.
     DateOffset,
     DateRangeError,
+    DatetimeIndex,
     DuplicateKeep,
     Index,
     IndexError,
@@ -89,6 +91,9 @@ pub use fp_index::{
     MultiAlignmentPlan,
     MultiIndex,
     MultiIndexOrIndex,
+    PeriodIndex,
+    RangeIndex,
+    TimedeltaIndex,
     TimedeltaRangeError,
     // fd90.269: AACE Pipeline alignment fns + bdate_range + datetime utils.
     align,
@@ -339,6 +344,7 @@ pub mod prelude {
         // Join (types + functions, matches README Recipes + Merge: Advanced Options)
         AsofDirection,
         CategoricalAccessor,
+        CategoricalIndex,
         CategoricalMetadata,
         Column,
         // Error types (matches README "Error Architecture" section lines 829-853 —
@@ -379,6 +385,7 @@ pub mod prelude {
         // match on Result<_, DateRangeError> from the prelude alone.
         DateRangeError,
         DatetimeAccessor,
+        DatetimeIndex,
         DecisionAction,
         DecisionMetrics,
         DecisionRecord,
@@ -424,6 +431,8 @@ pub mod prelude {
         NullKind,
         Period,
         PeriodFreq,
+        PeriodIndex,
+        RangeIndex,
         Resample,
         Rolling,
         RuntimeMode,
@@ -466,6 +475,7 @@ pub mod prelude {
         Timedelta,
         TimedeltaComponents,
         TimedeltaError,
+        TimedeltaIndex,
         TimedeltaRangeError,
         Timestamp,
         // fd90.211: ToDatetimeOptions + ToDatetimeOrigin pair with the
