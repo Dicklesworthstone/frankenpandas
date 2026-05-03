@@ -39417,3 +39417,63 @@ fn live_oracle_series_update_with_disjoint_index() {
     let actual = series.update(&other).expect("update disjoint");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_dataframe_query_inequality() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DF-QUERY-NE",
+        "case_id": "dataframe_query_inequality",
+        "mode": "strict",
+        "operation": "dataframe_query",
+        "oracle_source": "live_legacy_pandas",
+        "expr": "score != 70",
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 }
+            ],
+            "columns": {
+                "name": [
+                    { "kind": "utf8", "value": "alice" },
+                    { "kind": "utf8", "value": "bob" },
+                    { "kind": "utf8", "value": "carol" },
+                    { "kind": "utf8", "value": "dave" }
+                ],
+                "score": [
+                    { "kind": "int64", "value": 70 },
+                    { "kind": "int64", "value": 85 },
+                    { "kind": "int64", "value": 70 },
+                    { "kind": "int64", "value": 95 }
+                ]
+            },
+            "column_order": ["name", "score"]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping query inequality: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
+    let super::ResolvedExpected::Frame(expected_frame) = expected else { return; };
+
+    let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
+    let policy = super::RuntimePolicy::strict();
+    let mut ledger = super::EvidenceLedger::new();
+    let result = fp_expr::query_str(
+        fixture.expr.as_deref().expect("expr"),
+        &frame,
+        &policy,
+        &mut ledger,
+    )
+    .expect("query");
+    super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
+}
