@@ -12291,6 +12291,42 @@ mod tests {
 
     #[cfg(feature = "sql-sqlite")]
     #[test]
+    fn sql_read_chunks_sqlite_uses_paged_iterator_state() {
+        let conn = make_sql_test_conn();
+        conn.execute_batch(
+            "CREATE TABLE fp_sqlite_paged_chunks (id INTEGER, name TEXT);
+             INSERT INTO fp_sqlite_paged_chunks (id, name) VALUES
+                (1, 'alpha'),
+                (2, 'beta');",
+        )
+        .expect("create sqlite_paged_chunks table");
+
+        let mut chunks = read_sql_chunks(
+            &conn,
+            "SELECT id, name FROM fp_sqlite_paged_chunks ORDER BY id",
+            1,
+        )
+        .expect("chunk iterator");
+
+        let initial_debug = format!("{chunks:?}");
+        assert!(
+            initial_debug.contains("mode: \"paged\""),
+            "SQLite chunk reads must use paged mode, got {initial_debug}"
+        );
+        assert!(initial_debug.contains("next_offset: 0"));
+
+        let first = chunks
+            .next()
+            .expect("first chunk")
+            .expect("first chunk should read");
+        assert_eq!(first.column("id").unwrap().values(), &[Scalar::Int64(1)]);
+
+        let after_first_debug = format!("{chunks:?}");
+        assert!(after_first_debug.contains("next_offset: 1"));
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
     fn sql_read_chunks_with_options_applies_params_parse_dates_and_coerce_float() {
         let conn = make_sql_test_conn();
         conn.execute_batch(
