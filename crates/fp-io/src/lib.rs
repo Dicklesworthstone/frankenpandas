@@ -3610,6 +3610,9 @@ pub struct SqlQueryResult {
     pub rows: Vec<Vec<Scalar>>,
 }
 
+type SqlColumnDtypeHints = Vec<Option<DType>>;
+type SqlMaterializedColumns = (Vec<String>, Vec<Vec<Scalar>>, SqlColumnDtypeHints);
+
 /// Backend-neutral SQL column metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SqlColumnSchema {
@@ -3813,6 +3816,7 @@ enum SqlChunkIteratorState<'conn> {
     Materialized {
         headers: Vec<String>,
         columns: Vec<Vec<Scalar>>,
+        dtype_hints: SqlColumnDtypeHints,
         chunk_size: usize,
         next_row: usize,
     },
@@ -3833,6 +3837,7 @@ impl std::fmt::Debug for SqlChunkIterator<'_> {
             SqlChunkIteratorState::Materialized {
                 headers,
                 columns,
+                dtype_hints: _,
                 chunk_size,
                 next_row,
             } => f
@@ -3864,11 +3869,17 @@ impl std::fmt::Debug for SqlChunkIterator<'_> {
 }
 
 impl<'conn> SqlChunkIterator<'conn> {
-    fn materialized(headers: Vec<String>, columns: Vec<Vec<Scalar>>, chunk_size: usize) -> Self {
+    fn materialized(
+        headers: Vec<String>,
+        columns: Vec<Vec<Scalar>>,
+        dtype_hints: SqlColumnDtypeHints,
+        chunk_size: usize,
+    ) -> Self {
         Self {
             state: SqlChunkIteratorState::Materialized {
                 headers,
                 columns,
+                dtype_hints,
                 chunk_size,
                 next_row: 0,
             },
@@ -3911,6 +3922,7 @@ impl Iterator for SqlChunkIterator<'_> {
             SqlChunkIteratorState::Materialized {
                 headers,
                 columns,
+                dtype_hints,
                 chunk_size,
                 next_row,
             } => {
@@ -3927,7 +3939,11 @@ impl Iterator for SqlChunkIterator<'_> {
                     .iter()
                     .map(|column| column[start..end].to_vec())
                     .collect();
-                Some(dataframe_from_sql_columns(headers.clone(), chunk_columns))
+                Some(dataframe_from_sql_columns(
+                    headers.clone(),
+                    chunk_columns,
+                    dtype_hints.clone(),
+                ))
             }
             SqlChunkIteratorState::Paged {
                 conn,
@@ -3945,7 +3961,7 @@ impl Iterator for SqlChunkIterator<'_> {
                 let page =
                     sql_query_to_columns_paged(*conn, query, options, *chunk_size, *next_offset);
                 Some(match page {
-                    Ok((headers, columns)) => {
+                    Ok((headers, columns, dtype_hints)) => {
                         let row_count = columns.first().map_or(0, Vec::len);
                         if row_count == 0 {
                             *finished = true;
@@ -3955,7 +3971,7 @@ impl Iterator for SqlChunkIterator<'_> {
                             *finished = true;
                         }
                         *next_offset = next_offset.saturating_add(row_count);
-                        dataframe_from_sql_columns(headers, columns)
+                        dataframe_from_sql_columns(headers, columns, dtype_hints)
                     }
                     Err(err) => {
                         *finished = true;
@@ -4020,6 +4036,19 @@ fn sql_indexed_chunks<'conn>(
 /// Minimal SQL connection surface needed by FrankenPandas SQL IO.
 pub trait SqlConnection {
     fn query(&self, query: &str, params: &[Scalar]) -> Result<SqlQueryResult, IoError>;
+
+    /// Return optional dtype hints for each result column in `query`.
+    ///
+    /// Backends that expose declared result-column types should override this
+    /// so empty/all-null SQL results keep their table schema instead of
+    /// falling back to `DType::Null`.
+    fn query_column_dtypes(
+        &self,
+        _query: &str,
+        _params: &[Scalar],
+    ) -> Result<Vec<Option<DType>>, IoError> {
+        Ok(Vec::new())
+    }
 
     /// Whether `read_sql_chunks*` may page this backend with a bounded
     /// `LIMIT`/`OFFSET` wrapper instead of materializing the whole result
@@ -4391,6 +4420,20 @@ fn dtype_to_sql(dtype: DType) -> &'static str {
     }
 }
 
+#[cfg(feature = "sql-sqlite")]
+fn sqlite_decl_type_to_dtype(decl_type: &str) -> Option<DType> {
+    let upper = decl_type.trim().to_ascii_uppercase();
+    if upper.contains("INT") {
+        Some(DType::Int64)
+    } else if upper.contains("REAL") || upper.contains("FLOA") || upper.contains("DOUB") {
+        Some(DType::Float64)
+    } else if upper.contains("CHAR") || upper.contains("CLOB") || upper.contains("TEXT") {
+        Some(DType::Utf8)
+    } else {
+        None
+    }
+}
+
 /// Convert an SQLite column value to a Scalar.
 #[cfg(feature = "sql-sqlite")]
 fn sql_value_to_scalar(value: &rusqlite::types::Value) -> Scalar {
@@ -4484,6 +4527,21 @@ impl SqlConnection for rusqlite::Connection {
             columns,
             rows: out_rows,
         })
+    }
+
+    fn query_column_dtypes(
+        &self,
+        query: &str,
+        _params: &[Scalar],
+    ) -> Result<Vec<Option<DType>>, IoError> {
+        let stmt = self
+            .prepare(query)
+            .map_err(|e| IoError::Sql(format!("prepare failed: {e}")))?;
+        Ok(stmt
+            .columns()
+            .into_iter()
+            .map(|column| column.decl_type().and_then(sqlite_decl_type_to_dtype))
+            .collect())
     }
 
     fn supports_paged_sql_chunks(&self) -> bool {
@@ -5398,8 +5456,8 @@ pub fn read_sql_with_options<C: SqlConnection>(
                 .to_owned(),
         ));
     }
-    let (headers, columns) = sql_query_to_columns(conn, query, options)?;
-    let frame = dataframe_from_sql_columns(headers, columns)?;
+    let (headers, columns, dtype_hints) = sql_query_to_columns(conn, query, options)?;
+    let frame = dataframe_from_sql_columns(headers, columns, dtype_hints)?;
     apply_sql_index_col(frame, options.index_col.as_deref())
 }
 
@@ -5588,7 +5646,7 @@ fn sql_query_to_columns_paged<C: SqlConnection + ?Sized>(
     options: &SqlReadOptions,
     chunk_size: usize,
     offset: usize,
-) -> Result<(Vec<String>, Vec<Vec<Scalar>>), IoError> {
+) -> Result<SqlMaterializedColumns, IoError> {
     let base_param_count = options.params.as_ref().map_or(0, Vec::len);
     let paged_query = sql_paged_query(conn, query, base_param_count)?;
     let paged_options = sql_paged_options(options, chunk_size, offset)?;
@@ -5599,12 +5657,15 @@ fn sql_query_to_columns<C: SqlConnection + ?Sized>(
     conn: &C,
     query: &str,
     options: &SqlReadOptions,
-) -> Result<(Vec<String>, Vec<Vec<Scalar>>), IoError> {
+) -> Result<SqlMaterializedColumns, IoError> {
+    let params = options.params.as_deref().unwrap_or(&[]);
     let SqlQueryResult {
         columns: headers,
         rows,
-    } = conn.query(query, options.params.as_deref().unwrap_or(&[]))?;
+    } = conn.query(query, params)?;
     reject_duplicate_headers(&headers)?;
+    let mut dtype_hints = conn.query_column_dtypes(query, params)?;
+    dtype_hints.resize(headers.len(), None);
     let mut columns: Vec<Vec<Scalar>> = (0..headers.len()).map(|_| Vec::new()).collect();
 
     for row in rows {
@@ -5628,9 +5689,21 @@ fn sql_query_to_columns<C: SqlConnection + ?Sized>(
             dtype_map,
             options.parse_dates.as_deref().unwrap_or(&[]),
         )?;
+        for (idx, header) in headers.iter().enumerate() {
+            if let Some(dtype) = dtype_map.get(header)
+                && !options
+                    .parse_dates
+                    .as_deref()
+                    .unwrap_or(&[])
+                    .iter()
+                    .any(|d| d == header)
+            {
+                dtype_hints[idx] = Some(*dtype);
+            }
+        }
     }
 
-    Ok((headers, columns))
+    Ok((headers, columns, dtype_hints))
 }
 
 /// Apply pandas-style `dtype={'col': dtype}` overrides to materialized
@@ -5671,13 +5744,20 @@ fn apply_sql_dtype_overrides(
 fn dataframe_from_sql_columns(
     headers: Vec<String>,
     columns: Vec<Vec<Scalar>>,
+    dtype_hints: SqlColumnDtypeHints,
 ) -> Result<DataFrame, IoError> {
     let row_count = columns.first().map_or(0, Vec::len);
     let mut out_columns = BTreeMap::new();
     let mut column_order = Vec::new();
 
-    for (name, values) in headers.into_iter().zip(columns) {
-        out_columns.insert(name.clone(), Column::from_values(values)?);
+    for (idx, (name, values)) in headers.into_iter().zip(columns).enumerate() {
+        let dtype_hint = dtype_hints.get(idx).copied().flatten();
+        let has_observed_value = values.iter().any(|value| !matches!(value, Scalar::Null(_)));
+        let column = match (has_observed_value, dtype_hint) {
+            (false, Some(dtype)) => Column::new(dtype, values)?,
+            _ => Column::from_values(values)?,
+        };
+        out_columns.insert(name.clone(), column);
         column_order.push(name);
     }
 
@@ -5752,8 +5832,13 @@ pub fn read_sql_chunks_with_options<'conn, C: SqlConnection + 'conn>(
         return SqlChunkIterator::paged(conn, query, options, chunk_size);
     }
 
-    let (headers, columns) = sql_query_to_columns(conn, query, options)?;
-    Ok(SqlChunkIterator::materialized(headers, columns, chunk_size))
+    let (headers, columns, dtype_hints) = sql_query_to_columns(conn, query, options)?;
+    Ok(SqlChunkIterator::materialized(
+        headers,
+        columns,
+        dtype_hints,
+        chunk_size,
+    ))
 }
 
 /// Read a SQL query result as DataFrame chunks with read-time options and optional index promotion.
@@ -12360,6 +12445,19 @@ mod tests {
         let frame = read_sql_table(&conn, "empty").unwrap();
         assert_eq!(frame.index().len(), 0);
         assert_eq!(frame.column_names().len(), 2);
+        assert_eq!(frame.column("x").unwrap().dtype(), DType::Int64);
+        assert_eq!(frame.column("y").unwrap().dtype(), DType::Utf8);
+
+        conn.execute_batch(
+            "CREATE TABLE typed_nulls (i INTEGER, r REAL, t TEXT);
+             INSERT INTO typed_nulls VALUES (NULL, NULL, NULL);",
+        )
+        .unwrap();
+        let null_frame = read_sql_table(&conn, "typed_nulls").unwrap();
+        assert_eq!(null_frame.index().len(), 1);
+        assert_eq!(null_frame.column("i").unwrap().dtype(), DType::Int64);
+        assert_eq!(null_frame.column("r").unwrap().dtype(), DType::Float64);
+        assert_eq!(null_frame.column("t").unwrap().dtype(), DType::Utf8);
     }
 
     #[cfg(feature = "sql-sqlite")]
