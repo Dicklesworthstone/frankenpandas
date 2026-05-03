@@ -8064,6 +8064,7 @@ impl Rolling<'_> {
                 "prod" => self.prod()?,
                 "skew" => self.skew()?,
                 "kurt" => self.kurt()?,
+                "sem" => self.sem()?,
                 _ => {
                     return Err(FrameError::CompatibilityRejected(format!(
                         "rolling.agg: unsupported function '{func}'"
@@ -8081,6 +8082,118 @@ impl Rolling<'_> {
             column_multiindex: None,
             row_multiindex: None,
         })
+    }
+
+    /// pandas alias for [`Self::agg`].
+    ///
+    /// Matches `series.rolling(window).aggregate([...])`.
+    pub fn aggregate(&self, funcs: &[&str]) -> Result<DataFrame, FrameError> {
+        self.agg(funcs)
+    }
+
+    /// Rolling standard error of the mean.
+    ///
+    /// Matches `series.rolling(window).sem()`.
+    pub fn sem(&self) -> Result<Series, FrameError> {
+        self.apply_rolling(
+            |nums| {
+                if nums.len() < 2 {
+                    return f64::NAN;
+                }
+                let mean = nums.iter().sum::<f64>() / nums.len() as f64;
+                let var =
+                    nums.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (nums.len() - 1) as f64;
+                var.sqrt() / (nums.len() as f64).sqrt()
+            },
+            self.series.name(),
+        )
+    }
+
+    /// Rank the current observation within each rolling window.
+    ///
+    /// Matches `series.rolling(window).rank()`. The emitted value is the
+    /// rank of the row's own value within its window.
+    pub fn rank(
+        &self,
+        method: &str,
+        ascending: bool,
+        na_option: &str,
+    ) -> Result<Series, FrameError> {
+        validate_rank_method(method)?;
+        validate_rank_na_option(na_option)?;
+        self.validate()?;
+
+        let vals = self.series.column().values();
+        let len = vals.len();
+        let mut out = Vec::with_capacity(len);
+
+        for i in 0..len {
+            let (start, end, current_pos) = if self.center {
+                let half = self.window / 2;
+                let start = i.saturating_sub(half);
+                let end = (i + half + self.window % 2).min(len);
+                (start, end, i - start)
+            } else {
+                let start = (i + 1).saturating_sub(self.window);
+                (start, i + 1, i - start)
+            };
+            let window_slice = &vals[start..end];
+            let valid_count = window_slice
+                .iter()
+                .filter(|value| !value.is_missing() && value.to_f64().is_ok())
+                .count();
+
+            if valid_count < self.min_periods
+                || (self.center && window_slice.len() < self.window)
+                || (!self.center && i + 1 < self.window)
+            {
+                out.push(Scalar::Null(NullKind::NaN));
+                continue;
+            }
+
+            let mut null_positions = Vec::new();
+            let mut sortable = Vec::new();
+            for (pos, value) in window_slice.iter().enumerate() {
+                if value.is_missing() {
+                    null_positions.push(pos);
+                } else if let Ok(f) = value.to_f64() {
+                    sortable.push((pos, f));
+                } else {
+                    null_positions.push(pos);
+                }
+            }
+
+            let ranks = rank_numeric_positions(
+                window_slice.len(),
+                sortable,
+                &null_positions,
+                method,
+                ascending,
+                na_option,
+                false,
+            );
+            out.push(ranks[current_pos].clone());
+        }
+
+        Series::from_values(
+            self.series.name(),
+            self.series.index().labels().to_vec(),
+            out,
+        )
+    }
+
+    /// Frozenset-style label set excluded from this rolling window.
+    ///
+    /// Series rolling windows have no excluded columns.
+    #[must_use]
+    pub fn exclusions(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Number of dimensions of the underlying object. Series rolling is 1D.
+    #[must_use]
+    pub fn ndim(&self) -> usize {
+        1
     }
 }
 
@@ -8451,6 +8564,142 @@ impl Expanding<'_> {
             self.series.index().labels().to_vec(),
             out,
         )
+    }
+
+    /// Expanding standard error of the mean.
+    ///
+    /// Matches `series.expanding().sem()`.
+    pub fn sem(&self) -> Result<Series, FrameError> {
+        self.apply_expanding(
+            |nums| {
+                if nums.len() < 2 {
+                    return f64::NAN;
+                }
+                let mean = nums.iter().sum::<f64>() / nums.len() as f64;
+                let var =
+                    nums.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (nums.len() - 1) as f64;
+                var.sqrt() / (nums.len() as f64).sqrt()
+            },
+            self.series.name(),
+        )
+    }
+
+    /// Rank the current observation against all observations seen so far.
+    ///
+    /// Matches `series.expanding().rank()`.
+    pub fn rank(
+        &self,
+        method: &str,
+        ascending: bool,
+        na_option: &str,
+    ) -> Result<Series, FrameError> {
+        validate_rank_method(method)?;
+        validate_rank_na_option(na_option)?;
+
+        let vals = self.series.column().values();
+        let mut out = Vec::with_capacity(vals.len());
+
+        for i in 0..vals.len() {
+            let window_slice = &vals[..=i];
+            let valid_count = window_slice
+                .iter()
+                .filter(|value| !value.is_missing() && value.to_f64().is_ok())
+                .count();
+            if valid_count < self.min_periods {
+                out.push(Scalar::Null(NullKind::NaN));
+                continue;
+            }
+
+            let mut null_positions = Vec::new();
+            let mut sortable = Vec::new();
+            for (pos, value) in window_slice.iter().enumerate() {
+                if value.is_missing() {
+                    null_positions.push(pos);
+                } else if let Ok(f) = value.to_f64() {
+                    sortable.push((pos, f));
+                } else {
+                    null_positions.push(pos);
+                }
+            }
+
+            let ranks = rank_numeric_positions(
+                window_slice.len(),
+                sortable,
+                &null_positions,
+                method,
+                ascending,
+                na_option,
+                false,
+            );
+            out.push(ranks[i].clone());
+        }
+
+        Series::from_values(
+            self.series.name(),
+            self.series.index().labels().to_vec(),
+            out,
+        )
+    }
+
+    /// Aggregate with multiple functions, returning a DataFrame.
+    ///
+    /// Matches `series.expanding().agg(['sum', 'mean'])`.
+    pub fn agg(&self, funcs: &[&str]) -> Result<DataFrame, FrameError> {
+        let mut result_cols = BTreeMap::new();
+        let mut col_order = Vec::new();
+
+        for &func in funcs {
+            let result = match func {
+                "sum" => self.sum()?,
+                "mean" => self.mean()?,
+                "min" => self.min()?,
+                "max" => self.max()?,
+                "std" => self.std()?,
+                "var" => self.var()?,
+                "median" => self.median()?,
+                "count" => self.count()?,
+                "quantile" => self.quantile(0.5)?,
+                "skew" => self.skew()?,
+                "kurt" => self.kurt()?,
+                "sem" => self.sem()?,
+                _ => {
+                    return Err(FrameError::CompatibilityRejected(format!(
+                        "expanding.agg: unsupported function '{func}'"
+                    )));
+                }
+            };
+            result_cols.insert(func.to_string(), result.column().clone());
+            col_order.push(func.to_string());
+        }
+
+        Ok(DataFrame {
+            columns: result_cols,
+            column_order: col_order,
+            index: self.series.index().clone(),
+            column_multiindex: None,
+            row_multiindex: None,
+        })
+    }
+
+    /// pandas alias for [`Self::agg`].
+    ///
+    /// Matches `series.expanding().aggregate([...])`.
+    pub fn aggregate(&self, funcs: &[&str]) -> Result<DataFrame, FrameError> {
+        self.agg(funcs)
+    }
+
+    /// Frozenset-style label set excluded from this expanding window.
+    ///
+    /// Series expanding windows have no excluded columns.
+    #[must_use]
+    pub fn exclusions(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Number of dimensions of the underlying object. Series expanding is 1D.
+    #[must_use]
+    pub fn ndim(&self) -> usize {
+        1
     }
 }
 
@@ -9292,6 +9541,76 @@ impl DataFrameRolling<'_> {
             row_multiindex: None,
         })
     }
+
+    /// Aggregate each numeric column with multiple rolling functions.
+    ///
+    /// Matches `df.rolling(window).agg(['sum', 'mean'])`. Output columns are
+    /// named `{column}_{function}`.
+    pub fn agg(&self, funcs: &[&str]) -> Result<DataFrame, FrameError> {
+        let mut result_cols = BTreeMap::new();
+        let mut col_order = Vec::new();
+
+        for col_name in &self.df.column_order {
+            let col = &self.df.columns[col_name];
+            let dt = col.dtype();
+            if dt != DType::Int64 && dt != DType::Float64 {
+                continue;
+            }
+
+            let series = Series::new(col_name, self.df.index.clone(), col.clone())?;
+            let rolled = series
+                .rolling(self.window, Some(self.min_periods))
+                .agg(funcs)?;
+            for func in funcs {
+                let out_name = format!("{col_name}_{func}");
+                result_cols.insert(out_name.clone(), rolled.columns()[*func].clone());
+                col_order.push(out_name);
+            }
+        }
+
+        Ok(DataFrame {
+            columns: result_cols,
+            column_order: col_order,
+            index: self.df.index.clone(),
+            column_multiindex: None,
+            row_multiindex: None,
+        })
+    }
+
+    /// pandas alias for [`Self::agg`].
+    pub fn aggregate(&self, funcs: &[&str]) -> Result<DataFrame, FrameError> {
+        self.agg(funcs)
+    }
+
+    /// Rolling standard error of the mean across numeric columns.
+    pub fn sem(&self) -> Result<DataFrame, FrameError> {
+        self.apply_rolling(|s, w, mp| s.rolling(w, Some(mp)).sem())
+    }
+
+    /// Rolling rank across numeric columns.
+    pub fn rank(
+        &self,
+        method: &str,
+        ascending: bool,
+        na_option: &str,
+    ) -> Result<DataFrame, FrameError> {
+        self.apply_rolling(|s, w, mp| s.rolling(w, Some(mp)).rank(method, ascending, na_option))
+    }
+
+    /// Frozenset-style label set excluded from this rolling window.
+    ///
+    /// DataFrame rolling currently processes all numeric columns and excludes
+    /// no labels.
+    #[must_use]
+    pub fn exclusions(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Number of dimensions of the underlying object. DataFrame rolling is 2D.
+    #[must_use]
+    pub fn ndim(&self) -> usize {
+        2
+    }
 }
 
 /// Expanding window aggregation over a DataFrame's numeric columns.
@@ -9404,6 +9723,74 @@ impl DataFrameExpanding<'_> {
         F: Fn(&[f64]) -> f64 + Copy,
     {
         self.apply_expanding(|s, mp| s.expanding(Some(mp)).apply(func))
+    }
+
+    /// Aggregate each numeric column with multiple expanding functions.
+    ///
+    /// Matches `df.expanding().agg(['sum', 'mean'])`. Output columns are
+    /// named `{column}_{function}`.
+    pub fn agg(&self, funcs: &[&str]) -> Result<DataFrame, FrameError> {
+        let mut result_cols = BTreeMap::new();
+        let mut col_order = Vec::new();
+
+        for col_name in &self.df.column_order {
+            let col = &self.df.columns[col_name];
+            let dt = col.dtype();
+            if dt != DType::Int64 && dt != DType::Float64 {
+                continue;
+            }
+
+            let series = Series::new(col_name, self.df.index.clone(), col.clone())?;
+            let expanded = series.expanding(Some(self.min_periods)).agg(funcs)?;
+            for func in funcs {
+                let out_name = format!("{col_name}_{func}");
+                result_cols.insert(out_name.clone(), expanded.columns()[*func].clone());
+                col_order.push(out_name);
+            }
+        }
+
+        Ok(DataFrame {
+            columns: result_cols,
+            column_order: col_order,
+            index: self.df.index.clone(),
+            column_multiindex: None,
+            row_multiindex: None,
+        })
+    }
+
+    /// pandas alias for [`Self::agg`].
+    pub fn aggregate(&self, funcs: &[&str]) -> Result<DataFrame, FrameError> {
+        self.agg(funcs)
+    }
+
+    /// Expanding standard error of the mean across numeric columns.
+    pub fn sem(&self) -> Result<DataFrame, FrameError> {
+        self.apply_expanding(|s, mp| s.expanding(Some(mp)).sem())
+    }
+
+    /// Expanding rank across numeric columns.
+    pub fn rank(
+        &self,
+        method: &str,
+        ascending: bool,
+        na_option: &str,
+    ) -> Result<DataFrame, FrameError> {
+        self.apply_expanding(|s, mp| s.expanding(Some(mp)).rank(method, ascending, na_option))
+    }
+
+    /// Frozenset-style label set excluded from this expanding window.
+    ///
+    /// DataFrame expanding currently processes all numeric columns and excludes
+    /// no labels.
+    #[must_use]
+    pub fn exclusions(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Number of dimensions of the underlying object. DataFrame expanding is 2D.
+    #[must_use]
+    pub fn ndim(&self) -> usize {
+        2
     }
 }
 
@@ -15906,6 +16293,42 @@ pub struct DataFrame {
     column_multiindex: Option<fp_index::MultiIndex>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DataFrameFlags {
+    allows_duplicate_labels: bool,
+}
+
+impl DataFrameFlags {
+    #[must_use]
+    pub fn allows_duplicate_labels(&self) -> bool {
+        self.allows_duplicate_labels
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StyledDataFrame<'a> {
+    df: &'a DataFrame,
+}
+
+impl<'a> StyledDataFrame<'a> {
+    #[must_use]
+    pub fn dataframe(&self) -> &'a DataFrame {
+        self.df
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SparseDataFrameView<'a> {
+    df: &'a DataFrame,
+}
+
+impl<'a> SparseDataFrameView<'a> {
+    #[must_use]
+    pub fn dataframe(&self) -> &'a DataFrame {
+        self.df
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum DataFrameArithmeticOperand<'a> {
     DataFrame(&'a DataFrame),
@@ -19816,6 +20239,132 @@ impl DataFrame {
     /// Matches `df.T` in pandas.
     pub fn t(&self) -> Result<Self, FrameError> {
         self.transpose()
+    }
+
+    /// Uppercase pandas spelling for [`Self::transpose`].
+    ///
+    /// Rust style prefers [`Self::t`], but pandas exposes `df.T`.
+    #[allow(non_snake_case)]
+    pub fn T(&self) -> Result<Self, FrameError> {
+        self.transpose()
+    }
+
+    /// Return row-major scalar values.
+    ///
+    /// Matches `pd.DataFrame.values` at the API-shape level. Unlike
+    /// [`Self::to_numpy`], this preserves non-numeric scalar values.
+    #[must_use]
+    pub fn values(&self) -> Vec<Vec<Scalar>> {
+        self.row_major_values()
+    }
+
+    /// Per-column product alias.
+    ///
+    /// Matches `pd.DataFrame.product()` as an alias of `prod()`.
+    pub fn product(&self) -> Result<Series, FrameError> {
+        self.prod()
+    }
+
+    /// Dict-like column lookup.
+    ///
+    /// Matches `pd.DataFrame.get(key)` by returning `None` instead of an
+    /// error for a missing column.
+    pub fn get(&self, key: &str) -> Result<Option<Series>, FrameError> {
+        self.column_as_series(key).map(Some).or_else(|err| {
+            if matches!(err, FrameError::CompatibilityRejected(_)) {
+                Ok(None)
+            } else {
+                Err(err)
+            }
+        })
+    }
+
+    /// Dict-like column lookup with a fallback Series.
+    ///
+    /// Matches `pd.DataFrame.get(key, default)` for Series defaults.
+    pub fn get_or(&self, key: &str, default: Series) -> Result<Series, FrameError> {
+        self.get(key).map(|series| series.unwrap_or(default))
+    }
+
+    /// Extract the single boolean value from a 1x1 DataFrame.
+    ///
+    /// Matches `pd.DataFrame.bool()`. Raises unless the DataFrame has exactly
+    /// one row, one column, and that cell is a boolean scalar.
+    pub fn bool_(&self) -> Result<bool, FrameError> {
+        if self.len() != 1 || self.num_columns() != 1 {
+            return Err(FrameError::CompatibilityRejected(
+                "bool_: DataFrame must contain exactly one element".to_string(),
+            ));
+        }
+        let column_name = self.column_order.first().ok_or_else(|| {
+            FrameError::CompatibilityRejected(
+                "bool_: DataFrame must contain exactly one column".to_string(),
+            )
+        })?;
+        match &self.columns[column_name].values()[0] {
+            Scalar::Bool(flag) => Ok(*flag),
+            _ => Err(FrameError::CompatibilityRejected(
+                "bool_: value must be a boolean scalar".to_string(),
+            )),
+        }
+    }
+
+    /// User metadata mapping.
+    ///
+    /// Matches `pd.DataFrame.attrs` shape. FrankenPandas does not yet persist
+    /// mutable attrs on the DataFrame storage object, so the current accessor
+    /// returns the default empty metadata map.
+    #[must_use]
+    pub fn attrs(&self) -> BTreeMap<String, Scalar> {
+        BTreeMap::new()
+    }
+
+    /// DataFrame flags metadata.
+    ///
+    /// Matches `pd.DataFrame.flags` for the duplicate-label flag currently
+    /// represented by FrankenPandas.
+    #[must_use]
+    pub fn flags(&self) -> DataFrameFlags {
+        DataFrameFlags {
+            allows_duplicate_labels: true,
+        }
+    }
+
+    /// Return a DataFrame with updated flags.
+    ///
+    /// Matches `pd.DataFrame.set_flags(allows_duplicate_labels=...)` for the
+    /// duplicate-label flag.
+    pub fn set_flags(&self, allows_duplicate_labels: Option<bool>) -> Result<Self, FrameError> {
+        if matches!(allows_duplicate_labels, Some(false))
+            && (self.index.has_duplicates()
+                || self
+                    .row_multiindex
+                    .as_ref()
+                    .is_some_and(fp_index::MultiIndex::has_duplicates))
+        {
+            return Err(FrameError::CompatibilityRejected(
+                "set_flags: duplicate labels are present".to_string(),
+            ));
+        }
+        Ok(self.clone())
+    }
+
+    /// Styling accessor placeholder.
+    ///
+    /// Matches `pd.DataFrame.style` as a typed accessor over the current
+    /// DataFrame.
+    #[must_use]
+    pub fn style(&self) -> StyledDataFrame<'_> {
+        StyledDataFrame { df: self }
+    }
+
+    /// Sparse accessor placeholder.
+    ///
+    /// Matches `pd.DataFrame.sparse` as a typed accessor over the current
+    /// DataFrame.
+    #[must_use]
+    pub fn sparse(&self) -> SparseDataFrameView<'_> {
+        SparseDataFrameView { df: self }
     }
 
     /// Swap axes (rows and columns).
@@ -54146,6 +54695,43 @@ mod tests {
     }
 
     #[test]
+    fn rolling_aggregate_sem_rank_and_introspection() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Float64(3.0),
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+            ],
+        )
+        .unwrap();
+        let rolling = s.rolling(2, None);
+
+        let aggregate = rolling.aggregate(&["sum", "sem"]).unwrap();
+        assert_eq!(
+            aggregate
+                .column_names()
+                .into_iter()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec!["sum".to_string(), "sem".to_string()]
+        );
+        assert_eq!(aggregate.columns()["sum"].values()[1], Scalar::Float64(4.0));
+        let sem1 = expect_float64(&aggregate.columns()["sem"].values()[1]);
+        let sem2 = expect_float64(&aggregate.columns()["sem"].values()[2]);
+        assert!((sem1 - 1.0).abs() < 1e-10);
+        assert!((sem2 - 0.5).abs() < 1e-10);
+
+        let rank = rolling.rank("average", true, "keep").unwrap();
+        assert!(rank.values()[0].is_missing());
+        assert_eq!(rank.values()[1], Scalar::Float64(1.0));
+        assert_eq!(rank.values()[2], Scalar::Float64(2.0));
+        assert_eq!(rolling.exclusions(), Vec::<String>::new());
+        assert_eq!(rolling.ndim(), 1);
+    }
+
+    #[test]
     fn expanding_var() {
         let s = Series::from_values(
             "x",
@@ -54203,6 +54789,34 @@ mod tests {
         assert_eq!(result.values()[0], Scalar::Float64(1.0));
         assert_eq!(result.values()[1], Scalar::Float64(2.0));
         assert_eq!(result.values()[2], Scalar::Float64(6.0));
+    }
+
+    #[test]
+    fn expanding_aggregate_sem_rank_and_introspection() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Float64(3.0),
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+            ],
+        )
+        .unwrap();
+        let expanding = s.expanding(None);
+
+        let aggregate = expanding.aggregate(&["sum", "sem"]).unwrap();
+        assert_eq!(aggregate.columns()["sum"].values()[2], Scalar::Float64(6.0));
+        assert!(aggregate.columns()["sem"].values()[0].is_missing());
+        let sem2 = expect_float64(&aggregate.columns()["sem"].values()[2]);
+        assert!((sem2 - 0.5773502691896258).abs() < 1e-10);
+
+        let rank = expanding.rank("average", true, "keep").unwrap();
+        assert_eq!(rank.values()[0], Scalar::Float64(1.0));
+        assert_eq!(rank.values()[1], Scalar::Float64(1.0));
+        assert_eq!(rank.values()[2], Scalar::Float64(2.0));
+        assert_eq!(expanding.exclusions(), Vec::<String>::new());
+        assert_eq!(expanding.ndim(), 1);
     }
 
     // ── Batch 9: DataFrame isin/equals/first_valid_index/last_valid_index ──
@@ -54430,6 +55044,55 @@ mod tests {
     }
 
     #[test]
+    fn df_rolling_aggregate_sem_rank_and_introspection() {
+        let df = DataFrame::from_dict(
+            &["x", "label"],
+            vec![
+                (
+                    "x",
+                    vec![
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                    ],
+                ),
+                (
+                    "label",
+                    vec![
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("b".into()),
+                        Scalar::Utf8("c".into()),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let rolling = df.rolling(2, None);
+
+        let aggregate = rolling.aggregate(&["sum", "sem"]).unwrap();
+        assert_eq!(
+            aggregate
+                .column_names()
+                .into_iter()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec!["x_sum".to_string(), "x_sem".to_string()]
+        );
+        assert_eq!(
+            aggregate.columns()["x_sum"].values()[1],
+            Scalar::Float64(4.0)
+        );
+        assert!((expect_float64(&aggregate.columns()["x_sem"].values()[2]) - 0.5).abs() < 1e-10);
+
+        let rank = rolling.rank("average", true, "keep").unwrap();
+        assert!(rank.columns()["x"].values()[0].is_missing());
+        assert_eq!(rank.columns()["x"].values()[1], Scalar::Float64(1.0));
+        assert_eq!(rank.columns()["x"].values()[2], Scalar::Float64(2.0));
+        assert_eq!(rolling.exclusions(), Vec::<String>::new());
+        assert_eq!(rolling.ndim(), 2);
+    }
+
+    #[test]
     fn df_rolling_corr_pairwise() {
         let df = DataFrame::from_dict(
             &["x", "y"],
@@ -54548,6 +55211,51 @@ mod tests {
         assert_eq!(result.columns()["x"].values()[0], Scalar::Float64(3.0));
         assert_eq!(result.columns()["x"].values()[1], Scalar::Float64(2.0));
         assert_eq!(result.columns()["x"].values()[2], Scalar::Float64(2.0));
+    }
+
+    #[test]
+    fn df_expanding_aggregate_sem_rank_and_introspection() {
+        let df = DataFrame::from_dict(
+            &["x", "label"],
+            vec![
+                (
+                    "x",
+                    vec![
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                    ],
+                ),
+                (
+                    "label",
+                    vec![
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("b".into()),
+                        Scalar::Utf8("c".into()),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let expanding = df.expanding(None);
+
+        let aggregate = expanding.aggregate(&["sum", "sem"]).unwrap();
+        assert_eq!(
+            aggregate.columns()["x_sum"].values()[2],
+            Scalar::Float64(6.0)
+        );
+        assert!(aggregate.columns()["x_sem"].values()[0].is_missing());
+        assert!(
+            (expect_float64(&aggregate.columns()["x_sem"].values()[2]) - 0.5773502691896258).abs()
+                < 1e-10
+        );
+
+        let rank = expanding.rank("average", true, "keep").unwrap();
+        assert_eq!(rank.columns()["x"].values()[0], Scalar::Float64(1.0));
+        assert_eq!(rank.columns()["x"].values()[1], Scalar::Float64(1.0));
+        assert_eq!(rank.columns()["x"].values()[2], Scalar::Float64(2.0));
+        assert_eq!(expanding.exclusions(), Vec::<String>::new());
+        assert_eq!(expanding.ndim(), 2);
     }
 
     // ── GroupBy skew/kurtosis/ohlc ──
@@ -68318,7 +69026,10 @@ mod tests {
             FrameError::CompatibilityRejected(msg) => {
                 assert!(msg.contains("tz-naive"), "got: {msg}");
             }
-            other => panic!("expected CompatibilityRejected, got: {other:?}"),
+            other => assert!(
+                matches!(other, FrameError::CompatibilityRejected(_)),
+                "expected CompatibilityRejected, got: {other:?}"
+            ),
         }
     }
 
@@ -68349,7 +69060,10 @@ mod tests {
         match v {
             Scalar::Utf8(s) => assert!(!s.contains('+') && !s.ends_with('Z')),
             Scalar::Null(_) => {}
-            other => panic!("unexpected value: {other:?}"),
+            other => assert!(
+                matches!(other, Scalar::Utf8(_) | Scalar::Null(_)),
+                "unexpected value: {other:?}"
+            ),
         }
     }
 
@@ -68616,7 +69330,13 @@ mod tests {
             let eager_v = match &eager.values()[i] {
                 Scalar::Float64(f) => *f,
                 Scalar::Null(_) => f64::NAN,
-                other => panic!("unexpected eager value: {other:?}"),
+                other => {
+                    assert!(
+                        matches!(other, Scalar::Float64(_) | Scalar::Null(_)),
+                        "unexpected eager value: {other:?}"
+                    );
+                    f64::NAN
+                }
             };
             let online_v = opt.unwrap_or(f64::NAN);
             assert!(
