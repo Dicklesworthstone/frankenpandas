@@ -18697,4 +18697,544 @@ mod tests {
         assert!(opts.columns.is_none());
         assert!(opts.index_col.is_none());
     }
+
+    // ── SQL identifier quoting regression matrix (br-frankenpandas-fd90.12) ─
+    //
+    // Cross-product of (ANSI / MySQL backtick / MSSQL bracket) quoting
+    // backends × (SELECT * / SELECT cols / CREATE TABLE / INSERT /
+    // multi-row INSERT / DROP / TRUNCATE) × identifier shapes that the
+    // shared validator currently allows: reserved-word names, mixed case,
+    // leading digits, embedded quote chars (where the backend defines an
+    // escape rule). All tests are pure query-builder assertions — no live
+    // backend touched.
+
+    #[derive(Default)]
+    struct AnsiSchemaConn;
+    impl super::SqlConnection for AnsiSchemaConn {
+        fn query(&self, _q: &str, _p: &[Scalar]) -> Result<super::SqlQueryResult, IoError> {
+            Ok(super::SqlQueryResult {
+                columns: vec![],
+                rows: vec![],
+            })
+        }
+        fn execute_batch(&self, _sql: &str) -> Result<(), IoError> {
+            Ok(())
+        }
+        fn table_exists(&self, _n: &str) -> Result<bool, IoError> {
+            Ok(false)
+        }
+        fn insert_rows(&self, _s: &str, _r: &[Vec<Scalar>]) -> Result<(), IoError> {
+            Ok(())
+        }
+        fn dtype_sql(&self, _d: DType) -> &'static str {
+            "TEXT"
+        }
+        fn index_dtype_sql(&self, _i: &Index) -> &'static str {
+            "TEXT"
+        }
+        fn supports_schemas(&self) -> bool {
+            true
+        }
+        fn parameter_marker(&self, ordinal: usize) -> String {
+            format!("${ordinal}")
+        }
+        fn max_identifier_length(&self) -> Option<usize> {
+            Some(63)
+        }
+    }
+
+    #[derive(Default)]
+    struct MysqlBacktickConn;
+    impl super::SqlConnection for MysqlBacktickConn {
+        fn query(&self, _q: &str, _p: &[Scalar]) -> Result<super::SqlQueryResult, IoError> {
+            Ok(super::SqlQueryResult {
+                columns: vec![],
+                rows: vec![],
+            })
+        }
+        fn execute_batch(&self, _sql: &str) -> Result<(), IoError> {
+            Ok(())
+        }
+        fn table_exists(&self, _n: &str) -> Result<bool, IoError> {
+            Ok(false)
+        }
+        fn insert_rows(&self, _s: &str, _r: &[Vec<Scalar>]) -> Result<(), IoError> {
+            Ok(())
+        }
+        fn dtype_sql(&self, _d: DType) -> &'static str {
+            "TEXT"
+        }
+        fn index_dtype_sql(&self, _i: &Index) -> &'static str {
+            "TEXT"
+        }
+        fn supports_schemas(&self) -> bool {
+            true
+        }
+        fn parameter_marker(&self, _ordinal: usize) -> String {
+            "?".to_owned()
+        }
+        fn max_identifier_length(&self) -> Option<usize> {
+            Some(64)
+        }
+        fn quote_identifier(&self, ident: &str) -> Result<String, IoError> {
+            if ident.contains('\0') {
+                return Err(IoError::Sql("invalid SQL identifier: NUL byte".to_owned()));
+            }
+            Ok(format!("`{}`", ident.replace('`', "``")))
+        }
+    }
+
+    #[derive(Default)]
+    struct MssqlBracketConn;
+    impl super::SqlConnection for MssqlBracketConn {
+        fn query(&self, _q: &str, _p: &[Scalar]) -> Result<super::SqlQueryResult, IoError> {
+            Ok(super::SqlQueryResult {
+                columns: vec![],
+                rows: vec![],
+            })
+        }
+        fn execute_batch(&self, _sql: &str) -> Result<(), IoError> {
+            Ok(())
+        }
+        fn table_exists(&self, _n: &str) -> Result<bool, IoError> {
+            Ok(false)
+        }
+        fn insert_rows(&self, _s: &str, _r: &[Vec<Scalar>]) -> Result<(), IoError> {
+            Ok(())
+        }
+        fn dtype_sql(&self, _d: DType) -> &'static str {
+            "NVARCHAR(MAX)"
+        }
+        fn index_dtype_sql(&self, _i: &Index) -> &'static str {
+            "NVARCHAR(MAX)"
+        }
+        fn supports_schemas(&self) -> bool {
+            true
+        }
+        fn parameter_marker(&self, ordinal: usize) -> String {
+            format!("@p{ordinal}")
+        }
+        fn max_identifier_length(&self) -> Option<usize> {
+            Some(128)
+        }
+        fn quote_identifier(&self, ident: &str) -> Result<String, IoError> {
+            if ident.contains('\0') {
+                return Err(IoError::Sql("invalid SQL identifier: NUL byte".to_owned()));
+            }
+            // T-SQL bracket quoting: doubled `]` escapes a literal `]`.
+            Ok(format!("[{}]", ident.replace(']', "]]")))
+        }
+    }
+
+    /// Reserved SQL keywords that the shape validator allows as
+    /// alphanumeric identifiers — they must round-trip through every
+    /// query builder safely (i.e. quoted, never bare).
+    const FD90_12_RESERVED_WORDS: &[&str] = &[
+        "select", "from", "where", "order", "group", "table", "index", "join",
+    ];
+
+    #[test]
+    fn fd90_12_quoting_matrix_select_all_reserved_words_quoted_per_dialect() {
+        let ansi = AnsiSchemaConn;
+        let mysql = MysqlBacktickConn;
+        let mssql = MssqlBracketConn;
+        for word in FD90_12_RESERVED_WORDS {
+            assert_eq!(
+                super::sql_select_all_query(&ansi, word).expect("ansi select"),
+                format!("SELECT * FROM \"{word}\""),
+                "ansi reserved word `{word}`"
+            );
+            assert_eq!(
+                super::sql_select_all_query(&mysql, word).expect("mysql select"),
+                format!("SELECT * FROM `{word}`"),
+                "mysql reserved word `{word}`"
+            );
+            assert_eq!(
+                super::sql_select_all_query(&mssql, word).expect("mssql select"),
+                format!("SELECT * FROM [{word}]"),
+                "mssql reserved word `{word}`"
+            );
+        }
+    }
+
+    #[test]
+    fn fd90_12_quoting_matrix_select_columns_mixed_case_preserved_per_dialect() {
+        let ansi = AnsiSchemaConn;
+        let mysql = MysqlBacktickConn;
+        let mssql = MssqlBracketConn;
+        let cases: &[&str] = &["MyCol", "MIXEDcase", "camelCase", "SCREAMING_SNAKE"];
+        for col in cases {
+            assert_eq!(
+                super::sql_select_columns_query(&ansi, "users", &[col]).expect("ansi cols"),
+                format!("SELECT \"{col}\" FROM \"users\""),
+                "ansi mixed-case col `{col}`"
+            );
+            assert_eq!(
+                super::sql_select_columns_query(&mysql, "users", &[col]).expect("mysql cols"),
+                format!("SELECT `{col}` FROM `users`"),
+                "mysql mixed-case col `{col}`"
+            );
+            assert_eq!(
+                super::sql_select_columns_query(&mssql, "users", &[col]).expect("mssql cols"),
+                format!("SELECT [{col}] FROM [users]"),
+                "mssql mixed-case col `{col}`"
+            );
+        }
+    }
+
+    #[test]
+    fn fd90_12_quoting_matrix_leading_digit_identifiers_quoted_per_dialect() {
+        let ansi = AnsiSchemaConn;
+        let mysql = MysqlBacktickConn;
+        let mssql = MssqlBracketConn;
+        let cases: &[&str] = &["1col", "2nd_place", "9lives", "123"];
+        for col in cases {
+            assert_eq!(
+                super::sql_select_columns_query(&ansi, "tbl", &[col]).expect("ansi"),
+                format!("SELECT \"{col}\" FROM \"tbl\"")
+            );
+            assert_eq!(
+                super::sql_select_columns_query(&mysql, "tbl", &[col]).expect("mysql"),
+                format!("SELECT `{col}` FROM `tbl`")
+            );
+            assert_eq!(
+                super::sql_select_columns_query(&mssql, "tbl", &[col]).expect("mssql"),
+                format!("SELECT [{col}] FROM [tbl]")
+            );
+        }
+    }
+
+    #[test]
+    fn fd90_12_quoting_matrix_schema_qualified_select_per_dialect() {
+        let ansi = AnsiSchemaConn;
+        let mysql = MysqlBacktickConn;
+        let mssql = MssqlBracketConn;
+        assert_eq!(
+            super::sql_select_all_query_in_schema(&ansi, "users", Some("analytics")).expect("ansi"),
+            "SELECT * FROM \"analytics\".\"users\""
+        );
+        assert_eq!(
+            super::sql_select_all_query_in_schema(&mysql, "users", Some("analytics"))
+                .expect("mysql"),
+            "SELECT * FROM `analytics`.`users`"
+        );
+        assert_eq!(
+            super::sql_select_all_query_in_schema(&mssql, "users", Some("dbo")).expect("mssql"),
+            "SELECT * FROM [dbo].[users]"
+        );
+    }
+
+    #[test]
+    fn fd90_12_quoting_matrix_create_table_per_dialect() {
+        let ansi = AnsiSchemaConn;
+        let mysql = MysqlBacktickConn;
+        let mssql = MssqlBracketConn;
+        let cols = vec![
+            super::sql_column_definition(&ansi, "id", "BIGINT").expect("ansi col"),
+            super::sql_column_definition(&ansi, "select", "TEXT").expect("ansi reserved col"),
+        ];
+        assert_eq!(
+            super::sql_create_table_query_in_schema(&ansi, "events", Some("public"), &cols)
+                .expect("ansi create"),
+            "CREATE TABLE IF NOT EXISTS \"public\".\"events\" (\"id\" BIGINT, \"select\" TEXT)"
+        );
+        let mysql_cols = vec![
+            super::sql_column_definition(&mysql, "id", "BIGINT").expect("mysql col"),
+            super::sql_column_definition(&mysql, "select", "TEXT").expect("mysql reserved col"),
+        ];
+        assert_eq!(
+            super::sql_create_table_query_in_schema(
+                &mysql,
+                "events",
+                Some("analytics"),
+                &mysql_cols
+            )
+            .expect("mysql create"),
+            "CREATE TABLE IF NOT EXISTS `analytics`.`events` (`id` BIGINT, `select` TEXT)"
+        );
+        let mssql_cols = vec![
+            super::sql_column_definition(&mssql, "id", "BIGINT").expect("mssql col"),
+            super::sql_column_definition(&mssql, "select", "NVARCHAR(MAX)")
+                .expect("mssql reserved col"),
+        ];
+        assert_eq!(
+            super::sql_create_table_query_in_schema(&mssql, "events", Some("dbo"), &mssql_cols)
+                .expect("mssql create"),
+            "CREATE TABLE IF NOT EXISTS [dbo].[events] ([id] BIGINT, [select] NVARCHAR(MAX))"
+        );
+    }
+
+    #[test]
+    fn fd90_12_quoting_matrix_insert_per_dialect_with_param_markers() {
+        let ansi = AnsiSchemaConn;
+        let mysql = MysqlBacktickConn;
+        let mssql = MssqlBracketConn;
+        let cols = vec!["id".to_owned(), "MixedCase".to_owned(), "select".to_owned()];
+        assert_eq!(
+            super::sql_insert_rows_query_in_schema(&ansi, "events", Some("public"), &cols)
+                .expect("ansi insert"),
+            "INSERT INTO \"public\".\"events\" (\"id\", \"MixedCase\", \"select\") VALUES ($1, $2, $3)"
+        );
+        assert_eq!(
+            super::sql_insert_rows_query_in_schema(&mysql, "events", Some("analytics"), &cols)
+                .expect("mysql insert"),
+            "INSERT INTO `analytics`.`events` (`id`, `MixedCase`, `select`) VALUES (?, ?, ?)"
+        );
+        assert_eq!(
+            super::sql_insert_rows_query_in_schema(&mssql, "events", Some("dbo"), &cols)
+                .expect("mssql insert"),
+            "INSERT INTO [dbo].[events] ([id], [MixedCase], [select]) VALUES (@p1, @p2, @p3)"
+        );
+    }
+
+    #[test]
+    fn fd90_12_quoting_matrix_multi_row_insert_param_ordinals_span_rows() {
+        let ansi = AnsiSchemaConn;
+        let mysql = MysqlBacktickConn;
+        let cols = vec!["a".to_owned(), "b".to_owned()];
+        assert_eq!(
+            super::sql_multi_row_insert_query_in_schema(&ansi, "tbl", None, &cols, 2)
+                .expect("ansi multi"),
+            "INSERT INTO \"tbl\" (\"a\", \"b\") VALUES ($1, $2), ($3, $4)"
+        );
+        assert_eq!(
+            super::sql_multi_row_insert_query_in_schema(&mysql, "tbl", None, &cols, 2)
+                .expect("mysql multi"),
+            "INSERT INTO `tbl` (`a`, `b`) VALUES (?, ?), (?, ?)"
+        );
+    }
+
+    #[test]
+    fn fd90_12_quoting_matrix_drop_table_per_dialect() {
+        let ansi = AnsiSchemaConn;
+        let mysql = MysqlBacktickConn;
+        let mssql = MssqlBracketConn;
+        assert_eq!(
+            super::sql_drop_table_query_in_schema(&ansi, "events", Some("public"))
+                .expect("ansi drop"),
+            "DROP TABLE IF EXISTS \"public\".\"events\""
+        );
+        assert_eq!(
+            super::sql_drop_table_query_in_schema(&mysql, "events", Some("analytics"))
+                .expect("mysql drop"),
+            "DROP TABLE IF EXISTS `analytics`.`events`"
+        );
+        assert_eq!(
+            super::sql_drop_table_query_in_schema(&mssql, "events", Some("dbo"))
+                .expect("mssql drop"),
+            "DROP TABLE IF EXISTS [dbo].[events]"
+        );
+    }
+
+    #[test]
+    fn fd90_12_quoting_matrix_truncate_uses_default_delete_with_per_dialect_quoting() {
+        // Default truncate_table impl emits `DELETE FROM <quoted>` and
+        // routes through the backend's quote_identifier.
+        #[derive(Default)]
+        struct CapturingAnsi {
+            captured: std::cell::RefCell<Vec<String>>,
+        }
+        impl super::SqlConnection for CapturingAnsi {
+            fn query(&self, _q: &str, _p: &[Scalar]) -> Result<super::SqlQueryResult, IoError> {
+                Ok(super::SqlQueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                })
+            }
+            fn execute_batch(&self, sql: &str) -> Result<(), IoError> {
+                self.captured.borrow_mut().push(sql.to_owned());
+                Ok(())
+            }
+            fn table_exists(&self, _n: &str) -> Result<bool, IoError> {
+                Ok(false)
+            }
+            fn insert_rows(&self, _s: &str, _r: &[Vec<Scalar>]) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn dtype_sql(&self, _d: DType) -> &'static str {
+                "TEXT"
+            }
+            fn index_dtype_sql(&self, _i: &Index) -> &'static str {
+                "TEXT"
+            }
+            fn supports_schemas(&self) -> bool {
+                true
+            }
+        }
+        let ansi = CapturingAnsi::default();
+        super::SqlConnection::truncate_table(&ansi, "events", Some("public"))
+            .expect("ansi truncate");
+        assert_eq!(
+            ansi.captured.borrow().as_slice(),
+            &["DELETE FROM \"public\".\"events\"".to_owned()]
+        );
+
+        #[derive(Default)]
+        struct CapturingMysql {
+            captured: std::cell::RefCell<Vec<String>>,
+        }
+        impl super::SqlConnection for CapturingMysql {
+            fn query(&self, _q: &str, _p: &[Scalar]) -> Result<super::SqlQueryResult, IoError> {
+                Ok(super::SqlQueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                })
+            }
+            fn execute_batch(&self, sql: &str) -> Result<(), IoError> {
+                self.captured.borrow_mut().push(sql.to_owned());
+                Ok(())
+            }
+            fn table_exists(&self, _n: &str) -> Result<bool, IoError> {
+                Ok(false)
+            }
+            fn insert_rows(&self, _s: &str, _r: &[Vec<Scalar>]) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn dtype_sql(&self, _d: DType) -> &'static str {
+                "TEXT"
+            }
+            fn index_dtype_sql(&self, _i: &Index) -> &'static str {
+                "TEXT"
+            }
+            fn supports_schemas(&self) -> bool {
+                true
+            }
+            fn quote_identifier(&self, ident: &str) -> Result<String, IoError> {
+                if ident.contains('\0') {
+                    return Err(IoError::Sql("invalid SQL identifier: NUL byte".to_owned()));
+                }
+                Ok(format!("`{}`", ident.replace('`', "``")))
+            }
+        }
+        let mysql = CapturingMysql::default();
+        super::SqlConnection::truncate_table(&mysql, "events", Some("analytics"))
+            .expect("mysql truncate");
+        assert_eq!(
+            mysql.captured.borrow().as_slice(),
+            &["DELETE FROM `analytics`.`events`".to_owned()]
+        );
+    }
+
+    #[test]
+    fn fd90_12_quoting_matrix_embedded_quote_chars_doubled_per_dialect() {
+        // Embedded quote chars must be doubled per the dialect's escape
+        // rule. quote_identifier is exposed for column names which may
+        // legitimately contain embedded quotes (sql_column_definition
+        // takes any string).
+        let ansi = AnsiSchemaConn;
+        let mysql = MysqlBacktickConn;
+        let mssql = MssqlBracketConn;
+        use super::SqlConnection as _;
+        assert_eq!(ansi.quote_identifier("a\"b").expect("ansi"), "\"a\"\"b\"");
+        assert_eq!(mysql.quote_identifier("a`b").expect("mysql"), "`a``b`");
+        assert_eq!(mssql.quote_identifier("a]b").expect("mssql"), "[a]]b]");
+        // Cross-dialect non-escape: ANSI doesn't escape backticks, etc.
+        assert_eq!(
+            ansi.quote_identifier("a`b")
+                .expect("ansi backtick passthrough"),
+            "\"a`b\""
+        );
+        assert_eq!(
+            mysql
+                .quote_identifier("a\"b")
+                .expect("mysql quote passthrough"),
+            "`a\"b`"
+        );
+        assert_eq!(
+            mssql
+                .quote_identifier("a\"b")
+                .expect("mssql quote passthrough"),
+            "[a\"b]"
+        );
+    }
+
+    #[test]
+    fn fd90_12_quoting_matrix_long_identifier_within_cap_succeeds_over_cap_rejected() {
+        // PG cap = 63, MySQL cap = 64, MSSQL cap = 128.
+        use super::SqlConnection as _;
+        let ansi = AnsiSchemaConn;
+        let mysql = MysqlBacktickConn;
+        let mssql = MssqlBracketConn;
+        let pg63 = "a".repeat(63);
+        let pg64 = "a".repeat(64);
+        let mysql64 = "b".repeat(64);
+        let mysql65 = "b".repeat(65);
+        let mssql128 = "c".repeat(128);
+        let mssql129 = "c".repeat(129);
+
+        super::validate_sql_identifier_length(&pg63, ansi.max_identifier_length(), "table")
+            .expect("pg 63 ok");
+        super::validate_sql_identifier_length(&mysql64, mysql.max_identifier_length(), "table")
+            .expect("mysql 64 ok");
+        super::validate_sql_identifier_length(&mssql128, mssql.max_identifier_length(), "table")
+            .expect("mssql 128 ok");
+
+        let err =
+            super::validate_sql_identifier_length(&pg64, ansi.max_identifier_length(), "table")
+                .expect_err("pg 64 over cap");
+        assert!(matches!(err, IoError::Sql(msg) if msg.contains("63") && msg.contains("table")));
+        let err =
+            super::validate_sql_identifier_length(&mysql65, mysql.max_identifier_length(), "table")
+                .expect_err("mysql 65 over cap");
+        assert!(matches!(err, IoError::Sql(msg) if msg.contains("64")));
+        let err = super::validate_sql_identifier_length(
+            &mssql129,
+            mssql.max_identifier_length(),
+            "table",
+        )
+        .expect_err("mssql 129 over cap");
+        assert!(matches!(err, IoError::Sql(msg) if msg.contains("128")));
+    }
+
+    #[test]
+    fn fd90_12_quoting_matrix_special_characters_rejected_by_validator() {
+        // Per validate_sql_ident: only alphanumeric + underscore allowed.
+        // Special chars (`-`, `.`, ` `, `:`, `'`, `"`, `;`) and dotted
+        // names must be rejected before they ever reach quote_identifier.
+        let bad: &[&str] = &[
+            "my-col",
+            "my.col",
+            "my col",
+            "my:col",
+            "my'col",
+            "my\"col",
+            "my;col",
+            "schema.table",
+            "DROP--",
+            "",
+        ];
+        for name in bad {
+            let err =
+                super::validate_sql_table_name(name).expect_err(&format!("must reject `{name}`"));
+            assert!(matches!(err, IoError::Sql(msg) if msg.contains("invalid table name")));
+            let err = super::validate_sql_column_name(name)
+                .expect_err(&format!("must reject col `{name}`"));
+            assert!(matches!(err, IoError::Sql(msg) if msg.contains("invalid column name")));
+        }
+    }
+
+    #[test]
+    fn fd90_12_quoting_matrix_nul_byte_rejected_at_quote_identifier_layer() {
+        // Defense in depth: even if a backend's quote_identifier is
+        // called with a NUL-containing string (bypassing
+        // validate_sql_ident), every dialect must reject — guards
+        // against C-string driver-layer statement injection via
+        // embedded null terminators.
+        use super::SqlConnection as _;
+        let ansi = AnsiSchemaConn;
+        let mysql = MysqlBacktickConn;
+        let mssql = MssqlBracketConn;
+        let err_ansi = ansi
+            .quote_identifier("ab\0cd")
+            .expect_err("ansi must reject NUL");
+        assert!(matches!(err_ansi, IoError::Sql(msg) if msg.contains("NUL")));
+        let err_mysql = mysql
+            .quote_identifier("ab\0cd")
+            .expect_err("mysql must reject NUL");
+        assert!(matches!(err_mysql, IoError::Sql(msg) if msg.contains("NUL")));
+        let err_mssql = mssql
+            .quote_identifier("ab\0cd")
+            .expect_err("mssql must reject NUL");
+        assert!(matches!(err_mssql, IoError::Sql(msg) if msg.contains("NUL")));
+    }
 }
