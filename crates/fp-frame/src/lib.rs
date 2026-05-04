@@ -1457,6 +1457,71 @@ impl Series {
         self.column.values()
     }
 
+    /// Object-array-shaped materialization of the Series values.
+    ///
+    /// Matches `pd.Series.array` at the API-shape level for the current
+    /// immutable scalar-vector representation.
+    #[must_use]
+    pub fn array(&self) -> Vec<Scalar> {
+        self.to_list()
+    }
+
+    /// Flatten Series values to a one-dimensional scalar vector.
+    ///
+    /// Matches `pd.Series.ravel()` for this already-1D representation.
+    #[must_use]
+    pub fn ravel(&self) -> Vec<Scalar> {
+        self.to_list()
+    }
+
+    /// Pandas spelling alias for [`Self::to_list`].
+    ///
+    /// Matches `pd.Series.tolist()`.
+    #[must_use]
+    pub fn tolist(&self) -> Vec<Scalar> {
+        self.to_list()
+    }
+
+    /// Return a shallow clone view.
+    ///
+    /// Matches `pd.Series.view()` for this immutable Rust representation.
+    #[must_use]
+    pub fn view(&self) -> Self {
+        self.clone()
+    }
+
+    /// Series transpose is identity.
+    ///
+    /// Matches `pd.Series.transpose()`.
+    #[must_use]
+    pub fn transpose(&self) -> Self {
+        self.clone()
+    }
+
+    /// Lowercase alias for [`Self::transpose`].
+    #[must_use]
+    pub fn t(&self) -> Self {
+        self.transpose()
+    }
+
+    /// Uppercase pandas spelling for [`Self::transpose`].
+    ///
+    /// Rust style prefers [`Self::t`], but pandas exposes `series.T`.
+    #[allow(non_snake_case)]
+    #[must_use]
+    pub fn T(&self) -> Self {
+        self.transpose()
+    }
+
+    /// Swap Series axes.
+    ///
+    /// Matches `pd.Series.swapaxes()` for a one-dimensional object; the
+    /// operation is identity because Series has only axis 0.
+    #[must_use]
+    pub fn swapaxes(&self) -> Self {
+        self.clone()
+    }
+
     /// Return the dtype of this Series.
     ///
     /// Matches `pd.Series.dtype`.
@@ -1469,6 +1534,14 @@ impl Series {
         } else {
             self.column.dtype()
         }
+    }
+
+    /// Plural pandas alias for [`Self::dtype`].
+    ///
+    /// Matches `pd.Series.dtypes`.
+    #[must_use]
+    pub fn dtypes(&self) -> DType {
+        self.dtype()
     }
 
     /// Return a deep copy of this Series.
@@ -5718,6 +5791,14 @@ impl Series {
         self.column.len()
     }
 
+    /// Shape of the Series.
+    ///
+    /// Matches `pd.Series.shape` as a one-element tuple.
+    #[must_use]
+    pub fn shape(&self) -> (usize,) {
+        (self.len(),)
+    }
+
     /// Axes of the Series — a single-entry Vec containing the index
     /// labels (pandas returns `[self.index]`).
     ///
@@ -5733,6 +5814,62 @@ impl Series {
     #[must_use]
     pub fn empty(&self) -> bool {
         self.column.is_empty()
+    }
+
+    /// User metadata mapping.
+    ///
+    /// Matches `pd.Series.attrs` shape. FrankenPandas does not yet persist
+    /// mutable attrs on the Series storage object, so the current accessor
+    /// returns the default empty metadata map.
+    #[must_use]
+    pub fn attrs(&self) -> BTreeMap<String, Scalar> {
+        BTreeMap::new()
+    }
+
+    /// Human-readable Series summary.
+    ///
+    /// Matches `pd.Series.info()` at the API-shape level for the current
+    /// scalar-backed Series model.
+    #[must_use]
+    pub fn info(&self) -> String {
+        let non_null = self
+            .column
+            .values()
+            .iter()
+            .filter(|v| !v.is_missing())
+            .count();
+        format!(
+            "Series: {}\nLength: {}\nNon-Null Count: {}\nDtype: {:?}\nMemory Usage: {} bytes",
+            self.name,
+            self.len(),
+            non_null,
+            self.dtype(),
+            self.memory_usage()
+        )
+    }
+
+    /// Series flags metadata.
+    ///
+    /// Matches `pd.Series.flags` for the duplicate-label flag currently
+    /// represented by FrankenPandas.
+    #[must_use]
+    pub fn flags(&self) -> DataFrameFlags {
+        DataFrameFlags {
+            allows_duplicate_labels: true,
+        }
+    }
+
+    /// Return a Series with updated flags.
+    ///
+    /// Matches `pd.Series.set_flags(allows_duplicate_labels=...)` for the
+    /// duplicate-label flag.
+    pub fn set_flags(&self, allows_duplicate_labels: Option<bool>) -> Result<Self, FrameError> {
+        if matches!(allows_duplicate_labels, Some(false)) && self.index.has_duplicates() {
+            return Err(FrameError::CompatibilityRejected(
+                "set_flags: duplicate labels are present".to_string(),
+            ));
+        }
+        Ok(self.clone())
     }
 
     /// Reset the Series index to a default RangeIndex.
@@ -5871,6 +6008,41 @@ impl Series {
             FrameError::CompatibilityRejected(format!("at: label {label:?} not found in index"))
         })?;
         Ok(self.column.values()[pos].clone())
+    }
+
+    /// Dict-like scalar lookup by label.
+    ///
+    /// Matches `pd.Series.get(key)` by returning `None` instead of an
+    /// error for a missing label.
+    #[must_use]
+    pub fn get(&self, label: &IndexLabel) -> Option<Scalar> {
+        self.index
+            .position(label)
+            .map(|pos| self.column.values()[pos].clone())
+    }
+
+    /// Dict-like scalar lookup with a fallback value.
+    ///
+    /// Matches `pd.Series.get(key, default=...)`.
+    #[must_use]
+    pub fn get_or(&self, label: &IndexLabel, default: Scalar) -> Scalar {
+        self.get(label).unwrap_or(default)
+    }
+
+    /// Return a value and a Series with its first matching label removed.
+    ///
+    /// Matches `pd.Series.pop(item)` in an immutable form.
+    pub fn pop(&self, label: &IndexLabel) -> Result<(Scalar, Self), FrameError> {
+        let pos = self.index.position(label).ok_or_else(|| {
+            FrameError::CompatibilityRejected(format!("pop: label {label:?} not found in index"))
+        })?;
+
+        let mut labels = self.index.labels().to_vec();
+        let mut values = self.column.values().to_vec();
+        labels.remove(pos);
+        let value = values.remove(pos);
+        let remainder = Self::from_values(self.name.clone(), labels, values)?;
+        Ok((value, remainder))
     }
 
     /// Apply a function element-wise, returning a Series of the same shape.
@@ -6498,6 +6670,13 @@ impl Series {
         DataFrame::from_dict_with_index(vec![("self", self_vals), ("other", other_vals)], labels)
     }
 
+    /// Pandas spelling alias for [`Self::compare_with`].
+    ///
+    /// Matches `pd.Series.compare(other)`.
+    pub fn compare(&self, other: &Self) -> Result<DataFrame, FrameError> {
+        self.compare_with(other)
+    }
+
     /// Reindex to match another Series' index.
     ///
     /// Matches `pd.Series.reindex_like(other)`.
@@ -6532,6 +6711,14 @@ impl Series {
             }
         }
         Self::from_values(self.name.clone(), self.index.labels().to_vec(), converted)
+    }
+
+    /// Infer object dtypes to best-possible scalar dtypes.
+    ///
+    /// Matches `pd.Series.infer_objects()` for the current Utf8-backed
+    /// object representation.
+    pub fn infer_objects(&self) -> Result<Self, FrameError> {
+        self.convert_dtypes()
     }
 
     /// Map values with optional NaN skipping.
@@ -7046,6 +7233,13 @@ impl Series {
     pub fn cov_with(&self, other: &Self) -> Result<f64, FrameError> {
         let (cov, _, _, _) = self.cov_components(other)?;
         Ok(cov)
+    }
+
+    /// Pandas spelling alias for [`Self::cov_with`].
+    ///
+    /// Matches `pd.Series.cov(other)`.
+    pub fn cov(&self, other: &Self) -> Result<f64, FrameError> {
+        self.cov_with(other)
     }
 
     /// Internal: compute covariance, var_x, var_y, count between two Series.
@@ -53986,6 +54180,113 @@ mod tests {
     fn series_empty_false_when_populated() {
         let s = Series::from_values("x", vec![0_i64.into()], vec![Scalar::Int64(1)]).unwrap();
         assert!(!s.empty());
+    }
+
+    #[test]
+    fn series_r6uci_metadata_and_numpy_compat_aliases() {
+        let s = Series::from_values(
+            "x",
+            vec![IndexLabel::Utf8("a".into()), IndexLabel::Utf8("b".into())],
+            vec![Scalar::Int64(10), Scalar::Int64(20)],
+        )
+        .unwrap();
+
+        assert_eq!(s.transpose(), s);
+        assert_eq!(s.t(), s);
+        assert_eq!(s.T(), s);
+        assert_eq!(s.view(), s);
+        assert_eq!(s.swapaxes(), s);
+        assert_eq!(s.array(), vec![Scalar::Int64(10), Scalar::Int64(20)]);
+        assert_eq!(s.ravel(), s.array());
+        assert_eq!(s.tolist(), s.to_list());
+        assert_eq!(s.shape(), (2,));
+        assert_eq!(s.dtypes(), DType::Int64);
+        assert!(s.attrs().is_empty());
+        assert!(s.flags().allows_duplicate_labels());
+        assert_eq!(s.set_flags(None).unwrap(), s);
+        assert_eq!(s.set_flags(Some(false)).unwrap(), s);
+
+        let info = s.info();
+        assert!(info.contains("Series: x"));
+        assert!(info.contains("Length: 2"));
+        assert!(info.contains("Non-Null Count: 2"));
+        assert!(info.contains("Dtype: Int64"));
+
+        let strings = Series::from_values(
+            "obj",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Utf8("1".into()), Scalar::Utf8("2".into())],
+        )
+        .unwrap();
+        let inferred = strings.infer_objects().unwrap();
+        assert_eq!(inferred.dtypes(), DType::Int64);
+        assert_eq!(inferred.values(), &[Scalar::Int64(1), Scalar::Int64(2)]);
+    }
+
+    #[test]
+    fn series_r6uci_compare_cov_get_pop_and_flags() {
+        let s1 = Series::from_values(
+            "x",
+            vec![
+                IndexLabel::Utf8("a".into()),
+                IndexLabel::Utf8("b".into()),
+                IndexLabel::Utf8("c".into()),
+            ],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+            ],
+        )
+        .unwrap();
+        let s2 = Series::from_values(
+            "x",
+            vec![
+                IndexLabel::Utf8("a".into()),
+                IndexLabel::Utf8("b".into()),
+                IndexLabel::Utf8("c".into()),
+            ],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(4.0),
+                Scalar::Float64(3.0),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(s1.compare(&s2).unwrap(), s1.compare_with(&s2).unwrap());
+        assert_eq!(s1.cov(&s2).unwrap(), s1.cov_with(&s2).unwrap());
+        assert_eq!(
+            s1.get(&IndexLabel::Utf8("b".into())),
+            Some(Scalar::Float64(2.0))
+        );
+        assert_eq!(s1.get(&IndexLabel::Utf8("missing".into())), None);
+        assert_eq!(
+            s1.get_or(&IndexLabel::Utf8("missing".into()), Scalar::Float64(-1.0)),
+            Scalar::Float64(-1.0)
+        );
+
+        let (popped, remainder) = s1.pop(&IndexLabel::Utf8("b".into())).unwrap();
+        assert_eq!(popped, Scalar::Float64(2.0));
+        assert_eq!(
+            remainder.index().labels(),
+            &[IndexLabel::Utf8("a".into()), IndexLabel::Utf8("c".into()),]
+        );
+        assert_eq!(
+            remainder.values(),
+            &[Scalar::Float64(1.0), Scalar::Float64(3.0)]
+        );
+
+        let dup = Series::from_values(
+            "dup",
+            vec![IndexLabel::Utf8("a".into()), IndexLabel::Utf8("a".into())],
+            vec![Scalar::Int64(1), Scalar::Int64(2)],
+        )
+        .unwrap();
+        let err = dup.set_flags(Some(false)).unwrap_err();
+        assert!(
+            matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("duplicate labels"))
+        );
     }
 
     #[test]
