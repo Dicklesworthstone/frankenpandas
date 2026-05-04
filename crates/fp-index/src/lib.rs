@@ -3724,6 +3724,46 @@ impl MultiIndex {
         self.to_numpy()
     }
 
+    /// Return a shallow clone view, matching `pd.MultiIndex.view`.
+    #[must_use]
+    pub fn view(&self) -> Self {
+        self.clone()
+    }
+
+    /// MultiIndex transpose is identity, matching `pd.MultiIndex.transpose`.
+    #[must_use]
+    pub fn transpose(&self) -> Self {
+        self.clone()
+    }
+
+    /// Alias for `transpose`, matching `pd.MultiIndex.T`.
+    #[allow(non_snake_case)]
+    #[must_use]
+    pub fn T(&self) -> Self {
+        self.transpose()
+    }
+
+    /// Row materialization for `pd.MultiIndex.to_frame(index=False)`.
+    ///
+    /// `fp-frame` owns the richer DataFrame return type; the index crate keeps
+    /// the level-by-level row payload that callers can lift into a frame.
+    #[must_use]
+    pub fn to_frame(&self) -> Vec<Vec<IndexLabel>> {
+        self.to_list()
+    }
+
+    /// Series-shaped materialization using tuple keys as both index and value.
+    ///
+    /// This mirrors `pd.MultiIndex.to_series()` at the payload level while
+    /// avoiding a dependency from `fp-index` back into `fp-frame`.
+    #[must_use]
+    pub fn to_series(&self) -> Vec<(Vec<IndexLabel>, Vec<IndexLabel>)> {
+        self.to_list()
+            .into_iter()
+            .map(|tuple| (tuple.clone(), tuple))
+            .collect()
+    }
+
     /// Stringify each tuple in row order, matching `pd.MultiIndex.format()`.
     #[must_use]
     pub fn format(&self) -> Vec<String> {
@@ -3763,6 +3803,99 @@ impl MultiIndex {
     #[must_use]
     pub fn nbytes(&self) -> usize {
         self.memory_usage(false)
+    }
+
+    /// Pandas dtype string for MultiIndex itself.
+    #[must_use]
+    pub fn dtype(&self) -> &'static str {
+        "object"
+    }
+
+    /// Dtype string for each level, matching `pd.MultiIndex.dtypes`.
+    #[must_use]
+    pub fn dtypes(&self) -> Vec<&'static str> {
+        self.levels
+            .iter()
+            .map(|level| Index::new(level.clone()).dtype())
+            .collect()
+    }
+
+    /// Pandas-style inferred type for MultiIndex values.
+    #[must_use]
+    pub fn inferred_type(&self) -> &'static str {
+        "mixed"
+    }
+
+    /// Infer object labels without changing this typed representation.
+    #[must_use]
+    pub fn infer_objects(&self) -> Self {
+        self.clone()
+    }
+
+    /// Whether this MultiIndex can hold integer labels as scalar keys.
+    #[must_use]
+    pub fn holds_integer(&self) -> bool {
+        false
+    }
+
+    /// Return the sole tuple, matching `pd.MultiIndex.item()`.
+    pub fn item(&self) -> Result<Vec<IndexLabel>, IndexError> {
+        if self.len() == 1 {
+            Ok(self.tuple_at(0))
+        } else {
+            Err(IndexError::InvalidArgument(format!(
+                "item requires exactly one tuple, got {}",
+                self.len()
+            )))
+        }
+    }
+
+    /// Identity check, matching `pd.MultiIndex.is_`.
+    #[must_use]
+    pub fn is_(&self, other: &Self) -> bool {
+        std::ptr::eq(self, other)
+    }
+
+    /// Whether this MultiIndex is boolean-typed.
+    #[must_use]
+    pub fn is_boolean(&self) -> bool {
+        false
+    }
+
+    /// Whether this MultiIndex is categorical-typed.
+    #[must_use]
+    pub fn is_categorical(&self) -> bool {
+        false
+    }
+
+    /// Whether this MultiIndex is floating-typed.
+    #[must_use]
+    pub fn is_floating(&self) -> bool {
+        false
+    }
+
+    /// Whether this MultiIndex is integer-typed.
+    #[must_use]
+    pub fn is_integer(&self) -> bool {
+        false
+    }
+
+    /// Whether this MultiIndex is interval-typed.
+    #[must_use]
+    pub fn is_interval(&self) -> bool {
+        false
+    }
+
+    /// Whether this MultiIndex is numeric-typed.
+    #[must_use]
+    pub fn is_numeric(&self) -> bool {
+        false
+    }
+
+    /// Whether this MultiIndex is object-backed.
+    #[must_use]
+    pub fn is_object(&self) -> bool {
+        true
     }
 
     /// Compare row tuples only, matching `pd.MultiIndex.equals`.
@@ -3832,6 +3965,86 @@ impl MultiIndex {
             levels,
             names: self.names.clone(),
         })
+    }
+
+    /// Delete the tuple at a positional location.
+    ///
+    /// Matches `pd.MultiIndex.delete(loc)`.
+    pub fn delete(&self, loc: usize) -> Result<Self, IndexError> {
+        if loc >= self.len() {
+            return Err(IndexError::OutOfBounds {
+                position: loc,
+                length: self.len(),
+            });
+        }
+        let positions: Vec<usize> = (0..self.len()).filter(|&row| row != loc).collect();
+        Ok(self.take_existing_positions(&positions))
+    }
+
+    /// Insert a tuple at a positional location.
+    ///
+    /// Matches `pd.MultiIndex.insert(loc, item)`. Inserting into an empty
+    /// zero-level MultiIndex adopts the tuple arity as the new level count.
+    pub fn insert(&self, loc: usize, item: Vec<IndexLabel>) -> Result<Self, IndexError> {
+        if loc > self.len() {
+            return Err(IndexError::OutOfBounds {
+                position: loc,
+                length: self.len(),
+            });
+        }
+        if self.nlevels() == 0 {
+            if loc != 0 {
+                return Err(IndexError::OutOfBounds {
+                    position: loc,
+                    length: 0,
+                });
+            }
+            return Self::from_tuples(vec![item]);
+        }
+        if item.len() != self.nlevels() {
+            return Err(IndexError::LengthMismatch {
+                expected: self.nlevels(),
+                actual: item.len(),
+                context: "insert tuple arity mismatch".to_owned(),
+            });
+        }
+
+        let mut levels = self.levels.clone();
+        for (level_idx, label) in item.into_iter().enumerate() {
+            levels[level_idx].insert(loc, label);
+        }
+        Ok(Self {
+            levels,
+            names: self.names.clone(),
+        })
+    }
+
+    /// Drop every occurrence of the provided tuples.
+    ///
+    /// Matches `pd.MultiIndex.drop(labels)` with the default fail-closed
+    /// behavior for missing labels.
+    pub fn drop(&self, labels_to_drop: &[Vec<IndexLabel>]) -> Result<Self, IndexError> {
+        for label in labels_to_drop {
+            self.validate_key_arity(label, false)?;
+        }
+        let drop_set: std::collections::HashSet<&Vec<IndexLabel>> = labels_to_drop.iter().collect();
+        let mut found = std::collections::HashSet::<&Vec<IndexLabel>>::new();
+        let mut positions = Vec::new();
+        let tuples = self.to_list();
+        for (row, tuple) in tuples.iter().enumerate() {
+            if drop_set.contains(tuple) {
+                found.insert(tuple);
+            } else {
+                positions.push(row);
+            }
+        }
+        if let Some(missing) = labels_to_drop.iter().find(|label| !found.contains(label)) {
+            return Err(IndexError::InvalidArgument(format!(
+                "tuple key not found: {:?}",
+                missing
+            )));
+        }
+        Ok(self.take_existing_positions(&positions))
     }
 
     fn validate_key_arity(
@@ -4127,6 +4340,123 @@ impl MultiIndex {
             .filter_map(|(position, is_duplicated)| (!is_duplicated).then_some(position))
             .collect();
         self.take_existing_positions(&positions)
+    }
+
+    /// Unique tuples, preserving first-seen order.
+    #[must_use]
+    pub fn unique(&self) -> Self {
+        self.drop_duplicates_keep(DuplicateKeep::First)
+    }
+
+    /// Number of unique tuples.
+    #[must_use]
+    pub fn nunique(&self) -> usize {
+        self.unique().len()
+    }
+
+    /// Factorize tuples into integer codes and unique tuples.
+    ///
+    /// Missing labels remain part of the composite tuple identity, matching
+    /// pandas' MultiIndex-level factorization behavior.
+    #[must_use]
+    pub fn factorize(&self) -> (Vec<isize>, Self) {
+        let mut positions = HashMap::<Vec<IndexLabel>, isize>::new();
+        let mut uniques = Vec::<Vec<IndexLabel>>::new();
+        let mut codes = Vec::with_capacity(self.len());
+        for tuple in self.to_list() {
+            if let Some(code) = positions.get(&tuple) {
+                codes.push(*code);
+            } else {
+                let code = isize::try_from(uniques.len()).unwrap_or(isize::MAX);
+                positions.insert(tuple.clone(), code);
+                uniques.push(tuple);
+                codes.push(code);
+            }
+        }
+        let mut levels: Vec<Vec<IndexLabel>> = (0..self.nlevels())
+            .map(|_| Vec::with_capacity(uniques.len()))
+            .collect();
+        for tuple in uniques {
+            for (level_idx, label) in tuple.into_iter().enumerate() {
+                levels[level_idx].push(label);
+            }
+        }
+        let unique_index = Self {
+            levels,
+            names: self.names.clone(),
+        };
+        (codes, unique_index)
+    }
+
+    /// Count unique tuple occurrences, sorted by count descending then tuple.
+    #[must_use]
+    pub fn value_counts(&self) -> Vec<(Vec<IndexLabel>, usize)> {
+        let mut counts = HashMap::<Vec<IndexLabel>, usize>::new();
+        for tuple in self.to_list() {
+            *counts.entry(tuple).or_insert(0) += 1;
+        }
+        let mut pairs: Vec<(Vec<IndexLabel>, usize)> = counts.into_iter().collect();
+        pairs.sort_by(|(left_tuple, left_count), (right_tuple, right_count)| {
+            right_count
+                .cmp(left_count)
+                .then_with(|| left_tuple.cmp(right_tuple))
+        });
+        pairs
+    }
+
+    /// Positional sorter for lexicographic tuple order.
+    #[must_use]
+    pub fn argsort(&self) -> Vec<usize> {
+        let mut order: Vec<usize> = (0..self.len()).collect();
+        order.sort_by(|&left, &right| self.row_cmp(left, right).then_with(|| left.cmp(&right)));
+        order
+    }
+
+    /// Sort tuples lexicographically, matching `pd.MultiIndex.sort_values()`.
+    #[must_use]
+    pub fn sort_values(&self) -> Self {
+        self.take_existing_positions(&self.argsort())
+    }
+
+    /// Alias for `sort_values`, matching `pd.MultiIndex.sort`.
+    #[must_use]
+    pub fn sort(&self) -> Self {
+        self.sort_values()
+    }
+
+    /// Sort tuples and return the positional indexer used for the sort.
+    #[must_use]
+    pub fn sortlevel(&self) -> (Self, Vec<usize>) {
+        let order = self.argsort();
+        (self.take_existing_positions(&order), order)
+    }
+
+    /// Lexicographic minimum tuple.
+    #[must_use]
+    pub fn min(&self) -> Option<Vec<IndexLabel>> {
+        self.argsort()
+            .first()
+            .map(|&position| self.tuple_at(position))
+    }
+
+    /// Lexicographic maximum tuple.
+    #[must_use]
+    pub fn max(&self) -> Option<Vec<IndexLabel>> {
+        self.argsort()
+            .last()
+            .map(|&position| self.tuple_at(position))
+    }
+
+    /// Position of the maximum tuple.
+    #[must_use]
+    pub fn argmax(&self) -> Option<usize> {
+        self.argsort().last().copied()
+    }
+
+    /// Position of the minimum tuple.
+    #[must_use]
+    pub fn argmin(&self) -> Option<usize> {
+        self.argsort().first().copied()
     }
 
     /// Append another MultiIndex to this one.
@@ -6845,6 +7175,18 @@ mod tests {
         assert_eq!(mi.array(), mi.to_list());
         assert_eq!(mi.ravel(), mi.to_list());
         assert_eq!(mi.format(), vec!["(a, 1)", "(a, 2)", "(b, 1)"]);
+        assert_eq!(mi.view(), mi);
+        assert_eq!(mi.transpose(), mi);
+        assert_eq!(mi.T(), mi);
+        assert_eq!(mi.to_frame(), tuples);
+        assert_eq!(
+            mi.to_series(),
+            tuples
+                .iter()
+                .cloned()
+                .map(|tuple| (tuple.clone(), tuple))
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -6869,6 +7211,34 @@ mod tests {
         assert_eq!(mi.levshape(), vec![1, 2]);
         assert!(mi.memory_usage(false) <= mi.memory_usage(true));
         assert_eq!(mi.nbytes(), mi.memory_usage(false));
+    }
+
+    #[test]
+    fn multi_index_dtype_type_checks_and_item_match_object_index_shape() {
+        let mi = MultiIndex::from_tuples(vec![vec!["a".into(), 1_i64.into()]])
+            .unwrap()
+            .set_names(vec![Some("letter".into()), Some("number".into())]);
+
+        assert_eq!(mi.dtype(), "object");
+        assert_eq!(mi.dtypes(), vec!["object", "int64"]);
+        assert_eq!(mi.inferred_type(), "mixed");
+        assert_eq!(mi.infer_objects(), mi);
+        assert!(!mi.holds_integer());
+        assert!(!mi.is_boolean());
+        assert!(!mi.is_categorical());
+        assert!(!mi.is_floating());
+        assert!(!mi.is_integer());
+        assert!(!mi.is_interval());
+        assert!(!mi.is_numeric());
+        assert!(mi.is_object());
+        assert!(mi.is_(&mi));
+        assert_eq!(
+            mi.item().unwrap(),
+            vec![IndexLabel::Utf8("a".into()), IndexLabel::Int64(1)]
+        );
+
+        let multi = mi.repeat(2);
+        assert!(multi.item().is_err());
     }
 
     #[test]
@@ -7261,6 +7631,125 @@ mod tests {
             ]
         );
         assert_eq!(right.repeat(0).len(), 0);
+    }
+
+    #[test]
+    fn multi_index_insert_delete_and_drop_tuples() {
+        let mi = MultiIndex::from_tuples(vec![
+            vec!["b".into(), 2_i64.into()],
+            vec!["a".into(), 2_i64.into()],
+            vec!["a".into(), 1_i64.into()],
+            vec!["b".into(), 2_i64.into()],
+        ])
+        .unwrap()
+        .set_names(vec![Some("letter".into()), Some("number".into())]);
+
+        let inserted = mi.insert(1, vec!["z".into(), 9_i64.into()]).unwrap();
+        assert_eq!(
+            inserted.to_list(),
+            vec![
+                vec![IndexLabel::Utf8("b".into()), IndexLabel::Int64(2)],
+                vec![IndexLabel::Utf8("z".into()), IndexLabel::Int64(9)],
+                vec![IndexLabel::Utf8("a".into()), IndexLabel::Int64(2)],
+                vec![IndexLabel::Utf8("a".into()), IndexLabel::Int64(1)],
+                vec![IndexLabel::Utf8("b".into()), IndexLabel::Int64(2)],
+            ]
+        );
+        assert_eq!(inserted.names(), mi.names());
+
+        let deleted = inserted.delete(1).unwrap();
+        assert_eq!(deleted, mi);
+        assert!(mi.insert(0, vec!["short".into()]).is_err());
+        assert!(mi.delete(99).is_err());
+
+        let dropped = mi
+            .drop(&[vec![IndexLabel::Utf8("b".into()), IndexLabel::Int64(2)]])
+            .unwrap();
+        assert_eq!(
+            dropped.to_list(),
+            vec![
+                vec![IndexLabel::Utf8("a".into()), IndexLabel::Int64(2)],
+                vec![IndexLabel::Utf8("a".into()), IndexLabel::Int64(1)],
+            ]
+        );
+        assert!(
+            mi.drop(&[vec![
+                IndexLabel::Utf8("missing".into()),
+                IndexLabel::Int64(0)
+            ]])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn multi_index_factorize_sort_and_reduce_tuples() {
+        let mi = MultiIndex::from_tuples(vec![
+            vec!["b".into(), 2_i64.into()],
+            vec!["a".into(), 2_i64.into()],
+            vec!["a".into(), 1_i64.into()],
+            vec!["b".into(), 2_i64.into()],
+            vec!["a".into(), 2_i64.into()],
+            vec!["c".into(), 3_i64.into()],
+        ])
+        .unwrap()
+        .set_names(vec![Some("letter".into()), Some("number".into())]);
+
+        let (codes, uniques) = mi.factorize();
+        assert_eq!(codes, vec![0, 1, 2, 0, 1, 3]);
+        assert_eq!(
+            uniques.to_list(),
+            vec![
+                vec![IndexLabel::Utf8("b".into()), IndexLabel::Int64(2)],
+                vec![IndexLabel::Utf8("a".into()), IndexLabel::Int64(2)],
+                vec![IndexLabel::Utf8("a".into()), IndexLabel::Int64(1)],
+                vec![IndexLabel::Utf8("c".into()), IndexLabel::Int64(3)],
+            ]
+        );
+        assert_eq!(uniques.names(), mi.names());
+        assert_eq!(mi.unique(), uniques);
+        assert_eq!(mi.nunique(), 4);
+        assert_eq!(
+            mi.value_counts(),
+            vec![
+                (vec![IndexLabel::Utf8("a".into()), IndexLabel::Int64(2)], 2),
+                (vec![IndexLabel::Utf8("b".into()), IndexLabel::Int64(2)], 2),
+                (vec![IndexLabel::Utf8("a".into()), IndexLabel::Int64(1)], 1),
+                (vec![IndexLabel::Utf8("c".into()), IndexLabel::Int64(3)], 1),
+            ]
+        );
+
+        let sorted = mi.sort_values();
+        assert_eq!(
+            sorted.to_list(),
+            vec![
+                vec![IndexLabel::Utf8("a".into()), IndexLabel::Int64(1)],
+                vec![IndexLabel::Utf8("a".into()), IndexLabel::Int64(2)],
+                vec![IndexLabel::Utf8("a".into()), IndexLabel::Int64(2)],
+                vec![IndexLabel::Utf8("b".into()), IndexLabel::Int64(2)],
+                vec![IndexLabel::Utf8("b".into()), IndexLabel::Int64(2)],
+                vec![IndexLabel::Utf8("c".into()), IndexLabel::Int64(3)],
+            ]
+        );
+        let (sortlevel, order) = mi.sortlevel();
+        assert_eq!(sortlevel, sorted);
+        assert_eq!(order, vec![2, 1, 4, 0, 3, 5]);
+        assert_eq!(mi.sort(), sorted);
+        assert_eq!(
+            mi.min().unwrap(),
+            vec![IndexLabel::Utf8("a".into()), IndexLabel::Int64(1)]
+        );
+        assert_eq!(
+            mi.max().unwrap(),
+            vec![IndexLabel::Utf8("c".into()), IndexLabel::Int64(3)]
+        );
+        assert_eq!(mi.argmin(), Some(2));
+        assert_eq!(mi.argmax(), Some(5));
+
+        let empty = MultiIndex::from_tuples(Vec::new()).unwrap();
+        assert_eq!(empty.min(), None);
+        assert_eq!(empty.max(), None);
+        assert_eq!(empty.argmin(), None);
+        assert_eq!(empty.argmax(), None);
     }
 
     #[test]
