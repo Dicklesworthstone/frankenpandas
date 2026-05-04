@@ -71442,4 +71442,44 @@ mod tests {
         let two = qn0bj_df_with_nulls();
         assert!(two.r#bool().is_err());
     }
+
+    // ── Golden-artifact tests (br-frankenpandas-cod1m03 follow-up) ───
+    //
+    // The existing dataframe_info_basic test uses substring assertions
+    // (`info.contains("2 rows")` etc.) which miss column-alignment,
+    // row-ordering, and whitespace regressions. These golden tests
+    // freeze the EXACT output for a known input so any format change
+    // surfaces immediately. Per skill rotation /testing-golden-artifacts.
+
+    #[test]
+    fn dataframe_info_golden_two_row_one_float_column() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "a",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![Scalar::Float64(1.0), Scalar::Float64(2.0)],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        // Frozen golden — any format change fails this assertion.
+        let expected = "DataFrame: 2 rows x 1 columns\nIndex: 2 entries\n\nColumn               Non-Null   Dtype     \n------               --------   -----     \na                    2          Float64\n\nMemory usage: 32 bytes";
+        assert_eq!(df.info(), expected);
+    }
+
+    #[test]
+    fn series_info_golden_three_int_values() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+        )
+        .unwrap();
+
+        // Frozen golden — exact format from Series::info().
+        let expected =
+            "Series: vals\nLength: 3\nNon-Null Count: 3\nDtype: Int64\nMemory Usage: 48 bytes";
+        assert_eq!(s.info(), expected);
+    }
 }
