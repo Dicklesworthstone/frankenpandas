@@ -2,8 +2,8 @@
 #![warn(rustdoc::broken_intra_doc_links)]
 
 //! IO layer for **frankenpandas**: round-trips between `DataFrame` and the
-//! seven supported on-disk / wire formats — CSV, JSON, JSONL, Parquet, Excel
-//! (XLSX), Feather (Arrow IPC v2), and SQL.
+//! nine supported on-disk / wire formats — CSV, JSON, JSONL, Parquet, Excel
+//! (XLSX), Feather (Arrow IPC v2), SQL, Markdown, and LaTeX.
 //!
 //! ## Format readers / writers
 //!
@@ -18,6 +18,8 @@
 //! - **SQL**: [`read_sql`], [`read_sql_table`], [`write_sql`],
 //!   [`write_sql_with_options`], plus the chunked variants
 //!   ([`read_sql_chunks`], [`SqlChunkIterator`]).
+//! - **Markdown / LaTeX**: [`write_markdown_string`],
+//!   [`write_latex_string`].
 //!
 //! Each format has a per-call options struct ([`CsvReadOptions`],
 //! [`ExcelReadOptions`], [`SqlReadOptions`], [`SqlWriteOptions`], ...) so
@@ -326,6 +328,14 @@ pub fn write_csv_string(frame: &DataFrame) -> Result<String, IoError> {
     write_csv_string_with_options(frame, &CsvWriteOptions::default())
 }
 
+pub fn write_markdown_string(frame: &DataFrame) -> Result<String, IoError> {
+    write_markdown_string_with_options(frame, &MarkdownWriteOptions::default())
+}
+
+pub fn write_latex_string(frame: &DataFrame) -> Result<String, IoError> {
+    write_latex_string_with_options(frame, &LatexWriteOptions::default())
+}
+
 /// Options controlling CSV serialization.
 ///
 /// Mirrors the subset of pandas `DataFrame.to_csv` parameters that do
@@ -354,6 +364,55 @@ impl Default for CsvWriteOptions {
             header: true,
             include_index: false,
             index_label: None,
+        }
+    }
+}
+
+/// Options controlling Markdown table serialization.
+///
+/// Covers the pure string subset of pandas `DataFrame.to_markdown`.
+#[derive(Debug, Clone)]
+pub struct MarkdownWriteOptions {
+    /// If true, include the index as the first column. Default: true.
+    pub include_index: bool,
+    /// String written for missing values. Default: `"NaN"`.
+    pub na_rep: String,
+    /// Optional label for the index column header.
+    pub index_label: Option<String>,
+}
+
+impl Default for MarkdownWriteOptions {
+    fn default() -> Self {
+        Self {
+            include_index: true,
+            na_rep: "NaN".to_owned(),
+            index_label: None,
+        }
+    }
+}
+
+/// Options controlling LaTeX table serialization.
+///
+/// Covers the pure string subset of pandas `DataFrame.to_latex`.
+#[derive(Debug, Clone)]
+pub struct LatexWriteOptions {
+    /// If true, include the index as the first column. Default: true.
+    pub include_index: bool,
+    /// String written for missing values. Default: `"NaN"`.
+    pub na_rep: String,
+    /// Optional label for the index-name row.
+    pub index_label: Option<String>,
+    /// Escape LaTeX metacharacters in headers and cells.
+    pub escape: bool,
+}
+
+impl Default for LatexWriteOptions {
+    fn default() -> Self {
+        Self {
+            include_index: true,
+            na_rep: "NaN".to_owned(),
+            index_label: None,
+            escape: false,
         }
     }
 }
@@ -398,7 +457,7 @@ pub fn write_csv_string_with_options(
     for row_idx in 0..frame.index().len() {
         let mut row = Vec::with_capacity(headers.len() + if options.include_index { 1 } else { 0 });
         if options.include_index {
-            row.push(frame.index().labels()[row_idx].to_string());
+            row.push(index_label_string(frame, row_idx)?);
         }
         row.extend(headers.iter().map(|name| {
             let value = frame.column(name).and_then(|column| column.value(row_idx));
@@ -414,12 +473,151 @@ pub fn write_csv_string_with_options(
     Ok(String::from_utf8(bytes)?)
 }
 
+/// Serialize a DataFrame to a GitHub-style Markdown table.
+///
+/// This covers pandas' pure formatter path without taking a dependency on
+/// Python's optional `tabulate` package.
+pub fn write_markdown_string_with_options(
+    frame: &DataFrame,
+    options: &MarkdownWriteOptions,
+) -> Result<String, IoError> {
+    if options.include_index && frame.row_multiindex().is_some() {
+        let materialized = materialize_named_row_multiindex_columns(frame)?;
+        let mut nested_options = options.clone();
+        nested_options.include_index = false;
+        nested_options.index_label = None;
+        return write_markdown_string_with_options(&materialized, &nested_options);
+    }
+
+    let headers = frame
+        .column_names()
+        .into_iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    let table_width = headers.len() + usize::from(options.include_index);
+    let mut out = String::new();
+
+    let mut header_row = Vec::with_capacity(table_width);
+    if options.include_index {
+        header_row.push(resolve_table_index_header(
+            frame,
+            options.index_label.as_deref(),
+        ));
+    }
+    header_row.extend(headers.iter().cloned());
+    push_markdown_row(&mut out, &header_row);
+
+    let separator = vec!["---".to_owned(); table_width];
+    push_markdown_row(&mut out, &separator);
+
+    for row_idx in 0..frame.index().len() {
+        let mut row = Vec::with_capacity(table_width);
+        if options.include_index {
+            row.push(index_label_string(frame, row_idx)?);
+        }
+        row.extend(headers.iter().map(|name| {
+            let value = frame.column(name).and_then(|column| column.value(row_idx));
+            match value {
+                Some(scalar) => scalar_to_table_with_na(scalar, &options.na_rep),
+                None => options.na_rep.clone(),
+            }
+        }));
+        push_markdown_row(&mut out, &row);
+    }
+
+    Ok(out)
+}
+
+/// Serialize a DataFrame to a booktabs-compatible LaTeX tabular block.
+pub fn write_latex_string_with_options(
+    frame: &DataFrame,
+    options: &LatexWriteOptions,
+) -> Result<String, IoError> {
+    if options.include_index && frame.row_multiindex().is_some() {
+        let materialized = materialize_named_row_multiindex_columns(frame)?;
+        let mut nested_options = options.clone();
+        nested_options.include_index = false;
+        nested_options.index_label = None;
+        return write_latex_string_with_options(&materialized, &nested_options);
+    }
+
+    let headers = frame
+        .column_names()
+        .into_iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    let table_width = headers.len() + usize::from(options.include_index);
+    let mut out = String::new();
+
+    out.push_str("\\begin{tabular}{");
+    out.push_str(&"l".repeat(table_width));
+    out.push_str("}\n\\toprule\n");
+
+    let mut header_row = Vec::with_capacity(table_width);
+    if options.include_index {
+        header_row.push(String::new());
+    }
+    header_row.extend(headers.iter().cloned());
+    push_latex_row(&mut out, &header_row, options.escape);
+
+    if options.include_index {
+        let index_name = resolve_table_index_header(frame, options.index_label.as_deref());
+        if !index_name.is_empty() {
+            let mut index_name_row = Vec::with_capacity(table_width);
+            index_name_row.push(index_name);
+            index_name_row.extend(std::iter::repeat_n(String::new(), headers.len()));
+            push_latex_row(&mut out, &index_name_row, options.escape);
+        }
+    }
+
+    out.push_str("\\midrule\n");
+
+    for row_idx in 0..frame.index().len() {
+        let mut row = Vec::with_capacity(table_width);
+        if options.include_index {
+            row.push(index_label_string(frame, row_idx)?);
+        }
+        row.extend(headers.iter().map(|name| {
+            let value = frame.column(name).and_then(|column| column.value(row_idx));
+            match value {
+                Some(scalar) => scalar_to_table_with_na(scalar, &options.na_rep),
+                None => options.na_rep.clone(),
+            }
+        }));
+        push_latex_row(&mut out, &row, options.escape);
+    }
+
+    out.push_str("\\bottomrule\n\\end{tabular}\n");
+    Ok(out)
+}
+
 fn resolve_csv_index_header(frame: &DataFrame, options: &CsvWriteOptions) -> String {
     options
         .index_label
         .clone()
         .or_else(|| frame.index().name().map(ToOwned::to_owned))
         .unwrap_or_default()
+}
+
+fn resolve_table_index_header(frame: &DataFrame, index_label: Option<&str>) -> String {
+    index_label
+        .map(ToOwned::to_owned)
+        .or_else(|| frame.index().name().map(ToOwned::to_owned))
+        .unwrap_or_default()
+}
+
+fn index_label_string(frame: &DataFrame, row_idx: usize) -> Result<String, IoError> {
+    frame
+        .index()
+        .labels()
+        .get(row_idx)
+        .map(ToString::to_string)
+        .ok_or_else(|| {
+            IoError::Frame(FrameError::CompatibilityRejected(format!(
+                "index position {row_idx} out of bounds for index length {}",
+                frame.index().len()
+            )))
+        })
 }
 
 fn scalar_to_csv_with_na(scalar: &Scalar, na_rep: &str) -> String {
@@ -429,6 +627,73 @@ fn scalar_to_csv_with_na(scalar: &Scalar, na_rep: &str) -> String {
         Scalar::Timedelta64(v) if *v == Timedelta::NAT => na_rep.to_owned(),
         other => scalar_to_csv(other),
     }
+}
+
+fn scalar_to_table_with_na(scalar: &Scalar, na_rep: &str) -> String {
+    match scalar {
+        Scalar::Null(_) => na_rep.to_owned(),
+        Scalar::Float64(v) if v.is_nan() => na_rep.to_owned(),
+        Scalar::Timedelta64(v) if *v == Timedelta::NAT => na_rep.to_owned(),
+        other => scalar_to_csv(other),
+    }
+}
+
+fn push_markdown_row(out: &mut String, cells: &[String]) {
+    out.push('|');
+    for cell in cells {
+        out.push(' ');
+        out.push_str(&escape_markdown_table_cell(cell));
+        out.push_str(" |");
+    }
+    out.push('\n');
+}
+
+fn escape_markdown_table_cell(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '\\' => escaped.push_str("\\\\"),
+            '|' => escaped.push_str("\\|"),
+            '\n' | '\r' => escaped.push(' '),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
+fn push_latex_row(out: &mut String, cells: &[String], escape: bool) {
+    for (idx, cell) in cells.iter().enumerate() {
+        if idx > 0 {
+            out.push_str(" & ");
+        }
+        if escape {
+            out.push_str(&escape_latex_table_cell(cell));
+        } else {
+            out.push_str(cell);
+        }
+    }
+    out.push_str(" \\\\\n");
+}
+
+fn escape_latex_table_cell(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '&' => escaped.push_str("\\&"),
+            '%' => escaped.push_str("\\%"),
+            '$' => escaped.push_str("\\$"),
+            '#' => escaped.push_str("\\#"),
+            '_' => escaped.push_str("\\_"),
+            '{' => escaped.push_str("\\{"),
+            '}' => escaped.push_str("\\}"),
+            '~' => escaped.push_str("\\textasciitilde{}"),
+            '^' => escaped.push_str("\\textasciicircum{}"),
+            '\\' => escaped.push_str("\\textbackslash{}"),
+            '\n' | '\r' => escaped.push(' '),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
 }
 
 /// Default NA values recognized by pandas read_csv.
@@ -7045,6 +7310,16 @@ pub trait DataFrameIoExt {
     /// Matches `pd.DataFrame.to_csv()` with no path.
     fn to_csv_string(&self) -> Result<String, IoError>;
 
+    /// Serialize this DataFrame to a Markdown table string.
+    ///
+    /// Matches `pd.DataFrame.to_markdown()` with no buffer.
+    fn to_markdown_string(&self) -> Result<String, IoError>;
+
+    /// Serialize this DataFrame to a LaTeX tabular string.
+    ///
+    /// Matches `pd.DataFrame.to_latex()` with no buffer.
+    fn to_latex_string(&self) -> Result<String, IoError>;
+
     /// Write this DataFrame to a JSON file.
     ///
     /// Matches `pd.DataFrame.to_json(path)`.
@@ -7117,6 +7392,14 @@ impl DataFrameIoExt for DataFrame {
         write_csv_string(self)
     }
 
+    fn to_markdown_string(&self) -> Result<String, IoError> {
+        write_markdown_string(self)
+    }
+
+    fn to_latex_string(&self) -> Result<String, IoError> {
+        write_latex_string(self)
+    }
+
     fn to_json_file(&self, path: &Path, orient: JsonOrient) -> Result<(), IoError> {
         write_json(self, path, orient)
     }
@@ -7182,8 +7465,10 @@ mod tests {
     use fp_types::{DType, NullKind, Scalar};
 
     use super::{
-        CsvWriteOptions, IoError, read_csv_str, read_csv_with_index_cols, write_csv_string,
-        write_csv_string_with_options,
+        CsvWriteOptions, IoError, LatexWriteOptions, MarkdownWriteOptions, read_csv_str,
+        read_csv_with_index_cols, write_csv_string, write_csv_string_with_options,
+        write_latex_string, write_latex_string_with_options, write_markdown_string,
+        write_markdown_string_with_options,
     };
 
     #[test]
@@ -7215,6 +7500,108 @@ mod tests {
         let input = "a,a\n1,2\n";
         let err = read_csv_str(input).expect_err("duplicate header");
         assert!(matches!(err, IoError::DuplicateColumnName(name) if name == "a"));
+    }
+
+    fn make_table_format_dataframe() -> DataFrame {
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            "name".to_owned(),
+            Column::from_values(vec![
+                Scalar::Utf8("A|B".to_owned()),
+                Scalar::Utf8("under_score".to_owned()),
+            ])
+            .expect("name column"),
+        );
+        columns.insert(
+            "value".to_owned(),
+            Column::from_values(vec![Scalar::Float64(f64::NAN), Scalar::Int64(2)])
+                .expect("value column"),
+        );
+
+        let index = Index::new(vec![
+            IndexLabel::Utf8("r&1".to_owned()),
+            IndexLabel::Utf8("r_2".to_owned()),
+        ])
+        .set_name("row");
+        DataFrame::new_with_column_order(
+            index,
+            columns,
+            vec!["name".to_owned(), "value".to_owned()],
+        )
+        .expect("table format frame")
+    }
+
+    #[test]
+    fn markdown_table_writer_includes_index_missing_values_and_escaping() {
+        let frame = make_table_format_dataframe();
+
+        let out = write_markdown_string(&frame).expect("markdown");
+
+        assert_eq!(
+            out,
+            concat!(
+                "| row | name | value |\n",
+                "| --- | --- | --- |\n",
+                "| r&1 | A\\|B | NaN |\n",
+                "| r_2 | under_score | 2 |\n",
+            )
+        );
+    }
+
+    #[test]
+    fn markdown_table_writer_options_can_omit_index_and_override_na() {
+        let frame = make_table_format_dataframe();
+
+        let out = write_markdown_string_with_options(
+            &frame,
+            &MarkdownWriteOptions {
+                include_index: false,
+                na_rep: "<missing>".to_owned(),
+                index_label: Some("ignored".to_owned()),
+            },
+        )
+        .expect("markdown");
+
+        assert_eq!(
+            out,
+            concat!(
+                "| name | value |\n",
+                "| --- | --- |\n",
+                "| A\\|B | <missing> |\n",
+                "| under_score | 2 |\n",
+            )
+        );
+    }
+
+    #[test]
+    fn latex_table_writer_emits_booktabs_and_supports_escaping() {
+        let frame = make_table_format_dataframe();
+
+        let out = write_latex_string_with_options(
+            &frame,
+            &LatexWriteOptions {
+                include_index: true,
+                na_rep: "NA".to_owned(),
+                index_label: Some("row_id".to_owned()),
+                escape: true,
+            },
+        )
+        .expect("latex");
+
+        assert_eq!(
+            out,
+            concat!(
+                "\\begin{tabular}{lll}\n",
+                "\\toprule\n",
+                " & name & value \\\\\n",
+                "row\\_id &  &  \\\\\n",
+                "\\midrule\n",
+                "r\\&1 & A|B & NA \\\\\n",
+                "r\\_2 & under\\_score & 2 \\\\\n",
+                "\\bottomrule\n",
+                "\\end{tabular}\n",
+            )
+        );
     }
 
     // === AG-07-T: CSV Parser Optimization Tests ===
@@ -8638,6 +9025,14 @@ mod tests {
         let frame = make_test_dataframe();
         let csv = frame.to_csv_string().expect("csv string");
         assert_eq!(csv, super::write_csv_string(&frame).expect("free csv"));
+        assert_eq!(
+            frame.to_markdown_string().expect("markdown string"),
+            write_markdown_string(&frame).expect("free markdown")
+        );
+        assert_eq!(
+            frame.to_latex_string().expect("latex string"),
+            write_latex_string(&frame).expect("free latex")
+        );
 
         let dir = std::env::temp_dir();
         let stem = format!("fp_io_dataframe_io_ext_{}", std::process::id());
