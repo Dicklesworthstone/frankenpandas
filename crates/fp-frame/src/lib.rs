@@ -71482,4 +71482,111 @@ mod tests {
             "Series: vals\nLength: 3\nNon-Null Count: 3\nDtype: Int64\nMemory Usage: 48 bytes";
         assert_eq!(s.info(), expected);
     }
+
+    // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
+    //
+    // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))
+    // or f(f(x)) == f(x) that hold by mathematical/semantic invariant
+    // regardless of input data. Catches subtle implementation bugs that
+    // unit tests with hardcoded inputs miss.
+
+    fn metamorphic_int_series(name: &str, values: &[i64]) -> Series {
+        Series::from_values(
+            name,
+            (0..values.len() as i64).map(IndexLabel::Int64).collect(),
+            values.iter().map(|v| Scalar::Int64(*v)).collect(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn metamorphic_series_sort_values_is_idempotent() {
+        for vals in [
+            &[3_i64, 1, 4, 1, 5, 9, 2, 6][..],
+            &[10, 20, 30][..],
+            &[5, 5, 5, 5][..],
+            &[1][..],
+        ] {
+            let s = metamorphic_int_series("v", vals);
+            let once = s.sort_values(true).unwrap();
+            let twice = once.sort_values(true).unwrap();
+            assert_eq!(once.values(), twice.values(), "vals={vals:?}");
+        }
+    }
+
+    #[test]
+    fn metamorphic_series_sort_asc_then_desc_reverses() {
+        for vals in [&[3_i64, 1, 4, 1, 5, 9, 2, 6][..], &[10, 20, 30][..]] {
+            let s = metamorphic_int_series("v", vals);
+            let asc = s.sort_values(true).unwrap();
+            let desc = s.sort_values(false).unwrap();
+            let mut asc_rev = asc.values().to_vec();
+            asc_rev.reverse();
+            assert_eq!(asc_rev, desc.values().to_vec(), "vals={vals:?}");
+        }
+    }
+
+    #[test]
+    fn metamorphic_series_add_zero_is_identity() {
+        for vals in [&[3_i64, 1, 4, 1, 5][..], &[0, 0, 0][..], &[-7, 7, -7][..]] {
+            let s = metamorphic_int_series("v", vals);
+            let zero = metamorphic_int_series("v", &vec![0_i64; vals.len()]);
+            let result = s.add(&zero).unwrap();
+            assert_eq!(result.values(), s.values(), "add(0) for {vals:?}");
+        }
+    }
+
+    #[test]
+    fn metamorphic_series_mul_one_is_identity() {
+        for vals in [&[3_i64, 1, 4, 1, 5][..], &[0, 0, 0][..], &[100, -50, 0][..]] {
+            let s = metamorphic_int_series("v", vals);
+            let one = metamorphic_int_series("v", &vec![1_i64; vals.len()]);
+            let result = s.mul(&one).unwrap();
+            assert_eq!(result.values(), s.values(), "mul(1) for {vals:?}");
+        }
+    }
+
+    #[test]
+    fn metamorphic_series_add_is_commutative() {
+        let cases: &[(&[i64], &[i64])] = &[
+            (&[1, 2, 3], &[4, 5, 6]),
+            (&[10, 20, 30], &[-5, 0, 100]),
+            (&[0, 0, 0], &[42, 42, 42]),
+        ];
+        for (a, b) in cases {
+            let s1 = metamorphic_int_series("a", a);
+            let s2 = metamorphic_int_series("b", b);
+            let lhs = s1.add(&s2).unwrap();
+            let rhs = s2.add(&s1).unwrap();
+            assert_eq!(lhs.values(), rhs.values(), "a={a:?}, b={b:?}");
+        }
+    }
+
+    #[test]
+    fn metamorphic_series_mul_is_commutative() {
+        let cases: &[(&[i64], &[i64])] = &[(&[1, 2, 3], &[4, 5, 6]), (&[10, -20, 30], &[7, 0, -3])];
+        for (a, b) in cases {
+            let s1 = metamorphic_int_series("a", a);
+            let s2 = metamorphic_int_series("b", b);
+            let lhs = s1.mul(&s2).unwrap();
+            let rhs = s2.mul(&s1).unwrap();
+            assert_eq!(lhs.values(), rhs.values(), "a={a:?}, b={b:?}");
+        }
+    }
+
+    #[test]
+    fn metamorphic_series_sub_self_is_zero() {
+        for vals in [&[3_i64, 1, 4, 1, 5][..], &[100, -50, 0][..], &[0][..]] {
+            let s = metamorphic_int_series("v", vals);
+            let result = s.sub(&s).unwrap();
+            for v in result.values() {
+                match v {
+                    Scalar::Int64(0) => {}
+                    Scalar::Float64(f) if *f == 0.0 => {}
+                    Scalar::Null(_) => {}
+                    other => panic!("expected zero/null, got {other:?} for vals={vals:?}"),
+                }
+            }
+        }
+    }
 }
