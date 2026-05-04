@@ -5044,7 +5044,12 @@ impl Series {
                 continue;
             }
             let v = val.to_f64().map_err(ColumnError::from)?;
-            if v < best_val {
+            // Per br-frankenpandas-5c98a: must initialize best_idx on the
+            // first non-missing value even if v fails the strict-less check
+            // (e.g. all-INFINITY series). best_idx.is_none() captures that
+            // case while preserving first-occurrence tie-breaking semantics
+            // on regular floats (subsequent equal values still fail v < best_val).
+            if best_idx.is_none() || v < best_val {
                 best_val = v;
                 best_idx = Some(i);
             }
@@ -5067,7 +5072,9 @@ impl Series {
                 continue;
             }
             let v = val.to_f64().map_err(ColumnError::from)?;
-            if v > best_val {
+            // Per br-frankenpandas-5c98a: see idxmin above. Initialize on
+            // first non-missing value to handle all-NEG_INFINITY input.
+            if best_idx.is_none() || v > best_val {
                 best_val = v;
                 best_idx = Some(i);
             }
@@ -11209,8 +11216,11 @@ impl SeriesGroupBy<'_> {
                 if value.is_missing() {
                     continue;
                 }
+                // Per br-frankenpandas-5c98a: initialize on first non-missing
+                // value to handle all-INFINITY group. First-occurrence tie-
+                // breaking is preserved (subsequent equal values fail v < best_val).
                 if let Ok(v) = value.to_f64()
-                    && v < best_val
+                    && (best_idx.is_none() || v < best_val)
                 {
                     best_val = v;
                     best_idx = Some(idx);
@@ -11232,8 +11242,9 @@ impl SeriesGroupBy<'_> {
                 if value.is_missing() {
                     continue;
                 }
+                // Per br-frankenpandas-5c98a: see idxmin above.
                 if let Ok(v) = value.to_f64()
-                    && v > best_val
+                    && (best_idx.is_none() || v > best_val)
                 {
                     best_val = v;
                     best_idx = Some(idx);
@@ -71951,5 +71962,109 @@ mod tests {
         assert!(matches!(xs[1], Scalar::Float64(f) if f == 12.0));
         // Row label=3: a=NaN, b=20 → NaN
         assert!(matches!(xs[2], Scalar::Null(_)));
+    }
+
+    #[test]
+    fn series_idxmax_handles_all_neg_infinity() {
+        // Per br-frankenpandas-5c98a: idxmax on a series of all NEG_INFINITY
+        // must return the first index (pandas first-occurrence semantics),
+        // not Err. The previous implementation initialized best_val to
+        // NEG_INFINITY and required v > best_val, which silently dropped
+        // every NEG_INFINITY value.
+        let s = Series::from_values(
+            "x",
+            vec![10_i64.into(), 20_i64.into(), 30_i64.into()],
+            vec![
+                Scalar::Float64(f64::NEG_INFINITY),
+                Scalar::Float64(f64::NEG_INFINITY),
+                Scalar::Float64(f64::NEG_INFINITY),
+            ],
+        )
+        .unwrap();
+        assert_eq!(s.idxmax().unwrap(), IndexLabel::Int64(10));
+    }
+
+    #[test]
+    fn series_idxmin_handles_all_infinity() {
+        // Sister case: idxmin on a series of all INFINITY must return the
+        // first index, not Err.
+        let s = Series::from_values(
+            "x",
+            vec![10_i64.into(), 20_i64.into(), 30_i64.into()],
+            vec![
+                Scalar::Float64(f64::INFINITY),
+                Scalar::Float64(f64::INFINITY),
+                Scalar::Float64(f64::INFINITY),
+            ],
+        )
+        .unwrap();
+        assert_eq!(s.idxmin().unwrap(), IndexLabel::Int64(10));
+    }
+
+    #[test]
+    fn series_idxmax_first_occurrence_tie_breaking_preserved() {
+        // Regression guard: the fix must NOT change the first-occurrence
+        // tie-breaking on regular floats. For [3.0, 5.0, 5.0, 1.0],
+        // idxmax should return index of the FIRST 5.0 (label 20), not the
+        // second.
+        let s = Series::from_values(
+            "x",
+            vec![10_i64.into(), 20_i64.into(), 30_i64.into(), 40_i64.into()],
+            vec![
+                Scalar::Float64(3.0),
+                Scalar::Float64(5.0),
+                Scalar::Float64(5.0),
+                Scalar::Float64(1.0),
+            ],
+        )
+        .unwrap();
+        assert_eq!(s.idxmax().unwrap(), IndexLabel::Int64(20));
+    }
+
+    #[test]
+    fn series_idxmin_first_occurrence_tie_breaking_preserved() {
+        let s = Series::from_values(
+            "x",
+            vec![10_i64.into(), 20_i64.into(), 30_i64.into(), 40_i64.into()],
+            vec![
+                Scalar::Float64(3.0),
+                Scalar::Float64(1.0),
+                Scalar::Float64(1.0),
+                Scalar::Float64(5.0),
+            ],
+        )
+        .unwrap();
+        assert_eq!(s.idxmin().unwrap(), IndexLabel::Int64(20));
+    }
+
+    #[test]
+    fn series_idxmax_single_neg_infinity_value() {
+        // Edge case: single-element series with NEG_INFINITY. Must return
+        // that element's index, not Err.
+        let s = Series::from_values(
+            "x",
+            vec![42_i64.into()],
+            vec![Scalar::Float64(f64::NEG_INFINITY)],
+        )
+        .unwrap();
+        assert_eq!(s.idxmax().unwrap(), IndexLabel::Int64(42));
+    }
+
+    #[test]
+    fn series_idxmin_mixed_with_neg_infinity() {
+        // Regression guard: idxmin on [-INF, 0.0, -INF] must return
+        // the first NEG_INFINITY's index (label 10), confirming the
+        // tied-on-NEG_INFINITY case still picks first-occurrence.
+        let s = Series::from_values(
+            "x",
+            vec![10_i64.into(), 20_i64.into(), 30_i64.into()],
+            vec![
+                Scalar::Float64(f64::NEG_INFINITY),
+                Scalar::Float64(0.0),
+                Scalar::Float64(f64::NEG_INFINITY),
+            ],
+        )
+        .unwrap();
+        assert_eq!(s.idxmin().unwrap(), IndexLabel::Int64(10));
     }
 }
