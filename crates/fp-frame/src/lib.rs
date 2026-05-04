@@ -27481,6 +27481,54 @@ impl DataFrame {
     where
         F: Fn(f64, f64) -> f64,
     {
+        // Per br-frankenpandas-b0cab: fast path for the common case where self
+        // and other already share the same index and column ordering. The
+        // align_on_index round-trip would otherwise materialize two intermediate
+        // DataFrames byte-identical to self/other, costing 2×N×M Scalar clones
+        // that are discarded immediately by the op loop below. Skipping it
+        // saves both the alignment-plan build and those wasted clones; the
+        // result is identical for the equal-shape case.
+        if self.column_order == other.column_order
+            && self.index == other.index
+            && !self.index.has_duplicates()
+            && self
+                .column_order
+                .iter()
+                .all(|n| other.columns.contains_key(n))
+        {
+            let mut result_cols = BTreeMap::new();
+            for col_name in &self.column_order {
+                let lc = &self.columns[col_name];
+                let rc = &other.columns[col_name];
+                let left_numlike =
+                    matches!(lc.dtype(), DType::Int64 | DType::Float64 | DType::Null);
+                let right_numlike =
+                    matches!(rc.dtype(), DType::Int64 | DType::Float64 | DType::Null);
+
+                if left_numlike && right_numlike {
+                    let vals: Vec<Scalar> = lc
+                        .values()
+                        .iter()
+                        .zip(rc.values())
+                        .map(|(lv, rv)| match (lv.to_f64(), rv.to_f64()) {
+                            (Ok(l), Ok(r)) => Scalar::Float64(op(l, r)),
+                            _ => Scalar::Null(NullKind::NaN),
+                        })
+                        .collect();
+                    result_cols.insert(col_name.clone(), Column::from_values(vals)?);
+                } else {
+                    result_cols.insert(col_name.clone(), lc.clone());
+                }
+            }
+            return Ok(Self {
+                columns: result_cols,
+                column_order: self.column_order.clone(),
+                index: self.index.clone(),
+                column_multiindex: self.column_multiindex.clone(),
+                row_multiindex: self.row_multiindex.clone(),
+            });
+        }
+
         // align_on_index with Outer gives both sides the union column set,
         // filling missing columns with NaN (DType::Null).
         let (left, right) = self.align_on_index(other, AlignMode::Outer)?;
@@ -71750,5 +71798,158 @@ mod tests {
             out.column("label").unwrap().values(),
             &[Scalar::Utf8("a".into()), Scalar::Utf8("b".into())]
         );
+    }
+
+    #[test]
+    fn dataframe_add_df_fast_path_equal_shape() {
+        // Per br-frankenpandas-b0cab: when self and other share index +
+        // column_order, binary_df_op skips align_on_index. Verify the fast
+        // path produces correct results.
+        let mut cols_a = BTreeMap::new();
+        cols_a.insert(
+            "x".to_owned(),
+            Column::new(DType::Int64, vec![Scalar::Int64(1), Scalar::Int64(2)]).unwrap(),
+        );
+        cols_a.insert(
+            "y".to_owned(),
+            Column::new(
+                DType::Float64,
+                vec![Scalar::Float64(0.5), Scalar::Float64(1.5)],
+            )
+            .unwrap(),
+        );
+        let a = DataFrame::new_with_column_order(
+            Index::new(vec![10_i64.into(), 20_i64.into()]),
+            cols_a,
+            vec!["x".to_owned(), "y".to_owned()],
+        )
+        .unwrap();
+
+        let mut cols_b = BTreeMap::new();
+        cols_b.insert(
+            "x".to_owned(),
+            Column::new(DType::Int64, vec![Scalar::Int64(10), Scalar::Int64(20)]).unwrap(),
+        );
+        cols_b.insert(
+            "y".to_owned(),
+            Column::new(
+                DType::Float64,
+                vec![Scalar::Float64(2.0), Scalar::Float64(4.0)],
+            )
+            .unwrap(),
+        );
+        let b = DataFrame::new_with_column_order(
+            Index::new(vec![10_i64.into(), 20_i64.into()]),
+            cols_b,
+            vec!["x".to_owned(), "y".to_owned()],
+        )
+        .unwrap();
+
+        let sum = a.add_df(&b).unwrap();
+        assert_eq!(
+            sum.column("x").unwrap().values(),
+            &[Scalar::Float64(11.0), Scalar::Float64(22.0)]
+        );
+        assert_eq!(
+            sum.column("y").unwrap().values(),
+            &[Scalar::Float64(2.5), Scalar::Float64(5.5)]
+        );
+        assert_eq!(sum.column_order, vec!["x".to_owned(), "y".to_owned()]);
+        assert_eq!(sum.index, a.index);
+    }
+
+    #[test]
+    fn dataframe_add_df_fast_path_matches_slow_path() {
+        // Equivalence test: the fast path (equal index + columns) must
+        // produce results identical to the slow path (which goes through
+        // align_on_index). We verify by comparing fast-path result against
+        // a manual element-wise computation.
+        let mut cols_a = BTreeMap::new();
+        cols_a.insert(
+            "a".to_owned(),
+            Column::new(
+                DType::Float64,
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(2.0),
+                    Scalar::Float64(3.0),
+                ],
+            )
+            .unwrap(),
+        );
+        let a = DataFrame::new_with_column_order(
+            Index::new(vec![1_i64.into(), 2_i64.into(), 3_i64.into()]),
+            cols_a,
+            vec!["a".to_owned()],
+        )
+        .unwrap();
+
+        // Self-add: every value should double.
+        let doubled = a.add_df(&a).unwrap();
+        assert_eq!(
+            doubled.column("a").unwrap().values(),
+            &[
+                Scalar::Float64(2.0),
+                Scalar::Float64(4.0),
+                Scalar::Float64(6.0)
+            ]
+        );
+
+        // sub_df self → all zeros.
+        let zeros = a.sub_df(&a).unwrap();
+        for v in zeros.column("a").unwrap().values() {
+            assert!(matches!(v, Scalar::Float64(f) if *f == 0.0));
+        }
+
+        // mul_df self → squares.
+        let squared = a.mul_df(&a).unwrap();
+        assert_eq!(
+            squared.column("a").unwrap().values(),
+            &[
+                Scalar::Float64(1.0),
+                Scalar::Float64(4.0),
+                Scalar::Float64(9.0)
+            ]
+        );
+    }
+
+    #[test]
+    fn dataframe_add_df_misaligned_uses_slow_path() {
+        // Different index labels must still go through align_on_index;
+        // the fast-path guard correctly rejects this case.
+        let mut cols_a = BTreeMap::new();
+        cols_a.insert(
+            "x".to_owned(),
+            Column::new(DType::Int64, vec![Scalar::Int64(1), Scalar::Int64(2)]).unwrap(),
+        );
+        let a = DataFrame::new_with_column_order(
+            Index::new(vec![1_i64.into(), 2_i64.into()]),
+            cols_a,
+            vec!["x".to_owned()],
+        )
+        .unwrap();
+
+        let mut cols_b = BTreeMap::new();
+        cols_b.insert(
+            "x".to_owned(),
+            Column::new(DType::Int64, vec![Scalar::Int64(10), Scalar::Int64(20)]).unwrap(),
+        );
+        let b = DataFrame::new_with_column_order(
+            Index::new(vec![2_i64.into(), 3_i64.into()]),
+            cols_b,
+            vec!["x".to_owned()],
+        )
+        .unwrap();
+
+        // Outer alignment: union index = {1, 2, 3}, with NaN where missing.
+        let sum = a.add_df(&b).unwrap();
+        assert_eq!(sum.index.len(), 3);
+        let xs = sum.column("x").unwrap().values();
+        // Row label=1: a=1, b=NaN → NaN
+        assert!(matches!(xs[0], Scalar::Null(_)));
+        // Row label=2: a=2, b=10 → 12
+        assert!(matches!(xs[1], Scalar::Float64(f) if f == 12.0));
+        // Row label=3: a=NaN, b=20 → NaN
+        assert!(matches!(xs[2], Scalar::Null(_)));
     }
 }
