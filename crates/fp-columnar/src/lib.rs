@@ -701,13 +701,20 @@ fn vectorized_binary_i64(
         return None;
     }
 
-    // For Mod/FloorDiv: if any valid position has zero divisor, fall back to float
-    // (pandas promotes to float64 to represent NaN/inf for division by zero)
+    // For Mod/FloorDiv: if any non-missing right operand is zero, fall back
+    // to float. We must NOT gate on `combined` (left AND right validity) —
+    // pandas promotes the entire result dtype to Float64 whenever a zero
+    // divisor appears in the right operand, regardless of whether the
+    // matching left position is missing. Gating on combined caused
+    // promotion to be skipped when the zero divisor's left counterpart
+    // was Null, drifting the column dtype against the conformance oracle
+    // (fuzz_column_arith corpus surfaced this on the seed
+    // [97, 4, 11, 0, 0, 0, 0, 0, 0, 0, 10]).
     if matches!(op, ArithmeticOp::Mod | ArithmeticOp::FloorDiv) {
         let has_zero_divisor = right
             .iter()
             .enumerate()
-            .any(|(i, &r)| combined.get(i) && r == 0);
+            .any(|(i, &r)| right_validity.get(i) && r == 0);
         if has_zero_divisor {
             return None;
         }
