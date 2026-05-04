@@ -4303,6 +4303,39 @@ impl Series {
             return self.categorical_extreme(meta, true);
         }
 
+        // Per br-frankenpandas-e7d61: pandas preserves input dtype for
+        // min/max. Branch on column dtype to keep dtype contract.
+        match self.column.dtype() {
+            DType::Int64 => {
+                let mut best: Option<i64> = None;
+                for val in self.column.values() {
+                    if let Scalar::Int64(v) = val {
+                        best = Some(best.map_or(*v, |b| b.min(*v)));
+                    }
+                }
+                return Ok(best.map_or(Scalar::Float64(f64::NAN), Scalar::Int64));
+            }
+            DType::Bool => {
+                let mut found = false;
+                let mut any_false = false;
+                for val in self.column.values() {
+                    if let Scalar::Bool(b) = val {
+                        found = true;
+                        if !*b {
+                            any_false = true;
+                            break;
+                        }
+                    }
+                }
+                return Ok(if !found {
+                    Scalar::Float64(f64::NAN)
+                } else {
+                    Scalar::Bool(!any_false)
+                });
+            }
+            _ => {}
+        }
+
         let mut result = f64::INFINITY;
         let mut found = false;
         for val in self.column.values() {
@@ -4327,6 +4360,38 @@ impl Series {
     pub fn max(&self) -> Result<Scalar, FrameError> {
         if let Some(meta) = &self.categorical {
             return self.categorical_extreme(meta, false);
+        }
+
+        // Per br-frankenpandas-e7d61: see min above.
+        match self.column.dtype() {
+            DType::Int64 => {
+                let mut best: Option<i64> = None;
+                for val in self.column.values() {
+                    if let Scalar::Int64(v) = val {
+                        best = Some(best.map_or(*v, |b| b.max(*v)));
+                    }
+                }
+                return Ok(best.map_or(Scalar::Float64(f64::NAN), Scalar::Int64));
+            }
+            DType::Bool => {
+                let mut found = false;
+                let mut any_true = false;
+                for val in self.column.values() {
+                    if let Scalar::Bool(b) = val {
+                        found = true;
+                        if *b {
+                            any_true = true;
+                            break;
+                        }
+                    }
+                }
+                return Ok(if !found {
+                    Scalar::Float64(f64::NAN)
+                } else {
+                    Scalar::Bool(any_true)
+                });
+            }
+            _ => {}
         }
 
         let mut result = f64::NEG_INFINITY;
@@ -37086,6 +37151,8 @@ mod tests {
 
     #[test]
     fn series_min_max_basic() {
+        // Per br-frankenpandas-e7d61: pandas preserves Int64 dtype for
+        // min/max — was previously asserting the buggy Float64 coercion.
         let s = Series::from_values(
             "vals",
             vec![1_i64.into(), 2_i64.into(), 3_i64.into()],
@@ -37093,8 +37160,8 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(s.min().unwrap(), Scalar::Float64(5.0));
-        assert_eq!(s.max().unwrap(), Scalar::Float64(30.0));
+        assert_eq!(s.min().unwrap(), Scalar::Int64(5));
+        assert_eq!(s.max().unwrap(), Scalar::Int64(30));
     }
 
     #[test]
@@ -72325,5 +72392,93 @@ mod tests {
         assert_eq!(clipped_upper.values()[0], Scalar::Int64(0));
         assert_eq!(clipped_upper.values()[1], Scalar::Int64(5));
         assert_eq!(clipped_upper.values()[2], Scalar::Int64(7));
+    }
+
+    #[test]
+    fn series_min_max_preserve_int64() {
+        // Per br-frankenpandas-e7d61: min/max on Int64 input returns Int64.
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Int64(7),
+                Scalar::Int64(-3),
+                Scalar::Int64(11),
+                Scalar::Int64(0),
+            ],
+        )
+        .unwrap();
+        assert_eq!(s.min().unwrap(), Scalar::Int64(-3));
+        assert_eq!(s.max().unwrap(), Scalar::Int64(11));
+    }
+
+    #[test]
+    fn series_min_max_preserve_bool() {
+        // Per br-frankenpandas-e7d61: min/max on Bool input returns Bool.
+        // pandas: max([True,False,True]) == True; min([True,True]) == True;
+        // min([True,False]) == False.
+        let s_mixed = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)],
+        )
+        .unwrap();
+        assert_eq!(s_mixed.max().unwrap(), Scalar::Bool(true));
+        assert_eq!(s_mixed.min().unwrap(), Scalar::Bool(false));
+
+        let s_all_true = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Bool(true), Scalar::Bool(true)],
+        )
+        .unwrap();
+        assert_eq!(s_all_true.max().unwrap(), Scalar::Bool(true));
+        assert_eq!(s_all_true.min().unwrap(), Scalar::Bool(true));
+
+        let s_all_false = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Bool(false), Scalar::Bool(false)],
+        )
+        .unwrap();
+        assert_eq!(s_all_false.max().unwrap(), Scalar::Bool(false));
+        assert_eq!(s_all_false.min().unwrap(), Scalar::Bool(false));
+    }
+
+    #[test]
+    fn series_min_max_float64_input_stays_float64() {
+        // Regression guard: Float64 path is the existing-correct path.
+        // Must remain unchanged.
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Float64(1.5),
+                Scalar::Float64(-0.5),
+                Scalar::Float64(3.5),
+            ],
+        )
+        .unwrap();
+        assert_eq!(s.min().unwrap(), Scalar::Float64(-0.5));
+        assert_eq!(s.max().unwrap(), Scalar::Float64(3.5));
+    }
+
+    #[test]
+    fn series_min_max_int64_skips_nulls_and_preserves_dtype() {
+        // Int64 column with Null entries — nulls skipped, result still
+        // Int64 (not Float64 due to NaN representability).
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Int64(5),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Int64(2),
+                Scalar::Int64(8),
+            ],
+        )
+        .unwrap();
+        assert_eq!(s.min().unwrap(), Scalar::Int64(2));
+        assert_eq!(s.max().unwrap(), Scalar::Int64(8));
     }
 }
