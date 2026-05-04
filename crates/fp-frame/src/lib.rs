@@ -28532,7 +28532,13 @@ impl DataFrame {
         let mut result_cols = BTreeMap::new();
         for name in &self.column_order {
             let col = &self.columns[name];
-            if col.dtype() == DType::Int64 || col.dtype() == DType::Float64 {
+            // Per br-frankenpandas-fcf80: pandas treats Bool as numeric in
+            // cumsum/cumprod/diff/shift/abs (casts to Int64). Series-level
+            // implementations of these ops already handle Bool correctly
+            // (see Series::cumsum line ~4657); the DataFrame gate just
+            // needs to delegate Bool columns instead of passing them
+            // through as no-ops.
+            if matches!(col.dtype(), DType::Int64 | DType::Float64 | DType::Bool) {
                 let s = self.column_as_series(name)?;
                 let transformed = func(&s)?;
                 result_cols.insert(name.clone(), transformed.column().clone());
@@ -71654,5 +71660,95 @@ mod tests {
         let with_both = with_axis.rename("renamed").unwrap();
         assert_eq!(with_both.name(), "renamed");
         assert_eq!(with_both.index().name(), Some("ax"));
+    }
+
+    // ── DataFrame Bool-column numeric ops parity (br-frankenpandas-fcf80) ─
+    //
+    // pandas treats Bool as numeric in cumsum/cumprod/cummax/cummin/diff/
+    // shift/abs (casts to Int64). The Series-level ops already handle Bool
+    // correctly; the DataFrame layer's apply_per_column gate previously
+    // skipped Bool columns as a no-op. These tests lock in the fixed
+    // delegation.
+
+    fn fcf80_bool_df() -> DataFrame {
+        let mut cols = BTreeMap::new();
+        cols.insert(
+            "flags".to_owned(),
+            Column::new(
+                DType::Bool,
+                vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)],
+            )
+            .unwrap(),
+        );
+        DataFrame::new_with_column_order(
+            Index::new(vec![0_i64.into(), 1_i64.into(), 2_i64.into()]),
+            cols,
+            vec!["flags".to_owned()],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn dataframe_cumsum_handles_bool_columns() {
+        let df = fcf80_bool_df();
+        let out = df.cumsum().unwrap();
+        // pandas: cumsum on Bool col → [1, 1, 2] (Int64)
+        assert_eq!(
+            out.column("flags").unwrap().values(),
+            &[Scalar::Int64(1), Scalar::Int64(1), Scalar::Int64(2)]
+        );
+    }
+
+    #[test]
+    fn dataframe_cumprod_handles_bool_columns() {
+        let df = fcf80_bool_df();
+        let out = df.cumprod().unwrap();
+        // pandas: cumprod on Bool col → [1, 0, 0] (1*1=1, 1*0=0, 0*1=0)
+        assert_eq!(
+            out.column("flags").unwrap().values(),
+            &[Scalar::Int64(1), Scalar::Int64(0), Scalar::Int64(0)]
+        );
+    }
+
+    #[test]
+    fn dataframe_diff_handles_bool_columns() {
+        let df = fcf80_bool_df();
+        let out = df.diff(1).unwrap();
+        // pandas: diff(1) on Bool col [T, F, T] → [NaN, -1, 1] (cast to Int64)
+        let vals = out.column("flags").unwrap().values();
+        assert!(matches!(&vals[0], Scalar::Null(_)));
+        match (&vals[1], &vals[2]) {
+            // Accept either Int64 or Float64 representation; pandas itself
+            // promotes to Float64 because of the leading NaN.
+            (Scalar::Int64(-1), Scalar::Int64(1)) | (Scalar::Float64(_), Scalar::Float64(_)) => {}
+            other => panic!("unexpected diff values: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dataframe_cumsum_string_column_still_passes_through() {
+        // Regression guard: the dtype gate widening must NOT touch Utf8
+        // columns — pandas df.cumsum() on a string column passes through
+        // (no-op).
+        let mut cols = BTreeMap::new();
+        cols.insert(
+            "label".to_owned(),
+            Column::new(
+                DType::Utf8,
+                vec![Scalar::Utf8("a".into()), Scalar::Utf8("b".into())],
+            )
+            .unwrap(),
+        );
+        let df = DataFrame::new_with_column_order(
+            Index::new(vec![0_i64.into(), 1_i64.into()]),
+            cols,
+            vec!["label".to_owned()],
+        )
+        .unwrap();
+        let out = df.cumsum().unwrap();
+        assert_eq!(
+            out.column("label").unwrap().values(),
+            &[Scalar::Utf8("a".into()), Scalar::Utf8("b".into())]
+        );
     }
 }
