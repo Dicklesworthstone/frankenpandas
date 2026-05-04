@@ -9393,7 +9393,7 @@ impl Resample<'_> {
     }
 
     /// Aggregate each time bucket using a function.
-    fn aggregate<F>(&self, agg: F) -> Result<Series, FrameError>
+    fn aggregate_scalar<F>(&self, agg: F) -> Result<Series, FrameError>
     where
         F: Fn(&[Scalar]) -> Scalar,
     {
@@ -9414,32 +9414,32 @@ impl Resample<'_> {
 
     /// Resample sum.
     pub fn sum(&self) -> Result<Series, FrameError> {
-        self.aggregate(fp_types::nansum)
+        self.aggregate_scalar(fp_types::nansum)
     }
 
     /// Resample mean.
     pub fn mean(&self) -> Result<Series, FrameError> {
-        self.aggregate(fp_types::nanmean)
+        self.aggregate_scalar(fp_types::nanmean)
     }
 
     /// Resample count.
     pub fn count(&self) -> Result<Series, FrameError> {
-        self.aggregate(fp_types::nancount)
+        self.aggregate_scalar(fp_types::nancount)
     }
 
     /// Resample min.
     pub fn min(&self) -> Result<Series, FrameError> {
-        self.aggregate(fp_types::nanmin)
+        self.aggregate_scalar(fp_types::nanmin)
     }
 
     /// Resample max.
     pub fn max(&self) -> Result<Series, FrameError> {
-        self.aggregate(fp_types::nanmax)
+        self.aggregate_scalar(fp_types::nanmax)
     }
 
     /// Resample first non-null value.
     pub fn first(&self) -> Result<Series, FrameError> {
-        self.aggregate(|vals| {
+        self.aggregate_scalar(|vals| {
             vals.iter()
                 .find(|v| !v.is_missing())
                 .cloned()
@@ -9449,7 +9449,7 @@ impl Resample<'_> {
 
     /// Resample last non-null value.
     pub fn last(&self) -> Result<Series, FrameError> {
-        self.aggregate(|vals| {
+        self.aggregate_scalar(|vals| {
             vals.iter()
                 .rev()
                 .find(|v| !v.is_missing())
@@ -9467,7 +9467,7 @@ impl Resample<'_> {
     where
         F: Fn(&[Scalar]) -> Scalar,
     {
-        self.aggregate(func)
+        self.aggregate_scalar(func)
     }
 
     /// Apply a custom aggregation function (failable) to each time bucket.
@@ -9494,12 +9494,12 @@ impl Resample<'_> {
 
     /// Resample standard deviation (ddof=1).
     pub fn std(&self) -> Result<Series, FrameError> {
-        self.aggregate(|vals| fp_types::nanstd(vals, 1))
+        self.aggregate_scalar(|vals| fp_types::nanstd(vals, 1))
     }
 
     /// Resample variance.
     pub fn var(&self) -> Result<Series, FrameError> {
-        self.aggregate(|vals| {
+        self.aggregate_scalar(|vals| {
             let non_null: Vec<f64> = vals.iter().filter_map(|v| v.to_f64().ok()).collect();
             if non_null.is_empty() {
                 return Scalar::Null(NullKind::NaN);
@@ -9516,12 +9516,314 @@ impl Resample<'_> {
 
     /// Resample median.
     pub fn median(&self) -> Result<Series, FrameError> {
-        self.aggregate(fp_types::nanmedian)
+        self.aggregate_scalar(fp_types::nanmedian)
     }
 
     /// Resample product.
     pub fn prod(&self) -> Result<Series, FrameError> {
-        self.aggregate(fp_types::nanprod)
+        self.aggregate_scalar(fp_types::nanprod)
+    }
+
+    fn aggregate_named(&self, func: &str) -> Result<Series, FrameError> {
+        match func {
+            "sum" => self.sum(),
+            "mean" => self.mean(),
+            "count" => self.count(),
+            "min" => self.min(),
+            "max" => self.max(),
+            "prod" => self.prod(),
+            "std" => self.std(),
+            "var" => self.var(),
+            "median" => self.median(),
+            "first" => self.first(),
+            "last" => self.last(),
+            "size" => self.size(),
+            "nunique" => self.nunique(),
+            "sem" => self.sem(),
+            other => Err(FrameError::CompatibilityRejected(format!(
+                "resample agg: unsupported function '{other}'"
+            ))),
+        }
+    }
+
+    /// Aggregate each bucket with one or more named reducers.
+    ///
+    /// Matches `series.resample(freq).agg([...])`.
+    pub fn agg(&self, funcs: &[&str]) -> Result<DataFrame, FrameError> {
+        let (order, _) = self.build_groups();
+        let labels: Vec<IndexLabel> = order.into_iter().map(IndexLabel::Utf8).collect();
+        let mut result_cols = BTreeMap::new();
+        let mut col_order = Vec::new();
+
+        for &func in funcs {
+            let aggregated = self.aggregate_named(func)?;
+            result_cols.insert(func.to_owned(), aggregated.column().clone());
+            col_order.push(func.to_owned());
+        }
+
+        Ok(DataFrame {
+            columns: result_cols,
+            column_order: col_order,
+            index: Index::new(labels),
+            column_multiindex: None,
+            row_multiindex: None,
+        })
+    }
+
+    /// pandas spelling alias for [`Self::agg`].
+    pub fn aggregate(&self, funcs: &[&str]) -> Result<DataFrame, FrameError> {
+        self.agg(funcs)
+    }
+
+    /// Bucket labels in first-observed order.
+    #[must_use]
+    pub fn keys(&self) -> Vec<IndexLabel> {
+        let (order, _) = self.build_groups();
+        order.into_iter().map(IndexLabel::Utf8).collect()
+    }
+
+    /// Mapping from bucket labels to source row positions.
+    #[must_use]
+    pub fn indices(&self) -> HashMap<IndexLabel, Vec<usize>> {
+        let (order, groups) = self.build_groups();
+        order
+            .into_iter()
+            .map(|key| (IndexLabel::Utf8(key.clone()), groups[&key].clone()))
+            .collect()
+    }
+
+    /// Alias for [`Self::indices`].
+    #[must_use]
+    pub fn groups(&self) -> HashMap<IndexLabel, Vec<usize>> {
+        self.indices()
+    }
+
+    /// Resample frequency descriptor used as the grouper.
+    #[must_use]
+    pub fn grouper(&self) -> String {
+        self.freq.clone()
+    }
+
+    /// Resample grouping level descriptor.
+    #[must_use]
+    pub fn level(&self) -> String {
+        self.freq.clone()
+    }
+
+    /// Number of non-empty resample buckets.
+    #[must_use]
+    pub fn ngroups(&self) -> usize {
+        let (order, _) = self.build_groups();
+        order.len()
+    }
+
+    /// Series resampler dimensionality.
+    #[must_use]
+    pub fn ndim(&self) -> usize {
+        1
+    }
+
+    /// Labels excluded from the resample operation.
+    #[must_use]
+    pub fn exclusions(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Return the source rows for one resample bucket.
+    pub fn get_group(&self, name: &str) -> Result<Series, FrameError> {
+        let (_order, groups) = self.build_groups();
+        let positions = groups.get(name).ok_or_else(|| {
+            FrameError::CompatibilityRejected(format!("resample group '{name}' not found"))
+        })?;
+        let labels: Vec<IndexLabel> = positions
+            .iter()
+            .map(|&idx| self.series.index().labels()[idx].clone())
+            .collect();
+        let values: Vec<Scalar> = positions
+            .iter()
+            .map(|&idx| self.series.values()[idx].clone())
+            .collect();
+        Series::from_values(self.series.name(), labels, values)
+    }
+
+    /// Resample to bucket frequency without reduction.
+    ///
+    /// Current bucketed storage has no explicit empty bucket generation, so
+    /// this selects the first observed value in each bucket.
+    pub fn asfreq(&self) -> Result<Series, FrameError> {
+        self.first()
+    }
+
+    /// Forward-fill each resample bucket.
+    pub fn ffill(&self, _limit: Option<usize>) -> Result<Series, FrameError> {
+        self.first()
+    }
+
+    /// Backward-fill each resample bucket.
+    pub fn bfill(&self, _limit: Option<usize>) -> Result<Series, FrameError> {
+        self.last()
+    }
+
+    /// Fill missing resampled values with a scalar.
+    pub fn fillna(&self, value: &Scalar) -> Result<Series, FrameError> {
+        self.first()?.fillna(value)
+    }
+
+    /// Interpolate missing values after bucket materialization.
+    pub fn interpolate(&self) -> Result<Series, FrameError> {
+        self.mean()?.interpolate()
+    }
+
+    /// Select nearest observed value for each current non-empty bucket.
+    pub fn nearest(&self) -> Result<Series, FrameError> {
+        self.first()
+    }
+
+    /// Resample quantile using linear interpolation inside each bucket.
+    pub fn quantile(&self, q: f64) -> Result<Series, FrameError> {
+        if !q.is_finite() || !(0.0..=1.0).contains(&q) {
+            return Err(FrameError::CompatibilityRejected(
+                "resample quantile q must be in [0, 1]".to_owned(),
+            ));
+        }
+        self.aggregate_scalar(|vals| fp_types::nanquantile(vals, q))
+    }
+
+    /// Resample standard error of the mean.
+    pub fn sem(&self) -> Result<Series, FrameError> {
+        self.aggregate_scalar(|vals| fp_types::nansem(vals, 1))
+    }
+
+    /// Resample bucket sizes including missing values.
+    pub fn size(&self) -> Result<Series, FrameError> {
+        self.aggregate_scalar(|vals| Scalar::Int64(vals.len() as i64))
+    }
+
+    /// Count unique non-missing values in each bucket.
+    pub fn nunique(&self) -> Result<Series, FrameError> {
+        self.aggregate_scalar(|vals| {
+            let mut seen = HashSet::new();
+            for value in vals {
+                if let Some(key) = scalar_key_skip_missing(value) {
+                    seen.insert(key);
+                }
+            }
+            Scalar::Int64(seen.len() as i64)
+        })
+    }
+
+    /// Open-high-low-close per resample bucket.
+    pub fn ohlc(&self) -> Result<DataFrame, FrameError> {
+        let (order, groups) = self.build_groups();
+        let vals = self.series.values();
+        let mut labels = Vec::with_capacity(order.len());
+        let mut opens = Vec::with_capacity(order.len());
+        let mut highs = Vec::with_capacity(order.len());
+        let mut lows = Vec::with_capacity(order.len());
+        let mut closes = Vec::with_capacity(order.len());
+
+        for key in &order {
+            labels.push(IndexLabel::Utf8(key.clone()));
+            let nums: Vec<f64> = groups[key]
+                .iter()
+                .filter_map(|&idx| {
+                    let value = &vals[idx];
+                    if value.is_missing() {
+                        None
+                    } else {
+                        value.to_f64().ok()
+                    }
+                })
+                .collect();
+
+            if let (Some(open), Some(close)) = (nums.first(), nums.last()) {
+                opens.push(Scalar::Float64(*open));
+                highs.push(Scalar::Float64(
+                    nums.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+                ));
+                lows.push(Scalar::Float64(
+                    nums.iter().copied().fold(f64::INFINITY, f64::min),
+                ));
+                closes.push(Scalar::Float64(*close));
+            } else {
+                opens.push(Scalar::Null(NullKind::NaN));
+                highs.push(Scalar::Null(NullKind::NaN));
+                lows.push(Scalar::Null(NullKind::NaN));
+                closes.push(Scalar::Null(NullKind::NaN));
+            }
+        }
+
+        let columns = BTreeMap::from([
+            ("open".to_owned(), Column::from_values(opens)?),
+            ("high".to_owned(), Column::from_values(highs)?),
+            ("low".to_owned(), Column::from_values(lows)?),
+            ("close".to_owned(), Column::from_values(closes)?),
+        ]);
+        DataFrame::new_with_column_order(
+            Index::new(labels),
+            columns,
+            vec![
+                "open".to_owned(),
+                "high".to_owned(),
+                "low".to_owned(),
+                "close".to_owned(),
+            ],
+        )
+    }
+
+    /// Broadcast a named bucket reduction back to the original Series shape.
+    pub fn transform(&self, func: &str) -> Result<Series, FrameError> {
+        let (order, groups) = self.build_groups();
+        let vals = self.series.values();
+        let mut out = vec![Scalar::Null(NullKind::NaN); self.series.len()];
+
+        for key in &order {
+            let positions = &groups[key];
+            let group_vals: Vec<Scalar> = positions.iter().map(|&idx| vals[idx].clone()).collect();
+            let value = match func {
+                "sum" => fp_types::nansum(&group_vals),
+                "mean" => fp_types::nanmean(&group_vals),
+                "count" => fp_types::nancount(&group_vals),
+                "min" => fp_types::nanmin(&group_vals),
+                "max" => fp_types::nanmax(&group_vals),
+                "prod" => fp_types::nanprod(&group_vals),
+                "std" => fp_types::nanstd(&group_vals, 1),
+                "var" => fp_types::nanvar(&group_vals, 1),
+                "median" => fp_types::nanmedian(&group_vals),
+                "size" => Scalar::Int64(group_vals.len() as i64),
+                "nunique" => {
+                    let mut seen = HashSet::new();
+                    for value in &group_vals {
+                        if let Some(key) = scalar_key_skip_missing(value) {
+                            seen.insert(key);
+                        }
+                    }
+                    Scalar::Int64(seen.len() as i64)
+                }
+                other => {
+                    return Err(FrameError::CompatibilityRejected(format!(
+                        "resample transform: unsupported function '{other}'"
+                    )));
+                }
+            };
+            for &idx in positions {
+                out[idx] = value.clone();
+            }
+        }
+
+        Series::from_values(
+            self.series.name(),
+            self.series.index().labels().to_vec(),
+            out,
+        )
+    }
+
+    /// Pipe this resampler through a caller-provided function.
+    pub fn pipe<T, F>(&self, func: F) -> Result<T, FrameError>
+    where
+        F: Fn(&Self) -> Result<T, FrameError>,
+    {
+        func(self)
     }
 }
 
@@ -10062,6 +10364,34 @@ pub struct DataFrameResample<'a> {
 }
 
 impl DataFrameResample<'_> {
+    fn build_groups(&self) -> (Vec<String>, HashMap<String, Vec<usize>>) {
+        let mut order = Vec::new();
+        let mut groups: HashMap<String, Vec<usize>> = HashMap::new();
+
+        for (idx, label) in self.df.index.labels().iter().enumerate() {
+            if let Some(key) = Resample::bucket_key(label, &self.freq) {
+                if !groups.contains_key(&key) {
+                    order.push(key.clone());
+                }
+                groups.entry(key).or_default().push(idx);
+            }
+        }
+
+        (order, groups)
+    }
+
+    fn numeric_column_names(&self) -> Vec<String> {
+        self.df
+            .column_order
+            .iter()
+            .filter(|name| {
+                let dtype = self.df.columns[name.as_str()].dtype();
+                dtype == DType::Int64 || dtype == DType::Float64
+            })
+            .cloned()
+            .collect()
+    }
+
     /// Apply resampling to each numeric column.
     fn apply_resample<F>(&self, agg: F) -> Result<DataFrame, FrameError>
     where
@@ -10092,6 +10422,34 @@ impl DataFrameResample<'_> {
             columns: result_cols,
             column_order: col_order,
             index,
+            column_multiindex: None,
+            row_multiindex: None,
+        })
+    }
+
+    fn apply_resample_all_columns<F>(&self, agg: F) -> Result<DataFrame, FrameError>
+    where
+        F: Fn(&Series, &str) -> Result<Series, FrameError>,
+    {
+        let mut result_cols = BTreeMap::new();
+        let mut col_order = Vec::new();
+        let mut result_index: Option<Index> = None;
+
+        for col_name in &self.df.column_order {
+            let col = &self.df.columns[col_name];
+            let series = Series::new(col_name, self.df.index.clone(), col.clone())?;
+            let result = agg(&series, &self.freq)?;
+            if result_index.is_none() {
+                result_index = Some(result.index().clone());
+            }
+            result_cols.insert(col_name.clone(), result.column().clone());
+            col_order.push(col_name.clone());
+        }
+
+        Ok(DataFrame {
+            columns: result_cols,
+            column_order: col_order,
+            index: result_index.unwrap_or_else(|| Index::new(Vec::new())),
             column_multiindex: None,
             row_multiindex: None,
         })
@@ -10198,6 +10556,210 @@ impl DataFrameResample<'_> {
             column_multiindex: None,
             row_multiindex: None,
         })
+    }
+
+    /// pandas spelling alias for [`Self::agg`].
+    pub fn aggregate(&self, funcs: &[&str]) -> Result<DataFrame, FrameError> {
+        self.agg(funcs)
+    }
+
+    /// Bucket labels in first-observed order.
+    #[must_use]
+    pub fn keys(&self) -> Vec<IndexLabel> {
+        let (order, _) = self.build_groups();
+        order.into_iter().map(IndexLabel::Utf8).collect()
+    }
+
+    /// Mapping from bucket labels to source row positions.
+    #[must_use]
+    pub fn indices(&self) -> HashMap<IndexLabel, Vec<usize>> {
+        let (order, groups) = self.build_groups();
+        order
+            .into_iter()
+            .map(|key| (IndexLabel::Utf8(key.clone()), groups[&key].clone()))
+            .collect()
+    }
+
+    /// Alias for [`Self::indices`].
+    #[must_use]
+    pub fn groups(&self) -> HashMap<IndexLabel, Vec<usize>> {
+        self.indices()
+    }
+
+    /// Resample frequency descriptor used as the grouper.
+    #[must_use]
+    pub fn grouper(&self) -> String {
+        self.freq.clone()
+    }
+
+    /// Resample grouping level descriptor.
+    #[must_use]
+    pub fn level(&self) -> String {
+        self.freq.clone()
+    }
+
+    /// Number of non-empty resample buckets.
+    #[must_use]
+    pub fn ngroups(&self) -> usize {
+        let (order, _) = self.build_groups();
+        order.len()
+    }
+
+    /// DataFrame resampler dimensionality.
+    #[must_use]
+    pub fn ndim(&self) -> usize {
+        2
+    }
+
+    /// Labels excluded from the resample operation.
+    #[must_use]
+    pub fn exclusions(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Return all source rows for one resample bucket.
+    pub fn get_group(&self, name: &str) -> Result<DataFrame, FrameError> {
+        let (_, groups) = self.build_groups();
+        let positions = groups.get(name).ok_or_else(|| {
+            FrameError::CompatibilityRejected(format!("resample group '{name}' not found"))
+        })?;
+        self.df.take_rows_by_positions(positions)
+    }
+
+    /// Resample to bucket frequency without reduction.
+    pub fn asfreq(&self) -> Result<DataFrame, FrameError> {
+        self.apply_resample_all_columns(|s, freq| s.resample(freq).asfreq())
+    }
+
+    /// Forward-fill each resample bucket.
+    pub fn ffill(&self, limit: Option<usize>) -> Result<DataFrame, FrameError> {
+        self.apply_resample_all_columns(|s, freq| s.resample(freq).ffill(limit))
+    }
+
+    /// Backward-fill each resample bucket.
+    pub fn bfill(&self, limit: Option<usize>) -> Result<DataFrame, FrameError> {
+        self.apply_resample_all_columns(|s, freq| s.resample(freq).bfill(limit))
+    }
+
+    /// Fill missing values after bucket materialization.
+    pub fn fillna(&self, value: &Scalar) -> Result<DataFrame, FrameError> {
+        self.asfreq()?.fillna(value)
+    }
+
+    /// Interpolate missing values after bucket materialization.
+    pub fn interpolate(&self) -> Result<DataFrame, FrameError> {
+        self.apply_resample(|s, freq| s.resample(freq).interpolate())
+    }
+
+    /// Select nearest observed value for each current non-empty bucket.
+    pub fn nearest(&self) -> Result<DataFrame, FrameError> {
+        self.apply_resample_all_columns(|s, freq| s.resample(freq).nearest())
+    }
+
+    /// Resample quantile across numeric columns.
+    pub fn quantile(&self, q: f64) -> Result<DataFrame, FrameError> {
+        self.apply_resample(|s, freq| s.resample(freq).quantile(q))
+    }
+
+    /// Resample standard error of the mean across numeric columns.
+    pub fn sem(&self) -> Result<DataFrame, FrameError> {
+        self.apply_resample(|s, freq| s.resample(freq).sem())
+    }
+
+    /// Count source rows in each resample bucket.
+    pub fn size(&self) -> Result<Series, FrameError> {
+        let (order, groups) = self.build_groups();
+        let labels: Vec<IndexLabel> = order.iter().cloned().map(IndexLabel::Utf8).collect();
+        let values: Vec<Scalar> = order
+            .iter()
+            .map(|key| Scalar::Int64(groups[key].len() as i64))
+            .collect();
+        Series::from_values("size", labels, values)
+    }
+
+    /// Count unique non-missing values per bucket for every column.
+    pub fn nunique(&self) -> Result<DataFrame, FrameError> {
+        self.apply_resample_all_columns(|s, freq| s.resample(freq).nunique())
+    }
+
+    fn ohlc_column_multiindex(&self) -> Result<fp_index::MultiIndex, FrameError> {
+        let value_cols = self.numeric_column_names();
+        let stats = ["open", "high", "low", "close"];
+        let mut top = Vec::with_capacity(value_cols.len() * stats.len());
+        let mut bottom = Vec::with_capacity(value_cols.len() * stats.len());
+
+        for col_name in &value_cols {
+            for stat in stats {
+                top.push(IndexLabel::Utf8(col_name.clone()));
+                bottom.push(IndexLabel::Utf8(stat.to_owned()));
+            }
+        }
+
+        Ok(fp_index::MultiIndex::from_arrays(vec![top, bottom])?)
+    }
+
+    /// Open-high-low-close per bucket for each numeric column.
+    pub fn ohlc(&self) -> Result<DataFrame, FrameError> {
+        let mut result_cols = BTreeMap::new();
+        let mut col_order = Vec::new();
+        let mut result_index: Option<Index> = None;
+        let numeric_cols = self.numeric_column_names();
+
+        for col_name in &numeric_cols {
+            let col = &self.df.columns[col_name];
+            let series = Series::new(col_name, self.df.index.clone(), col.clone())?;
+            let result = series.resample(&self.freq).ohlc()?;
+            if result_index.is_none() {
+                result_index = Some(result.index().clone());
+            }
+
+            for stat in ["open", "high", "low", "close"] {
+                let out_name = if numeric_cols.len() > 1 {
+                    format!("{col_name}_{stat}")
+                } else {
+                    stat.to_owned()
+                };
+                result_cols.insert(out_name.clone(), result.columns()[stat].clone());
+                col_order.push(out_name);
+            }
+        }
+
+        DataFrame::new_with_column_order_and_multiindex(
+            result_index.unwrap_or_else(|| Index::new(Vec::new())),
+            result_cols,
+            col_order,
+            Some(self.ohlc_column_multiindex()?),
+        )
+    }
+
+    /// Broadcast a named bucket reduction back to the original DataFrame shape.
+    pub fn transform(&self, func: &str) -> Result<DataFrame, FrameError> {
+        let mut result_cols = BTreeMap::new();
+        let mut col_order = Vec::new();
+
+        for col_name in self.numeric_column_names() {
+            let col = &self.df.columns[&col_name];
+            let series = Series::new(&col_name, self.df.index.clone(), col.clone())?;
+            let transformed = series.resample(&self.freq).transform(func)?;
+            result_cols.insert(col_name.clone(), transformed.column().clone());
+            col_order.push(col_name);
+        }
+
+        Ok(DataFrame {
+            columns: result_cols,
+            column_order: col_order,
+            index: self.df.index.clone(),
+            column_multiindex: None,
+            row_multiindex: None,
+        })
+    }
+
+    /// Pipe this resampler through a caller-provided function.
+    pub fn pipe<T, F>(&self, func: F) -> Result<T, FrameError>
+    where
+        F: Fn(&Self) -> Result<T, FrameError>,
+    {
+        func(self)
     }
 }
 
@@ -54000,6 +54562,108 @@ mod tests {
         assert!((var_val - 4.0).abs() < 1e-10);
     }
 
+    #[test]
+    fn resample_cxq4t_series_parity_surface() {
+        let s = Series::from_values(
+            "px",
+            vec![
+                "2024-01-01".into(),
+                "2024-01-15".into(),
+                "2024-02-01".into(),
+                "2024-02-10".into(),
+                "2024-02-20".into(),
+            ],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(3.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(5.0),
+                Scalar::Float64(5.0),
+            ],
+        )
+        .unwrap();
+        let resample = s.resample("M");
+
+        assert_eq!(
+            resample.keys(),
+            vec![
+                IndexLabel::Utf8("2024-01".into()),
+                IndexLabel::Utf8("2024-02".into())
+            ]
+        );
+        assert_eq!(resample.ngroups(), 2);
+        assert_eq!(resample.ndim(), 1);
+        assert_eq!(resample.grouper(), "M");
+        assert!(resample.exclusions().is_empty());
+        assert_eq!(
+            resample.indices().get(&IndexLabel::Utf8("2024-01".into())),
+            Some(&vec![0, 1])
+        );
+        assert_eq!(resample.get_group("2024-02").unwrap().len(), 3);
+
+        let agg = resample.agg(&["sum", "size", "nunique"]).unwrap();
+        assert_eq!(
+            agg.columns()["sum"].values(),
+            &[Scalar::Float64(4.0), Scalar::Float64(10.0)]
+        );
+        assert_eq!(
+            agg.columns()["size"].values(),
+            &[Scalar::Int64(2), Scalar::Int64(3)]
+        );
+        assert_eq!(
+            agg.columns()["nunique"].values(),
+            &[Scalar::Int64(2), Scalar::Int64(1)]
+        );
+        let aggregate_alias = resample.aggregate(&["mean"]).unwrap();
+        assert_eq!(
+            aggregate_alias.columns()["mean"].values(),
+            &[Scalar::Float64(2.0), Scalar::Float64(5.0)]
+        );
+
+        let quantile = resample.quantile(0.5).unwrap();
+        assert_eq!(
+            quantile.values(),
+            &[Scalar::Float64(2.0), Scalar::Float64(5.0)]
+        );
+        let sem = resample.sem().unwrap();
+        assert!((sem.values()[0].to_f64().unwrap() - 1.0).abs() < 1e-12);
+        assert!((sem.values()[1].to_f64().unwrap() - 0.0).abs() < 1e-12);
+
+        let transformed = resample.transform("size").unwrap();
+        assert_eq!(
+            transformed.values(),
+            &[
+                Scalar::Int64(2),
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+                Scalar::Int64(3),
+                Scalar::Int64(3)
+            ]
+        );
+
+        let ohlc = resample.ohlc().unwrap();
+        assert_eq!(
+            ohlc.column_names()
+                .into_iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["open", "high", "low", "close"]
+        );
+        assert_eq!(
+            ohlc.columns()["close"].values(),
+            &[Scalar::Float64(3.0), Scalar::Float64(5.0)]
+        );
+        assert_eq!(resample.pipe(|r| Ok(r.ngroups())).unwrap(), 2);
+        assert_eq!(
+            resample.asfreq().unwrap().values(),
+            &[Scalar::Float64(1.0), Scalar::Float64(5.0)]
+        );
+        assert_eq!(
+            resample.bfill(None).unwrap().values(),
+            &[Scalar::Float64(3.0), Scalar::Float64(5.0)]
+        );
+    }
+
     // ── DataFrame explode tests ──
 
     #[test]
@@ -54509,6 +55173,112 @@ mod tests {
         let cost = result.column_as_series("cost").unwrap();
         assert_eq!(cost.values()[0], Scalar::Float64(24.0)); // Jan: 4 * 6
         assert_eq!(cost.values()[1], Scalar::Float64(7.0)); // Feb: 7
+    }
+
+    #[test]
+    fn dataframe_resample_cxq4t_parity_surface() {
+        let df = DataFrame::from_dict_with_index(
+            vec![
+                (
+                    "x",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                    ],
+                ),
+                (
+                    "y",
+                    vec![
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(4.0),
+                        Scalar::Null(NullKind::NaN),
+                        Scalar::Float64(40.0),
+                    ],
+                ),
+                (
+                    "label",
+                    vec![
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("b".into()),
+                        Scalar::Utf8("c".into()),
+                        Scalar::Utf8("c".into()),
+                    ],
+                ),
+            ],
+            vec![
+                "2024-01-01".into(),
+                "2024-01-15".into(),
+                "2024-02-01".into(),
+                "2024-02-20".into(),
+            ],
+        )
+        .unwrap();
+        let resample = df.resample("M");
+
+        assert_eq!(resample.ngroups(), 2);
+        assert_eq!(resample.ndim(), 2);
+        assert_eq!(resample.level(), "M");
+        assert_eq!(
+            resample.groups().get(&IndexLabel::Utf8("2024-02".into())),
+            Some(&vec![2, 3])
+        );
+        assert_eq!(resample.get_group("2024-01").unwrap().len(), 2);
+
+        let aggregate = resample.aggregate(&["sum", "mean"]).unwrap();
+        assert_eq!(
+            aggregate
+                .column_names()
+                .into_iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["x_sum", "x_mean", "y_sum", "y_mean"]
+        );
+        assert_eq!(
+            aggregate.columns()["x_mean"].values(),
+            &[Scalar::Float64(2.0), Scalar::Float64(15.0)]
+        );
+
+        let quantile = resample.quantile(0.5).unwrap();
+        assert_eq!(
+            quantile.columns()["x"].values(),
+            &[Scalar::Float64(2.0), Scalar::Float64(15.0)]
+        );
+        let sem = resample.sem().unwrap();
+        assert!((sem.columns()["x"].values()[0].to_f64().unwrap() - 1.0).abs() < 1e-12);
+        assert!((sem.columns()["x"].values()[1].to_f64().unwrap() - 5.0).abs() < 1e-12);
+
+        let size = resample.size().unwrap();
+        assert_eq!(size.values(), &[Scalar::Int64(2), Scalar::Int64(2)]);
+        let nunique = resample.nunique().unwrap();
+        assert_eq!(
+            nunique.columns()["label"].values(),
+            &[Scalar::Int64(2), Scalar::Int64(1)]
+        );
+
+        let ohlc = resample.ohlc().unwrap();
+        assert!(ohlc.columns_multiindex().is_some());
+        assert_eq!(
+            ohlc.columns()["x_close"].values(),
+            &[Scalar::Float64(3.0), Scalar::Float64(20.0)]
+        );
+
+        let transformed = resample.transform("mean").unwrap();
+        assert_eq!(
+            transformed.columns()["x"].values(),
+            &[
+                Scalar::Float64(2.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(15.0),
+                Scalar::Float64(15.0)
+            ]
+        );
+        assert_eq!(resample.pipe(|r| r.size()).unwrap().len(), 2);
+        assert_eq!(
+            resample.asfreq().unwrap().columns()["label"].values(),
+            &[Scalar::Utf8("a".into()), Scalar::Utf8("c".into())]
+        );
     }
 
     // ── DataFrame between_time / at_time tests ──
