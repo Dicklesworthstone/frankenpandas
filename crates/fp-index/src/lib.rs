@@ -3618,6 +3618,14 @@ impl MultiIndex {
         }
     }
 
+    fn missing_label_for_level(&self, level_idx: usize) -> IndexLabel {
+        self.levels[level_idx]
+            .iter()
+            .find(|label| label.is_missing())
+            .cloned()
+            .unwrap_or(IndexLabel::Datetime64(i64::MIN))
+    }
+
     fn from_tuples_with_names(
         tuples: Vec<Vec<IndexLabel>>,
         names: Vec<Option<String>>,
@@ -3848,6 +3856,272 @@ impl MultiIndex {
                 self.len()
             )))
         }
+    }
+
+    /// Return a shallow copy, matching `pd.MultiIndex.copy()`.
+    #[must_use]
+    pub fn copy(&self) -> Self {
+        self.clone()
+    }
+
+    /// Whether any tuple contains a missing level label.
+    #[must_use]
+    pub fn hasnans(&self) -> bool {
+        self.levels
+            .iter()
+            .any(|level| level.iter().any(IndexLabel::is_missing))
+    }
+
+    /// Per-row missing mask. A tuple is missing when any level label is missing.
+    #[must_use]
+    pub fn isna(&self) -> Vec<bool> {
+        (0..self.len())
+            .map(|row| self.levels.iter().any(|level| level[row].is_missing()))
+            .collect()
+    }
+
+    /// Alias for `isna`, matching `pd.MultiIndex.isnull`.
+    #[must_use]
+    pub fn isnull(&self) -> Vec<bool> {
+        self.isna()
+    }
+
+    /// Inverse of `isna`, matching `pd.MultiIndex.notna`.
+    #[must_use]
+    pub fn notna(&self) -> Vec<bool> {
+        self.isna()
+            .into_iter()
+            .map(|is_missing| !is_missing)
+            .collect()
+    }
+
+    /// Alias for `notna`, matching `pd.MultiIndex.notnull`.
+    #[must_use]
+    pub fn notnull(&self) -> Vec<bool> {
+        self.notna()
+    }
+
+    /// Replace missing labels in every level with one scalar label.
+    #[must_use]
+    pub fn fillna(&self, value: &IndexLabel) -> Self {
+        let levels = self
+            .levels
+            .iter()
+            .map(|level| {
+                level
+                    .iter()
+                    .map(|label| {
+                        if label.is_missing() {
+                            value.clone()
+                        } else {
+                            label.clone()
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
+        Self {
+            levels,
+            names: self.names.clone(),
+        }
+    }
+
+    /// Replace missing labels with one replacement per level.
+    pub fn fillna_tuple(&self, values: &[IndexLabel]) -> Result<Self, IndexError> {
+        if values.len() != self.nlevels() {
+            return Err(IndexError::LengthMismatch {
+                expected: self.nlevels(),
+                actual: values.len(),
+                context: "fillna_tuple replacement arity mismatch".to_owned(),
+            });
+        }
+        let levels = self
+            .levels
+            .iter()
+            .enumerate()
+            .map(|(level_idx, level)| {
+                level
+                    .iter()
+                    .map(|label| {
+                        if label.is_missing() {
+                            values[level_idx].clone()
+                        } else {
+                            label.clone()
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
+        Ok(Self {
+            levels,
+            names: self.names.clone(),
+        })
+    }
+
+    /// Replace tuples where `cond` is true with `value`.
+    pub fn putmask(&self, cond: &[bool], value: Vec<IndexLabel>) -> Result<Self, IndexError> {
+        if cond.len() != self.len() {
+            return Err(IndexError::LengthMismatch {
+                expected: self.len(),
+                actual: cond.len(),
+                context: "putmask condition length mismatch".to_owned(),
+            });
+        }
+        if value.len() != self.nlevels() {
+            return Err(IndexError::LengthMismatch {
+                expected: self.nlevels(),
+                actual: value.len(),
+                context: "putmask tuple arity mismatch".to_owned(),
+            });
+        }
+        let tuples = (0..self.len())
+            .map(|row| {
+                if cond[row] {
+                    value.clone()
+                } else {
+                    self.tuple_at(row)
+                }
+            })
+            .collect();
+        Self::from_tuples_with_names(tuples, self.names.clone())
+    }
+
+    /// Keep original tuples where `cond` is true, otherwise use `other`.
+    pub fn r#where(&self, cond: &[bool], other: Vec<IndexLabel>) -> Result<Self, IndexError> {
+        if cond.len() != self.len() {
+            return Err(IndexError::LengthMismatch {
+                expected: self.len(),
+                actual: cond.len(),
+                context: "where condition length mismatch".to_owned(),
+            });
+        }
+        if other.len() != self.nlevels() {
+            return Err(IndexError::LengthMismatch {
+                expected: self.nlevels(),
+                actual: other.len(),
+                context: "where tuple arity mismatch".to_owned(),
+            });
+        }
+        let tuples = (0..self.len())
+            .map(|row| {
+                if cond[row] {
+                    self.tuple_at(row)
+                } else {
+                    other.clone()
+                }
+            })
+            .collect();
+        Self::from_tuples_with_names(tuples, self.names.clone())
+    }
+
+    /// Map each composite tuple through a caller-supplied function.
+    pub fn map<T, F>(&self, mut mapper: F) -> Vec<T>
+    where
+        F: FnMut(&[IndexLabel]) -> T,
+    {
+        (0..self.len())
+            .map(|row| {
+                let tuple = self.tuple_at(row);
+                mapper(&tuple)
+            })
+            .collect()
+    }
+
+    /// Rebuild row labels using replacement level catalogs and current codes.
+    pub fn set_levels(&self, new_levels: Vec<Vec<IndexLabel>>) -> Result<Self, IndexError> {
+        if new_levels.len() != self.nlevels() {
+            return Err(IndexError::LengthMismatch {
+                expected: self.nlevels(),
+                actual: new_levels.len(),
+                context: "set_levels level count mismatch".to_owned(),
+            });
+        }
+        let codes = self.codes();
+        let mut levels = Vec::with_capacity(self.nlevels());
+        for (level_idx, level_codes) in codes.into_iter().enumerate() {
+            let mut level = Vec::with_capacity(self.len());
+            for code in level_codes {
+                if code == -1 {
+                    level.push(self.missing_label_for_level(level_idx));
+                    continue;
+                }
+                if code < -1 {
+                    return Err(IndexError::InvalidArgument(format!(
+                        "negative code {code} at level {level_idx}"
+                    )));
+                }
+                let position = usize::try_from(code).map_err(|_| {
+                    IndexError::InvalidArgument(format!("invalid code {code} at level {level_idx}"))
+                })?;
+                let label = new_levels[level_idx]
+                    .get(position)
+                    .ok_or(IndexError::OutOfBounds {
+                        position,
+                        length: new_levels[level_idx].len(),
+                    })?;
+                level.push(label.clone());
+            }
+            levels.push(level);
+        }
+        Ok(Self {
+            levels,
+            names: self.names.clone(),
+        })
+    }
+
+    /// Rebuild row labels using replacement codes and current level catalogs.
+    pub fn set_codes(&self, codes: Vec<Vec<isize>>) -> Result<Self, IndexError> {
+        if codes.len() != self.nlevels() {
+            return Err(IndexError::LengthMismatch {
+                expected: self.nlevels(),
+                actual: codes.len(),
+                context: "set_codes level count mismatch".to_owned(),
+            });
+        }
+        let catalogs = self.levels();
+        let mut levels = Vec::with_capacity(self.nlevels());
+        for (level_idx, level_codes) in codes.into_iter().enumerate() {
+            if level_codes.len() != self.len() {
+                return Err(IndexError::LengthMismatch {
+                    expected: self.len(),
+                    actual: level_codes.len(),
+                    context: format!("set_codes level {level_idx} length mismatch"),
+                });
+            }
+            let labels = catalogs[level_idx].labels();
+            let mut level = Vec::with_capacity(self.len());
+            for code in level_codes {
+                if code == -1 {
+                    level.push(self.missing_label_for_level(level_idx));
+                    continue;
+                }
+                if code < -1 {
+                    return Err(IndexError::InvalidArgument(format!(
+                        "negative code {code} at level {level_idx}"
+                    )));
+                }
+                let position = usize::try_from(code).map_err(|_| {
+                    IndexError::InvalidArgument(format!("invalid code {code} at level {level_idx}"))
+                })?;
+                let label = labels.get(position).ok_or(IndexError::OutOfBounds {
+                    position,
+                    length: labels.len(),
+                })?;
+                level.push(label.clone());
+            }
+            levels.push(level);
+        }
+        Ok(Self {
+            levels,
+            names: self.names.clone(),
+        })
+    }
+
+    /// Drop unused level labels. This representation stores row labels directly,
+    /// so there is no separate unused catalog to prune.
+    #[must_use]
+    pub fn remove_unused_levels(&self) -> Self {
+        self.clone()
     }
 
     /// Identity check, matching `pd.MultiIndex.is_`.
@@ -7239,6 +7513,164 @@ mod tests {
 
         let multi = mi.repeat(2);
         assert!(multi.item().is_err());
+    }
+
+    #[test]
+    fn multi_index_missing_masks_fillna_putmask_where_and_map() {
+        let mi = MultiIndex::from_tuples(vec![
+            vec!["a".into(), 1_i64.into()],
+            vec![IndexLabel::Datetime64(i64::MIN), 2_i64.into()],
+            vec!["b".into(), IndexLabel::Timedelta64(Timedelta::NAT)],
+            vec!["c".into(), 3_i64.into()],
+        ])
+        .unwrap()
+        .set_names(vec![Some("letter".into()), Some("number".into())]);
+
+        assert!(mi.hasnans());
+        assert_eq!(mi.isna(), vec![false, true, true, false]);
+        assert_eq!(mi.isnull(), mi.isna());
+        assert_eq!(mi.notna(), vec![true, false, false, true]);
+        assert_eq!(mi.notnull(), mi.notna());
+        assert_eq!(mi.copy(), mi);
+        assert_eq!(mi.remove_unused_levels(), mi);
+
+        let scalar_filled = mi.fillna(&IndexLabel::Utf8("missing".into()));
+        assert_eq!(
+            scalar_filled.to_list(),
+            vec![
+                vec![IndexLabel::Utf8("a".into()), IndexLabel::Int64(1)],
+                vec![IndexLabel::Utf8("missing".into()), IndexLabel::Int64(2)],
+                vec![
+                    IndexLabel::Utf8("b".into()),
+                    IndexLabel::Utf8("missing".into())
+                ],
+                vec![IndexLabel::Utf8("c".into()), IndexLabel::Int64(3)],
+            ]
+        );
+
+        let tuple_filled = mi
+            .fillna_tuple(&[IndexLabel::Utf8("z".into()), IndexLabel::Int64(0)])
+            .unwrap();
+        assert_eq!(
+            tuple_filled.to_list(),
+            vec![
+                vec![IndexLabel::Utf8("a".into()), IndexLabel::Int64(1)],
+                vec![IndexLabel::Utf8("z".into()), IndexLabel::Int64(2)],
+                vec![IndexLabel::Utf8("b".into()), IndexLabel::Int64(0)],
+                vec![IndexLabel::Utf8("c".into()), IndexLabel::Int64(3)],
+            ]
+        );
+        assert!(
+            mi.fillna_tuple(&[IndexLabel::Utf8("short".into())])
+                .is_err()
+        );
+
+        let masked = mi
+            .putmask(
+                &[false, true, false, true],
+                vec![IndexLabel::Utf8("x".into()), IndexLabel::Int64(9)],
+            )
+            .unwrap();
+        assert_eq!(
+            masked.to_list(),
+            vec![
+                vec![IndexLabel::Utf8("a".into()), IndexLabel::Int64(1)],
+                vec![IndexLabel::Utf8("x".into()), IndexLabel::Int64(9)],
+                vec![
+                    IndexLabel::Utf8("b".into()),
+                    IndexLabel::Timedelta64(Timedelta::NAT)
+                ],
+                vec![IndexLabel::Utf8("x".into()), IndexLabel::Int64(9)],
+            ]
+        );
+        assert!(
+            mi.putmask(&[true], vec![IndexLabel::Utf8("x".into())])
+                .is_err()
+        );
+
+        let where_result = mi
+            .r#where(
+                &[true, false, true, false],
+                vec![IndexLabel::Utf8("fallback".into()), IndexLabel::Int64(5)],
+            )
+            .unwrap();
+        assert_eq!(
+            where_result.to_list(),
+            vec![
+                vec![IndexLabel::Utf8("a".into()), IndexLabel::Int64(1)],
+                vec![IndexLabel::Utf8("fallback".into()), IndexLabel::Int64(5)],
+                vec![
+                    IndexLabel::Utf8("b".into()),
+                    IndexLabel::Timedelta64(Timedelta::NAT)
+                ],
+                vec![IndexLabel::Utf8("fallback".into()), IndexLabel::Int64(5)],
+            ]
+        );
+
+        let rendered = mi.map(|tuple| {
+            tuple
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("|")
+        });
+        assert_eq!(rendered[0], "a|1");
+        assert_eq!(rendered[3], "c|3");
+    }
+
+    #[test]
+    fn multi_index_set_levels_and_set_codes_rebuild_from_pandas_catalogs() {
+        let mi = MultiIndex::from_tuples(vec![
+            vec!["a".into(), 1_i64.into()],
+            vec!["b".into(), 2_i64.into()],
+            vec!["a".into(), 1_i64.into()],
+        ])
+        .unwrap()
+        .set_names(vec![Some("letter".into()), Some("number".into())]);
+
+        let relabeled = mi
+            .set_levels(vec![
+                vec![IndexLabel::Utf8("x".into()), IndexLabel::Utf8("y".into())],
+                vec![IndexLabel::Int64(10), IndexLabel::Int64(20)],
+            ])
+            .unwrap();
+        assert_eq!(
+            relabeled.to_list(),
+            vec![
+                vec![IndexLabel::Utf8("x".into()), IndexLabel::Int64(10)],
+                vec![IndexLabel::Utf8("y".into()), IndexLabel::Int64(20)],
+                vec![IndexLabel::Utf8("x".into()), IndexLabel::Int64(10)],
+            ]
+        );
+        assert_eq!(relabeled.names(), mi.names());
+        assert!(
+            mi.set_levels(vec![vec![IndexLabel::Utf8("only".into())]])
+                .is_err()
+        );
+        assert!(
+            mi.set_levels(vec![
+                vec![IndexLabel::Utf8("x".into())],
+                vec![IndexLabel::Int64(10), IndexLabel::Int64(20)],
+            ])
+            .is_err()
+        );
+
+        let recoded = mi.set_codes(vec![vec![1, 0, 1], vec![1, -1, 0]]).unwrap();
+        assert_eq!(
+            recoded.to_list(),
+            vec![
+                vec![IndexLabel::Utf8("b".into()), IndexLabel::Int64(2)],
+                vec![
+                    IndexLabel::Utf8("a".into()),
+                    IndexLabel::Datetime64(i64::MIN)
+                ],
+                vec![IndexLabel::Utf8("b".into()), IndexLabel::Int64(1)],
+            ]
+        );
+        assert_eq!(recoded.names(), mi.names());
+        assert!(mi.set_codes(vec![vec![0, 1, 0]]).is_err());
+        assert!(mi.set_codes(vec![vec![0, 1], vec![0, 1, 0]]).is_err());
+        assert!(mi.set_codes(vec![vec![0, 1, 0], vec![0, 99, 0]]).is_err());
     }
 
     #[test]
