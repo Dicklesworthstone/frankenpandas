@@ -72,10 +72,12 @@
 //! (decision policy + conformal guard primitives that snapshot
 //! into the `Decision*` / `ConformalSnapshot` families).
 
-use std::collections::{BTreeMap, HashMap};
-use std::fs::{self, File};
-use std::io::{BufRead, BufReader};
-use std::path::{Path, PathBuf};
+use std::{
+    collections::{BTreeMap, HashMap},
+    fs::{self, File},
+    io::{BufRead, BufReader},
+    path::{Path, PathBuf},
+};
 
 use fp_conformance::{
     CaseStatus, DecodeProofArtifact, DecodeProofStatus, DifferentialReport, DifferentialResult,
@@ -86,8 +88,7 @@ use fp_conformance::{
     verify_packet_sidecar_integrity,
 };
 use fp_runtime::{ConformalGuard, EvidenceLedger, RuntimeMode, RuntimePolicy, decision_to_card};
-use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use thiserror::Error;
 
 const PHASE2C_DIR: &str = "artifacts/phase2c";
@@ -1516,14 +1517,8 @@ pub fn summarize_decision_dashboard(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        ArtifactIssueKind, DashboardView, FsFtuiDataSource, FtuiAppState, FtuiDataSource,
-        build_frankentui_e2e_replay_bundles_baseline_with_stats,
-        build_frankentui_e2e_replay_bundles_optimized_with_stats, default_frankentui_e2e_scenarios,
-        differential_validation_log_entries, is_valid_packet_id,
-        run_differential_validation_by_packet, run_frankentui_e2e_scenario,
-        summarize_decision_dashboard, summarize_differential_validation,
-    };
+    use std::{fs, hint::black_box, path::Path, time::Instant};
+
     use fp_conformance::{
         CaseStatus, ComparisonCategory, DecodeProofArtifact, DecodeProofStatus, DifferentialReport,
         DifferentialResult, DriftLevel, DriftRecord, E2eReport, FixtureOperation,
@@ -1533,11 +1528,16 @@ mod tests {
     use fp_runtime::{EvidenceLedger, RuntimePolicy};
     use proptest::prelude::*;
     use serde_json::json;
-    use std::fs;
-    use std::hint::black_box;
-    use std::path::Path;
-    use std::time::Instant;
     use tempfile::tempdir;
+
+    use super::{
+        ArtifactIssueKind, DashboardView, FsFtuiDataSource, FtuiAppState, FtuiDataSource,
+        build_frankentui_e2e_replay_bundles_baseline_with_stats,
+        build_frankentui_e2e_replay_bundles_optimized_with_stats, default_frankentui_e2e_scenarios,
+        differential_validation_log_entries, is_valid_packet_id,
+        run_differential_validation_by_packet, run_frankentui_e2e_scenario,
+        summarize_decision_dashboard, summarize_differential_validation,
+    };
 
     fn emit_test_log(
         packet_id: &str,

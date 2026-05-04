@@ -12392,9 +12392,7 @@ fn live_oracle_dataframe_melt_basic() {
     };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
-    let result = frame
-        .melt(&["id"], &["a", "b"], None, None)
-        .expect("melt");
+    let result = frame.melt(&["id"], &["a", "b"], None, None).expect("melt");
     super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
 }
 
@@ -14295,7 +14293,9 @@ fn live_oracle_series_sub_aligned() {
     let right = super::build_series(fixture.right.as_ref().expect("right")).expect("right");
     let policy = super::RuntimePolicy::strict();
     let mut ledger = super::EvidenceLedger::new();
-    let result = left.sub_with_policy(&right, &policy, &mut ledger).expect("sub");
+    let result = left
+        .sub_with_policy(&right, &policy, &mut ledger)
+        .expect("sub");
     super::compare_series_expected(&result, &expected).expect("pandas parity");
 }
 
@@ -14357,7 +14357,9 @@ fn live_oracle_series_mul_aligned() {
     let right = super::build_series(fixture.right.as_ref().expect("right")).expect("right");
     let policy = super::RuntimePolicy::strict();
     let mut ledger = super::EvidenceLedger::new();
-    let result = left.mul_with_policy(&right, &policy, &mut ledger).expect("mul");
+    let result = left
+        .mul_with_policy(&right, &policy, &mut ledger)
+        .expect("mul");
     super::compare_series_expected(&result, &expected).expect("pandas parity");
 }
 
@@ -14419,7 +14421,9 @@ fn live_oracle_series_div_aligned() {
     let right = super::build_series(fixture.right.as_ref().expect("right")).expect("right");
     let policy = super::RuntimePolicy::strict();
     let mut ledger = super::EvidenceLedger::new();
-    let result = left.div_with_policy(&right, &policy, &mut ledger).expect("div");
+    let result = left
+        .div_with_policy(&right, &policy, &mut ledger)
+        .expect("div");
     super::compare_series_expected(&result, &expected).expect("pandas parity");
 }
 
@@ -16521,9 +16525,7 @@ fn live_oracle_series_str_index_of_substring() {
 
     let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
     if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
-        eprintln!(
-            "live pandas unavailable; skipping series_str_index_of test: {message}"
-        );
+        eprintln!("live pandas unavailable; skipping series_str_index_of test: {message}");
         return;
     }
     let expected = expected_result.expect("live oracle expected");
@@ -16544,9 +16546,9 @@ fn live_oracle_series_str_index_of_substring() {
         }
         (Err(_), super::ResolvedExpected::ErrorAny | super::ResolvedExpected::ErrorContains(_)) => {
         }
-        (actual_outcome, expected_outcome) => panic!(
-            "outcome mismatch: actual={actual_outcome:?} expected={expected_outcome:?}"
-        ),
+        (actual_outcome, expected_outcome) => {
+            panic!("outcome mismatch: actual={actual_outcome:?} expected={expected_outcome:?}")
+        }
     }
 }
 
@@ -17473,9 +17475,7 @@ fn live_oracle_dataframe_between_time_midday() {
 
     let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
     if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
-        eprintln!(
-            "live pandas unavailable; skipping dataframe_between_time test: {message}"
-        );
+        eprintln!("live pandas unavailable; skipping dataframe_between_time test: {message}");
         return;
     }
     let expected = expected_result.expect("live oracle expected");
@@ -17603,9 +17603,7 @@ fn live_oracle_series_add_misaligned() {
 
     let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
     if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
-        eprintln!(
-            "live pandas unavailable; skipping series_add misaligned test: {message}"
-        );
+        eprintln!("live pandas unavailable; skipping series_add misaligned test: {message}");
         return;
     }
     let expected = expected_result.expect("live oracle expected");
@@ -17694,12 +17692,9 @@ fn live_oracle_dataframe_concat_axis0_outer() {
     let left = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("left");
     let right =
         super::build_dataframe(fixture.frame_right.as_ref().expect("frame_right")).expect("right");
-    let actual = super::concat_dataframes_with_axis_join(
-        &[&left, &right],
-        0,
-        super::ConcatJoin::Outer,
-    )
-    .expect("concat axis=0");
+    let actual =
+        super::concat_dataframes_with_axis_join(&[&left, &right], 0, super::ConcatJoin::Outer)
+            .expect("concat axis=0");
     super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
 }
 
@@ -17766,12 +17761,9 @@ fn live_oracle_dataframe_concat_axis1_inner() {
     let left = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("left");
     let right =
         super::build_dataframe(fixture.frame_right.as_ref().expect("frame_right")).expect("right");
-    let actual = super::concat_dataframes_with_axis_join(
-        &[&left, &right],
-        1,
-        super::ConcatJoin::Inner,
-    )
-    .expect("concat axis=1");
+    let actual =
+        super::concat_dataframes_with_axis_join(&[&left, &right], 1, super::ConcatJoin::Inner)
+            .expect("concat axis=1");
     super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
 }
 
@@ -18029,9 +18021,7 @@ fn live_oracle_dataframe_to_json_records_basic() {
 
     let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
     if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
-        eprintln!(
-            "live pandas unavailable; skipping dataframe_to_json_records test: {message}"
-        );
+        eprintln!("live pandas unavailable; skipping dataframe_to_json_records test: {message}");
         return;
     }
     let expected = expected_result.expect("live oracle expected");
@@ -18350,9 +18340,7 @@ fn live_oracle_series_str_count_matches_pattern() {
 
     let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
     if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
-        eprintln!(
-            "live pandas unavailable; skipping series_str_count_matches test: {message}"
-        );
+        eprintln!("live pandas unavailable; skipping series_str_count_matches test: {message}");
         return;
     }
     let expected = expected_result.expect("live oracle expected");
@@ -18404,9 +18392,7 @@ fn live_oracle_series_str_contains_any_two_patterns() {
 
     let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
     if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
-        eprintln!(
-            "live pandas unavailable; skipping series_str_contains_any test: {message}"
-        );
+        eprintln!("live pandas unavailable; skipping series_str_contains_any test: {message}");
         return;
     }
     let expected = expected_result.expect("live oracle expected");
@@ -18489,7 +18475,13 @@ fn live_oracle_series_map_int_to_string() {
         .as_ref()
         .expect("replace_to_find")
         .iter()
-        .zip(fixture.replace_to_value.as_ref().expect("replace_to_value").iter())
+        .zip(
+            fixture
+                .replace_to_value
+                .as_ref()
+                .expect("replace_to_value")
+                .iter(),
+        )
         .map(|(f, v)| (f.clone(), v.clone()))
         .collect();
     let actual = series.map(&mapping).expect("series map");
@@ -18718,9 +18710,7 @@ fn live_oracle_series_filter_all_true_oracle() {
 
     let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
     if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
-        eprintln!(
-            "live pandas unavailable; skipping series_filter all_true test: {message}"
-        );
+        eprintln!("live pandas unavailable; skipping series_filter all_true test: {message}");
         return;
     }
     let expected = expected_result.expect("live oracle expected");
@@ -18943,9 +18933,7 @@ fn live_oracle_dataframe_apply_prod_axis1() {
 
     let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
     if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
-        eprintln!(
-            "live pandas unavailable; skipping dataframe_apply_prod_axis1 test: {message}"
-        );
+        eprintln!("live pandas unavailable; skipping dataframe_apply_prod_axis1 test: {message}");
         return;
     }
     let expected = expected_result.expect("live oracle expected");
@@ -19017,9 +19005,7 @@ fn live_oracle_dataframe_crosstab_normalize_all() {
 
     let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
     if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
-        eprintln!(
-            "live pandas unavailable; skipping dataframe_crosstab_normalize test: {message}"
-        );
+        eprintln!("live pandas unavailable; skipping dataframe_crosstab_normalize test: {message}");
         return;
     }
     let expected = expected_result.expect("live oracle expected");
@@ -19580,9 +19566,7 @@ fn live_oracle_series_str_startswith_any_prefixes() {
 
     let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
     if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
-        eprintln!(
-            "live pandas unavailable; skipping series_str_startswith_any test: {message}"
-        );
+        eprintln!("live pandas unavailable; skipping series_str_startswith_any test: {message}");
         return;
     }
     let expected = expected_result.expect("live oracle expected");
@@ -19641,9 +19625,7 @@ fn live_oracle_series_str_endswith_any_extensions() {
 
     let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
     if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
-        eprintln!(
-            "live pandas unavailable; skipping series_str_endswith_any test: {message}"
-        );
+        eprintln!("live pandas unavailable; skipping series_str_endswith_any test: {message}");
         return;
     }
     let expected = expected_result.expect("live oracle expected");
@@ -19663,10 +19645,7 @@ fn live_oracle_series_str_endswith_any_extensions() {
         .iter()
         .map(String::as_str)
         .collect();
-    let actual = series
-        .str()
-        .endswith_any(&pats)
-        .expect("str endswith_any");
+    let actual = series.str().endswith_any(&pats).expect("str endswith_any");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
 
@@ -19852,9 +19831,7 @@ fn live_oracle_series_str_split_count_basic() {
 
     let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
     if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
-        eprintln!(
-            "live pandas unavailable; skipping series_str_split_count test: {message}"
-        );
+        eprintln!("live pandas unavailable; skipping series_str_split_count test: {message}");
         return;
     }
     let expected = expected_result.expect("live oracle expected");
@@ -19905,9 +19882,7 @@ fn live_oracle_series_str_rsplit_get_index_0() {
 
     let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
     if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
-        eprintln!(
-            "live pandas unavailable; skipping series_str_rsplit_get test: {message}"
-        );
+        eprintln!("live pandas unavailable; skipping series_str_rsplit_get test: {message}");
         return;
     }
     let expected = expected_result.expect("live oracle expected");
@@ -19960,9 +19935,7 @@ fn live_oracle_series_str_rindex_of_substring() {
 
     let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
     if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
-        eprintln!(
-            "live pandas unavailable; skipping series_str_rindex_of test: {message}"
-        );
+        eprintln!("live pandas unavailable; skipping series_str_rindex_of test: {message}");
         return;
     }
     let expected = expected_result.expect("live oracle expected");
@@ -20012,9 +19985,7 @@ fn live_oracle_series_str_split_regex_get_first() {
 
     let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
     if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
-        eprintln!(
-            "live pandas unavailable; skipping series_str_split_regex_get test: {message}"
-        );
+        eprintln!("live pandas unavailable; skipping series_str_split_regex_get test: {message}");
         return;
     }
     let expected = expected_result.expect("live oracle expected");
@@ -20059,9 +20030,7 @@ fn live_oracle_index_has_duplicates_with_dups() {
 
     let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
     if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
-        eprintln!(
-            "live pandas unavailable; skipping index_has_duplicates test: {message}"
-        );
+        eprintln!("live pandas unavailable; skipping index_has_duplicates test: {message}");
         return;
     }
     let expected = expected_result.expect("live oracle expected");
@@ -20280,9 +20249,7 @@ fn live_oracle_series_sub_misaligned() {
 
     let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
     if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
-        eprintln!(
-            "live pandas unavailable; skipping series_sub misaligned test: {message}"
-        );
+        eprintln!("live pandas unavailable; skipping series_sub misaligned test: {message}");
         return;
     }
     let expected = expected_result.expect("live oracle expected");
@@ -20412,9 +20379,7 @@ fn live_oracle_series_mul_misaligned() {
 
     let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
     if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
-        eprintln!(
-            "live pandas unavailable; skipping series_mul misaligned test: {message}"
-        );
+        eprintln!("live pandas unavailable; skipping series_mul misaligned test: {message}");
         return;
     }
     let expected = expected_result.expect("live oracle expected");
@@ -20478,9 +20443,7 @@ fn live_oracle_series_mul_with_negatives() {
 
     let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
     if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
-        eprintln!(
-            "live pandas unavailable; skipping series_mul with negatives test: {message}"
-        );
+        eprintln!("live pandas unavailable; skipping series_mul with negatives test: {message}");
         return;
     }
     let expected = expected_result.expect("live oracle expected");
@@ -20534,9 +20497,7 @@ fn live_oracle_series_str_removeprefix_basic() {
 
     let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
     if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
-        eprintln!(
-            "live pandas unavailable; skipping series_str_removeprefix test: {message}"
-        );
+        eprintln!("live pandas unavailable; skipping series_str_removeprefix test: {message}");
         return;
     }
     let expected = expected_result.expect("live oracle expected");
@@ -20588,9 +20549,7 @@ fn live_oracle_series_str_removesuffix_basic() {
 
     let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
     if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
-        eprintln!(
-            "live pandas unavailable; skipping series_str_removesuffix test: {message}"
-        );
+        eprintln!("live pandas unavailable; skipping series_str_removesuffix test: {message}");
         return;
     }
     let expected = expected_result.expect("live oracle expected");
@@ -20745,9 +20704,7 @@ fn live_oracle_series_to_arrow_round_trip_int() {
 
     let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
     if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
-        eprintln!(
-            "live pandas unavailable; skipping series_to_arrow_round_trip test: {message}"
-        );
+        eprintln!("live pandas unavailable; skipping series_to_arrow_round_trip test: {message}");
         return;
     }
     let expected = expected_result.expect("live oracle expected");
@@ -21154,7 +21111,11 @@ fn live_oracle_dataframe_reindex_subset() {
     };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
-    let labels = fixture.reindex_labels.as_ref().expect("reindex_labels").clone();
+    let labels = fixture
+        .reindex_labels
+        .as_ref()
+        .expect("reindex_labels")
+        .clone();
     let actual = frame.reindex(labels).expect("reindex");
     super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
 }
@@ -21193,9 +21154,7 @@ fn live_oracle_dataframe_reindex_columns_with_new() {
 
     let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
     if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
-        eprintln!(
-            "live pandas unavailable; skipping dataframe_reindex_columns test: {message}"
-        );
+        eprintln!("live pandas unavailable; skipping dataframe_reindex_columns test: {message}");
         return;
     }
     let expected = expected_result.expect("live oracle expected");
@@ -21208,10 +21167,7 @@ fn live_oracle_dataframe_reindex_columns_with_new() {
     };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
-    let cols = fixture
-        .reindex_columns
-        .as_ref()
-        .expect("reindex_columns");
+    let cols = fixture.reindex_columns.as_ref().expect("reindex_columns");
     let col_refs: Vec<&str> = cols.iter().map(String::as_str).collect();
     let actual = frame.reindex_columns(&col_refs).expect("reindex_columns");
     super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
@@ -21543,7 +21499,9 @@ fn live_oracle_dataframe_duplicated_keep_last() {
 
     let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
     if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
-        eprintln!("live pandas unavailable; skipping dataframe_duplicated keep=last test: {message}");
+        eprintln!(
+            "live pandas unavailable; skipping dataframe_duplicated keep=last test: {message}"
+        );
         return;
     }
     let expected = expected_result.expect("live oracle expected");
@@ -21680,7 +21638,10 @@ fn live_oracle_dataframe_set_index_verify_integrity_unique() {
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
     let actual = frame
         .set_index_with_verify_integrity(
-            fixture.set_index_column.as_deref().expect("set_index_column"),
+            fixture
+                .set_index_column
+                .as_deref()
+                .expect("set_index_column"),
             fixture.set_index_drop.expect("set_index_drop"),
             fixture.set_index_verify_integrity.unwrap_or(false),
         )
@@ -21867,9 +21828,7 @@ fn live_oracle_series_pct_change_periods_3() {
 
     let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
     if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
-        eprintln!(
-            "live pandas unavailable; skipping series_pct_change periods=3: {message}"
-        );
+        eprintln!("live pandas unavailable; skipping series_pct_change periods=3: {message}");
         return;
     }
     let expected = expected_result.expect("live oracle expected");
@@ -21941,9 +21900,7 @@ fn live_oracle_series_clip_with_series_bounds() {
 
     let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
     if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
-        eprintln!(
-            "live pandas unavailable; skipping series_clip series bounds: {message}"
-        );
+        eprintln!("live pandas unavailable; skipping series_clip series bounds: {message}");
         return;
     }
     let expected = expected_result.expect("live oracle expected");
@@ -21956,10 +21913,10 @@ fn live_oracle_series_clip_with_series_bounds() {
     };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
-    let lower = super::build_series(fixture.clip_lower_series.as_ref().expect("lower"))
-        .expect("lower");
-    let upper = super::build_series(fixture.clip_upper_series.as_ref().expect("upper"))
-        .expect("upper");
+    let lower =
+        super::build_series(fixture.clip_lower_series.as_ref().expect("lower")).expect("lower");
+    let upper =
+        super::build_series(fixture.clip_upper_series.as_ref().expect("upper")).expect("upper");
     let actual = series
         .clip_with_series(Some(&lower), Some(&upper))
         .expect("clip_with_series");
@@ -22003,9 +21960,7 @@ fn live_oracle_dataframe_clip_upper_only() {
 
     let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
     if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
-        eprintln!(
-            "live pandas unavailable; skipping dataframe_clip upper only: {message}"
-        );
+        eprintln!("live pandas unavailable; skipping dataframe_clip upper only: {message}");
         return;
     }
     let expected = expected_result.expect("live oracle expected");
@@ -22126,7 +22081,9 @@ fn live_oracle_series_argmin_skipna_false_with_null() {
         (super::ResolvedExpected::ErrorAny | super::ResolvedExpected::ErrorContains(_), Err(_)) => {
         }
         (other_expected, other_actual) => {
-            panic!("argmin skipna=false outcome mismatch: actual={other_actual:?} expected={other_expected:?}")
+            panic!(
+                "argmin skipna=false outcome mismatch: actual={other_actual:?} expected={other_expected:?}"
+            )
         }
     }
 }
@@ -22179,7 +22136,9 @@ fn live_oracle_series_argmax_skipna_false_with_null() {
         (super::ResolvedExpected::ErrorAny | super::ResolvedExpected::ErrorContains(_), Err(_)) => {
         }
         (other_expected, other_actual) => {
-            panic!("argmax skipna=false outcome mismatch: actual={other_actual:?} expected={other_expected:?}")
+            panic!(
+                "argmax skipna=false outcome mismatch: actual={other_actual:?} expected={other_expected:?}"
+            )
         }
     }
 }
@@ -22229,9 +22188,7 @@ fn live_oracle_dataframe_nlargest_keep_last() {
 
     let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
     if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
-        eprintln!(
-            "live pandas unavailable; skipping dataframe_nlargest keep=last: {message}"
-        );
+        eprintln!("live pandas unavailable; skipping dataframe_nlargest keep=last: {message}");
         return;
     }
     let expected = expected_result.expect("live oracle expected");
@@ -22295,9 +22252,7 @@ fn live_oracle_dataframe_nsmallest_keep_last_with_ties() {
 
     let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
     if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
-        eprintln!(
-            "live pandas unavailable; skipping dataframe_nsmallest keep=last: {message}"
-        );
+        eprintln!("live pandas unavailable; skipping dataframe_nsmallest keep=last: {message}");
         return;
     }
     let expected = expected_result.expect("live oracle expected");
@@ -22349,9 +22304,7 @@ fn live_oracle_series_describe_string_dtype() {
 
     let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
     if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
-        eprintln!(
-            "live pandas unavailable; skipping series_describe string test: {message}"
-        );
+        eprintln!("live pandas unavailable; skipping series_describe string test: {message}");
         return;
     }
     let expected = expected_result.expect("live oracle expected");
@@ -22998,9 +22951,7 @@ fn live_oracle_dataframe_get_dummies_two_columns() {
 
     let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
     if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
-        eprintln!(
-            "live pandas unavailable; skipping dataframe_get_dummies two_columns: {message}"
-        );
+        eprintln!("live pandas unavailable; skipping dataframe_get_dummies two_columns: {message}");
         return;
     }
     let expected = expected_result.expect("live oracle expected");
@@ -23414,9 +23365,7 @@ fn live_oracle_dataframe_corr_pearson_min_periods_3() {
 
     let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
     if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
-        eprintln!(
-            "live pandas unavailable; skipping dataframe_corr min_periods: {message}"
-        );
+        eprintln!("live pandas unavailable; skipping dataframe_corr min_periods: {message}");
         return;
     }
     let expected = expected_result.expect("live oracle expected");
@@ -24003,9 +23952,7 @@ fn live_oracle_dataframe_drop_duplicates_keep_last() {
 
     let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
     if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
-        eprintln!(
-            "live pandas unavailable; skipping dataframe_drop_duplicates last: {message}"
-        );
+        eprintln!("live pandas unavailable; skipping dataframe_drop_duplicates last: {message}");
         return;
     }
     let expected = expected_result.expect("live oracle expected");
@@ -24017,7 +23964,8 @@ fn live_oracle_dataframe_drop_duplicates_keep_last() {
         return;
     };
 
-    let actual = super::execute_dataframe_fixture_operation(&fixture).expect("drop_duplicates last");
+    let actual =
+        super::execute_dataframe_fixture_operation(&fixture).expect("drop_duplicates last");
     super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
 }
 
@@ -24059,9 +24007,7 @@ fn live_oracle_dataframe_set_index_with_int_column() {
 
     let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
     if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
-        eprintln!(
-            "live pandas unavailable; skipping dataframe_set_index int_column: {message}"
-        );
+        eprintln!("live pandas unavailable; skipping dataframe_set_index int_column: {message}");
         return;
     }
     let expected = expected_result.expect("live oracle expected");
@@ -24304,9 +24250,7 @@ fn live_oracle_dataframe_combine_first_numeric_overlap() {
 
     let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
     if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
-        eprintln!(
-            "live pandas unavailable; skipping dataframe_combine_first numeric: {message}"
-        );
+        eprintln!("live pandas unavailable; skipping dataframe_combine_first numeric: {message}");
         return;
     }
     let expected = expected_result.expect("live oracle expected");
@@ -24489,9 +24433,7 @@ fn live_oracle_dataframe_rename_columns_three() {
 
     let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
     if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
-        eprintln!(
-            "live pandas unavailable; skipping dataframe_rename_columns three: {message}"
-        );
+        eprintln!("live pandas unavailable; skipping dataframe_rename_columns three: {message}");
         return;
     }
     let expected = expected_result.expect("live oracle expected");
@@ -24545,9 +24487,7 @@ fn live_oracle_dataframe_drop_columns_first_only() {
 
     let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
     if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
-        eprintln!(
-            "live pandas unavailable; skipping dataframe_drop_columns first: {message}"
-        );
+        eprintln!("live pandas unavailable; skipping dataframe_drop_columns first: {message}");
         return;
     }
     let expected = expected_result.expect("live oracle expected");
@@ -24824,7 +24764,13 @@ fn live_oracle_series_replace_string_to_string() {
         .as_ref()
         .expect("replace_to_find")
         .iter()
-        .zip(fixture.replace_to_value.as_ref().expect("replace_to_value").iter())
+        .zip(
+            fixture
+                .replace_to_value
+                .as_ref()
+                .expect("replace_to_value")
+                .iter(),
+        )
         .map(|(f, v)| (f.clone(), v.clone()))
         .collect();
     let actual = series.replace(&pairs).expect("replace string");
@@ -25111,7 +25057,9 @@ fn live_oracle_series_str_isalnum_mix() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.str().isalnum().expect("isalnum");
@@ -25154,7 +25102,9 @@ fn live_oracle_series_str_isnumeric_mix() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.str().isnumeric().expect("isnumeric");
@@ -25197,7 +25147,9 @@ fn live_oracle_series_str_islower_mix() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.str().islower().expect("islower");
@@ -25240,7 +25192,9 @@ fn live_oracle_series_str_isupper_mix() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.str().isupper().expect("isupper");
@@ -25282,7 +25236,9 @@ fn live_oracle_series_str_match_basic() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series
@@ -25328,7 +25284,9 @@ fn live_oracle_series_str_rjust_width8() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.str().rjust(8, '_').expect("rjust");
@@ -25376,7 +25334,9 @@ fn live_oracle_dataframe_apply_product_axis1() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
     let actual: super::Series = frame.apply("product", 1).expect("apply product");
@@ -25427,7 +25387,9 @@ fn live_oracle_dataframe_apply_sem_axis0() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
     let actual: super::Series = frame.apply("sem", 0).expect("apply sem");
@@ -25488,7 +25450,9 @@ fn live_oracle_dataframe_cov_three_columns() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected_frame) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected_frame) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
     let result = frame.cov().expect("cov");
@@ -25542,7 +25506,9 @@ fn live_oracle_dataframe_cov_with_nulls() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected_frame) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected_frame) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
     let result = frame.cov().expect("cov");
@@ -25611,10 +25577,14 @@ fn live_oracle_dataframe_pivot_table_mean() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected_frame) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected_frame) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
-    let result = frame.pivot_table("val", "row", "col", "mean").expect("pivot_table");
+    let result = frame
+        .pivot_table("val", "row", "col", "mean")
+        .expect("pivot_table");
     super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
 }
 
@@ -25680,10 +25650,14 @@ fn live_oracle_dataframe_pivot_table_sum() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected_frame) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected_frame) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
-    let result = frame.pivot_table("val", "row", "col", "sum").expect("pivot_table");
+    let result = frame
+        .pivot_table("val", "row", "col", "sum")
+        .expect("pivot_table");
     super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
 }
 
@@ -25747,11 +25721,15 @@ fn live_oracle_dataframe_merge_inner_basic() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected_frame) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected_frame) = expected else {
+        return;
+    };
 
     let left = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("left");
-    let right = super::build_dataframe(fixture.frame_right.as_ref().expect("frame_right")).expect("right");
-    let merged = super::merge_dataframes(&left, &right, "id", super::JoinType::Inner).expect("merge inner");
+    let right =
+        super::build_dataframe(fixture.frame_right.as_ref().expect("frame_right")).expect("right");
+    let merged =
+        super::merge_dataframes(&left, &right, "id", super::JoinType::Inner).expect("merge inner");
     let result = super::DataFrame::new(merged.index, merged.columns).expect("frame");
     super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
 }
@@ -25816,11 +25794,15 @@ fn live_oracle_dataframe_merge_left_basic() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected_frame) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected_frame) = expected else {
+        return;
+    };
 
     let left = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("left");
-    let right = super::build_dataframe(fixture.frame_right.as_ref().expect("frame_right")).expect("right");
-    let merged = super::merge_dataframes(&left, &right, "id", super::JoinType::Left).expect("merge left");
+    let right =
+        super::build_dataframe(fixture.frame_right.as_ref().expect("frame_right")).expect("right");
+    let merged =
+        super::merge_dataframes(&left, &right, "id", super::JoinType::Left).expect("merge left");
     let result = super::DataFrame::new(merged.index, merged.columns).expect("frame");
     super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
 }
@@ -25882,11 +25864,15 @@ fn live_oracle_dataframe_merge_outer_basic() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected_frame) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected_frame) = expected else {
+        return;
+    };
 
     let left = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("left");
-    let right = super::build_dataframe(fixture.frame_right.as_ref().expect("frame_right")).expect("right");
-    let merged = super::merge_dataframes(&left, &right, "id", super::JoinType::Outer).expect("merge outer");
+    let right =
+        super::build_dataframe(fixture.frame_right.as_ref().expect("frame_right")).expect("right");
+    let merged =
+        super::merge_dataframes(&left, &right, "id", super::JoinType::Outer).expect("merge outer");
     let result = super::DataFrame::new(merged.index, merged.columns).expect("frame");
     super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
 }
@@ -25948,11 +25934,15 @@ fn live_oracle_dataframe_merge_right_basic() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected_frame) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected_frame) = expected else {
+        return;
+    };
 
     let left = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("left");
-    let right = super::build_dataframe(fixture.frame_right.as_ref().expect("frame_right")).expect("right");
-    let merged = super::merge_dataframes(&left, &right, "id", super::JoinType::Right).expect("merge right");
+    let right =
+        super::build_dataframe(fixture.frame_right.as_ref().expect("frame_right")).expect("right");
+    let merged =
+        super::merge_dataframes(&left, &right, "id", super::JoinType::Right).expect("merge right");
     let result = super::DataFrame::new(merged.index, merged.columns).expect("frame");
     super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
 }
@@ -26008,7 +25998,9 @@ fn live_oracle_dataframe_groupby_sum_basic() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected_frame) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected_frame) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
     let result = frame.groupby(&["k"]).expect("groupby").sum().expect("sum");
@@ -26063,7 +26055,9 @@ fn live_oracle_dataframe_groupby_any_basic() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected_frame) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected_frame) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
     let result = frame.groupby(&["k"]).expect("groupby").any().expect("any");
@@ -26118,7 +26112,9 @@ fn live_oracle_dataframe_groupby_all_basic() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected_frame) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected_frame) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
     let result = frame.groupby(&["k"]).expect("groupby").all().expect("all");
@@ -26173,10 +26169,16 @@ fn live_oracle_dataframe_groupby_idxmin_basic() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected_frame) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected_frame) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
-    let result = frame.groupby(&["k"]).expect("groupby").idxmin().expect("idxmin");
+    let result = frame
+        .groupby(&["k"])
+        .expect("groupby")
+        .idxmin()
+        .expect("idxmin");
     super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
 }
 
@@ -26228,10 +26230,16 @@ fn live_oracle_dataframe_groupby_idxmax_basic() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected_frame) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected_frame) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
-    let result = frame.groupby(&["k"]).expect("groupby").idxmax().expect("idxmax");
+    let result = frame
+        .groupby(&["k"])
+        .expect("groupby")
+        .idxmax()
+        .expect("idxmax");
     super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
 }
 
@@ -26286,7 +26294,9 @@ fn live_oracle_dataframe_groupby_sem_basic() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected_frame) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected_frame) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
     let result = frame.groupby(&["k"]).expect("groupby").sem().expect("sem");
@@ -26350,10 +26360,16 @@ fn live_oracle_dataframe_groupby_skew_basic() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected_frame) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected_frame) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
-    let result = frame.groupby(&["k"]).expect("groupby").skew().expect("skew");
+    let result = frame
+        .groupby(&["k"])
+        .expect("groupby")
+        .skew()
+        .expect("skew");
     super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
 }
 
@@ -26420,10 +26436,16 @@ fn live_oracle_dataframe_groupby_kurtosis_basic() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected_frame) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected_frame) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
-    let result = frame.groupby(&["k"]).expect("groupby").kurtosis().expect("kurtosis");
+    let result = frame
+        .groupby(&["k"])
+        .expect("groupby")
+        .kurtosis()
+        .expect("kurtosis");
     super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
 }
 
@@ -26470,10 +26492,16 @@ fn live_oracle_dataframe_groupby_cumcount_basic() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
-    let result = frame.groupby(&["k"]).expect("groupby").cumcount().expect("cumcount");
+    let result = frame
+        .groupby(&["k"])
+        .expect("groupby")
+        .cumcount()
+        .expect("cumcount");
     super::compare_series_expected(&result, &expected).expect("pandas parity");
 }
 
@@ -26520,10 +26548,16 @@ fn live_oracle_dataframe_groupby_ngroup_basic() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
-    let result = frame.groupby(&["k"]).expect("groupby").ngroup().expect("ngroup");
+    let result = frame
+        .groupby(&["k"])
+        .expect("groupby")
+        .ngroup()
+        .expect("ngroup");
     super::compare_series_expected(&result, &expected).expect("pandas parity");
 }
 
@@ -26578,10 +26612,16 @@ fn live_oracle_dataframe_groupby_ffill_basic() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected_frame) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected_frame) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
-    let result = frame.groupby(&["k"]).expect("groupby").ffill(None).expect("ffill");
+    let result = frame
+        .groupby(&["k"])
+        .expect("groupby")
+        .ffill(None)
+        .expect("ffill");
     super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
 }
 
@@ -26636,10 +26676,16 @@ fn live_oracle_dataframe_groupby_bfill_basic() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected_frame) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected_frame) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
-    let result = frame.groupby(&["k"]).expect("groupby").bfill(None).expect("bfill");
+    let result = frame
+        .groupby(&["k"])
+        .expect("groupby")
+        .bfill(None)
+        .expect("bfill");
     super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
 }
 
@@ -26692,10 +26738,16 @@ fn live_oracle_dataframe_groupby_get_group_basic() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected_frame) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected_frame) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
-    let result = frame.groupby(&["k"]).expect("groupby").get_group("a").expect("get_group");
+    let result = frame
+        .groupby(&["k"])
+        .expect("groupby")
+        .get_group("a")
+        .expect("get_group");
     super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
 }
 
@@ -26751,10 +26803,17 @@ fn live_oracle_dataframe_groupby_rolling_mean_window_3() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected_frame) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected_frame) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
-    let result = frame.groupby(&["k"]).expect("groupby").rolling(3).mean().expect("rolling mean");
+    let result = frame
+        .groupby(&["k"])
+        .expect("groupby")
+        .rolling(3)
+        .mean()
+        .expect("rolling mean");
     super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
 }
 
@@ -26810,10 +26869,17 @@ fn live_oracle_dataframe_groupby_rolling_sum_window_2() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected_frame) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected_frame) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
-    let result = frame.groupby(&["k"]).expect("groupby").rolling(2).sum().expect("rolling sum");
+    let result = frame
+        .groupby(&["k"])
+        .expect("groupby")
+        .rolling(2)
+        .sum()
+        .expect("rolling sum");
     super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
 }
 
@@ -26869,10 +26935,17 @@ fn live_oracle_dataframe_groupby_rolling_min_basic() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected_frame) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected_frame) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
-    let result = frame.groupby(&["k"]).expect("groupby").rolling(2).min().expect("rolling min");
+    let result = frame
+        .groupby(&["k"])
+        .expect("groupby")
+        .rolling(2)
+        .min()
+        .expect("rolling min");
     super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
 }
 
@@ -26928,10 +27001,17 @@ fn live_oracle_dataframe_groupby_rolling_max_basic() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected_frame) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected_frame) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
-    let result = frame.groupby(&["k"]).expect("groupby").rolling(2).max().expect("rolling max");
+    let result = frame
+        .groupby(&["k"])
+        .expect("groupby")
+        .rolling(2)
+        .max()
+        .expect("rolling max");
     super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
 }
 
@@ -26987,10 +27067,17 @@ fn live_oracle_dataframe_groupby_rolling_count_basic() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected_frame) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected_frame) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
-    let result = frame.groupby(&["k"]).expect("groupby").rolling(2).count().expect("rolling count");
+    let result = frame
+        .groupby(&["k"])
+        .expect("groupby")
+        .rolling(2)
+        .count()
+        .expect("rolling count");
     super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
 }
 
@@ -27046,10 +27133,17 @@ fn live_oracle_dataframe_groupby_rolling_std_basic() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected_frame) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected_frame) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
-    let result = frame.groupby(&["k"]).expect("groupby").rolling(3).std().expect("rolling std");
+    let result = frame
+        .groupby(&["k"])
+        .expect("groupby")
+        .rolling(3)
+        .std()
+        .expect("rolling std");
     super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
 }
 
@@ -27105,10 +27199,17 @@ fn live_oracle_dataframe_groupby_rolling_var_basic() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected_frame) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected_frame) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
-    let result = frame.groupby(&["k"]).expect("groupby").rolling(3).var().expect("rolling var");
+    let result = frame
+        .groupby(&["k"])
+        .expect("groupby")
+        .rolling(3)
+        .var()
+        .expect("rolling var");
     super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
 }
 
@@ -27160,10 +27261,14 @@ fn live_oracle_dataframe_corr_kendall_method() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
-    let actual = frame.corr_method_with_numeric_only("kendall", false).expect("corr kendall");
+    let actual = frame
+        .corr_method_with_numeric_only("kendall", false)
+        .expect("corr kendall");
     super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
 }
 
@@ -27223,7 +27328,9 @@ fn live_oracle_dataframe_crosstab_normalize_columns() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected) = expected else {
+        return;
+    };
 
     let left = super::build_series(fixture.left.as_ref().expect("left")).expect("left");
     let right = super::build_series(fixture.right.as_ref().expect("right")).expect("right");
@@ -27298,10 +27405,13 @@ fn live_oracle_dataframe_merge_ordered_basic() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected_frame) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected_frame) = expected else {
+        return;
+    };
 
     let left = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("left");
-    let right = super::build_dataframe(fixture.frame_right.as_ref().expect("frame_right")).expect("right");
+    let right =
+        super::build_dataframe(fixture.frame_right.as_ref().expect("frame_right")).expect("right");
     let merged = fp_join::merge_ordered(&left, &right, &["k"], None).expect("merge_ordered");
     let result = super::DataFrame::new(merged.index, merged.columns).expect("frame");
     super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
@@ -27342,7 +27452,9 @@ fn live_oracle_series_str_normalize_nfd() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.str().normalize("NFD").expect("normalize NFD");
@@ -27384,7 +27496,9 @@ fn live_oracle_series_str_normalize_nfkc() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.str().normalize("NFKC").expect("normalize NFKC");
@@ -27426,7 +27540,9 @@ fn live_oracle_series_str_normalize_nfkd() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.str().normalize("NFKD").expect("normalize NFKD");
@@ -27472,7 +27588,9 @@ fn live_oracle_series_ewm_mean_alpha_05() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.ewm(None, Some(0.5)).mean().expect("ewm mean alpha");
@@ -27521,10 +27639,15 @@ fn live_oracle_series_rolling_mean_window_3_centered() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
-    let result = series.rolling_with_center(3, None, true).mean().expect("rolling mean centered");
+    let result = series
+        .rolling_with_center(3, None, true)
+        .mean()
+        .expect("rolling mean centered");
     super::compare_series_expected(&result, &expected).expect("pandas parity");
 }
 
@@ -27570,7 +27693,9 @@ fn live_oracle_series_rolling_sum_min_periods_2() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let result = series.rolling(4, Some(2)).sum().expect("rolling sum");
@@ -27632,14 +27757,17 @@ fn live_oracle_groupby_sum_int_keys() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let keys = super::build_series(fixture.left.as_ref().expect("left")).expect("keys");
     let values = super::build_series(fixture.right.as_ref().expect("right")).expect("values");
     let options = fp_groupby::GroupByOptions::default();
     let policy = super::RuntimePolicy::strict();
     let mut ledger = super::EvidenceLedger::new();
-    let result = fp_groupby::groupby_sum(&keys, &values, options, &policy, &mut ledger).expect("groupby_sum");
+    let result = fp_groupby::groupby_sum(&keys, &values, options, &policy, &mut ledger)
+        .expect("groupby_sum");
     super::compare_series_expected(&result, &expected).expect("pandas parity");
 }
 
@@ -27698,14 +27826,17 @@ fn live_oracle_groupby_mean_int_keys() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let keys = super::build_series(fixture.left.as_ref().expect("left")).expect("keys");
     let values = super::build_series(fixture.right.as_ref().expect("right")).expect("values");
     let options = fp_groupby::GroupByOptions::default();
     let policy = super::RuntimePolicy::strict();
     let mut ledger = super::EvidenceLedger::new();
-    let result = fp_groupby::groupby_mean(&keys, &values, options, &policy, &mut ledger).expect("groupby_mean");
+    let result = fp_groupby::groupby_mean(&keys, &values, options, &policy, &mut ledger)
+        .expect("groupby_mean");
     super::compare_series_expected(&result, &expected).expect("pandas parity");
 }
 
@@ -27764,14 +27895,17 @@ fn live_oracle_groupby_min_int_keys() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let keys = super::build_series(fixture.left.as_ref().expect("left")).expect("keys");
     let values = super::build_series(fixture.right.as_ref().expect("right")).expect("values");
     let options = fp_groupby::GroupByOptions::default();
     let policy = super::RuntimePolicy::strict();
     let mut ledger = super::EvidenceLedger::new();
-    let result = fp_groupby::groupby_min(&keys, &values, options, &policy, &mut ledger).expect("groupby_min");
+    let result = fp_groupby::groupby_min(&keys, &values, options, &policy, &mut ledger)
+        .expect("groupby_min");
     super::compare_series_expected(&result, &expected).expect("pandas parity");
 }
 
@@ -27830,14 +27964,17 @@ fn live_oracle_groupby_max_int_keys() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let keys = super::build_series(fixture.left.as_ref().expect("left")).expect("keys");
     let values = super::build_series(fixture.right.as_ref().expect("right")).expect("values");
     let options = fp_groupby::GroupByOptions::default();
     let policy = super::RuntimePolicy::strict();
     let mut ledger = super::EvidenceLedger::new();
-    let result = fp_groupby::groupby_max(&keys, &values, options, &policy, &mut ledger).expect("groupby_max");
+    let result = fp_groupby::groupby_max(&keys, &values, options, &policy, &mut ledger)
+        .expect("groupby_max");
     super::compare_series_expected(&result, &expected).expect("pandas parity");
 }
 
@@ -27896,14 +28033,17 @@ fn live_oracle_groupby_count_int_keys() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let keys = super::build_series(fixture.left.as_ref().expect("left")).expect("keys");
     let values = super::build_series(fixture.right.as_ref().expect("right")).expect("values");
     let options = fp_groupby::GroupByOptions::default();
     let policy = super::RuntimePolicy::strict();
     let mut ledger = super::EvidenceLedger::new();
-    let result = fp_groupby::groupby_count(&keys, &values, options, &policy, &mut ledger).expect("groupby_count");
+    let result = fp_groupby::groupby_count(&keys, &values, options, &policy, &mut ledger)
+        .expect("groupby_count");
     super::compare_series_expected(&result, &expected).expect("pandas parity");
 }
 
@@ -27962,14 +28102,17 @@ fn live_oracle_groupby_first_int_keys() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let keys = super::build_series(fixture.left.as_ref().expect("left")).expect("keys");
     let values = super::build_series(fixture.right.as_ref().expect("right")).expect("values");
     let options = fp_groupby::GroupByOptions::default();
     let policy = super::RuntimePolicy::strict();
     let mut ledger = super::EvidenceLedger::new();
-    let result = fp_groupby::groupby_first(&keys, &values, options, &policy, &mut ledger).expect("groupby_first");
+    let result = fp_groupby::groupby_first(&keys, &values, options, &policy, &mut ledger)
+        .expect("groupby_first");
     super::compare_series_expected(&result, &expected).expect("pandas parity");
 }
 
@@ -28028,14 +28171,17 @@ fn live_oracle_groupby_last_int_keys() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let keys = super::build_series(fixture.left.as_ref().expect("left")).expect("keys");
     let values = super::build_series(fixture.right.as_ref().expect("right")).expect("values");
     let options = fp_groupby::GroupByOptions::default();
     let policy = super::RuntimePolicy::strict();
     let mut ledger = super::EvidenceLedger::new();
-    let result = fp_groupby::groupby_last(&keys, &values, options, &policy, &mut ledger).expect("groupby_last");
+    let result = fp_groupby::groupby_last(&keys, &values, options, &policy, &mut ledger)
+        .expect("groupby_last");
     super::compare_series_expected(&result, &expected).expect("pandas parity");
 }
 
@@ -28098,14 +28244,17 @@ fn live_oracle_groupby_std_int_keys() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let keys = super::build_series(fixture.left.as_ref().expect("left")).expect("keys");
     let values = super::build_series(fixture.right.as_ref().expect("right")).expect("values");
     let options = fp_groupby::GroupByOptions::default();
     let policy = super::RuntimePolicy::strict();
     let mut ledger = super::EvidenceLedger::new();
-    let result = fp_groupby::groupby_std(&keys, &values, options, &policy, &mut ledger).expect("groupby_std");
+    let result = fp_groupby::groupby_std(&keys, &values, options, &policy, &mut ledger)
+        .expect("groupby_std");
     super::compare_series_expected(&result, &expected).expect("pandas parity");
 }
 
@@ -28168,14 +28317,17 @@ fn live_oracle_groupby_var_int_keys() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let keys = super::build_series(fixture.left.as_ref().expect("left")).expect("keys");
     let values = super::build_series(fixture.right.as_ref().expect("right")).expect("values");
     let options = fp_groupby::GroupByOptions::default();
     let policy = super::RuntimePolicy::strict();
     let mut ledger = super::EvidenceLedger::new();
-    let result = fp_groupby::groupby_var(&keys, &values, options, &policy, &mut ledger).expect("groupby_var");
+    let result = fp_groupby::groupby_var(&keys, &values, options, &policy, &mut ledger)
+        .expect("groupby_var");
     super::compare_series_expected(&result, &expected).expect("pandas parity");
 }
 
@@ -28238,14 +28390,17 @@ fn live_oracle_groupby_median_int_keys() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let keys = super::build_series(fixture.left.as_ref().expect("left")).expect("keys");
     let values = super::build_series(fixture.right.as_ref().expect("right")).expect("values");
     let options = fp_groupby::GroupByOptions::default();
     let policy = super::RuntimePolicy::strict();
     let mut ledger = super::EvidenceLedger::new();
-    let result = fp_groupby::groupby_median(&keys, &values, options, &policy, &mut ledger).expect("groupby_median");
+    let result = fp_groupby::groupby_median(&keys, &values, options, &policy, &mut ledger)
+        .expect("groupby_median");
     super::compare_series_expected(&result, &expected).expect("pandas parity");
 }
 
@@ -28289,7 +28444,9 @@ fn live_oracle_series_rank_min_method() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.rank("min", true, "keep").expect("rank min");
@@ -28336,7 +28493,9 @@ fn live_oracle_series_rank_max_method() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.rank("max", true, "keep").expect("rank max");
@@ -28383,7 +28542,9 @@ fn live_oracle_series_rank_first_method() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.rank("first", true, "keep").expect("rank first");
@@ -28436,7 +28597,9 @@ fn live_oracle_dataframe_rank_axis0_min() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
     let actual = frame.rank("min", true, "keep").expect("rank min");
@@ -28489,7 +28652,9 @@ fn live_oracle_dataframe_rank_axis0_dense() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
     let actual = frame.rank("dense", true, "keep").expect("rank dense");
@@ -28543,7 +28708,9 @@ fn live_oracle_series_concat_with_overlap() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let left = super::build_series(fixture.left.as_ref().expect("left")).expect("left");
     let right = super::build_series(fixture.right.as_ref().expect("right")).expect("right");
@@ -28594,7 +28761,9 @@ fn live_oracle_series_concat_with_nulls() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let left = super::build_series(fixture.left.as_ref().expect("left")).expect("left");
     let right = super::build_series(fixture.right.as_ref().expect("right")).expect("right");
@@ -28659,16 +28828,16 @@ fn live_oracle_dataframe_concat_axis0_inner() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected) = expected else {
+        return;
+    };
 
     let left = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("left");
-    let right = super::build_dataframe(fixture.frame_right.as_ref().expect("frame_right")).expect("right");
-    let actual = super::concat_dataframes_with_axis_join(
-        &[&left, &right],
-        0,
-        super::ConcatJoin::Inner,
-    )
-    .expect("concat axis=0 inner");
+    let right =
+        super::build_dataframe(fixture.frame_right.as_ref().expect("frame_right")).expect("right");
+    let actual =
+        super::concat_dataframes_with_axis_join(&[&left, &right], 0, super::ConcatJoin::Inner)
+            .expect("concat axis=0 inner");
     super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
 }
 
@@ -28725,16 +28894,16 @@ fn live_oracle_dataframe_concat_axis1_outer() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected) = expected else {
+        return;
+    };
 
     let left = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("left");
-    let right = super::build_dataframe(fixture.frame_right.as_ref().expect("frame_right")).expect("right");
-    let actual = super::concat_dataframes_with_axis_join(
-        &[&left, &right],
-        1,
-        super::ConcatJoin::Outer,
-    )
-    .expect("concat axis=1 outer");
+    let right =
+        super::build_dataframe(fixture.frame_right.as_ref().expect("frame_right")).expect("right");
+    let actual =
+        super::concat_dataframes_with_axis_join(&[&left, &right], 1, super::ConcatJoin::Outer)
+            .expect("concat axis=1 outer");
     super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
 }
 
@@ -28780,7 +28949,9 @@ fn live_oracle_dataframe_astype_int_to_string() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected_frame) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected_frame) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
     let result = frame.astype(fp_types::DType::Utf8).expect("astype");
@@ -28829,7 +29000,9 @@ fn live_oracle_dataframe_astype_int_to_bool() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected_frame) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected_frame) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
     let result = frame.astype(fp_types::DType::Bool).expect("astype");
@@ -28879,7 +29052,9 @@ fn live_oracle_dataframe_shift_axis0_periods_1() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
     let result = frame.shift(1).expect("shift");
@@ -28932,7 +29107,9 @@ fn live_oracle_dataframe_pct_change_axis0_periods_1() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
     let result = frame.pct_change(1).expect("pct_change");
@@ -28985,7 +29162,9 @@ fn live_oracle_dataframe_shift_axis0_periods_2() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
     let result = frame.shift(2).expect("shift periods=2");
@@ -29035,7 +29214,9 @@ fn live_oracle_dataframe_iloc_single_row() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
     let positions = fixture.iloc_positions.as_ref().expect("iloc_positions");
@@ -29091,7 +29272,9 @@ fn live_oracle_dataframe_iloc_reverse_positions() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
     let positions = fixture.iloc_positions.as_ref().expect("iloc_positions");
@@ -29146,10 +29329,14 @@ fn live_oracle_dataframe_duplicated_keep_false() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
-    let actual = frame.duplicated(None, super::DuplicateKeep::None).expect("duplicated keep=none");
+    let actual = frame
+        .duplicated(None, super::DuplicateKeep::None)
+        .expect("duplicated keep=none");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
 
@@ -29195,10 +29382,14 @@ fn live_oracle_dataframe_fillna_with_int() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
-    let result = frame.fillna(fixture.fill_value.as_ref().expect("fill_value")).expect("fillna");
+    let result = frame
+        .fillna(fixture.fill_value.as_ref().expect("fill_value"))
+        .expect("fillna");
     super::compare_dataframe_expected(&result, &expected).expect("pandas parity");
 }
 
@@ -29244,10 +29435,14 @@ fn live_oracle_dataframe_fillna_with_string() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
-    let result = frame.fillna(fixture.fill_value.as_ref().expect("fill_value")).expect("fillna");
+    let result = frame
+        .fillna(fixture.fill_value.as_ref().expect("fill_value"))
+        .expect("fillna");
     super::compare_dataframe_expected(&result, &expected).expect("pandas parity");
 }
 
@@ -29296,7 +29491,9 @@ fn live_oracle_series_cut_five_bins() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = fp_frame::cut(&series, 5).expect("cut");
@@ -29344,7 +29541,9 @@ fn live_oracle_series_qcut_two_quantiles() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = fp_frame::qcut(&series, 2).expect("qcut");
@@ -29385,7 +29584,9 @@ fn live_oracle_series_str_capitalize_with_unicode() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.str().capitalize().expect("capitalize");
@@ -29426,7 +29627,9 @@ fn live_oracle_series_str_swapcase_with_unicode() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.str().swapcase().expect("swapcase");
@@ -29467,7 +29670,9 @@ fn live_oracle_series_str_title_with_unicode() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.str().title().expect("title");
@@ -29511,7 +29716,9 @@ fn live_oracle_series_str_pad_right() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.str().pad(6, "right", '-').expect("pad right");
@@ -29555,7 +29762,9 @@ fn live_oracle_series_str_pad_both() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.str().pad(8, "both", '*').expect("pad both");
@@ -29598,7 +29807,9 @@ fn live_oracle_series_str_replace_literal() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.str().replace("cat", "DOG").expect("replace literal");
@@ -29641,10 +29852,15 @@ fn live_oracle_series_str_replace_capture_group() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
-    let actual = series.str().replace("([0-9]+)", "<\\1>").expect("replace capture");
+    let actual = series
+        .str()
+        .replace("([0-9]+)", "<\\1>")
+        .expect("replace capture");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
 
@@ -29689,10 +29905,14 @@ fn live_oracle_dataframe_explode_space_separator() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
-    let actual = frame.explode_with_ignore_index("words", " ", false).expect("explode");
+    let actual = frame
+        .explode_with_ignore_index("words", " ", false)
+        .expect("explode");
     super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
 }
 
@@ -29737,10 +29957,14 @@ fn live_oracle_dataframe_explode_colon_ignore_index() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
-    let actual = frame.explode_with_ignore_index("items", ":", true).expect("explode");
+    let actual = frame
+        .explode_with_ignore_index("items", ":", true)
+        .expect("explode");
     super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
 }
 
@@ -29800,11 +30024,16 @@ fn live_oracle_dataframe_compare_with_custom_result_names() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected) = expected else {
+        return;
+    };
 
     let left = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("left");
-    let right = super::build_dataframe(fixture.frame_right.as_ref().expect("frame_right")).expect("right");
-    let actual = left.compare_with_result_names(&right, ("before", "after")).expect("compare");
+    let right =
+        super::build_dataframe(fixture.frame_right.as_ref().expect("frame_right")).expect("right");
+    let actual = left
+        .compare_with_result_names(&right, ("before", "after"))
+        .expect("compare");
     super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
 }
 
@@ -29856,7 +30085,9 @@ fn live_oracle_dataframe_asof_intermediate_label() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
     let label = fixture.asof_label.as_ref().expect("asof_label");
@@ -29915,10 +30146,16 @@ fn live_oracle_dataframe_groupby_ohlc_basic() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected_frame) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected_frame) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
-    let result = frame.groupby(&["k"]).expect("groupby").ohlc().expect("ohlc");
+    let result = frame
+        .groupby(&["k"])
+        .expect("groupby")
+        .ohlc()
+        .expect("ohlc");
     super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
 }
 
@@ -29973,12 +30210,18 @@ fn live_oracle_dataframe_groupby_agg_multi_basic() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected_frame) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected_frame) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
     let mut func_map = std::collections::HashMap::new();
     func_map.insert("v".to_string(), vec!["sum".to_string(), "mean".to_string()]);
-    let result = frame.groupby(&["k"]).expect("groupby").agg_multi(&func_map).expect("agg_multi");
+    let result = frame
+        .groupby(&["k"])
+        .expect("groupby")
+        .agg_multi(&func_map)
+        .expect("agg_multi");
     super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
 }
 
@@ -30028,7 +30271,9 @@ fn live_oracle_dataframe_reindex_with_int_labels() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
     let labels = fixture.reindex_labels.clone().expect("reindex_labels");
@@ -30078,7 +30323,9 @@ fn live_oracle_dataframe_round_decimals_0() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
     let actual = frame.round(0).expect("round");
@@ -30127,7 +30374,9 @@ fn live_oracle_dataframe_round_negative_decimals() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
     let actual = frame.round(-1).expect("round");
@@ -30175,7 +30424,9 @@ fn live_oracle_dataframe_abs_with_negatives() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
     let actual = frame.abs().expect("abs");
@@ -30223,7 +30474,9 @@ fn live_oracle_dataframe_abs_with_nulls() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
     let actual = frame.abs().expect("abs");
@@ -30274,7 +30527,9 @@ fn live_oracle_dataframe_var_with_nulls() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
     let result = frame.var_agg().expect("var");
@@ -30322,7 +30577,9 @@ fn live_oracle_dataframe_prod_with_nulls() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
     let result = frame.prod_agg().expect("prod");
@@ -30373,7 +30630,9 @@ fn live_oracle_dataframe_idxmin_with_nulls() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
     let result = frame.idxmin().expect("idxmin");
@@ -30424,7 +30683,9 @@ fn live_oracle_dataframe_idxmax_with_nulls() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
     let result = frame.idxmax().expect("idxmax");
@@ -30480,7 +30741,9 @@ fn live_oracle_dataframe_diff_axis0_periods_2() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
     let actual = frame.diff(2).expect("diff");
@@ -30527,7 +30790,9 @@ fn live_oracle_dataframe_describe_pure_int() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
     let actual = frame.describe().expect("describe");
@@ -30584,7 +30849,9 @@ fn live_oracle_dataframe_describe_three_columns() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
     let actual = frame.describe().expect("describe");
@@ -30626,10 +30893,15 @@ fn live_oracle_series_str_wrap_long_width() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
-    let actual = series.str().wrap_with_drop_whitespace(50, true).expect("wrap");
+    let actual = series
+        .str()
+        .wrap_with_drop_whitespace(50, true)
+        .expect("wrap");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
 
@@ -30665,7 +30937,9 @@ fn live_oracle_series_str_expandtabs_default_size_8() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.str().expandtabs(8).expect("expandtabs default");
@@ -30708,7 +30982,9 @@ fn live_oracle_series_convert_dtypes_float_with_nulls() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.convert_dtypes().expect("convert_dtypes");
@@ -30749,7 +31025,9 @@ fn live_oracle_series_convert_dtypes_string_basic() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.convert_dtypes().expect("convert_dtypes");
@@ -30803,13 +31081,17 @@ fn live_oracle_series_add_with_nulls() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let left = super::build_series(fixture.left.as_ref().expect("left")).expect("left");
     let right = super::build_series(fixture.right.as_ref().expect("right")).expect("right");
     let policy = super::RuntimePolicy::strict();
     let mut ledger = super::EvidenceLedger::new();
-    let result = left.add_with_policy(&right, &policy, &mut ledger).expect("add");
+    let result = left
+        .add_with_policy(&right, &policy, &mut ledger)
+        .expect("add");
     super::compare_series_expected(&result, &expected).expect("pandas parity");
 }
 
@@ -30860,13 +31142,17 @@ fn live_oracle_series_sub_with_nulls() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let left = super::build_series(fixture.left.as_ref().expect("left")).expect("left");
     let right = super::build_series(fixture.right.as_ref().expect("right")).expect("right");
     let policy = super::RuntimePolicy::strict();
     let mut ledger = super::EvidenceLedger::new();
-    let result = left.sub_with_policy(&right, &policy, &mut ledger).expect("sub");
+    let result = left
+        .sub_with_policy(&right, &policy, &mut ledger)
+        .expect("sub");
     super::compare_series_expected(&result, &expected).expect("pandas parity");
 }
 
@@ -30917,13 +31203,17 @@ fn live_oracle_series_mul_with_nulls() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let left = super::build_series(fixture.left.as_ref().expect("left")).expect("left");
     let right = super::build_series(fixture.right.as_ref().expect("right")).expect("right");
     let policy = super::RuntimePolicy::strict();
     let mut ledger = super::EvidenceLedger::new();
-    let result = left.mul_with_policy(&right, &policy, &mut ledger).expect("mul");
+    let result = left
+        .mul_with_policy(&right, &policy, &mut ledger)
+        .expect("mul");
     super::compare_series_expected(&result, &expected).expect("pandas parity");
 }
 
@@ -30974,13 +31264,17 @@ fn live_oracle_series_div_with_nulls() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let left = super::build_series(fixture.left.as_ref().expect("left")).expect("left");
     let right = super::build_series(fixture.right.as_ref().expect("right")).expect("right");
     let policy = super::RuntimePolicy::strict();
     let mut ledger = super::EvidenceLedger::new();
-    let result = left.div_with_policy(&right, &policy, &mut ledger).expect("div");
+    let result = left
+        .div_with_policy(&right, &policy, &mut ledger)
+        .expect("div");
     super::compare_series_expected(&result, &expected).expect("pandas parity");
 }
 
@@ -31024,7 +31318,9 @@ fn live_oracle_series_describe_with_negative_values() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.describe().expect("describe");
@@ -31067,7 +31363,9 @@ fn live_oracle_series_describe_with_uniform_values() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.describe().expect("describe");
@@ -31113,7 +31411,9 @@ fn live_oracle_series_head_negative_n() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let result = series.head(-2).expect("head -2");
@@ -31162,7 +31462,9 @@ fn live_oracle_series_categorical_from_codes_basic() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let left = fixture.left.as_ref().expect("left");
     let codes: Vec<i64> = left
@@ -31173,10 +31475,18 @@ fn live_oracle_series_categorical_from_codes_basic() {
             _ => None,
         })
         .collect();
-    let categories = fixture.categorical_categories.clone().expect("categorical_categories");
-    let categorical = super::Series::from_categorical_codes(left.name.clone(), codes, categories, false)
-        .expect("from_categorical_codes");
-    let actual = categorical.cat().expect("cat").to_values().expect("to_values");
+    let categories = fixture
+        .categorical_categories
+        .clone()
+        .expect("categorical_categories");
+    let categorical =
+        super::Series::from_categorical_codes(left.name.clone(), codes, categories, false)
+            .expect("from_categorical_codes");
+    let actual = categorical
+        .cat()
+        .expect("cat")
+        .to_values()
+        .expect("to_values");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
 
@@ -31221,7 +31531,9 @@ fn live_oracle_dataframe_isnull_with_three_nulls() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
     let result = frame.isnull().expect("isnull");
@@ -31269,7 +31581,9 @@ fn live_oracle_dataframe_notnull_with_three_nulls() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
     let result = frame.notnull().expect("notnull");
@@ -31317,10 +31631,14 @@ fn live_oracle_series_value_counts_dropna_false() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
-    let actual = series.value_counts_with_options(false, true, false, false).expect("value_counts dropna=false");
+    let actual = series
+        .value_counts_with_options(false, true, false, false)
+        .expect("value_counts dropna=false");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
 
@@ -31359,7 +31677,9 @@ fn live_oracle_series_str_find_no_match() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.str().find("xyz").expect("find");
@@ -31401,7 +31721,9 @@ fn live_oracle_series_str_rfind_multiple_matches() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.str().rfind("ab").expect("rfind");
@@ -31443,7 +31765,9 @@ fn live_oracle_series_str_count_matches_no_matches() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.str().count_matches("xyz").expect("count_matches");
@@ -31485,7 +31809,9 @@ fn live_oracle_series_str_count_complex_pattern() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.str().count("[0-9]{2,}").expect("count");
@@ -31528,10 +31854,15 @@ fn live_oracle_series_str_split_regex_get_index_2() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
-    let actual = series.str().split_regex_get("[\\s,;]+", 2).expect("split_regex_get");
+    let actual = series
+        .str()
+        .split_regex_get("[\\s,;]+", 2)
+        .expect("split_regex_get");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
 
@@ -31583,11 +31914,15 @@ fn live_oracle_dataframe_drop_duplicates_with_subset() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
     let subset = vec!["a".to_string()];
-    let result = frame.drop_duplicates(Some(&subset), super::DuplicateKeep::First, false).expect("drop_duplicates");
+    let result = frame
+        .drop_duplicates(Some(&subset), super::DuplicateKeep::First, false)
+        .expect("drop_duplicates");
     super::compare_dataframe_expected(&result, &expected).expect("pandas parity");
 }
 
@@ -31625,7 +31960,9 @@ fn live_oracle_series_any_with_floats_and_zeros() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Bool(_)));
-    let super::ResolvedExpected::Bool(expected_bool) = expected else { return; };
+    let super::ResolvedExpected::Bool(expected_bool) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.any().expect("any");
@@ -31666,7 +32003,9 @@ fn live_oracle_series_all_with_floats_and_zeros() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Bool(_)));
-    let super::ResolvedExpected::Bool(expected_bool) = expected else { return; };
+    let super::ResolvedExpected::Bool(expected_bool) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.all().expect("all");
@@ -31722,13 +32061,17 @@ fn live_oracle_series_div_misaligned() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let left = super::build_series(fixture.left.as_ref().expect("left")).expect("left");
     let right = super::build_series(fixture.right.as_ref().expect("right")).expect("right");
     let policy = super::RuntimePolicy::strict();
     let mut ledger = super::EvidenceLedger::new();
-    let result = left.div_with_policy(&right, &policy, &mut ledger).expect("div");
+    let result = left
+        .div_with_policy(&right, &policy, &mut ledger)
+        .expect("div");
     super::compare_series_expected(&result, &expected).expect("pandas parity");
 }
 
@@ -31780,7 +32123,9 @@ fn live_oracle_dataframe_query_or_filter() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected_frame) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected_frame) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
     let policy = super::RuntimePolicy::strict();
@@ -31790,7 +32135,8 @@ fn live_oracle_dataframe_query_or_filter() {
         &frame,
         &policy,
         &mut ledger,
-    ).expect("query");
+    )
+    .expect("query");
     super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
 }
 
@@ -31839,7 +32185,9 @@ fn live_oracle_dataframe_query_string_equality() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected_frame) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected_frame) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
     let policy = super::RuntimePolicy::strict();
@@ -31849,7 +32197,8 @@ fn live_oracle_dataframe_query_string_equality() {
         &frame,
         &policy,
         &mut ledger,
-    ).expect("query");
+    )
+    .expect("query");
     super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
 }
 
@@ -31895,7 +32244,9 @@ fn live_oracle_dataframe_eval_with_parens_and_pow() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
     let policy = super::RuntimePolicy::strict();
@@ -31905,7 +32256,8 @@ fn live_oracle_dataframe_eval_with_parens_and_pow() {
         &frame,
         &policy,
         &mut ledger,
-    ).expect("eval");
+    )
+    .expect("eval");
     super::compare_series_expected(&result, &expected).expect("pandas parity");
 }
 
@@ -31954,7 +32306,9 @@ fn live_oracle_dataframe_eval_bool_combined() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
     let policy = super::RuntimePolicy::strict();
@@ -31964,7 +32318,8 @@ fn live_oracle_dataframe_eval_bool_combined() {
         &frame,
         &policy,
         &mut ledger,
-    ).expect("eval");
+    )
+    .expect("eval");
     super::compare_series_expected(&result, &expected).expect("pandas parity");
 }
 
@@ -32002,7 +32357,9 @@ fn live_oracle_series_to_arrow_round_trip_float() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let (dt, arr) = super::series_to_arrow_array(&series).expect("series_to_arrow_array");
@@ -32052,7 +32409,9 @@ fn live_oracle_series_to_arrow_round_trip_bool() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let (dt, arr) = super::series_to_arrow_array(&series).expect("series_to_arrow_array");
@@ -32107,7 +32466,9 @@ fn live_oracle_dataframe_to_json_records_with_floats() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Scalar(_)));
-    let super::ResolvedExpected::Scalar(expected) = expected else { return; };
+    let super::ResolvedExpected::Scalar(expected) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
     let json = frame.to_json("records").expect("to_json");
@@ -32151,7 +32512,9 @@ fn live_oracle_series_abs_with_nulls() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.abs().expect("abs");
@@ -32192,7 +32555,9 @@ fn live_oracle_series_abs_extreme_values() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.abs().expect("abs");
@@ -32238,10 +32603,14 @@ fn live_oracle_series_drop_duplicates_with_strings() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
-    let actual = series.drop_duplicates_keep(super::DuplicateKeep::First).expect("drop_duplicates");
+    let actual = series
+        .drop_duplicates_keep(super::DuplicateKeep::First)
+        .expect("drop_duplicates");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
 
@@ -32284,10 +32653,14 @@ fn live_oracle_series_drop_duplicates_with_floats() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
-    let actual = series.drop_duplicates_keep(super::DuplicateKeep::First).expect("drop_duplicates");
+    let actual = series
+        .drop_duplicates_keep(super::DuplicateKeep::First)
+        .expect("drop_duplicates");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
 
@@ -32353,10 +32726,14 @@ fn live_oracle_dataframe_pivot_table_count() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected_frame) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected_frame) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
-    let result = frame.pivot_table("val", "row", "col", "count").expect("pivot_table");
+    let result = frame
+        .pivot_table("val", "row", "col", "count")
+        .expect("pivot_table");
     super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
 }
 
@@ -32422,10 +32799,14 @@ fn live_oracle_dataframe_pivot_table_min() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected_frame) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected_frame) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
-    let result = frame.pivot_table("val", "row", "col", "min").expect("pivot_table");
+    let result = frame
+        .pivot_table("val", "row", "col", "min")
+        .expect("pivot_table");
     super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
 }
 
@@ -32465,7 +32846,9 @@ fn live_oracle_series_str_translate_no_match() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.str().translate("xyz", "ABC").expect("translate");
@@ -32508,7 +32891,9 @@ fn live_oracle_series_str_translate_partial_match() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.str().translate("aeiou", "AEIOU").expect("translate");
@@ -32549,7 +32934,9 @@ fn live_oracle_series_str_casefold_with_german_sharp_s() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.str().casefold().expect("casefold");
@@ -32595,7 +32982,9 @@ fn live_oracle_series_iloc_single_position() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let positions = fixture.iloc_positions.as_ref().expect("iloc_positions");
@@ -32642,7 +33031,9 @@ fn live_oracle_series_iloc_reverse() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let positions = fixture.iloc_positions.as_ref().expect("iloc_positions");
@@ -32692,7 +33083,9 @@ fn live_oracle_series_loc_subset_int_index() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let labels = fixture.loc_labels.as_ref().expect("loc_labels");
@@ -32734,7 +33127,9 @@ fn live_oracle_series_str_strip_with_tabs_newlines() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.str().strip().expect("strip");
@@ -32775,7 +33170,9 @@ fn live_oracle_series_str_lstrip_with_tabs() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.str().lstrip().expect("lstrip");
@@ -32817,7 +33214,9 @@ fn live_oracle_series_to_frame_named() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.to_frame(Some("renamed_col")).expect("to_frame");
@@ -32858,7 +33257,9 @@ fn live_oracle_series_to_frame_with_string_index() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.to_frame(None).expect("to_frame");
@@ -32901,7 +33302,9 @@ fn live_oracle_series_to_numeric_scientific() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = super::to_numeric(&series).expect("to_numeric");
@@ -32942,7 +33345,9 @@ fn live_oracle_series_to_timedelta_with_negatives() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = fp_frame::to_timedelta(&series).expect("to_timedelta");
@@ -32983,7 +33388,9 @@ fn live_oracle_series_to_timedelta_with_seconds() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = fp_frame::to_timedelta(&series).expect("to_timedelta");
@@ -33025,7 +33432,9 @@ fn live_oracle_series_to_datetime_unit_microseconds() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = fp_frame::to_datetime_with_options(
@@ -33037,7 +33446,8 @@ fn live_oracle_series_to_datetime_unit_microseconds() {
             origin: None,
             infer_mixed_timezone: true,
         },
-    ).expect("to_datetime");
+    )
+    .expect("to_datetime");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
 
@@ -33076,7 +33486,9 @@ fn live_oracle_series_to_datetime_unit_minutes() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = fp_frame::to_datetime_with_options(
@@ -33088,7 +33500,8 @@ fn live_oracle_series_to_datetime_unit_minutes() {
             origin: None,
             infer_mixed_timezone: true,
         },
-    ).expect("to_datetime");
+    )
+    .expect("to_datetime");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
 
@@ -33129,7 +33542,9 @@ fn live_oracle_series_str_split_count_pipe_separator() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.str().split_count("|").expect("split_count");
@@ -33175,10 +33590,14 @@ fn live_oracle_dataframe_at_time_evening() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
-    let actual = frame.at_time(fixture.time_value.as_deref().expect("time_value")).expect("at_time");
+    let actual = frame
+        .at_time(fixture.time_value.as_deref().expect("time_value"))
+        .expect("at_time");
     super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
 }
 
@@ -33224,13 +33643,17 @@ fn live_oracle_dataframe_between_time_evening() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
-    let actual = frame.between_time(
-        fixture.start_time.as_deref().expect("start_time"),
-        fixture.end_time.as_deref().expect("end_time"),
-    ).expect("between_time");
+    let actual = frame
+        .between_time(
+            fixture.start_time.as_deref().expect("start_time"),
+            fixture.end_time.as_deref().expect("end_time"),
+        )
+        .expect("between_time");
     super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
 }
 
@@ -33275,10 +33698,15 @@ fn live_oracle_dataframe_resample_sum_daily() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
-    let actual = frame.resample(fixture.resample_freq.as_deref().expect("resample_freq")).sum().expect("resample sum");
+    let actual = frame
+        .resample(fixture.resample_freq.as_deref().expect("resample_freq"))
+        .sum()
+        .expect("resample sum");
     super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
 }
 
@@ -33319,10 +33747,15 @@ fn live_oracle_series_resample_sum_daily() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
-    let actual = series.resample(fixture.resample_freq.as_deref().expect("resample_freq")).sum().expect("resample sum");
+    let actual = series
+        .resample(fixture.resample_freq.as_deref().expect("resample_freq"))
+        .sum()
+        .expect("resample sum");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
 
@@ -33363,10 +33796,15 @@ fn live_oracle_series_resample_mean_daily() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
-    let actual = series.resample(fixture.resample_freq.as_deref().expect("resample_freq")).mean().expect("resample mean");
+    let actual = series
+        .resample(fixture.resample_freq.as_deref().expect("resample_freq"))
+        .mean()
+        .expect("resample mean");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
 
@@ -33407,10 +33845,15 @@ fn live_oracle_series_resample_count_daily() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
-    let actual = series.resample(fixture.resample_freq.as_deref().expect("resample_freq")).count().expect("resample count");
+    let actual = series
+        .resample(fixture.resample_freq.as_deref().expect("resample_freq"))
+        .count()
+        .expect("resample count");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
 
@@ -33458,7 +33901,9 @@ fn live_oracle_series_categorical_from_codes_ordered() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let left = fixture.left.as_ref().expect("left");
     let codes: Vec<i64> = left
@@ -33469,10 +33914,18 @@ fn live_oracle_series_categorical_from_codes_ordered() {
             _ => None,
         })
         .collect();
-    let categories = fixture.categorical_categories.clone().expect("categorical_categories");
-    let categorical = super::Series::from_categorical_codes(left.name.clone(), codes, categories, true)
-        .expect("from_categorical_codes");
-    let actual = categorical.cat().expect("cat").to_values().expect("to_values");
+    let categories = fixture
+        .categorical_categories
+        .clone()
+        .expect("categorical_categories");
+    let categorical =
+        super::Series::from_categorical_codes(left.name.clone(), codes, categories, true)
+            .expect("from_categorical_codes");
+    let actual = categorical
+        .cat()
+        .expect("cat")
+        .to_values()
+        .expect("to_values");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
 
@@ -33512,7 +33965,9 @@ fn live_oracle_series_str_isalpha_with_unicode() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.str().isalpha().expect("isalpha");
@@ -33553,7 +34008,9 @@ fn live_oracle_series_str_isdigit_with_unicode() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.str().isdigit().expect("isdigit");
@@ -33596,7 +34053,9 @@ fn live_oracle_series_str_replace_with_empty() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.str().replace("[aeiou]", "").expect("replace empty");
@@ -33639,10 +34098,15 @@ fn live_oracle_series_str_replace_with_unicode() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
-    let actual = series.str().replace("café", "COFFEE").expect("replace unicode");
+    let actual = series
+        .str()
+        .replace("café", "COFFEE")
+        .expect("replace unicode");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
 
@@ -33681,7 +34145,9 @@ fn live_oracle_series_str_removeprefix_no_match() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.str().removeprefix("xyz").expect("removeprefix");
@@ -33723,7 +34189,9 @@ fn live_oracle_series_str_removesuffix_unicode() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.str().removesuffix("é").expect("removesuffix");
@@ -33766,7 +34234,9 @@ fn live_oracle_series_str_split_get_index_0() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.str().split_get("-", 0).expect("split_get");
@@ -33809,7 +34279,9 @@ fn live_oracle_series_str_split_get_index_2_basic() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.str().split_get("-", 2).expect("split_get");
@@ -33852,7 +34324,9 @@ fn live_oracle_series_str_rsplit_get_index_1() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.str().rsplit_get("-", 1).expect("rsplit_get");
@@ -33894,7 +34368,9 @@ fn live_oracle_series_str_normalize_nfc_combining_marks() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.str().normalize("NFC").expect("normalize NFC");
@@ -33938,7 +34414,9 @@ fn live_oracle_series_str_zfill_with_negative_prefix() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.str().zfill(6).expect("zfill");
@@ -33985,7 +34463,9 @@ fn live_oracle_series_unique_strings_with_nulls() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let unique_values = series.unique();
@@ -34035,7 +34515,9 @@ fn live_oracle_series_round_int_values() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.round(1).expect("round");
@@ -34079,7 +34561,9 @@ fn live_oracle_series_diff_int_values() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let result = series.diff(1).expect("diff");
@@ -34123,7 +34607,9 @@ fn live_oracle_series_diff_with_negatives() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let result = series.diff(1).expect("diff");
@@ -34167,7 +34653,9 @@ fn live_oracle_series_shift_with_strings() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.shift(1).expect("shift");
@@ -34221,9 +34709,12 @@ fn live_oracle_series_combine_first_int_data() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
-    let actual = super::execute_series_combine_first_fixture_operation(&fixture).expect("actual series");
+    let actual =
+        super::execute_series_combine_first_fixture_operation(&fixture).expect("actual series");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
 
@@ -34270,9 +34761,12 @@ fn live_oracle_series_combine_first_disjoint_indices() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
-    let actual = super::execute_series_combine_first_fixture_operation(&fixture).expect("actual series");
+    let actual =
+        super::execute_series_combine_first_fixture_operation(&fixture).expect("actual series");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
 
@@ -34314,7 +34808,9 @@ fn live_oracle_series_dropna_strings() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.dropna().expect("dropna");
@@ -34369,7 +34865,9 @@ fn live_oracle_series_replace_with_multiple_pairs() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let replacements: Vec<(super::Scalar, super::Scalar)> = fixture
@@ -34419,7 +34917,9 @@ fn live_oracle_series_take_with_floats() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let indices = fixture.take_indices.as_ref().expect("take_indices");
@@ -34466,7 +34966,9 @@ fn live_oracle_series_argsort_floats_with_ties() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.argsort(true).expect("argsort");
@@ -34509,7 +35011,9 @@ fn live_oracle_series_idxmin_with_int_index() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Scalar(_)));
-    let super::ResolvedExpected::Scalar(expected) = expected else { return; };
+    let super::ResolvedExpected::Scalar(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let label = series.idxmin().expect("idxmin");
@@ -34553,7 +35057,9 @@ fn live_oracle_series_idxmax_with_int_index() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Scalar(_)));
-    let super::ResolvedExpected::Scalar(expected) = expected else { return; };
+    let super::ResolvedExpected::Scalar(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let label = series.idxmax().expect("idxmax");
@@ -34601,7 +35107,9 @@ fn live_oracle_series_count_strings_with_nulls() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Scalar(_)));
-    let super::ResolvedExpected::Scalar(expected) = expected else { return; };
+    let super::ResolvedExpected::Scalar(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = fp_types::Scalar::Int64(series.count() as i64);
@@ -34646,7 +35154,9 @@ fn live_oracle_series_nunique_strings() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Scalar(_)));
-    let super::ResolvedExpected::Scalar(expected) = expected else { return; };
+    let super::ResolvedExpected::Scalar(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = fp_types::Scalar::Int64(series.nunique() as i64);
@@ -34689,7 +35199,9 @@ fn live_oracle_series_argmin_with_int_index() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Scalar(_)));
-    let super::ResolvedExpected::Scalar(expected) = expected else { return; };
+    let super::ResolvedExpected::Scalar(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let idx = series.argmin().expect("argmin");
@@ -34733,7 +35245,9 @@ fn live_oracle_series_argmax_with_int_index() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Scalar(_)));
-    let super::ResolvedExpected::Scalar(expected) = expected else { return; };
+    let super::ResolvedExpected::Scalar(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let idx = series.argmax().expect("argmax");
@@ -34777,7 +35291,9 @@ fn live_oracle_series_isna_with_strings() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let result = series.isna().expect("isna");
@@ -34820,7 +35336,9 @@ fn live_oracle_series_notna_with_strings() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let result = series.notna().expect("notna");
@@ -34863,10 +35381,15 @@ fn live_oracle_series_str_findall_words() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
-    let actual = series.str().findall("[a-zA-Z]+", "|").expect("findall words");
+    let actual = series
+        .str()
+        .findall("[a-zA-Z]+", "|")
+        .expect("findall words");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
 
@@ -34909,7 +35432,9 @@ fn live_oracle_series_str_contains_any_three_patterns() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let pats: Vec<&str> = fixture
@@ -34962,10 +35487,18 @@ fn live_oracle_series_str_startswith_any_three_prefixes() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
-    let pats: Vec<&str> = fixture.str_patterns.as_ref().expect("str_patterns").iter().map(String::as_str).collect();
+    let pats: Vec<&str> = fixture
+        .str_patterns
+        .as_ref()
+        .expect("str_patterns")
+        .iter()
+        .map(String::as_str)
+        .collect();
     let actual = series.str().startswith_any(&pats).expect("startswith_any");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
@@ -35009,10 +35542,18 @@ fn live_oracle_series_str_endswith_any_three_suffixes() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
-    let pats: Vec<&str> = fixture.str_patterns.as_ref().expect("str_patterns").iter().map(String::as_str).collect();
+    let pats: Vec<&str> = fixture
+        .str_patterns
+        .as_ref()
+        .expect("str_patterns")
+        .iter()
+        .map(String::as_str)
+        .collect();
     let actual = series.str().endswith_any(&pats).expect("endswith_any");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
@@ -35054,7 +35595,9 @@ fn live_oracle_series_str_fullmatch_alphanumeric() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.str().fullmatch("[a-zA-Z0-9]+").expect("fullmatch");
@@ -35098,7 +35641,9 @@ fn live_oracle_series_str_match_anchored_pattern() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.str().match_regex("^test").expect("match");
@@ -35140,7 +35685,9 @@ fn live_oracle_series_str_repeat_zero() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.str().repeat(0).expect("repeat 0");
@@ -35182,7 +35729,9 @@ fn live_oracle_series_str_repeat_large_n() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.str().repeat(5).expect("repeat 5");
@@ -35224,7 +35773,9 @@ fn live_oracle_series_str_slice_no_end() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.str().slice(2, fixture.str_slice_end).expect("slice");
@@ -35266,7 +35817,9 @@ fn live_oracle_series_str_get_with_unicode() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.str().get(0).expect("get");
@@ -35309,7 +35862,9 @@ fn live_oracle_series_str_istitle_with_unicode() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.str().istitle().expect("istitle");
@@ -35352,7 +35907,9 @@ fn live_oracle_series_str_isdecimal_with_unicode() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.str().isdecimal().expect("isdecimal");
@@ -35395,7 +35952,9 @@ fn live_oracle_series_str_isspace_with_tabs_newlines() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.str().isspace().expect("isspace");
@@ -35453,7 +36012,9 @@ fn live_oracle_dataframe_drop_columns_three() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected_frame) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected_frame) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
     let result = frame.drop_columns(&["a", "c", "d"]).expect("drop_columns");
@@ -35508,7 +36069,9 @@ fn live_oracle_dataframe_insert_at_zero() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected) = expected else {
+        return;
+    };
 
     let actual = super::execute_dataframe_fixture_operation(&fixture).expect("insert");
     super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
@@ -35562,7 +36125,9 @@ fn live_oracle_dataframe_insert_at_end() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected) = expected else {
+        return;
+    };
 
     let actual = super::execute_dataframe_fixture_operation(&fixture).expect("insert");
     super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
@@ -35610,10 +36175,14 @@ fn live_oracle_dataframe_rename_columns_with_unicode() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected_frame) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected_frame) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
-    let result = frame.rename_columns(&[("a", "alpha_é"), ("b", "über")]).expect("rename");
+    let result = frame
+        .rename_columns(&[("a", "alpha_é"), ("b", "über")])
+        .expect("rename");
     super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
 }
 
@@ -35660,10 +36229,14 @@ fn live_oracle_dataframe_set_index_with_string_column() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
-    let actual = frame.set_index_with_verify_integrity("name", true, false).expect("set_index");
+    let actual = frame
+        .set_index_with_verify_integrity("name", true, false)
+        .expect("set_index");
     super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
 }
 
@@ -35713,7 +36286,9 @@ fn live_oracle_dataframe_sort_values_strings() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected_frame) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected_frame) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
     let result = frame.sort_values("name", true).expect("sort_values");
@@ -35757,7 +36332,9 @@ fn live_oracle_dataframe_sort_index_with_string_index() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected_frame) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected_frame) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
     let result = frame.sort_index(true).expect("sort_index");
@@ -35814,10 +36391,14 @@ fn live_oracle_dataframe_nlargest_keep_all() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
-    let actual = frame.nlargest_keep(3, "a", "all").expect("nlargest keep=all");
+    let actual = frame
+        .nlargest_keep(3, "a", "all")
+        .expect("nlargest keep=all");
     super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
 }
 
@@ -35857,7 +36438,9 @@ fn live_oracle_series_str_slice_with_unicode() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.str().slice(0, Some(3)).expect("slice");
@@ -35907,11 +36490,15 @@ fn live_oracle_dataframe_loc_with_unicode_labels() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
     let labels = fixture.loc_labels.as_ref().expect("loc_labels");
-    let actual = frame.loc_with_columns(labels, fixture.column_order.as_deref()).expect("loc");
+    let actual = frame
+        .loc_with_columns(labels, fixture.column_order.as_deref())
+        .expect("loc");
     super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
 }
 
@@ -35966,13 +36553,24 @@ fn live_oracle_dataframe_replace_string_three_pairs() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected_frame) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected_frame) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
     let replacements = vec![
-        (fp_types::Scalar::Utf8("x".to_string()), fp_types::Scalar::Utf8("X".to_string())),
-        (fp_types::Scalar::Utf8("y".to_string()), fp_types::Scalar::Utf8("Y".to_string())),
-        (fp_types::Scalar::Utf8("z".to_string()), fp_types::Scalar::Utf8("Z".to_string())),
+        (
+            fp_types::Scalar::Utf8("x".to_string()),
+            fp_types::Scalar::Utf8("X".to_string()),
+        ),
+        (
+            fp_types::Scalar::Utf8("y".to_string()),
+            fp_types::Scalar::Utf8("Y".to_string()),
+        ),
+        (
+            fp_types::Scalar::Utf8("z".to_string()),
+            fp_types::Scalar::Utf8("Z".to_string()),
+        ),
     ];
     let result = frame.replace(&replacements).expect("replace");
     super::compare_dataframe_expected(&result, &expected_frame).expect("pandas parity");
@@ -36030,7 +36628,9 @@ fn live_oracle_dataframe_get_dummies_three_columns() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected_frame) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected_frame) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
     let result = frame.get_dummies(&["a", "b", "c"]).expect("get_dummies");
@@ -36074,7 +36674,9 @@ fn live_oracle_series_str_get_dummies_semicolon() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected_frame) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected_frame) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let result = series.str().get_dummies(";").expect("get_dummies");
@@ -36139,7 +36741,9 @@ fn live_oracle_dataframe_value_counts_three_columns() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
     let actual = frame.value_counts().expect("value_counts");
@@ -36197,10 +36801,14 @@ fn live_oracle_dataframe_corr_numeric_only_true() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
-    let actual = frame.corr_with_numeric_only(true).expect("corr numeric_only");
+    let actual = frame
+        .corr_with_numeric_only(true)
+        .expect("corr numeric_only");
     super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
 }
 
@@ -36239,7 +36847,9 @@ fn live_oracle_series_str_count_with_unicode() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.str().count("é").expect("count");
@@ -36281,7 +36891,9 @@ fn live_oracle_series_str_startswith_with_unicode() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.str().startswith("café").expect("startswith");
@@ -36323,7 +36935,9 @@ fn live_oracle_series_str_endswith_with_unicode() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.str().endswith("é").expect("endswith");
@@ -36365,7 +36979,9 @@ fn live_oracle_series_str_contains_with_unicode() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.str().contains("café").expect("contains");
@@ -36408,7 +37024,9 @@ fn live_oracle_series_str_replace_no_match() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.str().replace("xyz", "ABC").expect("replace");
@@ -36465,7 +37083,9 @@ fn live_oracle_dataframe_nunique_three_columns_with_strings() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
     let result = frame.nunique().expect("nunique");
@@ -36525,7 +37145,9 @@ fn live_oracle_dataframe_pivot_int_columns() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected_frame) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected_frame) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("dataframe");
     let result = frame.pivot("year", "month", "sales").expect("pivot");
@@ -36589,10 +37211,14 @@ fn live_oracle_dataframe_explode_larger_frame() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
-    let actual = frame.explode_with_ignore_index("tags", ",", false).expect("explode");
+    let actual = frame
+        .explode_with_ignore_index("tags", ",", false)
+        .expect("explode");
     super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
 }
 
@@ -36630,7 +37256,9 @@ fn live_oracle_series_str_decode_basic() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.str().decode("utf-8").expect("decode");
@@ -36680,7 +37308,9 @@ fn live_oracle_series_concat_with_strings() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let left = super::build_series(fixture.left.as_ref().expect("left")).expect("left");
     let right = super::build_series(fixture.right.as_ref().expect("right")).expect("right");
@@ -36728,7 +37358,9 @@ fn live_oracle_dataframe_diff_axis0_with_nulls() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
     let actual = frame.diff(1).expect("diff");
@@ -36772,7 +37404,9 @@ fn live_oracle_series_pct_change_with_int_values() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let result = series.pct_change(1).expect("pct_change");
@@ -36824,7 +37458,9 @@ fn live_oracle_series_update_with_strings() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let other = super::build_series(fixture.right.as_ref().expect("right")).expect("other");
@@ -36867,7 +37503,9 @@ fn live_oracle_series_str_split_count_unicode_separator() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.str().split_count("é").expect("split_count");
@@ -36929,14 +37567,17 @@ fn live_oracle_groupby_min_with_string_keys() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let keys = super::build_series(fixture.left.as_ref().expect("left")).expect("keys");
     let values = super::build_series(fixture.right.as_ref().expect("right")).expect("values");
     let options = fp_groupby::GroupByOptions::default();
     let policy = super::RuntimePolicy::strict();
     let mut ledger = super::EvidenceLedger::new();
-    let result = fp_groupby::groupby_min(&keys, &values, options, &policy, &mut ledger).expect("groupby_min");
+    let result = fp_groupby::groupby_min(&keys, &values, options, &policy, &mut ledger)
+        .expect("groupby_min");
     super::compare_series_expected(&result, &expected).expect("pandas parity");
 }
 
@@ -36995,14 +37636,17 @@ fn live_oracle_groupby_max_with_string_keys() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let keys = super::build_series(fixture.left.as_ref().expect("left")).expect("keys");
     let values = super::build_series(fixture.right.as_ref().expect("right")).expect("values");
     let options = fp_groupby::GroupByOptions::default();
     let policy = super::RuntimePolicy::strict();
     let mut ledger = super::EvidenceLedger::new();
-    let result = fp_groupby::groupby_max(&keys, &values, options, &policy, &mut ledger).expect("groupby_max");
+    let result = fp_groupby::groupby_max(&keys, &values, options, &policy, &mut ledger)
+        .expect("groupby_max");
     super::compare_series_expected(&result, &expected).expect("pandas parity");
 }
 
@@ -37061,14 +37705,17 @@ fn live_oracle_groupby_count_with_string_keys() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let keys = super::build_series(fixture.left.as_ref().expect("left")).expect("keys");
     let values = super::build_series(fixture.right.as_ref().expect("right")).expect("values");
     let options = fp_groupby::GroupByOptions::default();
     let policy = super::RuntimePolicy::strict();
     let mut ledger = super::EvidenceLedger::new();
-    let result = fp_groupby::groupby_count(&keys, &values, options, &policy, &mut ledger).expect("groupby_count");
+    let result = fp_groupby::groupby_count(&keys, &values, options, &policy, &mut ledger)
+        .expect("groupby_count");
     super::compare_series_expected(&result, &expected).expect("pandas parity");
 }
 
@@ -37127,14 +37774,17 @@ fn live_oracle_groupby_first_with_string_keys() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let keys = super::build_series(fixture.left.as_ref().expect("left")).expect("keys");
     let values = super::build_series(fixture.right.as_ref().expect("right")).expect("values");
     let options = fp_groupby::GroupByOptions::default();
     let policy = super::RuntimePolicy::strict();
     let mut ledger = super::EvidenceLedger::new();
-    let result = fp_groupby::groupby_first(&keys, &values, options, &policy, &mut ledger).expect("groupby_first");
+    let result = fp_groupby::groupby_first(&keys, &values, options, &policy, &mut ledger)
+        .expect("groupby_first");
     super::compare_series_expected(&result, &expected).expect("pandas parity");
 }
 
@@ -37193,14 +37843,17 @@ fn live_oracle_groupby_last_with_string_keys() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let keys = super::build_series(fixture.left.as_ref().expect("left")).expect("keys");
     let values = super::build_series(fixture.right.as_ref().expect("right")).expect("values");
     let options = fp_groupby::GroupByOptions::default();
     let policy = super::RuntimePolicy::strict();
     let mut ledger = super::EvidenceLedger::new();
-    let result = fp_groupby::groupby_last(&keys, &values, options, &policy, &mut ledger).expect("groupby_last");
+    let result = fp_groupby::groupby_last(&keys, &values, options, &policy, &mut ledger)
+        .expect("groupby_last");
     super::compare_series_expected(&result, &expected).expect("pandas parity");
 }
 
@@ -37259,14 +37912,17 @@ fn live_oracle_groupby_sum_with_float_values() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let keys = super::build_series(fixture.left.as_ref().expect("left")).expect("keys");
     let values = super::build_series(fixture.right.as_ref().expect("right")).expect("values");
     let options = fp_groupby::GroupByOptions::default();
     let policy = super::RuntimePolicy::strict();
     let mut ledger = super::EvidenceLedger::new();
-    let result = fp_groupby::groupby_sum(&keys, &values, options, &policy, &mut ledger).expect("groupby_sum");
+    let result = fp_groupby::groupby_sum(&keys, &values, options, &policy, &mut ledger)
+        .expect("groupby_sum");
     super::compare_series_expected(&result, &expected).expect("pandas parity");
 }
 
@@ -37325,14 +37981,17 @@ fn live_oracle_groupby_mean_with_float_values() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let keys = super::build_series(fixture.left.as_ref().expect("left")).expect("keys");
     let values = super::build_series(fixture.right.as_ref().expect("right")).expect("values");
     let options = fp_groupby::GroupByOptions::default();
     let policy = super::RuntimePolicy::strict();
     let mut ledger = super::EvidenceLedger::new();
-    let result = fp_groupby::groupby_mean(&keys, &values, options, &policy, &mut ledger).expect("groupby_mean");
+    let result = fp_groupby::groupby_mean(&keys, &values, options, &policy, &mut ledger)
+        .expect("groupby_mean");
     super::compare_series_expected(&result, &expected).expect("pandas parity");
 }
 
@@ -37395,14 +38054,17 @@ fn live_oracle_groupby_std_with_string_keys() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let keys = super::build_series(fixture.left.as_ref().expect("left")).expect("keys");
     let values = super::build_series(fixture.right.as_ref().expect("right")).expect("values");
     let options = fp_groupby::GroupByOptions::default();
     let policy = super::RuntimePolicy::strict();
     let mut ledger = super::EvidenceLedger::new();
-    let result = fp_groupby::groupby_std(&keys, &values, options, &policy, &mut ledger).expect("groupby_std");
+    let result = fp_groupby::groupby_std(&keys, &values, options, &policy, &mut ledger)
+        .expect("groupby_std");
     super::compare_series_expected(&result, &expected).expect("pandas parity");
 }
 
@@ -37465,14 +38127,17 @@ fn live_oracle_groupby_median_with_string_keys() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let keys = super::build_series(fixture.left.as_ref().expect("left")).expect("keys");
     let values = super::build_series(fixture.right.as_ref().expect("right")).expect("values");
     let options = fp_groupby::GroupByOptions::default();
     let policy = super::RuntimePolicy::strict();
     let mut ledger = super::EvidenceLedger::new();
-    let result = fp_groupby::groupby_median(&keys, &values, options, &policy, &mut ledger).expect("groupby_median");
+    let result = fp_groupby::groupby_median(&keys, &values, options, &policy, &mut ledger)
+        .expect("groupby_median");
     super::compare_series_expected(&result, &expected).expect("pandas parity");
 }
 
@@ -37535,14 +38200,17 @@ fn live_oracle_groupby_var_with_string_keys() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let keys = super::build_series(fixture.left.as_ref().expect("left")).expect("keys");
     let values = super::build_series(fixture.right.as_ref().expect("right")).expect("values");
     let options = fp_groupby::GroupByOptions::default();
     let policy = super::RuntimePolicy::strict();
     let mut ledger = super::EvidenceLedger::new();
-    let result = fp_groupby::groupby_var(&keys, &values, options, &policy, &mut ledger).expect("groupby_var");
+    let result = fp_groupby::groupby_var(&keys, &values, options, &policy, &mut ledger)
+        .expect("groupby_var");
     super::compare_series_expected(&result, &expected).expect("pandas parity");
 }
 
@@ -37601,14 +38269,17 @@ fn live_oracle_groupby_first_with_float_values() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let keys = super::build_series(fixture.left.as_ref().expect("left")).expect("keys");
     let values = super::build_series(fixture.right.as_ref().expect("right")).expect("values");
     let options = fp_groupby::GroupByOptions::default();
     let policy = super::RuntimePolicy::strict();
     let mut ledger = super::EvidenceLedger::new();
-    let result = fp_groupby::groupby_first(&keys, &values, options, &policy, &mut ledger).expect("groupby_first");
+    let result = fp_groupby::groupby_first(&keys, &values, options, &policy, &mut ledger)
+        .expect("groupby_first");
     super::compare_series_expected(&result, &expected).expect("pandas parity");
 }
 
@@ -37667,14 +38338,17 @@ fn live_oracle_groupby_last_with_float_values() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let keys = super::build_series(fixture.left.as_ref().expect("left")).expect("keys");
     let values = super::build_series(fixture.right.as_ref().expect("right")).expect("values");
     let options = fp_groupby::GroupByOptions::default();
     let policy = super::RuntimePolicy::strict();
     let mut ledger = super::EvidenceLedger::new();
-    let result = fp_groupby::groupby_last(&keys, &values, options, &policy, &mut ledger).expect("groupby_last");
+    let result = fp_groupby::groupby_last(&keys, &values, options, &policy, &mut ledger)
+        .expect("groupby_last");
     super::compare_series_expected(&result, &expected).expect("pandas parity");
 }
 
@@ -37720,7 +38394,9 @@ fn live_oracle_dataframe_transpose_strings() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected_frame) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected_frame) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
     let result = frame.transpose().expect("transpose");
@@ -37815,7 +38491,9 @@ fn live_oracle_series_str_center_width20() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.str().center(20, '*').expect("center");
@@ -37858,7 +38536,9 @@ fn live_oracle_series_str_ljust_narrow_width() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.str().ljust(3, '.').expect("ljust");
@@ -37901,7 +38581,9 @@ fn live_oracle_series_str_rjust_narrow_width() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.str().rjust(3, '.').expect("rjust");
@@ -37945,7 +38627,9 @@ fn live_oracle_series_str_zfill_width10() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.str().zfill(10).expect("zfill");
@@ -37987,7 +38671,9 @@ fn live_oracle_series_partition_df_at_sign() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected) = expected else {
+        return;
+    };
 
     let actual = super::execute_dataframe_fixture_operation(&fixture).expect("partition_df");
     super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
@@ -38028,7 +38714,9 @@ fn live_oracle_series_split_df_comma_separator() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected) = expected else {
+        return;
+    };
 
     let actual = super::execute_dataframe_fixture_operation(&fixture).expect("split_df");
     super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
@@ -38069,7 +38757,9 @@ fn live_oracle_series_extract_df_three_groups() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected) = expected else {
+        return;
+    };
 
     let actual = super::execute_dataframe_fixture_operation(&fixture).expect("extract_df");
     super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
@@ -38110,7 +38800,9 @@ fn live_oracle_series_str_extractall_two_groups() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected) = expected else {
+        return;
+    };
 
     let actual = super::execute_dataframe_fixture_operation(&fixture).expect("extractall");
     super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
@@ -38156,7 +38848,9 @@ fn live_oracle_series_rank_dense_method() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.rank("dense", true, "keep").expect("rank dense");
@@ -38204,7 +38898,9 @@ fn live_oracle_series_rank_descending() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.rank("average", false, "keep").expect("rank desc");
@@ -38251,7 +38947,9 @@ fn live_oracle_series_rank_na_top() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series.rank("average", true, "top").expect("rank na_top");
@@ -38298,10 +38996,14 @@ fn live_oracle_series_rank_na_bottom() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
-    let actual = series.rank("average", true, "bottom").expect("rank na_bottom");
+    let actual = series
+        .rank("average", true, "bottom")
+        .expect("rank na_bottom");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
 
@@ -38345,10 +39047,14 @@ fn live_oracle_series_sort_values_na_first() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
-    let result = series.sort_values_na(true, "first").expect("sort_values_na first");
+    let result = series
+        .sort_values_na(true, "first")
+        .expect("sort_values_na first");
     super::compare_series_expected(&result, &expected).expect("pandas parity");
 }
 
@@ -38403,7 +39109,9 @@ fn live_oracle_series_where_without_fill() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let cond = super::build_series(fixture.right.as_ref().expect("right")).expect("cond");
@@ -38462,7 +39170,9 @@ fn live_oracle_series_mask_without_fill() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let cond = super::build_series(fixture.right.as_ref().expect("right")).expect("cond");
@@ -38507,7 +39217,9 @@ fn live_oracle_series_asof_string_index() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Scalar(_)));
-    let super::ResolvedExpected::Scalar(expected) = expected else { return; };
+    let super::ResolvedExpected::Scalar(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let label = fixture.asof_label.as_ref().expect("asof_label");
@@ -38564,7 +39276,9 @@ fn live_oracle_series_autocorr_lag2() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Scalar(_)));
-    let super::ResolvedExpected::Scalar(expected) = expected else { return; };
+    let super::ResolvedExpected::Scalar(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let value = series.autocorr(2).expect("autocorr lag2");
@@ -38618,7 +39332,9 @@ fn live_oracle_series_autocorr_lag3() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Scalar(_)));
-    let super::ResolvedExpected::Scalar(expected) = expected else { return; };
+    let super::ResolvedExpected::Scalar(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let value = series.autocorr(3).expect("autocorr lag3");
@@ -38667,7 +39383,9 @@ fn live_oracle_series_between_inclusive_left() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series
@@ -38721,7 +39439,9 @@ fn live_oracle_series_between_inclusive_right() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let actual = series
@@ -38772,7 +39492,9 @@ fn live_oracle_series_astype_string_to_int() {
         Err(_) => return,
     };
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let result = series.astype(fp_types::DType::Int64).expect("astype int64");
@@ -38817,7 +39539,9 @@ fn live_oracle_series_astype_bool_to_string() {
         Err(_) => return,
     };
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let result = series.astype(fp_types::DType::Utf8).expect("astype string");
@@ -38866,7 +39590,9 @@ fn live_oracle_series_rolling_min_min_periods_2() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let result = series.rolling(4, Some(2)).min().expect("rolling min mp2");
@@ -38915,7 +39641,9 @@ fn live_oracle_series_rolling_max_min_periods_2() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let result = series.rolling(4, Some(2)).max().expect("rolling max mp2");
@@ -38964,7 +39692,9 @@ fn live_oracle_series_rolling_std_min_periods_2() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let result = series.rolling(4, Some(2)).std().expect("rolling std mp2");
@@ -39009,7 +39739,9 @@ fn live_oracle_series_searchsorted_strings() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Scalar(_)));
-    let super::ResolvedExpected::Scalar(expected) = expected else { return; };
+    let super::ResolvedExpected::Scalar(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let needle = fixture.searchsorted_value.as_ref().expect("needle");
@@ -39055,7 +39787,9 @@ fn live_oracle_series_fillna_float_with_zero() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let fill = fixture.fill_value.as_ref().expect("fill_value");
@@ -39098,7 +39832,9 @@ fn live_oracle_series_fillna_float_with_negative() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let fill = fixture.fill_value.as_ref().expect("fill_value");
@@ -39152,7 +39888,9 @@ fn live_oracle_series_map_string_to_int() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let mapping: Vec<(super::Scalar, super::Scalar)> = fixture
@@ -39160,7 +39898,13 @@ fn live_oracle_series_map_string_to_int() {
         .as_ref()
         .expect("replace_to_find")
         .iter()
-        .zip(fixture.replace_to_value.as_ref().expect("replace_to_value").iter())
+        .zip(
+            fixture
+                .replace_to_value
+                .as_ref()
+                .expect("replace_to_value")
+                .iter(),
+        )
         .map(|(f, v)| (f.clone(), v.clone()))
         .collect();
     let actual = series.map(&mapping).expect("series map s2i");
@@ -39213,7 +39957,9 @@ fn live_oracle_series_map_int_to_int() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let mapping: Vec<(super::Scalar, super::Scalar)> = fixture
@@ -39221,7 +39967,13 @@ fn live_oracle_series_map_int_to_int() {
         .as_ref()
         .expect("replace_to_find")
         .iter()
-        .zip(fixture.replace_to_value.as_ref().expect("replace_to_value").iter())
+        .zip(
+            fixture
+                .replace_to_value
+                .as_ref()
+                .expect("replace_to_value")
+                .iter(),
+        )
         .map(|(f, v)| (f.clone(), v.clone()))
         .collect();
     let actual = series.map(&mapping).expect("series map i2i");
@@ -39263,7 +40015,9 @@ fn live_oracle_series_repeat_strings() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let counts = vec![2usize; series.len()];
@@ -39310,7 +40064,9 @@ fn live_oracle_series_repeat_with_zero_counts() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let counts = vec![2usize, 0, 3, 0, 1];
@@ -39363,7 +40119,9 @@ fn live_oracle_series_update_with_floats() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let other = super::build_series(fixture.right.as_ref().expect("right")).expect("other");
@@ -39416,7 +40174,9 @@ fn live_oracle_series_update_with_disjoint_index() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Series(_)));
-    let super::ResolvedExpected::Series(expected) = expected else { return; };
+    let super::ResolvedExpected::Series(expected) = expected else {
+        return;
+    };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
     let other = super::build_series(fixture.right.as_ref().expect("right")).expect("other");
@@ -39469,7 +40229,9 @@ fn live_oracle_dataframe_query_inequality() {
     }
     let expected = expected_result.expect("live oracle expected");
     assert!(matches!(&expected, super::ResolvedExpected::Frame(_)));
-    let super::ResolvedExpected::Frame(expected_frame) = expected else { return; };
+    let super::ResolvedExpected::Frame(expected_frame) = expected else {
+        return;
+    };
 
     let frame = super::build_dataframe(fixture.frame.as_ref().expect("frame")).expect("frame");
     let policy = super::RuntimePolicy::strict();

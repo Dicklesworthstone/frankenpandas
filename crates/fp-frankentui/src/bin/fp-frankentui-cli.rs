@@ -1,7 +1,6 @@
 #![forbid(unsafe_code)]
 
-use std::path::PathBuf;
-use std::process::ExitCode;
+use std::{path::PathBuf, process::ExitCode};
 
 use fp_frankentui::{
     FsFtuiDataSource, FtuiDataSource, default_frankentui_e2e_scenarios,

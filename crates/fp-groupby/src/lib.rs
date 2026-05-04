@@ -1299,6 +1299,7 @@ pub fn approx_value_counts(values: &[Scalar]) -> Vec<(Scalar, u64)> {
 
 #[cfg(test)]
 mod tests {
+    use fp_frame::Series;
     use fp_index::IndexLabel;
     use fp_runtime::{EvidenceLedger, RuntimePolicy};
     use fp_types::{NullKind, Scalar};
@@ -1307,7 +1308,6 @@ mod tests {
         GroupByExecutionOptions, GroupByOptions, groupby_nunique, groupby_prod, groupby_size,
         groupby_sum, groupby_sum_with_options, groupby_sum_with_trace,
     };
-    use fp_frame::Series;
 
     #[test]
     fn groupby_sum_sorts_keys_by_default() {
@@ -2774,8 +2774,9 @@ mod tests {
     // === AG-12: Sketching / Streaming Aggregation Tests ===
 
     mod sketch_tests {
-        use super::super::*;
         use fp_types::{NullKind, Scalar};
+
+        use super::super::*;
 
         // --- HyperLogLog Tests ---
 
