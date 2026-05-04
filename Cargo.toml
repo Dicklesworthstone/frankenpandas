@@ -33,14 +33,14 @@ keywords = ["dataframe", "pandas", "analytics", "columnar", "rust"]
 categories = ["data-structures", "science"]
 
 [workspace.dependencies]
-arrow = { version = "58.1.0", default-features = false, features = ["prettyprint", "ipc"] }
+arrow = { version = "58.2.0", default-features = false, features = ["prettyprint", "ipc"] }
 bumpalo = { version = "3.20.2", features = ["collections"] }
 bytes = "1.11.1"
 calamine = "0.34.0"
 chrono = { version = "0.4.44", default-features = false, features = ["std"] }
 chrono-tz = "0.10.4"
 csv = "1.4.0"
-parquet = { version = "58.1.0", default-features = false, features = ["arrow", "snap"] }
+parquet = { version = "58.2.0", default-features = false, features = ["arrow", "snap"] }
 regex = "1.12.3"
 rust_xlsxwriter = "0.94.0"
 rusqlite = { version = "0.39.0", features = ["bundled", "column_decltype"] }
