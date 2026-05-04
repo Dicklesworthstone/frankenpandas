@@ -2032,6 +2032,78 @@ impl DatetimeIndex {
     }
 
     #[must_use]
+    pub fn set_names(&self, name: Option<&str>) -> Self {
+        Self {
+            index: self.index.set_names(name),
+        }
+    }
+
+    #[must_use]
+    pub fn rename_index(&self, name: Option<&str>) -> Self {
+        self.set_names(name)
+    }
+
+    #[must_use]
+    pub fn names(&self) -> Vec<Option<String>> {
+        self.index.names()
+    }
+
+    #[must_use]
+    pub fn copy(&self) -> Self {
+        self.clone()
+    }
+
+    #[must_use]
+    pub fn shape(&self) -> (usize,) {
+        self.index.shape()
+    }
+
+    #[must_use]
+    pub fn size(&self) -> usize {
+        self.index.size()
+    }
+
+    #[must_use]
+    pub fn empty(&self) -> bool {
+        self.index.empty()
+    }
+
+    #[must_use]
+    pub fn dtype(&self) -> &'static str {
+        "datetime64[ns]"
+    }
+
+    #[must_use]
+    pub fn dtypes(&self) -> Vec<&'static str> {
+        vec![self.dtype()]
+    }
+
+    #[must_use]
+    pub fn memory_usage(&self, deep: bool) -> usize {
+        self.index.memory_usage(deep)
+    }
+
+    #[must_use]
+    pub fn nbytes(&self) -> usize {
+        self.index.nbytes()
+    }
+
+    #[must_use]
+    pub fn hasnans(&self) -> bool {
+        self.index.hasnans()
+    }
+
+    #[must_use]
+    pub fn isna(&self) -> Vec<bool> {
+        self.index.isna()
+    }
+
+    #[must_use]
+    pub fn notna(&self) -> Vec<bool> {
+        self.index.notna()
+    }
+
+    #[must_use]
     pub fn nanos(&self) -> Vec<Option<i64>> {
         self.index
             .labels()
@@ -2044,6 +2116,31 @@ impl DatetimeIndex {
                 | IndexLabel::Datetime64(_) => None,
             })
             .collect()
+    }
+
+    #[must_use]
+    pub fn values(&self) -> Vec<Option<i64>> {
+        self.nanos()
+    }
+
+    #[must_use]
+    pub fn to_list(&self) -> Vec<Option<i64>> {
+        self.nanos()
+    }
+
+    #[must_use]
+    pub fn tolist(&self) -> Vec<Option<i64>> {
+        self.to_list()
+    }
+
+    #[must_use]
+    pub fn to_numpy(&self) -> Vec<Option<i64>> {
+        self.nanos()
+    }
+
+    #[must_use]
+    pub fn array(&self) -> Vec<Option<i64>> {
+        self.nanos()
     }
 
     #[must_use]
@@ -2121,8 +2218,105 @@ impl TimedeltaIndex {
     }
 
     #[must_use]
+    pub fn set_names(&self, name: Option<&str>) -> Self {
+        Self {
+            index: self.index.set_names(name),
+        }
+    }
+
+    #[must_use]
+    pub fn rename_index(&self, name: Option<&str>) -> Self {
+        self.set_names(name)
+    }
+
+    #[must_use]
+    pub fn names(&self) -> Vec<Option<String>> {
+        self.index.names()
+    }
+
+    #[must_use]
+    pub fn copy(&self) -> Self {
+        self.clone()
+    }
+
+    #[must_use]
+    pub fn shape(&self) -> (usize,) {
+        self.index.shape()
+    }
+
+    #[must_use]
+    pub fn size(&self) -> usize {
+        self.index.size()
+    }
+
+    #[must_use]
+    pub fn empty(&self) -> bool {
+        self.index.empty()
+    }
+
+    #[must_use]
+    pub fn dtype(&self) -> &'static str {
+        "timedelta64[ns]"
+    }
+
+    #[must_use]
+    pub fn dtypes(&self) -> Vec<&'static str> {
+        vec![self.dtype()]
+    }
+
+    #[must_use]
+    pub fn memory_usage(&self, deep: bool) -> usize {
+        self.index.memory_usage(deep)
+    }
+
+    #[must_use]
+    pub fn nbytes(&self) -> usize {
+        self.index.nbytes()
+    }
+
+    #[must_use]
+    pub fn hasnans(&self) -> bool {
+        self.index.hasnans()
+    }
+
+    #[must_use]
+    pub fn isna(&self) -> Vec<bool> {
+        self.index.isna()
+    }
+
+    #[must_use]
+    pub fn notna(&self) -> Vec<bool> {
+        self.index.notna()
+    }
+
+    #[must_use]
     pub fn nanos(&self) -> Vec<Option<i64>> {
         map_timedelta_labels(self.index.labels(), |nanos| nanos)
+    }
+
+    #[must_use]
+    pub fn values(&self) -> Vec<Option<i64>> {
+        self.nanos()
+    }
+
+    #[must_use]
+    pub fn to_list(&self) -> Vec<Option<i64>> {
+        self.nanos()
+    }
+
+    #[must_use]
+    pub fn tolist(&self) -> Vec<Option<i64>> {
+        self.to_list()
+    }
+
+    #[must_use]
+    pub fn to_numpy(&self) -> Vec<Option<i64>> {
+        self.nanos()
+    }
+
+    #[must_use]
+    pub fn array(&self) -> Vec<Option<i64>> {
+        self.nanos()
     }
 
     #[must_use]
@@ -2195,8 +2389,93 @@ impl PeriodIndex {
     }
 
     #[must_use]
+    pub fn set_names(&self, name: Option<&str>) -> Self {
+        let mut out = self.clone();
+        out.name = name.map(str::to_owned);
+        out
+    }
+
+    #[must_use]
+    pub fn rename_index(&self, name: Option<&str>) -> Self {
+        self.set_names(name)
+    }
+
+    #[must_use]
+    pub fn names(&self) -> Vec<Option<String>> {
+        vec![self.name.clone()]
+    }
+
+    #[must_use]
+    pub fn copy(&self) -> Self {
+        self.clone()
+    }
+
+    #[must_use]
+    pub fn shape(&self) -> (usize,) {
+        (self.len(),)
+    }
+
+    #[must_use]
+    pub fn size(&self) -> usize {
+        self.len()
+    }
+
+    #[must_use]
+    pub fn empty(&self) -> bool {
+        self.is_empty()
+    }
+
+    #[must_use]
+    pub fn dtype(&self) -> String {
+        self.freq().map_or_else(
+            || "period[unknown]".to_owned(),
+            |freq| format!("period[{freq}]"),
+        )
+    }
+
+    #[must_use]
+    pub fn dtypes(&self) -> Vec<String> {
+        vec![self.dtype()]
+    }
+
+    #[must_use]
+    pub fn memory_usage(&self, deep: bool) -> usize {
+        let name_bytes = if deep {
+            self.name.as_ref().map_or(0, String::len)
+        } else {
+            0
+        };
+        self.values.len() * std::mem::size_of::<Period>() + name_bytes
+    }
+
+    #[must_use]
+    pub fn nbytes(&self) -> usize {
+        self.memory_usage(false)
+    }
+
+    #[must_use]
     pub fn freq(&self) -> Option<PeriodFreq> {
         self.values.first().map(|period| period.freq)
+    }
+
+    #[must_use]
+    pub fn to_list(&self) -> Vec<Period> {
+        self.values.clone()
+    }
+
+    #[must_use]
+    pub fn tolist(&self) -> Vec<Period> {
+        self.to_list()
+    }
+
+    #[must_use]
+    pub fn to_numpy(&self) -> Vec<Period> {
+        self.values.clone()
+    }
+
+    #[must_use]
+    pub fn array(&self) -> Vec<Period> {
+        self.values.clone()
     }
 
     #[must_use]
@@ -2290,6 +2569,63 @@ impl RangeIndex {
     }
 
     #[must_use]
+    pub fn set_names(&self, name: Option<&str>) -> Self {
+        let mut out = self.clone();
+        out.name = name.map(str::to_owned);
+        out
+    }
+
+    #[must_use]
+    pub fn rename_index(&self, name: Option<&str>) -> Self {
+        self.set_names(name)
+    }
+
+    #[must_use]
+    pub fn names(&self) -> Vec<Option<String>> {
+        vec![self.name.clone()]
+    }
+
+    #[must_use]
+    pub fn copy(&self) -> Self {
+        self.clone()
+    }
+
+    #[must_use]
+    pub fn shape(&self) -> (usize,) {
+        (self.len(),)
+    }
+
+    #[must_use]
+    pub fn size(&self) -> usize {
+        self.len()
+    }
+
+    #[must_use]
+    pub fn empty(&self) -> bool {
+        self.is_empty()
+    }
+
+    #[must_use]
+    pub fn dtype(&self) -> &'static str {
+        "int64"
+    }
+
+    #[must_use]
+    pub fn dtypes(&self) -> Vec<&'static str> {
+        vec![self.dtype()]
+    }
+
+    #[must_use]
+    pub fn memory_usage(&self, _deep: bool) -> usize {
+        self.len() * std::mem::size_of::<i64>()
+    }
+
+    #[must_use]
+    pub fn nbytes(&self) -> usize {
+        self.memory_usage(false)
+    }
+
+    #[must_use]
     pub fn to_index(&self) -> Index {
         Index::from_range(self.start, self.stop, self.step).set_names(self.name.as_deref())
     }
@@ -2306,6 +2642,26 @@ impl RangeIndex {
                 }
             })
             .collect()
+    }
+
+    #[must_use]
+    pub fn to_list(&self) -> Vec<i64> {
+        self.values()
+    }
+
+    #[must_use]
+    pub fn tolist(&self) -> Vec<i64> {
+        self.values()
+    }
+
+    #[must_use]
+    pub fn to_numpy(&self) -> Vec<i64> {
+        self.values()
+    }
+
+    #[must_use]
+    pub fn array(&self) -> Vec<i64> {
+        self.values()
     }
 }
 
@@ -2393,6 +2749,81 @@ impl CategoricalIndex {
     }
 
     #[must_use]
+    pub fn set_names(&self, name: Option<&str>) -> Self {
+        let mut out = self.clone();
+        out.name = name.map(str::to_owned);
+        out
+    }
+
+    #[must_use]
+    pub fn rename_index(&self, name: Option<&str>) -> Self {
+        self.set_names(name)
+    }
+
+    #[must_use]
+    pub fn names(&self) -> Vec<Option<String>> {
+        vec![self.name.clone()]
+    }
+
+    #[must_use]
+    pub fn copy(&self) -> Self {
+        self.clone()
+    }
+
+    #[must_use]
+    pub fn shape(&self) -> (usize,) {
+        (self.len(),)
+    }
+
+    #[must_use]
+    pub fn size(&self) -> usize {
+        self.len()
+    }
+
+    #[must_use]
+    pub fn empty(&self) -> bool {
+        self.is_empty()
+    }
+
+    #[must_use]
+    pub fn dtype(&self) -> &'static str {
+        "category"
+    }
+
+    #[must_use]
+    pub fn dtypes(&self) -> Vec<&'static str> {
+        vec![self.dtype()]
+    }
+
+    #[must_use]
+    pub fn memory_usage(&self, deep: bool) -> usize {
+        let fixed = (self.labels.len() + self.categories.len()) * std::mem::size_of::<String>();
+        if deep {
+            fixed
+                + self.labels.iter().map(String::len).sum::<usize>()
+                + self.categories.iter().map(String::len).sum::<usize>()
+                + self.name.as_ref().map_or(0, String::len)
+        } else {
+            fixed
+        }
+    }
+
+    #[must_use]
+    pub fn nbytes(&self) -> usize {
+        self.memory_usage(false)
+    }
+
+    #[must_use]
+    pub fn isna(&self) -> Vec<bool> {
+        vec![false; self.len()]
+    }
+
+    #[must_use]
+    pub fn notna(&self) -> Vec<bool> {
+        vec![true; self.len()]
+    }
+
+    #[must_use]
     pub fn codes(&self) -> Vec<Option<usize>> {
         self.labels
             .iter()
@@ -2402,6 +2833,31 @@ impl CategoricalIndex {
                     .position(|category| category == label)
             })
             .collect()
+    }
+
+    #[must_use]
+    pub fn values(&self) -> Vec<String> {
+        self.labels.clone()
+    }
+
+    #[must_use]
+    pub fn to_list(&self) -> Vec<String> {
+        self.labels.clone()
+    }
+
+    #[must_use]
+    pub fn tolist(&self) -> Vec<String> {
+        self.to_list()
+    }
+
+    #[must_use]
+    pub fn to_numpy(&self) -> Vec<String> {
+        self.labels.clone()
+    }
+
+    #[must_use]
+    pub fn array(&self) -> Vec<String> {
+        self.labels.clone()
     }
 
     #[must_use]
@@ -5302,20 +5758,64 @@ mod tests {
     fn index_variant_wrappers_expose_public_type_surface() {
         let range = RangeIndex::new(1, 7, 2).unwrap().set_name("row");
         assert_eq!(range.values(), vec![1, 3, 5]);
+        assert_eq!(range.to_list(), range.values());
+        assert_eq!(range.tolist(), range.values());
+        assert_eq!(range.to_numpy(), range.values());
+        assert_eq!(range.array(), range.values());
         assert_eq!(range.len(), 3);
+        assert_eq!(range.size(), 3);
+        assert_eq!(range.shape(), (3,));
+        assert!(!range.empty());
+        assert_eq!(range.dtype(), "int64");
+        assert_eq!(range.dtypes(), vec!["int64"]);
+        assert_eq!(range.names(), vec![Some("row".to_owned())]);
+        assert_eq!(range.copy(), range);
+        assert_eq!(range.rename_index(None).name(), None);
+        assert_eq!(range.nbytes(), 3 * std::mem::size_of::<i64>());
         assert_eq!(range.to_index().name(), Some("row"));
         assert!(RangeIndex::new(0, 5, 0).is_err());
 
-        let dt = DatetimeIndex::new(vec![1_706_918_400_000_000_000, i64::MIN]);
+        let dt = DatetimeIndex::new(vec![1_706_918_400_000_000_000, i64::MIN]).set_name("when");
         assert_eq!(dt.year(), vec![Some(2024), None]);
         assert_eq!(dt.month(), vec![Some(2), None]);
         assert_eq!(dt.day(), vec![Some(3), None]);
+        assert_eq!(dt.values(), vec![Some(1_706_918_400_000_000_000), None]);
+        assert_eq!(dt.to_list(), dt.values());
+        assert_eq!(dt.tolist(), dt.values());
+        assert_eq!(dt.to_numpy(), dt.values());
+        assert_eq!(dt.array(), dt.values());
+        assert_eq!(dt.size(), 2);
+        assert_eq!(dt.shape(), (2,));
+        assert!(!dt.empty());
+        assert_eq!(dt.dtype(), "datetime64[ns]");
+        assert_eq!(dt.dtypes(), vec!["datetime64[ns]"]);
+        assert_eq!(dt.names(), vec![Some("when".to_owned())]);
+        assert_eq!(dt.copy(), dt);
+        assert!(dt.hasnans());
+        assert_eq!(dt.isna(), vec![false, true]);
+        assert_eq!(dt.notna(), vec![true, false]);
+        assert!(dt.nbytes() <= dt.memory_usage(true));
         assert!(DatetimeIndex::from_index(Index::from_i64(vec![1])).is_err());
 
-        let td = TimedeltaIndex::new(vec![90_061_000_000_000, Timedelta::NAT]);
+        let td = TimedeltaIndex::new(vec![90_061_000_000_000, Timedelta::NAT]).set_name("delta");
         assert_eq!(td.days(), vec![Some(1), None]);
         assert_eq!(td.seconds(), vec![Some(3661), None]);
         assert_eq!(td.total_seconds(), vec![Some(90061.0), None]);
+        assert_eq!(td.values(), vec![Some(90_061_000_000_000), None]);
+        assert_eq!(td.to_list(), td.values());
+        assert_eq!(td.tolist(), td.values());
+        assert_eq!(td.to_numpy(), td.values());
+        assert_eq!(td.array(), td.values());
+        assert_eq!(td.size(), 2);
+        assert_eq!(td.shape(), (2,));
+        assert!(!td.empty());
+        assert_eq!(td.dtype(), "timedelta64[ns]");
+        assert_eq!(td.dtypes(), vec!["timedelta64[ns]"]);
+        assert_eq!(td.names(), vec![Some("delta".to_owned())]);
+        assert_eq!(td.copy(), td);
+        assert!(td.hasnans());
+        assert_eq!(td.isna(), vec![false, true]);
+        assert_eq!(td.notna(), vec![true, false]);
 
         let period =
             PeriodIndex::from_range(Period::new(10, PeriodFreq::Monthly), 3).set_name("period");
@@ -5328,6 +5828,19 @@ mod tests {
                 Period::new(12, PeriodFreq::Monthly),
             ]
         );
+        assert_eq!(period.to_list(), period.values());
+        assert_eq!(period.tolist(), period.values());
+        assert_eq!(period.to_numpy(), period.values());
+        assert_eq!(period.array(), period.values());
+        assert_eq!(period.size(), 3);
+        assert_eq!(period.shape(), (3,));
+        assert!(!period.empty());
+        assert_eq!(period.dtype(), "period[M]");
+        assert_eq!(period.dtypes(), vec!["period[M]".to_owned()]);
+        assert_eq!(period.names(), vec![Some("period".to_owned())]);
+        assert_eq!(period.copy(), period);
+        assert_eq!(period.rename_index(None).name(), None);
+        assert!(period.nbytes() <= period.memory_usage(true));
         assert_eq!(period.to_index().name(), Some("period"));
 
         let categorical = CategoricalIndex::from_values(
@@ -5338,6 +5851,24 @@ mod tests {
         assert_eq!(categorical.categories(), &["low", "high"]);
         assert_eq!(categorical.codes(), vec![Some(0), Some(1), Some(0)]);
         assert!(categorical.ordered());
+        assert_eq!(
+            categorical.values(),
+            vec!["low".to_owned(), "high".to_owned(), "low".to_owned()]
+        );
+        assert_eq!(categorical.to_list(), categorical.values());
+        assert_eq!(categorical.tolist(), categorical.values());
+        assert_eq!(categorical.to_numpy(), categorical.values());
+        assert_eq!(categorical.array(), categorical.values());
+        assert_eq!(categorical.size(), 3);
+        assert_eq!(categorical.shape(), (3,));
+        assert!(!categorical.empty());
+        assert_eq!(categorical.dtype(), "category");
+        assert_eq!(categorical.dtypes(), vec!["category"]);
+        assert_eq!(categorical.names(), vec![Some("priority".to_owned())]);
+        assert_eq!(categorical.copy(), categorical);
+        assert_eq!(categorical.isna(), vec![false, false, false]);
+        assert_eq!(categorical.notna(), vec![true, true, true]);
+        assert!(categorical.nbytes() <= categorical.memory_usage(true));
         assert_eq!(categorical.to_index().name(), Some("priority"));
         assert!(
             CategoricalIndex::with_categories(
