@@ -3229,6 +3229,27 @@ impl Series {
         Self::from_values(self.name.clone(), self.index.labels().to_vec(), out)
     }
 
+    /// Deprecated pandas alias for [`Self::ffill`]. Matches
+    /// `pd.Series.pad(limit=None)`. Per br-frankenpandas-qn0bj — pandas
+    /// kept `pad` for backwards compatibility after promoting `ffill`.
+    pub fn pad(&self, limit: Option<usize>) -> Result<Self, FrameError> {
+        self.ffill(limit)
+    }
+
+    /// Deprecated pandas alias for [`Self::bfill`]. Matches
+    /// `pd.Series.backfill(limit=None)`. Per br-frankenpandas-qn0bj.
+    pub fn backfill(&self, limit: Option<usize>) -> Result<Self, FrameError> {
+        self.bfill(limit)
+    }
+
+    /// pandas-named alias for [`Self::bool_`]. Matches `pd.Series.bool()`.
+    /// Per br-frankenpandas-qn0bj. `bool` is a Rust keyword; the public
+    /// name uses the raw-identifier form. Callers from Rust write
+    /// `series.r#bool()`; the Python FFI surface exposes bare `bool`.
+    pub fn r#bool(&self) -> Result<bool, FrameError> {
+        self.bool_()
+    }
+
     /// Linearly interpolate missing values.
     ///
     /// Matches `pd.Series.interpolate(method='linear')`. Non-numeric values
@@ -28269,6 +28290,28 @@ impl DataFrame {
     /// Matches `pd.DataFrame.bfill()`. Applies to all columns.
     pub fn bfill(&self, limit: Option<usize>) -> Result<Self, FrameError> {
         self.apply_all_columns(|s| s.bfill(limit))
+    }
+
+    /// Deprecated pandas alias for [`Self::ffill`]. Matches
+    /// `pd.DataFrame.pad(limit=None)`. Per br-frankenpandas-qn0bj — pandas
+    /// kept `pad` for backwards compatibility after promoting `ffill`.
+    pub fn pad(&self, limit: Option<usize>) -> Result<Self, FrameError> {
+        self.ffill(limit)
+    }
+
+    /// Deprecated pandas alias for [`Self::bfill`]. Matches
+    /// `pd.DataFrame.backfill(limit=None)`. Per br-frankenpandas-qn0bj.
+    pub fn backfill(&self, limit: Option<usize>) -> Result<Self, FrameError> {
+        self.bfill(limit)
+    }
+
+    /// pandas-named alias for [`Self::bool_`]. Matches `pd.DataFrame.bool()`.
+    /// Per br-frankenpandas-qn0bj. `bool` is a Rust keyword in type
+    /// position; the public name uses the raw-identifier form so callers
+    /// from Rust write `df.r#bool()`. The Python FFI surface exposes it as
+    /// bare `bool`.
+    pub fn r#bool(&self) -> Result<bool, FrameError> {
+        self.bool_()
     }
 
     /// Back-fill missing values across columns for each row.
@@ -71273,5 +71316,130 @@ mod tests {
     fn ewm_ndim_is_1_for_series_window() {
         let s = mvynk_series();
         assert_eq!(s.ewm(None, Some(0.5)).ndim(), 1);
+    }
+
+    // ── Series.pad / backfill / r#bool aliases (br-frankenpandas-qn0bj) ─
+
+    fn qn0bj_series_with_nulls() -> Series {
+        Series::from_values(
+            "v",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(4.0),
+            ],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn series_pad_aliases_ffill() {
+        let s = qn0bj_series_with_nulls();
+        assert_eq!(
+            s.pad(None).unwrap().values(),
+            s.ffill(None).unwrap().values()
+        );
+        // With limit
+        assert_eq!(
+            s.pad(Some(1)).unwrap().values(),
+            s.ffill(Some(1)).unwrap().values()
+        );
+    }
+
+    #[test]
+    fn series_backfill_aliases_bfill() {
+        let s = qn0bj_series_with_nulls();
+        assert_eq!(
+            s.backfill(None).unwrap().values(),
+            s.bfill(None).unwrap().values()
+        );
+        assert_eq!(
+            s.backfill(Some(1)).unwrap().values(),
+            s.bfill(Some(1)).unwrap().values()
+        );
+    }
+
+    #[test]
+    fn series_bool_raw_ident_aliases_bool_underscore() {
+        let single_true =
+            Series::from_values("x", vec![0_i64.into()], vec![Scalar::Bool(true)]).unwrap();
+        assert_eq!(single_true.r#bool().unwrap(), single_true.bool_().unwrap());
+        assert!(single_true.r#bool().unwrap());
+        // Two-element series rejects (matching bool_ semantics)
+        let two = Series::from_values(
+            "y",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Bool(true), Scalar::Bool(false)],
+        )
+        .unwrap();
+        assert!(two.r#bool().is_err());
+    }
+
+    // ── DataFrame.pad / backfill / r#bool aliases (br-frankenpandas-qn0bj) ─
+
+    fn qn0bj_df_with_nulls() -> DataFrame {
+        let mut cols = BTreeMap::new();
+        cols.insert(
+            "a".to_owned(),
+            Column::new(
+                DType::Float64,
+                vec![
+                    Scalar::Float64(10.0),
+                    Scalar::Null(NullKind::NaN),
+                    Scalar::Float64(30.0),
+                ],
+            )
+            .unwrap(),
+        );
+        DataFrame::new_with_column_order(
+            Index::new(vec![0_i64.into(), 1_i64.into(), 2_i64.into()]),
+            cols,
+            vec!["a".to_owned()],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn dataframe_pad_aliases_ffill() {
+        let df = qn0bj_df_with_nulls();
+        let via_pad = df.pad(None).unwrap();
+        let via_ffill = df.ffill(None).unwrap();
+        assert_eq!(
+            via_pad.column("a").unwrap().values(),
+            via_ffill.column("a").unwrap().values()
+        );
+    }
+
+    #[test]
+    fn dataframe_backfill_aliases_bfill() {
+        let df = qn0bj_df_with_nulls();
+        let via_backfill = df.backfill(None).unwrap();
+        let via_bfill = df.bfill(None).unwrap();
+        assert_eq!(
+            via_backfill.column("a").unwrap().values(),
+            via_bfill.column("a").unwrap().values()
+        );
+    }
+
+    #[test]
+    fn dataframe_bool_raw_ident_aliases_bool_underscore() {
+        let mut cols = BTreeMap::new();
+        cols.insert(
+            "x".to_owned(),
+            Column::new(DType::Bool, vec![Scalar::Bool(true)]).unwrap(),
+        );
+        let single = DataFrame::new_with_column_order(
+            Index::new(vec![0_i64.into()]),
+            cols,
+            vec!["x".to_owned()],
+        )
+        .unwrap();
+        assert_eq!(single.r#bool().unwrap(), single.bool_().unwrap());
+        assert!(single.r#bool().unwrap());
+        // Two-row DataFrame rejects.
+        let two = qn0bj_df_with_nulls();
+        assert!(two.r#bool().is_err());
     }
 }
