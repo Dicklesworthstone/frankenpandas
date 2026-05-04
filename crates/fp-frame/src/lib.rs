@@ -28905,6 +28905,13 @@ impl DataFrame {
         Ok((left, right))
     }
 
+    /// pandas-named alias for [`Self::align_on_index`].
+    ///
+    /// Matches `pd.DataFrame.align(other, join=...)` for index-axis alignment.
+    pub fn align(&self, other: &Self, mode: AlignMode) -> Result<(Self, Self), FrameError> {
+        self.align_on_index(other, mode)
+    }
+
     /// Compare two DataFrames element-wise, showing differences.
     ///
     /// Matches `df.compare(other)`. Returns a DataFrame with multi-level-like
@@ -49441,6 +49448,31 @@ mod tests {
         assert_eq!(left.column("a").unwrap().values()[1], Scalar::Int64(3));
         assert_eq!(right.column("b").unwrap().values()[0], Scalar::Int64(10));
         assert_eq!(right.column("b").unwrap().values()[1], Scalar::Int64(20));
+    }
+
+    #[test]
+    fn dataframe_align_alias_delegates_to_align_on_index() {
+        let df1 = DataFrame::from_dict_with_index(
+            vec![("a", vec![Scalar::Int64(1), Scalar::Int64(2)])],
+            vec![0_i64.into(), 1_i64.into()],
+        )
+        .unwrap();
+        let df2 = DataFrame::from_dict_with_index(
+            vec![("b", vec![Scalar::Int64(10), Scalar::Int64(20)])],
+            vec![1_i64.into(), 2_i64.into()],
+        )
+        .unwrap();
+
+        let alias = df1.align(&df2, AlignMode::Outer).unwrap();
+        let existing = df1.align_on_index(&df2, AlignMode::Outer).unwrap();
+
+        assert_eq!(alias, existing);
+        assert_eq!(
+            alias.0.index().labels(),
+            &[0_i64.into(), 1_i64.into(), 2_i64.into()]
+        );
+        assert!(alias.0.column("b").unwrap().values()[0].is_missing());
+        assert_eq!(alias.1.column("b").unwrap().values()[1], Scalar::Int64(10));
     }
 
     #[test]
