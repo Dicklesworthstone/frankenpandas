@@ -21001,6 +21001,22 @@ impl DataFrame {
     /// of the result, and the original index labels become column names
     /// (converted to strings).
     pub fn transpose(&self) -> Result<Self, FrameError> {
+        // Per br-frankenpandas-3eaa5: DataFrame's column store is
+        // BTreeMap<String, Column> and cannot hold duplicate column names.
+        // If the source index has duplicate labels (e.g. [10, 10, 20]),
+        // transpose would silently collapse them via BTreeMap::insert
+        // (last-write-wins) and lose data. Detect that case up front and
+        // return a clear error rather than silently dropping rows.
+        if self.index.has_duplicates() {
+            return Err(FrameError::CompatibilityRejected(
+                "transpose requires unique index labels: the source index \
+                 contains duplicates and would silently collapse columns \
+                 in the transposed DataFrame (column store keys must be \
+                 unique). Deduplicate the index before transposing."
+                    .to_owned(),
+            ));
+        }
+
         let n_rows = self.len();
         let n_cols = self.num_columns();
 
@@ -72066,5 +72082,107 @@ mod tests {
         )
         .unwrap();
         assert_eq!(s.idxmin().unwrap(), IndexLabel::Int64(10));
+    }
+
+    #[test]
+    fn dataframe_transpose_rejects_duplicate_index_labels() {
+        // Per br-frankenpandas-3eaa5: transpose on a DataFrame with
+        // duplicate index labels would silently collapse columns in
+        // the transposed output (column store BTreeMap keys must be
+        // unique). The fix returns an explicit error rather than
+        // dropping rows silently.
+        let mut cols = BTreeMap::new();
+        cols.insert(
+            "a".to_owned(),
+            Column::new(
+                DType::Int64,
+                vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            )
+            .unwrap(),
+        );
+        let df = DataFrame::new_with_column_order(
+            // Note: 10 appears twice — duplicate label.
+            Index::new(vec![10_i64.into(), 10_i64.into(), 20_i64.into()]),
+            cols,
+            vec!["a".to_owned()],
+        )
+        .unwrap();
+        let err = df.transpose().expect_err("should reject duplicate labels");
+        assert!(
+            matches!(&err, FrameError::CompatibilityRejected(msg)
+                if msg.contains("unique") && msg.contains("transpose")),
+            "expected error mentioning unique+transpose, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn dataframe_transpose_preserves_all_rows_when_unique() {
+        // Regression guard: the fix must NOT break the no-duplicate
+        // case. A 3-row 1-col DF with unique index transposes to a
+        // 1-row 3-col DF with no data loss.
+        let mut cols = BTreeMap::new();
+        cols.insert(
+            "a".to_owned(),
+            Column::new(
+                DType::Int64,
+                vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            )
+            .unwrap(),
+        );
+        let df = DataFrame::new_with_column_order(
+            Index::new(vec![10_i64.into(), 20_i64.into(), 30_i64.into()]),
+            cols,
+            vec!["a".to_owned()],
+        )
+        .unwrap();
+        let t = df.transpose().unwrap();
+        assert_eq!(t.num_columns(), 3);
+        assert_eq!(t.len(), 1);
+        // Column names are the original index labels stringified.
+        assert!(t.columns.contains_key("10"));
+        assert!(t.columns.contains_key("20"));
+        assert!(t.columns.contains_key("30"));
+    }
+
+    #[test]
+    fn dataframe_transpose_involution_holds_when_index_unique() {
+        // Metamorphic property (the lens that surfaced the bug):
+        // df.transpose().transpose() == df when the index has no
+        // duplicates AND no duplicate column names.
+        let mut cols = BTreeMap::new();
+        cols.insert(
+            "x".to_owned(),
+            Column::new(DType::Int64, vec![Scalar::Int64(1), Scalar::Int64(2)]).unwrap(),
+        );
+        cols.insert(
+            "y".to_owned(),
+            Column::new(DType::Int64, vec![Scalar::Int64(3), Scalar::Int64(4)]).unwrap(),
+        );
+        let df = DataFrame::new_with_column_order(
+            // Stringified Utf8 labels survive the int↔string round-trip
+            // through transpose; using Int64 here would mean the second
+            // transpose recovers Utf8 labels (column names) parsed back
+            // as Utf8 — index dtype is not preserved by T.T (a pandas-
+            // accepted divergence). Use Utf8 labels for clean involution.
+            Index::new(vec![
+                IndexLabel::Utf8("r1".into()),
+                IndexLabel::Utf8("r2".into()),
+            ]),
+            cols,
+            vec!["x".to_owned(), "y".to_owned()],
+        )
+        .unwrap();
+        let twice = df.transpose().unwrap().transpose().unwrap();
+        // Same shape
+        assert_eq!(twice.num_columns(), df.num_columns());
+        assert_eq!(twice.len(), df.len());
+        // Same values (column-wise equal)
+        for name in ["x", "y"] {
+            assert_eq!(
+                twice.columns[name].values(),
+                df.columns[name].values(),
+                "column {name} should match after T.T"
+            );
+        }
     }
 }
