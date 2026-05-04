@@ -7310,6 +7310,11 @@ pub trait DataFrameIoExt {
     /// Matches `pd.DataFrame.to_csv()` with no path.
     fn to_csv_string(&self) -> Result<String, IoError>;
 
+    /// Serialize this DataFrame to a CSV string with explicit write options.
+    ///
+    /// Matches `pd.DataFrame.to_csv(sep, na_rep, header, index, index_label)`.
+    fn to_csv_string_with_options(&self, options: &CsvWriteOptions) -> Result<String, IoError>;
+
     /// Serialize this DataFrame to a Markdown table string.
     ///
     /// Matches `pd.DataFrame.to_markdown()` with no buffer.
@@ -7325,6 +7330,11 @@ pub trait DataFrameIoExt {
     /// Matches `pd.DataFrame.to_json(path)`.
     fn to_json_file(&self, path: &Path, orient: JsonOrient) -> Result<(), IoError>;
 
+    /// Serialize this DataFrame to a JSON string.
+    ///
+    /// Matches `pd.DataFrame.to_json()` with no path.
+    fn to_json_string(&self, orient: JsonOrient) -> Result<String, IoError>;
+
     /// Write this DataFrame to an Excel (.xlsx) file.
     ///
     /// Matches `pd.DataFrame.to_excel(path)`.
@@ -7335,13 +7345,28 @@ pub trait DataFrameIoExt {
     /// Explicit file-suffixed form of [`DataFrameIoExt::to_excel`].
     fn to_excel_file(&self, path: &Path) -> Result<(), IoError>;
 
+    /// Write this DataFrame to an Excel (.xlsx) file with explicit write options.
+    fn to_excel_with_options(
+        &self,
+        path: &Path,
+        options: &ExcelWriteOptions,
+    ) -> Result<(), IoError>;
+
     /// Serialize this DataFrame to Excel (.xlsx) bytes in memory.
     fn to_excel_bytes(&self) -> Result<Vec<u8>, IoError>;
+
+    /// Serialize this DataFrame to Excel (.xlsx) bytes with explicit write options.
+    fn to_excel_bytes_with_options(&self, options: &ExcelWriteOptions) -> Result<Vec<u8>, IoError>;
 
     /// Write this DataFrame to a JSONL file (one JSON object per line).
     ///
     /// Matches `pd.DataFrame.to_json(path, orient='records', lines=True)`.
     fn to_jsonl_file(&self, path: &Path) -> Result<(), IoError>;
+
+    /// Serialize this DataFrame to newline-delimited JSON.
+    ///
+    /// Matches `pd.DataFrame.to_json(orient='records', lines=True)`.
+    fn to_jsonl_string(&self) -> Result<String, IoError>;
 
     /// Write this DataFrame to an Arrow IPC (Feather v2) file.
     ///
@@ -7392,6 +7417,10 @@ impl DataFrameIoExt for DataFrame {
         write_csv_string(self)
     }
 
+    fn to_csv_string_with_options(&self, options: &CsvWriteOptions) -> Result<String, IoError> {
+        write_csv_string_with_options(self, options)
+    }
+
     fn to_markdown_string(&self) -> Result<String, IoError> {
         write_markdown_string(self)
     }
@@ -7404,6 +7433,10 @@ impl DataFrameIoExt for DataFrame {
         write_json(self, path, orient)
     }
 
+    fn to_json_string(&self, orient: JsonOrient) -> Result<String, IoError> {
+        write_json_string(self, orient)
+    }
+
     fn to_excel(&self, path: &Path) -> Result<(), IoError> {
         write_excel(self, path)
     }
@@ -7412,12 +7445,28 @@ impl DataFrameIoExt for DataFrame {
         self.to_excel(path)
     }
 
+    fn to_excel_with_options(
+        &self,
+        path: &Path,
+        options: &ExcelWriteOptions,
+    ) -> Result<(), IoError> {
+        write_excel_with_options(self, path, options)
+    }
+
     fn to_excel_bytes(&self) -> Result<Vec<u8>, IoError> {
         write_excel_bytes(self)
     }
 
+    fn to_excel_bytes_with_options(&self, options: &ExcelWriteOptions) -> Result<Vec<u8>, IoError> {
+        write_excel_bytes_with_options(self, options)
+    }
+
     fn to_jsonl_file(&self, path: &Path) -> Result<(), IoError> {
         write_jsonl(self, path)
+    }
+
+    fn to_jsonl_string(&self) -> Result<String, IoError> {
+        write_jsonl_string(self)
     }
 
     fn to_feather(&self, path: &Path) -> Result<(), IoError> {

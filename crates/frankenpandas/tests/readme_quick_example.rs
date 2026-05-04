@@ -103,6 +103,26 @@ fn readme_quick_start_round_trip_through_sqlite() -> Result<(), Box<dyn std::err
     let _bytes_parquet = by_ticker.to_parquet_bytes()?;
     let _bytes_feather = by_ticker.to_feather_bytes()?;
     let _bytes_excel = by_ticker.to_excel_bytes()?;
+    let csv_opts = CsvWriteOptions {
+        delimiter: b';',
+        na_rep: "NA".to_owned(),
+        header: true,
+        include_index: false,
+        index_label: None,
+    };
+    let csv_via_trait = by_ticker.to_csv_string_with_options(&csv_opts)?;
+    assert!(csv_via_trait.contains(';'));
+    let json_via_trait = by_ticker.to_json_string(JsonOrient::Records)?;
+    assert!(json_via_trait.contains("price"));
+    let jsonl_via_trait = by_ticker.to_jsonl_string()?;
+    assert_eq!(jsonl_via_trait.lines().count(), by_ticker.index().len());
+    let excel_opts = ExcelWriteOptions {
+        sheet_name: "Summary".to_owned(),
+        index: false,
+        index_label: None,
+        header: true,
+    };
+    let _bytes_excel_opts = by_ticker.to_excel_bytes_with_options(&excel_opts)?;
     let plain_table = by_ticker.to_string();
     assert!(!plain_table.is_empty());
     let dir = std::env::temp_dir();
@@ -113,6 +133,7 @@ fn readme_quick_start_round_trip_through_sqlite() -> Result<(), Box<dyn std::err
     by_ticker.to_excel(&excel_path)?;
     by_ticker.to_feather(&feather_path)?;
     by_ticker.to_parquet(&parquet_path)?;
+    by_ticker.to_excel_with_options(&excel_path, &excel_opts)?;
     assert!(std::fs::metadata(&excel_path)?.len() > 0);
     assert!(std::fs::metadata(&feather_path)?.len() > 0);
     assert!(std::fs::metadata(&parquet_path)?.len() > 0);
