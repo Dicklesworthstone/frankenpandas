@@ -3,6 +3,7 @@ name = "fp-join"
 description = "Merge and join engine (AG-05 leapfrog triejoin) for fp-frame DataFrames — inner / left / right / outer joins with index alignment."
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 license-file.workspace = true
 authors.workspace = true
 repository.workspace = true

@@ -3,6 +3,7 @@ name = "fp-index"
 description = "Flat and multi-level row index types (Index, MultiIndex) for pandas-parity dataframes."
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 license-file.workspace = true
 authors.workspace = true
 repository.workspace = true

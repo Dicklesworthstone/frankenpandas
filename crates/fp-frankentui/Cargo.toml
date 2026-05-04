@@ -3,6 +3,7 @@ name = "fp-frankentui"
 description = "FrankenTUI terminal interface for interactive fp-frame / frankenpandas workflows."
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 license-file.workspace = true
 authors.workspace = true
 repository.workspace = true

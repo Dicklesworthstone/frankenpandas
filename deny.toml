@@ -2,7 +2,13 @@
 all-features = true
 
 [advisories]
-ignore = []
+ignore = [
+  # paste 1.0.15 is flagged as unmaintained (RUSTSEC-2024-0436). It only
+  # enters the tree as a transitive dep of `parquet` 58.x via its arrow
+  # cast helpers; no direct usage from frankenpandas crates. Track via
+  # br-frankenpandas — drop this ignore once parquet replaces paste.
+  "RUSTSEC-2024-0436",
+]
 
 [licenses]
 allow = [
@@ -20,6 +26,35 @@ allow = [
   "Zlib",
 ]
 confidence-threshold = 0.8
+
+# asupersync 0.3.1 publishes its license as `non-standard` on crates.io
+# because the LICENSE file is "MIT License (with OpenAI/Anthropic Rider)".
+# The base license is MIT — the rider is an add-on usage restriction that
+# does not change the MIT terms governing source/binary distribution. Add
+# an explicit clarification so cargo-deny matches it against the MIT
+# allow-list rather than flagging it as `unlicensed`.
+[[licenses.clarify]]
+crate = "asupersync"
+expression = "MIT"
+license-files = []
+
+# Companion crates from the asupersync repo carry the same
+# MIT-with-OpenAI/Anthropic-rider LICENSE; clarify each so cargo-deny
+# recognises the SPDX-classifiable MIT base. Same rationale as asupersync.
+[[licenses.clarify]]
+crate = "franken-kernel"
+expression = "MIT"
+license-files = []
+
+[[licenses.clarify]]
+crate = "franken-evidence"
+expression = "MIT"
+license-files = []
+
+[[licenses.clarify]]
+crate = "franken-decision"
+expression = "MIT"
+license-files = []
 
 [licenses.private]
 ignore = true

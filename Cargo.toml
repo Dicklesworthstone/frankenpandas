@@ -18,6 +18,11 @@ members = [
 [workspace.package]
 edition = "2024"
 version = "0.1.0"
+# SPDX expression identifies the base license (MIT) so cargo-deny and
+# crates.io can match against allow-lists. The LICENSE file additionally
+# attaches a non-MIT rider on AI-assistant usage; the rider does not
+# change the SPDX classification of the underlying license terms.
+license = "MIT"
 license-file = "LICENSE"
 authors = ["Jeffrey Emanuel <jeff141421@gmail.com>"]
 repository = "https://github.com/Dicklesworthstone/frankenpandas"

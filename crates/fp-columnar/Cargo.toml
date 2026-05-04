@@ -3,6 +3,7 @@ name = "fp-columnar"
 description = "Columnar storage primitives (Column, ValidityMask) for pandas-parity dataframes — the storage layer behind fp-frame."
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 license-file.workspace = true
 authors.workspace = true
 repository.workspace = true

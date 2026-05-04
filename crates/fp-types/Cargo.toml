@@ -3,6 +3,7 @@ name = "fp-types"
 description = "Core Scalar, DType, NullKind primitives for the frankenpandas workspace — the universal type system behind fp-frame."
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 license-file.workspace = true
 authors.workspace = true
 repository.workspace = true

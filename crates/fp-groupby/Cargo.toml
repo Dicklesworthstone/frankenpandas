@@ -3,6 +3,7 @@ name = "fp-groupby"
 description = "GroupBy engine for fp-frame with dense-key / arena-backed / hash-map execution paths."
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 license-file.workspace = true
 authors.workspace = true
 repository.workspace = true
