@@ -4065,12 +4065,52 @@ impl Series {
     ///
     /// Matches `pd.Series.clip(lower, upper)`. NaN values pass through unchanged.
     pub fn clip(&self, lower: Option<f64>, upper: Option<f64>) -> Result<Self, FrameError> {
+        // Per br-frankenpandas-aaa1e: pandas preserves Int64 dtype when
+        // input is Int64 and all bounds are integer-valued (or absent).
+        // Detect that case to keep dtype contract; fall back to Float64
+        // only when the input or bounds genuinely demand it.
+        let is_integer_bound = |b: Option<f64>| -> bool {
+            match b {
+                None => true,
+                Some(v) => {
+                    v.is_finite()
+                        && v.fract() == 0.0
+                        && v >= i64::MIN as f64
+                        && v <= i64::MAX as f64
+                }
+            }
+        };
+        let preserve_int64 = matches!(self.column.dtype(), DType::Int64)
+            && is_integer_bound(lower)
+            && is_integer_bound(upper);
+
         let mut out = Vec::with_capacity(self.len());
         for val in self.column.values() {
             if val.is_missing() {
                 out.push(val.clone());
                 continue;
             }
+
+            if preserve_int64 {
+                if let Scalar::Int64(x) = val {
+                    let mut clamped = *x;
+                    if let Some(lo) = lower {
+                        let lo_i = lo as i64;
+                        if clamped < lo_i {
+                            clamped = lo_i;
+                        }
+                    }
+                    if let Some(hi) = upper {
+                        let hi_i = hi as i64;
+                        if clamped > hi_i {
+                            clamped = hi_i;
+                        }
+                    }
+                    out.push(Scalar::Int64(clamped));
+                    continue;
+                }
+            }
+
             let v = val.to_f64().map_err(ColumnError::from)?;
             let mut clamped = v;
             if let Some(lo) = lower
@@ -72184,5 +72224,106 @@ mod tests {
                 "column {name} should match after T.T"
             );
         }
+    }
+
+    #[test]
+    fn series_clip_preserves_int64_with_integer_bounds() {
+        // Per br-frankenpandas-aaa1e: pandas preserves Int64 dtype when
+        // input is Int64 and bounds are integer-valued. fp-frame previously
+        // always cast to Float64; now it stays Int64 in this case.
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Int64(1),
+                Scalar::Int64(5),
+                Scalar::Int64(9),
+                Scalar::Int64(-3),
+            ],
+        )
+        .unwrap();
+        let clipped = s.clip(Some(2.0), Some(7.0)).unwrap();
+        assert_eq!(clipped.column().dtype(), DType::Int64);
+        assert_eq!(clipped.values()[0], Scalar::Int64(2));
+        assert_eq!(clipped.values()[1], Scalar::Int64(5));
+        assert_eq!(clipped.values()[2], Scalar::Int64(7));
+        assert_eq!(clipped.values()[3], Scalar::Int64(2));
+    }
+
+    #[test]
+    fn series_clip_int64_no_bounds_is_noop() {
+        // Pandas: Series([1,2,3]).clip() returns identical Int64.
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+        )
+        .unwrap();
+        let clipped = s.clip(None, None).unwrap();
+        assert_eq!(clipped.column().dtype(), DType::Int64);
+        assert_eq!(clipped.values()[0], Scalar::Int64(1));
+        assert_eq!(clipped.values()[1], Scalar::Int64(2));
+        assert_eq!(clipped.values()[2], Scalar::Int64(3));
+    }
+
+    #[test]
+    fn series_clip_int64_promotes_to_float64_on_fractional_bounds() {
+        // Pandas: with non-integral bounds, Int64 input promotes to
+        // Float64 (mixed-type promotion). fp-frame must match.
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Int64(5), Scalar::Int64(9)],
+        )
+        .unwrap();
+        let clipped = s.clip(Some(2.5), Some(7.5)).unwrap();
+        assert_eq!(clipped.column().dtype(), DType::Float64);
+        assert_eq!(clipped.values()[0], Scalar::Float64(2.5));
+        assert_eq!(clipped.values()[1], Scalar::Float64(5.0));
+        assert_eq!(clipped.values()[2], Scalar::Float64(7.5));
+    }
+
+    #[test]
+    fn series_clip_float64_input_stays_float64() {
+        // Regression guard: Float64 input → Float64 output (existing
+        // contract; the dtype-preserving fix must not break the
+        // already-correct path).
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Float64(-5.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(10.0),
+            ],
+        )
+        .unwrap();
+        let clipped = s.clip(Some(0.0), Some(5.0)).unwrap();
+        assert_eq!(clipped.column().dtype(), DType::Float64);
+        assert_eq!(clipped.values()[0], Scalar::Float64(0.0));
+        assert_eq!(clipped.values()[1], Scalar::Float64(3.0));
+        assert_eq!(clipped.values()[2], Scalar::Float64(5.0));
+    }
+
+    #[test]
+    fn series_clip_int64_one_sided_integer_bound_preserves_int64() {
+        // Pandas: clip(2, None) on Int64 keeps Int64.
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(0), Scalar::Int64(5), Scalar::Int64(9)],
+        )
+        .unwrap();
+        let clipped = s.clip(Some(2.0), None).unwrap();
+        assert_eq!(clipped.column().dtype(), DType::Int64);
+        assert_eq!(clipped.values()[0], Scalar::Int64(2));
+        assert_eq!(clipped.values()[1], Scalar::Int64(5));
+        assert_eq!(clipped.values()[2], Scalar::Int64(9));
+
+        let clipped_upper = s.clip(None, Some(7.0)).unwrap();
+        assert_eq!(clipped_upper.column().dtype(), DType::Int64);
+        assert_eq!(clipped_upper.values()[0], Scalar::Int64(0));
+        assert_eq!(clipped_upper.values()[1], Scalar::Int64(5));
+        assert_eq!(clipped_upper.values()[2], Scalar::Int64(7));
     }
 }
