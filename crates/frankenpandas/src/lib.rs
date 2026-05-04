@@ -814,18 +814,25 @@ mod tests {
         // SqlWriteOptions has no Default impl — type-check via fn pointer.
         let _is_write_opts: fn(SqlWriteOptions) -> _ = |x| x;
         // SqlInspector is a struct; type-check via fn-pointer signature.
-        let _is_inspector: fn(&SqlInspector<'_, rusqlite::Connection>) = |_| {};
-        let _ = read_sql_chunks::<rusqlite::Connection>;
-        // fd90.209: write_sql_with_options pairs with SqlWriteOptions.
-        let _ = write_sql_with_options::<rusqlite::Connection>;
-        // fd90.210: read_sql_with_options pairs with SqlReadOptions.
-        let _ = read_sql_with_options::<rusqlite::Connection>;
-        // fd90.244: extra SQL reader variants.
-        let _ = read_sql_query::<rusqlite::Connection>;
-        let _ = read_sql_query_with_options::<rusqlite::Connection>;
-        let _ = read_sql_query_with_options_and_index_col::<rusqlite::Connection>;
-        let _ = read_sql_table_chunks::<rusqlite::Connection>;
-        let _ = read_sql_table_with_options::<rusqlite::Connection>;
+        // The rusqlite-typed assertions only compile with the `sql-sqlite`
+        // feature (which is what brings rusqlite into scope as an optional
+        // dep). Under `--no-default-features` we still want the rest of
+        // this guard to compile, so we feature-gate just these lines.
+        #[cfg(feature = "sql-sqlite")]
+        {
+            let _is_inspector: fn(&SqlInspector<'_, rusqlite::Connection>) = |_| {};
+            let _ = read_sql_chunks::<rusqlite::Connection>;
+            // fd90.209: write_sql_with_options pairs with SqlWriteOptions.
+            let _ = write_sql_with_options::<rusqlite::Connection>;
+            // fd90.210: read_sql_with_options pairs with SqlReadOptions.
+            let _ = read_sql_with_options::<rusqlite::Connection>;
+            // fd90.244: extra SQL reader variants.
+            let _ = read_sql_query::<rusqlite::Connection>;
+            let _ = read_sql_query_with_options::<rusqlite::Connection>;
+            let _ = read_sql_query_with_options_and_index_col::<rusqlite::Connection>;
+            let _ = read_sql_table_chunks::<rusqlite::Connection>;
+            let _ = read_sql_table_with_options::<rusqlite::Connection>;
+        }
         // fd90.220: SqlInsertMethod is the type of SqlWriteOptions.method.
         let _is_insert_method: fn(SqlInsertMethod) -> _ = |m| m;
         // fd90.222: ArithmeticOp + ComparisonOp are parameters of Column /
@@ -1009,25 +1016,29 @@ mod tests {
         let _ = join_series;
 
         // fd90.10 / fd90.11: SQL inspector free-fn surface promoted to
-        // the prelude alongside SqlInspector itself.
-        let _ = inspect::<rusqlite::Connection>;
-        let _ = list_sql_foreign_keys::<rusqlite::Connection>;
-        let _ = list_sql_indexes::<rusqlite::Connection>;
-        let _ = list_sql_schemas::<rusqlite::Connection>;
-        let _ = list_sql_tables::<rusqlite::Connection>;
-        let _ = list_sql_unique_constraints::<rusqlite::Connection>;
-        let _ = list_sql_views::<rusqlite::Connection>;
-        let _ = sql_backend_caps::<rusqlite::Connection>;
-        let _ = sql_max_identifier_length::<rusqlite::Connection>;
-        let _ = sql_max_insert_rows::<rusqlite::Connection>;
-        let _ = sql_max_param_count::<rusqlite::Connection>;
-        let _ = sql_primary_key_columns::<rusqlite::Connection>;
-        let _ = sql_server_version::<rusqlite::Connection>;
-        let _ = sql_supports_returning::<rusqlite::Connection>;
-        let _ = sql_supports_schemas::<rusqlite::Connection>;
-        let _ = sql_table_comment::<rusqlite::Connection>;
-        let _ = sql_table_schema::<rusqlite::Connection>;
-        let _ = truncate_sql_table::<rusqlite::Connection>;
+        // the prelude alongside SqlInspector itself. Same feature gating
+        // rationale as above: rusqlite is only in scope under sql-sqlite.
+        #[cfg(feature = "sql-sqlite")]
+        {
+            let _ = inspect::<rusqlite::Connection>;
+            let _ = list_sql_foreign_keys::<rusqlite::Connection>;
+            let _ = list_sql_indexes::<rusqlite::Connection>;
+            let _ = list_sql_schemas::<rusqlite::Connection>;
+            let _ = list_sql_tables::<rusqlite::Connection>;
+            let _ = list_sql_unique_constraints::<rusqlite::Connection>;
+            let _ = list_sql_views::<rusqlite::Connection>;
+            let _ = sql_backend_caps::<rusqlite::Connection>;
+            let _ = sql_max_identifier_length::<rusqlite::Connection>;
+            let _ = sql_max_insert_rows::<rusqlite::Connection>;
+            let _ = sql_max_param_count::<rusqlite::Connection>;
+            let _ = sql_primary_key_columns::<rusqlite::Connection>;
+            let _ = sql_server_version::<rusqlite::Connection>;
+            let _ = sql_supports_returning::<rusqlite::Connection>;
+            let _ = sql_supports_schemas::<rusqlite::Connection>;
+            let _ = sql_table_comment::<rusqlite::Connection>;
+            let _ = sql_table_schema::<rusqlite::Connection>;
+            let _ = truncate_sql_table::<rusqlite::Connection>;
+        }
 
         // fd90.12: Series ↔ Arrow interop (paired with the README's
         // documented Arrow zero-copy claim at line 1580).
