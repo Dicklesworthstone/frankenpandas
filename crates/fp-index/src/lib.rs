@@ -73,7 +73,11 @@
 //!   the alignment algebra here for binary ops.
 //! - **fp-join** consumes alignment plans for merge-style joins.
 
-use std::{collections::HashMap, fmt, sync::OnceLock};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt,
+    sync::OnceLock,
+};
 
 use fp_types::{Period, PeriodFreq, Scalar, Timedelta};
 use serde::{Deserialize, Serialize};
@@ -2104,6 +2108,116 @@ impl DatetimeIndex {
     }
 
     #[must_use]
+    pub fn is_unique(&self) -> bool {
+        self.index.is_unique()
+    }
+
+    #[must_use]
+    pub fn has_duplicates(&self) -> bool {
+        self.index.has_duplicates()
+    }
+
+    #[must_use]
+    pub fn is_monotonic_increasing(&self) -> bool {
+        self.index.is_monotonic_increasing()
+    }
+
+    #[must_use]
+    pub fn is_monotonic(&self) -> bool {
+        self.index.is_monotonic()
+    }
+
+    #[must_use]
+    pub fn is_monotonic_decreasing(&self) -> bool {
+        self.index.is_monotonic_decreasing()
+    }
+
+    #[must_use]
+    pub fn nunique(&self) -> usize {
+        self.index.nunique()
+    }
+
+    #[must_use]
+    pub fn nunique_with_dropna(&self, dropna: bool) -> usize {
+        self.index.nunique_with_dropna(dropna)
+    }
+
+    #[must_use]
+    pub fn ndim(&self) -> usize {
+        self.index.ndim()
+    }
+
+    pub fn item(&self) -> Result<Option<i64>, IndexError> {
+        match self.index.item()? {
+            IndexLabel::Datetime64(nanos) if nanos != i64::MIN => Ok(Some(nanos)),
+            IndexLabel::Datetime64(_) => Ok(None),
+            label => Err(IndexError::InvalidArgument(format!(
+                "DatetimeIndex item must be datetime64, got {label}"
+            ))),
+        }
+    }
+
+    #[must_use]
+    pub fn is_(&self, other: &Self) -> bool {
+        std::ptr::eq(self, other)
+    }
+
+    #[must_use]
+    pub fn equals(&self, other: &Self) -> bool {
+        self.index.equals(&other.index)
+    }
+
+    #[must_use]
+    pub fn identical(&self, other: &Self) -> bool {
+        self.index.identical(&other.index)
+    }
+
+    #[must_use]
+    pub fn holds_integer(&self) -> bool {
+        false
+    }
+
+    #[must_use]
+    pub fn inferred_type(&self) -> &'static str {
+        "datetime64"
+    }
+
+    #[must_use]
+    pub fn is_boolean(&self) -> bool {
+        false
+    }
+
+    #[must_use]
+    pub fn is_categorical(&self) -> bool {
+        false
+    }
+
+    #[must_use]
+    pub fn is_floating(&self) -> bool {
+        false
+    }
+
+    #[must_use]
+    pub fn is_integer(&self) -> bool {
+        false
+    }
+
+    #[must_use]
+    pub fn is_interval(&self) -> bool {
+        false
+    }
+
+    #[must_use]
+    pub fn is_numeric(&self) -> bool {
+        false
+    }
+
+    #[must_use]
+    pub fn is_object(&self) -> bool {
+        false
+    }
+
+    #[must_use]
     pub fn nanos(&self) -> Vec<Option<i64>> {
         self.index
             .labels()
@@ -2290,6 +2404,116 @@ impl TimedeltaIndex {
     }
 
     #[must_use]
+    pub fn is_unique(&self) -> bool {
+        self.index.is_unique()
+    }
+
+    #[must_use]
+    pub fn has_duplicates(&self) -> bool {
+        self.index.has_duplicates()
+    }
+
+    #[must_use]
+    pub fn is_monotonic_increasing(&self) -> bool {
+        self.index.is_monotonic_increasing()
+    }
+
+    #[must_use]
+    pub fn is_monotonic(&self) -> bool {
+        self.index.is_monotonic()
+    }
+
+    #[must_use]
+    pub fn is_monotonic_decreasing(&self) -> bool {
+        self.index.is_monotonic_decreasing()
+    }
+
+    #[must_use]
+    pub fn nunique(&self) -> usize {
+        self.index.nunique()
+    }
+
+    #[must_use]
+    pub fn nunique_with_dropna(&self, dropna: bool) -> usize {
+        self.index.nunique_with_dropna(dropna)
+    }
+
+    #[must_use]
+    pub fn ndim(&self) -> usize {
+        self.index.ndim()
+    }
+
+    pub fn item(&self) -> Result<Option<i64>, IndexError> {
+        match self.index.item()? {
+            IndexLabel::Timedelta64(nanos) if nanos != Timedelta::NAT => Ok(Some(nanos)),
+            IndexLabel::Timedelta64(_) => Ok(None),
+            label => Err(IndexError::InvalidArgument(format!(
+                "TimedeltaIndex item must be timedelta64, got {label}"
+            ))),
+        }
+    }
+
+    #[must_use]
+    pub fn is_(&self, other: &Self) -> bool {
+        std::ptr::eq(self, other)
+    }
+
+    #[must_use]
+    pub fn equals(&self, other: &Self) -> bool {
+        self.index.equals(&other.index)
+    }
+
+    #[must_use]
+    pub fn identical(&self, other: &Self) -> bool {
+        self.index.identical(&other.index)
+    }
+
+    #[must_use]
+    pub fn holds_integer(&self) -> bool {
+        false
+    }
+
+    #[must_use]
+    pub fn inferred_type(&self) -> &'static str {
+        "timedelta64"
+    }
+
+    #[must_use]
+    pub fn is_boolean(&self) -> bool {
+        false
+    }
+
+    #[must_use]
+    pub fn is_categorical(&self) -> bool {
+        false
+    }
+
+    #[must_use]
+    pub fn is_floating(&self) -> bool {
+        false
+    }
+
+    #[must_use]
+    pub fn is_integer(&self) -> bool {
+        false
+    }
+
+    #[must_use]
+    pub fn is_interval(&self) -> bool {
+        false
+    }
+
+    #[must_use]
+    pub fn is_numeric(&self) -> bool {
+        false
+    }
+
+    #[must_use]
+    pub fn is_object(&self) -> bool {
+        false
+    }
+
+    #[must_use]
     pub fn nanos(&self) -> Vec<Option<i64>> {
         map_timedelta_labels(self.index.labels(), |nanos| nanos)
     }
@@ -2451,6 +2675,125 @@ impl PeriodIndex {
     #[must_use]
     pub fn nbytes(&self) -> usize {
         self.memory_usage(false)
+    }
+
+    fn compare_periods(left: &Period, right: &Period) -> std::cmp::Ordering {
+        left.cmp_same_freq(right).unwrap_or_else(|| {
+            left.freq
+                .cmp(&right.freq)
+                .then(left.ordinal.cmp(&right.ordinal))
+        })
+    }
+
+    #[must_use]
+    pub fn is_unique(&self) -> bool {
+        let unique: HashSet<&Period> = self.values.iter().collect();
+        unique.len() == self.values.len()
+    }
+
+    #[must_use]
+    pub fn has_duplicates(&self) -> bool {
+        !self.is_unique()
+    }
+
+    #[must_use]
+    pub fn is_monotonic_increasing(&self) -> bool {
+        self.values
+            .windows(2)
+            .all(|window| Self::compare_periods(&window[0], &window[1]).is_le())
+    }
+
+    #[must_use]
+    pub fn is_monotonic(&self) -> bool {
+        self.is_monotonic_increasing()
+    }
+
+    #[must_use]
+    pub fn is_monotonic_decreasing(&self) -> bool {
+        self.values
+            .windows(2)
+            .all(|window| Self::compare_periods(&window[0], &window[1]).is_ge())
+    }
+
+    #[must_use]
+    pub fn nunique(&self) -> usize {
+        self.values.iter().collect::<HashSet<_>>().len()
+    }
+
+    #[must_use]
+    pub fn ndim(&self) -> usize {
+        1
+    }
+
+    pub fn item(&self) -> Result<Period, IndexError> {
+        if self.values.len() == 1 {
+            Ok(self.values[0])
+        } else {
+            Err(IndexError::InvalidArgument(format!(
+                "item requires exactly one label, got {}",
+                self.values.len()
+            )))
+        }
+    }
+
+    #[must_use]
+    pub fn is_(&self, other: &Self) -> bool {
+        std::ptr::eq(self, other)
+    }
+
+    #[must_use]
+    pub fn equals(&self, other: &Self) -> bool {
+        self.values == other.values
+    }
+
+    #[must_use]
+    pub fn identical(&self, other: &Self) -> bool {
+        self.equals(other) && self.name == other.name
+    }
+
+    #[must_use]
+    pub fn holds_integer(&self) -> bool {
+        false
+    }
+
+    #[must_use]
+    pub fn inferred_type(&self) -> &'static str {
+        "period"
+    }
+
+    #[must_use]
+    pub fn is_boolean(&self) -> bool {
+        false
+    }
+
+    #[must_use]
+    pub fn is_categorical(&self) -> bool {
+        false
+    }
+
+    #[must_use]
+    pub fn is_floating(&self) -> bool {
+        false
+    }
+
+    #[must_use]
+    pub fn is_integer(&self) -> bool {
+        false
+    }
+
+    #[must_use]
+    pub fn is_interval(&self) -> bool {
+        false
+    }
+
+    #[must_use]
+    pub fn is_numeric(&self) -> bool {
+        false
+    }
+
+    #[must_use]
+    pub fn is_object(&self) -> bool {
+        false
     }
 
     #[must_use]
@@ -2623,6 +2966,112 @@ impl RangeIndex {
     #[must_use]
     pub fn nbytes(&self) -> usize {
         self.memory_usage(false)
+    }
+
+    #[must_use]
+    pub fn is_unique(&self) -> bool {
+        true
+    }
+
+    #[must_use]
+    pub fn has_duplicates(&self) -> bool {
+        false
+    }
+
+    #[must_use]
+    pub fn is_monotonic_increasing(&self) -> bool {
+        self.len() <= 1 || self.step > 0
+    }
+
+    #[must_use]
+    pub fn is_monotonic(&self) -> bool {
+        self.is_monotonic_increasing()
+    }
+
+    #[must_use]
+    pub fn is_monotonic_decreasing(&self) -> bool {
+        self.len() <= 1 || self.step < 0
+    }
+
+    #[must_use]
+    pub fn nunique(&self) -> usize {
+        self.len()
+    }
+
+    #[must_use]
+    pub fn ndim(&self) -> usize {
+        1
+    }
+
+    pub fn item(&self) -> Result<i64, IndexError> {
+        if self.len() == 1 {
+            Ok(self.start)
+        } else {
+            Err(IndexError::InvalidArgument(format!(
+                "item requires exactly one label, got {}",
+                self.len()
+            )))
+        }
+    }
+
+    #[must_use]
+    pub fn is_(&self, other: &Self) -> bool {
+        std::ptr::eq(self, other)
+    }
+
+    #[must_use]
+    pub fn equals(&self, other: &Self) -> bool {
+        self.values() == other.values()
+    }
+
+    #[must_use]
+    pub fn identical(&self, other: &Self) -> bool {
+        self.equals(other) && self.name == other.name
+    }
+
+    #[must_use]
+    pub fn holds_integer(&self) -> bool {
+        true
+    }
+
+    #[must_use]
+    pub fn inferred_type(&self) -> &'static str {
+        if self.is_empty() { "empty" } else { "integer" }
+    }
+
+    #[must_use]
+    pub fn is_boolean(&self) -> bool {
+        false
+    }
+
+    #[must_use]
+    pub fn is_categorical(&self) -> bool {
+        false
+    }
+
+    #[must_use]
+    pub fn is_floating(&self) -> bool {
+        false
+    }
+
+    #[must_use]
+    pub fn is_integer(&self) -> bool {
+        true
+    }
+
+    #[must_use]
+    pub fn is_interval(&self) -> bool {
+        false
+    }
+
+    #[must_use]
+    pub fn is_numeric(&self) -> bool {
+        true
+    }
+
+    #[must_use]
+    pub fn is_object(&self) -> bool {
+        false
     }
 
     #[must_use]
@@ -2821,6 +3270,117 @@ impl CategoricalIndex {
     #[must_use]
     pub fn notna(&self) -> Vec<bool> {
         vec![true; self.len()]
+    }
+
+    #[must_use]
+    pub fn is_unique(&self) -> bool {
+        let unique: HashSet<&String> = self.labels.iter().collect();
+        unique.len() == self.labels.len()
+    }
+
+    #[must_use]
+    pub fn has_duplicates(&self) -> bool {
+        !self.is_unique()
+    }
+
+    #[must_use]
+    pub fn is_monotonic_increasing(&self) -> bool {
+        let codes = self.codes();
+        codes.windows(2).all(|window| window[0] <= window[1])
+    }
+
+    #[must_use]
+    pub fn is_monotonic(&self) -> bool {
+        self.is_monotonic_increasing()
+    }
+
+    #[must_use]
+    pub fn is_monotonic_decreasing(&self) -> bool {
+        let codes = self.codes();
+        codes.windows(2).all(|window| window[0] >= window[1])
+    }
+
+    #[must_use]
+    pub fn nunique(&self) -> usize {
+        self.labels.iter().collect::<HashSet<_>>().len()
+    }
+
+    #[must_use]
+    pub fn ndim(&self) -> usize {
+        1
+    }
+
+    pub fn item(&self) -> Result<String, IndexError> {
+        if self.labels.len() == 1 {
+            Ok(self.labels[0].clone())
+        } else {
+            Err(IndexError::InvalidArgument(format!(
+                "item requires exactly one label, got {}",
+                self.labels.len()
+            )))
+        }
+    }
+
+    #[must_use]
+    pub fn is_(&self, other: &Self) -> bool {
+        std::ptr::eq(self, other)
+    }
+
+    #[must_use]
+    pub fn equals(&self, other: &Self) -> bool {
+        self.labels == other.labels
+            && self.categories == other.categories
+            && self.ordered == other.ordered
+    }
+
+    #[must_use]
+    pub fn identical(&self, other: &Self) -> bool {
+        self.equals(other) && self.name == other.name
+    }
+
+    #[must_use]
+    pub fn holds_integer(&self) -> bool {
+        false
+    }
+
+    #[must_use]
+    pub fn inferred_type(&self) -> &'static str {
+        "categorical"
+    }
+
+    #[must_use]
+    pub fn is_boolean(&self) -> bool {
+        false
+    }
+
+    #[must_use]
+    pub fn is_categorical(&self) -> bool {
+        true
+    }
+
+    #[must_use]
+    pub fn is_floating(&self) -> bool {
+        false
+    }
+
+    #[must_use]
+    pub fn is_integer(&self) -> bool {
+        false
+    }
+
+    #[must_use]
+    pub fn is_interval(&self) -> bool {
+        false
+    }
+
+    #[must_use]
+    pub fn is_numeric(&self) -> bool {
+        false
+    }
+
+    #[must_use]
+    pub fn is_object(&self) -> bool {
+        false
     }
 
     #[must_use]
@@ -5877,6 +6437,150 @@ mod tests {
                 false,
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn index_variant_wrappers_expose_identity_and_type_surface() {
+        let range = RangeIndex::new(1, 7, 2).unwrap().set_name("row");
+        assert!(range.is_(&range));
+        assert!(range.equals(&range.copy()));
+        assert!(range.identical(&range.copy()));
+        assert!(!range.identical(&range.rename_index(None)));
+        assert!(range.is_unique());
+        assert!(!range.has_duplicates());
+        assert!(range.is_monotonic_increasing());
+        assert!(!range.is_monotonic_decreasing());
+        assert_eq!(range.nunique(), 3);
+        assert_eq!(range.ndim(), 1);
+        assert_eq!(RangeIndex::new(4, 5, 1).unwrap().item().unwrap(), 4);
+        assert!(range.item().is_err());
+        assert!(range.holds_integer());
+        assert_eq!(range.inferred_type(), "integer");
+        assert!(range.is_integer());
+        assert!(range.is_numeric());
+        assert!(!range.is_boolean());
+        assert!(!range.is_categorical());
+        assert!(!range.is_floating());
+        assert!(!range.is_interval());
+        assert!(!range.is_object());
+
+        let dt = DatetimeIndex::new(vec![1_706_918_400_000_000_000, i64::MIN]).set_name("when");
+        assert!(dt.is_(&dt));
+        assert!(dt.equals(&dt.copy()));
+        assert!(dt.identical(&dt.copy()));
+        assert!(!dt.identical(&dt.rename_index(None)));
+        assert!(dt.is_unique());
+        assert!(!dt.has_duplicates());
+        assert_eq!(dt.nunique(), 1);
+        assert_eq!(dt.nunique_with_dropna(false), 2);
+        assert_eq!(dt.ndim(), 1);
+        assert_eq!(
+            DatetimeIndex::new(vec![1_706_918_400_000_000_000])
+                .item()
+                .unwrap(),
+            Some(1_706_918_400_000_000_000)
+        );
+        assert_eq!(DatetimeIndex::new(vec![i64::MIN]).item().unwrap(), None);
+        assert_eq!(dt.inferred_type(), "datetime64");
+        assert!(!dt.holds_integer());
+        assert!(!dt.is_integer());
+        assert!(!dt.is_numeric());
+        assert!(!dt.is_boolean());
+        assert!(!dt.is_categorical());
+        assert!(!dt.is_floating());
+        assert!(!dt.is_interval());
+        assert!(!dt.is_object());
+        assert!(DatetimeIndex::new(vec![1, 2]).is_monotonic_increasing());
+        assert!(DatetimeIndex::new(vec![2, 1]).is_monotonic_decreasing());
+
+        let td = TimedeltaIndex::new(vec![1, Timedelta::NAT]).set_name("delta");
+        assert!(td.is_(&td));
+        assert!(td.equals(&td.copy()));
+        assert!(td.identical(&td.copy()));
+        assert!(!td.identical(&td.rename_index(None)));
+        assert!(td.is_unique());
+        assert_eq!(td.nunique(), 1);
+        assert_eq!(td.nunique_with_dropna(false), 2);
+        assert_eq!(td.ndim(), 1);
+        assert_eq!(TimedeltaIndex::new(vec![7]).item().unwrap(), Some(7));
+        assert_eq!(
+            TimedeltaIndex::new(vec![Timedelta::NAT]).item().unwrap(),
+            None
+        );
+        assert_eq!(td.inferred_type(), "timedelta64");
+        assert!(!td.holds_integer());
+        assert!(!td.is_integer());
+        assert!(!td.is_numeric());
+        assert!(!td.is_boolean());
+        assert!(!td.is_categorical());
+        assert!(!td.is_floating());
+        assert!(!td.is_interval());
+        assert!(!td.is_object());
+        assert!(TimedeltaIndex::new(vec![1, 2]).is_monotonic_increasing());
+        assert!(TimedeltaIndex::new(vec![2, 1]).is_monotonic_decreasing());
+
+        let period =
+            PeriodIndex::from_range(Period::new(10, PeriodFreq::Monthly), 3).set_name("period");
+        assert!(period.is_(&period));
+        assert!(period.equals(&period.copy()));
+        assert!(period.identical(&period.copy()));
+        assert!(!period.identical(&period.rename_index(None)));
+        assert!(period.is_unique());
+        assert!(!period.has_duplicates());
+        assert!(period.is_monotonic_increasing());
+        assert!(!period.is_monotonic_decreasing());
+        assert_eq!(period.nunique(), 3);
+        assert_eq!(period.ndim(), 1);
+        assert_eq!(
+            PeriodIndex::new(vec![Period::new(42, PeriodFreq::Daily)])
+                .item()
+                .unwrap(),
+            Period::new(42, PeriodFreq::Daily)
+        );
+        assert_eq!(period.inferred_type(), "period");
+        assert!(!period.holds_integer());
+        assert!(!period.is_integer());
+        assert!(!period.is_numeric());
+        assert!(!period.is_boolean());
+        assert!(!period.is_categorical());
+        assert!(!period.is_floating());
+        assert!(!period.is_interval());
+        assert!(!period.is_object());
+
+        let categorical = CategoricalIndex::from_values(
+            vec!["low".to_owned(), "high".to_owned(), "low".to_owned()],
+            true,
+        )
+        .set_name("priority");
+        assert!(categorical.is_(&categorical));
+        assert!(categorical.equals(&categorical.copy()));
+        assert!(categorical.identical(&categorical.copy()));
+        assert!(!categorical.identical(&categorical.rename_index(None)));
+        assert!(!categorical.is_unique());
+        assert!(categorical.has_duplicates());
+        assert_eq!(categorical.nunique(), 2);
+        assert_eq!(categorical.ndim(), 1);
+        assert_eq!(
+            CategoricalIndex::from_values(vec!["high".to_owned()], true)
+                .item()
+                .unwrap(),
+            "high"
+        );
+        assert_eq!(categorical.inferred_type(), "categorical");
+        assert!(!categorical.holds_integer());
+        assert!(!categorical.is_integer());
+        assert!(!categorical.is_numeric());
+        assert!(!categorical.is_boolean());
+        assert!(categorical.is_categorical());
+        assert!(!categorical.is_floating());
+        assert!(!categorical.is_interval());
+        assert!(!categorical.is_object());
+        assert!(!categorical.is_monotonic_increasing());
+        assert!(!categorical.is_monotonic_decreasing());
+        assert!(
+            CategoricalIndex::from_values(vec!["low".to_owned(), "high".to_owned()], true)
+                .is_monotonic_increasing()
         );
     }
 
