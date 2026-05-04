@@ -10531,6 +10531,9 @@ impl DataFrameResample<'_> {
                     "std" => resample.std()?,
                     "var" => resample.var()?,
                     "median" => resample.median()?,
+                    "sem" => resample.sem()?,
+                    "size" => resample.size()?,
+                    "nunique" => resample.nunique()?,
                     "first" => resample.first()?,
                     "last" => resample.last()?,
                     _ => {
@@ -55226,18 +55229,41 @@ mod tests {
         );
         assert_eq!(resample.get_group("2024-01").unwrap().len(), 2);
 
-        let aggregate = resample.aggregate(&["sum", "mean"]).unwrap();
+        let aggregate = resample
+            .aggregate(&["sum", "mean", "sem", "size", "nunique"])
+            .unwrap();
         assert_eq!(
             aggregate
                 .column_names()
                 .into_iter()
                 .map(String::as_str)
                 .collect::<Vec<_>>(),
-            vec!["x_sum", "x_mean", "y_sum", "y_mean"]
+            vec![
+                "x_sum",
+                "x_mean",
+                "x_sem",
+                "x_size",
+                "x_nunique",
+                "y_sum",
+                "y_mean",
+                "y_sem",
+                "y_size",
+                "y_nunique"
+            ]
         );
         assert_eq!(
             aggregate.columns()["x_mean"].values(),
             &[Scalar::Float64(2.0), Scalar::Float64(15.0)]
+        );
+        assert!((aggregate.columns()["x_sem"].values()[0].to_f64().unwrap() - 1.0).abs() < 1e-12);
+        assert!((aggregate.columns()["x_sem"].values()[1].to_f64().unwrap() - 5.0).abs() < 1e-12);
+        assert_eq!(
+            aggregate.columns()["x_size"].values(),
+            &[Scalar::Int64(2), Scalar::Int64(2)]
+        );
+        assert_eq!(
+            aggregate.columns()["y_nunique"].values(),
+            &[Scalar::Int64(2), Scalar::Int64(1)]
         );
 
         let quantile = resample.quantile(0.5).unwrap();
