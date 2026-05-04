@@ -6816,6 +6816,21 @@ impl Series {
         Self::new(name.to_owned(), self.index.clone(), self.column.clone())
     }
 
+    /// Rename the index axis (return a copy with a renamed index).
+    ///
+    /// Matches `pd.Series.rename_axis(mapper, axis='index')`. Distinct from
+    /// [`Self::rename`] which renames the Series itself: `rename_axis`
+    /// renames the index AXIS (the label that appears above the index column
+    /// in `Series.info()` / `Series.to_frame()`). Per br-frankenpandas-17c2d
+    /// (skill /porting-to-rust).
+    pub fn rename_axis(&self, name: &str) -> Result<Self, FrameError> {
+        Self::new(
+            self.name.clone(),
+            self.index.set_name(name),
+            self.column.clone(),
+        )
+    }
+
     /// Replace the index labels.
     ///
     /// Matches `pd.Series.set_axis(labels)`.
@@ -71588,5 +71603,56 @@ mod tests {
                 }
             }
         }
+    }
+
+    // ── Series.rename_axis (br-frankenpandas-17c2d, skill: /porting-to-rust) ─
+
+    #[test]
+    fn series_rename_axis_sets_index_name() {
+        let s = Series::from_values(
+            "values",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(10), Scalar::Int64(20)],
+        )
+        .unwrap();
+        // Initial index has no name.
+        assert_eq!(s.index().name(), None);
+
+        let renamed = s.rename_axis("idx").unwrap();
+        // Index axis renamed.
+        assert_eq!(renamed.index().name(), Some("idx"));
+        // Series name itself unchanged.
+        assert_eq!(renamed.name(), "values");
+        // Values unchanged.
+        assert_eq!(renamed.values(), s.values());
+        // Original Series unchanged.
+        assert_eq!(s.index().name(), None);
+    }
+
+    #[test]
+    fn series_rename_axis_overrides_existing_axis_name() {
+        let s = Series::from_values(
+            "values",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(10), Scalar::Int64(20)],
+        )
+        .unwrap();
+        let first = s.rename_axis("first_name").unwrap();
+        assert_eq!(first.index().name(), Some("first_name"));
+        // Renaming again replaces the axis name.
+        let second = first.rename_axis("second_name").unwrap();
+        assert_eq!(second.index().name(), Some("second_name"));
+    }
+
+    #[test]
+    fn series_rename_axis_distinct_from_rename() {
+        // rename() sets the Series name; rename_axis() sets the index axis name.
+        // Demonstrate they're independent and don't interfere.
+        let s =
+            Series::from_values("original", vec![0_i64.into()], vec![Scalar::Int64(42)]).unwrap();
+        let with_axis = s.rename_axis("ax").unwrap();
+        let with_both = with_axis.rename("renamed").unwrap();
+        assert_eq!(with_both.name(), "renamed");
+        assert_eq!(with_both.index().name(), Some("ax"));
     }
 }
