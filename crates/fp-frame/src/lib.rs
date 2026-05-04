@@ -29406,8 +29406,216 @@ impl DataFrameGroupBy<'_> {
         }
     }
 
+    fn value_column_names(&self) -> Vec<String> {
+        self.df
+            .column_order
+            .iter()
+            .filter(|c| !self.by.contains(c))
+            .cloned()
+            .collect()
+    }
+
+    fn sample_n_for_group(
+        group_len: usize,
+        n: Option<usize>,
+        frac: Option<f64>,
+        replace: bool,
+    ) -> Result<usize, FrameError> {
+        let sample_n = match (n, frac) {
+            (Some(count), None) => count,
+            (None, Some(fraction)) => {
+                if fraction < 0.0 {
+                    return Err(FrameError::CompatibilityRejected(format!(
+                        "sample frac must be non-negative, got {fraction}"
+                    )));
+                }
+                (group_len as f64 * fraction).round() as usize
+            }
+            (None, None) => 1,
+            (Some(_), Some(_)) => {
+                return Err(FrameError::CompatibilityRejected(
+                    "cannot specify both n and frac".to_owned(),
+                ));
+            }
+        };
+
+        if !replace && sample_n > group_len {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "cannot sample {sample_n} rows from group of size {group_len} without replacement"
+            )));
+        }
+        Ok(sample_n)
+    }
+
+    fn sampled_group_positions(
+        row_indices: &[usize],
+        sample_n: usize,
+        replace: bool,
+        rng_state: &mut u64,
+    ) -> Vec<usize> {
+        let mut next_rand = || -> usize {
+            *rng_state = rng_state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
+            (*rng_state >> 33) as usize
+        };
+
+        if replace {
+            (0..sample_n)
+                .map(|_| row_indices[next_rand() % row_indices.len()])
+                .collect()
+        } else {
+            let mut pool = row_indices.to_vec();
+            for i in 0..sample_n {
+                let j = i + (next_rand() % (pool.len() - i));
+                pool.swap(i, j);
+            }
+            pool[..sample_n].to_vec()
+        }
+    }
+
+    fn combine_group_stat_frames<F>(&self, stat: F) -> Result<DataFrame, FrameError>
+    where
+        F: Fn(&DataFrame) -> Result<DataFrame, FrameError>,
+    {
+        let (group_order, groups) = self.build_groups();
+        let mut first_rows = Vec::with_capacity(group_order.len());
+        let mut stat_frames = Vec::with_capacity(group_order.len());
+
+        for gkey in &group_order {
+            let row_indices = &groups[gkey];
+            first_rows.push(row_indices[0]);
+            stat_frames.push(stat(&self.build_group_dataframe(row_indices, false)?)?);
+        }
+
+        if stat_frames.is_empty() {
+            return Self::empty_apply_frame();
+        }
+
+        let out_col_order = Self::apply_frame_column_order(&stat_frames);
+        let total_rows: usize = stat_frames.iter().map(DataFrame::len).sum();
+        let mut out_cols: BTreeMap<String, Vec<Scalar>> = out_col_order
+            .iter()
+            .map(|name| (name.clone(), Vec::with_capacity(total_rows)))
+            .collect();
+
+        let mut flat_labels = Vec::with_capacity(total_rows);
+        let mut level_arrays: Vec<Vec<IndexLabel>> = (0..=self.by.len())
+            .map(|_| Vec::with_capacity(total_rows))
+            .collect();
+
+        for (group_idx, frame) in stat_frames.iter().enumerate() {
+            let first_row = first_rows[group_idx];
+            let group_label = self.group_key_label(first_row);
+            let group_level_labels: Vec<IndexLabel> = self
+                .by
+                .iter()
+                .map(|col_name| self.group_key_level_label(first_row, col_name))
+                .collect();
+
+            for (row_idx, inner_label) in frame.index.labels().iter().enumerate() {
+                flat_labels.push(IndexLabel::Utf8(format!("{group_label}, {inner_label}")));
+                for (level_idx, label) in group_level_labels.iter().enumerate() {
+                    level_arrays[level_idx].push(label.clone());
+                }
+                level_arrays[self.by.len()].push(inner_label.clone());
+
+                for col_name in &out_col_order {
+                    let value = frame
+                        .columns
+                        .get(col_name)
+                        .map_or(Scalar::Null(NullKind::NaN), |col| {
+                            col.values()[row_idx].clone()
+                        });
+                    out_cols.get_mut(col_name).unwrap().push(value);
+                }
+            }
+        }
+
+        let result_cols: BTreeMap<String, Column> = out_cols
+            .into_iter()
+            .map(|(name, values)| Ok((name, Column::from_values(values)?)))
+            .collect::<Result<_, FrameError>>()?;
+        let mut names: Vec<Option<String>> =
+            self.by.iter().map(|name| Some(name.clone())).collect();
+        names.push(Some("index".to_owned()));
+
+        DataFrame::new_with_axes(
+            Index::new(flat_labels),
+            Some(fp_index::MultiIndex::from_arrays(level_arrays)?.set_names(names)),
+            result_cols,
+            out_col_order,
+            None,
+        )
+    }
+
+    /// Group labels in group iteration order.
+    #[must_use]
+    pub fn keys(&self) -> Vec<IndexLabel> {
+        let (group_order, groups) = self.build_groups();
+        group_order
+            .iter()
+            .map(|gkey| self.group_key_label(groups[gkey][0]))
+            .collect()
+    }
+
+    /// Mapping from group labels to source row positions.
+    #[must_use]
+    pub fn indices(&self) -> HashMap<IndexLabel, Vec<usize>> {
+        let (group_order, groups) = self.build_groups();
+        group_order
+            .iter()
+            .map(|gkey| (self.group_key_label(groups[gkey][0]), groups[gkey].clone()))
+            .collect()
+    }
+
+    /// Alias for `indices`, matching pandas' `groups` property shape.
+    #[must_use]
+    pub fn groups(&self) -> HashMap<IndexLabel, Vec<usize>> {
+        self.indices()
+    }
+
+    /// Names of the columns used as groupers.
+    #[must_use]
+    pub fn grouper(&self) -> Vec<String> {
+        self.by.clone()
+    }
+
+    /// Names of the grouping levels.
+    #[must_use]
+    pub fn level(&self) -> Vec<String> {
+        self.by.clone()
+    }
+
+    /// Number of groups.
+    #[must_use]
+    pub fn ngroups(&self) -> usize {
+        let (group_order, _) = self.build_groups();
+        group_order.len()
+    }
+
+    /// Grouped object dimensionality.
+    #[must_use]
+    pub fn ndim(&self) -> usize {
+        2
+    }
+
+    /// DTypes for grouped value columns.
+    pub fn dtypes(&self) -> Result<Series, FrameError> {
+        let value_cols = self.value_column_names();
+        let labels: Vec<IndexLabel> = value_cols
+            .iter()
+            .map(|name| IndexLabel::Utf8(name.clone()))
+            .collect();
+        let values: Vec<Scalar> = value_cols
+            .iter()
+            .map(|name| Scalar::Utf8(format!("{:?}", self.df.columns[name].dtype())))
+            .collect();
+        Series::from_values("dtypes".to_owned(), labels, values)
+    }
+
     /// Aggregate each value column per group with the given function.
-    fn aggregate(&self, func_name: &str) -> Result<DataFrame, FrameError> {
+    fn aggregate_named_func(&self, func_name: &str) -> Result<DataFrame, FrameError> {
         let (group_order, groups) = self.build_groups();
 
         // Determine value columns (all columns not in group-by keys)
@@ -29512,12 +29720,12 @@ impl DataFrameGroupBy<'_> {
 
     /// GroupBy any (returns True if any value is truthy per group).
     pub fn any(&self) -> Result<DataFrame, FrameError> {
-        self.aggregate("any")
+        self.aggregate_named_func("any")
     }
 
     /// GroupBy all (returns True if all values are truthy per group).
     pub fn all(&self) -> Result<DataFrame, FrameError> {
-        self.aggregate("all")
+        self.aggregate_named_func("all")
     }
 
     /// GroupBy quantile.
@@ -29592,42 +29800,42 @@ impl DataFrameGroupBy<'_> {
 
     /// GroupBy sum.
     pub fn sum(&self) -> Result<DataFrame, FrameError> {
-        self.aggregate("sum")
+        self.aggregate_named_func("sum")
     }
 
     /// GroupBy mean.
     pub fn mean(&self) -> Result<DataFrame, FrameError> {
-        self.aggregate("mean")
+        self.aggregate_named_func("mean")
     }
 
     /// GroupBy count.
     pub fn count(&self) -> Result<DataFrame, FrameError> {
-        self.aggregate("count")
+        self.aggregate_named_func("count")
     }
 
     /// GroupBy min.
     pub fn min(&self) -> Result<DataFrame, FrameError> {
-        self.aggregate("min")
+        self.aggregate_named_func("min")
     }
 
     /// GroupBy max.
     pub fn max(&self) -> Result<DataFrame, FrameError> {
-        self.aggregate("max")
+        self.aggregate_named_func("max")
     }
 
     /// GroupBy std.
     pub fn std(&self) -> Result<DataFrame, FrameError> {
-        self.aggregate("std")
+        self.aggregate_named_func("std")
     }
 
     /// GroupBy var.
     pub fn var(&self) -> Result<DataFrame, FrameError> {
-        self.aggregate("var")
+        self.aggregate_named_func("var")
     }
 
     /// GroupBy median.
     pub fn median(&self) -> Result<DataFrame, FrameError> {
-        self.aggregate("median")
+        self.aggregate_named_func("median")
     }
 
     /// GroupBy idxmin. Returns the index label of the minimum value for each group.
@@ -29750,22 +29958,22 @@ impl DataFrameGroupBy<'_> {
 
     /// GroupBy first.
     pub fn first(&self) -> Result<DataFrame, FrameError> {
-        self.aggregate("first")
+        self.aggregate_named_func("first")
     }
 
     /// GroupBy last.
     pub fn last(&self) -> Result<DataFrame, FrameError> {
-        self.aggregate("last")
+        self.aggregate_named_func("last")
     }
 
     /// GroupBy nunique (count of unique non-null values per group).
     pub fn nunique(&self) -> Result<DataFrame, FrameError> {
-        self.aggregate("nunique")
+        self.aggregate_named_func("nunique")
     }
 
     /// GroupBy prod (product of non-null values per group).
     pub fn prod(&self) -> Result<DataFrame, FrameError> {
-        self.aggregate("prod")
+        self.aggregate_named_func("prod")
     }
 
     /// Aggregate with per-column function mapping.
@@ -29822,6 +30030,14 @@ impl DataFrameGroupBy<'_> {
         }
 
         self.format_output(result_cols, col_order, labels, &group_order, &groups)
+    }
+
+    /// pandas spelling alias for [`Self::agg`].
+    pub fn aggregate(
+        &self,
+        func_map: &std::collections::HashMap<String, String>,
+    ) -> Result<DataFrame, FrameError> {
+        self.agg(func_map)
     }
 
     /// Aggregate with multiple functions applied to all value columns.
@@ -31125,6 +31341,51 @@ impl DataFrameGroupBy<'_> {
         self.df.take_rows_by_positions(&keep_indices)
     }
 
+    /// Return positional rows from each group.
+    ///
+    /// Matches `pd.DataFrameGroupBy.take(indices)`, resolving negative
+    /// positions relative to each group's length.
+    pub fn take(&self, indices: &[i64]) -> Result<DataFrame, FrameError> {
+        let (group_order, groups) = self.build_groups();
+        let mut keep_indices = Vec::new();
+
+        for gkey in &group_order {
+            let row_indices = &groups[gkey];
+            let normalized = DataFrame::normalize_take_indices(indices, row_indices.len(), 0)?;
+            keep_indices.extend(normalized.into_iter().map(|idx| row_indices[idx]));
+        }
+
+        self.df.take_rows_by_positions(&keep_indices)
+    }
+
+    /// Randomly sample rows from each group.
+    ///
+    /// Matches `pd.DataFrameGroupBy.sample(n=..., frac=..., replace=...)`.
+    pub fn sample(
+        &self,
+        n: Option<usize>,
+        frac: Option<f64>,
+        replace: bool,
+        seed: Option<u64>,
+    ) -> Result<DataFrame, FrameError> {
+        let (group_order, groups) = self.build_groups();
+        let mut keep_indices = Vec::new();
+        let mut rng_state = seed.unwrap_or(42);
+
+        for gkey in &group_order {
+            let row_indices = &groups[gkey];
+            let sample_n = Self::sample_n_for_group(row_indices.len(), n, frac, replace)?;
+            keep_indices.extend(Self::sampled_group_positions(
+                row_indices,
+                sample_n,
+                replace,
+                &mut rng_state,
+            ));
+        }
+
+        self.df.take_rows_by_positions(&keep_indices)
+    }
+
     /// GroupBy pct_change within each group.
     ///
     /// Matches `df.groupby(col).pct_change()`.
@@ -31453,6 +31714,69 @@ impl DataFrameGroupBy<'_> {
         F: FnOnce(&Self) -> Result<DataFrame, FrameError>,
     {
         func(self)
+    }
+
+    /// Pairwise Pearson correlation matrix per group.
+    ///
+    /// Matches `pd.DataFrameGroupBy.corr()` by stacking each group's
+    /// DataFrame correlation matrix under group-key row metadata.
+    pub fn corr(&self) -> Result<DataFrame, FrameError> {
+        self.combine_group_stat_frames(DataFrame::corr)
+    }
+
+    /// Pairwise covariance matrix per group.
+    ///
+    /// Matches `pd.DataFrameGroupBy.cov()` by stacking each group's
+    /// DataFrame covariance matrix under group-key row metadata.
+    pub fn cov(&self) -> Result<DataFrame, FrameError> {
+        self.combine_group_stat_frames(DataFrame::cov)
+    }
+
+    /// Column-wise correlation against another DataFrame per group.
+    ///
+    /// Matches the `DataFrameGroupBy.corrwith(other)` result shape: one row
+    /// per group and one column per shared numeric column.
+    pub fn corrwith(&self, other: &DataFrame) -> Result<DataFrame, FrameError> {
+        let (group_order, groups) = self.build_groups();
+        let mut labels = Vec::with_capacity(group_order.len());
+        let mut col_order = Vec::new();
+        let mut result_values: BTreeMap<String, Vec<Scalar>> = BTreeMap::new();
+
+        for gkey in &group_order {
+            let row_indices = &groups[gkey];
+            let first_row = row_indices[0];
+            labels.push(self.group_key_label(first_row));
+
+            let group_df = self.build_group_dataframe(row_indices, false)?;
+            let corr = group_df.corrwith(other)?;
+            let mut row_values = BTreeMap::new();
+            for (label, value) in corr.index().labels().iter().zip(corr.values()) {
+                let col_name = label.to_string();
+                if !result_values.contains_key(&col_name) {
+                    result_values.insert(
+                        col_name.clone(),
+                        vec![Scalar::Null(NullKind::NaN); labels.len() - 1],
+                    );
+                    col_order.push(col_name.clone());
+                }
+                row_values.insert(col_name, value.clone());
+            }
+
+            for col_name in &col_order {
+                let value = row_values
+                    .get(col_name)
+                    .cloned()
+                    .unwrap_or(Scalar::Null(NullKind::NaN));
+                result_values.get_mut(col_name).unwrap().push(value);
+            }
+        }
+
+        let result_cols: BTreeMap<String, Column> = result_values
+            .into_iter()
+            .map(|(name, values)| Ok((name, Column::from_values(values)?)))
+            .collect::<Result<_, FrameError>>()?;
+
+        self.format_output(result_cols, col_order, labels, &group_order, &groups)
     }
 
     /// Standard error of the mean per group.
@@ -31914,6 +32238,27 @@ impl DataFrameGroupBy<'_> {
         self.df.fillna(value)
     }
 
+    /// Grouped expanding window operations.
+    ///
+    /// Matches `pd.DataFrameGroupBy.expanding(min_periods=...)`.
+    pub fn expanding(&self, min_periods: Option<usize>) -> GroupByExpanding<'_> {
+        GroupByExpanding {
+            groupby: self,
+            min_periods: min_periods.unwrap_or(1),
+        }
+    }
+
+    /// Grouped exponentially weighted moving window operations.
+    ///
+    /// Matches `pd.DataFrameGroupBy.ewm(span=..., alpha=...)`.
+    pub fn ewm(&self, span: Option<f64>, alpha: Option<f64>) -> GroupByEwm<'_> {
+        GroupByEwm {
+            groupby: self,
+            span,
+            alpha,
+        }
+    }
+
     /// Grouped rolling window operations.
     ///
     /// Matches `pd.DataFrameGroupBy.rolling(window)`. Returns a
@@ -32056,6 +32401,215 @@ impl GroupByRolling<'_> {
     /// Grouped rolling variance.
     pub fn var(&self) -> Result<DataFrame, FrameError> {
         self.apply_grouped_rolling(|s, w, mp| s.rolling(w, Some(mp)).var())
+    }
+}
+
+/// Grouped expanding window over a `DataFrameGroupBy`.
+pub struct GroupByExpanding<'a> {
+    groupby: &'a DataFrameGroupBy<'a>,
+    min_periods: usize,
+}
+
+impl GroupByExpanding<'_> {
+    fn apply_grouped_expanding<F>(&self, agg: F) -> Result<DataFrame, FrameError>
+    where
+        F: Fn(&Series, usize) -> Result<Series, FrameError>,
+    {
+        let (group_order, groups) = self.groupby.build_groups();
+        let value_cols: Vec<String> = self
+            .groupby
+            .df
+            .column_order
+            .iter()
+            .filter(|c| {
+                if self.groupby.by.contains(c) {
+                    return false;
+                }
+                matches!(
+                    self.groupby.df.columns[c.as_str()].dtype(),
+                    DType::Int64 | DType::Float64
+                )
+            })
+            .cloned()
+            .collect();
+
+        let n = self.groupby.df.len();
+        let mut result_data: std::collections::HashMap<String, Vec<Scalar>> = value_cols
+            .iter()
+            .map(|c| (c.clone(), vec![Scalar::Null(NullKind::NaN); n]))
+            .collect();
+
+        for gkey in &group_order {
+            let indices = &groups[gkey];
+            for col_name in &value_cols {
+                let col = &self.groupby.df.columns[col_name];
+                let group_vals: Vec<Scalar> =
+                    indices.iter().map(|&i| col.values()[i].clone()).collect();
+                let group_idx: Vec<IndexLabel> =
+                    (0..group_vals.len() as i64).map(IndexLabel::from).collect();
+                let group_series = Series::from_values(col_name, group_idx, group_vals)?;
+                let expanded = agg(&group_series, self.min_periods)?;
+
+                let result_col = result_data.get_mut(col_name).unwrap();
+                for (group_pos, &orig_idx) in indices.iter().enumerate() {
+                    result_col[orig_idx] = expanded.values()[group_pos].clone();
+                }
+            }
+        }
+
+        let mut cols = BTreeMap::new();
+        let mut col_order = Vec::new();
+        for col_name in &self.groupby.df.column_order {
+            if self.groupby.by.contains(col_name) {
+                cols.insert(col_name.clone(), self.groupby.df.columns[col_name].clone());
+                col_order.push(col_name.clone());
+            }
+        }
+        for col_name in &value_cols {
+            cols.insert(
+                col_name.clone(),
+                Column::from_values(result_data.remove(col_name).unwrap())?,
+            );
+            col_order.push(col_name.clone());
+        }
+
+        Ok(DataFrame {
+            columns: cols,
+            column_order: col_order,
+            index: self.groupby.df.index.clone(),
+            column_multiindex: None,
+            row_multiindex: None,
+        })
+    }
+
+    /// Grouped expanding sum.
+    pub fn sum(&self) -> Result<DataFrame, FrameError> {
+        self.apply_grouped_expanding(|s, mp| s.expanding(Some(mp)).sum())
+    }
+
+    /// Grouped expanding mean.
+    pub fn mean(&self) -> Result<DataFrame, FrameError> {
+        self.apply_grouped_expanding(|s, mp| s.expanding(Some(mp)).mean())
+    }
+
+    /// Grouped expanding min.
+    pub fn min(&self) -> Result<DataFrame, FrameError> {
+        self.apply_grouped_expanding(|s, mp| s.expanding(Some(mp)).min())
+    }
+
+    /// Grouped expanding max.
+    pub fn max(&self) -> Result<DataFrame, FrameError> {
+        self.apply_grouped_expanding(|s, mp| s.expanding(Some(mp)).max())
+    }
+
+    /// Grouped expanding standard deviation.
+    pub fn std(&self) -> Result<DataFrame, FrameError> {
+        self.apply_grouped_expanding(|s, mp| s.expanding(Some(mp)).std())
+    }
+
+    /// Grouped expanding variance.
+    pub fn var(&self) -> Result<DataFrame, FrameError> {
+        self.apply_grouped_expanding(|s, mp| s.expanding(Some(mp)).var())
+    }
+}
+
+/// Grouped exponentially weighted window over a `DataFrameGroupBy`.
+pub struct GroupByEwm<'a> {
+    groupby: &'a DataFrameGroupBy<'a>,
+    span: Option<f64>,
+    alpha: Option<f64>,
+}
+
+impl GroupByEwm<'_> {
+    fn apply_grouped_ewm<F>(&self, agg: F) -> Result<DataFrame, FrameError>
+    where
+        F: Fn(&Series, Option<f64>, Option<f64>) -> Result<Series, FrameError>,
+    {
+        let (group_order, groups) = self.groupby.build_groups();
+        let value_cols: Vec<String> = self
+            .groupby
+            .df
+            .column_order
+            .iter()
+            .filter(|c| {
+                if self.groupby.by.contains(c) {
+                    return false;
+                }
+                matches!(
+                    self.groupby.df.columns[c.as_str()].dtype(),
+                    DType::Int64 | DType::Float64
+                )
+            })
+            .cloned()
+            .collect();
+
+        let n = self.groupby.df.len();
+        let mut result_data: std::collections::HashMap<String, Vec<Scalar>> = value_cols
+            .iter()
+            .map(|c| (c.clone(), vec![Scalar::Null(NullKind::NaN); n]))
+            .collect();
+
+        for gkey in &group_order {
+            let indices = &groups[gkey];
+            for col_name in &value_cols {
+                let col = &self.groupby.df.columns[col_name];
+                let group_vals: Vec<Scalar> =
+                    indices.iter().map(|&i| col.values()[i].clone()).collect();
+                let group_idx: Vec<IndexLabel> =
+                    (0..group_vals.len() as i64).map(IndexLabel::from).collect();
+                let group_series = Series::from_values(col_name, group_idx, group_vals)?;
+                let weighted = agg(&group_series, self.span, self.alpha)?;
+
+                let result_col = result_data.get_mut(col_name).unwrap();
+                for (group_pos, &orig_idx) in indices.iter().enumerate() {
+                    result_col[orig_idx] = weighted.values()[group_pos].clone();
+                }
+            }
+        }
+
+        let mut cols = BTreeMap::new();
+        let mut col_order = Vec::new();
+        for col_name in &self.groupby.df.column_order {
+            if self.groupby.by.contains(col_name) {
+                cols.insert(col_name.clone(), self.groupby.df.columns[col_name].clone());
+                col_order.push(col_name.clone());
+            }
+        }
+        for col_name in &value_cols {
+            cols.insert(
+                col_name.clone(),
+                Column::from_values(result_data.remove(col_name).unwrap())?,
+            );
+            col_order.push(col_name.clone());
+        }
+
+        Ok(DataFrame {
+            columns: cols,
+            column_order: col_order,
+            index: self.groupby.df.index.clone(),
+            column_multiindex: None,
+            row_multiindex: None,
+        })
+    }
+
+    /// Grouped EWM mean.
+    pub fn mean(&self) -> Result<DataFrame, FrameError> {
+        self.apply_grouped_ewm(|s, span, alpha| s.ewm(span, alpha).mean())
+    }
+
+    /// Grouped EWM sum.
+    pub fn sum(&self) -> Result<DataFrame, FrameError> {
+        self.apply_grouped_ewm(|s, span, alpha| s.ewm(span, alpha).sum())
+    }
+
+    /// Grouped EWM standard deviation.
+    pub fn std(&self) -> Result<DataFrame, FrameError> {
+        self.apply_grouped_ewm(|s, span, alpha| s.ewm(span, alpha).std())
+    }
+
+    /// Grouped EWM variance.
+    pub fn var(&self) -> Result<DataFrame, FrameError> {
+        self.apply_grouped_ewm(|s, span, alpha| s.ewm(span, alpha).var())
     }
 }
 
@@ -54859,6 +55413,169 @@ mod tests {
         let gb = df.groupby(&["g"]).unwrap();
         let result = gb.pipe(|gb| gb.sum()).unwrap();
         assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn dataframe_groupby_ba1kr_introspection_aggregate_take_sample() {
+        let df = DataFrame::from_dict(
+            &["g", "v", "w"],
+            vec![
+                (
+                    "g",
+                    vec![
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("b".into()),
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("b".into()),
+                    ],
+                ),
+                (
+                    "v",
+                    vec![
+                        Scalar::Int64(10),
+                        Scalar::Int64(20),
+                        Scalar::Int64(30),
+                        Scalar::Int64(40),
+                    ],
+                ),
+                (
+                    "w",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(4.0),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let grouped = df.groupby(&["g"]).unwrap();
+
+        assert_eq!(
+            grouped.keys(),
+            vec![IndexLabel::Utf8("a".into()), IndexLabel::Utf8("b".into())]
+        );
+        assert_eq!(grouped.grouper(), vec!["g".to_owned()]);
+        assert_eq!(grouped.level(), vec!["g".to_owned()]);
+        assert_eq!(grouped.ngroups(), 2);
+        assert_eq!(grouped.ndim(), 2);
+        assert_eq!(
+            grouped.indices().get(&IndexLabel::Utf8("a".into())),
+            Some(&vec![0, 2])
+        );
+        assert_eq!(
+            grouped.groups().get(&IndexLabel::Utf8("b".into())),
+            Some(&vec![1, 3])
+        );
+        assert_eq!(
+            grouped.dtypes().unwrap().values(),
+            &[Scalar::Utf8("Int64".into()), Scalar::Utf8("Float64".into())]
+        );
+
+        let mut funcs = std::collections::HashMap::new();
+        funcs.insert("v".to_owned(), "sum".to_owned());
+        let aggregated = grouped.aggregate(&funcs).unwrap();
+        assert_eq!(
+            aggregated.columns()["v"].values(),
+            &[Scalar::Int64(40), Scalar::Int64(60)]
+        );
+
+        let taken = grouped.take(&[-1]).unwrap();
+        assert_eq!(
+            taken.columns()["v"].values(),
+            &[Scalar::Int64(30), Scalar::Int64(40)]
+        );
+
+        let sampled = grouped.sample(Some(1), None, false, Some(7)).unwrap();
+        assert_eq!(sampled.len(), 2);
+        assert_eq!(
+            sampled
+                .column_names()
+                .into_iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["g", "v", "w"]
+        );
+    }
+
+    #[test]
+    fn dataframe_groupby_ba1kr_stats_and_grouped_windows() {
+        let df = DataFrame::from_dict(
+            &["g", "x", "y"],
+            vec![
+                (
+                    "g",
+                    vec![
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("b".into()),
+                        Scalar::Utf8("b".into()),
+                    ],
+                ),
+                (
+                    "x",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                    ],
+                ),
+                (
+                    "y",
+                    vec![
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(4.0),
+                        Scalar::Float64(30.0),
+                        Scalar::Float64(50.0),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let grouped = df.groupby(&["g"]).unwrap();
+
+        let corr = grouped.corr().unwrap();
+        assert_eq!(corr.len(), 4);
+        assert!(corr.row_multiindex().is_some());
+        assert!((corr.columns()["y"].values()[0].to_f64().unwrap() - 1.0).abs() < 1e-12);
+
+        let cov = grouped.cov().unwrap();
+        assert!((cov.columns()["y"].values()[0].to_f64().unwrap() - 1.0).abs() < 1e-12);
+
+        let corrwith = grouped.corrwith(&df).unwrap();
+        assert_eq!(corrwith.len(), 2);
+        assert_eq!(
+            corrwith
+                .column_names()
+                .into_iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["x", "y"]
+        );
+
+        let expanding = grouped.expanding(Some(1)).mean().unwrap();
+        assert_eq!(
+            expanding.columns()["x"].values(),
+            &[
+                Scalar::Float64(1.0),
+                Scalar::Float64(1.5),
+                Scalar::Float64(10.0),
+                Scalar::Float64(15.0)
+            ]
+        );
+
+        let ewm = grouped.ewm(None, Some(0.5)).mean().unwrap();
+        assert_eq!(
+            ewm.columns()["x"].values(),
+            &[
+                Scalar::Float64(1.0),
+                Scalar::Float64(1.5),
+                Scalar::Float64(10.0),
+                Scalar::Float64(15.0)
+            ]
+        );
     }
 
     #[test]
