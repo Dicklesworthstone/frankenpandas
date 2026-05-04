@@ -27285,25 +27285,6 @@ impl DataFrame {
         self.squeeze_to_series(axis)
     }
 
-    /// Extract the single bool value from a single-element DataFrame.
-    ///
-    /// Matches `pd.DataFrame.bool()`. Raises an error unless the DataFrame
-    /// contains exactly one boolean scalar.
-    pub fn bool_(&self) -> Result<bool, FrameError> {
-        if self.len() != 1 || self.column_order.len() != 1 {
-            return Err(FrameError::CompatibilityRejected(
-                "bool_: DataFrame must contain exactly one element".to_string(),
-            ));
-        }
-        let col = &self.columns[&self.column_order[0]];
-        match &col.values()[0] {
-            Scalar::Bool(b) => Ok(*b),
-            _ => Err(FrameError::CompatibilityRejected(
-                "bool_: value must be a boolean scalar".to_string(),
-            )),
-        }
-    }
-
     /// Get a column by name with a default if not found.
     ///
     /// Matches `pd.DataFrame.get(key, default)`. Returns the column
@@ -69271,7 +69252,10 @@ mod tests {
         assert_eq!(values[0][2], Scalar::Utf8("x".into()));
 
         let found = df.get("a").unwrap().expect("column a should exist");
-        assert_eq!(found.values(), &[Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)]);
+        assert_eq!(
+            found.values(),
+            &[Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)]
+        );
         assert!(df.get("missing").unwrap().is_none());
 
         let default = Series::from_values(
@@ -69297,7 +69281,9 @@ mod tests {
         assert_eq!(bool_df.sparse().dataframe(), &bool_df);
 
         let err = nk54a_df().bool_().unwrap_err();
-        assert!(matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("exactly one element")));
+        assert!(
+            matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("exactly one element"))
+        );
     }
 
     #[test]
@@ -69307,11 +69293,12 @@ mod tests {
             "x".to_owned(),
             Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2)]).unwrap(),
         );
-        let df =
-            DataFrame::new(Index::new(vec![0_i64.into(), 0_i64.into()]), columns).unwrap();
+        let df = DataFrame::new(Index::new(vec![0_i64.into(), 0_i64.into()]), columns).unwrap();
 
         let err = df.set_flags(Some(false)).unwrap_err();
-        assert!(matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("duplicate labels")));
+        assert!(
+            matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("duplicate labels"))
+        );
     }
 
     // ── Ewm.agg / online / exclusions / ndim (br-frankenpandas-mvynk) ─
