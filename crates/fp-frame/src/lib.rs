@@ -4602,6 +4602,25 @@ impl Series {
                     Scalar::Bool(!any_false)
                 });
             }
+            // Per br-frankenpandas-83c2a: pandas supports min on Utf8
+            // (lexicographic). Sister gap to cummin/cummax fix in c4898.
+            DType::Utf8 => {
+                let mut best: Option<&str> = None;
+                for val in self.column.values() {
+                    if let Scalar::Utf8(s) = val {
+                        let s_ref = s.as_str();
+                        best = Some(match best {
+                            None => s_ref,
+                            Some(b) if b < s_ref => b,
+                            _ => s_ref,
+                        });
+                    }
+                }
+                return Ok(match best {
+                    Some(s) => Scalar::Utf8(s.to_string()),
+                    None => Scalar::Float64(f64::NAN),
+                });
+            }
             _ => {}
         }
 
@@ -4658,6 +4677,25 @@ impl Series {
                     Scalar::Float64(f64::NAN)
                 } else {
                     Scalar::Bool(any_true)
+                });
+            }
+            // Per br-frankenpandas-83c2a: pandas supports max on Utf8
+            // (lexicographic). Sister to min above.
+            DType::Utf8 => {
+                let mut best: Option<&str> = None;
+                for val in self.column.values() {
+                    if let Scalar::Utf8(s) = val {
+                        let s_ref = s.as_str();
+                        best = Some(match best {
+                            None => s_ref,
+                            Some(b) if b > s_ref => b,
+                            _ => s_ref,
+                        });
+                    }
+                }
+                return Ok(match best {
+                    Some(s) => Scalar::Utf8(s.to_string()),
+                    None => Scalar::Float64(f64::NAN),
                 });
             }
             _ => {}
@@ -72992,6 +73030,82 @@ mod tests {
         .unwrap();
         assert_eq!(s.sum().unwrap(), Scalar::Float64(8.0));
         assert_eq!(s.prod().unwrap(), Scalar::Float64(15.0));
+    }
+
+    #[test]
+    fn series_min_max_utf8_lexicographic() {
+        // Per br-frankenpandas-83c2a: pandas supports min/max on Utf8
+        // lexicographically.
+        let s = Series::from_values(
+            "x",
+            (0..3_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("c".into()),
+            ],
+        )
+        .unwrap();
+        assert_eq!(s.min().unwrap(), Scalar::Utf8("a".into()));
+        assert_eq!(s.max().unwrap(), Scalar::Utf8("c".into()));
+    }
+
+    #[test]
+    fn series_min_max_utf8_skips_nulls() {
+        // is_missing values should be skipped in the lexicographic scan.
+        let s = Series::from_values(
+            "x",
+            (0..4_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![
+                Scalar::Utf8("b".into()),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("c".into()),
+            ],
+        )
+        .unwrap();
+        assert_eq!(s.min().unwrap(), Scalar::Utf8("a".into()));
+        assert_eq!(s.max().unwrap(), Scalar::Utf8("c".into()));
+    }
+
+    #[test]
+    fn series_min_max_utf8_all_null_returns_nan() {
+        // All-null Utf8 series: best stays None → Float64(NaN) sentinel
+        // (matching the existing all-null behavior for Int64/Bool/Float64).
+        let s = Series::from_values(
+            "x",
+            (0..2_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![Scalar::Null(NullKind::NaN), Scalar::Null(NullKind::NaN)],
+        )
+        .unwrap();
+        let min_val = s.min().unwrap();
+        let max_val = s.max().unwrap();
+        assert!(matches!(min_val, Scalar::Float64(v) if v.is_nan()));
+        assert!(matches!(max_val, Scalar::Float64(v) if v.is_nan()));
+    }
+
+    #[test]
+    fn series_cummax_last_equals_max_metamorphic_utf8() {
+        // Per br-frankenpandas-83c2a: the metamorphic property that
+        // surfaced this fix. cummax(s)[-1] == max(s) on a Utf8 series.
+        let s = Series::from_values(
+            "x",
+            (0..4_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![
+                Scalar::Utf8("dog".into()),
+                Scalar::Utf8("apple".into()),
+                Scalar::Utf8("banana".into()),
+                Scalar::Utf8("cherry".into()),
+            ],
+        )
+        .unwrap();
+        let cm = s.cummax().unwrap();
+        let cm_last = cm.column().values().last().unwrap().clone();
+        let max = s.max().unwrap();
+        assert_eq!(cm_last, max);
+        // Sanity: max should be "dog" (lex max of these strings —
+        // "dog" > "cherry" > "banana" > "apple").
+        assert_eq!(max, Scalar::Utf8("dog".into()));
     }
 
     #[test]
