@@ -3578,20 +3578,26 @@ impl Series {
             return self.categorical_value_counts_with_options(false, true, false, true);
         }
 
+        // Per br-frankenpandas-7c7d0: replaced O(n²) iter_mut().find() with
+        // a HashMap-keyed-by-ScalarKey index tracker + parallel insertion-
+        // ordered Vec. O(n) amortized; first-seen ordering preserved for
+        // the subsequent stable sort.
         let mut counts: Vec<(Scalar, usize)> = Vec::new();
+        let mut index_map: HashMap<ScalarKey<'_>, usize> = HashMap::new();
 
         for value in self.column.values() {
             if value.is_missing() {
                 continue;
             }
-
-            if let Some((_, count)) = counts
-                .iter_mut()
-                .find(|(existing, _)| existing.semantic_eq(value))
-            {
-                *count += 1;
-            } else {
-                counts.push((value.clone(), 1));
+            let Some(key) = scalar_key_skip_missing(value) else {
+                continue;
+            };
+            match index_map.get(&key) {
+                Some(&idx) => counts[idx].1 += 1,
+                None => {
+                    index_map.insert(key, counts.len());
+                    counts.push((value.clone(), 1));
+                }
             }
         }
 
@@ -3622,7 +3628,10 @@ impl Series {
             return self.categorical_value_counts_with_options(normalize, sort, ascending, dropna);
         }
 
+        // Per br-frankenpandas-7c7d0: O(n) HashMap-driven counter; see
+        // value_counts above for rationale.
         let mut counts: Vec<(Scalar, usize)> = Vec::new();
+        let mut index_map: HashMap<ScalarKey<'_>, usize> = HashMap::new();
         let mut null_count = 0_usize;
 
         for value in self.column.values() {
@@ -3630,13 +3639,15 @@ impl Series {
                 null_count += 1;
                 continue;
             }
-            if let Some((_, count)) = counts
-                .iter_mut()
-                .find(|(existing, _)| existing.semantic_eq(value))
-            {
-                *count += 1;
-            } else {
-                counts.push((value.clone(), 1));
+            let Some(key) = scalar_key_skip_missing(value) else {
+                continue;
+            };
+            match index_map.get(&key) {
+                Some(&idx) => counts[idx].1 += 1,
+                None => {
+                    index_map.insert(key, counts.len());
+                    counts.push((value.clone(), 1));
+                }
             }
         }
 
@@ -72623,6 +72634,70 @@ mod tests {
         .unwrap();
         assert_eq!(s.sum().unwrap(), Scalar::Float64(8.0));
         assert_eq!(s.prod().unwrap(), Scalar::Float64(15.0));
+    }
+
+    #[test]
+    fn series_value_counts_handles_many_unique_values_fast() {
+        // Per br-frankenpandas-7c7d0: regression guard for the O(n²) →
+        // O(n) fix. With 5_000 unique Int64 values, the old linear-scan
+        // implementation would do ~12.5M comparisons; the HashMap version
+        // does ~5K. Keep this test small enough to stay in the unit
+        // suite (no perf assertion — correctness suffices since the
+        // big-O improvement is the goal; perf would need a benchmark).
+        let n: i64 = 5_000;
+        let labels: Vec<IndexLabel> = (0..n).map(IndexLabel::Int64).collect();
+        let values: Vec<Scalar> = (0..n).map(Scalar::Int64).collect();
+        let s = Series::from_values("x", labels, values).unwrap();
+
+        let counts = s.value_counts().unwrap();
+        // All values are distinct → n rows, each count == 1.
+        assert_eq!(counts.len() as i64, n);
+        for v in counts.column().values() {
+            assert_eq!(*v, Scalar::Int64(1));
+        }
+    }
+
+    #[test]
+    fn series_value_counts_preserves_first_seen_order_for_ties_after_o_n_fix() {
+        // Per br-frankenpandas-7c7d0: the HashMap-driven counter must
+        // still preserve first-seen ordering for tied counts (the sort
+        // is stable). Without insertion-order tracking, HashMap iteration
+        // would scramble equal-count entries.
+        // Input: [b, a, c, a, b] — all three have count {a:2, b:2, c:1}.
+        // After stable descending sort, ties preserve first-seen order:
+        // expected output index sequence is [b, a, c] (b seen first
+        // among count-2 entries; c is unique with count 1).
+        let s = Series::from_values(
+            "x",
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+            ],
+            vec![
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("c".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+            ],
+        )
+        .unwrap();
+
+        let counts = s.value_counts().unwrap();
+        // Three buckets: a, b, c.
+        assert_eq!(counts.len(), 3);
+        // Counts in order [b:2, a:2, c:1] preserved by stable sort.
+        let labels = counts.index().labels();
+        assert_eq!(labels[0], IndexLabel::Utf8("b".into()));
+        assert_eq!(labels[1], IndexLabel::Utf8("a".into()));
+        assert_eq!(labels[2], IndexLabel::Utf8("c".into()));
+        let count_vals = counts.column().values();
+        assert_eq!(count_vals[0], Scalar::Int64(2));
+        assert_eq!(count_vals[1], Scalar::Int64(2));
+        assert_eq!(count_vals[2], Scalar::Int64(1));
     }
 
     #[test]
