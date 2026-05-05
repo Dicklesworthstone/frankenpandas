@@ -5543,6 +5543,31 @@ impl Series {
     /// Matches `series.idxmin()`. Skips missing values. Returns an error
     /// if the series is empty or all-null.
     pub fn idxmin(&self) -> Result<IndexLabel, FrameError> {
+        // Per br-frankenpandas-7db78: pandas supports idxmin on Utf8
+        // (returns label of lex-min). Was previously falling through to
+        // to_f64 which errors. Sister gap to min/max Utf8 fix in 83c2a.
+        if matches!(self.column.dtype(), DType::Utf8) {
+            let mut best_idx: Option<usize> = None;
+            let mut best: Option<&str> = None;
+            for (i, val) in self.column.values().iter().enumerate() {
+                if let Scalar::Utf8(s) = val {
+                    let s_ref = s.as_str();
+                    // Same first-non-missing-wins as br-5c98a numeric path.
+                    if best_idx.is_none() || s_ref < best.unwrap() {
+                        best = Some(s_ref);
+                        best_idx = Some(i);
+                    }
+                }
+            }
+            return best_idx
+                .map(|i| self.index.labels()[i].clone())
+                .ok_or_else(|| {
+                    FrameError::CompatibilityRejected(
+                        "idxmin of empty or all-null series".to_owned(),
+                    )
+                });
+        }
+
         let mut best_idx: Option<usize> = None;
         let mut best_val = f64::INFINITY;
         for (i, val) in self.column.values().iter().enumerate() {
@@ -5571,6 +5596,29 @@ impl Series {
     ///
     /// Matches `series.idxmax()`. Skips missing values.
     pub fn idxmax(&self) -> Result<IndexLabel, FrameError> {
+        // Per br-frankenpandas-7db78: pandas supports idxmax on Utf8
+        // (returns label of lex-max). Sister to idxmin Utf8 path above.
+        if matches!(self.column.dtype(), DType::Utf8) {
+            let mut best_idx: Option<usize> = None;
+            let mut best: Option<&str> = None;
+            for (i, val) in self.column.values().iter().enumerate() {
+                if let Scalar::Utf8(s) = val {
+                    let s_ref = s.as_str();
+                    if best_idx.is_none() || s_ref > best.unwrap() {
+                        best = Some(s_ref);
+                        best_idx = Some(i);
+                    }
+                }
+            }
+            return best_idx
+                .map(|i| self.index.labels()[i].clone())
+                .ok_or_else(|| {
+                    FrameError::CompatibilityRejected(
+                        "idxmax of empty or all-null series".to_owned(),
+                    )
+                });
+        }
+
         let mut best_idx: Option<usize> = None;
         let mut best_val = f64::NEG_INFINITY;
         for (i, val) in self.column.values().iter().enumerate() {
@@ -73030,6 +73078,103 @@ mod tests {
         .unwrap();
         assert_eq!(s.sum().unwrap(), Scalar::Float64(8.0));
         assert_eq!(s.prod().unwrap(), Scalar::Float64(15.0));
+    }
+
+    #[test]
+    fn series_idxmin_idxmax_utf8_lexicographic() {
+        // Per br-frankenpandas-7db78: pandas supports idxmin/idxmax on
+        // Utf8, returning the label of the lex-min/max element.
+        let s = Series::from_values(
+            "x",
+            vec![10_i64.into(), 20_i64.into(), 30_i64.into()],
+            vec![
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("c".into()),
+            ],
+        )
+        .unwrap();
+        assert_eq!(s.idxmin().unwrap(), IndexLabel::Int64(20));
+        assert_eq!(s.idxmax().unwrap(), IndexLabel::Int64(30));
+    }
+
+    #[test]
+    fn series_idxmin_utf8_first_occurrence_tie_breaking() {
+        // Same first-occurrence semantics as the numeric path. For
+        // ['b', 'a', 'a', 'c'], idxmin should return label of FIRST 'a'.
+        let s = Series::from_values(
+            "x",
+            vec![10_i64.into(), 20_i64.into(), 30_i64.into(), 40_i64.into()],
+            vec![
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("c".into()),
+            ],
+        )
+        .unwrap();
+        assert_eq!(s.idxmin().unwrap(), IndexLabel::Int64(20));
+    }
+
+    #[test]
+    fn series_idxmin_utf8_skips_nulls() {
+        // is_missing values should be skipped.
+        let s = Series::from_values(
+            "x",
+            vec![10_i64.into(), 20_i64.into(), 30_i64.into()],
+            vec![
+                Scalar::Null(NullKind::NaN),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("c".into()),
+            ],
+        )
+        .unwrap();
+        assert_eq!(s.idxmin().unwrap(), IndexLabel::Int64(20));
+        assert_eq!(s.idxmax().unwrap(), IndexLabel::Int64(30));
+    }
+
+    #[test]
+    fn series_idxmin_utf8_all_null_returns_err() {
+        // Matches the existing numeric path: all-null returns Err.
+        let s = Series::from_values(
+            "x",
+            vec![10_i64.into(), 20_i64.into()],
+            vec![Scalar::Null(NullKind::NaN), Scalar::Null(NullKind::NaN)],
+        )
+        .unwrap();
+        // (NB: declared dtype on a series of all-Null is Null, not Utf8 —
+        // so this exercises the existing all-null Err path. Keeping the
+        // test for documentation completeness.)
+        assert!(s.idxmin().is_err() || s.idxmax().is_err());
+    }
+
+    #[test]
+    fn series_idxmin_utf8_metamorphic_consistency_with_min() {
+        // Per br-frankenpandas-7db78: metamorphic property —
+        // s.values()[position_of(s.idxmin())] == s.min()
+        let s = Series::from_values(
+            "x",
+            vec![10_i64.into(), 20_i64.into(), 30_i64.into(), 40_i64.into()],
+            vec![
+                Scalar::Utf8("dog".into()),
+                Scalar::Utf8("apple".into()),
+                Scalar::Utf8("banana".into()),
+                Scalar::Utf8("cherry".into()),
+            ],
+        )
+        .unwrap();
+        let idxmin_label = s.idxmin().unwrap();
+        // Find the position of idxmin_label in the index.
+        let pos = s
+            .index()
+            .labels()
+            .iter()
+            .position(|l| *l == idxmin_label)
+            .unwrap();
+        let val_at_idxmin = s.column().values()[pos].clone();
+        assert_eq!(val_at_idxmin, s.min().unwrap());
+        // And it should be "apple" (lex min).
+        assert_eq!(val_at_idxmin, Scalar::Utf8("apple".into()));
     }
 
     #[test]
