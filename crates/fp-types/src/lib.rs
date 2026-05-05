@@ -561,8 +561,17 @@ impl Timedelta {
         let (seconds, frac_nanos) = if parts.len() == 3 {
             if let Some((sec_str, frac_str)) = parts[2].split_once('.') {
                 let sec: i64 = sec_str.parse().ok()?;
-                let padded = format!("{:0<9}", frac_str);
-                let frac: i64 = padded[..9].parse().ok()?;
+                if !frac_str.bytes().all(|byte| byte.is_ascii_digit()) {
+                    return None;
+                }
+                let mut frac = 0_i64;
+                let taken = frac_str.len().min(9);
+                for byte in frac_str.bytes().take(9) {
+                    frac = frac * 10 + i64::from(byte - b'0');
+                }
+                for _ in taken..9 {
+                    frac *= 10;
+                }
                 (sec, frac)
             } else {
                 let sec: i64 = parts[2].parse().ok()?;
@@ -572,12 +581,11 @@ impl Timedelta {
             (0, 0)
         };
 
-        Some(
-            hours * Self::NANOS_PER_HOUR
-                + minutes * Self::NANOS_PER_MIN
-                + seconds * Self::NANOS_PER_SEC
-                + frac_nanos,
-        )
+        hours
+            .checked_mul(Self::NANOS_PER_HOUR)?
+            .checked_add(minutes.checked_mul(Self::NANOS_PER_MIN)?)?
+            .checked_add(seconds.checked_mul(Self::NANOS_PER_SEC)?)?
+            .checked_add(frac_nanos)
     }
 
     fn parse_compound(s: &str) -> Result<i64, TimedeltaError> {
@@ -2457,6 +2465,22 @@ mod tests {
             + 30 * Timedelta::NANOS_PER_MIN
             + 45 * Timedelta::NANOS_PER_SEC;
         assert_eq!(Timedelta::parse("01:30:45").unwrap(), expected);
+    }
+
+    #[test]
+    fn timedelta_parse_time_fraction_rejects_unicode_without_panic() {
+        use super::{Timedelta, TimedeltaError};
+        let err = Timedelta::parse("00:00:00.\u{00e9}\u{00e9}\u{00e9}\u{00e9}\u{00e9}")
+            .expect_err("non-ASCII fractional seconds must reject");
+        assert!(matches!(err, TimedeltaError::InvalidFormat(_)));
+    }
+
+    #[test]
+    fn timedelta_parse_time_format_rejects_overflow_without_panic() {
+        use super::{Timedelta, TimedeltaError};
+        let err = Timedelta::parse("9223372036854775807:00")
+            .expect_err("oversized hour component must reject");
+        assert!(matches!(err, TimedeltaError::InvalidFormat(_)));
     }
 
     #[test]
