@@ -4271,6 +4271,32 @@ impl Series {
     ///
     /// Matches `pd.Series.sum()`.
     pub fn sum(&self) -> Result<Scalar, FrameError> {
+        // Per br-frankenpandas-a52db: pandas preserves Int64/Bool dtype for
+        // sum and matches numpy wrap-on-overflow for Int64 (wrapping_add).
+        // Empty Int64/Bool series → Scalar::Int64(0). Float64 path falls
+        // through to the existing f64 accumulator.
+        match self.column.dtype() {
+            DType::Int64 => {
+                let mut total: i64 = 0;
+                for val in self.column.values() {
+                    if let Scalar::Int64(v) = val {
+                        total = total.wrapping_add(*v);
+                    }
+                }
+                return Ok(Scalar::Int64(total));
+            }
+            DType::Bool => {
+                let mut total: i64 = 0;
+                for val in self.column.values() {
+                    if let Scalar::Bool(b) = val {
+                        total = total.wrapping_add(i64::from(*b));
+                    }
+                }
+                return Ok(Scalar::Int64(total));
+            }
+            _ => {}
+        }
+
         let mut total = 0.0_f64;
         for val in self.column.values() {
             if !val.is_missing() {
@@ -4284,12 +4310,16 @@ impl Series {
     ///
     /// Matches `pd.Series.mean()`.
     pub fn mean(&self) -> Result<Scalar, FrameError> {
+        // Per br-frankenpandas-a52db: sum() now preserves Int64/Bool dtype.
+        // Mean is always Float64 (pandas: int.mean() returns float64), so
+        // accept any numeric Scalar variant from sum() and convert to f64.
         let count = self.count();
         if count == 0 {
             return Ok(Scalar::Float64(f64::NAN));
         }
         let sum_val = match self.sum()? {
             Scalar::Float64(v) => v,
+            Scalar::Int64(v) => v as f64,
             _ => return Ok(Scalar::Float64(f64::NAN)),
         };
         Ok(Scalar::Float64(sum_val / count as f64))
@@ -4571,6 +4601,30 @@ impl Series {
     ///
     /// Matches `pd.Series.prod()`.
     pub fn prod(&self) -> Result<Scalar, FrameError> {
+        // Per br-frankenpandas-a52db: see sum above. Empty Int64/Bool
+        // series → Scalar::Int64(1) (multiplicative identity).
+        match self.column.dtype() {
+            DType::Int64 => {
+                let mut product: i64 = 1;
+                for val in self.column.values() {
+                    if let Scalar::Int64(v) = val {
+                        product = product.wrapping_mul(*v);
+                    }
+                }
+                return Ok(Scalar::Int64(product));
+            }
+            DType::Bool => {
+                let mut product: i64 = 1;
+                for val in self.column.values() {
+                    if let Scalar::Bool(b) = val {
+                        product = product.wrapping_mul(i64::from(*b));
+                    }
+                }
+                return Ok(Scalar::Int64(product));
+            }
+            _ => {}
+        }
+
         let mut product = 1.0_f64;
         for val in self.column.values() {
             if !val.is_missing() {
@@ -36061,7 +36115,8 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(s.sum().unwrap(), Scalar::Float64(60.0));
+        // Per br-frankenpandas-a52db: pandas preserves Int64 dtype for sum.
+        assert_eq!(s.sum().unwrap(), Scalar::Int64(60));
     }
 
     #[test]
@@ -36077,7 +36132,8 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(s.sum().unwrap(), Scalar::Float64(40.0));
+        // Per br-frankenpandas-a52db: nulls skipped, dtype preserved.
+        assert_eq!(s.sum().unwrap(), Scalar::Int64(40));
     }
 
     #[test]
@@ -72461,6 +72517,128 @@ mod tests {
         .unwrap();
         assert_eq!(s.min().unwrap(), Scalar::Float64(-0.5));
         assert_eq!(s.max().unwrap(), Scalar::Float64(3.5));
+    }
+
+    #[test]
+    fn series_sum_preserves_int64() {
+        // Per br-frankenpandas-a52db: pandas preserves Int64 dtype for sum.
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+        )
+        .unwrap();
+        assert_eq!(s.sum().unwrap(), Scalar::Int64(60));
+    }
+
+    #[test]
+    fn series_prod_preserves_int64() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(2), Scalar::Int64(3), Scalar::Int64(5)],
+        )
+        .unwrap();
+        assert_eq!(s.prod().unwrap(), Scalar::Int64(30));
+    }
+
+    #[test]
+    fn series_sum_bool_returns_int64() {
+        // Per pandas: bool sum is "count of true" with dtype int64.
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Bool(true),
+                Scalar::Bool(false),
+                Scalar::Bool(true),
+                Scalar::Bool(true),
+            ],
+        )
+        .unwrap();
+        assert_eq!(s.sum().unwrap(), Scalar::Int64(3));
+    }
+
+    #[test]
+    fn series_prod_bool_returns_int64() {
+        // pandas: bool prod = 1 if all true else 0 (int64).
+        let s_all_true = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Bool(true), Scalar::Bool(true)],
+        )
+        .unwrap();
+        assert_eq!(s_all_true.prod().unwrap(), Scalar::Int64(1));
+
+        let s_with_false = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)],
+        )
+        .unwrap();
+        assert_eq!(s_with_false.prod().unwrap(), Scalar::Int64(0));
+    }
+
+    #[test]
+    fn series_sum_int64_wraps_on_overflow() {
+        // Per br-frankenpandas-a52db: numpy/pandas semantics for int64
+        // overflow is wrap-around. fp-frame must use wrapping_add to
+        // match. i64::MAX + 1 == i64::MIN.
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(i64::MAX), Scalar::Int64(1)],
+        )
+        .unwrap();
+        assert_eq!(s.sum().unwrap(), Scalar::Int64(i64::MIN));
+    }
+
+    #[test]
+    fn series_prod_int64_wraps_on_overflow() {
+        // Same wrap semantics for prod.
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(i64::MAX), Scalar::Int64(2)],
+        )
+        .unwrap();
+        // i64::MAX.wrapping_mul(2) == -2 (the low bit of MAX is preserved
+        // and the sign bit flips on the wraparound).
+        assert_eq!(s.sum().unwrap(), Scalar::Int64(i64::MAX.wrapping_add(2)));
+        assert_eq!(s.prod().unwrap(), Scalar::Int64(i64::MAX.wrapping_mul(2)));
+    }
+
+    #[test]
+    fn series_sum_prod_float64_input_stays_float64() {
+        // Regression guard: Float64 path must remain unchanged.
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Float64(1.5),
+                Scalar::Float64(2.5),
+                Scalar::Float64(4.0),
+            ],
+        )
+        .unwrap();
+        assert_eq!(s.sum().unwrap(), Scalar::Float64(8.0));
+        assert_eq!(s.prod().unwrap(), Scalar::Float64(15.0));
+    }
+
+    #[test]
+    fn series_sum_int64_with_nulls_skips_and_preserves_dtype() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Int64(7),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Int64(13),
+                Scalar::Int64(20),
+            ],
+        )
+        .unwrap();
+        assert_eq!(s.sum().unwrap(), Scalar::Int64(40));
     }
 
     #[test]
