@@ -6109,8 +6109,13 @@ impl Series {
     /// `codes` is an Int64 Series of category indices (-1 for NaN) and
     /// `uniques` is a Series of the unique values in order of appearance.
     pub fn factorize(&self) -> Result<(Self, Self), FrameError> {
+        // Per br-frankenpandas-78d0c: HashMap-based code lookup; was
+        // O(n × k) Vec::iter().position() per value. Parallel
+        // insertion-ordered Vec preserves first-seen ordering.
+        // Same shape as the broader scan-and-find family.
         let vals = self.column.values();
         let mut uniques: Vec<Scalar> = Vec::new();
+        let mut idx_map: HashMap<ScalarKey<'_>, i64> = HashMap::new();
         let mut codes: Vec<Scalar> = Vec::with_capacity(vals.len());
 
         for val in vals {
@@ -6118,15 +6123,18 @@ impl Series {
                 codes.push(Scalar::Int64(-1));
                 continue;
             }
-            let pos = uniques.iter().position(|u| u == val);
-            match pos {
-                Some(p) => codes.push(Scalar::Int64(p as i64)),
+            let key = scalar_key_allow_missing(val);
+            match idx_map.get(&key) {
+                Some(&p) => codes.push(Scalar::Int64(p)),
                 None => {
-                    codes.push(Scalar::Int64(uniques.len() as i64));
+                    let code = uniques.len() as i64;
+                    idx_map.insert(key, code);
                     uniques.push(val.clone());
+                    codes.push(Scalar::Int64(code));
                 }
             }
         }
+        drop(idx_map);
 
         let code_labels: Vec<IndexLabel> = (0..codes.len()).map(|i| (i as i64).into()).collect();
         let unique_labels: Vec<IndexLabel> =
@@ -73502,6 +73510,90 @@ mod tests {
         .unwrap();
         assert_eq!(s.sum().unwrap(), Scalar::Float64(8.0));
         assert_eq!(s.prod().unwrap(), Scalar::Float64(15.0));
+    }
+
+    #[test]
+    fn series_factorize_basic_correctness_after_o_n_fix() {
+        // Per br-frankenpandas-78d0c: regression guard for HashMap-based
+        // factorize. Input ['a', 'b', 'a', 'c', 'b'] →
+        //   codes = [0, 1, 0, 2, 1]
+        //   uniques = ['a', 'b', 'c']
+        let s = Series::from_values(
+            "x",
+            (0..5_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("c".into()),
+                Scalar::Utf8("b".into()),
+            ],
+        )
+        .unwrap();
+        let (codes, uniques) = s.factorize().unwrap();
+        assert_eq!(
+            codes.column().values(),
+            &[
+                Scalar::Int64(0),
+                Scalar::Int64(1),
+                Scalar::Int64(0),
+                Scalar::Int64(2),
+                Scalar::Int64(1),
+            ]
+        );
+        assert_eq!(
+            uniques.column().values(),
+            &[
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("c".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn series_factorize_handles_nulls_with_minus_one_code() {
+        let s = Series::from_values(
+            "x",
+            (0..4_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![
+                Scalar::Int64(7),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Int64(7),
+                Scalar::Int64(99),
+            ],
+        )
+        .unwrap();
+        let (codes, uniques) = s.factorize().unwrap();
+        // Nulls map to -1; non-null values get sequential codes.
+        assert_eq!(codes.column().values()[0], Scalar::Int64(0));
+        assert_eq!(codes.column().values()[1], Scalar::Int64(-1));
+        assert_eq!(codes.column().values()[2], Scalar::Int64(0)); // same as first
+        assert_eq!(codes.column().values()[3], Scalar::Int64(1));
+        // Uniques excludes the null.
+        assert_eq!(uniques.len(), 2);
+    }
+
+    #[test]
+    fn series_factorize_wide_scaling_correctness() {
+        // 5K values from 50 unique. Old impl: ~5K × ~50 = ~250K compares.
+        // New: ~5K hash lookups + ~50 inserts.
+        let n: i64 = 5_000;
+        let values: Vec<Scalar> = (0..n).map(|i| Scalar::Int64(i % 50)).collect();
+        let s = Series::from_values(
+            "x",
+            (0..n).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            values,
+        )
+        .unwrap();
+        let (codes, uniques) = s.factorize().unwrap();
+        assert_eq!(codes.len() as i64, n);
+        assert_eq!(uniques.len(), 50);
+        // First 50 values get codes 0..49 (one new each); next 4950 are
+        // repeats with codes already assigned.
+        for i in 0..50 {
+            assert_eq!(codes.column().values()[i], Scalar::Int64(i as i64));
+        }
     }
 
     #[test]
