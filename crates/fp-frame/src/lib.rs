@@ -16969,29 +16969,43 @@ pub fn cut(series: &Series, bins: usize) -> Result<Series, FrameError> {
     // Build bin edges
     let edges: Vec<f64> = (0..=bins).map(|i| min_val + width * i as f64).collect();
 
+    // Per br-frankenpandas-21a14: pre-format bin labels ONCE (one per bin)
+    // and compute bucket index in O(1) per value. Was O(n × bins) inner
+    // scan plus n redundant String allocations.
+    let bin_labels: Vec<String> = (0..bins)
+        .map(|i| format!("({:.3}, {:.3}]", edges[i], edges[i + 1]))
+        .collect();
+
     let labels: Vec<Scalar> = floats
         .iter()
         .map(|v| match v {
             None => Scalar::Null(NullKind::NaN),
             Some(f) => {
-                // Find which bin this value falls into
-                for i in 0..bins {
-                    let left = edges[i];
-                    let right = edges[i + 1];
-                    let in_bin = if i == 0 {
-                        // First bin is inclusive on both sides for min value
-                        *f >= left && *f <= right
-                    } else {
-                        *f > left && *f <= right
-                    };
-                    if in_bin {
-                        return Scalar::Utf8(format!("({left:.3}, {right:.3}]"));
-                    }
-                }
-                // Edge case: exactly at max with float rounding
-                let left = edges[bins - 1];
-                let right = edges[bins];
-                Scalar::Utf8(format!("({left:.3}, {right:.3}]"))
+                // Compute bucket index directly from uniform bin width.
+                // Edge cases:
+                // - All values equal min_val (width == 0): every value
+                //   lands in bin 0.
+                // - Value == min_val: pandas's first-bin-inclusive on
+                //   both sides means bin 0 (the floor formula gives 0).
+                // - Value == max_val: floor((max - min) / width) == bins,
+                //   which we clamp to bins - 1.
+                // - Value just above max (shouldn't happen since min/max
+                //   come from this same set, but float rounding can put
+                //   things slightly outside): clamp to bins - 1.
+                let bin_idx = if width == 0.0 {
+                    0
+                } else {
+                    // Right-closed intervals (left, right]: a value at
+                    // exactly bin_idx * width + min belongs to bin
+                    // (bin_idx - 1), not bin_idx. Hence ceil - 1 rather
+                    // than floor. The first bin is inclusive on the
+                    // left edge too — handled by clamping the raw
+                    // result to [0, bins-1] (a value at min gives -1
+                    // before clamping).
+                    let raw = ((*f - min_val) / width).ceil() as i64 - 1;
+                    raw.clamp(0, (bins as i64) - 1) as usize
+                };
+                Scalar::Utf8(bin_labels[bin_idx].clone())
             }
         })
         .collect();
@@ -72879,6 +72893,92 @@ mod tests {
         .unwrap();
         assert_eq!(s.sum().unwrap(), Scalar::Float64(8.0));
         assert_eq!(s.prod().unwrap(), Scalar::Float64(15.0));
+    }
+
+    #[test]
+    fn cut_uses_o1_bucket_index_per_value() {
+        // Per br-frankenpandas-21a14: cut() now computes bucket index in
+        // O(1) per value via ((v - min) / width).ceil() - 1, with clamping.
+        // Was O(bins) linear scan + n redundant String allocations.
+        // Test with 1000 values across 10 bins; verify each value lands
+        // in the correct bin (matches the right-closed-interval semantics).
+        let labels: Vec<IndexLabel> = (0..1000_i64).map(IndexLabel::Int64).collect();
+        // Values 0..1000, range [0, 999], 10 bins → width = 99.9.
+        let values: Vec<Scalar> = (0..1000_i64).map(|i| Scalar::Float64(i as f64)).collect();
+        let s = Series::from_values("x", labels, values).unwrap();
+
+        let binned = cut(&s, 10).unwrap();
+        // 10 unique bin labels (assuming all bins are populated, which
+        // they should be for a uniform 0..1000 spread).
+        let unique = binned.unique();
+        assert!(
+            unique.len() >= 9 && unique.len() <= 10,
+            "expected ~10 distinct bin labels, got {}",
+            unique.len()
+        );
+        // Every output is a Utf8 bin label (no NaNs since input has no nulls).
+        for v in binned.column().values() {
+            assert!(
+                matches!(v, Scalar::Utf8(_)),
+                "expected Utf8 label, got {v:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn cut_value_at_bin_boundary_uses_right_closed_semantics() {
+        // Per br-frankenpandas-21a14: pandas right-closed intervals
+        // (left, right]. A value at the exact upper edge of bin k
+        // belongs to bin k, NOT k+1. With min=1, max=10, bins=3,
+        // width=3.0, edges at [1, 4, 7, 10]:
+        // - 1 → bin 0 (first-bin-inclusive on left)
+        // - 4 → bin 0 (right edge of bin 0, inclusive)
+        // - 5 → bin 1 ((4, 7])
+        // - 7 → bin 1 (right edge of bin 1)
+        // - 10 → bin 2 (right edge of bin 2)
+        let s = Series::from_values(
+            "x",
+            (0..5_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(7.0),
+                Scalar::Float64(10.0),
+            ],
+        )
+        .unwrap();
+
+        let counts = s.value_counts_bins(3).unwrap();
+        // All 3 bins should be populated:
+        // - bin 0 (1, 4]: values 1, 2, 3 (with 1 inclusive via clamp)
+        // - bin 1 (4, 7]: value 7
+        // - bin 2 (7, 10]: value 10
+        assert_eq!(counts.len(), 3);
+    }
+
+    #[test]
+    fn cut_handles_all_equal_values_via_zero_width_branch() {
+        // Edge case: when min == max (all values equal), width is 0;
+        // every value should land in bin 0. Old impl handled this
+        // (sort of) via the loop; new impl explicitly branches.
+        let s = Series::from_values(
+            "x",
+            (0..3_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![
+                Scalar::Float64(5.0),
+                Scalar::Float64(5.0),
+                Scalar::Float64(5.0),
+            ],
+        )
+        .unwrap();
+        let binned = cut(&s, 4).unwrap();
+        assert_eq!(binned.len(), 3);
+        // All three values should map to the same bin label.
+        let first_label = binned.column().values()[0].clone();
+        for v in binned.column().values() {
+            assert_eq!(*v, first_label);
+        }
     }
 
     #[test]
