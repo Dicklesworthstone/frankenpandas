@@ -76884,9 +76884,13 @@ mod test_str_find_char_position_02ae2b {
     use super::*;
 
     fn make_str_series(name: &str, vals: &[&str]) -> Series {
-        let labels: Vec<IndexLabel> =
-            (0..vals.len()).map(|i| IndexLabel::Int64(i as i64)).collect();
-        let scalars: Vec<Scalar> = vals.iter().map(|s| Scalar::Utf8((*s).to_string())).collect();
+        let labels: Vec<IndexLabel> = (0..vals.len())
+            .map(|i| IndexLabel::Int64(i as i64))
+            .collect();
+        let scalars: Vec<Scalar> = vals
+            .iter()
+            .map(|s| Scalar::Utf8((*s).to_string()))
+            .collect();
         Series::from_values(name, labels, scalars).unwrap()
     }
 
@@ -76898,14 +76902,14 @@ mod test_str_find_char_position_02ae2b {
         // Buggy byte impl would return 4; correct char impl returns 3.
         let s = make_str_series("x", &["héllo"]);
         let out = s.str().find("lo").unwrap();
-        assert_eq!(out.values().get(0).unwrap(), &Scalar::Int64(3));
+        assert_eq!(out.values().first().unwrap(), &Scalar::Int64(3));
 
         // Discriminating case where byte != char:
         // "café_lo": chars c=0, a=1, f=2, é=3, _=4, l=5, o=6. "lo" → char 5.
         // bytes c=0, a=1, f=2, é=3..4, _=5, l=6, o=7. "lo" → byte 6.
         let s2 = make_str_series("x", &["café_lo"]);
         let out2 = s2.str().find("lo").unwrap();
-        assert_eq!(out2.values().get(0).unwrap(), &Scalar::Int64(5));
+        assert_eq!(out2.values().first().unwrap(), &Scalar::Int64(5));
     }
 
     #[test]
@@ -76914,7 +76918,7 @@ mod test_str_find_char_position_02ae2b {
         // Byte position would be different due to multiple 'é' (each 2 bytes).
         let s = make_str_series("x", &["héllo héllo"]);
         let out = s.str().rfind("lo").unwrap();
-        assert_eq!(out.values().get(0).unwrap(), &Scalar::Int64(9));
+        assert_eq!(out.values().first().unwrap(), &Scalar::Int64(9));
     }
 
     #[test]
@@ -76922,14 +76926,14 @@ mod test_str_find_char_position_02ae2b {
         // Sanity: ASCII char position == byte position.
         let s = make_str_series("x", &["hello"]);
         let out = s.str().find("lo").unwrap();
-        assert_eq!(out.values().get(0).unwrap(), &Scalar::Int64(3));
+        assert_eq!(out.values().first().unwrap(), &Scalar::Int64(3));
     }
 
     #[test]
     fn str_find_not_found_returns_neg_one() {
         let s = make_str_series("x", &["héllo"]);
         let out = s.str().find("xyz").unwrap();
-        assert_eq!(out.values().get(0).unwrap(), &Scalar::Int64(-1));
+        assert_eq!(out.values().first().unwrap(), &Scalar::Int64(-1));
     }
 
     #[test]
@@ -76939,14 +76943,14 @@ mod test_str_find_char_position_02ae2b {
         let out = s.str().index_of("é").unwrap();
         // 'c'=0, 'a'=1, 'f'=2, 'é'=3 in chars; byte position would be 3 too here actually
         // (c, a, f are 1 byte each), so use a more discriminating case:
-        assert_eq!(out.values().get(0).unwrap(), &Scalar::Int64(3));
+        assert_eq!(out.values().first().unwrap(), &Scalar::Int64(3));
 
         let s2 = make_str_series("x", &["héllé"]);
         // 'h'=0, 'é'=1, 'l'=2, 'l'=3, 'é'=4. find returns first 'é' at char 1.
         // Byte position would be 1 (h is 1 byte). But for last 'é':
         let out2 = s2.str().rindex_of("é").unwrap();
         // rindex_of('é') -> char 4. Byte position would be 6 (h=1 + é=2 + l=1 + l=1 + é at byte 5? actually starts at 5).
-        assert_eq!(out2.values().get(0).unwrap(), &Scalar::Int64(4));
+        assert_eq!(out2.values().first().unwrap(), &Scalar::Int64(4));
     }
 
     #[test]
@@ -76963,7 +76967,7 @@ mod test_str_find_char_position_02ae2b {
             let pair: String = chars.iter().take(2).collect();
             for sub in [single.as_str(), pair.as_str()].iter() {
                 let out = s.str().find(sub).unwrap();
-                let result = match out.values().get(0).unwrap() {
+                let result = match out.values().first().unwrap() {
                     Scalar::Int64(v) => *v,
                     other => panic!("expected Int64, got {:?}", other),
                 };
@@ -77016,12 +77020,8 @@ mod test_dt_dtype_gate_d14250 {
 
     #[test]
     fn dt_day_on_bool_series_errors() {
-        let s = Series::from_values(
-            "x",
-            idx(2),
-            vec![Scalar::Bool(true), Scalar::Bool(false)],
-        )
-        .unwrap();
+        let s = Series::from_values("x", idx(2), vec![Scalar::Bool(true), Scalar::Bool(false)])
+            .unwrap();
         assert!(s.dt().day().is_err());
     }
 
@@ -77037,7 +77037,7 @@ mod test_dt_dtype_gate_d14250 {
         )
         .unwrap();
         let out = s.dt().year().unwrap();
-        assert_eq!(out.values().get(0).unwrap(), &Scalar::Int64(2024));
+        assert_eq!(out.values().first().unwrap(), &Scalar::Int64(2024));
         assert_eq!(out.values().get(1).unwrap(), &Scalar::Int64(2025));
     }
 
@@ -77047,10 +77047,7 @@ mod test_dt_dtype_gate_d14250 {
         let s = Series::from_values(
             "x",
             idx(2),
-            vec![
-                Scalar::Null(NullKind::NaN),
-                Scalar::Null(NullKind::NaN),
-            ],
+            vec![Scalar::Null(NullKind::NaN), Scalar::Null(NullKind::NaN)],
         )
         .unwrap();
         let out = s.dt().year().unwrap();
