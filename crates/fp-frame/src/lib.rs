@@ -3854,7 +3854,14 @@ impl Series {
     /// Matches `pd.Series.is_unique`.
     #[must_use]
     pub fn is_unique(&self) -> bool {
-        let non_null = self.unique();
+        // Per br-frankenpandas-05216: prior implementation called
+        // self.unique() which INCLUDES one null bucket if any null is
+        // present, then compared against total_non_null. That gave the
+        // wrong answer for [1, 2, 3, Null] (returned false; pandas: true).
+        // nunique() counts unique NON-null values, which is the correct
+        // population to compare against total_non_null. The null_count
+        // <= 1 guard separately enforces "at most one null" — pandas
+        // treats multiple nulls as duplicates.
         let null_count = self
             .column
             .values()
@@ -3862,7 +3869,7 @@ impl Series {
             .filter(|v| v.is_missing())
             .count();
         let total_non_null = self.len() - null_count;
-        non_null.len() == total_non_null && null_count <= 1
+        self.nunique() == total_non_null && null_count <= 1
     }
 
     /// Return whether the Series contains any duplicated values.
@@ -72895,6 +72902,94 @@ mod tests {
         .unwrap();
         assert_eq!(s.sum().unwrap(), Scalar::Float64(8.0));
         assert_eq!(s.prod().unwrap(), Scalar::Float64(15.0));
+    }
+
+    #[test]
+    fn series_is_unique_true_with_single_null() {
+        // Per br-frankenpandas-05216: pandas treats a single null as one
+        // distinct value alongside other distinct non-null values.
+        // [1, 2, 3, Null] is unique (4 distinct values).
+        // Was returning false because the implementation conflated
+        // unique()'s null bucket with the null count.
+        let s = Series::from_values(
+            "x",
+            (0..4_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+                Scalar::Null(NullKind::NaN),
+            ],
+        )
+        .unwrap();
+        assert!(s.is_unique());
+    }
+
+    #[test]
+    fn series_is_unique_false_with_two_nulls() {
+        // Two nulls are "duplicate" per pandas (NaN == NaN for is_unique
+        // purposes). The null_count <= 1 guard catches this.
+        let s = Series::from_values(
+            "x",
+            (0..4_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::NaN),
+            ],
+        )
+        .unwrap();
+        assert!(!s.is_unique());
+    }
+
+    #[test]
+    fn series_is_unique_false_with_repeated_value_and_one_null() {
+        // Repeated non-null value blocks uniqueness regardless of nulls.
+        let s = Series::from_values(
+            "x",
+            (0..4_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![
+                Scalar::Int64(1),
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Null(NullKind::NaN),
+            ],
+        )
+        .unwrap();
+        assert!(!s.is_unique());
+    }
+
+    #[test]
+    fn series_is_unique_true_for_all_distinct_no_nulls() {
+        // Regression guard: original-correct path (no nulls, all distinct).
+        let s = Series::from_values(
+            "x",
+            (0..3_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+        )
+        .unwrap();
+        assert!(s.is_unique());
+    }
+
+    #[test]
+    fn series_has_duplicates_inverse_of_is_unique() {
+        // Metamorphic property: has_duplicates() == !is_unique().
+        let s = Series::from_values(
+            "x",
+            (0..4_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+                Scalar::Null(NullKind::NaN),
+            ],
+        )
+        .unwrap();
+        assert_eq!(s.has_duplicates(), !s.is_unique());
+        // For this input both should reflect "no duplicates".
+        assert!(!s.has_duplicates());
+        assert!(s.is_unique());
     }
 
     #[test]
