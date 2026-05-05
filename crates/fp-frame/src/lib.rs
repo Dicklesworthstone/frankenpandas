@@ -6173,11 +6173,16 @@ impl Series {
     ///
     /// Matches `pd.Series.skew()`.
     pub fn skew(&self) -> Result<f64, FrameError> {
-        let (count, mean, vals) = self.numeric_values()?;
+        // Per br-frankenpandas-d1aa3: pandas returns NaN (not Err) when
+        // there are too few non-null values, including empty/all-null
+        // (which numeric_values() turns into Err). The Rolling::skew
+        // variant already returns NaN correctly in this case (line 8868+).
+        let (count, mean, vals) = match self.numeric_values() {
+            Ok(t) => t,
+            Err(_) => return Ok(f64::NAN),
+        };
         if count < 3 {
-            return Err(FrameError::CompatibilityRejected(
-                "skew requires at least 3 non-null values".to_owned(),
-            ));
+            return Ok(f64::NAN);
         }
         let n = count as f64;
         let m2: f64 = vals.iter().map(|v| (v - mean).powi(2)).sum();
@@ -6194,11 +6199,14 @@ impl Series {
     ///
     /// Matches `pd.Series.kurtosis()` / `pd.Series.kurt()`.
     pub fn kurtosis(&self) -> Result<f64, FrameError> {
-        let (count, mean, vals) = self.numeric_values()?;
+        // Per br-frankenpandas-d1aa3: pandas returns NaN (not Err) when
+        // there are too few non-null values. See skew above.
+        let (count, mean, vals) = match self.numeric_values() {
+            Ok(t) => t,
+            Err(_) => return Ok(f64::NAN),
+        };
         if count < 4 {
-            return Err(FrameError::CompatibilityRejected(
-                "kurtosis requires at least 4 non-null values".to_owned(),
-            ));
+            return Ok(f64::NAN);
         }
         let n = count as f64;
         let m2: f64 = vals.iter().map(|v| (v - mean).powi(2)).sum();
@@ -53008,7 +53016,9 @@ mod tests {
     }
 
     #[test]
-    fn series_skew_requires_3() {
+    fn series_skew_returns_nan_below_3() {
+        // Per br-frankenpandas-d1aa3: pandas returns NaN (not Err) when
+        // count < 3. Was previously asserting the buggy Err return.
         let s = Series::from_values(
             "x",
             vec![0_i64.into(), 1_i64.into()],
@@ -53016,7 +53026,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(s.skew().is_err());
+        assert!(s.skew().unwrap().is_nan());
     }
 
     // ── squeeze / memory_usage ──
@@ -73120,6 +73130,62 @@ mod tests {
         .unwrap();
         assert_eq!(s.sum().unwrap(), Scalar::Float64(8.0));
         assert_eq!(s.prod().unwrap(), Scalar::Float64(15.0));
+    }
+
+    #[test]
+    fn series_kurtosis_returns_nan_below_4() {
+        // Per br-frankenpandas-d1aa3: pandas returns NaN (not Err) when
+        // count < 4 for kurtosis.
+        let s = Series::from_values(
+            "x",
+            (0..3_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+            ],
+        )
+        .unwrap();
+        assert!(s.kurtosis().unwrap().is_nan());
+    }
+
+    #[test]
+    fn series_skew_kurt_empty_returns_nan() {
+        // Per br-frankenpandas-d1aa3: pandas: empty Series → skew=NaN,
+        // kurt=NaN.
+        let s = Series::from_values("x", Vec::<IndexLabel>::new(), Vec::<Scalar>::new()).unwrap();
+        assert!(s.skew().unwrap().is_nan());
+        assert!(s.kurtosis().unwrap().is_nan());
+    }
+
+    #[test]
+    fn series_skew_single_element_returns_nan() {
+        let s = Series::from_values("x", vec![0_i64.into()], vec![Scalar::Float64(42.0)]).unwrap();
+        assert!(s.skew().unwrap().is_nan());
+        assert!(s.kurtosis().unwrap().is_nan());
+    }
+
+    #[test]
+    fn series_skew_kurtosis_with_enough_values_regression_guard() {
+        // Regression guard: the existing-correct numeric path must
+        // remain unchanged.
+        let s = Series::from_values(
+            "x",
+            (0..5_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(4.0),
+                Scalar::Float64(5.0),
+            ],
+        )
+        .unwrap();
+        // For symmetric uniform data, skew is 0 and excess kurt is -1.2.
+        let skew = s.skew().unwrap();
+        assert!(skew.abs() < 0.01);
+        let kurt = s.kurtosis().unwrap();
+        assert!((kurt - (-1.2)).abs() < 0.01);
     }
 
     #[test]
