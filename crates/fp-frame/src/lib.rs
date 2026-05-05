@@ -19241,11 +19241,16 @@ impl DataFrame {
         }
         pending_rows.extend(lines.map(ToOwned::to_owned));
 
+        // Per br-frankenpandas-fcf5d: pre-build NA set once instead of
+        // O(|na_values|) Vec::iter().any() per cell. CSV parsing is
+        // hot-loop territory; this turns N × M × |na| into N × M.
+        let na_set: HashSet<&str> = options.na_values.iter().map(String::as_str).collect();
+
         for line in pending_rows {
             let fields: Vec<&str> = line.split(options.sep).collect();
             for (idx, col) in col_data.iter_mut().enumerate() {
                 let raw = fields.get(idx).map(|field| field.trim()).unwrap_or("");
-                let is_na = raw.is_empty() || options.na_values.iter().any(|na| na == raw);
+                let is_na = raw.is_empty() || na_set.contains(raw);
                 let value = if let Some(dtype) = options.dtypes.get(&col_names[idx]) {
                     if is_na {
                         Scalar::missing_for_dtype(*dtype)
@@ -73510,6 +73515,70 @@ mod tests {
         .unwrap();
         assert_eq!(s.sum().unwrap(), Scalar::Float64(8.0));
         assert_eq!(s.prod().unwrap(), Scalar::Float64(15.0));
+    }
+
+    #[test]
+    fn dataframe_from_csv_with_options_na_values_correctly_identified() {
+        // Per br-frankenpandas-fcf5d: regression guard for HashSet-based
+        // NA detection in CSV reader. Cells matching any na_value
+        // become NaN.
+        let csv = "a,b\n1,foo\nNA,bar\n3,---\n";
+        let mut opts = DataFrameCsvReadOptions::default();
+        opts.na_values = vec!["NA".to_owned(), "---".to_owned()];
+        opts.dtypes.insert("a".to_owned(), DType::Int64);
+        let df = DataFrame::from_csv_with_options(csv, &opts).unwrap();
+        // Column "a" row 1 should be missing (was "NA"); rest are Int64.
+        assert!(df.columns["a"].values()[0] == Scalar::Int64(1));
+        assert!(df.columns["a"].values()[1].is_missing());
+        assert!(df.columns["a"].values()[2] == Scalar::Int64(3));
+        // Column "b" row 2 should be missing (was "---").
+        let b_vals = df.columns["b"].values();
+        assert!(b_vals[2].is_missing());
+    }
+
+    #[test]
+    fn dataframe_from_csv_empty_na_values_marks_no_cells() {
+        // Default options: na_values is empty → no NA detection (besides
+        // raw.is_empty()).
+        let csv = "a\n1\nfoo\n3\n";
+        let mut opts = DataFrameCsvReadOptions::default();
+        opts.dtypes.insert("a".to_owned(), DType::Utf8);
+        let df = DataFrame::from_csv_with_options(csv, &opts).unwrap();
+        // No values should be NA (none are empty strings).
+        for v in df.columns["a"].values() {
+            assert!(!v.is_missing());
+        }
+    }
+
+    #[test]
+    fn dataframe_from_csv_wide_na_set_correctness() {
+        // 100 rows × 3 cols with 5 na markers.  Old impl: ~1500 Vec::any
+        // checks; new: ~300 hash lookups + 5 inserts.
+        let mut csv = String::from("a,b,c\n");
+        for i in 0..100 {
+            if i % 10 == 0 {
+                csv.push_str("NA,1,2\n");
+            } else {
+                csv.push_str(&format!("{i},1,2\n"));
+            }
+        }
+        let mut opts = DataFrameCsvReadOptions::default();
+        opts.na_values = vec![
+            "NA".to_owned(),
+            "n/a".to_owned(),
+            "?".to_owned(),
+            "missing".to_owned(),
+            "null".to_owned(),
+        ];
+        opts.dtypes.insert("a".to_owned(), DType::Int64);
+        let df = DataFrame::from_csv_with_options(&csv, &opts).unwrap();
+        // 10 NA rows out of 100.
+        let na_count = df.columns["a"]
+            .values()
+            .iter()
+            .filter(|v| v.is_missing())
+            .count();
+        assert_eq!(na_count, 10);
     }
 
     #[test]
