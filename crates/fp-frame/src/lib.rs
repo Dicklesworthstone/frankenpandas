@@ -26128,6 +26128,27 @@ impl DataFrame {
         seed: Option<u64>,
     ) -> Result<Self, FrameError> {
         let total = self.len();
+        // Per br-frankenpandas-380a0: same frac validation as
+        // Series::sample (br-c1db4). Cross-API consistency: pandas
+        // raises ValueError on the same invalid frac inputs for both
+        // Series.sample and DataFrame.sample.
+        if let Some(f) = frac {
+            if !f.is_finite() {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "sample: frac must be finite, got {f}"
+                )));
+            }
+            if f < 0.0 {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "sample: frac must be >= 0, got {f}"
+                )));
+            }
+            if !replace && f > 1.0 {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "sample: frac must be <= 1 when replace=false, got {f}"
+                )));
+            }
+        }
         let sample_n = match (n, frac) {
             (Some(count), None) => count,
             (None, Some(f)) => (total as f64 * f).round() as usize,
@@ -73296,6 +73317,133 @@ mod tests {
         .unwrap();
         assert_eq!(s.sum().unwrap(), Scalar::Float64(8.0));
         assert_eq!(s.prod().unwrap(), Scalar::Float64(15.0));
+    }
+
+    #[test]
+    fn dataframe_sample_negative_frac_errors() {
+        // Per br-frankenpandas-380a0: cross-API consistency with
+        // Series::sample (c1db4). Negative frac was silently
+        // saturating to 0.
+        let mut cols = BTreeMap::new();
+        cols.insert(
+            "a".to_owned(),
+            Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)])
+                .unwrap(),
+        );
+        let df = DataFrame::new_with_column_order(
+            Index::new(vec![0_i64.into(), 1_i64.into(), 2_i64.into()]),
+            cols,
+            vec!["a".to_owned()],
+        )
+        .unwrap();
+        let err = df.sample(None, Some(-0.5), false, None).unwrap_err();
+        assert!(matches!(&err,
+            FrameError::CompatibilityRejected(msg)
+                if msg.contains("frac must be >= 0")));
+    }
+
+    #[test]
+    fn dataframe_sample_nan_frac_errors() {
+        let mut cols = BTreeMap::new();
+        cols.insert(
+            "a".to_owned(),
+            Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2)]).unwrap(),
+        );
+        let df = DataFrame::new_with_column_order(
+            Index::new(vec![0_i64.into(), 1_i64.into()]),
+            cols,
+            vec!["a".to_owned()],
+        )
+        .unwrap();
+        let err = df.sample(None, Some(f64::NAN), false, None).unwrap_err();
+        assert!(matches!(&err,
+            FrameError::CompatibilityRejected(msg)
+                if msg.contains("frac must be finite")));
+    }
+
+    #[test]
+    fn dataframe_sample_frac_above_one_without_replace_errors() {
+        let mut cols = BTreeMap::new();
+        cols.insert(
+            "a".to_owned(),
+            Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)])
+                .unwrap(),
+        );
+        let df = DataFrame::new_with_column_order(
+            Index::new(vec![0_i64.into(), 1_i64.into(), 2_i64.into()]),
+            cols,
+            vec!["a".to_owned()],
+        )
+        .unwrap();
+        let err = df.sample(None, Some(2.0), false, None).unwrap_err();
+        assert!(matches!(&err,
+            FrameError::CompatibilityRejected(msg)
+                if msg.contains("frac must be <= 1")));
+    }
+
+    #[test]
+    fn dataframe_sample_frac_above_one_with_replace_is_valid() {
+        // Pandas allows frac > 1 only with replace=True (oversampling).
+        let mut cols = BTreeMap::new();
+        cols.insert(
+            "a".to_owned(),
+            Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)])
+                .unwrap(),
+        );
+        let df = DataFrame::new_with_column_order(
+            Index::new(vec![0_i64.into(), 1_i64.into(), 2_i64.into()]),
+            cols,
+            vec!["a".to_owned()],
+        )
+        .unwrap();
+        let result = df.sample(None, Some(2.0), true, Some(42)).unwrap();
+        assert_eq!(result.len(), 6);
+    }
+
+    #[test]
+    fn sample_validation_consistency_series_and_dataframe_metamorphic() {
+        // Per br-frankenpandas-380a0: cross-API metamorphic property —
+        // s.sample(args) and df.sample(args) reject/accept the same
+        // (n, frac, replace) combinations.
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+        )
+        .unwrap();
+        let mut cols = BTreeMap::new();
+        cols.insert(
+            "x".to_owned(),
+            Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)])
+                .unwrap(),
+        );
+        let df = DataFrame::new_with_column_order(
+            Index::new(vec![0_i64.into(), 1_i64.into(), 2_i64.into()]),
+            cols,
+            vec!["x".to_owned()],
+        )
+        .unwrap();
+
+        // Both should reject negative frac.
+        assert_eq!(
+            s.sample(None, Some(-0.1), false, None).is_err(),
+            df.sample(None, Some(-0.1), false, None).is_err()
+        );
+        // Both should reject NaN frac.
+        assert_eq!(
+            s.sample(None, Some(f64::NAN), false, None).is_err(),
+            df.sample(None, Some(f64::NAN), false, None).is_err()
+        );
+        // Both should reject frac > 1 without replace.
+        assert_eq!(
+            s.sample(None, Some(1.5), false, None).is_err(),
+            df.sample(None, Some(1.5), false, None).is_err()
+        );
+        // Both should accept frac in [0, 1].
+        assert_eq!(
+            s.sample(None, Some(0.5), false, Some(42)).is_ok(),
+            df.sample(None, Some(0.5), false, Some(42)).is_ok()
+        );
     }
 
     #[test]
