@@ -14211,10 +14211,12 @@ impl StringAccessor<'_> {
     /// Find the first occurrence of a substring.
     ///
     /// Matches `pd.Series.str.find(sub)`. Returns -1 if not found.
+    /// Per br-frankenpandas-02ae2b: pandas returns CHAR-based positions
+    /// (Python 3 strings are char-indexed), not byte positions.
     pub fn find(&self, sub: &str) -> Result<Series, FrameError> {
         self.apply_str(
             |s| match s.find(sub) {
-                Some(pos) => Scalar::Int64(pos as i64),
+                Some(byte_pos) => Scalar::Int64(s[..byte_pos].chars().count() as i64),
                 None => Scalar::Int64(-1),
             },
             self.series.name(),
@@ -14224,10 +14226,11 @@ impl StringAccessor<'_> {
     /// Find the last occurrence of a substring.
     ///
     /// Matches `pd.Series.str.rfind(sub)`. Returns -1 if not found.
+    /// Per br-frankenpandas-02ae2b: char-based, not byte-based.
     pub fn rfind(&self, sub: &str) -> Result<Series, FrameError> {
         self.apply_str(
             |s| match s.rfind(sub) {
-                Some(pos) => Scalar::Int64(pos as i64),
+                Some(byte_pos) => Scalar::Int64(s[..byte_pos].chars().count() as i64),
                 None => Scalar::Int64(-1),
             },
             self.series.name(),
@@ -14238,10 +14241,11 @@ impl StringAccessor<'_> {
     ///
     /// Matches `pd.Series.str.index(sub)`. Like `find()` but raises
     /// an error for missing values (here, returns NaN for not-found).
+    /// Per br-frankenpandas-02ae2b: char-based, not byte-based.
     pub fn index_of(&self, sub: &str) -> Result<Series, FrameError> {
         self.apply_str(
             |s| match s.find(sub) {
-                Some(pos) => Scalar::Int64(pos as i64),
+                Some(byte_pos) => Scalar::Int64(s[..byte_pos].chars().count() as i64),
                 None => Scalar::Null(NullKind::NaN),
             },
             self.series.name(),
@@ -14252,10 +14256,11 @@ impl StringAccessor<'_> {
     ///
     /// Matches `pd.Series.str.rindex(sub)`. Like `rfind()` but raises
     /// an error for missing values (here, returns NaN for not-found).
+    /// Per br-frankenpandas-02ae2b: char-based, not byte-based.
     pub fn rindex_of(&self, sub: &str) -> Result<Series, FrameError> {
         self.apply_str(
             |s| match s.rfind(sub) {
-                Some(pos) => Scalar::Int64(pos as i64),
+                Some(byte_pos) => Scalar::Int64(s[..byte_pos].chars().count() as i64),
                 None => Scalar::Null(NullKind::NaN),
             },
             self.series.name(),
@@ -76854,5 +76859,106 @@ mod tests {
         .unwrap();
         assert_eq!(s.min().unwrap(), Scalar::Int64(2));
         assert_eq!(s.max().unwrap(), Scalar::Int64(8));
+    }
+}
+
+#[cfg(test)]
+mod test_str_find_char_position_02ae2b {
+    use super::*;
+
+    fn make_str_series(name: &str, vals: &[&str]) -> Series {
+        let labels: Vec<IndexLabel> =
+            (0..vals.len()).map(|i| IndexLabel::Int64(i as i64)).collect();
+        let scalars: Vec<Scalar> = vals.iter().map(|s| Scalar::Utf8((*s).to_string())).collect();
+        Series::from_values(name, labels, scalars).unwrap()
+    }
+
+    #[test]
+    fn str_find_returns_char_position_not_byte_position() {
+        // pandas: pd.Series(["héllo"]).str.find("lo") -> 3 (char index of second 'l').
+        // chars: h=0, é=1, l=2, l=3, o=4. "lo" matches at char 3 (l-o pair).
+        // bytes:  h=0, é=1..2, l=3, l=4, o=5. "lo" matches at byte 4.
+        // Buggy byte impl would return 4; correct char impl returns 3.
+        let s = make_str_series("x", &["héllo"]);
+        let out = s.str().find("lo").unwrap();
+        assert_eq!(out.values().get(0).unwrap(), &Scalar::Int64(3));
+
+        // Discriminating case where byte != char:
+        // "café_lo": chars c=0, a=1, f=2, é=3, _=4, l=5, o=6. "lo" → char 5.
+        // bytes c=0, a=1, f=2, é=3..4, _=5, l=6, o=7. "lo" → byte 6.
+        let s2 = make_str_series("x", &["café_lo"]);
+        let out2 = s2.str().find("lo").unwrap();
+        assert_eq!(out2.values().get(0).unwrap(), &Scalar::Int64(5));
+    }
+
+    #[test]
+    fn str_rfind_returns_char_position_not_byte_position() {
+        // 'héllo héllo': last 'lo' starts at char 9 (h0 é1 l2 l3 o4 ' '5 h6 é7 l8 l9 o10).
+        // Byte position would be different due to multiple 'é' (each 2 bytes).
+        let s = make_str_series("x", &["héllo héllo"]);
+        let out = s.str().rfind("lo").unwrap();
+        assert_eq!(out.values().get(0).unwrap(), &Scalar::Int64(9));
+    }
+
+    #[test]
+    fn str_find_ascii_matches_byte_position() {
+        // Sanity: ASCII char position == byte position.
+        let s = make_str_series("x", &["hello"]);
+        let out = s.str().find("lo").unwrap();
+        assert_eq!(out.values().get(0).unwrap(), &Scalar::Int64(3));
+    }
+
+    #[test]
+    fn str_find_not_found_returns_neg_one() {
+        let s = make_str_series("x", &["héllo"]);
+        let out = s.str().find("xyz").unwrap();
+        assert_eq!(out.values().get(0).unwrap(), &Scalar::Int64(-1));
+    }
+
+    #[test]
+    fn str_index_of_returns_char_position() {
+        // index_of differs from find only on not-found (returns NaN); position semantics same.
+        let s = make_str_series("x", &["café"]);
+        let out = s.str().index_of("é").unwrap();
+        // 'c'=0, 'a'=1, 'f'=2, 'é'=3 in chars; byte position would be 3 too here actually
+        // (c, a, f are 1 byte each), so use a more discriminating case:
+        assert_eq!(out.values().get(0).unwrap(), &Scalar::Int64(3));
+
+        let s2 = make_str_series("x", &["héllé"]);
+        // 'h'=0, 'é'=1, 'l'=2, 'l'=3, 'é'=4. find returns first 'é' at char 1.
+        // Byte position would be 1 (h is 1 byte). But for last 'é':
+        let out2 = s2.str().rindex_of("é").unwrap();
+        // rindex_of('é') -> char 4. Byte position would be 6 (h=1 + é=2 + l=1 + l=1 + é at byte 5? actually starts at 5).
+        assert_eq!(out2.values().get(0).unwrap(), &Scalar::Int64(4));
+    }
+
+    #[test]
+    fn str_find_metamorphic_oracle_char_count_matches() {
+        // Metamorphic property: if find() returns char position p, then
+        // s.chars().nth(p) must equal the first char of sub.
+        // Build subs by char-slicing (not byte-slicing) to avoid splitting multi-byte chars.
+        let inputs = ["héllo", "café", "naïve", "façade", "Zürich"];
+        for input in inputs.iter() {
+            let s = make_str_series("x", &[input]);
+            let chars: Vec<char> = input.chars().collect();
+            // Pick a single-char and a two-char window starting at char index 1 (often multi-byte).
+            let single: String = chars.iter().skip(1).take(1).collect();
+            let pair: String = chars.iter().take(2).collect();
+            for sub in [single.as_str(), pair.as_str()].iter() {
+                let out = s.str().find(sub).unwrap();
+                let result = match out.values().get(0).unwrap() {
+                    Scalar::Int64(v) => *v,
+                    other => panic!("expected Int64, got {:?}", other),
+                };
+                assert!(result >= 0, "expected match for sub={} in {}", sub, input);
+                let p = result as usize;
+                let first_char_of_sub = sub.chars().next().unwrap();
+                assert_eq!(
+                    chars[p], first_char_of_sub,
+                    "find(\"{}\") on \"{}\" returned char-pos {} but chars[{}]={}, expected {}",
+                    sub, input, result, p, chars[p], first_char_of_sub
+                );
+            }
+        }
     }
 }
