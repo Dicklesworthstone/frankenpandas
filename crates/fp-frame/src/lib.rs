@@ -668,6 +668,14 @@ fn distinct_values(values: &[Scalar], dropna: bool) -> Vec<Scalar> {
 }
 
 fn mode_values(values: &[Scalar], dropna: bool) -> Vec<Scalar> {
+    // NB: this helper supports CROSS-DTYPE comparison (used by
+    // DataFrame::mode_with_options axis=1 with row-wise values pulled
+    // from multiple columns of different dtypes), so it relies on
+    // grouped_scalar_eq's pandas-style numeric equivalence
+    // (Bool(true) ≡ Int64(1) ≡ Float64(1.0)). ScalarKey-based hashing
+    // can NOT replace this — same constraint as distinct_values per
+    // br-frankenpandas-15f51. Single-Series callers (Series::mode_with_dropna)
+    // get an O(n) inline HashMap path via br-frankenpandas-cec8f.
     let mut counts: Vec<(Scalar, usize)> = Vec::new();
     for value in values {
         if dropna && value.is_missing() {
@@ -4952,7 +4960,46 @@ impl Series {
     ///
     /// Matches `pd.Series.mode(dropna=...)`.
     pub fn mode_with_dropna(&self, dropna: bool) -> Result<Self, FrameError> {
-        let modes = mode_values(self.column.values(), dropna);
+        // Per br-frankenpandas-cec8f: O(n) HashMap-based mode for the
+        // single-Series case. Within a single Column, values are
+        // homogeneous (Column::new validation), so ScalarKey equivalence
+        // matches grouped_scalar_eq for in-column pairs; NaN/Null collapse
+        // identically. The cross-dtype mode_values helper stays linear-
+        // scan for DataFrame::mode_with_options axis=1.
+        let mut counts: Vec<(Scalar, usize)> = Vec::new();
+        let mut index_map: HashMap<ScalarKey<'_>, usize> = HashMap::new();
+        for value in self.column.values() {
+            if dropna && value.is_missing() {
+                continue;
+            }
+            let key = scalar_key_allow_missing(value);
+            match index_map.get(&key) {
+                Some(&idx) => counts[idx].1 += 1,
+                None => {
+                    index_map.insert(key, counts.len());
+                    counts.push((value.clone(), 1));
+                }
+            }
+        }
+        drop(index_map);
+
+        let max_count = counts.iter().map(|(_, c)| *c).max().unwrap_or(0);
+        let mut modes: Vec<Scalar> = if max_count == 0 {
+            Vec::new()
+        } else {
+            counts
+                .into_iter()
+                .filter(|(_, c)| *c == max_count)
+                .map(|(v, _)| v)
+                .collect()
+        };
+        modes.sort_by(|left, right| {
+            scalar_key_cmp(
+                &scalar_key_allow_missing(left),
+                &scalar_key_allow_missing(right),
+            )
+        });
+
         let labels: Vec<IndexLabel> = (0..modes.len()).map(|i| (i as i64).into()).collect();
         Self::new(
             self.name.clone(),
@@ -72908,6 +72955,102 @@ mod tests {
         .unwrap();
         assert_eq!(s.sum().unwrap(), Scalar::Float64(8.0));
         assert_eq!(s.prod().unwrap(), Scalar::Float64(15.0));
+    }
+
+    #[test]
+    fn series_mode_handles_many_unique_fast() {
+        // Per br-frankenpandas-cec8f: O(n) HashMap fast path. 5K distinct
+        // Int64 values; old impl would do ~12.5M comparisons.
+        let n: i64 = 5_000;
+        let labels: Vec<IndexLabel> = (0..n).map(IndexLabel::Int64).collect();
+        let values: Vec<Scalar> = (0..n).map(Scalar::Int64).collect();
+        let s = Series::from_values("x", labels, values).unwrap();
+
+        let modes = s.mode().unwrap();
+        // Every value appears exactly once → all are modes; len == n.
+        assert_eq!(modes.len() as i64, n);
+    }
+
+    #[test]
+    fn series_mode_returns_single_most_frequent() {
+        // Input: [1, 2, 2, 3, 2, 1] → mode is [2] (count 3).
+        let s = Series::from_values(
+            "x",
+            (0..6_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+                Scalar::Int64(2),
+                Scalar::Int64(1),
+            ],
+        )
+        .unwrap();
+        let modes = s.mode().unwrap();
+        assert_eq!(modes.len(), 1);
+        assert_eq!(modes.column().values()[0], Scalar::Int64(2));
+    }
+
+    #[test]
+    fn series_mode_returns_all_values_for_uniform_input() {
+        // All values appear once → all are modes (sorted by scalar_key_cmp).
+        let s = Series::from_values(
+            "x",
+            (0..3_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![Scalar::Int64(3), Scalar::Int64(1), Scalar::Int64(2)],
+        )
+        .unwrap();
+        let modes = s.mode().unwrap();
+        assert_eq!(modes.len(), 3);
+        // Sorted by scalar_key_cmp (numeric ascending).
+        assert_eq!(modes.column().values()[0], Scalar::Int64(1));
+        assert_eq!(modes.column().values()[1], Scalar::Int64(2));
+        assert_eq!(modes.column().values()[2], Scalar::Int64(3));
+    }
+
+    #[test]
+    fn series_mode_with_ties_returns_all_tied_values() {
+        // Input: [1, 1, 2, 2, 3] → mode is [1, 2] (count 2 each).
+        let s = Series::from_values(
+            "x",
+            (0..5_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![
+                Scalar::Int64(1),
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+            ],
+        )
+        .unwrap();
+        let modes = s.mode().unwrap();
+        assert_eq!(modes.len(), 2);
+        // Sorted ascending.
+        assert_eq!(modes.column().values()[0], Scalar::Int64(1));
+        assert_eq!(modes.column().values()[1], Scalar::Int64(2));
+    }
+
+    #[test]
+    fn series_mode_handles_nulls_with_dropna_false() {
+        // dropna=false: Null counts as a value; if it's the most
+        // frequent, it's the mode.
+        let s = Series::from_values(
+            "x",
+            (0..5_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![
+                Scalar::Int64(1),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Int64(2),
+            ],
+        )
+        .unwrap();
+        let modes = s.mode_with_dropna(false).unwrap();
+        assert_eq!(modes.len(), 1);
+        // Mode is the null value (count 3).
+        assert!(modes.column().values()[0].is_missing());
     }
 
     #[test]
