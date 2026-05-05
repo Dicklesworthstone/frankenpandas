@@ -4533,6 +4533,19 @@ impl Series {
                 }
                 return Ok(Scalar::Int64(total));
             }
+            // Per br-frankenpandas-f031e: pandas concatenates strings on
+            // Series.sum (object dtype). Sister gap to cumsum Utf8 fix in
+            // 4e050. Default skipna=True: nulls are skipped silently;
+            // empty/all-null returns Scalar::Utf8("").
+            DType::Utf8 => {
+                let mut total = String::new();
+                for val in self.column.values() {
+                    if let Scalar::Utf8(s) = val {
+                        total.push_str(s);
+                    }
+                }
+                return Ok(Scalar::Utf8(total));
+            }
             _ => {}
         }
 
@@ -73107,6 +73120,69 @@ mod tests {
         .unwrap();
         assert_eq!(s.sum().unwrap(), Scalar::Float64(8.0));
         assert_eq!(s.prod().unwrap(), Scalar::Float64(15.0));
+    }
+
+    #[test]
+    fn series_sum_utf8_concatenates_strings() {
+        // Per br-frankenpandas-f031e: pandas concatenates strings on
+        // Series.sum. Was previously erroring on to_f64.
+        let s = Series::from_values(
+            "x",
+            (0..3_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("c".into()),
+            ],
+        )
+        .unwrap();
+        assert_eq!(s.sum().unwrap(), Scalar::Utf8("abc".into()));
+    }
+
+    #[test]
+    fn series_sum_utf8_skips_nulls() {
+        // Default skipna=True: nulls are bypassed silently.
+        let s = Series::from_values(
+            "x",
+            (0..4_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![
+                Scalar::Utf8("hello".into()),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Utf8(" ".into()),
+                Scalar::Utf8("world".into()),
+            ],
+        )
+        .unwrap();
+        assert_eq!(s.sum().unwrap(), Scalar::Utf8("hello world".into()));
+    }
+
+    #[test]
+    fn series_sum_utf8_metamorphic_with_cumsum() {
+        // Per br-frankenpandas-f031e: the metamorphic property that
+        // surfaced this fix. cumsum(s).last() == sum(s) on Utf8.
+        let s = Series::from_values(
+            "x",
+            (0..4_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![
+                Scalar::Utf8("foo".into()),
+                Scalar::Utf8("bar".into()),
+                Scalar::Utf8("baz".into()),
+                Scalar::Utf8("qux".into()),
+            ],
+        )
+        .unwrap();
+        let cumsum_last = s
+            .cumsum()
+            .unwrap()
+            .column()
+            .values()
+            .last()
+            .unwrap()
+            .clone();
+        let total = s.sum().unwrap();
+        assert_eq!(cumsum_last, total);
+        // Sanity: the actual concatenation.
+        assert_eq!(total, Scalar::Utf8("foobarbazqux".into()));
     }
 
     #[test]
