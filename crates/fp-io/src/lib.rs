@@ -3211,10 +3211,13 @@ pub fn read_excel_sheets_ordered(
     let mut workbook = open_workbook_auto(path)
         .map_err(|e| IoError::Excel(format!("cannot open workbook: {e}")))?;
     let available: Vec<String> = workbook.sheet_names();
+    // Per br-frankenpandas-c9cb4: HashSet<&str> for O(1) membership;
+    // was O(m × n) Vec::iter().any() per requested name.
+    let available_set: HashSet<&str> = available.iter().map(String::as_str).collect();
     let selected: Vec<String> = match sheet_names {
         Some(names) => {
             for name in names {
-                if !available.iter().any(|s| s == name) {
+                if !available_set.contains(name.as_str()) {
                     return Err(IoError::Excel(format!(
                         "workbook does not contain sheet {name:?}"
                     )));
@@ -3255,10 +3258,13 @@ pub fn read_excel_sheets_ordered_bytes(
     let mut workbook = open_workbook_auto_from_rs(cursor)
         .map_err(|e| IoError::Excel(format!("cannot open workbook from bytes: {e}")))?;
     let available: Vec<String> = workbook.sheet_names();
+    // Per br-frankenpandas-c9cb4: HashSet<&str> for O(1) membership;
+    // was O(m × n) Vec::iter().any() per requested name.
+    let available_set: HashSet<&str> = available.iter().map(String::as_str).collect();
     let selected: Vec<String> = match sheet_names {
         Some(names) => {
             for name in names {
-                if !available.iter().any(|s| s == name) {
+                if !available_set.contains(name.as_str()) {
                     return Err(IoError::Excel(format!(
                         "workbook does not contain sheet {name:?}"
                     )));
@@ -3297,10 +3303,13 @@ pub fn read_excel_sheets(
     let mut workbook = open_workbook_auto(path)
         .map_err(|e| IoError::Excel(format!("cannot open workbook: {e}")))?;
     let available: Vec<String> = workbook.sheet_names();
+    // Per br-frankenpandas-c9cb4: HashSet<&str> for O(1) membership;
+    // was O(m × n) Vec::iter().any() per requested name.
+    let available_set: HashSet<&str> = available.iter().map(String::as_str).collect();
     let selected: Vec<String> = match sheet_names {
         Some(names) => {
             for name in names {
-                if !available.iter().any(|s| s == name) {
+                if !available_set.contains(name.as_str()) {
                     return Err(IoError::Excel(format!(
                         "workbook does not contain sheet {name:?}"
                     )));
@@ -3344,10 +3353,13 @@ pub fn read_excel_sheets_bytes(
     let mut workbook = open_workbook_auto_from_rs(cursor)
         .map_err(|e| IoError::Excel(format!("cannot open workbook from bytes: {e}")))?;
     let available: Vec<String> = workbook.sheet_names();
+    // Per br-frankenpandas-c9cb4: HashSet<&str> for O(1) membership;
+    // was O(m × n) Vec::iter().any() per requested name.
+    let available_set: HashSet<&str> = available.iter().map(String::as_str).collect();
     let selected: Vec<String> = match sheet_names {
         Some(names) => {
             for name in names {
-                if !available.iter().any(|s| s == name) {
+                if !available_set.contains(name.as_str()) {
                     return Err(IoError::Excel(format!(
                         "workbook does not contain sheet {name:?}"
                     )));
