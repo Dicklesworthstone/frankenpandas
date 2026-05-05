@@ -3753,10 +3753,10 @@ pub struct SqlReadOptions {
     /// MSSQL, etc.) and `schema` is `Some(s)`, the SELECT references
     /// `s.table` with each part quoted by `conn.quote_identifier(...)`.
     /// When the backend reports `supports_schemas() == false` (SQLite),
-    /// any `Some(s)` here is silently ignored and the bare `table`
-    /// reference is used — pandas/SQLAlchemy raises NotImplementedError
-    /// there but we choose ignore-with-doc-note so SQLite users with
-    /// pandas-shaped option structs aren't broken.
+    /// any `Some(s)` here is rejected before query execution. Pandas /
+    /// SQLAlchemy raises `NotImplementedError` on that surface; failing
+    /// closed avoids silently reading an unqualified table from the wrong
+    /// namespace.
     ///
     /// Per br-frankenpandas-u6zn (fd90.14).
     pub schema: Option<String>,
@@ -5419,10 +5419,9 @@ fn sql_select_all_query<C: SqlConnection>(conn: &C, table_name: &str) -> Result<
 ///
 /// Per br-frankenpandas-u6zn (fd90.14). When `schema` is `Some(s)` AND
 /// `conn.supports_schemas()`, the FROM clause becomes `\"schema\".\"table\"`.
-/// When `supports_schemas` returns false, any `Some(s)` is ignored and the
-/// bare table name is used — preserves SQLite compatibility (pandas would
-/// raise NotImplementedError there; we choose silent fallback so existing
-/// SqlReadOptions consumers aren't broken).
+/// When `supports_schemas` returns false, any `Some(s)` is rejected before
+/// query generation so `read_sql_table(schema=...)` matches pandas' fail-closed
+/// SQLite behavior.
 fn sql_select_all_query_in_schema<C: SqlConnection>(
     conn: &C,
     table_name: &str,
@@ -5431,8 +5430,14 @@ fn sql_select_all_query_in_schema<C: SqlConnection>(
     validate_sql_table_name(table_name)?;
     validate_sql_table_ref_identifier_lengths(conn, table_name, schema)?;
     let qualified = match schema {
-        Some(s) if conn.supports_schemas() => {
+        Some(s) => {
             validate_sql_schema_name(s)?;
+            if !conn.supports_schemas() {
+                return Err(IoError::Sql(format!(
+                    "read_sql_table: schema is not supported by {} backend",
+                    conn.dialect_name()
+                )));
+            }
             format!(
                 "{}.{}",
                 conn.quote_identifier(s)?,
@@ -5462,8 +5467,8 @@ fn sql_select_columns_query<C: SqlConnection>(
 /// Per br-frankenpandas-d3e9 (fd90.34). Companion to
 /// `sql_select_all_query_in_schema`. Same schema rules: when
 /// `schema` is `Some(s)` AND `conn.supports_schemas()`, the FROM
-/// clause becomes `\"schema\".\"table\"`; otherwise the bare table
-/// name is used.
+/// clause becomes `\"schema\".\"table\"`; when `supports_schemas()`
+/// returns false, the request is rejected before query generation.
 fn sql_select_columns_query_in_schema<C: SqlConnection>(
     conn: &C,
     table_name: &str,
@@ -5483,8 +5488,14 @@ fn sql_select_columns_query_in_schema<C: SqlConnection>(
     validate_sql_column_identifier_lengths(conn, columns)?;
 
     let qualified = match schema {
-        Some(s) if conn.supports_schemas() => {
+        Some(s) => {
             validate_sql_schema_name(s)?;
+            if !conn.supports_schemas() {
+                return Err(IoError::Sql(format!(
+                    "read_sql_table: schema is not supported by {} backend",
+                    conn.dialect_name()
+                )));
+            }
             format!(
                 "{}.{}",
                 conn.quote_identifier(s)?,
@@ -14484,9 +14495,50 @@ mod tests {
         let conn = StubSql;
         let q1 = super::sql_select_all_query_in_schema(&conn, "users", None).expect("q1");
         assert_eq!(q1, "SELECT * FROM \"users\"");
-        let q2 =
-            super::sql_select_all_query_in_schema(&conn, "users", Some("ignored")).expect("q2");
-        assert_eq!(q2, "SELECT * FROM \"users\"");
+    }
+
+    #[test]
+    fn sql_select_query_with_schema_rejects_non_schema_backend() {
+        struct StubSql;
+        impl super::SqlConnection for StubSql {
+            fn query(&self, _q: &str, _p: &[Scalar]) -> Result<super::SqlQueryResult, IoError> {
+                Ok(super::SqlQueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                })
+            }
+            fn execute_batch(&self, _sql: &str) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn table_exists(&self, _name: &str) -> Result<bool, IoError> {
+                Ok(false)
+            }
+            fn insert_rows(&self, _sql: &str, _rows: &[Vec<Scalar>]) -> Result<(), IoError> {
+                Ok(())
+            }
+            fn dtype_sql(&self, _dtype: DType) -> &'static str {
+                "TEXT"
+            }
+            fn index_dtype_sql(&self, _index: &Index) -> &'static str {
+                "TEXT"
+            }
+            fn dialect_name(&self) -> &'static str {
+                "stub"
+            }
+        }
+        let conn = StubSql;
+        let err = super::sql_select_all_query_in_schema(&conn, "users", Some("analytics"))
+            .expect_err("schema must reject when backend has no schema support");
+        assert!(
+            matches!(err, IoError::Sql(msg) if msg.contains("schema is not supported by stub backend"))
+        );
+
+        let err =
+            super::sql_select_columns_query_in_schema(&conn, "users", Some("analytics"), &["id"])
+                .expect_err("projected schema select must reject too");
+        assert!(
+            matches!(err, IoError::Sql(msg) if msg.contains("schema is not supported by stub backend"))
+        );
     }
 
     #[test]
@@ -14528,14 +14580,14 @@ mod tests {
 
     #[cfg(feature = "sql-sqlite")]
     #[test]
-    fn read_sql_table_with_options_schema_silently_ignored_on_sqlite() {
+    fn read_sql_table_with_options_schema_rejected_on_sqlite() {
         let conn = make_sql_test_conn();
         super::SqlConnection::execute_batch(
             &conn,
             "CREATE TABLE bare_tbl (x INTEGER); INSERT INTO bare_tbl VALUES (1), (2);",
         )
         .unwrap();
-        let frame = read_sql_table_with_options(
+        let err = read_sql_table_with_options(
             &conn,
             "bare_tbl",
             &SqlReadOptions {
@@ -14548,10 +14600,34 @@ mod tests {
                 index_col: None,
             },
         )
-        .expect("read with schema=Some on SQLite");
-        let col = frame.column("x").expect("x");
-        assert_eq!(col.values()[0], Scalar::Int64(1));
-        assert_eq!(col.values()[1], Scalar::Int64(2));
+        .expect_err("read_sql_table schema=Some must reject on SQLite");
+        assert!(
+            matches!(err, IoError::Sql(msg) if msg.contains("schema is not supported by sqlite backend"))
+        );
+    }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn read_sql_table_chunks_with_options_schema_rejected_on_sqlite() {
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE TABLE chunk_bare_tbl (x INTEGER); INSERT INTO chunk_bare_tbl VALUES (1), (2);",
+        )
+        .unwrap();
+        let err = read_sql_table_chunks_with_options(
+            &conn,
+            "chunk_bare_tbl",
+            &SqlReadOptions {
+                schema: Some("ignored_on_sqlite".to_owned()),
+                ..Default::default()
+            },
+            1,
+        )
+        .expect_err("chunked read_sql_table schema=Some must reject on SQLite");
+        assert!(
+            matches!(err, IoError::Sql(msg) if msg.contains("schema is not supported by sqlite backend"))
+        );
     }
 
     #[test]
