@@ -4295,7 +4295,11 @@ impl Series {
     /// - `errors="raise"` (default): same as `astype()`
     /// - `errors="coerce"`: values that fail conversion become NaN
     pub fn astype_safe(&self, dtype: DType, errors: &str) -> Result<Self, FrameError> {
+        // Per br-frankenpandas-3d30a: pandas validates errors ∈
+        // {raise, ignore, coerce}. Was silently treating any non-
+        // {ignore, coerce} value as "raise".
         match errors {
+            "raise" => self.astype(dtype),
             "ignore" => self.astype(dtype).or_else(|_| Ok(self.clone())),
             "coerce" => {
                 let out: Vec<Scalar> = self
@@ -4306,7 +4310,9 @@ impl Series {
                     .collect();
                 Self::from_values(self.name.clone(), self.index.labels().to_vec(), out)
             }
-            _ => self.astype(dtype),
+            other => Err(FrameError::CompatibilityRejected(format!(
+                "astype: errors must be 'raise', 'ignore', or 'coerce', got '{other}'"
+            ))),
         }
     }
 
@@ -21060,7 +21066,9 @@ impl DataFrame {
         mapping: &[(&str, DType)],
         errors: &str,
     ) -> Result<Self, FrameError> {
+        // Per br-frankenpandas-3d30a.
         match errors {
+            "raise" => self.astype_columns(mapping),
             "ignore" => self.astype_columns(mapping).or_else(|_| Ok(self.clone())),
             "coerce" => {
                 let mut columns = self.columns.clone();
@@ -21078,7 +21086,9 @@ impl DataFrame {
                 }
                 Self::new_with_column_order(self.index.clone(), columns, self.column_order.clone())
             }
-            _ => self.astype_columns(mapping),
+            other => Err(FrameError::CompatibilityRejected(format!(
+                "astype: errors must be 'raise', 'ignore', or 'coerce', got '{other}'"
+            ))),
         }
     }
 
@@ -73449,6 +73459,61 @@ mod tests {
         .unwrap();
         assert_eq!(s.sum().unwrap(), Scalar::Float64(8.0));
         assert_eq!(s.prod().unwrap(), Scalar::Float64(15.0));
+    }
+
+    #[test]
+    fn series_astype_safe_invalid_errors_arg_rejected() {
+        // Per br-frankenpandas-3d30a: pandas raises on invalid `errors`.
+        // Was silently treating any non-{ignore, coerce} value as "raise".
+        let s = Series::from_values("x", vec![0_i64.into()], vec![Scalar::Int64(1)]).unwrap();
+        let err = s.astype_safe(DType::Int64, "WAT").unwrap_err();
+        assert!(matches!(&err,
+            FrameError::CompatibilityRejected(msg)
+                if msg.contains("errors must be") && msg.contains("'WAT'")));
+    }
+
+    #[test]
+    fn series_astype_safe_case_sensitive() {
+        let s = Series::from_values("x", vec![0_i64.into()], vec![Scalar::Int64(1)]).unwrap();
+        let err = s.astype_safe(DType::Int64, "RAISE").unwrap_err();
+        assert!(matches!(&err,
+            FrameError::CompatibilityRejected(msg) if msg.contains("errors must be")));
+        let err_empty = s.astype_safe(DType::Int64, "").unwrap_err();
+        assert!(matches!(&err_empty,
+            FrameError::CompatibilityRejected(msg) if msg.contains("errors must be")));
+    }
+
+    #[test]
+    fn series_astype_safe_valid_errors_regression_guard() {
+        // All three valid values should succeed.
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2)],
+        )
+        .unwrap();
+        assert!(s.astype_safe(DType::Float64, "raise").is_ok());
+        assert!(s.astype_safe(DType::Float64, "ignore").is_ok());
+        assert!(s.astype_safe(DType::Float64, "coerce").is_ok());
+    }
+
+    #[test]
+    fn dataframe_astype_safe_invalid_errors_arg_rejected() {
+        let mut cols = BTreeMap::new();
+        cols.insert(
+            "a".to_owned(),
+            Column::from_values(vec![Scalar::Int64(1)]).unwrap(),
+        );
+        let df = DataFrame::new_with_column_order(
+            Index::new(vec![0_i64.into()]),
+            cols,
+            vec!["a".to_owned()],
+        )
+        .unwrap();
+        let err = df.astype_safe(DType::Float64, "WAT").unwrap_err();
+        assert!(matches!(&err,
+            FrameError::CompatibilityRejected(msg)
+                if msg.contains("errors must be")));
     }
 
     #[test]
