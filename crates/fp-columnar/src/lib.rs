@@ -3426,29 +3426,82 @@ impl Column {
         sort: bool,
         use_na_sentinel: bool,
     ) -> Result<(Self, Self), ColumnError> {
+        // Per br-frankenpandas-9433f: HashMap-based code lookup mirrors
+        // fp-frame's Series::factorize fix (br-78d0c). fp-columnar can't
+        // import fp-frame's ScalarKey (cycle), so define a local
+        // hashable wrapper. missing_position tracker handles the
+        // use_na_sentinel=false branch separately so multiple null
+        // kinds collapse to the same code (matches the existing
+        // is_missing-based check).
+        use std::collections::HashMap;
+        #[derive(Hash, PartialEq, Eq, Clone, Copy)]
+        enum LocalKey<'a> {
+            Bool(bool),
+            Int64(i64),
+            FloatBits(u64),
+            Utf8(&'a str),
+            Timedelta64(i64),
+        }
+        fn key_of(s: &Scalar) -> Option<LocalKey<'_>> {
+            match s {
+                Scalar::Null(_) => None,
+                Scalar::Bool(b) => Some(LocalKey::Bool(*b)),
+                Scalar::Int64(i) => Some(LocalKey::Int64(*i)),
+                Scalar::Float64(f) => {
+                    if f.is_nan() {
+                        None
+                    } else {
+                        let normalized = if *f == 0.0 { 0.0 } else { *f };
+                        Some(LocalKey::FloatBits(normalized.to_bits()))
+                    }
+                }
+                Scalar::Utf8(s) => Some(LocalKey::Utf8(s.as_str())),
+                Scalar::Timedelta64(t) => {
+                    if *t == Timedelta::NAT {
+                        None
+                    } else {
+                        Some(LocalKey::Timedelta64(*t))
+                    }
+                }
+            }
+        }
+
         let mut uniques: Vec<Scalar> = Vec::new();
+        let mut idx_map: HashMap<LocalKey<'_>, i64> = HashMap::new();
+        let mut missing_position: Option<i64> = None;
         let mut codes: Vec<Scalar> = Vec::with_capacity(self.values.len());
 
         for value in &self.values {
             if value.is_missing() {
                 if use_na_sentinel {
                     codes.push(Scalar::Int64(-1));
-                } else if let Some(position) = uniques.iter().position(Scalar::is_missing) {
-                    codes.push(Scalar::Int64(position as i64));
+                } else if let Some(p) = missing_position {
+                    codes.push(Scalar::Int64(p));
                 } else {
-                    codes.push(Scalar::Int64(uniques.len() as i64));
+                    let code = uniques.len() as i64;
+                    missing_position = Some(code);
                     uniques.push(value.clone());
+                    codes.push(Scalar::Int64(code));
                 }
                 continue;
             }
-
-            if let Some(position) = uniques.iter().position(|existing| existing == value) {
-                codes.push(Scalar::Int64(position as i64));
-            } else {
-                codes.push(Scalar::Int64(uniques.len() as i64));
-                uniques.push(value.clone());
+            let Some(key) = key_of(value) else {
+                // Defensive: non-missing value that maps to no key
+                // (shouldn't happen for valid Scalar variants).
+                codes.push(Scalar::Int64(-1));
+                continue;
+            };
+            match idx_map.get(&key) {
+                Some(&p) => codes.push(Scalar::Int64(p)),
+                None => {
+                    let code = uniques.len() as i64;
+                    idx_map.insert(key, code);
+                    uniques.push(value.clone());
+                    codes.push(Scalar::Int64(code));
+                }
             }
         }
+        drop(idx_map);
 
         if sort && !uniques.is_empty() {
             let mut ordering: Vec<usize> = (0..uniques.len()).collect();
