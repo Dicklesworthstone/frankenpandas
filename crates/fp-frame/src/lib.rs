@@ -73424,6 +73424,53 @@ mod tests {
     }
 
     #[test]
+    fn series_str_pad_invalid_side_errors() {
+        // Per br-frankenpandas-e6937: pandas raises on invalid side.
+        // Was silently returning the original string (no padding).
+        let s =
+            Series::from_values("x", vec![0_i64.into()], vec![Scalar::Utf8("hi".into())]).unwrap();
+        let err = s.str().pad(5, "wat", '*').unwrap_err();
+        assert!(matches!(&err,
+            FrameError::CompatibilityRejected(msg)
+                if msg.contains("side must be one of") && msg.contains("'wat'")));
+    }
+
+    #[test]
+    fn series_str_pad_case_sensitive_side_rejected() {
+        // pandas is case-sensitive; "LEFT" is not a valid side.
+        let s =
+            Series::from_values("x", vec![0_i64.into()], vec![Scalar::Utf8("hi".into())]).unwrap();
+        let err = s.str().pad(5, "LEFT", ' ').unwrap_err();
+        assert!(matches!(&err,
+            FrameError::CompatibilityRejected(msg)
+                if msg.contains("side must be one of")));
+    }
+
+    #[test]
+    fn series_str_pad_empty_side_rejected() {
+        let s =
+            Series::from_values("x", vec![0_i64.into()], vec![Scalar::Utf8("hi".into())]).unwrap();
+        let err = s.str().pad(5, "", ' ').unwrap_err();
+        assert!(matches!(&err,
+            FrameError::CompatibilityRejected(msg)
+                if msg.contains("side must be one of")));
+    }
+
+    #[test]
+    fn series_str_pad_valid_sides_regression_guard() {
+        let s =
+            Series::from_values("x", vec![0_i64.into()], vec![Scalar::Utf8("hi".into())]).unwrap();
+        // All three valid sides should succeed.
+        let left = s.str().pad(5, "left", '*').unwrap();
+        assert_eq!(left.column().values()[0], Scalar::Utf8("***hi".into()));
+        let right = s.str().pad(5, "right", '*').unwrap();
+        assert_eq!(right.column().values()[0], Scalar::Utf8("hi***".into()));
+        let both = s.str().pad(5, "both", '*').unwrap();
+        // pad_len=3, left=1, right=2 → "*hi**"
+        assert_eq!(both.column().values()[0], Scalar::Utf8("*hi**".into()));
+    }
+
+    #[test]
     fn dataframe_sample_negative_frac_errors() {
         // Per br-frankenpandas-380a0: cross-API consistency with
         // Series::sample (c1db4). Negative frac was silently
