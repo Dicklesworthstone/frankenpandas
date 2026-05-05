@@ -7830,7 +7830,9 @@ impl Series {
             unique_strs.sort();
             unique_strs.dedup();
             let key_of = |s: &str| -> f64 {
-                unique_strs.binary_search(&s).expect("string must be in deduped set") as f64
+                unique_strs
+                    .binary_search(&s)
+                    .expect("string must be in deduped set") as f64
             };
             for (i, v) in vals.iter().enumerate() {
                 if v.is_missing() {
