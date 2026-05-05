@@ -496,6 +496,32 @@ fn grouped_scalar_eq(left: &Scalar, right: &Scalar) -> bool {
     }
 }
 
+/// Per br-frankenpandas-5110c: build a hash-based fast-path for
+/// mapping-driven Series operations (map/replace). Returns Some(hashmap)
+/// when every key in `mapping` is non-Float64 (where ScalarKey hashing
+/// matches semantic_eq exactly). Returns None when any key is Float64,
+/// signaling callers to fall back to the linear-scan path that
+/// preserves Scalar::semantic_eq's relative-tolerance behavior for
+/// Float64-vs-Float64 pairs (1e-14 relative). NaN/Null mapping keys
+/// collapse to ScalarKey::Null(NaN), matching semantic_eq's null
+/// equivalence; that case is hashable and stays on the fast path.
+fn try_build_mapping_index(mapping: &[(Scalar, Scalar)]) -> Option<HashMap<ScalarKey<'_>, &Scalar>> {
+    if mapping
+        .iter()
+        .any(|(k, _)| matches!(k, Scalar::Float64(v) if !v.is_nan()))
+    {
+        return None;
+    }
+    let mut index: HashMap<ScalarKey<'_>, &Scalar> = HashMap::with_capacity(mapping.len());
+    for (k, v) in mapping {
+        let key = scalar_key_allow_missing(k);
+        // First-occurrence wins, matching the prior linear-scan behavior
+        // (Vec::iter().find() returns the first match).
+        index.entry(key).or_insert(v);
+    }
+    Some(index)
+}
+
 fn distinct_values(values: &[Scalar], dropna: bool) -> Vec<Scalar> {
     // NB: this helper supports CROSS-DTYPE comparison (used by
     // DataFrame::nunique_axis_with_dropna with row-wise values pulled
@@ -3877,16 +3903,26 @@ impl Series {
     ///
     /// Matches `pd.Series.map(dict)`.
     pub fn map(&self, mapping: &[(Scalar, Scalar)]) -> Result<Self, FrameError> {
+        // Per br-frankenpandas-5110c: O(n + m) hash fast path when no
+        // mapping key is Float64 (preserves semantic_eq's tolerance
+        // behavior on Float64 by falling back to linear scan in that
+        // case).
+        let index = try_build_mapping_index(mapping);
         let mut out = Vec::with_capacity(self.len());
         for val in self.column.values() {
             if val.is_missing() {
                 out.push(Scalar::Null(NullKind::NaN));
                 continue;
             }
-            let mapped = mapping
-                .iter()
-                .find(|(k, _)| k.semantic_eq(val))
-                .map(|(_, v)| v.clone());
+            let mapped = if let Some(idx) = &index {
+                let key = scalar_key_allow_missing(val);
+                idx.get(&key).map(|v| (*v).clone())
+            } else {
+                mapping
+                    .iter()
+                    .find(|(k, _)| k.semantic_eq(val))
+                    .map(|(_, v)| v.clone())
+            };
             out.push(mapped.unwrap_or(Scalar::Null(NullKind::NaN)));
         }
         Self::from_values(self.name.clone(), self.index.labels().to_vec(), out)
@@ -3922,16 +3958,23 @@ impl Series {
         mapping: &[(Scalar, Scalar)],
         default: &Scalar,
     ) -> Result<Self, FrameError> {
+        // Per br-frankenpandas-5110c: O(n + m) hash fast path; see map() above.
+        let index = try_build_mapping_index(mapping);
         let mut out = Vec::with_capacity(self.len());
         for val in self.column.values() {
             if val.is_missing() {
                 out.push(Scalar::Null(NullKind::NaN));
                 continue;
             }
-            let mapped = mapping
-                .iter()
-                .find(|(k, _)| k.semantic_eq(val))
-                .map(|(_, v)| v.clone());
+            let mapped = if let Some(idx) = &index {
+                let key = scalar_key_allow_missing(val);
+                idx.get(&key).map(|v| (*v).clone())
+            } else {
+                mapping
+                    .iter()
+                    .find(|(k, _)| k.semantic_eq(val))
+                    .map(|(_, v)| v.clone())
+            };
             out.push(mapped.unwrap_or_else(|| default.clone()));
         }
         Self::from_values(self.name.clone(), self.index.labels().to_vec(), out)
@@ -3993,12 +4036,19 @@ impl Series {
     ///
     /// Matches `pd.Series.replace(to_replace, value)` for scalar pairs.
     pub fn replace(&self, replacements: &[(Scalar, Scalar)]) -> Result<Self, FrameError> {
+        // Per br-frankenpandas-5110c: O(n + m) hash fast path; see map() above.
+        let index = try_build_mapping_index(replacements);
         let mut out = Vec::with_capacity(self.len());
         for val in self.column.values() {
-            let replaced = replacements
-                .iter()
-                .find(|(old, _)| old.semantic_eq(val))
-                .map(|(_, new)| new.clone());
+            let replaced = if let Some(idx) = &index {
+                let key = scalar_key_allow_missing(val);
+                idx.get(&key).map(|v| (*v).clone())
+            } else {
+                replacements
+                    .iter()
+                    .find(|(old, _)| old.semantic_eq(val))
+                    .map(|(_, new)| new.clone())
+            };
             out.push(replaced.unwrap_or_else(|| val.clone()));
         }
         Self::from_values(self.name.clone(), self.index.labels().to_vec(), out)
@@ -6995,6 +7045,8 @@ impl Series {
         mapping: &[(Scalar, Scalar)],
         na_action_ignore: bool,
     ) -> Result<Self, FrameError> {
+        // Per br-frankenpandas-5110c: O(n + m) hash fast path; see map() above.
+        let index = try_build_mapping_index(mapping);
         let mut out = Vec::with_capacity(self.len());
         for val in self.column.values() {
             if val.is_missing() {
@@ -7006,10 +7058,15 @@ impl Series {
                 }
                 continue;
             }
-            let mapped = mapping
-                .iter()
-                .find(|(k, _)| k.semantic_eq(val))
-                .map(|(_, v)| v.clone());
+            let mapped = if let Some(idx) = &index {
+                let key = scalar_key_allow_missing(val);
+                idx.get(&key).map(|v| (*v).clone())
+            } else {
+                mapping
+                    .iter()
+                    .find(|(k, _)| k.semantic_eq(val))
+                    .map(|(_, v)| v.clone())
+            };
             out.push(mapped.unwrap_or(Scalar::Null(NullKind::NaN)));
         }
         Self::from_values(self.name.clone(), self.index.labels().to_vec(), out)
@@ -72700,6 +72757,106 @@ mod tests {
         .unwrap();
         assert_eq!(s.sum().unwrap(), Scalar::Float64(8.0));
         assert_eq!(s.prod().unwrap(), Scalar::Float64(15.0));
+    }
+
+    #[test]
+    fn series_map_uses_hash_fast_path_for_int_keys() {
+        // Per br-frankenpandas-5110c: O(n + m) hash fast path. Build a
+        // 1000-entry mapping and a 5000-element series; the result must
+        // match what the linear-scan version would produce.
+        let mapping: Vec<(Scalar, Scalar)> = (0..1000)
+            .map(|i| (Scalar::Int64(i), Scalar::Int64(i * 10)))
+            .collect();
+        let labels: Vec<IndexLabel> = (0..5000_i64).map(IndexLabel::Int64).collect();
+        let values: Vec<Scalar> = (0..5000_i64).map(|i| Scalar::Int64(i % 1000)).collect();
+        let s = Series::from_values("x", labels, values).unwrap();
+
+        let mapped = s.map(&mapping).unwrap();
+        // Each value i % 1000 maps to (i % 1000) * 10.
+        for (i, v) in mapped.column().values().iter().enumerate() {
+            let expected = ((i as i64) % 1000) * 10;
+            assert_eq!(*v, Scalar::Int64(expected), "row {i}");
+        }
+    }
+
+    #[test]
+    fn series_replace_uses_hash_fast_path_for_int_keys() {
+        // Same pattern as map: large mapping, large input, hash fast path.
+        let replacements: Vec<(Scalar, Scalar)> = vec![
+            (Scalar::Int64(1), Scalar::Int64(100)),
+            (Scalar::Int64(2), Scalar::Int64(200)),
+            (Scalar::Int64(3), Scalar::Int64(300)),
+        ];
+        let s = Series::from_values(
+            "x",
+            (0..6_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+                Scalar::Int64(4),
+                Scalar::Int64(1),
+                Scalar::Int64(5),
+            ],
+        )
+        .unwrap();
+        let out = s.replace(&replacements).unwrap();
+        assert_eq!(
+            out.column().values(),
+            &[
+                Scalar::Int64(100),
+                Scalar::Int64(200),
+                Scalar::Int64(300),
+                Scalar::Int64(4), // unmapped → keep original
+                Scalar::Int64(100),
+                Scalar::Int64(5), // unmapped → keep original
+            ]
+        );
+    }
+
+    #[test]
+    fn series_map_falls_back_to_linear_scan_for_float_keys() {
+        // Per br-frankenpandas-5110c: when any mapping key is Float64
+        // (non-NaN), the hash fast path is bypassed to preserve
+        // semantic_eq's relative-tolerance behavior.
+        // semantic_eq treats Float64(1.0 + 1e-16) and Float64(1.0) as
+        // equal (relative tolerance 1e-14). With the linear-scan
+        // fallback, both should map to the same target.
+        let close_to_one = 1.0_f64 + 1e-16;
+        let mapping: Vec<(Scalar, Scalar)> =
+            vec![(Scalar::Float64(1.0), Scalar::Int64(999))];
+        let s = Series::from_values(
+            "x",
+            (0..2_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![Scalar::Float64(1.0), Scalar::Float64(close_to_one)],
+        )
+        .unwrap();
+        let out = s.map(&mapping).unwrap();
+        // Both values should hit the Float64(1.0) entry under semantic_eq's
+        // tolerance — both map to Int64(999). The fact that
+        // close_to_one != 1.0 bit-exactly is what proves this took the
+        // linear-scan path (hash path would only match exact bits).
+        assert_eq!(out.column().values()[0], Scalar::Int64(999));
+        assert_eq!(out.column().values()[1], Scalar::Int64(999));
+    }
+
+    #[test]
+    fn series_replace_unmapped_value_keeps_original() {
+        // Regression guard: replace's "no match → keep original" path
+        // must work on both fast and slow paths.
+        let replacements = vec![(Scalar::Int64(99), Scalar::Int64(999))];
+        let s = Series::from_values(
+            "x",
+            (0..3_i64).map(IndexLabel::Int64).collect::<Vec<_>>(),
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+        )
+        .unwrap();
+        let out = s.replace(&replacements).unwrap();
+        // No values match Int64(99); all originals preserved.
+        assert_eq!(
+            out.column().values(),
+            &[Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]
+        );
     }
 
     #[test]
