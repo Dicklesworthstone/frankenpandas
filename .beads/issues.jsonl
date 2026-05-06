@@ -1629,3 +1629,4 @@
 {"id":"br-frankenpandas-41edff","status":"closed","closed_at":"2026-05-06T02:35:00Z"}
 {"id":"br-frankenpandas-50b6b0","title":"[deadlock-finder] subprocess pipe deadlock in 6 conformance test sites","status":"open","priority":1,"issue_type":"bug","created_at":"2026-05-06T02:40:00Z"}
 {"id":"br-frankenpandas-50b6b0","status":"closed","closed_at":"2026-05-06T02:50:00Z"}
+{"id":"br-frankenpandas-e4e83a","title":"[mock-code-finder] cumsum/cummin/cummax errors on Utf8+Null","status":"open","priority":1,"issue_type":"bug","created_at":"2026-05-06T03:00:00Z"}

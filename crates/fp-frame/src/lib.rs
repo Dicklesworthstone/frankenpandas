@@ -5285,13 +5285,23 @@ impl Series {
         }
         // Per br-frankenpandas-4e050: pandas cumsum on Utf8 concatenates
         // strings cumulatively. Sister to cummin/cummax Utf8 fix in c4898.
-        if !values.is_empty() && values.iter().all(|value| matches!(value, Scalar::Utf8(_))) {
+        // Per br-frankenpandas-e4e83a: accept Utf8-or-missing mix; skipna=True
+        // (default) preserves Null positions without updating the accumulator.
+        if !values.is_empty()
+            && values
+                .iter()
+                .all(|value| matches!(value, Scalar::Utf8(_)) || value.is_missing())
+            && values.iter().any(|value| matches!(value, Scalar::Utf8(_)))
+        {
             let mut acc = String::new();
             let mut out = Vec::with_capacity(values.len());
             for value in values {
-                if let Scalar::Utf8(s) = value {
-                    acc.push_str(s);
-                    out.push(Scalar::Utf8(acc.clone()));
+                match value {
+                    Scalar::Utf8(s) => {
+                        acc.push_str(s);
+                        out.push(Scalar::Utf8(acc.clone()));
+                    }
+                    _ => out.push(Scalar::Null(NullKind::NaN)),
                 }
             }
             return Self::from_values(self.name.clone(), self.index.labels().to_vec(), out);
@@ -5381,18 +5391,27 @@ impl Series {
         // Per br-frankenpandas-c4898: pandas supports cummin on Utf8
         // (lexicographic). Was previously falling through to to_f64
         // which errors. Match pandas.
-        if !values.is_empty() && values.iter().all(|value| matches!(value, Scalar::Utf8(_))) {
+        // Per br-frankenpandas-e4e83a: accept Utf8-or-missing mix.
+        if !values.is_empty()
+            && values
+                .iter()
+                .all(|value| matches!(value, Scalar::Utf8(_)) || value.is_missing())
+            && values.iter().any(|value| matches!(value, Scalar::Utf8(_)))
+        {
             let mut acc: Option<&str> = None;
             let mut out = Vec::with_capacity(values.len());
             for value in values {
-                if let Scalar::Utf8(s) = value {
-                    let s_ref = s.as_str();
-                    acc = Some(match acc {
-                        None => s_ref,
-                        Some(a) if a < s_ref => a,
-                        _ => s_ref,
-                    });
-                    out.push(Scalar::Utf8(acc.unwrap().to_string()));
+                match value {
+                    Scalar::Utf8(s) => {
+                        let s_ref = s.as_str();
+                        acc = Some(match acc {
+                            None => s_ref,
+                            Some(a) if a < s_ref => a,
+                            _ => s_ref,
+                        });
+                        out.push(Scalar::Utf8(acc.unwrap().to_string()));
+                    }
+                    _ => out.push(Scalar::Null(NullKind::NaN)),
                 }
             }
             return Self::from_values(self.name.clone(), self.index.labels().to_vec(), out);
@@ -5443,18 +5462,27 @@ impl Series {
         }
         // Per br-frankenpandas-c4898: pandas supports cummax on Utf8
         // (lexicographic). Match pandas.
-        if !values.is_empty() && values.iter().all(|value| matches!(value, Scalar::Utf8(_))) {
+        // Per br-frankenpandas-e4e83a: accept Utf8-or-missing mix.
+        if !values.is_empty()
+            && values
+                .iter()
+                .all(|value| matches!(value, Scalar::Utf8(_)) || value.is_missing())
+            && values.iter().any(|value| matches!(value, Scalar::Utf8(_)))
+        {
             let mut acc: Option<&str> = None;
             let mut out = Vec::with_capacity(values.len());
             for value in values {
-                if let Scalar::Utf8(s) = value {
-                    let s_ref = s.as_str();
-                    acc = Some(match acc {
-                        None => s_ref,
-                        Some(a) if a > s_ref => a,
-                        _ => s_ref,
-                    });
-                    out.push(Scalar::Utf8(acc.unwrap().to_string()));
+                match value {
+                    Scalar::Utf8(s) => {
+                        let s_ref = s.as_str();
+                        acc = Some(match acc {
+                            None => s_ref,
+                            Some(a) if a > s_ref => a,
+                            _ => s_ref,
+                        });
+                        out.push(Scalar::Utf8(acc.unwrap().to_string()));
+                    }
+                    _ => out.push(Scalar::Null(NullKind::NaN)),
                 }
             }
             return Self::from_values(self.name.clone(), self.index.labels().to_vec(), out);
@@ -78110,5 +78138,91 @@ mod test_format_pandas_csv_float_41edff {
         .unwrap();
         let out = s.to_csv(',', false);
         assert!(out.contains("3.0"), "got {out}");
+    }
+}
+
+#[cfg(test)]
+mod test_cum_utf8_with_null_e4e83a {
+    use super::*;
+
+    fn s_utf8_mixed(vals: &[Option<&str>]) -> Series {
+        let labels: Vec<IndexLabel> = (0..vals.len())
+            .map(|i| IndexLabel::Int64(i as i64))
+            .collect();
+        let scalars: Vec<Scalar> = vals
+            .iter()
+            .map(|opt| match opt {
+                Some(s) => Scalar::Utf8((*s).to_string()),
+                None => Scalar::Null(NullKind::NaN),
+            })
+            .collect();
+        Series::from_values("x", labels, scalars).unwrap()
+    }
+
+    fn unwrap_utf8_or_null(s: &Scalar) -> Option<&str> {
+        match s {
+            Scalar::Utf8(s) => Some(s.as_str()),
+            Scalar::Null(_) => None,
+            other => panic!("expected Utf8 or Null, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn cumsum_utf8_with_middle_null() {
+        // pandas: pd.Series(["a", None, "b"]).cumsum() -> ["a", NaN, "ab"]
+        let s = s_utf8_mixed(&[Some("a"), None, Some("b")]);
+        let out = s.cumsum().unwrap();
+        let actual: Vec<Option<&str>> = out.values().iter().map(unwrap_utf8_or_null).collect();
+        assert_eq!(actual, vec![Some("a"), None, Some("ab")]);
+    }
+
+    #[test]
+    fn cummax_utf8_with_middle_null() {
+        // pandas: pd.Series(["a", None, "b"]).cummax() -> ["a", NaN, "b"]
+        let s = s_utf8_mixed(&[Some("a"), None, Some("b")]);
+        let out = s.cummax().unwrap();
+        let actual: Vec<Option<&str>> = out.values().iter().map(unwrap_utf8_or_null).collect();
+        assert_eq!(actual, vec![Some("a"), None, Some("b")]);
+    }
+
+    #[test]
+    fn cummin_utf8_with_middle_null() {
+        // pandas: pd.Series(["b", None, "a"]).cummin() -> ["b", NaN, "a"]
+        let s = s_utf8_mixed(&[Some("b"), None, Some("a")]);
+        let out = s.cummin().unwrap();
+        let actual: Vec<Option<&str>> = out.values().iter().map(unwrap_utf8_or_null).collect();
+        assert_eq!(actual, vec![Some("b"), None, Some("a")]);
+    }
+
+    #[test]
+    fn cummax_utf8_with_leading_null() {
+        // pandas: pd.Series([None, "z", None, "y"]).cummax()
+        //   -> [NaN, "z", NaN, "z"]
+        // Skipna does NOT update acc on missing, so the "z" sticks.
+        let s = s_utf8_mixed(&[None, Some("z"), None, Some("y")]);
+        let out = s.cummax().unwrap();
+        let actual: Vec<Option<&str>> = out.values().iter().map(unwrap_utf8_or_null).collect();
+        assert_eq!(actual, vec![None, Some("z"), None, Some("z")]);
+    }
+
+    #[test]
+    fn cumsum_utf8_all_null_falls_through_to_float_path() {
+        // All-null Utf8 series — the Utf8 detector requires at least one
+        // Utf8 value to engage. With all-null, falls to the f64 path which
+        // returns all-NaN (no f64 conversion attempted on missing).
+        let s = s_utf8_mixed(&[None, None]);
+        let out = s.cumsum().unwrap();
+        for v in out.values() {
+            assert!(v.is_missing(), "expected all-NaN, got {:?}", v);
+        }
+    }
+
+    #[test]
+    fn cumsum_pure_utf8_still_concatenates() {
+        // No-null path: existing behavior preserved.
+        let s = s_utf8_mixed(&[Some("a"), Some("b"), Some("c")]);
+        let out = s.cumsum().unwrap();
+        let actual: Vec<Option<&str>> = out.values().iter().map(unwrap_utf8_or_null).collect();
+        assert_eq!(actual, vec![Some("a"), Some("ab"), Some("abc")]);
     }
 }
