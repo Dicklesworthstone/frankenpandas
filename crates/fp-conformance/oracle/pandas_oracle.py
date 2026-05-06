@@ -3312,6 +3312,65 @@ def op_series_str_title(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return _str_unary_op(pd, payload, "series_str_title", "title")
 
 
+def op_series_str_lstrip(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return _str_unary_op(pd, payload, "series_str_lstrip", "lstrip")
+
+
+def op_series_str_rstrip(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return _str_unary_op(pd, payload, "series_str_rstrip", "rstrip")
+
+
+def op_series_str_slice(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    # Per br-frankenpandas-9f9e78. Mirrors fp-frame Series::str.slice(start, end).
+    left = payload.get("left")
+    if left is None:
+        raise OracleError("series_str_slice requires left payload")
+    start = payload.get("str_slice_start")
+    if not isinstance(start, int) or start < 0:
+        raise OracleError("series_str_slice str_slice_start must be a non-negative integer")
+    end = payload.get("str_slice_end")
+    if end is not None and (not isinstance(end, int) or end < 0):
+        raise OracleError("series_str_slice str_slice_end must be a non-negative integer or null")
+    series = fixture_series_from_payload(pd, left, "series_str_slice")
+    try:
+        out = series.str.slice(start, end)
+    except Exception as exc:
+        raise OracleError(f"series_str_slice failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
+def op_series_str_repeat(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    # Per br-frankenpandas-9f9e78. Mirrors fp-frame Series::str.repeat(n).
+    left = payload.get("left")
+    if left is None:
+        raise OracleError("series_str_repeat requires left payload")
+    n = payload.get("str_repeat_n")
+    if not isinstance(n, int) or n < 0:
+        raise OracleError("series_str_repeat str_repeat_n must be a non-negative integer")
+    series = fixture_series_from_payload(pd, left, "series_str_repeat")
+    try:
+        out = series.str.repeat(n)
+    except Exception as exc:
+        raise OracleError(f"series_str_repeat failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
+def op_series_str_count(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    # Per br-frankenpandas-9f9e78. Mirrors fp-frame Series::str.count(regex).
+    left = payload.get("left")
+    if left is None:
+        raise OracleError("series_str_count requires left payload")
+    pat = payload.get("regex_pattern")
+    if not isinstance(pat, str):
+        raise OracleError("series_str_count regex_pattern must be a string")
+    series = fixture_series_from_payload(pd, left, "series_str_count")
+    try:
+        out = series.str.count(pat)
+    except Exception as exc:
+        raise OracleError(f"series_str_count failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
 def op_series_str_zfill(pd, payload: dict[str, Any]) -> dict[str, Any]:
     # Per br-frankenpandas-cfdaf3: live-oracle coverage for fp-frame's
     # Series.str.zfill, which preserves leading +/- signs while zero-padding.
@@ -5756,6 +5815,16 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_series_str_capitalize(pd, payload)
     if op in {"series_str_title", "series_str_title_default"}:
         return op_series_str_title(pd, payload)
+    if op in {"series_str_lstrip", "series_str_lstrip_default"}:
+        return op_series_str_lstrip(pd, payload)
+    if op in {"series_str_rstrip", "series_str_rstrip_default"}:
+        return op_series_str_rstrip(pd, payload)
+    if op in {"series_str_slice", "series_str_slice_default"}:
+        return op_series_str_slice(pd, payload)
+    if op in {"series_str_repeat", "series_str_repeat_default"}:
+        return op_series_str_repeat(pd, payload)
+    if op in {"series_str_count", "series_str_count_default"}:
+        return op_series_str_count(pd, payload)
     if op in {"groupby_sum", "group_by_sum"}:
         return op_groupby_sum(pd, payload)
     if op in {"groupby_mean", "group_by_mean"}:

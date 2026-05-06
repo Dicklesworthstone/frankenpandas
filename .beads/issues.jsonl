@@ -1636,3 +1636,5 @@
 {"id":"br-frankenpandas-66085a","title":"[testing-metamorphic] No proptest for GroupBy::idxmin/idxmax round-trip invariant","status":"open","priority":1,"issue_type":"task","created_at":"2026-05-06T04:40:00Z"}
 {"id":"br-frankenpandas-66085a","status":"closed","closed_at":"2026-05-06T04:45:00Z"}
 {"id":"br-frankenpandas-76e1fd","title":"[profiling] select_columns O(|names|*|column_order|) position scan","status":"open","priority":1,"issue_type":"task","created_at":"2026-05-06T04:50:00Z"}
+{"id":"br-frankenpandas-76e1fd","status":"closed","closed_at":"2026-05-06T04:55:00Z"}
+{"id":"br-frankenpandas-9f9e78","title":"[testing-conformance-harnesses] 5 more str-op oracle handlers missing","status":"open","priority":1,"issue_type":"task","created_at":"2026-05-06T05:00:00Z"}
