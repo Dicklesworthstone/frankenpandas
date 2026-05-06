@@ -3274,6 +3274,23 @@ def op_dataframe_get_dummies(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return {"expected_frame": dataframe_to_json(out)}
 
 
+def op_series_str_zfill(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    # Per br-frankenpandas-cfdaf3: live-oracle coverage for fp-frame's
+    # Series.str.zfill, which preserves leading +/- signs while zero-padding.
+    left = payload.get("left")
+    if left is None:
+        raise OracleError("series_str_zfill requires left payload")
+    width = payload.get("str_width")
+    if not isinstance(width, int) or width < 0:
+        raise OracleError("series_str_zfill str_width must be a non-negative integer")
+    series = fixture_series_from_payload(pd, left, "series_str_zfill")
+    try:
+        out = series.str.zfill(width)
+    except Exception as exc:
+        raise OracleError(f"series_str_zfill failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
 def op_series_str_find(pd, payload: dict[str, Any]) -> dict[str, Any]:
     # Per br-frankenpandas-04aaef: live-oracle coverage for the char-position
     # fix in br-frankenpandas-02ae2b. pandas Series.str.find returns CHAR-based
@@ -5687,6 +5704,8 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_series_str_find(pd, payload)
     if op in {"series_str_rfind", "series_str_rfind_default"}:
         return op_series_str_rfind(pd, payload)
+    if op in {"series_str_zfill", "series_str_zfill_default"}:
+        return op_series_str_zfill(pd, payload)
     if op in {"groupby_sum", "group_by_sum"}:
         return op_groupby_sum(pd, payload)
     if op in {"groupby_mean", "group_by_mean"}:

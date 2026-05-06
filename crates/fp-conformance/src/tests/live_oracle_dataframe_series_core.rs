@@ -40337,3 +40337,55 @@ fn live_oracle_series_str_rfind_char_position_matches_pandas() {
     let result = series.str().rfind("lo").expect("str rfind");
     super::compare_series_expected(&result, &expected).expect("pandas parity");
 }
+
+#[test]
+fn live_oracle_series_str_zfill_sign_handling_matches_pandas() {
+    // Per br-frankenpandas-cfdaf3: lock in fp-frame's str.zfill sign-prefix
+    // handling (Python str.zfill semantics) against live pandas. Multi-byte
+    // UTF-8 ("5é") covers the char-vs-byte width subtlety from br-02ae2b.
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-STR-ZFILL-SIGN",
+        "case_id": "series_str_zfill_sign_handling",
+        "mode": "strict",
+        "operation": "series_str_zfill",
+        "oracle_source": "live_legacy_pandas",
+        "str_width": 5,
+        "left": {
+            "name": "txt",
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 },
+                { "kind": "int64", "value": 2 },
+                { "kind": "int64", "value": 3 },
+                { "kind": "int64", "value": 4 },
+                { "kind": "int64", "value": 5 }
+            ],
+            "values": [
+                { "kind": "utf8", "value": "5" },
+                { "kind": "utf8", "value": "-5" },
+                { "kind": "utf8", "value": "+5" },
+                { "kind": "utf8", "value": "abc" },
+                { "kind": "utf8", "value": "5é" },
+                { "kind": "utf8", "value": "12345" }
+            ]
+        }
+    }))
+    .expect("fixture");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping str.zfill sign test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    let super::ResolvedExpected::Series(expected) = expected else {
+        panic!("expected series payload");
+    };
+
+    let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    let result = series.str().zfill(5).expect("str zfill");
+    super::compare_series_expected(&result, &expected).expect("pandas parity");
+}
