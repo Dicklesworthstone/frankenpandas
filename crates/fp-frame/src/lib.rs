@@ -6108,6 +6108,36 @@ impl Series {
     /// Matches `pd.Series.factorize()`. Returns `(codes, uniques)` where
     /// `codes` is an Int64 Series of category indices (-1 for NaN) and
     /// `uniques` is a Series of the unique values in order of appearance.
+    /// Factorize with sort + use_na_sentinel options.
+    ///
+    /// Per br-frankenpandas-ca5bc2: matches `pd.Series.factorize(sort, use_na_sentinel)`.
+    /// - `sort=true`: uniques are returned in sorted order; codes are
+    ///   remapped accordingly.
+    /// - `use_na_sentinel=false`: missing values become a regular unique
+    ///   bucket with their own code instead of `-1`.
+    /// Delegates to fp-columnar's Column::factorize_with_options (br-9433f).
+    pub fn factorize_with_options(
+        &self,
+        sort: bool,
+        use_na_sentinel: bool,
+    ) -> Result<(Self, Self), FrameError> {
+        let (code_col, unique_col) = self
+            .column
+            .factorize_with_options(sort, use_na_sentinel)?;
+        let code_labels: Vec<IndexLabel> =
+            (0..code_col.len()).map(|i| (i as i64).into()).collect();
+        let unique_labels: Vec<IndexLabel> =
+            (0..unique_col.len()).map(|i| (i as i64).into()).collect();
+        let code_series =
+            Self::from_values(self.name.clone(), code_labels, code_col.values().to_vec())?;
+        let unique_series = Self::from_values(
+            "uniques".to_owned(),
+            unique_labels,
+            unique_col.values().to_vec(),
+        )?;
+        Ok((code_series, unique_series))
+    }
+
     pub fn factorize(&self) -> Result<(Self, Self), FrameError> {
         // Per br-frankenpandas-78d0c: HashMap-based code lookup; was
         // O(n × k) Vec::iter().position() per value. Parallel
@@ -77282,5 +77312,133 @@ mod test_normalize_column_order_de4175 {
             "normalize_column_order on 1500-entry order took {}ms",
             elapsed.as_millis()
         );
+    }
+}
+
+#[cfg(test)]
+mod test_factorize_with_options_ca5bc2 {
+    use super::*;
+
+    fn series_str(name: &str, vals: &[&str]) -> Series {
+        let labels: Vec<IndexLabel> =
+            (0..vals.len()).map(|i| IndexLabel::Int64(i as i64)).collect();
+        let scalars: Vec<Scalar> = vals.iter().map(|s| Scalar::Utf8((*s).to_string())).collect();
+        Series::from_values(name, labels, scalars).unwrap()
+    }
+
+    fn unwrap_int(s: &Scalar) -> i64 {
+        match s {
+            Scalar::Int64(v) => *v,
+            other => panic!("expected Int64, got {:?}", other),
+        }
+    }
+
+    fn codes_vec(s: &Series) -> Vec<i64> {
+        s.values().iter().map(unwrap_int).collect()
+    }
+
+    fn uniques_str(s: &Series) -> Vec<&str> {
+        s.values()
+            .iter()
+            .map(|sc| match sc {
+                Scalar::Utf8(s) => s.as_str(),
+                _ => "<non-utf8>",
+            })
+            .collect()
+    }
+
+    #[test]
+    fn factorize_with_options_default_matches_factorize() {
+        // sort=false, use_na_sentinel=true should match the bare factorize().
+        let s = series_str("x", &["b", "a", "b", "c", "a"]);
+        let (codes_a, uniques_a) = s.factorize().unwrap();
+        let (codes_b, uniques_b) = s.factorize_with_options(false, true).unwrap();
+        assert_eq!(codes_vec(&codes_a), codes_vec(&codes_b));
+        assert_eq!(uniques_str(&uniques_a), uniques_str(&uniques_b));
+    }
+
+    #[test]
+    fn factorize_with_sort_true_orders_uniques_lexicographically() {
+        // First-seen would yield [b, a, c]; sort=true yields [a, b, c].
+        let s = series_str("x", &["b", "a", "b", "c", "a"]);
+        let (codes, uniques) = s.factorize_with_options(true, true).unwrap();
+        // uniques sorted alphabetically.
+        assert_eq!(uniques_str(&uniques), vec!["a", "b", "c"]);
+        // codes: b=1, a=0, b=1, c=2, a=0.
+        assert_eq!(codes_vec(&codes), vec![1, 0, 1, 2, 0]);
+    }
+
+    #[test]
+    fn factorize_with_use_na_sentinel_false_emits_null_as_unique() {
+        // Missing becomes a real unique bucket, not -1.
+        let s = Series::from_values(
+            "x",
+            vec![
+                IndexLabel::Int64(0),
+                IndexLabel::Int64(1),
+                IndexLabel::Int64(2),
+                IndexLabel::Int64(3),
+            ],
+            vec![
+                Scalar::Utf8("a".to_string()),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Utf8("a".to_string()),
+                Scalar::Null(NullKind::NaN),
+            ],
+        )
+        .unwrap();
+        let (codes, uniques) = s.factorize_with_options(false, false).unwrap();
+        let cs = codes_vec(&codes);
+        // No code is -1; null gets its own bucket. Both nulls share it.
+        assert!(!cs.iter().any(|&c| c == -1), "codes were {:?}", cs);
+        assert_eq!(cs[0], cs[2]); // both 'a'
+        assert_eq!(cs[1], cs[3]); // both null
+        assert_ne!(cs[0], cs[1]); // 'a' bucket != null bucket
+        // Uniques list contains 2 entries: "a" and a null.
+        assert_eq!(uniques.len(), 2);
+    }
+
+    #[test]
+    fn factorize_with_use_na_sentinel_true_emits_neg_one_for_null() {
+        let s = Series::from_values(
+            "x",
+            vec![
+                IndexLabel::Int64(0),
+                IndexLabel::Int64(1),
+                IndexLabel::Int64(2),
+            ],
+            vec![
+                Scalar::Utf8("a".to_string()),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Utf8("a".to_string()),
+            ],
+        )
+        .unwrap();
+        let (codes, uniques) = s.factorize_with_options(false, true).unwrap();
+        let cs = codes_vec(&codes);
+        assert_eq!(cs[1], -1); // null sentinel
+        assert_eq!(cs[0], cs[2]); // 'a' shares
+        assert_eq!(uniques.len(), 1);
+    }
+
+    #[test]
+    fn factorize_sort_with_na_sentinel_false_includes_null_in_sort() {
+        let s = Series::from_values(
+            "x",
+            vec![
+                IndexLabel::Int64(0),
+                IndexLabel::Int64(1),
+                IndexLabel::Int64(2),
+            ],
+            vec![
+                Scalar::Utf8("b".to_string()),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Utf8("a".to_string()),
+            ],
+        )
+        .unwrap();
+        let (_codes, uniques) = s.factorize_with_options(true, false).unwrap();
+        // 3 uniques: 'a', 'b', null (in some sorted order).
+        assert_eq!(uniques.len(), 3);
     }
 }
