@@ -12590,7 +12590,12 @@ fn capture_live_oracle_expected(
     };
     let input = serde_json::to_vec(&payload)?;
 
-    let output = Command::new(&config.python_bin)
+    // Per br-frankenpandas-92df89: spawn a thread to drain stdin so
+    // wait_with_output can drain stdout/stderr concurrently. Synchronous
+    // pre-wait write_all deadlocks if the JSON payload exceeds the OS
+    // stdin pipe buffer (~64 KB) AND the child emits output that fills
+    // its stdout pipe buffer before reading all input.
+    let mut child = Command::new(&config.python_bin)
         .arg(&script)
         .arg("--legacy-root")
         .arg(&config.oracle_root)
@@ -12599,14 +12604,19 @@ fn capture_live_oracle_expected(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()
-        .and_then(|mut child| {
-            use std::io::Write;
-            if let Some(mut stdin) = child.stdin.take() {
-                stdin.write_all(&input)?;
-            }
-            child.wait_with_output()
-        })?;
+        .spawn()?;
+    let stdin_handle = child.stdin.take();
+    let stdin_writer = std::thread::spawn(move || -> std::io::Result<()> {
+        use std::io::Write;
+        if let Some(mut stdin) = stdin_handle {
+            stdin.write_all(&input)?;
+        }
+        Ok(())
+    });
+    let output = child.wait_with_output()?;
+    stdin_writer
+        .join()
+        .map_err(|_| std::io::Error::other("oracle stdin writer thread panicked"))??;
 
     if !output.status.success() {
         if expects_error {

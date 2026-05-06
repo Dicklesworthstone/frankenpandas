@@ -1608,3 +1608,5 @@
 {"id":"br-frankenpandas-1a07c0","title":"[testing-golden-artifacts] DataFrame::to_markdown no golden coverage","status":"open","priority":1,"issue_type":"task","created_at":"2026-05-05T20:50:00Z"}
 {"id":"br-frankenpandas-1a07c0","status":"closed","closed_at":"2026-05-05T20:55:00Z"}
 {"id":"br-frankenpandas-e21ca1","title":"[modes-of-reasoning] prop_dataframe_abs_is_sign_flip_invariant fails on Int64 due to mul_scalar dtype promotion","status":"open","priority":1,"issue_type":"bug","created_at":"2026-05-06T01:00:00Z"}
+{"id":"br-frankenpandas-e21ca1","status":"closed","closed_at":"2026-05-06T01:05:00Z"}
+{"id":"br-frankenpandas-92df89","title":"[deadlock-finder] capture_live_oracle_expected can deadlock on >64KB payload","status":"open","priority":1,"issue_type":"bug","created_at":"2026-05-06T01:10:00Z"}
