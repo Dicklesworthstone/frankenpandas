@@ -10394,3 +10394,96 @@ proptest! {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Property: Series::cov_with_options invariants
+// (br-frankenpandas-129bc1)
+// ---------------------------------------------------------------------------
+
+fn arb_paired_bounded_float_series(
+    max_len: usize,
+) -> impl Strategy<Value = (Series, Series)> {
+    (2usize..=max_len).prop_flat_map(move |len| {
+        (
+            prop::collection::vec(-1e6_f64..=1e6_f64, len),
+            prop::collection::vec(-1e6_f64..=1e6_f64, len),
+        )
+            .prop_filter_map("series construction", move |(va, vb)| {
+                let labels: Vec<IndexLabel> =
+                    (0..len).map(|i| IndexLabel::Int64(i as i64)).collect();
+                let scalars_a: Vec<Scalar> = va.into_iter().map(Scalar::Float64).collect();
+                let scalars_b: Vec<Scalar> = vb.into_iter().map(Scalar::Float64).collect();
+                let a = Series::from_values("a".to_string(), labels.clone(), scalars_a).ok()?;
+                let b = Series::from_values("b".to_string(), labels, scalars_b).ok()?;
+                Some((a, b))
+            })
+    })
+}
+
+fn arb_single_bounded_float_series(max_len: usize) -> impl Strategy<Value = Series> {
+    (2usize..=max_len).prop_flat_map(move |len| {
+        prop::collection::vec(-1e6_f64..=1e6_f64, len).prop_filter_map(
+            "series construction",
+            move |va| {
+                let labels: Vec<IndexLabel> =
+                    (0..len).map(|i| IndexLabel::Int64(i as i64)).collect();
+                let scalars: Vec<Scalar> = va.into_iter().map(Scalar::Float64).collect();
+                Series::from_values("s".to_string(), labels, scalars).ok()
+            },
+        )
+    })
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(200))]
+
+    /// cov(a, b) == cov(b, a) for any equal-length series pair.
+    #[test]
+    fn prop_cov_with_options_is_symmetric(
+        (a, b) in arb_paired_bounded_float_series(20),
+    ) {
+        let ab = a.cov_with_options(&b, None, 1).expect("cov ok");
+        let ba = b.cov_with_options(&a, None, 1).expect("cov ok");
+        if !ab.is_finite() || !ba.is_finite() {
+            return Ok(());
+        }
+        let tol = ab.abs().max(ba.abs()).max(1.0) * 1e-9;
+        prop_assert!(
+            (ab - ba).abs() <= tol,
+            "asymmetry: cov(a,b)={ab}, cov(b,a)={ba}, tol={tol}"
+        );
+    }
+
+    /// cov(s, s) >= 0 for any series s.
+    #[test]
+    fn prop_cov_self_is_non_negative(s in arb_single_bounded_float_series(20)) {
+        let result = s.cov_with_options(&s, None, 1).expect("cov ok");
+        if !result.is_finite() {
+            return Ok(());
+        }
+        // Allow tiny negative due to f64 rounding when all values nearly equal.
+        let tol = result.abs().max(1.0) * 1e-12;
+        prop_assert!(
+            result >= -tol,
+            "expected non-negative self-cov, got {result}"
+        );
+    }
+
+    /// cov(s, s) with ddof=1 equals var(s).
+    #[test]
+    fn prop_cov_self_equals_var_at_ddof_one(s in arb_single_bounded_float_series(20)) {
+        let cov_ss = s.cov_with_options(&s, None, 1).expect("cov ok");
+        let var_s = match s.var().expect("var ok") {
+            Scalar::Float64(v) => v,
+            _ => panic!("non-Float64"),
+        };
+        if !cov_ss.is_finite() || !var_s.is_finite() {
+            return Ok(());
+        }
+        let tol = cov_ss.abs().max(var_s.abs()).max(1.0) * 1e-9;
+        prop_assert!(
+            (cov_ss - var_s).abs() <= tol,
+            "cov(s,s)={cov_ss} != var(s)={var_s}, tol={tol}"
+        );
+    }
+}
