@@ -10151,3 +10151,82 @@ proptest! {
     }
 }
 
+
+// ---------------------------------------------------------------------------
+// Property: Series::shift inner-overlap preservation
+// (br-frankenpandas-7aa36a)
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(200))]
+
+    /// For periods p with 0 <= p < n: shifted[p..n] equals s[0..n-p] value-wise,
+    /// and shifted[0..p] are all NaN.
+    #[test]
+    fn prop_series_shift_positive_preserves_inner_overlap(
+        s in arb_unique_numeric_series("shift_pos", 12),
+        periods in 0i64..=10,
+    ) {
+        let n = s.len() as i64;
+        if periods >= n {
+            return Ok(());
+        }
+        let shifted = s.shift(periods).expect("shift must succeed");
+        let p = periods as usize;
+        let n_us = n as usize;
+        // Boundary NaNs.
+        for i in 0..p {
+            prop_assert!(
+                shifted.values()[i].is_missing(),
+                "expected NaN at position {} for periods={}", i, periods
+            );
+        }
+        // Inner overlap.
+        for i in p..n_us {
+            let lhs = &shifted.values()[i];
+            let rhs = &s.values()[i - p];
+            prop_assert!(
+                approx_equal_scalar(lhs, rhs),
+                "shift({})[{}] = {:?} != s[{}] = {:?}", periods, i, lhs, i - p, rhs
+            );
+        }
+    }
+
+    /// For periods p with -n < p < 0: shifted[0..n+p] equals s[|p|..n] value-wise,
+    /// and shifted[n+p..n] are all NaN.
+    #[test]
+    fn prop_series_shift_negative_preserves_inner_overlap(
+        s in arb_unique_numeric_series("shift_neg", 12),
+        periods in -10i64..=-1,
+    ) {
+        let n = s.len() as i64;
+        if periods.unsigned_abs() as i64 >= n {
+            return Ok(());
+        }
+        let shifted = s.shift(periods).expect("shift must succeed");
+        let abs_p = periods.unsigned_abs() as usize;
+        let n_us = n as usize;
+        // Inner overlap at the front.
+        for i in 0..(n_us - abs_p) {
+            let lhs = &shifted.values()[i];
+            let rhs = &s.values()[i + abs_p];
+            prop_assert!(
+                approx_equal_scalar(lhs, rhs),
+                "shift({})[{}] = {:?} != s[{}] = {:?}",
+                periods, i, lhs, i + abs_p, rhs
+            );
+        }
+        // Trailing NaNs.
+        for i in (n_us - abs_p)..n_us {
+            prop_assert!(
+                shifted.values()[i].is_missing(),
+                "expected NaN at position {} for periods={}", i, periods
+            );
+        }
+    }
+
+    // Note: shift(p1).shift(p2) == shift(p1 + p2) composition is already
+    // covered by prop_series_shift_same_direction_composes (line 9531) and
+    // shift(0) identity by prop_series_shift_zero_is_identity (line 9518).
+    // The tests above add the missing inner-overlap byte-equality coverage.
+}
