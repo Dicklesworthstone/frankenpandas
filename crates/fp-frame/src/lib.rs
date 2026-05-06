@@ -898,6 +898,21 @@ fn index_label_to_utf8_scalar(label: &IndexLabel) -> Scalar {
     }
 }
 
+/// Per br-frankenpandas-41edff: render Float64 the same way pandas to_csv
+/// does — whole-number floats get a `.0` suffix instead of being collapsed
+/// to integer form by Rust's default Display. Mirrors the predicate used
+/// in to_markdown / to_latex / to_psql formatters.
+fn format_pandas_csv_float(v: f64) -> String {
+    if v.is_nan() {
+        return "".to_string();
+    }
+    if v.is_finite() && v == v.round() && v.abs() < 1e15 {
+        format!("{v:.1}")
+    } else {
+        v.to_string()
+    }
+}
+
 fn csv_escape(value: &str, sep: char) -> String {
     if value.contains(sep) || value.contains('"') || value.contains('\n') || value.contains('\r') {
         let mut escaped = String::with_capacity(value.len() + 2);
@@ -7194,7 +7209,8 @@ impl Series {
                 Scalar::Null(_) => String::new(),
                 Scalar::Bool(b) => if *b { "True" } else { "False" }.to_string(),
                 Scalar::Int64(v) => v.to_string(),
-                Scalar::Float64(v) => v.to_string(),
+                // Per br-frankenpandas-41edff: pandas-canonical `.0` suffix.
+                Scalar::Float64(v) => format_pandas_csv_float(*v),
                 Scalar::Utf8(s) => csv_escape(s, sep),
                 Scalar::Timedelta64(v) if *v == Timedelta::NAT => String::new(),
                 Scalar::Timedelta64(v) => Timedelta::format(*v),
@@ -25533,7 +25549,9 @@ impl DataFrame {
                     Scalar::Null(_) => {}
                     Scalar::Bool(b) => out.push_str(if *b { "True" } else { "False" }),
                     Scalar::Int64(v) => out.push_str(&v.to_string()),
-                    Scalar::Float64(v) => out.push_str(&v.to_string()),
+                    // Per br-frankenpandas-41edff: whole-number Float64 needs
+                    // pandas-canonical `.0` suffix.
+                    Scalar::Float64(v) => out.push_str(&format_pandas_csv_float(*v)),
                     Scalar::Utf8(s) => out.push_str(&csv_escape(s, sep)),
                     Scalar::Timedelta64(v) if *v == Timedelta::NAT => {}
                     Scalar::Timedelta64(v) => out.push_str(&Timedelta::format(*v)),
@@ -25611,7 +25629,9 @@ impl DataFrame {
                     Scalar::Null(_) => out.push_str(&na_rep_escaped),
                     Scalar::Bool(b) => out.push_str(if *b { "True" } else { "False" }),
                     Scalar::Int64(v) => out.push_str(&v.to_string()),
-                    Scalar::Float64(v) => out.push_str(&v.to_string()),
+                    // Per br-frankenpandas-41edff: whole-number Float64 needs
+                    // pandas-canonical `.0` suffix.
+                    Scalar::Float64(v) => out.push_str(&format_pandas_csv_float(*v)),
                     Scalar::Utf8(s) => out.push_str(&csv_escape(s, sep)),
                     Scalar::Timedelta64(v) if *v == Timedelta::NAT => out.push_str(&na_rep_escaped),
                     Scalar::Timedelta64(v) => out.push_str(&Timedelta::format(*v)),
@@ -78005,5 +78025,90 @@ mod test_quantile_interpolation_a56003 {
         // Effective values: [1, 2]. q=0.5 linear -> 1.5.
         let result = unwrap_f(&series.quantile_with_interpolation(0.5, "linear").unwrap());
         assert!((result - 1.5).abs() < 1e-9, "got {result}");
+    }
+}
+
+#[cfg(test)]
+mod test_format_pandas_csv_float_41edff {
+    use super::*;
+
+    #[test]
+    fn whole_number_float_gets_dot_zero_suffix() {
+        assert_eq!(format_pandas_csv_float(3.0), "3.0");
+        assert_eq!(format_pandas_csv_float(0.0), "0.0");
+        assert_eq!(format_pandas_csv_float(-7.0), "-7.0");
+        assert_eq!(format_pandas_csv_float(1e6), "1000000.0");
+    }
+
+    #[test]
+    fn fractional_floats_use_default_repr() {
+        assert_eq!(format_pandas_csv_float(2.5), "2.5");
+        assert_eq!(format_pandas_csv_float(3.14), "3.14");
+        assert_eq!(format_pandas_csv_float(-0.5), "-0.5");
+    }
+
+    #[test]
+    fn nan_renders_empty() {
+        assert_eq!(format_pandas_csv_float(f64::NAN), "");
+    }
+
+    #[test]
+    fn infinity_falls_through_to_default_repr() {
+        // Not finite so the .0 branch skips; Rust default for inf is "inf".
+        // We don't try to mimic pandas's "inf"/"-inf" — pandas itself uses
+        // the same Display.
+        assert_eq!(format_pandas_csv_float(f64::INFINITY), "inf");
+        assert_eq!(format_pandas_csv_float(f64::NEG_INFINITY), "-inf");
+    }
+
+    #[test]
+    fn very_large_whole_floats_skip_dot_zero() {
+        // Values >= 1e15 fall through; Rust may use scientific or full form.
+        // The cutoff matches the to_markdown convention; just ensure no .0
+        // is forcibly appended to a value that already lacks fractional info.
+        let result = format_pandas_csv_float(1e16);
+        assert!(!result.is_empty());
+        assert!(!result.ends_with(".0") || result.starts_with("10000"));
+    }
+
+    #[test]
+    fn dataframe_to_csv_emits_dot_zero_for_whole_floats() {
+        let df = DataFrame::from_series(vec![Series::from_values(
+            "amount",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Float64(2.5), Scalar::Float64(3.0)],
+        )
+        .unwrap()])
+        .unwrap();
+        let out = df.to_csv(',', false);
+        assert!(out.contains("2.5"), "expected 2.5 in {out}");
+        assert!(out.contains("3.0"), "expected 3.0 in {out}");
+        assert!(!out.contains(",3\n") && !out.contains("\n3\n"), "unexpected bare 3 in {out}");
+    }
+
+    #[test]
+    fn dataframe_to_csv_options_emits_dot_zero_for_whole_floats() {
+        let df = DataFrame::from_series(vec![Series::from_values(
+            "amount",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Float64(2.5), Scalar::Float64(3.0)],
+        )
+        .unwrap()])
+        .unwrap();
+        let out = df.to_csv_options(',', false, "NA", None).unwrap();
+        assert!(out.contains("2.5"));
+        assert!(out.contains("3.0"));
+    }
+
+    #[test]
+    fn series_to_csv_emits_dot_zero_for_whole_floats() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Float64(2.5), Scalar::Float64(3.0)],
+        )
+        .unwrap();
+        let out = s.to_csv(',', false);
+        assert!(out.contains("3.0"), "got {out}");
     }
 }

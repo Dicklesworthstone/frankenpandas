@@ -1624,3 +1624,5 @@
 {"id":"br-frankenpandas-d9af0a","title":"[testing-fuzzing] No proptest for Series::quantile_with_interpolation ordering invariant","status":"open","priority":1,"issue_type":"task","created_at":"2026-05-06T02:10:00Z"}
 {"id":"br-frankenpandas-d9af0a","status":"closed","closed_at":"2026-05-06T02:15:00Z"}
 {"id":"br-frankenpandas-464b83","title":"[testing-golden-artifacts] DataFrame::to_csv_options no golden coverage","status":"open","priority":1,"issue_type":"task","created_at":"2026-05-06T02:20:00Z"}
+{"id":"br-frankenpandas-464b83","status":"closed","closed_at":"2026-05-06T02:25:00Z"}
+{"id":"br-frankenpandas-41edff","title":"[modes-of-reasoning] to_csv renders whole-number Float64 as 3 instead of pandas-canonical 3.0","status":"open","priority":1,"issue_type":"bug","created_at":"2026-05-06T02:30:00Z"}

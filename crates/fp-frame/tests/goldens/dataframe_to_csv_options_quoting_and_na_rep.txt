@@ -2,4 +2,4 @@ index,name,amount,active
 0,plain,2.5,True
 1,"has, comma",NA,False
 2,"has ""quote"" and
-newline",3,True
+newline",3.0,True
