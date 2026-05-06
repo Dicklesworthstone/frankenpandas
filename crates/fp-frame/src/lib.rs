@@ -49939,6 +49939,55 @@ mod tests {
     }
 
     #[test]
+    fn dataframe_to_markdown_mixed_dtypes_golden() {
+        // Per br-frankenpandas-1a07c0: lock in to_markdown byte output for
+        // a representative DataFrame covering Int64, Float64 (whole + non-
+        // whole), Utf8, Bool, and Null. Detects formatting drift across
+        // refactors.
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "ints",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![Scalar::Int64(1), Scalar::Int64(20), Scalar::Int64(300)],
+            )
+            .unwrap(),
+            Series::from_values(
+                "floats",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![
+                    Scalar::Float64(2.0),
+                    Scalar::Float64(2.5),
+                    Scalar::Null(NullKind::NaN),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "labels",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![
+                    Scalar::Utf8("alpha".to_string()),
+                    Scalar::Utf8("b".to_string()),
+                    Scalar::Utf8("gamma".to_string()),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "flags",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![
+                    Scalar::Bool(true),
+                    Scalar::Bool(false),
+                    Scalar::Bool(true),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+        let output = df.to_markdown(true, None).expect("to_markdown");
+        assert_text_golden("dataframe_to_markdown_mixed.txt", &output);
+    }
+
+    #[test]
     fn dataframe_display() {
         let df = DataFrame::from_series(vec![
             Series::from_values(

@@ -1,0 +1,5 @@
+|     | ints | floats | labels | flags |
+| --- | ---- | ------ | ------ | ----- |
+| 0   | 1    | 2.0    | alpha  | True  |
+| 1   | 20   | 2.5    | b      | False |
+| 2   | 300  | NaN    | gamma  | True  |
