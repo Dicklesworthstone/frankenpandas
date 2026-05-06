@@ -13222,19 +13222,31 @@ impl StringAccessor<'_> {
         self.split_df_n(pat, None)
     }
 
+    fn checked_split_part_limit(n: Option<usize>, op: &str) -> Result<Option<usize>, FrameError> {
+        n.map(|limit| {
+            limit.checked_add(1).ok_or_else(|| {
+                FrameError::CompatibilityRejected(format!(
+                    "{op}: n is too large to compute split part count"
+                ))
+            })
+        })
+        .transpose()
+    }
+
     /// Split each string with a maximum number of splits, returning a DataFrame.
     ///
     /// Matches `pd.Series.str.split(pat, n=..., expand=True)`. `n=None`
     /// means split on every occurrence (default behavior); `n=Some(k)`
     /// caps the result at `k + 1` parts by doing at most `k` splits.
     pub fn split_df_n(&self, pat: &str, n: Option<usize>) -> Result<DataFrame, FrameError> {
+        let split_limit = Self::checked_split_part_limit(n, "str.split")?;
         let mut row_parts = Vec::new();
         let mut max_parts = 0;
         for val in self.series.column().values() {
             match val {
                 Scalar::Utf8(s) => {
-                    let parts: Vec<Scalar> = if let Some(limit) = n {
-                        s.splitn(limit + 1, pat)
+                    let parts: Vec<Scalar> = if let Some(limit) = split_limit {
+                        s.splitn(limit, pat)
                             .map(|p| Scalar::Utf8(p.to_string()))
                             .collect()
                     } else {
@@ -13277,13 +13289,14 @@ impl StringAccessor<'_> {
     ///
     /// Matches `pd.Series.str.rsplit(pat, expand=True)`.
     pub fn rsplit_df(&self, pat: &str, n: Option<usize>) -> Result<DataFrame, FrameError> {
+        let split_limit = Self::checked_split_part_limit(n, "str.rsplit")?;
         let mut row_parts = Vec::new();
         let mut max_parts = 0;
         for val in self.series.column().values() {
             match val {
                 Scalar::Utf8(s) => {
-                    let parts: Vec<Scalar> = if let Some(limit) = n {
-                        s.rsplitn(limit + 1, pat)
+                    let parts: Vec<Scalar> = if let Some(limit) = split_limit {
+                        s.rsplitn(limit, pat)
                             .map(|p| Scalar::Utf8(p.to_string()))
                             .collect()
                     } else {
@@ -76992,6 +77005,68 @@ mod test_str_find_char_position_02ae2b {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod test_str_split_limit_vu574 {
+    use super::*;
+
+    fn make_str_series(vals: &[&str]) -> Series {
+        let labels: Vec<IndexLabel> = (0..vals.len())
+            .map(|i| IndexLabel::Int64(i as i64))
+            .collect();
+        let scalars: Vec<Scalar> = vals
+            .iter()
+            .map(|s| Scalar::Utf8((*s).to_string()))
+            .collect();
+        Series::from_values("x", labels, scalars).unwrap()
+    }
+
+    #[test]
+    fn split_df_n_rejects_usize_max_limit_without_panic() {
+        let s = make_str_series(&["a-b-c"]);
+        let err = s
+            .str()
+            .split_df_n("-", Some(usize::MAX))
+            .expect_err("usize::MAX split limit must fail closed");
+        match err {
+            FrameError::CompatibilityRejected(msg) => {
+                assert!(msg.contains("str.split: n is too large"), "msg: {msg}");
+            }
+            other => panic!("expected CompatibilityRejected, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rsplit_df_rejects_usize_max_limit_without_panic() {
+        let s = make_str_series(&["a-b-c"]);
+        let err = s
+            .str()
+            .rsplit_df("-", Some(usize::MAX))
+            .expect_err("usize::MAX rsplit limit must fail closed");
+        match err {
+            FrameError::CompatibilityRejected(msg) => {
+                assert!(msg.contains("str.rsplit: n is too large"), "msg: {msg}");
+            }
+            other => panic!("expected CompatibilityRejected, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn split_df_n_preserves_bounded_limit_semantics() {
+        let s = make_str_series(&["a-b-c"]);
+        let out = s.str().split_df_n("-", Some(1)).unwrap();
+        let names: Vec<&str> = out.column_names().iter().map(|s| s.as_str()).collect();
+        assert_eq!(names, vec!["0", "1"]);
+        assert_eq!(
+            out.column("0").unwrap().values()[0],
+            Scalar::Utf8("a".into())
+        );
+        assert_eq!(
+            out.column("1").unwrap().values()[0],
+            Scalar::Utf8("b-c".into())
+        );
     }
 }
 
