@@ -4408,7 +4408,9 @@ impl Series {
             return Ok(Scalar::Float64(f64::NAN));
         }
         nums.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        Ok(Scalar::Float64(percentile_with_interpolation(&nums, q, mode)))
+        Ok(Scalar::Float64(percentile_with_interpolation(
+            &nums, q, mode,
+        )))
     }
 
     fn percentile_linear_series(sorted: &[f64], q: f64) -> f64 {
@@ -6294,11 +6296,8 @@ impl Series {
         sort: bool,
         use_na_sentinel: bool,
     ) -> Result<(Self, Self), FrameError> {
-        let (code_col, unique_col) = self
-            .column
-            .factorize_with_options(sort, use_na_sentinel)?;
-        let code_labels: Vec<IndexLabel> =
-            (0..code_col.len()).map(|i| (i as i64).into()).collect();
+        let (code_col, unique_col) = self.column.factorize_with_options(sort, use_na_sentinel)?;
+        let code_labels: Vec<IndexLabel> = (0..code_col.len()).map(|i| (i as i64).into()).collect();
         let unique_labels: Vec<IndexLabel> =
             (0..unique_col.len()).map(|i| (i as i64).into()).collect();
         let code_series =
@@ -50205,11 +50204,7 @@ mod tests {
             Series::from_values(
                 "secret",
                 vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-                vec![
-                    Scalar::Int64(100),
-                    Scalar::Int64(200),
-                    Scalar::Int64(300),
-                ],
+                vec![Scalar::Int64(100), Scalar::Int64(200), Scalar::Int64(300)],
             )
             .unwrap(),
         ])
@@ -50263,11 +50258,7 @@ mod tests {
             Series::from_values(
                 "flags",
                 vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-                vec![
-                    Scalar::Bool(true),
-                    Scalar::Bool(false),
-                    Scalar::Bool(true),
-                ],
+                vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)],
             )
             .unwrap(),
         ])
@@ -73037,10 +73028,7 @@ mod tests {
         ])
         .unwrap();
 
-        assert_text_golden(
-            "dataframe_info_two_row_one_float_column.txt",
-            &df.info(),
-        );
+        assert_text_golden("dataframe_info_two_row_one_float_column.txt", &df.info());
     }
 
     #[test]
@@ -77657,9 +77645,13 @@ mod test_factorize_with_options_ca5bc2 {
     use super::*;
 
     fn series_str(name: &str, vals: &[&str]) -> Series {
-        let labels: Vec<IndexLabel> =
-            (0..vals.len()).map(|i| IndexLabel::Int64(i as i64)).collect();
-        let scalars: Vec<Scalar> = vals.iter().map(|s| Scalar::Utf8((*s).to_string())).collect();
+        let labels: Vec<IndexLabel> = (0..vals.len())
+            .map(|i| IndexLabel::Int64(i as i64))
+            .collect();
+        let scalars: Vec<Scalar> = vals
+            .iter()
+            .map(|s| Scalar::Utf8((*s).to_string()))
+            .collect();
         Series::from_values(name, labels, scalars).unwrap()
     }
 
@@ -77806,7 +77798,10 @@ mod test_td_dtype_gate_46658d {
     fn assert_compat_err(r: Result<Series, FrameError>, fragment: &str) {
         match r {
             Err(FrameError::CompatibilityRejected(m)) => {
-                assert!(m.contains(fragment), "expected fragment {fragment:?} in {m}");
+                assert!(
+                    m.contains(fragment),
+                    "expected fragment {fragment:?} in {m}"
+                );
             }
             Err(other) => panic!("expected CompatibilityRejected, got {other:?}"),
             Ok(_) => panic!("expected error, got Ok"),
@@ -77934,14 +77929,18 @@ mod test_between_inclusive_mode_fd57ef {
     fn between_both_inclusive() {
         // [1,2,3,4,5] between 2 and 4 inclusive both -> [F, T, T, T, F]
         let s = s_int("x", &[1, 2, 3, 4, 5]);
-        let out = s.between(&Scalar::Int64(2), &Scalar::Int64(4), "both").unwrap();
+        let out = s
+            .between(&Scalar::Int64(2), &Scalar::Int64(4), "both")
+            .unwrap();
         assert_eq!(bools(&out), vec![false, true, true, true, false]);
     }
 
     #[test]
     fn between_neither_inclusive() {
         let s = s_int("x", &[1, 2, 3, 4, 5]);
-        let out = s.between(&Scalar::Int64(2), &Scalar::Int64(4), "neither").unwrap();
+        let out = s
+            .between(&Scalar::Int64(2), &Scalar::Int64(4), "neither")
+            .unwrap();
         assert_eq!(bools(&out), vec![false, false, true, false, false]);
     }
 
@@ -77949,7 +77948,9 @@ mod test_between_inclusive_mode_fd57ef {
     fn between_left_inclusive() {
         // [1..=5] between 2..4 left-inclusive -> [F, T, T, F, F]
         let s = s_int("x", &[1, 2, 3, 4, 5]);
-        let out = s.between(&Scalar::Int64(2), &Scalar::Int64(4), "left").unwrap();
+        let out = s
+            .between(&Scalar::Int64(2), &Scalar::Int64(4), "left")
+            .unwrap();
         assert_eq!(bools(&out), vec![false, true, true, false, false]);
     }
 
@@ -77957,7 +77958,9 @@ mod test_between_inclusive_mode_fd57ef {
     fn between_right_inclusive() {
         // [1..=5] between 2..4 right-inclusive -> [F, F, T, T, F]
         let s = s_int("x", &[1, 2, 3, 4, 5]);
-        let out = s.between(&Scalar::Int64(2), &Scalar::Int64(4), "right").unwrap();
+        let out = s
+            .between(&Scalar::Int64(2), &Scalar::Int64(4), "right")
+            .unwrap();
         assert_eq!(bools(&out), vec![false, false, true, true, false]);
     }
 
@@ -77988,7 +77991,9 @@ mod test_between_inclusive_mode_fd57ef {
             ],
         )
         .unwrap();
-        let out = s.between(&Scalar::Int64(0), &Scalar::Int64(5), "both").unwrap();
+        let out = s
+            .between(&Scalar::Int64(0), &Scalar::Int64(5), "both")
+            .unwrap();
         assert_eq!(bools(&out), vec![true, false, true]);
     }
 }
@@ -77998,9 +78003,7 @@ mod test_quantile_interpolation_a56003 {
     use super::*;
 
     fn s(vs: &[f64]) -> Series {
-        let labels: Vec<IndexLabel> = (0..vs.len())
-            .map(|i| IndexLabel::Int64(i as i64))
-            .collect();
+        let labels: Vec<IndexLabel> = (0..vs.len()).map(|i| IndexLabel::Int64(i as i64)).collect();
         let vals: Vec<Scalar> = vs.iter().map(|&v| Scalar::Float64(v)).collect();
         Series::from_values("x", labels, vals).unwrap()
     }
@@ -78067,7 +78070,11 @@ mod test_quantile_interpolation_a56003 {
     fn quantile_midpoint_q025_on_4_elements() {
         // pos=0.75, lower=0(1), upper=1(2), midpoint = 1.5 (regardless of frac).
         let series = s(&[1.0, 2.0, 3.0, 4.0]);
-        let result = unwrap_f(&series.quantile_with_interpolation(0.25, "midpoint").unwrap());
+        let result = unwrap_f(
+            &series
+                .quantile_with_interpolation(0.25, "midpoint")
+                .unwrap(),
+        );
         assert!((result - 1.5).abs() < 1e-9, "got {result}");
     }
 
@@ -78193,27 +78200,34 @@ mod test_format_pandas_csv_float_41edff {
 
     #[test]
     fn dataframe_to_csv_emits_dot_zero_for_whole_floats() {
-        let df = DataFrame::from_series(vec![Series::from_values(
-            "amount",
-            vec![0_i64.into(), 1_i64.into()],
-            vec![Scalar::Float64(2.5), Scalar::Float64(3.0)],
-        )
-        .unwrap()])
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "amount",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![Scalar::Float64(2.5), Scalar::Float64(3.0)],
+            )
+            .unwrap(),
+        ])
         .unwrap();
         let out = df.to_csv(',', false);
         assert!(out.contains("2.5"), "expected 2.5 in {out}");
         assert!(out.contains("3.0"), "expected 3.0 in {out}");
-        assert!(!out.contains(",3\n") && !out.contains("\n3\n"), "unexpected bare 3 in {out}");
+        assert!(
+            !out.contains(",3\n") && !out.contains("\n3\n"),
+            "unexpected bare 3 in {out}"
+        );
     }
 
     #[test]
     fn dataframe_to_csv_options_emits_dot_zero_for_whole_floats() {
-        let df = DataFrame::from_series(vec![Series::from_values(
-            "amount",
-            vec![0_i64.into(), 1_i64.into()],
-            vec![Scalar::Float64(2.5), Scalar::Float64(3.0)],
-        )
-        .unwrap()])
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "amount",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![Scalar::Float64(2.5), Scalar::Float64(3.0)],
+            )
+            .unwrap(),
+        ])
         .unwrap();
         let out = df.to_csv_options(',', false, "NA", None).unwrap();
         assert!(out.contains("2.5"));
@@ -78390,16 +78404,16 @@ mod test_mode_values_b5e850 {
         // dropna=false: NaN counted, count=2 wins over 1's count=1.
         let modes = mode_values(&vals, false);
         assert_eq!(modes.len(), 1);
-        assert!(modes[0].is_missing(), "expected missing, got {:?}", modes[0]);
+        assert!(
+            modes[0].is_missing(),
+            "expected missing, got {:?}",
+            modes[0]
+        );
     }
 
     #[test]
     fn mode_returns_all_values_with_max_count() {
-        let vals = vec![
-            Scalar::Int64(1),
-            Scalar::Int64(2),
-            Scalar::Int64(3),
-        ];
+        let vals = vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)];
         // All have count 1; all 3 are modes.
         let modes = mode_values(&vals, true);
         assert_eq!(modes.len(), 3);
@@ -78430,11 +78444,7 @@ mod test_mode_values_b5e850 {
     #[test]
     fn mode_preserves_first_seen_representative() {
         // Float64(2.0) appears before Int64(2); should be the chosen rep.
-        let vals = vec![
-            Scalar::Float64(2.0),
-            Scalar::Int64(2),
-            Scalar::Bool(true),
-        ];
+        let vals = vec![Scalar::Float64(2.0), Scalar::Int64(2), Scalar::Bool(true)];
         let modes = mode_values(&vals, true);
         // Bool(true) has count 1, Int64(2)+Float64(2.0) collapse to count 2.
         // Representative is the first-seen scalar from that class.
@@ -78452,8 +78462,7 @@ mod test_cov_with_options_9ac700 {
     use super::*;
 
     fn fs(name: &str, vs: &[f64]) -> Series {
-        let labels: Vec<IndexLabel> =
-            (0..vs.len()).map(|i| IndexLabel::Int64(i as i64)).collect();
+        let labels: Vec<IndexLabel> = (0..vs.len()).map(|i| IndexLabel::Int64(i as i64)).collect();
         let vals: Vec<Scalar> = vs.iter().map(|&v| Scalar::Float64(v)).collect();
         Series::from_values(name, labels, vals).unwrap()
     }

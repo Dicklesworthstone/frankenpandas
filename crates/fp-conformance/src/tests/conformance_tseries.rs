@@ -174,7 +174,9 @@ print(json.dumps({
     stdin_writer
         .join()
         .map_err(|_| format!("pandas {pandas_function_for_err} oracle stdin writer panicked"))?
-        .map_err(|err| format!("write pandas {pandas_function_for_err} oracle payload failed: {err}"))?;
+        .map_err(|err| {
+            format!("write pandas {pandas_function_for_err} oracle payload failed: {err}")
+        })?;
     if !output.status.success() {
         return Err(format!(
             "pandas {pandas_function} oracle failed for {case_id}: {}",

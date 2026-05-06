@@ -10075,7 +10075,7 @@ proptest! {
 
         let series = single_str_series(&haystack);
         let result = series.str().find(&sub).expect("find ok");
-        let pos = match result.values().get(0).expect("len 1") {
+        let pos = match result.values().first().expect("len 1") {
             Scalar::Int64(v) => *v,
             other => panic!("expected Int64, got {:?}", other),
         };
@@ -10120,7 +10120,7 @@ proptest! {
 
         let series = single_str_series(&haystack);
         let result = series.str().rfind(&sub).expect("rfind ok");
-        let pos = match result.values().get(0).expect("len 1") {
+        let pos = match result.values().first().expect("len 1") {
             Scalar::Int64(v) => *v,
             other => panic!("expected Int64, got {:?}", other),
         };
@@ -10143,14 +10143,13 @@ proptest! {
         let sub = "\u{E000}\u{E001}";
         let series = single_str_series(&haystack);
         let result = series.str().find(sub).expect("find ok");
-        let pos = match result.values().get(0).expect("len 1") {
+        let pos = match result.values().first().expect("len 1") {
             Scalar::Int64(v) => *v,
             other => panic!("expected Int64, got {:?}", other),
         };
         prop_assert_eq!(pos, -1);
     }
 }
-
 
 // ---------------------------------------------------------------------------
 // Property: Series::shift inner-overlap preservation
