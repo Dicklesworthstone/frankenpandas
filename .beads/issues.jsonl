@@ -1628,3 +1628,5 @@
 {"id":"br-frankenpandas-129bc1","title":"[testing-fuzzing] No proptest for Series::cov_with_options symmetry + self-cov invariants","status":"open","priority":1,"issue_type":"task","created_at":"2026-05-06T04:00:00Z"}
 {"id":"br-frankenpandas-129bc1","status":"closed","closed_at":"2026-05-06T04:05:00Z"}
 {"id":"br-frankenpandas-84e338","title":"[modes-of-reasoning] cumprod proptest flaky on Int64 wrap vs Float64 precision","status":"open","priority":1,"issue_type":"bug","created_at":"2026-05-06T04:10:00Z"}
+{"id":"br-frankenpandas-84e338","status":"closed","closed_at":"2026-05-06T04:15:00Z"}
+{"id":"br-frankenpandas-bc6fa4","title":"[deadlock-finder] recover_once unbounded loop under buggy RecoveryPolicy","status":"open","priority":1,"issue_type":"bug","created_at":"2026-05-06T04:20:00Z"}

@@ -85,14 +85,21 @@ where
         ));
     }
 
+    // Per br-frankenpandas-bc6fa4: enforce a hard ceiling at max_attempts even
+    // if a buggy RecoveryPolicy returns should_retry=true past the limit.
+    // saturating_add prevents u32 overflow panics in debug; the explicit
+    // attempts >= max_attempts gate makes the contract independent of the
+    // policy implementation.
     let mut attempts = 0_u32;
+    let should_retry =
+        |attempt: u32| attempt < plan.max_attempts && policy.should_retry(attempt, plan.max_attempts);
     loop {
-        attempts += 1;
+        attempts = attempts.saturating_add(1);
 
         let encoded = match transport.receive(&plan.artifact_id, config) {
             Ok(encoded) => encoded,
             Err(_) => {
-                if policy.should_retry(attempts, plan.max_attempts) {
+                if should_retry(attempts) {
                     continue;
                 }
                 return Err(AsupersyncError::RecoveryExhausted {
@@ -105,7 +112,7 @@ where
         let payload = match codec.decode(&encoded, config) {
             Ok(p) => p,
             Err(_) => {
-                if policy.should_retry(attempts, plan.max_attempts) {
+                if should_retry(attempts) {
                     continue;
                 }
                 return Err(AsupersyncError::RecoveryExhausted {
@@ -125,7 +132,7 @@ where
                 });
             }
             Err(_) => {
-                if policy.should_retry(attempts, plan.max_attempts) {
+                if should_retry(attempts) {
                     continue;
                 }
                 return Err(AsupersyncError::RecoveryExhausted {
@@ -134,5 +141,146 @@ where
                 });
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod test_recover_once_bounded_loop_bc6fa4 {
+    use super::*;
+    use crate::asupersync::{
+        codec::{ArtifactPayload, EncodedArtifact},
+        config::{AsupersyncConfig, CapabilitySet, CxCapability},
+        integrity::IntegrityProof,
+    };
+
+    /// A buggy policy that always says "retry" — without the hard ceiling fix
+    /// in br-bc6fa4, recover_once would loop forever and eventually overflow
+    /// attempts: u32 in release builds (or panic in debug).
+    struct AlwaysRetryPolicy;
+
+    impl RecoveryPolicy for AlwaysRetryPolicy {
+        fn should_retry(&self, _attempt: u32, _max_attempts: u32) -> bool {
+            true
+        }
+    }
+
+    /// A transport that always fails so the policy gets a chance to keep retrying.
+    struct AlwaysFailingTransport;
+
+    impl TransportLayer for AlwaysFailingTransport {
+        fn send(
+            &self,
+            _artifact: EncodedArtifact,
+            _config: &AsupersyncConfig,
+        ) -> Result<crate::asupersync::transport::TransferReport, AsupersyncError> {
+            Err(AsupersyncError::Transport(
+                "always-failing send".to_string(),
+            ))
+        }
+        fn receive(
+            &self,
+            _artifact_id: &str,
+            _config: &AsupersyncConfig,
+        ) -> Result<EncodedArtifact, AsupersyncError> {
+            Err(AsupersyncError::Transport(
+                "always-failing receive".to_string(),
+            ))
+        }
+        fn required_capabilities(&self) -> CapabilitySet {
+            CapabilitySet::for_capability(CxCapability::Io)
+        }
+    }
+
+    /// Stub codec — never invoked because transport.receive always fails first,
+    /// but the trait must be satisfied for the recover_once signature.
+    struct StubCodec;
+
+    impl ArtifactCodec for StubCodec {
+        fn encode(
+            &self,
+            _payload: &ArtifactPayload,
+            _config: &AsupersyncConfig,
+        ) -> Result<EncodedArtifact, AsupersyncError> {
+            Err(AsupersyncError::Codec("not implemented".to_string()))
+        }
+        fn decode(
+            &self,
+            _encoded: &EncodedArtifact,
+            _config: &AsupersyncConfig,
+        ) -> Result<ArtifactPayload, AsupersyncError> {
+            Err(AsupersyncError::Codec("not implemented".to_string()))
+        }
+    }
+
+    struct StubVerifier;
+
+    impl IntegrityVerifier for StubVerifier {
+        fn verify(
+            &self,
+            _artifact_id: &str,
+            _bytes: &[u8],
+            _expected_digest: &str,
+        ) -> Result<IntegrityProof, AsupersyncError> {
+            Err(AsupersyncError::IntegrityMismatch {
+                artifact_id: "stub".to_string(),
+                expected: "x".to_string(),
+                observed: "y".to_string(),
+            })
+        }
+    }
+
+    #[test]
+    fn recover_once_terminates_at_max_attempts_under_buggy_policy() {
+        // Without the hard ceiling fix, this test would never return.
+        let plan = RecoveryPlan {
+            artifact_id: "test-artifact".to_string(),
+            max_attempts: 5,
+            deadline_unix_ms: 0,
+        };
+        let config = AsupersyncConfig::default()
+            .with_capabilities(CapabilitySet::for_capability(CxCapability::Io));
+        let result = recover_once(
+            &StubCodec,
+            &AlwaysFailingTransport,
+            &StubVerifier,
+            &AlwaysRetryPolicy,
+            &config,
+            &plan,
+            "any-digest",
+        );
+        match result {
+            Err(AsupersyncError::RecoveryExhausted {
+                artifact_id,
+                attempts,
+            }) => {
+                assert_eq!(artifact_id, "test-artifact");
+                assert_eq!(
+                    attempts, 5,
+                    "loop should terminate exactly at max_attempts even when policy always returns true"
+                );
+            }
+            other => panic!("expected RecoveryExhausted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn recover_once_zero_max_attempts_returns_configuration_error() {
+        let plan = RecoveryPlan {
+            artifact_id: "test".to_string(),
+            max_attempts: 0,
+            deadline_unix_ms: 0,
+        };
+        let config = AsupersyncConfig::default()
+            .with_capabilities(CapabilitySet::for_capability(CxCapability::Io));
+        let result = recover_once(
+            &StubCodec,
+            &AlwaysFailingTransport,
+            &StubVerifier,
+            &AlwaysRetryPolicy,
+            &config,
+            &plan,
+            "x",
+        );
+        assert!(matches!(result, Err(AsupersyncError::Configuration(_))));
     }
 }
