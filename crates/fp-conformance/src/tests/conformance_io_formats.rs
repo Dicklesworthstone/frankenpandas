@@ -174,18 +174,23 @@ sys.stdout.write(df.to_html(index=request["include_index"]))
         .spawn()
         .map_err(|err| format!("spawn pandas to_html oracle failed: {err}"))?;
 
-    let mut stdin = child
+    // Per br-frankenpandas-50b6b0: drain stdin in a worker thread.
+    let stdin_handle = child
         .stdin
         .take()
         .ok_or_else(|| "pandas to_html oracle stdin unavailable".to_owned())?;
-    stdin
-        .write_all(payload.to_string().as_bytes())
-        .map_err(|err| format!("write pandas to_html oracle payload failed: {err}"))?;
-    drop(stdin);
-
+    let payload_bytes = payload.to_string().into_bytes();
+    let stdin_writer = std::thread::spawn(move || -> std::io::Result<()> {
+        let mut stdin = stdin_handle;
+        stdin.write_all(&payload_bytes)
+    });
     let output = child
         .wait_with_output()
         .map_err(|err| format!("wait for pandas to_html oracle failed: {err}"))?;
+    stdin_writer
+        .join()
+        .map_err(|_| "pandas to_html oracle stdin writer panicked".to_owned())?
+        .map_err(|err| format!("write pandas to_html oracle payload failed: {err}"))?;
     if !output.status.success() {
         return Err(format!(
             "pandas to_html oracle failed for {}: {}",

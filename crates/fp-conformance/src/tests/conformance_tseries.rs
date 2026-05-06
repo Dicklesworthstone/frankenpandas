@@ -157,18 +157,24 @@ print(json.dumps({
         .spawn()
         .map_err(|err| format!("spawn pandas {pandas_function} oracle failed: {err}"))?;
 
-    let mut stdin = child
+    // Per br-frankenpandas-50b6b0: drain stdin in a worker thread.
+    let stdin_handle = child
         .stdin
         .take()
         .ok_or_else(|| format!("pandas {pandas_function} oracle stdin unavailable"))?;
-    stdin
-        .write_all(payload.to_string().as_bytes())
-        .map_err(|err| format!("write pandas {pandas_function} oracle payload failed: {err}"))?;
-    drop(stdin);
-
+    let payload_bytes = payload.to_string().into_bytes();
+    let stdin_writer = std::thread::spawn(move || -> std::io::Result<()> {
+        let mut stdin = stdin_handle;
+        stdin.write_all(&payload_bytes)
+    });
     let output = child
         .wait_with_output()
         .map_err(|err| format!("wait for pandas {pandas_function} oracle failed: {err}"))?;
+    let pandas_function_for_err = pandas_function.to_string();
+    stdin_writer
+        .join()
+        .map_err(|_| format!("pandas {pandas_function_for_err} oracle stdin writer panicked"))?
+        .map_err(|err| format!("write pandas {pandas_function_for_err} oracle payload failed: {err}"))?;
     if !output.status.success() {
         return Err(format!(
             "pandas {pandas_function} oracle failed for {case_id}: {}",
@@ -288,18 +294,23 @@ print(json.dumps({"value": int(result.value)}, separators=(",", ":")))
         .spawn()
         .map_err(|err| format!("spawn pandas offset oracle failed: {err}"))?;
 
-    let mut stdin = child
+    // Per br-frankenpandas-50b6b0: drain stdin in a worker thread.
+    let stdin_handle = child
         .stdin
         .take()
         .ok_or_else(|| "pandas offset oracle stdin unavailable".to_owned())?;
-    stdin
-        .write_all(payload.to_string().as_bytes())
-        .map_err(|err| format!("write pandas offset oracle payload failed: {err}"))?;
-    drop(stdin);
-
+    let payload_bytes = payload.to_string().into_bytes();
+    let stdin_writer = std::thread::spawn(move || -> std::io::Result<()> {
+        let mut stdin = stdin_handle;
+        stdin.write_all(&payload_bytes)
+    });
     let output = child
         .wait_with_output()
         .map_err(|err| format!("wait for pandas offset oracle failed: {err}"))?;
+    stdin_writer
+        .join()
+        .map_err(|_| "pandas offset oracle stdin writer panicked".to_owned())?
+        .map_err(|err| format!("write pandas offset oracle payload failed: {err}"))?;
     if !output.status.success() {
         return Err(format!(
             "pandas offset oracle failed for {}: {}",
@@ -379,18 +390,23 @@ except Exception as exc:
         .spawn()
         .map_err(|err| format!("spawn pandas infer_freq oracle failed: {err}"))?;
 
-    let mut stdin = child
+    // Per br-frankenpandas-50b6b0: drain stdin in a worker thread.
+    let stdin_handle = child
         .stdin
         .take()
         .ok_or_else(|| "pandas infer_freq oracle stdin unavailable".to_owned())?;
-    stdin
-        .write_all(payload.to_string().as_bytes())
-        .map_err(|err| format!("write pandas infer_freq oracle payload failed: {err}"))?;
-    drop(stdin);
-
+    let payload_bytes = payload.to_string().into_bytes();
+    let stdin_writer = std::thread::spawn(move || -> std::io::Result<()> {
+        let mut stdin = stdin_handle;
+        stdin.write_all(&payload_bytes)
+    });
     let output = child
         .wait_with_output()
         .map_err(|err| format!("wait for pandas infer_freq oracle failed: {err}"))?;
+    stdin_writer
+        .join()
+        .map_err(|_| "pandas infer_freq oracle stdin writer panicked".to_owned())?
+        .map_err(|err| format!("write pandas infer_freq oracle payload failed: {err}"))?;
     if !output.status.success() {
         return Err(format!(
             "pandas infer_freq oracle failed for {}: {}",

@@ -184,18 +184,26 @@ sys.stdout.write(json.dumps({
         .spawn()
         .map_err(|err| format!("spawn pandas JSONL oracle failed: {err}"))?;
 
-    let mut stdin = child
+    // Per br-frankenpandas-50b6b0: drain stdin in a worker thread so
+    // wait_with_output can drain stdout/stderr concurrently. Synchronous
+    // pre-wait write deadlocks if the payload exceeds the OS stdin pipe
+    // buffer AND the child emits enough stdout to fill its own buffer.
+    let stdin_handle = child
         .stdin
         .take()
         .ok_or_else(|| "pandas JSONL oracle stdin unavailable".to_owned())?;
-    stdin
-        .write_all(case.input.as_bytes())
-        .map_err(|err| format!("write pandas JSONL oracle payload failed: {err}"))?;
-    drop(stdin);
-
+    let payload: Vec<u8> = case.input.as_bytes().to_vec();
+    let stdin_writer = std::thread::spawn(move || -> std::io::Result<()> {
+        let mut stdin = stdin_handle;
+        stdin.write_all(&payload)
+    });
     let output = child
         .wait_with_output()
         .map_err(|err| format!("wait for pandas JSONL oracle failed: {err}"))?;
+    stdin_writer
+        .join()
+        .map_err(|_| "pandas JSONL oracle stdin writer panicked".to_owned())?
+        .map_err(|err| format!("write pandas JSONL oracle payload failed: {err}"))?;
     if !output.status.success() {
         return Err(format!(
             "pandas JSONL oracle failed for {}: {}",
