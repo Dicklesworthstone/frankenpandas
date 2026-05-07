@@ -1638,3 +1638,9 @@
 {"id":"br-frankenpandas-76e1fd","title":"[profiling] select_columns O(|names|*|column_order|) position scan","status":"open","priority":1,"issue_type":"task","created_at":"2026-05-06T04:50:00Z"}
 {"id":"br-frankenpandas-76e1fd","status":"closed","closed_at":"2026-05-06T04:55:00Z"}
 {"id":"br-frankenpandas-9f9e78","title":"[testing-conformance-harnesses] 5 more str-op oracle handlers missing","status":"open","priority":1,"issue_type":"task","created_at":"2026-05-06T05:00:00Z"}
+{"id":"br-frankenpandas-9f9e78","status":"closed","closed_at":"2026-05-06T05:05:00Z"}
+{"id":"frankenpandas-ygy8m","status":"in_progress","updated_at":"2026-05-06T05:10:00Z"}
+{"id":"frankenpandas-ygy8m","status":"closed","closed_at":"2026-05-06T05:15:00Z","note":"Already shipped in ad56d0d (5dccff6 close commit). DB drift surfaced this as open; verified test passes (read_sql_chunks_with_options_rejects_options_index_col)."}
+{"id":"frankenpandas-5ps2h","status":"in_progress","updated_at":"2026-05-06T05:18:00Z"}
+{"id":"frankenpandas-5ps2h","status":"closed","closed_at":"2026-05-06T05:25:00Z","note":"Already shipped in 49bfd24 (validate_sql_table_ref_identifier_lengths now called from all 6 builders). DB drift surfaced this as open."}
+{"id":"frankenpandas-ex8ec","status":"in_progress","updated_at":"2026-05-06T05:30:00Z"}
