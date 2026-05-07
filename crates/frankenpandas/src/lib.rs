@@ -1101,4 +1101,15 @@ mod tests {
         let _ = read_csv_with_index_cols;
         let _ = read_csv_with_index_cols_path;
     }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn sql_backend_caps_root_reexports_compile_guard_19gxp() {
+        let _is_backend_caps: fn(crate::SqlBackendCaps) -> _ = |x| x;
+        let _ = crate::sql_backend_caps::<rusqlite::Connection>;
+        let _ = crate::sql_max_param_count::<rusqlite::Connection>;
+        let _ = crate::sql_max_insert_rows::<rusqlite::Connection>;
+        let _ = crate::sql_supports_returning::<rusqlite::Connection>;
+        let _ = crate::sql_supports_schemas::<rusqlite::Connection>;
+    }
 }
