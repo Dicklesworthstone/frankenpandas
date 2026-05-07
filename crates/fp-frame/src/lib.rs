@@ -72325,6 +72325,85 @@ mod tests {
     }
 
     #[test]
+    fn series_az1pt_alias_surface_smoke() {
+        let (left, right) = az1pt_pair();
+
+        assert_eq!(
+            left.subtract(&right).unwrap().values(),
+            left.sub(&right).unwrap().values()
+        );
+        assert_eq!(
+            left.multiply(&right).unwrap().values(),
+            left.mul(&right).unwrap().values()
+        );
+        assert_eq!(
+            left.divide(&right).unwrap().values(),
+            left.div(&right).unwrap().values()
+        );
+        assert_eq!(
+            left.truediv(&right).unwrap().values(),
+            left.div(&right).unwrap().values()
+        );
+        assert_eq!(
+            left.r#mod(&right).unwrap().values(),
+            left.modulo(&right).unwrap().values()
+        );
+        assert_eq!(left.product().unwrap(), left.prod().unwrap());
+        assert_eq!(
+            left.radd(&right).unwrap().values(),
+            right.add(&left).unwrap().values()
+        );
+        assert_eq!(
+            left.rsub(&right).unwrap().values(),
+            right.sub(&left).unwrap().values()
+        );
+        assert_eq!(
+            left.rmul(&right).unwrap().values(),
+            right.mul(&left).unwrap().values()
+        );
+        assert_eq!(
+            left.rdiv(&right).unwrap().values(),
+            right.div(&left).unwrap().values()
+        );
+        assert_eq!(
+            left.rtruediv(&right).unwrap().values(),
+            right.div(&left).unwrap().values()
+        );
+        assert_eq!(
+            left.rfloordiv(&right).unwrap().values(),
+            right.floordiv(&left).unwrap().values()
+        );
+        assert_eq!(
+            left.rmod(&right).unwrap().values(),
+            right.modulo(&left).unwrap().values()
+        );
+        let pow_left = Series::from_values(
+            "pow_left",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(2), Scalar::Int64(3)],
+        )
+        .unwrap();
+        let pow_right = Series::from_values(
+            "pow_right",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(3), Scalar::Int64(2)],
+        )
+        .unwrap();
+        assert_eq!(
+            pow_left.rpow(&pow_right).unwrap().values(),
+            pow_right.pow(&pow_left).unwrap().values()
+        );
+        assert_eq!(
+            left.eq(&right).unwrap().values(),
+            left.eq_series(&right).unwrap().values()
+        );
+        assert_eq!(
+            left.ne(&right).unwrap().values(),
+            left.ne_series(&right).unwrap().values()
+        );
+    }
+
+    #[test]
     fn series_subtract_alias_matches_sub() {
         let (l, r) = az1pt_pair();
         assert_eq!(
