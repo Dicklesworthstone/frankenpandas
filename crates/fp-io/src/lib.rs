@@ -21115,4 +21115,26 @@ mod tests {
             .expect_err("mssql must reject NUL");
         assert!(matches!(err_mssql, IoError::Sql(msg) if msg.contains("NUL")));
     }
+
+    #[cfg(feature = "sql-sqlite")]
+    #[test]
+    fn read_sql_empty_typed_table_preserves_column_dtypes_ex8ec() {
+        let conn = make_sql_test_conn();
+        super::SqlConnection::execute_batch(
+            &conn,
+            "CREATE TABLE empty_typed_ex8ec (i INTEGER, t TEXT, r REAL);",
+        )
+        .expect("create");
+        // No INSERTs — empty result set.
+
+        let frame = read_sql(&conn, "SELECT * FROM empty_typed_ex8ec").expect("read empty");
+        assert_eq!(frame.index().len(), 0, "empty table should yield zero rows");
+
+        let i_col = frame.column("i").expect("column i must exist");
+        assert_eq!(i_col.dtype(), crate::DType::Int64);
+        let t_col = frame.column("t").expect("column t must exist");
+        assert_eq!(t_col.dtype(), crate::DType::Utf8);
+        let r_col = frame.column("r").expect("column r must exist");
+        assert_eq!(r_col.dtype(), crate::DType::Float64);
+    }
 }
