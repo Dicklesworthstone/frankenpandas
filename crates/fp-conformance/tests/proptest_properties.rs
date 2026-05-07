@@ -10415,9 +10415,7 @@ proptest! {
 // (br-frankenpandas-129bc1)
 // ---------------------------------------------------------------------------
 
-fn arb_paired_bounded_float_series(
-    max_len: usize,
-) -> impl Strategy<Value = (Series, Series)> {
+fn arb_paired_bounded_float_series(max_len: usize) -> impl Strategy<Value = (Series, Series)> {
     (2usize..=max_len).prop_flat_map(move |len| {
         (
             prop::collection::vec(-1e6_f64..=1e6_f64, len),
@@ -10508,9 +10506,7 @@ proptest! {
 // (br-frankenpandas-66085a — locks in br-frankenpandas-e9aba4 Utf8 fix)
 // ---------------------------------------------------------------------------
 
-fn arb_utf8_series_with_groups(
-    max_len: usize,
-) -> impl Strategy<Value = (Series, Series)> {
+fn arb_utf8_series_with_groups(max_len: usize) -> impl Strategy<Value = (Series, Series)> {
     (3usize..=max_len).prop_flat_map(move |len| {
         (
             prop::collection::vec(

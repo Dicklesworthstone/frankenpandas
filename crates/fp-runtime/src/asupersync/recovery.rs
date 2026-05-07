@@ -91,8 +91,9 @@ where
     // attempts >= max_attempts gate makes the contract independent of the
     // policy implementation.
     let mut attempts = 0_u32;
-    let should_retry =
-        |attempt: u32| attempt < plan.max_attempts && policy.should_retry(attempt, plan.max_attempts);
+    let should_retry = |attempt: u32| {
+        attempt < plan.max_attempts && policy.should_retry(attempt, plan.max_attempts)
+    };
     loop {
         attempts = attempts.saturating_add(1);
 
