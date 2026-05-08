@@ -12213,7 +12213,12 @@ impl SeriesGroupBy<'_> {
             .iter()
             .map(|&idx| self.series.column.values()[idx].clone())
             .collect();
-        Series::from_values(self.series.name(), labels, values)
+        let column = if values.is_empty() {
+            Column::new(self.series.dtype(), values)?
+        } else {
+            Column::from_values(values)?
+        };
+        Series::new(self.series.name().to_owned(), Index::new(labels), column)
     }
 
     fn transform_groups<F>(&self, func: F) -> Result<Series, FrameError>
@@ -12845,6 +12850,111 @@ impl SeriesGroupBy<'_> {
                 })
                 .collect()
         })
+    }
+
+    /// Broadcast a named per-group reduction back to the original Series shape.
+    ///
+    /// Matches `series.groupby(by).transform("mean")` for supported reduction
+    /// names. The output keeps the original index and length.
+    pub fn transform(&self, func: &str) -> Result<Series, FrameError> {
+        let (_order, order_keys, groups) = self.build_groups();
+        let vals = self.series.values();
+        let mut out = vec![Scalar::Null(NullKind::NaN); self.series.len()];
+
+        for key in &order_keys {
+            let positions = &groups[key];
+            let group_vals: Vec<Scalar> = positions.iter().map(|&idx| vals[idx].clone()).collect();
+            let value = match func {
+                "sum" => fp_types::nansum(&group_vals),
+                "mean" => fp_types::nanmean(&group_vals),
+                "count" => fp_types::nancount(&group_vals),
+                "min" => fp_types::nanmin(&group_vals),
+                "max" => fp_types::nanmax(&group_vals),
+                "prod" => fp_types::nanprod(&group_vals),
+                "std" => fp_types::nanstd(&group_vals, 1),
+                "var" => fp_types::nanvar(&group_vals, 1),
+                "median" => fp_types::nanmedian(&group_vals),
+                "size" => Scalar::Int64(group_vals.len() as i64),
+                "nunique" => {
+                    let mut seen = HashSet::new();
+                    for value in &group_vals {
+                        if let Some(key) = scalar_key_skip_missing(value) {
+                            seen.insert(key);
+                        }
+                    }
+                    Scalar::Int64(seen.len() as i64)
+                }
+                "first" => group_vals
+                    .first()
+                    .cloned()
+                    .unwrap_or(Scalar::Null(NullKind::NaN)),
+                "last" => group_vals
+                    .last()
+                    .cloned()
+                    .unwrap_or(Scalar::Null(NullKind::NaN)),
+                "any" => Scalar::Bool(
+                    group_vals
+                        .iter()
+                        .any(|value| !value.is_missing() && Series::scalar_truthy(value)),
+                ),
+                "all" => Scalar::Bool(
+                    group_vals
+                        .iter()
+                        .all(|value| value.is_missing() || Series::scalar_truthy(value)),
+                ),
+                other => {
+                    return Err(FrameError::CompatibilityRejected(format!(
+                        "SeriesGroupBy.transform: unsupported function '{other}'"
+                    )));
+                }
+            };
+
+            for &idx in positions {
+                out[idx] = value.clone();
+            }
+        }
+
+        Series::from_values(self.series.name(), self.series.index.labels().to_vec(), out)
+    }
+
+    /// Keep or discard whole groups with a caller-supplied predicate.
+    ///
+    /// Matches `series.groupby(by).filter(func)`: the predicate sees one
+    /// per-group Series and the returned Series preserves the original row
+    /// order and index labels for groups that pass.
+    pub fn filter<F>(&self, func: F) -> Result<Series, FrameError>
+    where
+        F: Fn(&Series) -> Result<bool, FrameError>,
+    {
+        let (_order, order_keys, groups) = self.build_groups();
+        let mut positions = Vec::new();
+
+        for key in &order_keys {
+            let row_indices = &groups[key];
+            let group_labels: Vec<IndexLabel> = row_indices
+                .iter()
+                .map(|&idx| self.series.index.labels()[idx].clone())
+                .collect();
+            let group_values: Vec<Scalar> = row_indices
+                .iter()
+                .map(|&idx| self.series.column.values()[idx].clone())
+                .collect();
+            let group = Series::from_values(self.series.name(), group_labels, group_values)?;
+            if func(&group)? {
+                positions.extend_from_slice(row_indices);
+            }
+        }
+
+        positions.sort_unstable();
+        self.take_positions(&positions)
+    }
+
+    /// Pipe this grouped Series through a caller-provided function.
+    pub fn pipe<T, F>(&self, func: F) -> Result<T, FrameError>
+    where
+        F: Fn(&Self) -> Result<T, FrameError>,
+    {
+        func(self)
     }
 
     /// Select first `n` rows per group, preserving original row order.
@@ -66122,6 +66232,117 @@ mod tests {
                 Scalar::Float64(3.0),
             ]
         );
+    }
+
+    #[test]
+    fn test_series_groupby_transform_filter_and_pipe_nt65g1() -> Result<(), FrameError> {
+        let values = Series::from_values(
+            "data",
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+                5_i64.into(),
+            ],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(10.0),
+                Scalar::Float64(20.0),
+                Scalar::Float64(40.0),
+            ],
+        )?;
+        let groups = Series::from_values(
+            "grp",
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+                5_i64.into(),
+            ],
+            vec![
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("b".into()),
+            ],
+        )?;
+        let gb = values.groupby(&groups)?;
+
+        assert_eq!(
+            gb.transform("mean")?.column().values(),
+            &[
+                Scalar::Float64(2.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(70.0 / 3.0),
+                Scalar::Float64(70.0 / 3.0),
+                Scalar::Float64(70.0 / 3.0),
+            ]
+        );
+        assert_eq!(
+            gb.transform("size")?.column().values(),
+            &[
+                Scalar::Int64(3),
+                Scalar::Int64(3),
+                Scalar::Int64(3),
+                Scalar::Int64(3),
+                Scalar::Int64(3),
+                Scalar::Int64(3),
+            ]
+        );
+        let unsupported_err = match gb.transform("definitely_not_supported") {
+            Ok(series) => {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "unsupported transform unexpectedly returned {} rows",
+                    series.len()
+                )));
+            }
+            Err(err) => err,
+        };
+        assert!(
+            unsupported_err
+                .to_string()
+                .contains("SeriesGroupBy.transform: unsupported function")
+        );
+
+        let filtered =
+            gb.filter(|group| Ok(matches!(group.mean()?, Scalar::Float64(value) if value > 10.0)))?;
+        assert_eq!(
+            filtered.index().labels(),
+            &[
+                IndexLabel::Int64(3),
+                IndexLabel::Int64(4),
+                IndexLabel::Int64(5),
+            ]
+        );
+        assert_eq!(
+            filtered.column().values(),
+            &[
+                Scalar::Float64(10.0),
+                Scalar::Float64(20.0),
+                Scalar::Float64(40.0),
+            ]
+        );
+
+        let empty = gb.filter(|_| Ok(false))?;
+        assert_eq!(empty.len(), 0);
+        assert_eq!(empty.dtype(), DType::Float64);
+
+        let piped_sum = gb.pipe(|grouped| grouped.sum())?;
+        assert_eq!(
+            piped_sum.column().values(),
+            &[Scalar::Float64(6.0), Scalar::Float64(70.0)]
+        );
+
+        Ok(())
     }
 
     #[test]
