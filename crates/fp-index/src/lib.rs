@@ -4914,41 +4914,33 @@ impl MultiIndex {
         self.clone()
     }
 
-    /// Whether any tuple contains a missing level label.
-    #[must_use]
-    pub fn hasnans(&self) -> bool {
-        self.levels
-            .iter()
-            .any(|level| level.iter().any(IndexLabel::is_missing))
+    fn multi_index_isna_error() -> IndexError {
+        IndexError::InvalidArgument("isna is not defined for MultiIndex".to_owned())
     }
 
-    /// Per-row missing mask. A tuple is missing when any level label is missing.
-    #[must_use]
-    pub fn isna(&self) -> Vec<bool> {
-        (0..self.len())
-            .map(|row| self.levels.iter().any(|level| level[row].is_missing()))
-            .collect()
+    /// Unsupported missing-label check, matching `pd.MultiIndex.hasnans`.
+    pub fn hasnans(&self) -> Result<bool, IndexError> {
+        Err(Self::multi_index_isna_error())
+    }
+
+    /// Unsupported missing-label mask, matching `pd.MultiIndex.isna()`.
+    pub fn isna(&self) -> Result<Vec<bool>, IndexError> {
+        Err(Self::multi_index_isna_error())
     }
 
     /// Alias for `isna`, matching `pd.MultiIndex.isnull`.
-    #[must_use]
-    pub fn isnull(&self) -> Vec<bool> {
-        self.isna()
+    pub fn isnull(&self) -> Result<Vec<bool>, IndexError> {
+        Err(Self::multi_index_isna_error())
     }
 
-    /// Inverse of `isna`, matching `pd.MultiIndex.notna`.
-    #[must_use]
-    pub fn notna(&self) -> Vec<bool> {
-        self.isna()
-            .into_iter()
-            .map(|is_missing| !is_missing)
-            .collect()
+    /// Unsupported inverse missing-label mask, matching `pd.MultiIndex.notna()`.
+    pub fn notna(&self) -> Result<Vec<bool>, IndexError> {
+        Err(Self::multi_index_isna_error())
     }
 
     /// Alias for `notna`, matching `pd.MultiIndex.notnull`.
-    #[must_use]
-    pub fn notnull(&self) -> Vec<bool> {
-        self.notna()
+    pub fn notnull(&self) -> Result<Vec<bool>, IndexError> {
+        Err(Self::multi_index_isna_error())
     }
 
     /// Replace missing labels in every level with one scalar label.
@@ -8943,11 +8935,20 @@ mod tests {
         .unwrap()
         .set_names(vec![Some("letter".into()), Some("number".into())]);
 
-        assert!(mi.hasnans());
-        assert_eq!(mi.isna(), vec![false, true, true, false]);
-        assert_eq!(mi.isnull(), mi.isna());
-        assert_eq!(mi.notna(), vec![true, false, false, true]);
-        assert_eq!(mi.notnull(), mi.notna());
+        let missing_mask_errors = [
+            mi.hasnans().unwrap_err(),
+            mi.isna().unwrap_err(),
+            mi.isnull().unwrap_err(),
+            mi.notna().unwrap_err(),
+            mi.notnull().unwrap_err(),
+        ];
+        for err in missing_mask_errors {
+            assert!(matches!(
+                err,
+                super::IndexError::InvalidArgument(message)
+                    if message == "isna is not defined for MultiIndex"
+            ));
+        }
         assert_eq!(mi.copy(), mi);
         assert_eq!(mi.remove_unused_levels(), mi);
 
