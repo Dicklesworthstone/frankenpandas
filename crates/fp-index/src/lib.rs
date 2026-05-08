@@ -5567,6 +5567,21 @@ impl MultiIndex {
         self.slice_locs(start, end)
     }
 
+    /// Return a label-bounded range, matching `pd.MultiIndex.truncate`.
+    ///
+    /// Bounds are interpreted as partial or full tuple prefixes and are
+    /// inclusive on both sides. Open-ended bounds retain the corresponding
+    /// leading or trailing rows.
+    pub fn truncate(
+        &self,
+        before: Option<&[IndexLabel]>,
+        after: Option<&[IndexLabel]>,
+    ) -> Result<Self, IndexError> {
+        let (start, stop) = self.slice_locs(before, after)?;
+        let positions: Vec<usize> = (start..stop).collect();
+        Ok(self.take_existing_positions(&positions))
+    }
+
     /// Insertion positions for target tuples, matching `pd.MultiIndex.searchsorted`.
     ///
     /// `side` is `"left"` for the first valid insertion position or `"right"`
@@ -9385,6 +9400,55 @@ mod tests {
         let key = [IndexLabel::Utf8("east".into())];
 
         assert!(mi.get_slice_bound(&key, "middle").is_err());
+    }
+
+    #[test]
+    fn multi_index_truncate_uses_prefix_bounds_d89fe11() -> Result<(), super::IndexError> {
+        let mi = MultiIndex::from_tuples(vec![
+            vec!["a".into(), 1_i64.into()],
+            vec!["a".into(), 3_i64.into()],
+            vec!["b".into(), 1_i64.into()],
+            vec!["c".into(), 1_i64.into()],
+        ])?
+        .set_names(vec![Some("letter".into()), Some("number".into())]);
+
+        let bounded = mi.truncate(
+            Some(&[IndexLabel::Utf8("a".into())]),
+            Some(&[IndexLabel::Utf8("b".into())]),
+        )?;
+        assert_eq!(
+            bounded.to_list(),
+            vec![
+                vec![IndexLabel::Utf8("a".into()), IndexLabel::Int64(1)],
+                vec![IndexLabel::Utf8("a".into()), IndexLabel::Int64(3)],
+                vec![IndexLabel::Utf8("b".into()), IndexLabel::Int64(1)],
+            ]
+        );
+        assert_eq!(bounded.names(), mi.names());
+
+        let tail = mi.truncate(Some(&[IndexLabel::Utf8("b".into())]), None)?;
+        assert_eq!(
+            tail.to_list(),
+            vec![
+                vec![IndexLabel::Utf8("b".into()), IndexLabel::Int64(1)],
+                vec![IndexLabel::Utf8("c".into()), IndexLabel::Int64(1)],
+            ]
+        );
+
+        let clipped = mi.truncate(None, Some(&[IndexLabel::Utf8("aa".into())]))?;
+        assert_eq!(
+            clipped.to_list(),
+            vec![
+                vec![IndexLabel::Utf8("a".into()), IndexLabel::Int64(1)],
+                vec![IndexLabel::Utf8("a".into()), IndexLabel::Int64(3)],
+            ]
+        );
+
+        let empty = mi.truncate(Some(&[IndexLabel::Utf8("d".into())]), None)?;
+        assert!(empty.is_empty());
+        assert_eq!(empty.names(), mi.names());
+
+        Ok(())
     }
 
     #[test]
