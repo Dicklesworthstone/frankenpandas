@@ -12355,6 +12355,20 @@ impl SeriesGroupBy<'_> {
             .unwrap_or(Scalar::Null(NullKind::NaN))
     }
 
+    fn series_from_groupby_apply_parts(
+        &self,
+        name: &str,
+        labels: Vec<IndexLabel>,
+        values: Vec<Scalar>,
+    ) -> Result<Series, FrameError> {
+        if values.is_empty() {
+            let column = Column::new(self.series.dtype(), values)?;
+            Series::new(name, Index::new(labels), column)
+        } else {
+            Series::from_values(name, labels, values)
+        }
+    }
+
     /// Group labels in first-seen order.
     #[must_use]
     pub fn keys(&self) -> Vec<IndexLabel> {
@@ -13332,6 +13346,65 @@ impl SeriesGroupBy<'_> {
         }
 
         Series::from_values(self.series.name(), self.series.index.labels().to_vec(), out)
+    }
+
+    /// Apply a Series-returning function to each group and concatenate results.
+    ///
+    /// Matches the Rust callback shape for `series.groupby(by).apply(func)`.
+    /// Returned rows are emitted in the existing SeriesGroupBy first-seen group
+    /// order, with flat labels retaining both group key and returned index
+    /// label until Series row MultiIndex metadata exists.
+    pub fn apply<F>(&self, func: F) -> Result<Series, FrameError>
+    where
+        F: Fn(&Series) -> Result<Series, FrameError>,
+    {
+        let (order, order_keys, groups) = self.build_groups();
+        let mut labels = Vec::new();
+        let mut values = Vec::new();
+
+        for (group_label, key) in order.iter().zip(&order_keys) {
+            let row_indices = groups.get(key).ok_or_else(|| {
+                FrameError::CompatibilityRejected(
+                    "group key missing from SeriesGroupBy apply state".to_owned(),
+                )
+            })?;
+            let group = self.take_positions(row_indices)?;
+            let applied = func(&group)?;
+            labels.extend(
+                applied
+                    .index()
+                    .labels()
+                    .iter()
+                    .map(|label| IndexLabel::Utf8(format!("{group_label}, {label}"))),
+            );
+            values.extend(applied.values().iter().cloned());
+        }
+
+        self.series_from_groupby_apply_parts(self.series.name(), labels, values)
+    }
+
+    /// Apply a scalar-returning function to each group.
+    ///
+    /// This exposes pandas' scalar `SeriesGroupBy.apply` result shape as a
+    /// typed Rust API: one value per group, indexed by group keys.
+    pub fn apply_scalar<F>(&self, name: &str, func: F) -> Result<Series, FrameError>
+    where
+        F: Fn(&Series) -> Result<Scalar, FrameError>,
+    {
+        let (order, order_keys, groups) = self.build_groups();
+        let mut values = Vec::with_capacity(order_keys.len());
+
+        for key in &order_keys {
+            let row_indices = groups.get(key).ok_or_else(|| {
+                FrameError::CompatibilityRejected(
+                    "group key missing from SeriesGroupBy scalar apply state".to_owned(),
+                )
+            })?;
+            let group = self.take_positions(row_indices)?;
+            values.push(func(&group)?);
+        }
+
+        self.series_from_groupby_apply_parts(name, order, values)
     }
 
     /// Keep or discard whole groups with a caller-supplied predicate.
@@ -68097,6 +68170,101 @@ mod tests {
             piped_sum.column().values(),
             &[Scalar::Float64(6.0), Scalar::Float64(70.0)]
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_series_groupby_apply_variants_dscmn() -> Result<(), FrameError> {
+        let values = Series::from_values(
+            "data",
+            vec![
+                IndexLabel::Utf8("r0".into()),
+                IndexLabel::Utf8("r1".into()),
+                IndexLabel::Utf8("r2".into()),
+                IndexLabel::Utf8("r3".into()),
+            ],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(10.0),
+                Scalar::Float64(20.0),
+            ],
+        )?;
+        let groups = Series::from_values(
+            "grp",
+            vec![
+                IndexLabel::Utf8("r0".into()),
+                IndexLabel::Utf8("r1".into()),
+                IndexLabel::Utf8("r2".into()),
+                IndexLabel::Utf8("r3".into()),
+            ],
+            vec![
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("b".into()),
+            ],
+        )?;
+        let gb = values.groupby(&groups)?;
+
+        let applied = gb.apply(|group| {
+            let shifted = group
+                .values()
+                .iter()
+                .map(|value| {
+                    value
+                        .to_f64()
+                        .map(|number| Scalar::Float64(number + 1.0))
+                        .unwrap_or(Scalar::Null(NullKind::NaN))
+                })
+                .collect();
+            Series::from_values("shifted", group.index().labels().to_vec(), shifted)
+        })?;
+        assert_eq!(applied.name(), "data");
+        assert_eq!(
+            applied.index().labels(),
+            &[
+                IndexLabel::Utf8("a, r0".into()),
+                IndexLabel::Utf8("a, r1".into()),
+                IndexLabel::Utf8("b, r2".into()),
+                IndexLabel::Utf8("b, r3".into()),
+            ]
+        );
+        assert_eq!(
+            applied.values(),
+            &[
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(11.0),
+                Scalar::Float64(21.0),
+            ]
+        );
+
+        let scalar = gb.apply_scalar("total", |group| {
+            Ok(Scalar::Float64(
+                group
+                    .values()
+                    .iter()
+                    .filter_map(|value| value.to_f64().ok())
+                    .sum(),
+            ))
+        })?;
+        assert_eq!(scalar.name(), "total");
+        assert_eq!(
+            scalar.index().labels(),
+            &[IndexLabel::Utf8("a".into()), IndexLabel::Utf8("b".into())]
+        );
+        assert_eq!(
+            scalar.values(),
+            &[Scalar::Float64(3.0), Scalar::Float64(30.0)]
+        );
+
+        let empty = gb.apply(|_| {
+            Series::from_values("empty", Vec::<IndexLabel>::new(), Vec::<Scalar>::new())
+        })?;
+        assert!(empty.is_empty());
+        assert_eq!(empty.dtype(), DType::Float64);
 
         Ok(())
     }
