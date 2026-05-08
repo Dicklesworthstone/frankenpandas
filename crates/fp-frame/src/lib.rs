@@ -12894,6 +12894,82 @@ impl SeriesGroupBy<'_> {
         })
     }
 
+    /// Forward-fill missing values within each group.
+    pub fn ffill(&self, limit: Option<usize>) -> Result<Series, FrameError> {
+        self.transform_groups(|vals| {
+            let mut out = Vec::with_capacity(vals.len());
+            let mut last_valid: Option<&Scalar> = None;
+            let mut consecutive_fills: usize = 0;
+
+            for val in vals {
+                if val.is_missing() {
+                    if let Some(fill) = last_valid {
+                        consecutive_fills += 1;
+                        if limit.is_none_or(|max| consecutive_fills <= max) {
+                            out.push(fill.clone());
+                        } else {
+                            out.push(val.clone());
+                        }
+                    } else {
+                        out.push(val.clone());
+                    }
+                } else {
+                    last_valid = Some(val);
+                    consecutive_fills = 0;
+                    out.push(val.clone());
+                }
+            }
+
+            out
+        })
+    }
+
+    /// Backward-fill missing values within each group.
+    pub fn bfill(&self, limit: Option<usize>) -> Result<Series, FrameError> {
+        self.transform_groups(|vals| {
+            let mut out = vec![Scalar::Null(NullKind::NaN); vals.len()];
+            let mut next_valid: Option<&Scalar> = None;
+            let mut consecutive_fills: usize = 0;
+
+            for idx in (0..vals.len()).rev() {
+                let val = &vals[idx];
+                if val.is_missing() {
+                    if let Some(fill) = next_valid {
+                        consecutive_fills += 1;
+                        if limit.is_none_or(|max| consecutive_fills <= max) {
+                            out[idx] = fill.clone();
+                        } else {
+                            out[idx] = val.clone();
+                        }
+                    } else {
+                        out[idx] = val.clone();
+                    }
+                } else {
+                    next_valid = Some(val);
+                    consecutive_fills = 0;
+                    out[idx] = val.clone();
+                }
+            }
+
+            out
+        })
+    }
+
+    /// Fill missing values in each group with a scalar value.
+    pub fn fillna(&self, value: &Scalar) -> Result<Series, FrameError> {
+        self.transform_groups(|vals| {
+            vals.iter()
+                .map(|val| {
+                    if val.is_missing() {
+                        value.clone()
+                    } else {
+                        val.clone()
+                    }
+                })
+                .collect()
+        })
+    }
+
     /// Broadcast a named per-group reduction back to the original Series shape.
     ///
     /// Matches `series.groupby(by).transform("mean")` for supported reduction
@@ -66587,6 +66663,109 @@ mod tests {
 
         let invalid_q = gb.quantile(1.5).expect_err("invalid quantile q");
         assert!(invalid_q.to_string().contains("quantile must be"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_series_groupby_missing_value_nt65g5() -> Result<(), FrameError> {
+        let missing = Scalar::Null(NullKind::NaN);
+        let values = Series::from_values(
+            "data",
+            (0_i64..9).map(Into::into).collect(),
+            vec![
+                missing.clone(),
+                missing.clone(),
+                Scalar::Float64(1.0),
+                Scalar::Float64(10.0),
+                missing.clone(),
+                missing.clone(),
+                missing.clone(),
+                Scalar::Float64(4.0),
+                missing.clone(),
+            ],
+        )?;
+        let groups = Series::from_values(
+            "grp",
+            (0_i64..9).map(Into::into).collect(),
+            vec![
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+            ],
+        )?;
+        let gb = values.groupby(&groups)?;
+
+        let ffilled = gb.ffill(Some(1))?;
+        assert_eq!(ffilled.index().labels(), values.index().labels());
+        assert_eq!(
+            ffilled.column().values(),
+            &[
+                missing.clone(),
+                missing.clone(),
+                Scalar::Float64(1.0),
+                Scalar::Float64(10.0),
+                Scalar::Float64(1.0),
+                missing.clone(),
+                Scalar::Float64(10.0),
+                Scalar::Float64(4.0),
+                missing.clone(),
+            ]
+        );
+
+        let ffilled_all = gb.ffill(None)?;
+        assert_eq!(
+            ffilled_all.column().values(),
+            &[
+                missing.clone(),
+                missing.clone(),
+                Scalar::Float64(1.0),
+                Scalar::Float64(10.0),
+                Scalar::Float64(1.0),
+                Scalar::Float64(1.0),
+                Scalar::Float64(10.0),
+                Scalar::Float64(4.0),
+                Scalar::Float64(10.0),
+            ]
+        );
+
+        let bfilled = gb.bfill(Some(1))?;
+        assert_eq!(
+            bfilled.column().values(),
+            &[
+                Scalar::Float64(1.0),
+                Scalar::Float64(10.0),
+                Scalar::Float64(1.0),
+                Scalar::Float64(10.0),
+                missing.clone(),
+                Scalar::Float64(4.0),
+                missing.clone(),
+                Scalar::Float64(4.0),
+                missing.clone(),
+            ]
+        );
+
+        let filled = gb.fillna(&Scalar::Float64(99.0))?;
+        assert_eq!(
+            filled.column().values(),
+            &[
+                Scalar::Float64(99.0),
+                Scalar::Float64(99.0),
+                Scalar::Float64(1.0),
+                Scalar::Float64(10.0),
+                Scalar::Float64(99.0),
+                Scalar::Float64(99.0),
+                Scalar::Float64(99.0),
+                Scalar::Float64(4.0),
+                Scalar::Float64(99.0),
+            ]
+        );
 
         Ok(())
     }
