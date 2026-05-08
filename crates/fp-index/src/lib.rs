@@ -5499,6 +5499,26 @@ impl MultiIndex {
         Ok((start_pos, end_pos))
     }
 
+    /// Bound for a tuple slice, matching `pd.MultiIndex.get_slice_bound`.
+    pub fn get_slice_bound(&self, label: &[IndexLabel], side: &str) -> Result<usize, IndexError> {
+        match side {
+            "left" => Ok(self.slice_locs(Some(label), Some(label))?.0),
+            "right" => Ok(self.slice_locs(Some(label), Some(label))?.1),
+            other => Err(IndexError::InvalidArgument(format!(
+                "get_slice_bound: side must be 'left' or 'right', got {other:?}"
+            ))),
+        }
+    }
+
+    /// Alias for `slice_locs`, matching `pd.MultiIndex.slice_indexer`.
+    pub fn slice_indexer(
+        &self,
+        start: Option<&[IndexLabel]>,
+        end: Option<&[IndexLabel]>,
+    ) -> Result<(usize, usize), IndexError> {
+        self.slice_locs(start, end)
+    }
+
     /// Compute a non-unique indexer against another MultiIndex.
     ///
     /// Matches `pd.MultiIndex.get_indexer_non_unique(target)` by expanding
@@ -9123,6 +9143,48 @@ mod tests {
             )
             .unwrap();
         assert_eq!((start, stop), (1, 3));
+    }
+
+    #[test]
+    fn multi_index_slice_bound_partial_prefixes_d89fe2() {
+        let mi = MultiIndex::from_arrays(vec![
+            vec!["east".into(), "east".into(), "west".into(), "west".into()],
+            vec![1_i64.into(), 2_i64.into(), 1_i64.into(), 2_i64.into()],
+        ])
+        .unwrap();
+
+        let east = [IndexLabel::Utf8("east".into())];
+        assert_eq!(mi.get_slice_bound(&east, "left").unwrap(), 0);
+        assert_eq!(mi.get_slice_bound(&east, "right").unwrap(), 2);
+
+        let west = [IndexLabel::Utf8("west".into())];
+        assert_eq!(mi.slice_indexer(Some(&west), None).unwrap(), (2, 4));
+        assert_eq!(mi.slice_indexer(None, Some(&east)).unwrap(), (0, 2));
+    }
+
+    #[test]
+    fn multi_index_slice_bound_full_tuple_and_missing_insert_d89fe2() {
+        let mi = MultiIndex::from_arrays(vec![
+            vec!["east".into(), "east".into(), "west".into(), "west".into()],
+            vec![1_i64.into(), 2_i64.into(), 1_i64.into(), 2_i64.into()],
+        ])
+        .unwrap();
+
+        let exact = [IndexLabel::Utf8("east".into()), IndexLabel::Int64(2)];
+        assert_eq!(mi.get_slice_bound(&exact, "left").unwrap(), 1);
+        assert_eq!(mi.get_slice_bound(&exact, "right").unwrap(), 2);
+
+        let missing_insert = [IndexLabel::Utf8("east".into()), IndexLabel::Int64(3)];
+        assert_eq!(mi.get_slice_bound(&missing_insert, "left").unwrap(), 2);
+        assert_eq!(mi.get_slice_bound(&missing_insert, "right").unwrap(), 2);
+    }
+
+    #[test]
+    fn multi_index_slice_bound_rejects_invalid_side_d89fe2() {
+        let mi = MultiIndex::from_tuples(vec![vec![IndexLabel::Utf8("east".into())]]).unwrap();
+        let key = [IndexLabel::Utf8("east".into())];
+
+        assert!(mi.get_slice_bound(&key, "middle").is_err());
     }
 
     #[test]
