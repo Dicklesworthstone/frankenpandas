@@ -36891,7 +36891,7 @@ mod tests {
 
     use super::{
         ConcatJoin, concat_dataframes, concat_dataframes_with_axis,
-        concat_dataframes_with_axis_join,
+        concat_dataframes_with_axis_join, concat_dataframes_with_keys,
     };
 
     #[test]
@@ -37319,6 +37319,227 @@ mod tests {
             mutated_sum.column().values()[2]
         );
         assert_eq!(mutated_sum.column().values()[1], Scalar::Float64(1000.0));
+
+        Ok(())
+    }
+
+    #[test]
+    fn reshape_null_nan_metamorphic_melt_auto_matches_explicit_tn6qb9() -> Result<(), FrameError> {
+        let frame = DataFrame::from_series(vec![
+            Series::from_values(
+                "id",
+                (0_i64..3).map(Into::into).collect(),
+                vec![
+                    Scalar::Utf8("a".into()),
+                    Scalar::Null(NullKind::NaN),
+                    Scalar::Null(NullKind::Null),
+                ],
+            )?,
+            Series::from_values(
+                "x",
+                (0_i64..3).map(Into::into).collect(),
+                vec![
+                    Scalar::Int64(1),
+                    Scalar::Null(NullKind::NaN),
+                    Scalar::Float64(-0.0),
+                ],
+            )?,
+            Series::from_values(
+                "y",
+                (0_i64..3).map(Into::into).collect(),
+                vec![
+                    Scalar::Float64(10.5),
+                    Scalar::Float64(20.5),
+                    Scalar::Float64(30.5),
+                ],
+            )?,
+        ])?;
+
+        let explicit = frame.melt(&["id"], &["x", "y"], None, None)?;
+        let automatic = frame.melt(&["id"], &[], None, None)?;
+
+        assert_eq!(automatic.column_order, explicit.column_order);
+        assert_eq!(
+            automatic.column("id").ok_or_else(|| {
+                FrameError::CompatibilityRejected("melt output missing 'id'".to_owned())
+            })?,
+            explicit.column("id").ok_or_else(|| {
+                FrameError::CompatibilityRejected("melt output missing explicit 'id'".to_owned())
+            })?
+        );
+        assert_eq!(
+            automatic.column("variable").ok_or_else(|| {
+                FrameError::CompatibilityRejected("melt output missing 'variable'".to_owned())
+            })?,
+            explicit.column("variable").ok_or_else(|| {
+                FrameError::CompatibilityRejected(
+                    "melt output missing explicit 'variable'".to_owned(),
+                )
+            })?
+        );
+        assert_eq!(
+            automatic.column("value").ok_or_else(|| {
+                FrameError::CompatibilityRejected("melt output missing 'value'".to_owned())
+            })?,
+            explicit.column("value").ok_or_else(|| {
+                FrameError::CompatibilityRejected("melt output missing explicit 'value'".to_owned())
+            })?
+        );
+        let value_column = automatic.column("value").ok_or_else(|| {
+            FrameError::CompatibilityRejected("melt output missing 'value'".to_owned())
+        })?;
+        assert!(matches!(
+            value_column.values()[2],
+            Scalar::Float64(v) if v.to_bits() == (-0.0_f64).to_bits()
+        ));
+
+        Ok(())
+    }
+
+    #[test]
+    fn reshape_null_nan_metamorphic_pivot_table_missing_keys_do_not_disturb_default_tn6qb9()
+    -> Result<(), FrameError> {
+        let baseline = DataFrame::from_series(vec![
+            Series::from_values(
+                "row",
+                (0_i64..3).map(Into::into).collect(),
+                vec![
+                    Scalar::Utf8("r1".into()),
+                    Scalar::Utf8("r1".into()),
+                    Scalar::Utf8("r2".into()),
+                ],
+            )?,
+            Series::from_values(
+                "col",
+                (0_i64..3).map(Into::into).collect(),
+                vec![
+                    Scalar::Utf8("c1".into()),
+                    Scalar::Utf8("c2".into()),
+                    Scalar::Utf8("c1".into()),
+                ],
+            )?,
+            Series::from_values(
+                "val",
+                (0_i64..3).map(Into::into).collect(),
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(2.0),
+                    Scalar::Float64(3.0),
+                ],
+            )?,
+        ])?;
+        let with_missing_keys = DataFrame::from_series(vec![
+            Series::from_values(
+                "row",
+                (0_i64..7).map(Into::into).collect(),
+                vec![
+                    Scalar::Utf8("r1".into()),
+                    Scalar::Utf8("r1".into()),
+                    Scalar::Utf8("r2".into()),
+                    Scalar::Null(NullKind::NaN),
+                    Scalar::Null(NullKind::Null),
+                    Scalar::Utf8("r1".into()),
+                    Scalar::Utf8("r2".into()),
+                ],
+            )?,
+            Series::from_values(
+                "col",
+                (0_i64..7).map(Into::into).collect(),
+                vec![
+                    Scalar::Utf8("c1".into()),
+                    Scalar::Utf8("c2".into()),
+                    Scalar::Utf8("c1".into()),
+                    Scalar::Utf8("c1".into()),
+                    Scalar::Utf8("c2".into()),
+                    Scalar::Null(NullKind::NaN),
+                    Scalar::Null(NullKind::Null),
+                ],
+            )?,
+            Series::from_values(
+                "val",
+                (0_i64..7).map(Into::into).collect(),
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(2.0),
+                    Scalar::Float64(3.0),
+                    Scalar::Float64(100.0),
+                    Scalar::Float64(200.0),
+                    Scalar::Float64(400.0),
+                    Scalar::Float64(500.0),
+                ],
+            )?,
+        ])?;
+
+        let baseline_pivot = baseline.pivot_table("val", "row", "col", "sum")?;
+        let missing_key_pivot = with_missing_keys.pivot_table("val", "row", "col", "sum")?;
+
+        assert_eq!(missing_key_pivot.index(), baseline_pivot.index());
+        assert_eq!(missing_key_pivot.column_order, baseline_pivot.column_order);
+        assert_eq!(
+            missing_key_pivot.column("c1").ok_or_else(|| {
+                FrameError::CompatibilityRejected("pivot output missing 'c1'".to_owned())
+            })?,
+            baseline_pivot.column("c1").ok_or_else(|| {
+                FrameError::CompatibilityRejected("baseline pivot output missing 'c1'".to_owned())
+            })?
+        );
+        assert_eq!(
+            missing_key_pivot.column("c2").ok_or_else(|| {
+                FrameError::CompatibilityRejected("pivot output missing 'c2'".to_owned())
+            })?,
+            baseline_pivot.column("c2").ok_or_else(|| {
+                FrameError::CompatibilityRejected("baseline pivot output missing 'c2'".to_owned())
+            })?
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn reshape_null_nan_metamorphic_concat_keys_preserve_value_projection_tn6qb9()
+    -> Result<(), FrameError> {
+        let left = DataFrame::from_dict_with_index(
+            vec![("v", vec![Scalar::Float64(1.0), Scalar::Null(NullKind::NaN)])],
+            vec!["dup".into(), "dup".into()],
+        )?;
+        let right = DataFrame::from_dict_with_index(
+            vec![(
+                "v",
+                vec![Scalar::Float64(3.0), Scalar::Null(NullKind::Null)],
+            )],
+            vec!["tail".into(), "tail".into()],
+        )?;
+
+        let plain = concat_dataframes(&[&left, &right])?;
+        let keyed = concat_dataframes_with_keys(&[&left, &right], &["L", "R"])?;
+
+        assert_eq!(plain.column_order, keyed.column_order);
+        assert_eq!(
+            keyed.column("v").ok_or_else(|| {
+                FrameError::CompatibilityRejected("keyed concat output missing 'v'".to_owned())
+            })?,
+            plain.column("v").ok_or_else(|| {
+                FrameError::CompatibilityRejected("plain concat output missing 'v'".to_owned())
+            })?
+        );
+        assert_eq!(
+            keyed.index().labels(),
+            &[
+                IndexLabel::Utf8("L|dup".to_owned()),
+                IndexLabel::Utf8("L|dup".to_owned()),
+                IndexLabel::Utf8("R|tail".to_owned()),
+                IndexLabel::Utf8("R|tail".to_owned()),
+            ]
+        );
+        assert_eq!(
+            plain.index().labels(),
+            &[
+                IndexLabel::Utf8("dup".to_owned()),
+                IndexLabel::Utf8("dup".to_owned()),
+                IndexLabel::Utf8("tail".to_owned()),
+                IndexLabel::Utf8("tail".to_owned()),
+            ]
+        );
 
         Ok(())
     }

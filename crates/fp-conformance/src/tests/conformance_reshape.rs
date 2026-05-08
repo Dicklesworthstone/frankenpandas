@@ -203,6 +203,26 @@ fn conformance_reshape_melt_nan_heavy_mixed_values() {
 }
 
 #[test]
+fn conformance_reshape_melt_null_nan_ids_auto_value_vars_tn6qb9() {
+    let fixture = frame_fixture(
+        "FP-CONF-RESHAPE-011",
+        "reshape_melt_null_nan_ids_auto_value_vars_tn6qb9",
+        "dataframe_melt",
+        frame(
+            vec![i(0), i(1), i(2)],
+            &["id", "x", "y"],
+            &[
+                ("id", vec![s("a"), nan(), null()]),
+                ("x", vec![i(1), nan(), f(-0.0)]),
+                ("y", vec![f(10.5), f(20.5), f(30.5)]),
+            ],
+        ),
+        &[("melt_id_vars", serde_json::json!(["id"]))],
+    );
+    check_reshape_fixture(fixture);
+}
+
+#[test]
 fn conformance_reshape_pivot_single_row() {
     let fixture = frame_fixture(
         "FP-CONF-RESHAPE-004",
@@ -299,6 +319,48 @@ fn conformance_reshape_pivot_table_fill_missing_cells() {
                 "fill_value",
                 serde_json::json!({ "kind": "float64", "value": 0.0 }),
             ),
+        ],
+    );
+    check_reshape_fixture(fixture);
+}
+
+#[test]
+fn conformance_reshape_pivot_table_missing_keys_dropna_default_tn6qb9() {
+    let fixture = frame_fixture(
+        "FP-CONF-RESHAPE-012",
+        "reshape_pivot_table_missing_keys_dropna_default_tn6qb9",
+        "dataframe_pivot_table",
+        frame(
+            vec![i(0), i(1), i(2), i(3), i(4), i(5), i(6)],
+            &["row", "col", "val"],
+            &[
+                (
+                    "row",
+                    vec![s("r1"), s("r1"), s("r2"), nan(), null(), s("r1"), s("r2")],
+                ),
+                (
+                    "col",
+                    vec![s("c1"), s("c2"), s("c1"), s("c1"), s("c2"), nan(), null()],
+                ),
+                (
+                    "val",
+                    vec![
+                        f(1.0),
+                        f(2.0),
+                        f(3.0),
+                        f(100.0),
+                        f(200.0),
+                        f(400.0),
+                        f(500.0),
+                    ],
+                ),
+            ],
+        ),
+        &[
+            ("pivot_index", serde_json::json!("row")),
+            ("pivot_columns", serde_json::json!("col")),
+            ("pivot_values", serde_json::json!(["val"])),
+            ("pivot_aggfunc", serde_json::json!("sum")),
         ],
     );
     check_reshape_fixture(fixture);
