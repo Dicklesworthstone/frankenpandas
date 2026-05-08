@@ -13008,6 +13008,39 @@ impl SeriesGroupBy<'_> {
         self.take_positions(&positions)
     }
 
+    /// Randomly sample rows from each group.
+    ///
+    /// Matches `pd.SeriesGroupBy.sample(n=..., frac=..., replace=...)`.
+    pub fn sample(
+        &self,
+        n: Option<usize>,
+        frac: Option<f64>,
+        replace: bool,
+        seed: Option<u64>,
+    ) -> Result<Series, FrameError> {
+        let (_order, order_keys, groups) = self.build_groups();
+        let mut positions = Vec::new();
+        let mut rng_state = seed.unwrap_or(42);
+
+        for key in &order_keys {
+            let row_indices = groups.get(key).ok_or_else(|| {
+                FrameError::CompatibilityRejected(
+                    "group key missing from SeriesGroupBy sample state".to_owned(),
+                )
+            })?;
+            let sample_n =
+                DataFrameGroupBy::sample_n_for_group(row_indices.len(), n, frac, replace)?;
+            positions.extend(DataFrameGroupBy::sampled_group_positions(
+                row_indices,
+                sample_n,
+                replace,
+                &mut rng_state,
+            ));
+        }
+
+        self.take_positions(&positions)
+    }
+
     /// Select the nth row from each group. Negative `n` counts from the end.
     pub fn nth(&self, n: i64) -> Result<Series, FrameError> {
         let (_order, order_keys, groups) = self.build_groups();
@@ -66331,6 +66364,102 @@ mod tests {
 
         assert!(gb.take(&[3]).is_err());
         assert!(gb.take(&[-4]).is_err());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_series_groupby_sample_nt65g3() -> Result<(), FrameError> {
+        let values = Series::from_values(
+            "data",
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+                5_i64.into(),
+            ],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(10.0),
+                Scalar::Float64(20.0),
+                Scalar::Float64(40.0),
+            ],
+        )?;
+        let groups = Series::from_values(
+            "grp",
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+                5_i64.into(),
+            ],
+            vec![
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("b".into()),
+            ],
+        )?;
+        let gb = values.groupby(&groups)?;
+
+        let default_sample = gb.sample(None, None, false, None)?;
+        assert_eq!(
+            default_sample.index().labels(),
+            &[IndexLabel::Int64(2), IndexLabel::Int64(4)]
+        );
+        assert_eq!(
+            default_sample.column().values(),
+            &[Scalar::Float64(3.0), Scalar::Float64(20.0)]
+        );
+
+        let seeded = gb.sample(None, Some(2.0 / 3.0), false, Some(123))?;
+        assert_eq!(
+            seeded.index().labels(),
+            &[
+                IndexLabel::Int64(1),
+                IndexLabel::Int64(0),
+                IndexLabel::Int64(3),
+                IndexLabel::Int64(4),
+            ]
+        );
+        assert_eq!(
+            seeded.column().values(),
+            &[
+                Scalar::Float64(2.0),
+                Scalar::Float64(1.0),
+                Scalar::Float64(10.0),
+                Scalar::Float64(20.0),
+            ]
+        );
+
+        let replacement = gb.sample(Some(4), None, true, Some(7))?;
+        assert_eq!(
+            replacement.index().labels(),
+            &[
+                IndexLabel::Int64(2),
+                IndexLabel::Int64(2),
+                IndexLabel::Int64(2),
+                IndexLabel::Int64(2),
+                IndexLabel::Int64(3),
+                IndexLabel::Int64(5),
+                IndexLabel::Int64(5),
+                IndexLabel::Int64(4),
+            ]
+        );
+        assert_eq!(replacement.name(), "data");
+        assert_eq!(replacement.dtype(), DType::Float64);
+
+        assert!(gb.sample(Some(1), Some(0.5), false, Some(1)).is_err());
+        assert!(gb.sample(Some(4), None, false, Some(1)).is_err());
+        assert!(gb.sample(None, Some(1.5), false, Some(1)).is_err());
 
         Ok(())
     }
