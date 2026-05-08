@@ -12379,6 +12379,30 @@ impl SeriesGroupBy<'_> {
         Series::from_values(name, labels, values)
     }
 
+    fn utf8_extreme(values: &[Scalar], largest: bool) -> Scalar {
+        let mut best_value: Option<&str> = None;
+        let mut best_index: Option<usize> = None;
+
+        for (idx, value) in values.iter().enumerate() {
+            let Scalar::Utf8(candidate) = value else {
+                continue;
+            };
+            let candidate = candidate.as_str();
+            if best_value.is_none_or(|best| {
+                if largest {
+                    candidate > best
+                } else {
+                    candidate < best
+                }
+            }) {
+                best_value = Some(candidate);
+                best_index = Some(idx);
+            }
+        }
+
+        Self::grouped_value_or_null(values, best_index)
+    }
+
     /// Sum of each group.
     pub fn sum(&self) -> Result<Series, FrameError> {
         self.agg_numeric(|nums| nums.iter().sum(), self.series.name())
@@ -12411,6 +12435,11 @@ impl SeriesGroupBy<'_> {
 
     /// Minimum of each group.
     pub fn min(&self) -> Result<Series, FrameError> {
+        if matches!(self.series.column.dtype(), DType::Utf8) {
+            return self.agg_values_scalar(self.series.name(), |values| {
+                Self::utf8_extreme(values, false)
+            });
+        }
         self.agg_numeric(
             |nums| nums.iter().copied().fold(f64::INFINITY, f64::min),
             self.series.name(),
@@ -12419,6 +12448,11 @@ impl SeriesGroupBy<'_> {
 
     /// Maximum of each group.
     pub fn max(&self) -> Result<Series, FrameError> {
+        if matches!(self.series.column.dtype(), DType::Utf8) {
+            return self.agg_values_scalar(self.series.name(), |values| {
+                Self::utf8_extreme(values, true)
+            });
+        }
         self.agg_numeric(
             |nums| nums.iter().copied().fold(f64::NEG_INFINITY, f64::max),
             self.series.name(),
@@ -66553,6 +66587,58 @@ mod tests {
                 Scalar::Float64(4.0),
                 Scalar::Null(NullKind::NaN),
                 Scalar::Float64(6.0),
+            ]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_series_groupby_utf8_min_max_nt65g12() -> Result<(), FrameError> {
+        let values = Series::from_values(
+            "data",
+            (0_i64..8).map(Into::into).collect(),
+            vec![
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Utf8("e".into()),
+                Scalar::Utf8("c".into()),
+                Scalar::Utf8("d".into()),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::NaN),
+            ],
+        )?;
+        let groups = Series::from_values(
+            "grp",
+            (0_i64..8).map(Into::into).collect(),
+            vec![
+                Scalar::Utf8("left".into()),
+                Scalar::Utf8("left".into()),
+                Scalar::Utf8("left".into()),
+                Scalar::Utf8("right".into()),
+                Scalar::Utf8("right".into()),
+                Scalar::Utf8("right".into()),
+                Scalar::Utf8("emptyish".into()),
+                Scalar::Utf8("emptyish".into()),
+            ],
+        )?;
+        let gb = values.groupby(&groups)?;
+
+        assert_eq!(
+            gb.min()?.column().values(),
+            &[
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("c".into()),
+                Scalar::Null(NullKind::NaN),
+            ]
+        );
+        assert_eq!(
+            gb.max()?.column().values(),
+            &[
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("e".into()),
+                Scalar::Null(NullKind::NaN),
             ]
         );
 
