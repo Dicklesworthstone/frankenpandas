@@ -12451,6 +12451,42 @@ impl SeriesGroupBy<'_> {
         })
     }
 
+    /// Unique values in each group, preserving first-seen group and value order.
+    pub fn unique(&self) -> Result<Series, FrameError> {
+        let (order, order_keys, groups) = self.build_groups();
+        let values = self.series.column.values();
+        let mut out_labels = Vec::new();
+        let mut out_values = Vec::new();
+
+        for (group_idx, key) in order_keys.iter().enumerate() {
+            let group_label = &order[group_idx];
+            let mut seen_keys: HashSet<ScalarKey<'_>> = HashSet::new();
+            let mut missing_seen = false;
+
+            for &row_idx in &groups[key] {
+                let value = &values[row_idx];
+                if value.is_missing() {
+                    if !missing_seen {
+                        out_labels.push(group_label.clone());
+                        out_values.push(value.clone());
+                        missing_seen = true;
+                    }
+                    continue;
+                }
+
+                let Some(value_key) = scalar_key_skip_missing(value) else {
+                    continue;
+                };
+                if seen_keys.insert(value_key) {
+                    out_labels.push(group_label.clone());
+                    out_values.push(value.clone());
+                }
+            }
+        }
+
+        Series::from_values(self.series.name(), out_labels, out_values)
+    }
+
     /// Quantile of each group using linear interpolation.
     pub fn quantile(&self, q: f64) -> Result<Series, FrameError> {
         if !q.is_finite() || !(0.0..=1.0).contains(&q) {
@@ -67023,6 +67059,66 @@ mod tests {
         assert_eq!(
             aliased.column("nunique").unwrap().values(),
             aggregated.column("nunique").unwrap().values()
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_series_groupby_unique_nt65g8() -> Result<(), FrameError> {
+        let values = Series::from_values(
+            "data",
+            (0_i64..9).map(Into::into).collect(),
+            vec![
+                Scalar::Utf8("x".into()),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Utf8("x".into()),
+                Scalar::Utf8("y".into()),
+                Scalar::Utf8("z".into()),
+                Scalar::Utf8("z".into()),
+                Scalar::Utf8("y".into()),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Utf8("w".into()),
+            ],
+        )?;
+        let groups = Series::from_values(
+            "grp",
+            (0_i64..9).map(Into::into).collect(),
+            vec![
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("c".into()),
+            ],
+        )?;
+
+        let unique = values.groupby(&groups)?.unique()?;
+        assert_eq!(
+            unique.index().labels(),
+            &[
+                IndexLabel::Utf8("a".into()),
+                IndexLabel::Utf8("a".into()),
+                IndexLabel::Utf8("b".into()),
+                IndexLabel::Utf8("b".into()),
+                IndexLabel::Utf8("b".into()),
+                IndexLabel::Utf8("c".into()),
+            ]
+        );
+        assert_eq!(
+            unique.column().values(),
+            &[
+                Scalar::Utf8("x".into()),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Utf8("y".into()),
+                Scalar::Utf8("z".into()),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Utf8("w".into()),
+            ]
         );
 
         Ok(())
