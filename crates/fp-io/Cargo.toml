@@ -23,6 +23,7 @@ fp-frame = { path = "../fp-frame" }
 fp-index = { path = "../fp-index" }
 fp-types = { path = "../fp-types" }
 parquet = { workspace = true }
+quick-xml = { workspace = true }
 rust_xlsxwriter = { workspace = true }
 rusqlite = { workspace = true, optional = true }
 serde_json = { workspace = true }

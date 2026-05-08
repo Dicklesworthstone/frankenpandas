@@ -938,6 +938,7 @@ dependencies = [
  "fp-index",
  "fp-types",
  "parquet",
+ "quick-xml",
  "rusqlite",
  "rust_xlsxwriter",
  "serde_json",

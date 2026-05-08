@@ -19,7 +19,8 @@
 //!   [`write_sql_with_options`], plus the chunked variants
 //!   ([`read_sql_chunks`], [`SqlChunkIterator`]).
 //! - **Markdown / LaTeX / HTML / XML**: [`write_markdown_string`],
-//!   [`write_latex_string`], [`write_html_string`], [`write_xml_string`].
+//!   [`write_latex_string`], [`write_html_string`], [`write_xml_string`],
+//!   [`read_xml_str`].
 //!
 //! Each format has a per-call options struct ([`CsvReadOptions`],
 //! [`ExcelReadOptions`], [`SqlReadOptions`], [`SqlWriteOptions`], ...) so
@@ -104,6 +105,7 @@ use fp_frame::{DataFrame, FrameError, Series, ToDatetimeOptions, to_datetime_wit
 use fp_index::{Index, IndexError, IndexLabel, format_datetime_ns};
 use fp_types::{DType, NullKind, Scalar, Timedelta, cast_scalar_owned};
 use parquet::arrow::{ArrowWriter, arrow_reader::ParquetRecordBatchReaderBuilder};
+use quick_xml::{Reader as XmlReader, events::Event};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -471,6 +473,23 @@ impl Default for XmlWriteOptions {
     }
 }
 
+/// Options controlling XML parsing.
+///
+/// Covers the row-oriented subset produced by pandas `DataFrame.to_xml`.
+#[derive(Debug, Clone)]
+pub struct XmlReadOptions {
+    /// XML element name representing one DataFrame row. Default: `"row"`.
+    pub row_name: String,
+}
+
+impl Default for XmlReadOptions {
+    fn default() -> Self {
+        Self {
+            row_name: "row".to_owned(),
+        }
+    }
+}
+
 /// Serialize a DataFrame to CSV with explicit options.
 ///
 /// Matches `pd.DataFrame.to_csv(sep, na_rep, header, index, index_label)`
@@ -661,6 +680,153 @@ pub fn write_html_string_with_options(
     Ok(frame.to_html(options.include_index))
 }
 
+/// Parse a DataFrame from a row-oriented XML document string.
+///
+/// Matches the writer-oriented subset accepted by `pd.read_xml(...,
+/// parser="etree")`: each row is an element named by
+/// [`XmlReadOptions::row_name`], and each direct child element becomes a
+/// DataFrame column. Attributes, XPath, namespaces, and nested field elements
+/// are intentionally out of scope for this slice.
+pub fn read_xml_str(input: &str) -> Result<DataFrame, IoError> {
+    read_xml_str_with_options(input, &XmlReadOptions::default())
+}
+
+/// Parse a DataFrame from a row-oriented XML document string with options.
+pub fn read_xml_str_with_options(
+    input: &str,
+    options: &XmlReadOptions,
+) -> Result<DataFrame, IoError> {
+    validate_xml_element_name(&options.row_name)?;
+
+    let mut reader = XmlReader::from_str(input);
+    reader.config_mut().trim_text(false);
+    let mut buf = Vec::new();
+    let mut rows: Vec<BTreeMap<String, Scalar>> = Vec::new();
+    let mut column_order = Vec::new();
+    let mut seen_columns = HashSet::new();
+    let mut current_row: Option<BTreeMap<String, Scalar>> = None;
+    let mut current_field: Option<String> = None;
+    let mut field_text = String::new();
+
+    loop {
+        match reader
+            .read_event_into(&mut buf)
+            .map_err(|err| IoError::Xml(err.to_string()))?
+        {
+            Event::Start(event) => {
+                let name = xml_event_name(event.name())?;
+                if current_row.is_none() {
+                    if name == options.row_name {
+                        current_row = Some(BTreeMap::new());
+                    }
+                } else if let Some(field_name) = &current_field {
+                    return Err(IoError::Xml(format!(
+                        "nested xml element '{name}' inside field '{field_name}' is unsupported"
+                    )));
+                } else {
+                    current_field = Some(name);
+                    field_text.clear();
+                }
+            }
+            Event::Empty(event) => {
+                let name = xml_event_name(event.name())?;
+                if let Some(field_name) = &current_field {
+                    return Err(IoError::Xml(format!(
+                        "nested xml element '{name}' inside field '{field_name}' is unsupported"
+                    )));
+                }
+                if let Some(row) = current_row.as_mut() {
+                    insert_xml_field(
+                        row,
+                        &mut column_order,
+                        &mut seen_columns,
+                        name,
+                        Scalar::Null(NullKind::Null),
+                    )?;
+                } else if name == options.row_name {
+                    rows.push(BTreeMap::new());
+                }
+            }
+            Event::Text(event) => {
+                if current_field.is_some() {
+                    let decoded = event
+                        .xml_content()
+                        .map_err(|err| IoError::Xml(err.to_string()))?;
+                    field_text.push_str(&decoded);
+                }
+            }
+            Event::CData(event) => {
+                if current_field.is_some() {
+                    let decoded = event
+                        .xml_content()
+                        .map_err(|err| IoError::Xml(err.to_string()))?;
+                    field_text.push_str(&decoded);
+                }
+            }
+            Event::End(event) => {
+                let name = xml_event_name(event.name())?;
+                if let Some(field_name) = current_field.as_ref() {
+                    if name != *field_name {
+                        return Err(IoError::Xml(format!(
+                            "xml field '{field_name}' closed by mismatched element '{name}'"
+                        )));
+                    }
+                    let field_name = current_field.take().expect("field checked");
+                    let value = parse_scalar(&field_text);
+                    field_text.clear();
+                    let row = current_row
+                        .as_mut()
+                        .ok_or_else(|| IoError::Xml("xml field outside row".to_owned()))?;
+                    insert_xml_field(row, &mut column_order, &mut seen_columns, field_name, value)?;
+                } else if name == options.row_name {
+                    let row = current_row.take().ok_or_else(|| {
+                        IoError::Xml("xml row closed before it opened".to_owned())
+                    })?;
+                    rows.push(row);
+                }
+            }
+            Event::GeneralRef(reference) => {
+                if current_field.is_some() {
+                    field_text.push_str(&decode_xml_general_ref(reference)?);
+                }
+            }
+            Event::Eof => break,
+            Event::Decl(_) | Event::PI(_) | Event::DocType(_) | Event::Comment(_) => {}
+        }
+        buf.clear();
+    }
+
+    if current_field.is_some() || current_row.is_some() {
+        return Err(IoError::Xml(
+            "xml document ended inside an open row or field".to_owned(),
+        ));
+    }
+    if rows.is_empty() {
+        return Err(IoError::Xml(
+            "xml input contains no row elements".to_owned(),
+        ));
+    }
+
+    let mut out_columns = BTreeMap::new();
+    for name in &column_order {
+        let values = rows
+            .iter()
+            .map(|row| {
+                row.get(name)
+                    .cloned()
+                    .unwrap_or(Scalar::Null(NullKind::Null))
+            })
+            .collect::<Vec<_>>();
+        out_columns.insert(name.clone(), Column::from_values(values)?);
+    }
+    let index = Index::from_i64((0..rows.len() as i64).collect());
+    Ok(DataFrame::new_with_column_order(
+        index,
+        out_columns,
+        column_order,
+    )?)
+}
+
 /// Serialize a DataFrame to an XML document string.
 pub fn write_xml_string_with_options(
     frame: &DataFrame,
@@ -728,6 +894,58 @@ pub fn write_xml_string_with_options(
     out.push_str(&options.root_name);
     out.push_str(">\n");
     Ok(out)
+}
+
+fn xml_event_name(name: quick_xml::name::QName<'_>) -> Result<String, IoError> {
+    std::str::from_utf8(name.as_ref())
+        .map(ToOwned::to_owned)
+        .map_err(|err| IoError::Xml(format!("invalid utf-8 xml element name: {err}")))
+}
+
+fn decode_xml_general_ref(reference: quick_xml::events::BytesRef<'_>) -> Result<String, IoError> {
+    let raw = std::str::from_utf8(reference.as_ref())
+        .map_err(|err| IoError::Xml(format!("invalid utf-8 xml entity reference: {err}")))?;
+    match raw {
+        "amp" => Ok("&".to_owned()),
+        "lt" => Ok("<".to_owned()),
+        "gt" => Ok(">".to_owned()),
+        "quot" => Ok("\"".to_owned()),
+        "apos" => Ok("'".to_owned()),
+        _ if raw.starts_with("#x") => {
+            let value = u32::from_str_radix(&raw[2..], 16)
+                .map_err(|err| IoError::Xml(format!("invalid hex xml entity '&{raw};': {err}")))?;
+            char::from_u32(value)
+                .map(|ch| ch.to_string())
+                .ok_or_else(|| IoError::Xml(format!("invalid unicode xml entity '&{raw};'")))
+        }
+        _ if raw.starts_with('#') => {
+            let value = raw[1..].parse::<u32>().map_err(|err| {
+                IoError::Xml(format!("invalid decimal xml entity '&{raw};': {err}"))
+            })?;
+            char::from_u32(value)
+                .map(|ch| ch.to_string())
+                .ok_or_else(|| IoError::Xml(format!("invalid unicode xml entity '&{raw};'")))
+        }
+        _ => Err(IoError::Xml(format!(
+            "unsupported xml entity reference '&{raw};'"
+        ))),
+    }
+}
+
+fn insert_xml_field(
+    row: &mut BTreeMap<String, Scalar>,
+    column_order: &mut Vec<String>,
+    seen_columns: &mut HashSet<String>,
+    name: String,
+    value: Scalar,
+) -> Result<(), IoError> {
+    if row.insert(name.clone(), value).is_some() {
+        return Err(IoError::Xml(format!("duplicate xml field '{name}' in row")));
+    }
+    if seen_columns.insert(name.clone()) {
+        column_order.push(name);
+    }
+    Ok(())
 }
 
 fn validate_xml_element_name(name: &str) -> Result<(), IoError> {
@@ -1718,6 +1936,17 @@ pub fn write_xml_with_options(
     let content = write_xml_string_with_options(frame, options)?;
     std::fs::write(path, content)?;
     Ok(())
+}
+
+// ── File-based XML readers ─────────────────────────────────────────────
+
+pub fn read_xml(path: &Path) -> Result<DataFrame, IoError> {
+    read_xml_with_options(path, &XmlReadOptions::default())
+}
+
+pub fn read_xml_with_options(path: &Path, options: &XmlReadOptions) -> Result<DataFrame, IoError> {
+    let content = std::fs::read_to_string(path)?;
+    read_xml_str_with_options(&content, options)
 }
 
 // ── JSON IO ────────────────────────────────────────────────────────────
@@ -7897,8 +8126,9 @@ mod tests {
 
     use super::{
         CsvWriteOptions, ExcelReadOptions, HtmlWriteOptions, IoError, LatexWriteOptions,
-        MarkdownWriteOptions, XmlWriteOptions, read_csv_str, read_csv_with_index_cols,
-        read_excel_bytes, read_feather_bytes, read_parquet_bytes, write_csv_string,
+        MarkdownWriteOptions, XmlReadOptions, XmlWriteOptions, read_csv_str,
+        read_csv_with_index_cols, read_excel_bytes, read_feather_bytes, read_parquet_bytes,
+        read_xml, read_xml_str, read_xml_str_with_options, write_csv_string,
         write_csv_string_with_options, write_html, write_html_string,
         write_html_string_with_options, write_jsonl_string, write_latex_string,
         write_latex_string_with_options, write_markdown_string, write_markdown_string_with_options,
@@ -8248,6 +8478,163 @@ mod tests {
             std::fs::read_to_string(&no_index_path).expect("read trait xml"),
             write_xml_string_with_options(&frame, &no_index_options).expect("free xml options")
         );
+    }
+
+    #[test]
+    fn xml_reader_parses_pandas_row_shape_and_empty_values() {
+        let xml = concat!(
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n",
+            "<data>\n",
+            "  <row>\n",
+            "    <index>0</index>\n",
+            "    <a>1</a>\n",
+            "    <b/>\n",
+            "  </row>\n",
+            "  <row>\n",
+            "    <index>1</index>\n",
+            "    <a>2.5</a>\n",
+            "    <b>x</b>\n",
+            "  </row>\n",
+            "</data>\n",
+        );
+
+        let frame = read_xml_str(xml).expect("read xml");
+
+        assert_eq!(
+            frame
+                .column_names()
+                .into_iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["index", "a", "b"]
+        );
+        assert_eq!(
+            frame.index().labels(),
+            &[IndexLabel::Int64(0), IndexLabel::Int64(1)]
+        );
+        assert_eq!(
+            frame.column("index").expect("index").values()[0],
+            Scalar::Int64(0)
+        );
+        assert_eq!(
+            frame.column("a").expect("a").values()[1],
+            Scalar::Float64(2.5)
+        );
+        assert!(matches!(
+            frame.column("b").expect("b").values()[0],
+            Scalar::Null(NullKind::Null)
+        ));
+        assert_eq!(
+            frame.column("b").expect("b").values()[1],
+            Scalar::Utf8("x".to_owned())
+        );
+    }
+
+    #[test]
+    fn xml_reader_roundtrips_writer_output_as_columns() {
+        let source = make_table_format_dataframe();
+        let xml = write_xml_string(&source).expect("write xml");
+
+        let frame = read_xml_str(&xml).expect("read writer xml");
+
+        assert_eq!(
+            frame
+                .column_names()
+                .into_iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["row", "name", "value"]
+        );
+        assert_eq!(
+            frame.column("row").expect("row").values()[0],
+            Scalar::Utf8("r&1".to_owned())
+        );
+        assert_eq!(
+            frame.column("name").expect("name").values()[0],
+            Scalar::Utf8("A|B".to_owned())
+        );
+        assert!(frame.column("value").expect("value").values()[0].is_missing());
+        assert_eq!(
+            frame.column("value").expect("value").values()[1],
+            Scalar::Float64(2.0)
+        );
+    }
+
+    #[test]
+    fn xml_reader_unescapes_text_and_supports_custom_row_names() {
+        let xml = concat!(
+            "<records>\n",
+            "  <entry><name>A&amp;B &lt;tag&gt; \"quote\" it's</name><flag>True</flag></entry>\n",
+            "  <entry><name>line\n",
+            "next</name><flag>false</flag></entry>\n",
+            "</records>\n",
+        );
+
+        let frame = read_xml_str_with_options(
+            xml,
+            &XmlReadOptions {
+                row_name: "entry".to_owned(),
+            },
+        )
+        .expect("read custom xml");
+
+        assert_eq!(
+            frame.column("name").expect("name").values()[0],
+            Scalar::Utf8("A&B <tag> \"quote\" it's".to_owned())
+        );
+        assert_eq!(
+            frame.column("name").expect("name").values()[1],
+            Scalar::Utf8("line\nnext".to_owned())
+        );
+        assert_eq!(
+            frame.column("flag").expect("flag").values()[0],
+            Scalar::Bool(true)
+        );
+        assert_eq!(
+            frame.column("flag").expect("flag").values()[1],
+            Scalar::Bool(false)
+        );
+    }
+
+    #[test]
+    fn xml_reader_path_reader_matches_string_reader() {
+        use std::io::Write;
+
+        let xml = "<data><row><name>A</name></row></data>\n";
+        let path = std::env::temp_dir().join(format!(
+            "fp_io_xml_reader_{}_{}.xml",
+            std::process::id(),
+            line!()
+        ));
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .expect("create xml fixture");
+        file.write_all(xml.as_bytes()).expect("write xml fixture");
+
+        let via_path = read_xml(&path).expect("read path xml");
+        let via_str = read_xml_str(xml).expect("read string xml");
+
+        assert_eq!(via_path.column_names(), via_str.column_names());
+        assert_eq!(
+            via_path.column("name").expect("path name").values(),
+            via_str.column("name").expect("str name").values()
+        );
+    }
+
+    #[test]
+    fn xml_reader_rejects_malformed_nested_and_duplicate_fields() {
+        let malformed = "<data><row><name>A</row></data>";
+        assert!(matches!(read_xml_str(malformed), Err(IoError::Xml(_))));
+
+        let nested = "<data><row><name><inner>A</inner></name></row></data>";
+        let err = read_xml_str(nested).expect_err("nested field error");
+        assert!(matches!(err, IoError::Xml(message) if message.contains("nested xml element")));
+
+        let duplicate = "<data><row><name>A</name><name>B</name></row></data>";
+        let err = read_xml_str(duplicate).expect_err("duplicate field error");
+        assert!(matches!(err, IoError::Xml(message) if message.contains("duplicate xml field")));
     }
 
     // === AG-07-T: CSV Parser Optimization Tests ===
