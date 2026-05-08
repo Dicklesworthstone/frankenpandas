@@ -5478,6 +5478,16 @@ impl MultiIndex {
         Ok(positions)
     }
 
+    /// Return row positions for a list-like exact or partial-prefix selector.
+    ///
+    /// Matches the list-label subset of `pd.MultiIndex.get_locs(seq)`.
+    pub fn get_locs(&self, key: &[IndexLabel]) -> Result<Vec<usize>, IndexError> {
+        if key.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.get_loc(key, None)
+    }
+
     /// pandas-style partial tuple lookup returning matching positions and the remaining index.
     pub fn get_loc_level(
         &self,
@@ -9375,6 +9385,43 @@ mod tests {
         let key = [IndexLabel::Utf8("east".into())];
 
         assert!(mi.get_slice_bound(&key, "middle").is_err());
+    }
+
+    #[test]
+    fn multi_index_get_locs_prefix_and_exact_selectors_d89fe10() -> Result<(), super::IndexError> {
+        let mi = MultiIndex::from_tuples(vec![
+            vec!["a".into(), 1_i64.into()],
+            vec!["a".into(), 2_i64.into()],
+            vec!["b".into(), 1_i64.into()],
+            vec!["b".into(), 2_i64.into()],
+        ])?;
+
+        assert_eq!(mi.get_locs(&[IndexLabel::Utf8("a".into())])?, vec![0, 1]);
+        assert_eq!(
+            mi.get_locs(&[IndexLabel::Utf8("a".into()), IndexLabel::Int64(1)])?,
+            vec![0]
+        );
+        assert_eq!(mi.get_locs(&[])?, Vec::<usize>::new());
+
+        Ok(())
+    }
+
+    #[test]
+    fn multi_index_get_locs_rejects_missing_and_overlong_keys_d89fe10()
+    -> Result<(), super::IndexError> {
+        let mi = MultiIndex::from_tuples(vec![vec!["a".into(), 1_i64.into()]])?;
+
+        assert!(mi.get_locs(&[IndexLabel::Utf8("z".into())]).is_err());
+        assert!(
+            mi.get_locs(&[
+                IndexLabel::Utf8("a".into()),
+                IndexLabel::Int64(1),
+                IndexLabel::Utf8("extra".into()),
+            ])
+            .is_err()
+        );
+
+        Ok(())
     }
 
     #[test]
