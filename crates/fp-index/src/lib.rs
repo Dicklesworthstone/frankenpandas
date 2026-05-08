@@ -4590,6 +4590,40 @@ impl MultiIndex {
         self
     }
 
+    /// Rename all MultiIndex levels, matching `pd.MultiIndex.rename(names)`.
+    ///
+    /// Unlike [`Self::set_names`], pandas rename requires one name per level
+    /// and returns a renamed clone without mutating the source index.
+    pub fn rename(&self, names: Vec<Option<String>>) -> Result<Self, IndexError> {
+        if names.len() != self.nlevels() {
+            return Err(IndexError::LengthMismatch {
+                expected: self.nlevels(),
+                actual: names.len(),
+                context: "MultiIndex.rename names length".to_owned(),
+            });
+        }
+        Ok(Self {
+            levels: self.levels.clone(),
+            names,
+        })
+    }
+
+    /// Rename one MultiIndex level, matching `pd.MultiIndex.rename(name, level=...)`.
+    pub fn rename_level(&self, name: Option<String>, level: usize) -> Result<Self, IndexError> {
+        if level >= self.nlevels() {
+            return Err(IndexError::OutOfBounds {
+                position: level,
+                length: self.nlevels(),
+            });
+        }
+        let mut names = self.names.clone();
+        names[level] = name;
+        Ok(Self {
+            levels: self.levels.clone(),
+            names,
+        })
+    }
+
     fn shared_names(&self, other: &Self) -> Vec<Option<String>> {
         self.names
             .iter()
@@ -9409,6 +9443,68 @@ mod tests {
         let (reindexed, indexer) = source.reindex(&target)?;
         assert_eq!(reindexed, target);
         assert_eq!(indexer, vec![-1]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn multi_index_rename_replaces_all_names_d89fe5() -> Result<(), super::IndexError> {
+        let source = MultiIndex::from_tuples(vec![vec!["a".into(), 1_i64.into()]])?
+            .set_names(vec![Some("old0".into()), Some("old1".into())]);
+
+        let renamed = source.rename(vec![Some("new0".into()), Some("new1".into())])?;
+
+        assert_eq!(renamed.names(), &[Some("new0".into()), Some("new1".into())]);
+        assert_eq!(source.names(), &[Some("old0".into()), Some("old1".into())]);
+        assert_eq!(renamed.to_list(), source.to_list());
+
+        Ok(())
+    }
+
+    #[test]
+    fn multi_index_rename_level_replaces_one_name_d89fe5() -> Result<(), super::IndexError> {
+        let source = MultiIndex::from_tuples(vec![vec!["a".into(), 1_i64.into()]])?
+            .set_names(vec![Some("old0".into()), Some("old1".into())]);
+
+        let renamed = source.rename_level(Some("new1".into()), 1)?;
+
+        assert_eq!(renamed.names(), &[Some("old0".into()), Some("new1".into())]);
+        assert_eq!(source.names(), &[Some("old0".into()), Some("old1".into())]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn multi_index_rename_rejects_wrong_name_count_d89fe5() -> Result<(), super::IndexError> {
+        let source = MultiIndex::from_tuples(vec![vec!["a".into(), 1_i64.into()]])?;
+
+        let err = source.rename(vec![Some("only".into())]).unwrap_err();
+
+        assert!(matches!(
+            err,
+            super::IndexError::LengthMismatch {
+                expected: 2,
+                actual: 1,
+                ..
+            }
+        ));
+
+        Ok(())
+    }
+
+    #[test]
+    fn multi_index_rename_level_rejects_out_of_bounds_d89fe5() -> Result<(), super::IndexError> {
+        let source = MultiIndex::from_tuples(vec![vec!["a".into(), 1_i64.into()]])?;
+
+        let err = source.rename_level(Some("missing".into()), 2).unwrap_err();
+
+        assert!(matches!(
+            err,
+            super::IndexError::OutOfBounds {
+                position: 2,
+                length: 2
+            }
+        ));
 
         Ok(())
     }
