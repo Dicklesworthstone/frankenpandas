@@ -13200,6 +13200,18 @@ impl SeriesGroupBy<'_> {
         })
     }
 
+    /// Grouped rolling window operations.
+    ///
+    /// Matches the narrow `pd.SeriesGroupBy.rolling(window)` reduction shape.
+    /// Results are mapped back onto the original flat Series index.
+    pub fn rolling(&self, window: usize) -> SeriesGroupByRolling<'_, '_> {
+        SeriesGroupByRolling {
+            groupby: self,
+            window,
+            min_periods: window,
+        }
+    }
+
     fn select_extreme_positions(&self, n: usize, largest: bool) -> Vec<usize> {
         if n == 0 {
             return Vec::new();
@@ -13662,6 +13674,139 @@ impl SeriesGroupBy<'_> {
     /// pandas spelling alias for [`Self::agg`].
     pub fn aggregate(&self, funcs: &[&str]) -> Result<DataFrame, FrameError> {
         self.agg(funcs)
+    }
+}
+
+/// Grouped rolling window over a `SeriesGroupBy`.
+///
+/// Created by `SeriesGroupBy::rolling()`. Applies existing Series rolling
+/// operations within each group independently, then maps the results back to
+/// the original flat Series index.
+pub struct SeriesGroupByRolling<'grouped, 'data> {
+    groupby: &'grouped SeriesGroupBy<'data>,
+    window: usize,
+    min_periods: usize,
+}
+
+impl SeriesGroupByRolling<'_, '_> {
+    fn apply_grouped_rolling<F>(&self, agg: F) -> Result<Series, FrameError>
+    where
+        F: Fn(&Series, usize, usize) -> Result<Series, FrameError>,
+    {
+        let (_order, order_keys, groups) = self.groupby.build_groups();
+        let mut out = vec![Scalar::Null(NullKind::NaN); self.groupby.series.len()];
+
+        for key in &order_keys {
+            let row_indices = groups.get(key).ok_or_else(|| {
+                FrameError::CompatibilityRejected(
+                    "group key missing from SeriesGroupBy rolling state".to_owned(),
+                )
+            })?;
+            let mut group_values = Vec::with_capacity(row_indices.len());
+            for &idx in row_indices {
+                let value = self
+                    .groupby
+                    .series
+                    .values()
+                    .get(idx)
+                    .cloned()
+                    .ok_or_else(|| {
+                        FrameError::CompatibilityRejected(
+                            "SeriesGroupBy rolling source index out of bounds".to_owned(),
+                        )
+                    })?;
+                group_values.push(value);
+            }
+
+            let mut group_index = Vec::with_capacity(group_values.len());
+            for pos in 0..group_values.len() {
+                let label = i64::try_from(pos).map_err(|_| {
+                    FrameError::CompatibilityRejected(
+                        "SeriesGroupBy rolling group is too large to label".to_owned(),
+                    )
+                })?;
+                group_index.push(IndexLabel::Int64(label));
+            }
+
+            let group_series =
+                Series::from_values(self.groupby.series.name(), group_index, group_values)?;
+            let rolled = agg(&group_series, self.window, self.min_periods)?;
+            if rolled.len() != row_indices.len() {
+                return Err(FrameError::LengthMismatch {
+                    index_len: row_indices.len(),
+                    column_len: rolled.len(),
+                });
+            }
+
+            for (group_pos, &source_pos) in row_indices.iter().enumerate() {
+                let value = rolled.values().get(group_pos).cloned().ok_or_else(|| {
+                    FrameError::CompatibilityRejected(
+                        "SeriesGroupBy rolling result index out of bounds".to_owned(),
+                    )
+                })?;
+                let slot = out.get_mut(source_pos).ok_or_else(|| {
+                    FrameError::CompatibilityRejected(
+                        "SeriesGroupBy rolling output index out of bounds".to_owned(),
+                    )
+                })?;
+                *slot = value;
+            }
+        }
+
+        self.groupby.series_from_groupby_apply_parts(
+            self.groupby.series.name(),
+            self.groupby.series.index().labels().to_vec(),
+            out,
+        )
+    }
+
+    /// Grouped rolling sum.
+    pub fn sum(&self) -> Result<Series, FrameError> {
+        self.apply_grouped_rolling(|series, window, min_periods| {
+            series.rolling(window, Some(min_periods)).sum()
+        })
+    }
+
+    /// Grouped rolling mean.
+    pub fn mean(&self) -> Result<Series, FrameError> {
+        self.apply_grouped_rolling(|series, window, min_periods| {
+            series.rolling(window, Some(min_periods)).mean()
+        })
+    }
+
+    /// Grouped rolling minimum.
+    pub fn min(&self) -> Result<Series, FrameError> {
+        self.apply_grouped_rolling(|series, window, min_periods| {
+            series.rolling(window, Some(min_periods)).min()
+        })
+    }
+
+    /// Grouped rolling maximum.
+    pub fn max(&self) -> Result<Series, FrameError> {
+        self.apply_grouped_rolling(|series, window, min_periods| {
+            series.rolling(window, Some(min_periods)).max()
+        })
+    }
+
+    /// Grouped rolling sample standard deviation.
+    pub fn std(&self) -> Result<Series, FrameError> {
+        self.apply_grouped_rolling(|series, window, min_periods| {
+            series.rolling(window, Some(min_periods)).std()
+        })
+    }
+
+    /// Grouped rolling count of non-null values.
+    pub fn count(&self) -> Result<Series, FrameError> {
+        self.apply_grouped_rolling(|series, window, min_periods| {
+            series.rolling(window, Some(min_periods)).count()
+        })
+    }
+
+    /// Grouped rolling sample variance.
+    pub fn var(&self) -> Result<Series, FrameError> {
+        self.apply_grouped_rolling(|series, window, min_periods| {
+            series.rolling(window, Some(min_periods)).var()
+        })
     }
 }
 
@@ -68265,6 +68410,89 @@ mod tests {
         })?;
         assert!(empty.is_empty());
         assert_eq!(empty.dtype(), DType::Float64);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_series_groupby_rolling_reductions_qfabo() -> Result<(), FrameError> {
+        let values = Series::from_values(
+            "data",
+            vec![
+                IndexLabel::Int64(10),
+                IndexLabel::Int64(11),
+                IndexLabel::Int64(12),
+                IndexLabel::Int64(13),
+                IndexLabel::Int64(14),
+            ],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(10.0),
+                Scalar::Float64(20.0),
+                Scalar::Float64(30.0),
+            ],
+        )?;
+        let groups = Series::from_values(
+            "grp",
+            vec![
+                IndexLabel::Int64(10),
+                IndexLabel::Int64(11),
+                IndexLabel::Int64(12),
+                IndexLabel::Int64(13),
+                IndexLabel::Int64(14),
+            ],
+            vec![
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("b".into()),
+            ],
+        )?;
+        let grouped = values.groupby(&groups)?;
+        let rolling = grouped.rolling(2);
+
+        let sums = rolling.sum()?;
+        assert_eq!(sums.index().labels(), values.index().labels());
+        assert!(matches!(
+            sums.values(),
+            [
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(a),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(b),
+                Scalar::Float64(c),
+            ] if (*a - 3.0).abs() < 1e-12
+                && (*b - 30.0).abs() < 1e-12
+                && (*c - 50.0).abs() < 1e-12
+        ));
+
+        let means = rolling.mean()?;
+        assert!(matches!(
+            means.values(),
+            [
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(a),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(b),
+                Scalar::Float64(c),
+            ] if (*a - 1.5).abs() < 1e-12
+                && (*b - 15.0).abs() < 1e-12
+                && (*c - 25.0).abs() < 1e-12
+        ));
+
+        let counts = rolling.count()?;
+        assert_eq!(
+            counts.values(),
+            &[
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(2.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(2.0),
+                Scalar::Float64(2.0),
+            ]
+        );
 
         Ok(())
     }
