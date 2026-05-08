@@ -13237,6 +13237,18 @@ impl SeriesGroupBy<'_> {
         }
     }
 
+    /// Grouped resampling.
+    ///
+    /// Matches the narrow `pd.SeriesGroupBy.resample(freq)` reduction shape.
+    /// Until row MultiIndex support is real, group and bucket labels are
+    /// represented as flat `"{group}, {bucket}"` labels.
+    pub fn resample(&self, freq: &str) -> SeriesGroupByResample<'_, '_> {
+        SeriesGroupByResample {
+            groupby: self,
+            freq: freq.to_owned(),
+        }
+    }
+
     fn select_extreme_positions(&self, n: usize, largest: bool) -> Vec<usize> {
         if n == 0 {
             return Vec::new();
@@ -13699,6 +13711,118 @@ impl SeriesGroupBy<'_> {
     /// pandas spelling alias for [`Self::agg`].
     pub fn aggregate(&self, funcs: &[&str]) -> Result<DataFrame, FrameError> {
         self.agg(funcs)
+    }
+}
+
+/// Grouped resampling over a `SeriesGroupBy`.
+///
+/// Created by `SeriesGroupBy::resample()`. Applies existing Series resample
+/// operations within each group independently.
+pub struct SeriesGroupByResample<'grouped, 'data> {
+    groupby: &'grouped SeriesGroupBy<'data>,
+    freq: String,
+}
+
+impl SeriesGroupByResample<'_, '_> {
+    fn apply_grouped_resample<F>(&self, agg: F) -> Result<Series, FrameError>
+    where
+        F: Fn(&Series, &str) -> Result<Series, FrameError>,
+    {
+        let (order, order_keys, groups) = self.groupby.build_groups();
+        let mut out_labels = Vec::new();
+        let mut out_values = Vec::new();
+
+        for (group_pos, key) in order_keys.iter().enumerate() {
+            let row_indices = groups.get(key).ok_or_else(|| {
+                FrameError::CompatibilityRejected(
+                    "group key missing from SeriesGroupBy resample state".to_owned(),
+                )
+            })?;
+            let mut group_labels = Vec::with_capacity(row_indices.len());
+            let mut group_values = Vec::with_capacity(row_indices.len());
+            for &idx in row_indices {
+                let label = self
+                    .groupby
+                    .series
+                    .index()
+                    .labels()
+                    .get(idx)
+                    .cloned()
+                    .ok_or_else(|| {
+                        FrameError::CompatibilityRejected(
+                            "SeriesGroupBy resample source index out of bounds".to_owned(),
+                        )
+                    })?;
+                let value = self
+                    .groupby
+                    .series
+                    .values()
+                    .get(idx)
+                    .cloned()
+                    .ok_or_else(|| {
+                        FrameError::CompatibilityRejected(
+                            "SeriesGroupBy resample source value out of bounds".to_owned(),
+                        )
+                    })?;
+                group_labels.push(label);
+                group_values.push(value);
+            }
+
+            let group_series =
+                Series::from_values(self.groupby.series.name(), group_labels, group_values)?;
+            let resampled = agg(&group_series, &self.freq)?;
+            let group_label = &order[group_pos];
+            for (bucket_label, value) in resampled
+                .index()
+                .labels()
+                .iter()
+                .zip(resampled.values().iter())
+            {
+                out_labels.push(IndexLabel::Utf8(format!("{group_label}, {bucket_label}")));
+                out_values.push(value.clone());
+            }
+        }
+
+        self.groupby.series_from_groupby_apply_parts(
+            self.groupby.series.name(),
+            out_labels,
+            out_values,
+        )
+    }
+
+    /// Grouped resample sum.
+    pub fn sum(&self) -> Result<Series, FrameError> {
+        self.apply_grouped_resample(|series, freq| series.resample(freq).sum())
+    }
+
+    /// Grouped resample mean.
+    pub fn mean(&self) -> Result<Series, FrameError> {
+        self.apply_grouped_resample(|series, freq| series.resample(freq).mean())
+    }
+
+    /// Grouped resample count.
+    pub fn count(&self) -> Result<Series, FrameError> {
+        self.apply_grouped_resample(|series, freq| series.resample(freq).count())
+    }
+
+    /// Grouped resample minimum.
+    pub fn min(&self) -> Result<Series, FrameError> {
+        self.apply_grouped_resample(|series, freq| series.resample(freq).min())
+    }
+
+    /// Grouped resample maximum.
+    pub fn max(&self) -> Result<Series, FrameError> {
+        self.apply_grouped_resample(|series, freq| series.resample(freq).max())
+    }
+
+    /// Grouped resample first non-null value.
+    pub fn first(&self) -> Result<Series, FrameError> {
+        self.apply_grouped_resample(|series, freq| series.resample(freq).first())
+    }
+
+    /// Grouped resample last non-null value.
+    pub fn last(&self) -> Result<Series, FrameError> {
+        self.apply_grouped_resample(|series, freq| series.resample(freq).last())
     }
 }
 
@@ -68924,6 +69048,112 @@ mod tests {
                 && (*d - 25.0).abs() < 1e-12
                 && (*e - 42.5).abs() < 1e-12
         ));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_series_groupby_resample_reductions_meqrr() -> Result<(), FrameError> {
+        let values = Series::from_values(
+            "sales",
+            vec![
+                IndexLabel::Utf8("2024-01-05".into()),
+                IndexLabel::Utf8("2024-01-20".into()),
+                IndexLabel::Utf8("2024-01-07".into()),
+                IndexLabel::Utf8("2024-02-03".into()),
+                IndexLabel::Utf8("2024-02-08".into()),
+            ],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(10.0),
+                Scalar::Float64(20.0),
+                Scalar::Float64(30.0),
+            ],
+        )?;
+        let groups = Series::from_values(
+            "store",
+            vec![
+                IndexLabel::Utf8("2024-01-05".into()),
+                IndexLabel::Utf8("2024-01-20".into()),
+                IndexLabel::Utf8("2024-01-07".into()),
+                IndexLabel::Utf8("2024-02-03".into()),
+                IndexLabel::Utf8("2024-02-08".into()),
+            ],
+            vec![
+                Scalar::Utf8("east".into()),
+                Scalar::Utf8("east".into()),
+                Scalar::Utf8("west".into()),
+                Scalar::Utf8("west".into()),
+                Scalar::Utf8("east".into()),
+            ],
+        )?;
+        let grouped = values.groupby(&groups)?;
+        let resample = grouped.resample("M");
+
+        let sums = resample.sum()?;
+        assert_eq!(
+            sums.index().labels(),
+            &[
+                IndexLabel::Utf8("east, 2024-01".into()),
+                IndexLabel::Utf8("east, 2024-02".into()),
+                IndexLabel::Utf8("west, 2024-01".into()),
+                IndexLabel::Utf8("west, 2024-02".into()),
+            ]
+        );
+        assert_eq!(
+            sums.values(),
+            &[
+                Scalar::Float64(3.0),
+                Scalar::Float64(30.0),
+                Scalar::Float64(10.0),
+                Scalar::Float64(20.0),
+            ]
+        );
+
+        let means = resample.mean()?;
+        assert_eq!(
+            means.values(),
+            &[
+                Scalar::Float64(1.5),
+                Scalar::Float64(30.0),
+                Scalar::Float64(10.0),
+                Scalar::Float64(20.0),
+            ]
+        );
+
+        let counts = resample.count()?;
+        assert_eq!(
+            counts.values(),
+            &[
+                Scalar::Int64(2),
+                Scalar::Int64(1),
+                Scalar::Int64(1),
+                Scalar::Int64(1),
+            ]
+        );
+
+        let first = resample.first()?;
+        assert_eq!(
+            first.values(),
+            &[
+                Scalar::Float64(1.0),
+                Scalar::Float64(30.0),
+                Scalar::Float64(10.0),
+                Scalar::Float64(20.0),
+            ]
+        );
+
+        let last = resample.last()?;
+        assert_eq!(
+            last.values(),
+            &[
+                Scalar::Float64(2.0),
+                Scalar::Float64(30.0),
+                Scalar::Float64(10.0),
+                Scalar::Float64(20.0),
+            ]
+        );
 
         Ok(())
     }
