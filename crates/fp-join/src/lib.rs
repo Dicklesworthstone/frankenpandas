@@ -2516,11 +2516,11 @@ mod tests {
 
     // ---- DataFrame merge tests (bd-2gi.17) ----
 
-    use fp_frame::DataFrame;
+    use fp_frame::{DataFrame, FrameError};
 
     use super::{
-        MergeExecutionOptions, MergeValidateMode, merge_dataframes, merge_dataframes_on,
-        merge_dataframes_on_with, merge_dataframes_on_with_options,
+        JoinError, MergeExecutionOptions, MergeValidateMode, MergedDataFrame, merge_dataframes,
+        merge_dataframes_on, merge_dataframes_on_with, merge_dataframes_on_with_options,
     };
 
     fn make_left_df() -> DataFrame {
@@ -2555,6 +2555,42 @@ mod tests {
             ],
         )
         .unwrap()
+    }
+
+    fn merged_values<'a>(
+        merged: &'a MergedDataFrame,
+        name: &str,
+    ) -> Result<&'a [Scalar], JoinError> {
+        Ok(merged
+            .columns
+            .get(name)
+            .ok_or_else(|| {
+                JoinError::Frame(FrameError::CompatibilityRejected(format!(
+                    "missing merged column '{name}'"
+                )))
+            })?
+            .values())
+    }
+
+    fn merged_values_where_indicator(
+        merged: &MergedDataFrame,
+        column_name: &str,
+        indicator_name: &str,
+        indicator_value: &str,
+    ) -> Result<Vec<Scalar>, JoinError> {
+        let values = merged_values(merged, column_name)?;
+        let indicators = merged_values(merged, indicator_name)?;
+        Ok(values
+            .iter()
+            .zip(indicators.iter())
+            .filter_map(|(value, indicator)| {
+                if matches!(indicator, Scalar::Utf8(v) if v == indicator_value) {
+                    Some(value.clone())
+                } else {
+                    None
+                }
+            })
+            .collect())
     }
 
     #[test]
@@ -3084,6 +3120,250 @@ mod tests {
         let merged = merge_dataframes(&left, &right, "id", JoinType::Inner).unwrap();
         // 2 left × 2 right = 4 rows
         assert_eq!(merged.columns.get("id").unwrap().len(), 4);
+    }
+
+    #[test]
+    fn merge_null_nan_keys_metamorphic_unmatched_rows_do_not_disturb_inner_tn6qb8()
+    -> Result<(), JoinError> {
+        let left = DataFrame::from_dict(
+            &["id", "left_v"],
+            vec![
+                (
+                    "id",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Null(NullKind::NaN),
+                        Scalar::Null(NullKind::Null),
+                        Scalar::Float64(2.0),
+                    ],
+                ),
+                (
+                    "left_v",
+                    vec![
+                        Scalar::Int64(10),
+                        Scalar::Int64(20),
+                        Scalar::Int64(21),
+                        Scalar::Int64(30),
+                    ],
+                ),
+            ],
+        )?;
+        let right = DataFrame::from_dict(
+            &["id", "right_v"],
+            vec![
+                (
+                    "id",
+                    vec![
+                        Scalar::Null(NullKind::Null),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(f64::NAN),
+                    ],
+                ),
+                (
+                    "right_v",
+                    vec![Scalar::Int64(200), Scalar::Int64(300), Scalar::Int64(201)],
+                ),
+            ],
+        )?;
+
+        let baseline = merge_dataframes(&left, &right, "id", JoinType::Inner)?;
+
+        let left_with_unmatched = DataFrame::from_dict(
+            &["id", "left_v"],
+            vec![
+                (
+                    "id",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Null(NullKind::NaN),
+                        Scalar::Null(NullKind::Null),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(99.0),
+                    ],
+                ),
+                (
+                    "left_v",
+                    vec![
+                        Scalar::Int64(10),
+                        Scalar::Int64(20),
+                        Scalar::Int64(21),
+                        Scalar::Int64(30),
+                        Scalar::Int64(990),
+                    ],
+                ),
+            ],
+        )?;
+        let right_with_unmatched = DataFrame::from_dict(
+            &["id", "right_v"],
+            vec![
+                (
+                    "id",
+                    vec![
+                        Scalar::Null(NullKind::Null),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(f64::NAN),
+                        Scalar::Float64(100.0),
+                    ],
+                ),
+                (
+                    "right_v",
+                    vec![
+                        Scalar::Int64(200),
+                        Scalar::Int64(300),
+                        Scalar::Int64(201),
+                        Scalar::Int64(1000),
+                    ],
+                ),
+            ],
+        )?;
+
+        let transformed = merge_dataframes(
+            &left_with_unmatched,
+            &right_with_unmatched,
+            "id",
+            JoinType::Inner,
+        )?;
+
+        assert_eq!(
+            merged_values(&baseline, "left_v")?,
+            merged_values(&transformed, "left_v")?
+        );
+        assert_eq!(
+            merged_values(&baseline, "right_v")?,
+            merged_values(&transformed, "right_v")?
+        );
+        assert_eq!(
+            merged_values(&baseline, "left_v")?,
+            &[
+                Scalar::Int64(20),
+                Scalar::Int64(20),
+                Scalar::Int64(21),
+                Scalar::Int64(21),
+                Scalar::Int64(30),
+            ]
+        );
+        assert_eq!(
+            merged_values(&baseline, "right_v")?,
+            &[
+                Scalar::Int64(200),
+                Scalar::Int64(201),
+                Scalar::Int64(200),
+                Scalar::Int64(201),
+                Scalar::Int64(300),
+            ]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn merge_mixed_dtype_missing_keys_metamorphic_outer_both_equals_inner_tn6qb8()
+    -> Result<(), JoinError> {
+        let left = DataFrame::from_dict(
+            &["id", "left_v"],
+            vec![
+                (
+                    "id",
+                    vec![
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                        Scalar::Null(NullKind::NaN),
+                        Scalar::Int64(3),
+                    ],
+                ),
+                (
+                    "left_v",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(30.0),
+                        Scalar::Float64(40.0),
+                    ],
+                ),
+            ],
+        )?;
+        let right = DataFrame::from_dict(
+            &["id", "right_v"],
+            vec![
+                (
+                    "id",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.5),
+                        Scalar::Null(NullKind::Null),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
+                (
+                    "right_v",
+                    vec![
+                        Scalar::Float64(100.0),
+                        Scalar::Float64(250.0),
+                        Scalar::Float64(300.0),
+                        Scalar::Float64(400.0),
+                    ],
+                ),
+            ],
+        )?;
+        let options = MergeExecutionOptions {
+            indicator_name: Some("_merge".to_owned()),
+            sort: true,
+            ..MergeExecutionOptions::default()
+        };
+
+        let inner = merge_dataframes_on_with_options(
+            &left,
+            &right,
+            &["id"],
+            &["id"],
+            JoinType::Inner,
+            options.clone(),
+        )?;
+        let outer = merge_dataframes_on_with_options(
+            &left,
+            &right,
+            &["id"],
+            &["id"],
+            JoinType::Outer,
+            options,
+        )?;
+
+        assert_eq!(
+            merged_values(&inner, "left_v")?,
+            merged_values_where_indicator(&outer, "left_v", "_merge", "both")?
+        );
+        assert_eq!(
+            merged_values(&inner, "right_v")?,
+            merged_values_where_indicator(&outer, "right_v", "_merge", "both")?
+        );
+        assert_eq!(
+            merged_values(&inner, "left_v")?,
+            &[
+                Scalar::Float64(10.0),
+                Scalar::Float64(40.0),
+                Scalar::Float64(30.0)
+            ]
+        );
+        assert_eq!(
+            merged_values(&inner, "right_v")?,
+            &[
+                Scalar::Float64(100.0),
+                Scalar::Float64(400.0),
+                Scalar::Float64(300.0)
+            ]
+        );
+        assert_eq!(
+            merged_values(&outer, "_merge")?,
+            &[
+                Scalar::Utf8("both".to_owned()),
+                Scalar::Utf8("left_only".to_owned()),
+                Scalar::Utf8("right_only".to_owned()),
+                Scalar::Utf8("both".to_owned()),
+                Scalar::Utf8("both".to_owned()),
+            ]
+        );
+
+        Ok(())
     }
 
     #[test]
