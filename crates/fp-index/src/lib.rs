@@ -5602,6 +5602,15 @@ impl MultiIndex {
         }
     }
 
+    /// Reindex to a target MultiIndex, returning the target and source positions.
+    ///
+    /// Matches `pd.MultiIndex.reindex(target)` for unique source indexes:
+    /// the returned index is the requested target, and the indexer maps each
+    /// target tuple to its source position or `-1` for missing tuples.
+    pub fn reindex(&self, target: &Self) -> Result<(Self, Vec<isize>), IndexError> {
+        Ok((target.clone(), self.get_indexer(target)?))
+    }
+
     /// Per-row flag for duplicated composite tuples.
     ///
     /// Matches `pd.MultiIndex.duplicated(keep='first'|'last'|False)`.
@@ -9354,6 +9363,52 @@ mod tests {
 
         assert_eq!(source.get_indexer(&target)?, vec![-1, -1]);
         assert_eq!(source.get_indexer_for(&target)?, vec![-1, -1]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn multi_index_reindex_maps_target_hits_and_missing_d89fe4() -> Result<(), super::IndexError> {
+        let source = MultiIndex::from_tuples(vec![
+            vec!["a".into(), 1_i64.into()],
+            vec!["b".into(), 2_i64.into()],
+            vec!["c".into(), 3_i64.into()],
+        ])?;
+        let target = MultiIndex::from_tuples(vec![
+            vec!["b".into(), 2_i64.into()],
+            vec!["z".into(), 9_i64.into()],
+            vec!["a".into(), 1_i64.into()],
+        ])?
+        .set_names(vec![Some("letter".into()), Some("number".into())]);
+
+        let (reindexed, indexer) = source.reindex(&target)?;
+        assert_eq!(reindexed, target);
+        assert_eq!(indexer, vec![1, -1, 0]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn multi_index_reindex_rejects_duplicate_source_d89fe4() -> Result<(), super::IndexError> {
+        let source = MultiIndex::from_tuples(vec![
+            vec!["a".into(), 1_i64.into()],
+            vec!["a".into(), 1_i64.into()],
+        ])?;
+        let target = MultiIndex::from_tuples(vec![vec!["a".into(), 1_i64.into()]])?;
+
+        assert!(source.reindex(&target).is_err());
+
+        Ok(())
+    }
+
+    #[test]
+    fn multi_index_reindex_level_mismatch_marks_missing_d89fe4() -> Result<(), super::IndexError> {
+        let source = MultiIndex::from_tuples(vec![vec!["a".into(), 1_i64.into()]])?;
+        let target = MultiIndex::from_tuples(vec![vec!["a".into()]])?;
+
+        let (reindexed, indexer) = source.reindex(&target)?;
+        assert_eq!(reindexed, target);
+        assert_eq!(indexer, vec![-1]);
 
         Ok(())
     }
