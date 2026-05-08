@@ -5536,6 +5536,52 @@ impl MultiIndex {
         (indexer, missing)
     }
 
+    /// Compute a positional indexer against another MultiIndex.
+    ///
+    /// Matches `pd.MultiIndex.get_indexer(target)` for unique source indexes:
+    /// each target tuple maps to its first source position, and missing target
+    /// tuples map to `-1`. Duplicate source tuples are rejected because pandas
+    /// treats reindexing from a non-unique index as invalid; callers that want
+    /// duplicate expansion should use [`Self::get_indexer_for`] or
+    /// [`Self::get_indexer_non_unique`].
+    pub fn get_indexer(&self, target: &Self) -> Result<Vec<isize>, IndexError> {
+        if self.has_duplicates() {
+            return Err(IndexError::InvalidArgument(
+                "get_indexer requires a uniquely valued MultiIndex".to_owned(),
+            ));
+        }
+        if self.nlevels() != target.nlevels() {
+            return Ok(vec![-1; target.len()]);
+        }
+
+        let mut positions = HashMap::<Vec<IndexLabel>, isize>::with_capacity(self.len());
+        for row in 0..self.len() {
+            positions
+                .entry(self.tuple_at(row))
+                .or_insert(isize::try_from(row).unwrap_or(isize::MAX));
+        }
+
+        Ok((0..target.len())
+            .map(|target_row| {
+                let key = target.tuple_at(target_row);
+                positions.get(&key).copied().unwrap_or(-1)
+            })
+            .collect())
+    }
+
+    /// Compute a positional indexer, expanding duplicate source matches.
+    ///
+    /// Matches `pd.MultiIndex.get_indexer_for(target)`: unique source indexes
+    /// use the compact one-position-per-target form, while non-unique source
+    /// indexes expand every matching source position for each target tuple.
+    pub fn get_indexer_for(&self, target: &Self) -> Result<Vec<isize>, IndexError> {
+        if self.has_duplicates() {
+            Ok(self.get_indexer_non_unique(target).0)
+        } else {
+            self.get_indexer(target)
+        }
+    }
+
     /// Per-row flag for duplicated composite tuples.
     ///
     /// Matches `pd.MultiIndex.duplicated(keep='first'|'last'|False)`.
@@ -9099,6 +9145,71 @@ mod tests {
         let (indexer, missing) = source.get_indexer_non_unique(&target);
         assert_eq!(indexer, vec![0, 3, -1, 1, 0, 3]);
         assert_eq!(missing, vec![1]);
+    }
+
+    #[test]
+    fn multi_index_get_indexer_unique_maps_hits_and_missing_d89fe1() -> Result<(), super::IndexError>
+    {
+        let source = MultiIndex::from_tuples(vec![
+            vec!["a".into(), 1_i64.into()],
+            vec!["b".into(), 2_i64.into()],
+            vec!["c".into(), 3_i64.into()],
+        ])?;
+        let target = MultiIndex::from_tuples(vec![
+            vec!["b".into(), 2_i64.into()],
+            vec!["z".into(), 9_i64.into()],
+            vec!["a".into(), 1_i64.into()],
+        ])?;
+
+        assert_eq!(source.get_indexer(&target)?, vec![1, -1, 0]);
+        assert_eq!(source.get_indexer_for(&target)?, vec![1, -1, 0]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn multi_index_get_indexer_rejects_duplicate_source_d89fe1() -> Result<(), super::IndexError> {
+        let source = MultiIndex::from_tuples(vec![
+            vec!["a".into(), 1_i64.into()],
+            vec!["a".into(), 1_i64.into()],
+            vec!["b".into(), 2_i64.into()],
+        ])?;
+        let target = MultiIndex::from_tuples(vec![
+            vec!["a".into(), 1_i64.into()],
+            vec!["b".into(), 2_i64.into()],
+        ])?;
+
+        let err = match source.get_indexer(&target) {
+            Ok(indexer) => {
+                return Err(super::IndexError::InvalidArgument(format!(
+                    "duplicate source index unexpectedly returned {indexer:?}"
+                )));
+            }
+            Err(err) => err,
+        };
+        assert!(matches!(
+            err,
+            super::IndexError::InvalidArgument(message)
+                if message == "get_indexer requires a uniquely valued MultiIndex"
+        ));
+        assert_eq!(source.get_indexer_for(&target)?, vec![0, 1, 2]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn multi_index_get_indexer_level_mismatch_marks_missing_d89fe1() -> Result<(), super::IndexError>
+    {
+        let source = MultiIndex::from_tuples(vec![
+            vec!["a".into(), 1_i64.into()],
+            vec!["b".into(), 2_i64.into()],
+        ])?;
+        let target = MultiIndex::from_tuples(vec![vec!["a".into()], vec!["b".into()]])?;
+
+        assert_eq!(source.get_indexer(&target)?, vec![-1, -1]);
+        assert_eq!(source.get_indexer_for(&target)?, vec![-1, -1]);
+
+        Ok(())
     }
 
     #[test]
