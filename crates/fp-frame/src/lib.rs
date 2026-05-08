@@ -12451,6 +12451,21 @@ impl SeriesGroupBy<'_> {
         self.indices()
     }
 
+    /// Name of the Series used as the grouper.
+    #[must_use]
+    pub fn grouper(&self) -> String {
+        self.by.name().to_owned()
+    }
+
+    /// Grouping level descriptor.
+    ///
+    /// `Series::groupby(by)` currently groups by a supplied Series rather than
+    /// by an index level, so this mirrors pandas' `None` level state.
+    #[must_use]
+    pub fn level(&self) -> Option<String> {
+        None
+    }
+
     /// Deferred pandas-style grouped plotting hook.
     ///
     /// Matches `pd.Series.groupby(...).plot()` as an explicit in-scope but
@@ -69499,6 +69514,26 @@ mod tests {
                     && (*west - 1.0).abs() < 1e-12
                     && solo.is_nan()
         ));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_series_groupby_grouper_level_60l87() -> Result<(), FrameError> {
+        let values = Series::from_values(
+            "sales",
+            vec![IndexLabel::Int64(0), IndexLabel::Int64(1)],
+            vec![Scalar::Float64(1.0), Scalar::Float64(2.0)],
+        )?;
+        let groups = Series::from_values(
+            "store",
+            vec![IndexLabel::Int64(0), IndexLabel::Int64(1)],
+            vec![Scalar::Utf8("east".into()), Scalar::Utf8("west".into())],
+        )?;
+        let grouped = values.groupby(&groups)?;
+
+        assert_eq!(grouped.grouper(), "store");
+        assert!(grouped.level().is_none());
 
         Ok(())
     }
