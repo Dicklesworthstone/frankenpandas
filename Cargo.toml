@@ -40,6 +40,7 @@ calamine = "0.34.0"
 chrono = { version = "0.4.44", default-features = false, features = ["std"] }
 chrono-tz = "0.10.4"
 csv = "1.4.0"
+dta = "0.5.0"
 parquet = { version = "58.1.0", default-features = false, features = ["arrow", "snap"] }
 quick-xml = "0.39.2"
 regex = "1.12.3"

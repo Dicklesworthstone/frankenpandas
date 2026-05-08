@@ -3,8 +3,8 @@
 
 //! IO layer for **frankenpandas**: round-trips between `DataFrame` and the
 //! twelve supported on-disk / wire formats — CSV, JSON, JSONL, Parquet, Excel
-//! (XLSX), Feather (Arrow IPC v2), SQL, Markdown, LaTeX, HTML, XML, and
-//! Pickle.
+//! (XLSX), Feather (Arrow IPC v2), SQL, Markdown, LaTeX, HTML, XML, Pickle,
+//! and Stata.
 //!
 //! ## Format readers / writers
 //!
@@ -24,6 +24,8 @@
 //!   [`write_xml_string`], [`read_xml_str`].
 //! - **Pickle**: [`write_pickle_bytes`], [`read_pickle_bytes`] for the
 //!   fail-closed FrankenPandas DataFrame snapshot envelope.
+//! - **Stata**: [`write_stata_bytes`], [`read_stata_bytes`] for the bounded
+//!   DTA V118 DataFrame round-trip surface.
 //!
 //! Each format has a per-call options struct ([`CsvReadOptions`],
 //! [`ExcelReadOptions`], [`SqlReadOptions`], [`SqlWriteOptions`], ...) so
@@ -89,6 +91,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
+    io::Cursor,
     path::Path,
     sync::Arc,
 };
@@ -103,6 +106,16 @@ use arrow::{
     datatypes::{DataType as ArrowDataType, Field, Schema, TimeUnit},
 };
 use csv::{ReaderBuilder, StringRecord, WriterBuilder};
+use dta::stata::{
+    dta::{
+        byte_order::ByteOrder, dta_reader::DtaReader, dta_writer::DtaWriter, header::Header,
+        release::Release, schema::Schema as StataSchema, value::Value as StataValue,
+        variable::Variable, variable_type::VariableType,
+    },
+    missing_value::MissingValue,
+    stata_double::StataDouble,
+    stata_long::StataLong,
+};
 use fp_columnar::{Column, ColumnError};
 use fp_frame::{DataFrame, FrameError, Series, ToDatetimeOptions, to_datetime_with_options};
 use fp_index::{Index, IndexError, IndexLabel, format_datetime_ns};
@@ -137,6 +150,8 @@ pub enum IoError {
     Xml(String),
     #[error("pickle error: {0}")]
     Pickle(String),
+    #[error("stata error: {0}")]
+    Stata(String),
     #[error("arrow ipc error: {0}")]
     Arrow(String),
     #[error("sql error: {0}")]
@@ -360,6 +375,10 @@ pub fn write_pickle_bytes(frame: &DataFrame) -> Result<Vec<u8>, IoError> {
     write_pickle_bytes_with_options(frame, &PickleWriteOptions::default())
 }
 
+pub fn write_stata_bytes(frame: &DataFrame) -> Result<Vec<u8>, IoError> {
+    write_stata_bytes_with_options(frame, &StataWriteOptions::default())
+}
+
 /// Options controlling CSV serialization.
 ///
 /// Mirrors the subset of pandas `DataFrame.to_csv` parameters that do
@@ -501,6 +520,24 @@ impl Default for PickleWriteOptions {
 pub struct PickleReadOptions {
     /// Decode legacy protocol 0-2 STRING opcodes as UTF-8. Default: false.
     pub decode_legacy_strings: bool,
+}
+
+/// Options controlling Stata DTA serialization.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StataWriteOptions {
+    /// Include the DataFrame index as the first Stata variable. Default: true.
+    pub include_index: bool,
+    /// Optional index variable name. Default: `"index"`.
+    pub index_label: Option<String>,
+}
+
+impl Default for StataWriteOptions {
+    fn default() -> Self {
+        Self {
+            include_index: true,
+            index_label: None,
+        }
+    }
 }
 
 /// Options controlling XML serialization.
@@ -929,6 +966,368 @@ fn pickle_de_options(options: &PickleReadOptions) -> serde_pickle::DeOptions {
     } else {
         de_options
     }
+}
+
+#[derive(Debug, Clone)]
+struct StataField {
+    variable_name: String,
+    source: StataFieldSource,
+    variable_type: VariableType,
+}
+
+#[derive(Debug, Clone)]
+enum StataFieldSource {
+    Index,
+    Column(String),
+}
+
+/// Serialize a DataFrame to Stata DTA bytes.
+///
+/// This first slice targets DTA release 118 and a DataFrame-oriented subset:
+/// integer/bool, float, fixed string, and missing values.
+pub fn write_stata_bytes_with_options(
+    frame: &DataFrame,
+    options: &StataWriteOptions,
+) -> Result<Vec<u8>, IoError> {
+    let fields = stata_fields_for_frame(frame, options)?;
+    let header = Header::builder(Release::V118, ByteOrder::LittleEndian).build();
+    let mut schema = StataSchema::builder();
+    for field in &fields {
+        let format = stata_format_for_type(field.variable_type);
+        schema = schema.add_variable(
+            Variable::builder(field.variable_type, &field.variable_name).format(format),
+        );
+    }
+    let schema = schema.build().map_err(stata_error)?;
+
+    let mut record_writer = DtaWriter::new()
+        .from_writer(Cursor::new(Vec::<u8>::new()))
+        .write_header(header)
+        .map_err(stata_error)?
+        .write_schema(schema)
+        .map_err(stata_error)?
+        .into_record_writer()
+        .map_err(stata_error)?;
+
+    for row_idx in 0..frame.index().len() {
+        let mut record = Vec::with_capacity(fields.len());
+        for field in &fields {
+            record.push(stata_value_for_field(frame, row_idx, field)?);
+        }
+        record_writer.write_record(&record).map_err(stata_error)?;
+    }
+
+    Ok(record_writer
+        .into_long_string_writer()
+        .map_err(stata_error)?
+        .into_value_label_writer()
+        .map_err(stata_error)?
+        .finish()
+        .map_err(stata_error)?
+        .into_inner())
+}
+
+/// Read a DataFrame from Stata DTA bytes.
+pub fn read_stata_bytes(input: &[u8]) -> Result<DataFrame, IoError> {
+    let mut characteristic_reader = DtaReader::new()
+        .from_reader(Cursor::new(input))
+        .read_header()
+        .map_err(stata_error)?
+        .read_schema()
+        .map_err(stata_error)?;
+    characteristic_reader.skip_to_end().map_err(stata_error)?;
+
+    let mut record_reader = characteristic_reader
+        .into_record_reader()
+        .map_err(stata_error)?;
+    let column_order = record_reader
+        .schema()
+        .variables()
+        .iter()
+        .map(|variable| variable.name().to_owned())
+        .collect::<Vec<_>>();
+    reject_duplicate_headers(&column_order)?;
+
+    let mut columns = column_order
+        .iter()
+        .cloned()
+        .map(|name| (name, Vec::new()))
+        .collect::<BTreeMap<_, _>>();
+    let mut row_count: i64 = 0;
+    while let Some(record) = record_reader.read_record().map_err(stata_error)? {
+        for (name, value) in column_order.iter().zip(record.values()) {
+            columns
+                .get_mut(name)
+                .ok_or_else(|| IoError::Stata(format!("missing Stata column '{name}'")))?
+                .push(stata_value_to_scalar(value)?);
+        }
+        row_count = row_count
+            .checked_add(1)
+            .ok_or_else(|| IoError::Stata("Stata row count exceeded i64 range".to_owned()))?;
+    }
+
+    let mut out = BTreeMap::new();
+    for name in &column_order {
+        let values = columns
+            .remove(name)
+            .ok_or_else(|| IoError::Stata(format!("missing Stata column '{name}'")))?;
+        out.insert(name.clone(), Column::from_values(values)?);
+    }
+    Ok(DataFrame::new_with_column_order(
+        Index::from_i64((0..row_count).collect()),
+        out,
+        column_order,
+    )?)
+}
+
+fn stata_fields_for_frame(
+    frame: &DataFrame,
+    options: &StataWriteOptions,
+) -> Result<Vec<StataField>, IoError> {
+    let mut fields = Vec::new();
+    if options.include_index {
+        let name = options
+            .index_label
+            .clone()
+            .unwrap_or_else(|| "index".to_owned());
+        validate_stata_variable_name(&name)?;
+        fields.push(StataField {
+            variable_name: name,
+            source: StataFieldSource::Index,
+            variable_type: stata_index_variable_type(frame)?,
+        });
+    }
+
+    for name in frame.column_names() {
+        validate_stata_variable_name(name)?;
+        let column = frame
+            .column(name)
+            .ok_or_else(|| IoError::Stata(format!("missing DataFrame column '{name}'")))?;
+        fields.push(StataField {
+            variable_name: name.clone(),
+            source: StataFieldSource::Column(name.clone()),
+            variable_type: infer_stata_variable_type(column, name)?,
+        });
+    }
+
+    let mut seen = BTreeSet::new();
+    for field in &fields {
+        if !seen.insert(field.variable_name.clone()) {
+            return Err(IoError::DuplicateColumnName(field.variable_name.clone()));
+        }
+    }
+    Ok(fields)
+}
+
+fn validate_stata_variable_name(name: &str) -> Result<(), IoError> {
+    if name.is_empty() {
+        return Err(IoError::Stata(
+            "Stata variable name cannot be empty".to_owned(),
+        ));
+    }
+    if name.len() > 32 {
+        return Err(IoError::Stata(format!(
+            "Stata variable name '{name}' exceeds 32 bytes"
+        )));
+    }
+    let mut chars = name.chars();
+    let first = chars
+        .next()
+        .ok_or_else(|| IoError::Stata("Stata variable name cannot be empty".to_owned()))?;
+    if !(first == '_' || first.is_ascii_alphabetic()) {
+        return Err(IoError::Stata(format!(
+            "invalid Stata variable name '{name}': first character must be ASCII letter or '_'"
+        )));
+    }
+    if !chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric()) {
+        return Err(IoError::Stata(format!(
+            "invalid Stata variable name '{name}': only ASCII letters, digits, and '_' are supported"
+        )));
+    }
+    Ok(())
+}
+
+fn stata_index_variable_type(frame: &DataFrame) -> Result<VariableType, IoError> {
+    let max_len = frame
+        .index()
+        .labels()
+        .iter()
+        .map(|label| label.to_string().len())
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    stata_fixed_string_type(max_len, "index")
+}
+
+fn infer_stata_variable_type(column: &Column, name: &str) -> Result<VariableType, IoError> {
+    let mut saw_numeric = false;
+    let mut saw_float = false;
+    let mut saw_string = false;
+    let mut max_string_len = 1usize;
+
+    for value in column.values() {
+        match value {
+            Scalar::Null(_) => {}
+            Scalar::Bool(_) => {
+                saw_numeric = true;
+            }
+            Scalar::Int64(v) => {
+                saw_numeric = true;
+                if i32::try_from(*v).is_err() {
+                    return Err(IoError::Stata(format!(
+                        "Stata long column '{name}' cannot encode i64 value {v}"
+                    )));
+                }
+            }
+            Scalar::Float64(v) => {
+                if !v.is_nan() {
+                    saw_numeric = true;
+                    saw_float = true;
+                }
+            }
+            Scalar::Utf8(text) => {
+                saw_string = true;
+                max_string_len = max_string_len.max(text.len());
+            }
+            other => {
+                saw_string = true;
+                max_string_len = max_string_len.max(scalar_to_table_with_na(other, "").len());
+            }
+        }
+    }
+
+    if saw_string {
+        stata_fixed_string_type(max_string_len, name)
+    } else if saw_numeric && !saw_float {
+        Ok(VariableType::Long)
+    } else {
+        Ok(VariableType::Double)
+    }
+}
+
+fn stata_fixed_string_type(len: usize, name: &str) -> Result<VariableType, IoError> {
+    let width = len.max(1);
+    let width = u16::try_from(width).map_err(|_| {
+        IoError::Stata(format!(
+            "Stata string column '{name}' exceeds fixed string capacity"
+        ))
+    })?;
+    if width > 2045 {
+        return Err(IoError::Stata(format!(
+            "Stata string column '{name}' requires strL; this slice supports fixed strings only"
+        )));
+    }
+    Ok(VariableType::FixedString(width))
+}
+
+fn stata_format_for_type(variable_type: VariableType) -> &'static str {
+    match variable_type {
+        VariableType::Byte | VariableType::Int | VariableType::Long => "%12.0g",
+        VariableType::Float | VariableType::Double => "%10.0g",
+        VariableType::FixedString(_) | VariableType::LongString => "%9s",
+    }
+}
+
+fn stata_value_for_field(
+    frame: &DataFrame,
+    row_idx: usize,
+    field: &StataField,
+) -> Result<StataValue<'static>, IoError> {
+    match field.source {
+        StataFieldSource::Index => Ok(StataValue::String(std::borrow::Cow::Owned(
+            index_label_string(frame, row_idx)?,
+        ))),
+        StataFieldSource::Column(ref name) => {
+            let value = frame.column(name).and_then(|column| column.value(row_idx));
+            scalar_to_stata_value(value, field.variable_type, name)
+        }
+    }
+}
+
+fn scalar_to_stata_value(
+    value: Option<&Scalar>,
+    variable_type: VariableType,
+    name: &str,
+) -> Result<StataValue<'static>, IoError> {
+    match variable_type {
+        VariableType::Long => match value {
+            Some(Scalar::Bool(v)) => Ok(StataValue::Long(StataLong::Present(i32::from(*v)))),
+            Some(Scalar::Int64(v)) => Ok(StataValue::Long(StataLong::Present(
+                i32::try_from(*v).map_err(|_| {
+                    IoError::Stata(format!("Stata long column '{name}' cannot encode {v}"))
+                })?,
+            ))),
+            Some(Scalar::Null(_)) | None => {
+                Ok(StataValue::Long(StataLong::Missing(MissingValue::System)))
+            }
+            Some(other) => Err(IoError::Stata(format!(
+                "Stata long column '{name}' cannot encode {other:?}"
+            ))),
+        },
+        VariableType::Double => match value {
+            Some(Scalar::Bool(v)) => Ok(StataValue::Double(StataDouble::Present(if *v {
+                1.0
+            } else {
+                0.0
+            }))),
+            Some(Scalar::Int64(v)) => Ok(StataValue::Double(StataDouble::Present(*v as f64))),
+            Some(Scalar::Float64(v)) if v.is_nan() => Ok(StataValue::Double(StataDouble::Missing(
+                MissingValue::System,
+            ))),
+            Some(Scalar::Float64(v)) => Ok(StataValue::Double(StataDouble::Present(*v))),
+            Some(Scalar::Null(_)) | None => Ok(StataValue::Double(StataDouble::Missing(
+                MissingValue::System,
+            ))),
+            Some(other) => Err(IoError::Stata(format!(
+                "Stata double column '{name}' cannot encode {other:?}"
+            ))),
+        },
+        VariableType::FixedString(_) => {
+            let text = match value {
+                Some(Scalar::Null(_)) | None => String::new(),
+                Some(scalar) => scalar_to_table_with_na(scalar, ""),
+            };
+            Ok(StataValue::String(std::borrow::Cow::Owned(text)))
+        }
+        VariableType::Byte | VariableType::Int | VariableType::Float | VariableType::LongString => {
+            Err(IoError::Stata(format!(
+                "unsupported Stata variable type for column '{name}': {variable_type:?}"
+            )))
+        }
+    }
+}
+
+fn stata_value_to_scalar(value: &StataValue<'_>) -> Result<Scalar, IoError> {
+    match value {
+        StataValue::Byte(v) => Ok(v
+            .present()
+            .map(|value| Scalar::Int64(i64::from(value)))
+            .unwrap_or(Scalar::Null(NullKind::NaN))),
+        StataValue::Int(v) => Ok(v
+            .present()
+            .map(|value| Scalar::Int64(i64::from(value)))
+            .unwrap_or(Scalar::Null(NullKind::NaN))),
+        StataValue::Long(v) => Ok(v
+            .present()
+            .map(|value| Scalar::Int64(i64::from(value)))
+            .unwrap_or(Scalar::Null(NullKind::NaN))),
+        StataValue::Float(v) => Ok(v
+            .present()
+            .map(|value| Scalar::Float64(f64::from(value)))
+            .unwrap_or(Scalar::Null(NullKind::NaN))),
+        StataValue::Double(v) => Ok(v
+            .present()
+            .map(Scalar::Float64)
+            .unwrap_or(Scalar::Null(NullKind::NaN))),
+        StataValue::String(text) => Ok(Scalar::Utf8(text.to_string())),
+        StataValue::LongStringRef(_) => Err(IoError::Stata(
+            "Stata strL values are not supported by this reader slice".to_owned(),
+        )),
+    }
+}
+
+fn stata_error<E: std::fmt::Display>(err: E) -> IoError {
+    IoError::Stata(err.to_string())
 }
 
 /// Parse a DataFrame from a row-oriented XML document string.
@@ -3115,6 +3514,30 @@ pub fn write_pickle_with_options(
     options: &PickleWriteOptions,
 ) -> Result<(), IoError> {
     let content = write_pickle_bytes_with_options(frame, options)?;
+    std::fs::write(path, content)?;
+    Ok(())
+}
+
+// ── File-based Stata ───────────────────────────────────────────────────
+
+/// Read a DataFrame from a Stata DTA file.
+pub fn read_stata(path: &Path) -> Result<DataFrame, IoError> {
+    let content = std::fs::read(path)?;
+    read_stata_bytes(&content)
+}
+
+/// Write a DataFrame to a Stata DTA file.
+pub fn write_stata(frame: &DataFrame, path: &Path) -> Result<(), IoError> {
+    write_stata_with_options(frame, path, &StataWriteOptions::default())
+}
+
+/// Write a DataFrame to a Stata DTA file with explicit options.
+pub fn write_stata_with_options(
+    frame: &DataFrame,
+    path: &Path,
+    options: &StataWriteOptions,
+) -> Result<(), IoError> {
+    let content = write_stata_bytes_with_options(frame, options)?;
     std::fs::write(path, content)?;
     Ok(())
 }
@@ -8317,6 +8740,29 @@ pub trait DataFrameIoExt {
         options: &PickleWriteOptions,
     ) -> Result<Vec<u8>, IoError>;
 
+    /// Write this DataFrame to a Stata DTA file.
+    ///
+    /// Matches `pd.DataFrame.to_stata(path)` for the supported subset.
+    fn to_stata(&self, path: &Path) -> Result<(), IoError>;
+
+    /// Write this DataFrame to a Stata DTA file.
+    ///
+    /// Explicit file-suffixed form of [`DataFrameIoExt::to_stata`].
+    fn to_stata_file(&self, path: &Path) -> Result<(), IoError>;
+
+    /// Write this DataFrame to a Stata DTA file with explicit options.
+    fn to_stata_with_options(
+        &self,
+        path: &Path,
+        options: &StataWriteOptions,
+    ) -> Result<(), IoError>;
+
+    /// Serialize this DataFrame to Stata DTA bytes.
+    fn to_stata_bytes(&self) -> Result<Vec<u8>, IoError>;
+
+    /// Serialize this DataFrame to Stata DTA bytes with explicit options.
+    fn to_stata_bytes_with_options(&self, options: &StataWriteOptions) -> Result<Vec<u8>, IoError>;
+
     /// Write this DataFrame to an Excel (.xlsx) file.
     ///
     /// Matches `pd.DataFrame.to_excel(path)`.
@@ -8486,6 +8932,30 @@ impl DataFrameIoExt for DataFrame {
         write_pickle_bytes_with_options(self, options)
     }
 
+    fn to_stata(&self, path: &Path) -> Result<(), IoError> {
+        write_stata(self, path)
+    }
+
+    fn to_stata_file(&self, path: &Path) -> Result<(), IoError> {
+        self.to_stata(path)
+    }
+
+    fn to_stata_with_options(
+        &self,
+        path: &Path,
+        options: &StataWriteOptions,
+    ) -> Result<(), IoError> {
+        write_stata_with_options(self, path, options)
+    }
+
+    fn to_stata_bytes(&self) -> Result<Vec<u8>, IoError> {
+        write_stata_bytes(self)
+    }
+
+    fn to_stata_bytes_with_options(&self, options: &StataWriteOptions) -> Result<Vec<u8>, IoError> {
+        write_stata_bytes_with_options(self, options)
+    }
+
     fn to_excel(&self, path: &Path) -> Result<(), IoError> {
         write_excel(self, path)
     }
@@ -8565,14 +9035,15 @@ mod tests {
     use super::{
         CsvWriteOptions, ExcelReadOptions, HtmlReadOptions, HtmlWriteOptions, IoError, JsonOrient,
         LatexWriteOptions, MarkdownWriteOptions, PickleProtocol, PickleWriteOptions,
-        XmlReadOptions, XmlWriteOptions, read_csv_str, read_csv_with_index_cols, read_excel_bytes,
-        read_feather_bytes, read_html, read_html_str, read_html_str_with_options, read_json_str,
-        read_parquet_bytes, read_pickle, read_pickle_bytes, read_xml, read_xml_str,
-        read_xml_str_with_options, write_csv_string, write_csv_string_with_options, write_html,
-        write_html_string, write_html_string_with_options, write_json_string, write_jsonl_string,
-        write_latex_string, write_latex_string_with_options, write_markdown_string,
-        write_markdown_string_with_options, write_pickle, write_pickle_bytes, write_xml,
-        write_xml_string, write_xml_string_with_options,
+        StataWriteOptions, XmlReadOptions, XmlWriteOptions, read_csv_str, read_csv_with_index_cols,
+        read_excel_bytes, read_feather_bytes, read_html, read_html_str, read_html_str_with_options,
+        read_json_str, read_parquet_bytes, read_pickle, read_pickle_bytes, read_stata,
+        read_stata_bytes, read_xml, read_xml_str, read_xml_str_with_options, write_csv_string,
+        write_csv_string_with_options, write_html, write_html_string,
+        write_html_string_with_options, write_json_string, write_jsonl_string, write_latex_string,
+        write_latex_string_with_options, write_markdown_string, write_markdown_string_with_options,
+        write_pickle, write_pickle_bytes, write_stata, write_stata_bytes,
+        write_stata_bytes_with_options, write_xml, write_xml_string, write_xml_string_with_options,
     };
 
     #[test]
@@ -8970,6 +9441,211 @@ mod tests {
             err,
             IoError::Pickle(message) if message.contains("format marker")
         ));
+    }
+
+    fn make_stata_dataframe() -> DataFrame {
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            "id".to_owned(),
+            Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)])
+                .expect("id column"),
+        );
+        columns.insert(
+            "score".to_owned(),
+            Column::from_values(vec![
+                Scalar::Float64(1.5),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(3.25),
+            ])
+            .expect("score column"),
+        );
+        columns.insert(
+            "flag".to_owned(),
+            Column::from_values(vec![
+                Scalar::Bool(true),
+                Scalar::Bool(false),
+                Scalar::Bool(true),
+            ])
+            .expect("flag column"),
+        );
+        columns.insert(
+            "label".to_owned(),
+            Column::from_values(vec![
+                Scalar::Utf8("alpha".to_owned()),
+                Scalar::Utf8("beta".to_owned()),
+                Scalar::Utf8("gamma".to_owned()),
+            ])
+            .expect("label column"),
+        );
+
+        DataFrame::new_with_column_order(
+            Index::new(vec![
+                IndexLabel::Utf8("row_a".to_owned()),
+                IndexLabel::Utf8("row_b".to_owned()),
+                IndexLabel::Utf8("row_c".to_owned()),
+            ]),
+            columns,
+            vec![
+                "id".to_owned(),
+                "score".to_owned(),
+                "flag".to_owned(),
+                "label".to_owned(),
+            ],
+        )
+        .expect("stata frame")
+    }
+
+    #[test]
+    fn stata_bytes_roundtrip_preserves_supported_columns() {
+        let source = make_stata_dataframe();
+        let bytes = write_stata_bytes(&source).expect("write stata bytes");
+        assert!(!bytes.is_empty());
+
+        let roundtrip = read_stata_bytes(&bytes).expect("read stata bytes");
+
+        assert_eq!(
+            roundtrip
+                .column_names()
+                .into_iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["index", "id", "score", "flag", "label"]
+        );
+        assert_eq!(
+            roundtrip.column("index").expect("index").values(),
+            &[
+                Scalar::Utf8("row_a".to_owned()),
+                Scalar::Utf8("row_b".to_owned()),
+                Scalar::Utf8("row_c".to_owned())
+            ]
+        );
+        assert_eq!(
+            roundtrip.column("id").expect("id").values(),
+            &[Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]
+        );
+        assert_eq!(
+            roundtrip.column("score").expect("score").values(),
+            &[
+                Scalar::Float64(1.5),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(3.25)
+            ]
+        );
+        assert_eq!(
+            roundtrip.column("flag").expect("flag").values(),
+            &[Scalar::Int64(1), Scalar::Int64(0), Scalar::Int64(1)]
+        );
+        assert_eq!(
+            roundtrip.column("label").expect("label").values(),
+            &[
+                Scalar::Utf8("alpha".to_owned()),
+                Scalar::Utf8("beta".to_owned()),
+                Scalar::Utf8("gamma".to_owned())
+            ]
+        );
+    }
+
+    #[test]
+    fn stata_path_reader_matches_bytes_reader() {
+        let source = make_stata_dataframe();
+        let path = std::env::temp_dir().join(format!(
+            "fp_io_stata_reader_{}_{}.dta",
+            std::process::id(),
+            line!()
+        ));
+
+        write_stata(&source, &path).expect("write stata path");
+
+        let via_path = read_stata(&path).expect("read stata path");
+        let via_bytes =
+            read_stata_bytes(&std::fs::read(&path).expect("read stata bytes from path"))
+                .expect("read stata bytes");
+
+        assert_eq!(via_path.column_names(), via_bytes.column_names());
+        for name in via_path.column_names() {
+            assert_eq!(
+                via_path.column(name).expect("path column").values(),
+                via_bytes.column(name).expect("bytes column").values()
+            );
+        }
+    }
+
+    #[test]
+    fn stata_extension_aliases_and_no_index_option_roundtrip() {
+        use super::DataFrameIoExt;
+
+        let source = make_stata_dataframe();
+        let options = StataWriteOptions {
+            include_index: false,
+            index_label: Some("ignored".to_owned()),
+        };
+        let bytes = source
+            .to_stata_bytes_with_options(&options)
+            .expect("trait stata bytes without index");
+        let roundtrip = read_stata_bytes(&bytes).expect("read no-index stata");
+
+        assert_eq!(
+            roundtrip
+                .column_names()
+                .into_iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["id", "score", "flag", "label"]
+        );
+
+        let path = std::env::temp_dir().join(format!(
+            "fp_io_stata_trait_{}_{}.dta",
+            std::process::id(),
+            line!()
+        ));
+        source
+            .to_stata_with_options(&path, &options)
+            .expect("trait stata path without index");
+        let via_path = read_stata(&path).expect("read trait stata path");
+        assert_eq!(via_path.column_names(), roundtrip.column_names());
+
+        assert_eq!(
+            source.to_stata_bytes().expect("trait stata bytes"),
+            write_stata_bytes(&source).expect("free stata bytes")
+        );
+    }
+
+    #[test]
+    fn stata_writer_rejects_invalid_variable_names_and_malformed_input() {
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            "bad-name".to_owned(),
+            Column::from_values(vec![Scalar::Int64(1)]).expect("bad column"),
+        );
+        let frame = DataFrame::new_with_column_order(
+            Index::from_i64(vec![0]),
+            columns,
+            vec!["bad-name".to_owned()],
+        )
+        .expect("frame with invalid stata column");
+
+        let err = write_stata_bytes(&frame).expect_err("invalid stata variable name");
+        assert!(matches!(
+            err,
+            IoError::Stata(message) if message.contains("invalid Stata variable name")
+        ));
+
+        let source = make_stata_dataframe();
+        let err = write_stata_bytes_with_options(
+            &source,
+            &StataWriteOptions {
+                include_index: true,
+                index_label: Some("1bad".to_owned()),
+            },
+        )
+        .expect_err("invalid index variable name");
+        assert!(matches!(
+            err,
+            IoError::Stata(message) if message.contains("first character")
+        ));
+
+        let err = read_stata_bytes(b"not a dta").expect_err("malformed stata");
+        assert!(matches!(err, IoError::Stata(_)));
     }
 
     #[test]

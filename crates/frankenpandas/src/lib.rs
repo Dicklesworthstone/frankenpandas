@@ -152,6 +152,8 @@ pub use fp_io::{
     SqlTableSchema,
     SqlUniqueConstraintSchema,
     SqlWriteOptions,
+    // Stata
+    StataWriteOptions,
     inspect,
     list_sql_foreign_keys,
     list_sql_indexes,
@@ -222,6 +224,8 @@ pub use fp_io::{
     read_sql_table_with_options_and_index_col,
     read_sql_with_index_col,
     read_sql_with_options,
+    read_stata,
+    read_stata_bytes,
     // fd90.264: Series-level Arrow interop (README line 1580 mentions
     // DataFrame ↔ Arrow RecordBatch; these are the Series counterparts).
     series_from_arrow_array,
@@ -259,6 +263,10 @@ pub use fp_io::{
     write_pickle_with_options,
     write_sql,
     write_sql_with_options,
+    write_stata,
+    write_stata_bytes,
+    write_stata_bytes_with_options,
+    write_stata_with_options,
 };
 // ── Join/merge ──────────────────────────────────────────────────────────
 pub use fp_join::{
@@ -488,6 +496,7 @@ pub mod prelude {
         SqlTableSchema,
         SqlUniqueConstraintSchema,
         SqlWriteOptions,
+        StataWriteOptions,
         StringAccessor,
         Timedelta,
         TimedeltaComponents,
@@ -644,6 +653,8 @@ pub mod prelude {
         read_sql_table_with_options,
         // fd90.210: read_sql_with_options pairs with SqlReadOptions.
         read_sql_with_options,
+        read_stata,
+        read_stata_bytes,
         // fd90.12: Series ↔ Arrow array interop. README line 1580
         // documents Arrow interop as a public surface; fd90.264 added
         // the Series-level pair. Promote to the prelude alongside the
@@ -692,6 +703,10 @@ pub mod prelude {
         // fd90.209: write_sql_with_options pairs with SqlWriteOptions
         // (which is in the prelude as of fd90.206).
         write_sql_with_options,
+        write_stata,
+        write_stata_bytes,
+        write_stata_bytes_with_options,
+        write_stata_with_options,
     };
 }
 
