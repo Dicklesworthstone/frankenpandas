@@ -4635,6 +4635,51 @@ impl MultiIndex {
         Err(self.asof_unsupported_error())
     }
 
+    fn asof_locs_no_mask_error() -> IndexError {
+        IndexError::InvalidArgument("object too deep for desired array".to_owned())
+    }
+
+    fn asof_locs_empty_mask_error() -> IndexError {
+        IndexError::InvalidArgument("attempt to get argmax of an empty sequence".to_owned())
+    }
+
+    fn asof_locs_empty_take_error() -> IndexError {
+        IndexError::InvalidArgument("cannot do a non-empty take from an empty axes.".to_owned())
+    }
+
+    fn asof_locs_mask_length_error(expected: usize, actual: usize) -> IndexError {
+        IndexError::InvalidArgument(format!(
+            "boolean index did not match indexed array along axis 0; size of axis is {expected} but size of corresponding boolean axis is {actual}"
+        ))
+    }
+
+    fn asof_locs_broadcast_error(where_len: usize) -> IndexError {
+        IndexError::InvalidArgument(format!(
+            "operands could not be broadcast together with shapes ({where_len},) (2,)"
+        ))
+    }
+
+    /// Unsupported nearest-position lookup, matching `pd.MultiIndex.asof_locs(...)`.
+    pub fn asof_locs(
+        &self,
+        where_index: &Self,
+        mask: Option<&[bool]>,
+    ) -> Result<Vec<Option<usize>>, IndexError> {
+        let Some(mask) = mask else {
+            return Err(Self::asof_locs_no_mask_error());
+        };
+        if mask.len() != self.len() {
+            return Err(Self::asof_locs_mask_length_error(self.len(), mask.len()));
+        }
+        if mask.is_empty() && self.is_empty() && where_index.is_empty() {
+            return Err(Self::asof_locs_empty_mask_error());
+        }
+        if mask.iter().all(|include| !*include) && !where_index.is_empty() {
+            return Err(Self::asof_locs_empty_take_error());
+        }
+        Err(Self::asof_locs_broadcast_error(where_index.len()))
+    }
+
     /// Set the names for all levels.
     #[must_use]
     pub fn set_names(mut self, names: Vec<Option<String>>) -> Self {
@@ -10113,6 +10158,64 @@ mod tests {
                 if message == "'<' not supported between instances of 'tuple' and 'int'"
         ));
         assert_eq!(MultiIndex::from_tuples(Vec::new())?.asof(&[])?, None);
+
+        Ok(())
+    }
+
+    #[test]
+    fn multi_index_asof_locs_rejects_mask_and_broadcast_paths_d89fe14()
+    -> Result<(), super::IndexError> {
+        let source = MultiIndex::from_tuples(vec![
+            vec!["a".into(), 1_i64.into()],
+            vec!["a".into(), 3_i64.into()],
+            vec!["b".into(), 2_i64.into()],
+        ])?;
+        let where_index = MultiIndex::from_tuples(vec![
+            vec!["a".into(), 0_i64.into()],
+            vec!["a".into(), 2_i64.into()],
+            vec!["b".into(), 2_i64.into()],
+        ])?;
+
+        let no_mask = source.asof_locs(&where_index, None).unwrap_err();
+        let mismatched_mask = source
+            .asof_locs(&where_index, Some(&[true, true]))
+            .unwrap_err();
+        let empty_take = source
+            .asof_locs(&where_index, Some(&[false, false, false]))
+            .unwrap_err();
+        let broadcast = source
+            .asof_locs(&where_index, Some(&[true, false, true]))
+            .unwrap_err();
+        let empty_source = MultiIndex::from_arrays(vec![Vec::new(), Vec::new()])?;
+        let empty_mask = empty_source
+            .asof_locs(&empty_source, Some(&[]))
+            .unwrap_err();
+
+        assert!(matches!(
+            no_mask,
+            super::IndexError::InvalidArgument(message)
+                if message == "object too deep for desired array"
+        ));
+        assert!(matches!(
+            mismatched_mask,
+            super::IndexError::InvalidArgument(message)
+                if message == "boolean index did not match indexed array along axis 0; size of axis is 3 but size of corresponding boolean axis is 2"
+        ));
+        assert!(matches!(
+            empty_take,
+            super::IndexError::InvalidArgument(message)
+                if message == "cannot do a non-empty take from an empty axes."
+        ));
+        assert!(matches!(
+            broadcast,
+            super::IndexError::InvalidArgument(message)
+                if message == "operands could not be broadcast together with shapes (3,) (2,)"
+        ));
+        assert!(matches!(
+            empty_mask,
+            super::IndexError::InvalidArgument(message)
+                if message == "attempt to get argmax of an empty sequence"
+        ));
 
         Ok(())
     }
