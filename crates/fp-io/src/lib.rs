@@ -2,8 +2,8 @@
 #![warn(rustdoc::broken_intra_doc_links)]
 
 //! IO layer for **frankenpandas**: round-trips between `DataFrame` and the
-//! ten supported on-disk / wire formats — CSV, JSON, JSONL, Parquet, Excel
-//! (XLSX), Feather (Arrow IPC v2), SQL, Markdown, LaTeX, and HTML.
+//! eleven supported on-disk / wire formats — CSV, JSON, JSONL, Parquet, Excel
+//! (XLSX), Feather (Arrow IPC v2), SQL, Markdown, LaTeX, HTML, and XML.
 //!
 //! ## Format readers / writers
 //!
@@ -18,8 +18,8 @@
 //! - **SQL**: [`read_sql`], [`read_sql_table`], [`write_sql`],
 //!   [`write_sql_with_options`], plus the chunked variants
 //!   ([`read_sql_chunks`], [`SqlChunkIterator`]).
-//! - **Markdown / LaTeX / HTML**: [`write_markdown_string`],
-//!   [`write_latex_string`], [`write_html_string`].
+//! - **Markdown / LaTeX / HTML / XML**: [`write_markdown_string`],
+//!   [`write_latex_string`], [`write_html_string`], [`write_xml_string`].
 //!
 //! Each format has a per-call options struct ([`CsvReadOptions`],
 //! [`ExcelReadOptions`], [`SqlReadOptions`], [`SqlWriteOptions`], ...) so
@@ -125,6 +125,8 @@ pub enum IoError {
     Parquet(String),
     #[error("excel error: {0}")]
     Excel(String),
+    #[error("xml error: {0}")]
+    Xml(String),
     #[error("arrow ipc error: {0}")]
     Arrow(String),
     #[error("sql error: {0}")]
@@ -340,6 +342,10 @@ pub fn write_html_string(frame: &DataFrame) -> Result<String, IoError> {
     write_html_string_with_options(frame, &HtmlWriteOptions::default())
 }
 
+pub fn write_xml_string(frame: &DataFrame) -> Result<String, IoError> {
+    write_xml_string_with_options(frame, &XmlWriteOptions::default())
+}
+
 /// Options controlling CSV serialization.
 ///
 /// Mirrors the subset of pandas `DataFrame.to_csv` parameters that do
@@ -434,6 +440,33 @@ impl Default for HtmlWriteOptions {
     fn default() -> Self {
         Self {
             include_index: true,
+        }
+    }
+}
+
+/// Options controlling XML serialization.
+///
+/// Covers the writer-only default shape of pandas `DataFrame.to_xml`.
+#[derive(Debug, Clone)]
+pub struct XmlWriteOptions {
+    /// If true, include the index as the first field in each row. Default: true.
+    pub include_index: bool,
+    /// XML root element name. Default: `"data"`.
+    pub root_name: String,
+    /// XML row element name. Default: `"row"`.
+    pub row_name: String,
+    /// Optional index element name. When omitted, use the index name or
+    /// pandas' default `"index"`.
+    pub index_label: Option<String>,
+}
+
+impl Default for XmlWriteOptions {
+    fn default() -> Self {
+        Self {
+            include_index: true,
+            root_name: "data".to_owned(),
+            row_name: "row".to_owned(),
+            index_label: None,
         }
     }
 }
@@ -626,6 +659,152 @@ pub fn write_html_string_with_options(
     }
 
     Ok(frame.to_html(options.include_index))
+}
+
+/// Serialize a DataFrame to an XML document string.
+pub fn write_xml_string_with_options(
+    frame: &DataFrame,
+    options: &XmlWriteOptions,
+) -> Result<String, IoError> {
+    if options.include_index && frame.row_multiindex().is_some() {
+        let materialized = materialize_named_row_multiindex_columns(frame)?;
+        let mut nested_options = options.clone();
+        nested_options.include_index = false;
+        nested_options.index_label = None;
+        return write_xml_string_with_options(&materialized, &nested_options);
+    }
+
+    validate_xml_element_name(&options.root_name)?;
+    validate_xml_element_name(&options.row_name)?;
+
+    let headers = frame
+        .column_names()
+        .into_iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    for name in &headers {
+        validate_xml_element_name(name)?;
+    }
+
+    let index_label = options
+        .index_label
+        .clone()
+        .or_else(|| frame.index().name().map(ToOwned::to_owned))
+        .unwrap_or_else(|| "index".to_owned());
+    if options.include_index {
+        validate_xml_element_name(&index_label)?;
+    }
+
+    let mut out = String::new();
+    out.push_str("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n");
+    out.push('<');
+    out.push_str(&options.root_name);
+    out.push_str(">\n");
+
+    for row_idx in 0..frame.index().len() {
+        out.push_str("  <");
+        out.push_str(&options.row_name);
+        out.push_str(">\n");
+
+        if options.include_index {
+            let value = index_label_string(frame, row_idx)?;
+            push_xml_field(&mut out, &index_label, Some(&value));
+        }
+
+        for name in &headers {
+            let value = frame
+                .column(name)
+                .and_then(|column| column.value(row_idx))
+                .and_then(scalar_to_xml_value);
+            push_xml_field(&mut out, name, value.as_deref());
+        }
+
+        out.push_str("  </");
+        out.push_str(&options.row_name);
+        out.push_str(">\n");
+    }
+
+    out.push_str("</");
+    out.push_str(&options.root_name);
+    out.push_str(">\n");
+    Ok(out)
+}
+
+fn validate_xml_element_name(name: &str) -> Result<(), IoError> {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return Err(IoError::Xml(
+            "xml element name must be non-empty".to_owned(),
+        ));
+    };
+    let valid_first = first == '_' || first.is_ascii_alphabetic();
+    let valid_rest =
+        chars.all(|ch| ch == '_' || ch == '-' || ch == '.' || ch.is_ascii_alphanumeric());
+    if valid_first && valid_rest {
+        Ok(())
+    } else {
+        Err(IoError::Xml(format!("invalid xml element name '{name}'")))
+    }
+}
+
+fn push_xml_field(out: &mut String, name: &str, value: Option<&str>) {
+    out.push_str("    <");
+    out.push_str(name);
+    match value {
+        Some(value) => {
+            out.push('>');
+            out.push_str(&escape_xml_text(value));
+            out.push_str("</");
+            out.push_str(name);
+            out.push_str(">\n");
+        }
+        None => out.push_str("/>\n"),
+    }
+}
+
+fn escape_xml_text(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    let mut chars = value.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '\r' => {
+                escaped.push('\n');
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+            }
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
+fn scalar_to_xml_value(scalar: &Scalar) -> Option<String> {
+    match scalar {
+        Scalar::Null(_) => None,
+        Scalar::Bool(value) => Some(if *value { "True" } else { "False" }.to_owned()),
+        Scalar::Int64(value) => Some(value.to_string()),
+        Scalar::Float64(value) => {
+            if value.is_nan() {
+                None
+            } else if value.is_finite() && *value == value.round() && value.abs() < 1e15 {
+                Some(format!("{value:.1}"))
+            } else {
+                Some(value.to_string())
+            }
+        }
+        Scalar::Utf8(value) => Some(value.clone()),
+        Scalar::Timedelta64(value) => {
+            if *value == Timedelta::NAT {
+                None
+            } else {
+                Some(Timedelta::format(*value))
+            }
+        }
+    }
 }
 
 fn resolve_csv_index_header(frame: &DataFrame, options: &CsvWriteOptions) -> String {
@@ -1521,6 +1700,22 @@ pub fn write_html_with_options(
     options: &HtmlWriteOptions,
 ) -> Result<(), IoError> {
     let content = write_html_string_with_options(frame, options)?;
+    std::fs::write(path, content)?;
+    Ok(())
+}
+
+// ── File-based XML ─────────────────────────────────────────────────────
+
+pub fn write_xml(frame: &DataFrame, path: &Path) -> Result<(), IoError> {
+    write_xml_with_options(frame, path, &XmlWriteOptions::default())
+}
+
+pub fn write_xml_with_options(
+    frame: &DataFrame,
+    path: &Path,
+    options: &XmlWriteOptions,
+) -> Result<(), IoError> {
+    let content = write_xml_string_with_options(frame, options)?;
     std::fs::write(path, content)?;
     Ok(())
 }
@@ -7452,6 +7647,26 @@ pub trait DataFrameIoExt {
         options: &HtmlWriteOptions,
     ) -> Result<(), IoError>;
 
+    /// Serialize this DataFrame to an XML document string.
+    ///
+    /// Matches `pd.DataFrame.to_xml()` with no buffer for the writer-only subset.
+    fn to_xml_string(&self) -> Result<String, IoError>;
+
+    /// Serialize this DataFrame to an XML document string with explicit options.
+    fn to_xml_string_with_options(&self, options: &XmlWriteOptions) -> Result<String, IoError>;
+
+    /// Write this DataFrame to an XML file.
+    ///
+    /// Matches `pd.DataFrame.to_xml(path)`.
+    fn to_xml_file(&self, path: &Path) -> Result<(), IoError>;
+
+    /// Write this DataFrame to an XML file with explicit options.
+    fn to_xml_file_with_options(
+        &self,
+        path: &Path,
+        options: &XmlWriteOptions,
+    ) -> Result<(), IoError>;
+
     /// Write this DataFrame to a JSON file.
     ///
     /// Matches `pd.DataFrame.to_json(path)`.
@@ -7576,6 +7791,26 @@ impl DataFrameIoExt for DataFrame {
         write_html_with_options(self, path, options)
     }
 
+    fn to_xml_string(&self) -> Result<String, IoError> {
+        write_xml_string(self)
+    }
+
+    fn to_xml_string_with_options(&self, options: &XmlWriteOptions) -> Result<String, IoError> {
+        write_xml_string_with_options(self, options)
+    }
+
+    fn to_xml_file(&self, path: &Path) -> Result<(), IoError> {
+        write_xml(self, path)
+    }
+
+    fn to_xml_file_with_options(
+        &self,
+        path: &Path,
+        options: &XmlWriteOptions,
+    ) -> Result<(), IoError> {
+        write_xml_with_options(self, path, options)
+    }
+
     fn to_json_file(&self, path: &Path, orient: JsonOrient) -> Result<(), IoError> {
         write_json(self, path, orient)
     }
@@ -7662,11 +7897,12 @@ mod tests {
 
     use super::{
         CsvWriteOptions, ExcelReadOptions, HtmlWriteOptions, IoError, LatexWriteOptions,
-        MarkdownWriteOptions, read_csv_str, read_csv_with_index_cols, read_excel_bytes,
-        read_feather_bytes, read_parquet_bytes, write_csv_string, write_csv_string_with_options,
-        write_html, write_html_string, write_html_string_with_options, write_jsonl_string,
-        write_latex_string, write_latex_string_with_options, write_markdown_string,
-        write_markdown_string_with_options,
+        MarkdownWriteOptions, XmlWriteOptions, read_csv_str, read_csv_with_index_cols,
+        read_excel_bytes, read_feather_bytes, read_parquet_bytes, write_csv_string,
+        write_csv_string_with_options, write_html, write_html_string,
+        write_html_string_with_options, write_jsonl_string, write_latex_string,
+        write_latex_string_with_options, write_markdown_string, write_markdown_string_with_options,
+        write_xml, write_xml_string, write_xml_string_with_options,
     };
 
     #[test]
@@ -7865,6 +8101,152 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(&no_index_path).expect("read trait html"),
             write_html_string_with_options(&frame, &no_index_options).expect("free html options")
+        );
+    }
+
+    #[test]
+    fn xml_writer_defaults_to_index_and_escapes_values() {
+        let frame = make_table_format_dataframe();
+
+        let out = write_xml_string(&frame).expect("xml");
+
+        assert_eq!(
+            out,
+            concat!(
+                "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n",
+                "<data>\n",
+                "  <row>\n",
+                "    <row>r&amp;1</row>\n",
+                "    <name>A|B</name>\n",
+                "    <value/>\n",
+                "  </row>\n",
+                "  <row>\n",
+                "    <row>r_2</row>\n",
+                "    <name>under_score</name>\n",
+                "    <value>2.0</value>\n",
+                "  </row>\n",
+                "</data>\n",
+            )
+        );
+    }
+
+    #[test]
+    fn xml_writer_options_can_omit_index_and_reject_bad_names() {
+        let frame = make_table_format_dataframe();
+
+        let out = write_xml_string_with_options(
+            &frame,
+            &XmlWriteOptions {
+                include_index: false,
+                root_name: "records".to_owned(),
+                row_name: "entry".to_owned(),
+                index_label: Some("ignored".to_owned()),
+            },
+        )
+        .expect("xml");
+
+        assert_eq!(
+            out,
+            concat!(
+                "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n",
+                "<records>\n",
+                "  <entry>\n",
+                "    <name>A|B</name>\n",
+                "    <value/>\n",
+                "  </entry>\n",
+                "  <entry>\n",
+                "    <name>under_score</name>\n",
+                "    <value>2.0</value>\n",
+                "  </entry>\n",
+                "</records>\n",
+            )
+        );
+
+        let err = write_xml_string_with_options(
+            &frame,
+            &XmlWriteOptions {
+                root_name: "bad name".to_owned(),
+                ..Default::default()
+            },
+        )
+        .expect_err("invalid xml name");
+        assert!(matches!(err, IoError::Xml(message) if message.contains("bad name")));
+    }
+
+    #[test]
+    fn xml_writer_escapes_text_like_pandas_etree() {
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            "name".to_owned(),
+            Column::from_values(vec![Scalar::Utf8(
+                "A&B <tag> \"quote\" it's\r\nnext".to_owned(),
+            )])
+            .expect("name column"),
+        );
+        let frame = DataFrame::new_with_column_order(
+            Index::new(vec![IndexLabel::Utf8("idx".to_owned())]),
+            columns,
+            vec!["name".to_owned()],
+        )
+        .expect("xml escape frame");
+
+        assert_eq!(
+            write_xml_string_with_options(
+                &frame,
+                &XmlWriteOptions {
+                    include_index: false,
+                    ..Default::default()
+                },
+            )
+            .expect("xml"),
+            concat!(
+                "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n",
+                "<data>\n",
+                "  <row>\n",
+                "    <name>A&amp;B &lt;tag&gt; \"quote\" it's\n",
+                "next</name>\n",
+                "  </row>\n",
+                "</data>\n",
+            )
+        );
+    }
+
+    #[test]
+    fn xml_writer_file_output_and_extension_aliases_match_free_functions() {
+        use super::DataFrameIoExt;
+
+        let frame = make_table_format_dataframe();
+        let path = std::env::temp_dir().join(format!(
+            "fp_io_xml_writer_{}_{}.xml",
+            std::process::id(),
+            line!()
+        ));
+
+        write_xml(&frame, &path).expect("write xml");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read xml"),
+            write_xml_string(&frame).expect("xml string")
+        );
+        assert_eq!(
+            frame.to_xml_string().expect("trait xml string"),
+            write_xml_string(&frame).expect("free xml string")
+        );
+
+        let no_index_options = XmlWriteOptions {
+            include_index: false,
+            ..Default::default()
+        };
+        let no_index_path = std::env::temp_dir().join(format!(
+            "fp_io_xml_writer_no_index_{}_{}.xml",
+            std::process::id(),
+            line!()
+        ));
+        frame
+            .to_xml_file_with_options(&no_index_path, &no_index_options)
+            .expect("trait xml file");
+        assert_eq!(
+            std::fs::read_to_string(&no_index_path).expect("read trait xml"),
+            write_xml_string_with_options(&frame, &no_index_options).expect("free xml options")
         );
     }
 
@@ -9369,6 +9751,18 @@ mod tests {
                 .to_html_string_with_options(&html_options)
                 .expect("html options through extension"),
             write_html_string_with_options(&frame, &html_options).expect("html options free fn")
+        );
+        let xml_options = XmlWriteOptions {
+            include_index: false,
+            root_name: "records".to_owned(),
+            row_name: "record".to_owned(),
+            index_label: None,
+        };
+        assert_eq!(
+            frame
+                .to_xml_string_with_options(&xml_options)
+                .expect("xml options through extension"),
+            write_xml_string_with_options(&frame, &xml_options).expect("xml options free fn")
         );
 
         let parquet = frame
