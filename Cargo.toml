@@ -41,6 +41,7 @@ chrono = { version = "0.4.44", default-features = false, features = ["std"] }
 chrono-tz = "0.10.4"
 csv = "1.4.0"
 dta = "0.5.0"
+hdf5 = { package = "hdf5-metno", version = "0.12.4" }
 orc-rust = "0.8.0"
 parquet = { version = "58.1.0", default-features = false, features = ["arrow", "snap"] }
 quick-xml = "0.39.2"

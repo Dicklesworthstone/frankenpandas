@@ -2,9 +2,9 @@
 #![warn(rustdoc::broken_intra_doc_links)]
 
 //! IO layer for **frankenpandas**: round-trips between `DataFrame` and the
-//! fourteen supported on-disk / wire formats — CSV, JSON, JSONL, Parquet, ORC,
-//! Excel (XLSX), Feather (Arrow IPC v2), SQL, Markdown, LaTeX, HTML, XML,
-//! Pickle, and Stata.
+//! fifteen supported on-disk / wire formats — CSV, JSON, JSONL, Parquet, ORC,
+//! HDF5, Excel (XLSX), Feather (Arrow IPC v2), SQL, Markdown, LaTeX, HTML,
+//! XML, Pickle, and Stata.
 //!
 //! ## Format readers / writers
 //!
@@ -14,6 +14,8 @@
 //!   [`write_jsonl`]
 //! - **Parquet**: [`read_parquet`], [`write_parquet`]
 //! - **ORC**: [`read_orc`], [`write_orc`]
+//! - **HDF5**: [`read_hdf`], [`write_hdf`] for the keyed DataFrame snapshot
+//!   surface.
 //! - **Excel**: [`read_excel`], [`write_excel`]
 //! - **Feather / Arrow IPC**: [`read_feather`], [`write_feather`],
 //!   [`read_ipc_stream_bytes`], [`write_ipc_stream_bytes`]
@@ -121,6 +123,7 @@ use fp_columnar::{Column, ColumnError};
 use fp_frame::{DataFrame, FrameError, Series, ToDatetimeOptions, to_datetime_with_options};
 use fp_index::{Index, IndexError, IndexLabel, format_datetime_ns};
 use fp_types::{DType, NullKind, Scalar, Timedelta, cast_scalar_owned};
+use hdf5::File as Hdf5File;
 use orc_rust::{
     ArrowReaderBuilder as OrcArrowReaderBuilder, ArrowWriterBuilder as OrcArrowWriterBuilder,
 };
@@ -148,6 +151,8 @@ pub enum IoError {
     Parquet(String),
     #[error("orc error: {0}")]
     Orc(String),
+    #[error("hdf5 error: {0}")]
+    Hdf5(String),
     #[error("excel error: {0}")]
     Excel(String),
     #[error("html error: {0}")]
@@ -526,6 +531,46 @@ impl Default for PickleWriteOptions {
 pub struct PickleReadOptions {
     /// Decode legacy protocol 0-2 STRING opcodes as UTF-8. Default: false.
     pub decode_legacy_strings: bool,
+}
+
+/// Default HDF5 group key used by [`read_hdf`] and [`write_hdf`].
+pub const DEFAULT_HDF5_KEY: &str = "frame";
+
+const HDF5_PAYLOAD_DATASET: &str = "__frankenpandas_dataframe_pickle_v1";
+
+/// Options controlling HDF5 path reads.
+///
+/// The current HDF5 surface stores the versioned FrankenPandas DataFrame
+/// snapshot envelope under a keyed group. This deliberately preserves index,
+/// row multiindex, dtype, and null semantics before native PyTables-compatible
+/// table layouts land.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HdfReadOptions {
+    /// HDF5 group key to read. Default: [`DEFAULT_HDF5_KEY`].
+    pub key: String,
+}
+
+impl Default for HdfReadOptions {
+    fn default() -> Self {
+        Self {
+            key: DEFAULT_HDF5_KEY.to_owned(),
+        }
+    }
+}
+
+/// Options controlling HDF5 path writes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HdfWriteOptions {
+    /// HDF5 group key to write. Default: [`DEFAULT_HDF5_KEY`].
+    pub key: String,
+}
+
+impl Default for HdfWriteOptions {
+    fn default() -> Self {
+        Self {
+            key: DEFAULT_HDF5_KEY.to_owned(),
+        }
+    }
 }
 
 /// Options controlling Stata DTA serialization.
@@ -3556,6 +3601,106 @@ pub fn write_pickle_with_options(
     let content = write_pickle_bytes_with_options(frame, options)?;
     std::fs::write(path, content)?;
     Ok(())
+}
+
+// ── File-based HDF5 ────────────────────────────────────────────────────
+
+/// Read a DataFrame from the default HDF5 key.
+pub fn read_hdf(path: &Path) -> Result<DataFrame, IoError> {
+    read_hdf_with_options(path, &HdfReadOptions::default())
+}
+
+/// Read a DataFrame from an explicit HDF5 key.
+pub fn read_hdf_key(path: &Path, key: &str) -> Result<DataFrame, IoError> {
+    read_hdf_with_options(
+        path,
+        &HdfReadOptions {
+            key: key.to_owned(),
+        },
+    )
+}
+
+/// Read a DataFrame from an HDF5 file with options.
+pub fn read_hdf_with_options(path: &Path, options: &HdfReadOptions) -> Result<DataFrame, IoError> {
+    let key = normalize_hdf5_key(&options.key)?;
+    let dataset_path = hdf5_payload_path(&key);
+    let file = Hdf5File::open(path).map_err(hdf5_error)?;
+    let dataset = file.dataset(&dataset_path).map_err(|err| {
+        IoError::Hdf5(format!(
+            "missing FrankenPandas payload dataset '{dataset_path}': {err}"
+        ))
+    })?;
+    let payload = dataset.read_raw::<u8>().map_err(hdf5_error)?;
+    read_pickle_bytes(&payload).map_err(|err| {
+        IoError::Hdf5(format!(
+            "invalid FrankenPandas payload at key '{key}': {err}"
+        ))
+    })
+}
+
+/// Write a DataFrame to the default HDF5 key.
+pub fn write_hdf(frame: &DataFrame, path: &Path) -> Result<(), IoError> {
+    write_hdf_with_options(frame, path, &HdfWriteOptions::default())
+}
+
+/// Write a DataFrame to an explicit HDF5 key.
+pub fn write_hdf_key(frame: &DataFrame, path: &Path, key: &str) -> Result<(), IoError> {
+    write_hdf_with_options(
+        frame,
+        path,
+        &HdfWriteOptions {
+            key: key.to_owned(),
+        },
+    )
+}
+
+/// Write a DataFrame to an HDF5 file with options.
+pub fn write_hdf_with_options(
+    frame: &DataFrame,
+    path: &Path,
+    options: &HdfWriteOptions,
+) -> Result<(), IoError> {
+    let key = normalize_hdf5_key(&options.key)?;
+    let payload = write_pickle_bytes(frame)?;
+    let file = Hdf5File::create(path).map_err(hdf5_error)?;
+    let group = file.create_group(&key).map_err(hdf5_error)?;
+    group
+        .new_dataset_builder()
+        .with_data(payload.as_slice())
+        .create(HDF5_PAYLOAD_DATASET)
+        .map_err(hdf5_error)?;
+    file.flush().map_err(hdf5_error)?;
+    Ok(())
+}
+
+fn normalize_hdf5_key(key: &str) -> Result<String, IoError> {
+    let trimmed = key.trim_matches('/');
+    if trimmed.is_empty() {
+        return Err(IoError::Hdf5(
+            "hdf5 key must name a non-root group".to_owned(),
+        ));
+    }
+
+    for part in trimmed.split('/') {
+        if part.is_empty() || part == "." || part == ".." {
+            return Err(IoError::Hdf5(format!("invalid hdf5 key '{key}'")));
+        }
+        if part == HDF5_PAYLOAD_DATASET {
+            return Err(IoError::Hdf5(format!(
+                "hdf5 key '{key}' uses reserved FrankenPandas dataset name"
+            )));
+        }
+    }
+
+    Ok(trimmed.to_owned())
+}
+
+fn hdf5_payload_path(key: &str) -> String {
+    format!("{key}/{HDF5_PAYLOAD_DATASET}")
+}
+
+fn hdf5_error(err: hdf5::Error) -> IoError {
+    IoError::Hdf5(err.to_string())
 }
 
 // ── File-based Stata ───────────────────────────────────────────────────
@@ -8735,7 +8880,8 @@ pub fn write_sql_with_options<C: SqlConnection>(
 /// Extension trait that adds IO convenience methods to `DataFrame`.
 ///
 /// Import this trait to call `df.to_parquet(path)`, `df.to_orc(path)`,
-/// `df.to_parquet_bytes()`, etc. directly on DataFrame values.
+/// `df.to_hdf(path)`, `df.to_parquet_bytes()`, etc. directly on DataFrame
+/// values.
 pub trait DataFrameIoExt {
     /// Write this DataFrame to a Parquet file.
     ///
@@ -8759,6 +8905,22 @@ pub trait DataFrameIoExt {
 
     /// Serialize this DataFrame to ORC bytes in memory.
     fn to_orc_bytes(&self) -> Result<Vec<u8>, IoError>;
+
+    /// Write this DataFrame to an HDF5 file at the default key.
+    ///
+    /// Matches the scoped `DataFrame.to_hdf(path)` compatibility surface.
+    fn to_hdf(&self, path: &Path) -> Result<(), IoError>;
+
+    /// Write this DataFrame to an HDF5 file at the default key.
+    ///
+    /// Explicit file-suffixed form of [`DataFrameIoExt::to_hdf`].
+    fn to_hdf_file(&self, path: &Path) -> Result<(), IoError>;
+
+    /// Write this DataFrame to an HDF5 file at an explicit key.
+    fn to_hdf_key(&self, path: &Path, key: &str) -> Result<(), IoError>;
+
+    /// Write this DataFrame to an HDF5 file with explicit options.
+    fn to_hdf_with_options(&self, path: &Path, options: &HdfWriteOptions) -> Result<(), IoError>;
 
     /// Write this DataFrame to a CSV file.
     ///
@@ -9005,6 +9167,22 @@ impl DataFrameIoExt for DataFrame {
         write_orc_bytes(self)
     }
 
+    fn to_hdf(&self, path: &Path) -> Result<(), IoError> {
+        write_hdf(self, path)
+    }
+
+    fn to_hdf_file(&self, path: &Path) -> Result<(), IoError> {
+        self.to_hdf(path)
+    }
+
+    fn to_hdf_key(&self, path: &Path, key: &str) -> Result<(), IoError> {
+        write_hdf_key(self, path, key)
+    }
+
+    fn to_hdf_with_options(&self, path: &Path, options: &HdfWriteOptions) -> Result<(), IoError> {
+        write_hdf_with_options(self, path, options)
+    }
+
     fn to_csv_file(&self, path: &Path) -> Result<(), IoError> {
         write_csv(self, path)
     }
@@ -9236,15 +9414,17 @@ mod tests {
     use fp_types::{DType, NullKind, Scalar};
 
     use super::{
-        CsvWriteOptions, ExcelReadOptions, HtmlReadOptions, HtmlWriteOptions, IoError, JsonOrient,
-        LatexWriteOptions, MarkdownWriteOptions, PickleProtocol, PickleWriteOptions,
-        StataWriteOptions, XmlReadOptions, XmlWriteOptions, read_csv_str, read_csv_with_index_cols,
-        read_excel_bytes, read_feather_bytes, read_html, read_html_str, read_html_str_with_options,
+        CsvWriteOptions, ExcelReadOptions, HdfReadOptions, HdfWriteOptions, HtmlReadOptions,
+        HtmlWriteOptions, IoError, JsonOrient, LatexWriteOptions, MarkdownWriteOptions,
+        PickleProtocol, PickleWriteOptions, StataWriteOptions, XmlReadOptions, XmlWriteOptions,
+        read_csv_str, read_csv_with_index_cols, read_excel_bytes, read_feather_bytes, read_hdf,
+        read_hdf_key, read_hdf_with_options, read_html, read_html_str, read_html_str_with_options,
         read_json_str, read_orc, read_orc_bytes, read_parquet_bytes, read_pickle,
         read_pickle_bytes, read_stata, read_stata_bytes, read_xml, read_xml_str,
-        read_xml_str_with_options, write_csv_string, write_csv_string_with_options, write_html,
-        write_html_string, write_html_string_with_options, write_json_string, write_jsonl_string,
-        write_latex, write_latex_string, write_latex_string_with_options, write_latex_with_options,
+        read_xml_str_with_options, write_csv_string, write_csv_string_with_options, write_hdf,
+        write_hdf_key, write_hdf_with_options, write_html, write_html_string,
+        write_html_string_with_options, write_json_string, write_jsonl_string, write_latex,
+        write_latex_string, write_latex_string_with_options, write_latex_with_options,
         write_markdown, write_markdown_string, write_markdown_string_with_options,
         write_markdown_with_options, write_orc, write_orc_bytes, write_pickle, write_pickle_bytes,
         write_stata, write_stata_bytes, write_stata_bytes_with_options, write_xml,
@@ -9771,6 +9951,135 @@ mod tests {
         assert!(matches!(
             err,
             IoError::Pickle(message) if message.contains("format marker")
+        ));
+    }
+
+    #[test]
+    fn hdf5_path_roundtrip_preserves_snapshot_frame() {
+        let source = make_table_format_dataframe();
+        let path = std::env::temp_dir().join(format!(
+            "fp_io_hdf5_default_{}_{}.h5",
+            std::process::id(),
+            line!()
+        ));
+
+        write_hdf(&source, &path).expect("write hdf default key");
+        let roundtrip = read_hdf(&path).expect("read hdf default key");
+
+        assert_eq!(
+            write_json_string(&roundtrip, JsonOrient::Split).expect("roundtrip json"),
+            write_json_string(&source, JsonOrient::Split).expect("source json")
+        );
+    }
+
+    #[test]
+    fn hdf5_custom_key_and_extension_aliases_roundtrip() {
+        use super::DataFrameIoExt;
+
+        let source = make_test_dataframe();
+        let free_path = std::env::temp_dir().join(format!(
+            "fp_io_hdf5_custom_free_{}_{}.h5",
+            std::process::id(),
+            line!()
+        ));
+        let trait_path = std::env::temp_dir().join(format!(
+            "fp_io_hdf5_custom_trait_{}_{}.h5",
+            std::process::id(),
+            line!()
+        ));
+        let default_path = std::env::temp_dir().join(format!(
+            "fp_io_hdf5_custom_default_{}_{}.h5",
+            std::process::id(),
+            line!()
+        ));
+        let write_options = HdfWriteOptions {
+            key: "tables/snapshot".to_owned(),
+        };
+
+        write_hdf_with_options(&source, &free_path, &write_options).expect("write custom key");
+        let roundtrip = read_hdf_with_options(
+            &free_path,
+            &HdfReadOptions {
+                key: "/tables/snapshot/".to_owned(),
+            },
+        )
+        .expect("read custom key with slash aliases");
+        assert!(roundtrip.equals(&source));
+
+        source
+            .to_hdf_key(&trait_path, "nested/frame")
+            .expect("trait hdf key");
+        assert!(
+            read_hdf_key(&trait_path, "nested/frame")
+                .expect("read trait hdf key")
+                .equals(&source)
+        );
+
+        source
+            .to_hdf_file(&default_path)
+            .expect("trait hdf default key");
+        assert!(
+            read_hdf(&default_path)
+                .expect("read trait hdf default")
+                .equals(&source)
+        );
+    }
+
+    #[test]
+    fn hdf5_row_multiindex_roundtrip_restores_logical_row_axis() {
+        let frame = make_row_multiindex_test_dataframe();
+        let path = std::env::temp_dir().join(format!(
+            "fp_io_hdf5_multiindex_{}_{}.h5",
+            std::process::id(),
+            line!()
+        ));
+
+        write_hdf_key(&frame, &path, "axes/frame").expect("write hdf multiindex");
+        let roundtrip = read_hdf_key(&path, "axes/frame").expect("read hdf multiindex");
+
+        assert!(roundtrip.equals(&frame));
+        assert!(roundtrip.column("__index_level_0__").is_none());
+        assert_eq!(
+            roundtrip
+                .row_multiindex()
+                .expect("row multiindex should be restored")
+                .get_level_values(0)
+                .unwrap()
+                .labels(),
+            frame
+                .row_multiindex()
+                .expect("source row multiindex")
+                .get_level_values(0)
+                .unwrap()
+                .labels()
+        );
+    }
+
+    #[test]
+    fn hdf5_reader_rejects_invalid_keys_and_missing_payloads() {
+        let frame = make_test_dataframe();
+        let path = std::env::temp_dir().join(format!(
+            "fp_io_hdf5_missing_payload_{}_{}.h5",
+            std::process::id(),
+            line!()
+        ));
+
+        let file = hdf5::File::create(&path).expect("create hdf shell");
+        file.create_group("frame")
+            .expect("create empty frame group");
+        file.flush().expect("flush hdf shell");
+        drop(file);
+
+        let err = read_hdf(&path).expect_err("missing payload should fail");
+        assert!(matches!(
+            err,
+            IoError::Hdf5(message) if message.contains("missing FrankenPandas payload dataset")
+        ));
+
+        let err = write_hdf_key(&frame, &path, "../bad").expect_err("invalid key should fail");
+        assert!(matches!(
+            err,
+            IoError::Hdf5(message) if message.contains("invalid hdf5 key")
         ));
     }
 

@@ -1,6 +1,6 @@
 [package]
 name = "fp-io"
-description = "IO layer for frankenpandas: CSV, JSON, JSONL, Parquet, ORC, Excel, Feather, Arrow IPC, Pickle, Stata, SQL (SqlConnection with SQLite default backend)."
+description = "IO layer for frankenpandas: CSV, JSON, JSONL, Parquet, ORC, HDF5, Excel, Feather, Arrow IPC, Pickle, Stata, SQL (SqlConnection with SQLite default backend)."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -23,6 +23,7 @@ fp-columnar = { path = "../fp-columnar" }
 fp-frame = { path = "../fp-frame" }
 fp-index = { path = "../fp-index" }
 fp-types = { path = "../fp-types" }
+hdf5 = { workspace = true }
 orc-rust = { workspace = true }
 parquet = { workspace = true }
 quick-xml = { workspace = true }

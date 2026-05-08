@@ -1483,7 +1483,7 @@ Every parity report gets a **RaptorQ repair-symbol sidecar** for bit-rot detecti
 |-----------|--------|------------|
 | No native Datetime dtype | Datetimes stored as ISO 8601 Utf8 strings | Use `to_datetime()` for normalization |
 | Categorical metadata not propagated through arithmetic | By design (matches pandas) | Use `.cat().to_values()` to materialize |
-| No HDF5, Clipboard, or HTML IO | System-library dependencies | Use Feather (faster) or Parquet instead |
+| No Clipboard IO | System clipboard dependency | Use CSV/JSON string export and copy through the host application |
 | SQL IO has one built-in backend | `read_sql` / `write_sql` are generic over `SqlConnection`, and `rusqlite::Connection` implements it behind the default `sql-sqlite` feature. The trait surface is feature-complete (introspection via `SqlInspector` + `reflect_table` / `reflect_all_tables`, `SqlReadOptions` / `SqlWriteOptions` matching pandas keyword args including `chunksize`, `coerce_float`, `dtype`, `parse_dates`, `index_col`, `columns`, `schema`, `method`). Concrete PostgreSQL/MySQL/MS SQL/Oracle adapters are not yet bound — placeholder feature flags `sql-postgresql` / `sql-mysql` exist on fp-io for the future Phase 2 backend integrations. | Use SQLite via `rusqlite::Connection::open[_in_memory]`, or implement `SqlConnection` for another backend while native adapters land |
 | Single-threaded execution | No parallel execution yet | Profile-proven fast paths compensate |
 | Plotting backend deferred | `DataFrame.plot` / `hist` / `boxplot`, `Series.plot` / `hist`, and GroupBy plotting hooks exist and return a typed compatibility error while the plotters/charming backend is pending | Use Feather/Parquet/CSV export with pandas/matplotlib for visualization until native rendering lands |
@@ -1668,7 +1668,7 @@ Uses a deterministic LCG (Linear Congruential Generator) with Fisher-Yates shuff
 | Medium | Parallel execution (rayon) | Not started; architecture supports it (columns are independent) |
 | Medium | Native plotting via plotters/charming | Public plotting hooks are present and explicitly deferred; backend implementation would enable PNG/SVG/chart output |
 | Medium | Lazy evaluation / query planning | Not started; would enable optimization across chained operations |
-| Low | HDF5 IO | Needs system library (libhdf5) |
+| Low | Native HDF5 table layout | `read_hdf` / `to_hdf` provide a keyed DataFrame snapshot surface; PyTables-compatible table/storer layouts remain future work |
 | Low | Clipboard IO | Needs system clipboard access |
 | Low | DataFrame.style for HTML formatting | Decorative; low priority vs correctness work |
 
