@@ -1,0 +1,187 @@
+{
+  "schema_version": 1,
+  "bead": "br-frankenpandas-tn6qb.4",
+  "generated_at": "2026-05-08T09:28:20-04:00",
+  "git_sha": "0b9005bcaa2061401ee52a92fe61c2f79d4decac",
+  "profile_name": "smoke-local-2026-05-08",
+  "profile_shape": {
+    "rows": 5000,
+    "iters": 10,
+    "warmup": 2,
+    "frame_cols": 5,
+    "key_cardinality": 256,
+    "join_type": "inner",
+    "alignment_overlap_rows": 2500
+  },
+  "host": {
+    "os": "linux",
+    "arch": "x86_64",
+    "available_parallelism": 64,
+    "rss_high_water_source": "/proc/self/status VmHWM"
+  },
+  "frankenpandas_command": "/data/tmp/frankenpandas-whiteotter-tn6qb4-build2/debug/high_ram_perf_baseline --profile smoke-local-2026-05-08 --rows 5000 --iters 10 --warmup 2 --frame-cols 5 --key-cardinality 256",
+  "pandas_oracle": {
+    "status": "available",
+    "pandas_version": "2.2.3",
+    "python_version": "3.13.7",
+    "command": "python3 companion timing script recorded in artifacts/perf/high_ram_baseline_tn6qb4.md"
+  },
+  "delta_artifact_contract": {
+    "compare_key": "workloads[].name",
+    "required_fields": [
+      "name",
+      "category",
+      "rows_in",
+      "rows_out",
+      "p50_ms",
+      "p95_ms",
+      "p99_ms",
+      "throughput_rows_per_sec",
+      "input_bytes_estimate",
+      "output_bytes_estimate",
+      "rss_high_water_kib"
+    ],
+    "regression_rule": "future same-profile deltas should flag p95 drift greater than 10% and block p95 drift greater than 20%; compare pandas rows only when the local oracle is available"
+  },
+  "workloads": [
+    {
+      "name": "filter_boolean_mask",
+      "category": "filter",
+      "rows_in": 5000,
+      "rows_out": 2500,
+      "frankenpandas": {
+        "p50_ms": 7.15131,
+        "p95_ms": 7.999208,
+        "p99_ms": 7.999208,
+        "throughput_rows_per_sec": 742468.2939680851,
+        "input_bytes_estimate": 285000,
+        "output_bytes_estimate": 120000,
+        "rss_high_water_kib": 6404,
+        "checksum": 39071875.0
+      },
+      "pandas": {
+        "p50_ms": 0.489598,
+        "p95_ms": 0.596611,
+        "p99_ms": 0.596611,
+        "throughput_rows_per_sec": 9924770.241568908,
+        "input_bytes_estimate": 205264,
+        "output_bytes_estimate": 120000,
+        "rss_high_water_kib": 154200,
+        "checksum": 39071875.0
+      }
+    },
+    {
+      "name": "dataframe_groupby_sum",
+      "category": "groupby",
+      "rows_in": 5000,
+      "rows_out": 256,
+      "frankenpandas": {
+        "p50_ms": 4.866568,
+        "p95_ms": 6.239521,
+        "p99_ms": 6.239521,
+        "throughput_rows_per_sec": 972675.5782035933,
+        "input_bytes_estimate": 120000,
+        "output_bytes_estimate": 4096,
+        "rss_high_water_kib": 6412,
+        "checksum": 6253750.0
+      },
+      "pandas": {
+        "p50_ms": 0.84381,
+        "p95_ms": 1.150732,
+        "p99_ms": 1.150732,
+        "throughput_rows_per_sec": 5636158.890082503,
+        "input_bytes_estimate": 80132,
+        "output_bytes_estimate": 4096,
+        "rss_high_water_kib": 154200,
+        "checksum": 6253750.0
+      }
+    },
+    {
+      "name": "dataframe_inner_join",
+      "category": "join",
+      "rows_in": 10000,
+      "rows_out": 97720,
+      "frankenpandas": {
+        "p50_ms": 46.281978,
+        "p95_ms": 55.487053,
+        "p99_ms": 55.487053,
+        "throughput_rows_per_sec": 212855.76718248273,
+        "input_bytes_estimate": 240000,
+        "output_bytes_estimate": 9381120,
+        "rss_high_water_kib": 22540,
+        "checksum": 934260104.0
+      },
+      "pandas": {
+        "p50_ms": 5.788606,
+        "p95_ms": 8.260793,
+        "p99_ms": 8.260793,
+        "throughput_rows_per_sec": 1577518.642997009,
+        "input_bytes_estimate": 160264,
+        "output_bytes_estimate": 2345412,
+        "rss_high_water_kib": 154200,
+        "checksum": 934260104.0
+      }
+    },
+    {
+      "name": "series_add_outer_alignment",
+      "category": "alignment",
+      "rows_in": 10000,
+      "rows_out": 7500,
+      "frankenpandas": {
+        "p50_ms": 45.378826,
+        "p95_ms": 48.474034,
+        "p99_ms": 48.474034,
+        "throughput_rows_per_sec": 217520.41311616072,
+        "input_bytes_estimate": 160000,
+        "output_bytes_estimate": 120000,
+        "rss_high_water_kib": 22540,
+        "checksum": 18747500.0
+      },
+      "pandas": {
+        "p50_ms": 0.232961,
+        "p95_ms": 0.317292,
+        "p99_ms": 0.317292,
+        "throughput_rows_per_sec": 42091014.24191558,
+        "input_bytes_estimate": 80264,
+        "output_bytes_estimate": 120000,
+        "rss_high_water_kib": 154200,
+        "checksum": 18747500.0
+      }
+    },
+    {
+      "name": "csv_write_read_roundtrip",
+      "category": "io",
+      "rows_in": 5000,
+      "rows_out": 5000,
+      "frankenpandas": {
+        "p50_ms": 23.938191,
+        "p95_ms": 24.018663,
+        "p99_ms": 24.018663,
+        "throughput_rows_per_sec": 209519.8415771869,
+        "throughput_bytes_per_sec": 7149780.785884872,
+        "input_bytes_estimate": 240000,
+        "output_bytes_estimate": 240000,
+        "io_payload_bytes": 170623,
+        "rss_high_water_kib": 22540,
+        "checksum": 78159375.0
+      },
+      "pandas": {
+        "p50_ms": 14.290656,
+        "p95_ms": 15.819294,
+        "p99_ms": 15.819294,
+        "throughput_rows_per_sec": 346542.438318201,
+        "throughput_bytes_per_sec": 12691978.186428783,
+        "input_bytes_estimate": 200132,
+        "output_bytes_estimate": 200132,
+        "io_payload_bytes": 183123,
+        "rss_high_water_kib": 154200,
+        "checksum": 78159375.0
+      }
+    }
+  ],
+  "notes": [
+    "This is a smoke baseline recorded on a shared 64-way Linux host, not a final high-RAM quiet-host SLO.",
+    "FrankenPandas RSS is in-process VmHWM and can inherit previous workload peaks; pandas RSS is Python process ru_maxrss.",
+    "Checksums match between FrankenPandas and pandas for every comparable workload."
+  ]
+}
