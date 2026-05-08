@@ -13015,6 +13015,44 @@ impl SeriesGroupBy<'_> {
         self.take_positions(&positions)
     }
 
+    /// Count non-missing values within each group.
+    pub fn value_counts(&self) -> Result<Series, FrameError> {
+        let (order, order_keys, groups) = self.build_groups();
+        let values = self.series.column.values();
+        let mut out_labels = Vec::new();
+        let mut out_counts = Vec::new();
+
+        for (group_idx, key) in order_keys.iter().enumerate() {
+            let group_label = &order[group_idx];
+            let mut value_counts: Vec<(Scalar, i64)> = Vec::new();
+            let mut index_by_key: HashMap<ScalarKey<'_>, usize> = HashMap::new();
+
+            for &row_idx in &groups[key] {
+                let value = &values[row_idx];
+                let Some(value_key) = scalar_key_skip_missing(value) else {
+                    continue;
+                };
+                match index_by_key.get(&value_key) {
+                    Some(&idx) => value_counts[idx].1 += 1,
+                    None => {
+                        index_by_key.insert(value_key, value_counts.len());
+                        value_counts.push((value.clone(), 1));
+                    }
+                }
+            }
+            drop(index_by_key);
+
+            value_counts.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
+
+            for (value, count) in value_counts {
+                out_labels.push(IndexLabel::Utf8(format!("{group_label}, {value}")));
+                out_counts.push(Scalar::Int64(count));
+            }
+        }
+
+        Series::from_values("count", out_labels, out_counts)
+    }
+
     /// Broadcast a named per-group reduction back to the original Series shape.
     ///
     /// Matches `series.groupby(by).transform("mean")` for supported reduction
@@ -13318,6 +13356,11 @@ impl SeriesGroupBy<'_> {
             column_multiindex: None,
             row_multiindex: None,
         })
+    }
+
+    /// pandas spelling alias for [`Self::agg`].
+    pub fn aggregate(&self, funcs: &[&str]) -> Result<DataFrame, FrameError> {
+        self.agg(funcs)
     }
 }
 
@@ -66909,6 +66952,78 @@ mod tests {
         let empty = gb.nlargest(0)?;
         assert!(empty.is_empty());
         assert_eq!(empty.dtype(), values.dtype());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_series_groupby_value_counts_aggregate_nt65g7() -> Result<(), FrameError> {
+        let values = Series::from_values(
+            "data",
+            (0_i64..9).map(Into::into).collect(),
+            vec![
+                Scalar::Utf8("x".into()),
+                Scalar::Utf8("y".into()),
+                Scalar::Utf8("x".into()),
+                Scalar::Utf8("x".into()),
+                Scalar::Utf8("y".into()),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Utf8("z".into()),
+                Scalar::Utf8("z".into()),
+                Scalar::Utf8("y".into()),
+            ],
+        )?;
+        let groups = Series::from_values(
+            "grp",
+            (0_i64..9).map(Into::into).collect(),
+            vec![
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("b".into()),
+            ],
+        )?;
+        let gb = values.groupby(&groups)?;
+
+        let counts = gb.value_counts()?;
+        assert_eq!(
+            counts.index().labels(),
+            &[
+                IndexLabel::Utf8("a, x".into()),
+                IndexLabel::Utf8("a, y".into()),
+                IndexLabel::Utf8("b, y".into()),
+                IndexLabel::Utf8("b, z".into()),
+                IndexLabel::Utf8("b, x".into()),
+            ]
+        );
+        assert_eq!(
+            counts.column().values(),
+            &[
+                Scalar::Int64(2),
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(2),
+                Scalar::Int64(1),
+            ]
+        );
+
+        let aggregated = gb.agg(&["count", "nunique"])?;
+        let aliased = gb.aggregate(&["count", "nunique"])?;
+        assert_eq!(aliased.column_order, aggregated.column_order);
+        assert_eq!(aliased.index().labels(), aggregated.index().labels());
+        assert_eq!(
+            aliased.column("count").unwrap().values(),
+            aggregated.column("count").unwrap().values()
+        );
+        assert_eq!(
+            aliased.column("nunique").unwrap().values(),
+            aggregated.column("nunique").unwrap().values()
+        );
 
         Ok(())
     }
