@@ -5964,6 +5964,29 @@ impl MultiIndex {
         Self::from_tuples_with_names(tuples, self.shared_names(other))
     }
 
+    /// Group tuple positions by composite key, matching `pd.MultiIndex.groupby`.
+    #[must_use]
+    pub fn groupby(&self) -> HashMap<Vec<IndexLabel>, Vec<usize>> {
+        let mut groups = HashMap::<Vec<IndexLabel>, Vec<usize>>::new();
+        for row in 0..self.len() {
+            groups.entry(self.tuple_at(row)).or_default().push(row);
+        }
+        groups
+    }
+
+    /// Join two MultiIndexes using pandas-style join modes.
+    pub fn join(&self, other: &Self, how: &str) -> Result<Self, IndexError> {
+        match how {
+            "left" => Ok(self.clone()),
+            "right" => Ok(other.clone()),
+            "inner" => self.intersection(other),
+            "outer" => self.union(other),
+            other => Err(IndexError::InvalidArgument(format!(
+                "join: how must be 'left', 'right', 'inner', or 'outer', got {other:?}"
+            ))),
+        }
+    }
+
     /// Per-row membership test against a set of tuples.
     ///
     /// Matches `pd.MultiIndex.isin(values)`. Each entry in the returned
@@ -9126,6 +9149,67 @@ mod tests {
                     == [IndexLabel::Utf8("A".into()), IndexLabel::Utf8("B".into())]
                     && index.name() == Some("product")
         ));
+    }
+
+    #[test]
+    fn multi_index_groupby_join_groups_duplicate_tuples_d89fe3() {
+        let mi = MultiIndex::from_tuples(vec![
+            vec!["a".into(), 1_i64.into()],
+            vec!["b".into(), 2_i64.into()],
+            vec!["a".into(), 1_i64.into()],
+        ])
+        .unwrap();
+
+        let groups = mi.groupby();
+        assert_eq!(
+            groups[&vec![IndexLabel::Utf8("a".into()), IndexLabel::Int64(1)]],
+            vec![0, 2]
+        );
+        assert_eq!(
+            groups[&vec![IndexLabel::Utf8("b".into()), IndexLabel::Int64(2)]],
+            vec![1]
+        );
+    }
+
+    #[test]
+    fn multi_index_groupby_join_modes_d89fe3() {
+        let left = MultiIndex::from_tuples(vec![
+            vec!["a".into(), 1_i64.into()],
+            vec!["b".into(), 2_i64.into()],
+            vec!["c".into(), 3_i64.into()],
+        ])
+        .unwrap();
+        let right = MultiIndex::from_tuples(vec![
+            vec!["b".into(), 2_i64.into()],
+            vec!["d".into(), 4_i64.into()],
+        ])
+        .unwrap();
+
+        assert_eq!(left.join(&right, "left").unwrap(), left);
+        assert_eq!(left.join(&right, "right").unwrap(), right);
+        assert_eq!(
+            left.join(&right, "inner").unwrap().to_list(),
+            vec![vec!["b".into(), 2_i64.into()]]
+        );
+        assert_eq!(
+            left.join(&right, "outer").unwrap().to_list(),
+            vec![
+                vec!["a".into(), 1_i64.into()],
+                vec!["b".into(), 2_i64.into()],
+                vec!["c".into(), 3_i64.into()],
+                vec!["d".into(), 4_i64.into()]
+            ]
+        );
+    }
+
+    #[test]
+    fn multi_index_groupby_join_rejects_bad_mode_and_level_mismatch_d89fe3() {
+        let left = MultiIndex::from_tuples(vec![vec!["a".into(), 1_i64.into()]]).unwrap();
+        let right = MultiIndex::from_tuples(vec![vec!["a".into()]]).unwrap();
+
+        assert!(left.join(&right, "sideways").is_err());
+        assert!(left.join(&right, "inner").is_err());
+        assert!(left.join(&right, "outer").is_err());
     }
 
     #[test]
