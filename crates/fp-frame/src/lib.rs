@@ -88,7 +88,8 @@ use std::{
 };
 
 use chrono::{
-    DateTime, Duration, FixedOffset, LocalResult, NaiveDate, NaiveDateTime, Offset, TimeZone, Utc,
+    DateTime, Datelike, Duration, FixedOffset, LocalResult, NaiveDate, NaiveDateTime, Offset,
+    TimeZone, Utc,
 };
 use chrono_tz::Tz;
 use fp_columnar::{ArithmeticOp, Column, ColumnError, ComparisonOp};
@@ -99,7 +100,9 @@ use fp_index::{
 use fp_runtime::{
     DecisionAction, EvidenceLedger, RuntimePolicy, SemanticIndexIdentity, SemanticWitnessRecord,
 };
-use fp_types::{DType, NullKind, Scalar, SparseDType, Timedelta, cast_scalar_owned, common_dtype};
+use fp_types::{
+    DType, NullKind, PeriodFreq, Scalar, SparseDType, Timedelta, cast_scalar_owned, common_dtype,
+};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -18062,6 +18065,41 @@ fn parse_naive_datetime_value(s: &str) -> Result<NaiveDateTime, FrameError> {
     )))
 }
 
+fn period_index_label(label: &IndexLabel, freq: PeriodFreq) -> Result<IndexLabel, FrameError> {
+    match label {
+        IndexLabel::Datetime64(nanos) if *nanos == i64::MIN => Ok(IndexLabel::Utf8("NaT".into())),
+        IndexLabel::Datetime64(nanos) => datetime64_nanos_to_naive(*nanos)
+            .map(|dt| IndexLabel::Utf8(format_period_label(dt, freq))),
+        IndexLabel::Utf8(value) if value.trim() == "NaT" => Ok(IndexLabel::Utf8("NaT".into())),
+        IndexLabel::Utf8(value) => parse_naive_datetime_value(value)
+            .map(|dt| IndexLabel::Utf8(format_period_label(dt, freq))),
+        other => Err(FrameError::CompatibilityRejected(format!(
+            "to_period requires datetime-like row index labels, got {other:?}"
+        ))),
+    }
+}
+
+fn datetime64_nanos_to_naive(nanos: i64) -> Result<NaiveDateTime, FrameError> {
+    let secs = nanos.div_euclid(1_000_000_000);
+    let subsec_nanos = nanos.rem_euclid(1_000_000_000) as u32;
+    DateTime::from_timestamp(secs, subsec_nanos)
+        .map(|dt| dt.naive_utc())
+        .ok_or_else(|| FrameError::CompatibilityRejected(format!("invalid datetime nanos {nanos}")))
+}
+
+fn format_period_label(dt: NaiveDateTime, freq: PeriodFreq) -> String {
+    match freq {
+        PeriodFreq::Annual => dt.format("%Y").to_string(),
+        PeriodFreq::Quarterly => format!("{}Q{}", dt.year(), ((dt.month() - 1) / 3) + 1),
+        PeriodFreq::Monthly => dt.format("%Y-%m").to_string(),
+        PeriodFreq::Daily => dt.format("%Y-%m-%d").to_string(),
+        PeriodFreq::Hourly => dt.format("%Y-%m-%d %H:00").to_string(),
+        PeriodFreq::Minutely => dt.format("%Y-%m-%d %H:%M").to_string(),
+        PeriodFreq::Secondly => dt.format("%Y-%m-%d %H:%M:%S").to_string(),
+        _ => unreachable!("checked by DataFrame::to_period"),
+    }
+}
+
 fn parse_fixed_offset_datetime(s: &str) -> Option<DateTime<FixedOffset>> {
     let trimmed = s.trim();
     let normalized = if let Some(stripped) = trimmed.strip_suffix('Z') {
@@ -23043,6 +23081,44 @@ impl DataFrame {
     /// Same axis-deviation note as [`Self::tz_localize`].
     pub fn tz_convert(&self, tz: Option<&str>) -> Result<Self, FrameError> {
         self.tz_op_each_column(|series| series.dt().tz_convert(tz))
+    }
+
+    /// Convert a datetime-like row index to period-style labels.
+    ///
+    /// Matches the row-index default of `pd.DataFrame.to_period(freq)` for the
+    /// supported `Y`, `Q`, `M`, `D`, `H`, `T`/`min`, and `S` frequencies.
+    /// FrankenPandas stores the converted labels in the existing flat `Index`
+    /// as canonical period strings until a dedicated Period label variant lands.
+    pub fn to_period(&self, freq: &str) -> Result<Self, FrameError> {
+        if self.row_multiindex.is_some() {
+            return Err(FrameError::CompatibilityRejected(
+                "to_period currently supports flat row indexes only".to_owned(),
+            ));
+        }
+
+        let period_freq = PeriodFreq::parse(freq).ok_or_else(|| {
+            FrameError::CompatibilityRejected(format!("to_period: unsupported frequency '{freq}'"))
+        })?;
+        if matches!(period_freq, PeriodFreq::Weekly | PeriodFreq::Business) {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "to_period: frequency '{freq}' is not supported yet"
+            )));
+        }
+
+        let labels = self
+            .index
+            .labels()
+            .iter()
+            .map(|label| period_index_label(label, period_freq))
+            .collect::<Result<Vec<_>, _>>()?;
+        let index = Index::new(labels).set_names(self.index.name());
+        Ok(Self {
+            index,
+            row_multiindex: None,
+            columns: self.columns.clone(),
+            column_order: self.column_order.clone(),
+            column_multiindex: self.column_multiindex.clone(),
+        })
     }
 
     /// Per br-frankenpandas-6iac0: shared column-walker used by tz_localize
@@ -76786,6 +76862,85 @@ mod tests {
         let err = df.set_flags(Some(false)).unwrap_err();
         assert!(
             matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("duplicate labels"))
+        );
+    }
+
+    // ── DataFrame.to_period index conversion (frankenpandas-gd11l.3) ──
+
+    #[test]
+    fn dataframe_to_period_converts_datetime64_index_to_month_labels() {
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            "value".to_owned(),
+            Column::from_values(vec![
+                Scalar::Int64(10),
+                Scalar::Int64(20),
+                Scalar::Int64(30),
+            ])
+            .unwrap(),
+        );
+        let index = Index::from_datetime64(vec![0, 2_678_400_000_000_000, i64::MIN])
+            .set_names(Some("when"));
+        let df =
+            DataFrame::new_with_column_order(index, columns, vec!["value".to_owned()]).unwrap();
+
+        let out = df.to_period("M").unwrap();
+        let expected = vec![
+            IndexLabel::Utf8("1970-01".into()),
+            IndexLabel::Utf8("1970-02".into()),
+            IndexLabel::Utf8("NaT".into()),
+        ];
+        assert_eq!(out.index().labels(), expected.as_slice());
+        assert_eq!(out.index().name(), Some("when"));
+        assert_eq!(
+            out.column("value").unwrap().values(),
+            df.column("value").unwrap().values()
+        );
+        assert_eq!(out.column_names(), vec!["value"]);
+    }
+
+    #[test]
+    fn dataframe_to_period_converts_datetime_strings_to_quarter_labels() {
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            "amount".to_owned(),
+            Column::from_values(vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]).unwrap(),
+        );
+        let df = DataFrame::new_with_column_order(
+            Index::from_utf8(vec![
+                "2001-03-31 00:00:00".to_owned(),
+                "2002-05-31T12:30:00".to_owned(),
+            ]),
+            columns,
+            vec!["amount".to_owned()],
+        )
+        .unwrap();
+
+        let out = df.to_period("Q").unwrap();
+        let expected = vec![
+            IndexLabel::Utf8("2001Q1".into()),
+            IndexLabel::Utf8("2002Q2".into()),
+        ];
+        assert_eq!(out.index().labels(), expected.as_slice());
+    }
+
+    #[test]
+    fn dataframe_to_period_rejects_unsupported_or_non_datetime_index() {
+        let df = nk54a_df();
+
+        let non_datetime = df.to_period("M").unwrap_err();
+        assert!(
+            matches!(non_datetime, FrameError::CompatibilityRejected(msg) if msg.contains("datetime-like"))
+        );
+
+        let unsupported = df.to_period("B").unwrap_err();
+        assert!(
+            matches!(unsupported, FrameError::CompatibilityRejected(msg) if msg.contains("not supported yet"))
+        );
+
+        let bad_freq = df.to_period("fortnight").unwrap_err();
+        assert!(
+            matches!(bad_freq, FrameError::CompatibilityRejected(msg) if msg.contains("unsupported frequency"))
         );
     }
 
