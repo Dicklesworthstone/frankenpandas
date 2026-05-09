@@ -4885,6 +4885,21 @@ impl PeriodIndex {
         Ok(lo)
     }
 
+    /// Find positions of `[start, end]` for a period slice, matching
+    /// `pd.PeriodIndex.slice_locs(start, end)`. Requires the index to
+    /// be sorted ascending and the start/end periods to share its
+    /// frequency.
+    pub fn slice_locs(&self, start: Period, end: Period) -> Result<(usize, usize), IndexError> {
+        if !self.is_monotonic_increasing() {
+            return Err(IndexError::InvalidArgument(
+                "slice_locs requires a monotonic increasing PeriodIndex".to_owned(),
+            ));
+        }
+        let left = self.searchsorted(start, "left")?;
+        let right = self.searchsorted(end, "right")?;
+        Ok((left, right))
+    }
+
     /// First position of `period`, matching
     /// `pd.PeriodIndex.get_loc(period)`.
     pub fn get_loc(&self, period: Period) -> Result<usize, IndexError> {
@@ -5710,6 +5725,20 @@ impl RangeIndex {
     pub fn isin(&self, values: &[i64]) -> Vec<bool> {
         let needle: HashSet<i64> = values.iter().copied().collect();
         self.values().iter().map(|v| needle.contains(v)).collect()
+    }
+
+    /// Find positions of `[start, end]` for a value slice, matching
+    /// `pd.RangeIndex.slice_locs(start, end)`. Requires the range to
+    /// be ascending (`step > 0`).
+    pub fn slice_locs(&self, start: i64, end: i64) -> Result<(usize, usize), IndexError> {
+        if self.step < 0 {
+            return Err(IndexError::InvalidArgument(
+                "slice_locs requires a monotonic increasing RangeIndex".to_owned(),
+            ));
+        }
+        let left = self.searchsorted(start, "left")?;
+        let right = self.searchsorted(end, "right")?;
+        Ok((left, right))
     }
 
     /// First position of `value`, matching `pd.RangeIndex.get_loc(value)`.
@@ -14307,6 +14336,31 @@ mod tests {
         // Mismatched names drop the name.
         let other_name = super::RangeIndex::new(3, 6, 1).unwrap().set_name("other");
         assert_eq!(left.union(&other_name).name(), None);
+    }
+
+    #[test]
+    fn period_range_slice_locs_match_pandas_fdga0() -> Result<(), super::IndexError> {
+        use fp_types::{Period, PeriodFreq};
+        let p1 = Period::new(10, PeriodFreq::Monthly);
+        let p2 = Period::new(11, PeriodFreq::Monthly);
+        let p3 = Period::new(12, PeriodFreq::Monthly);
+        let p4 = Period::new(13, PeriodFreq::Monthly);
+        let pi = super::PeriodIndex::new(vec![p1, p2, p3, p4]);
+        assert_eq!(pi.slice_locs(p2, p3)?, (1, 3));
+        assert_eq!(pi.slice_locs(p1, p4)?, (0, 4));
+        // Non-monotonic rejects.
+        let unsorted = super::PeriodIndex::new(vec![p3, p1, p2]);
+        assert!(unsorted.slice_locs(p1, p3).is_err());
+
+        let r = super::RangeIndex::new(0, 10, 2).unwrap();
+        // Values 0,2,4,6,8.
+        assert_eq!(r.slice_locs(2, 6)?, (1, 4));
+        assert_eq!(r.slice_locs(0, 8)?, (0, 5));
+
+        // Descending rejects.
+        let desc = super::RangeIndex::new(10, 0, -2).unwrap();
+        assert!(desc.slice_locs(2, 6).is_err());
+        Ok(())
     }
 
     #[test]
