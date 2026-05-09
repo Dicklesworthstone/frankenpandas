@@ -2909,6 +2909,19 @@ impl DatetimeIndex {
         None
     }
 
+    /// Cast to a different storage resolution, matching
+    /// `pd.DatetimeIndex.as_unit(unit)`. FrankenPandas's storage is fixed
+    /// at nanoseconds so only `"ns"` is supported as a no-op clone; other
+    /// units reject with a typed compatibility error.
+    pub fn as_unit(&self, unit: &str) -> Result<Self, IndexError> {
+        match unit {
+            "ns" => Ok(self.clone()),
+            other => Err(IndexError::InvalidArgument(format!(
+                "as_unit: only 'ns' is supported by FrankenPandas's Datetime64 storage; got {other:?}"
+            ))),
+        }
+    }
+
     /// Storage resolution unit, matching `pd.DatetimeIndex.unit`. Always
     /// `"ns"` because FrankenPandas stores Datetime64 as nanoseconds.
     #[must_use]
@@ -3950,6 +3963,17 @@ impl TimedeltaIndex {
     #[must_use]
     pub fn inferred_freq(&self) -> Option<String> {
         None
+    }
+
+    /// Cast to a different storage resolution, matching
+    /// `pd.TimedeltaIndex.as_unit(unit)`. Only `"ns"` is supported.
+    pub fn as_unit(&self, unit: &str) -> Result<Self, IndexError> {
+        match unit {
+            "ns" => Ok(self.clone()),
+            other => Err(IndexError::InvalidArgument(format!(
+                "as_unit: only 'ns' is supported by FrankenPandas's Timedelta64 storage; got {other:?}"
+            ))),
+        }
     }
 
     /// Storage resolution unit, matching `pd.TimedeltaIndex.unit`. Always
@@ -14452,6 +14476,21 @@ mod tests {
             super::IndexError::InvalidArgument(ref message)
                 if message.contains("tz_convert")
         ));
+    }
+
+    #[test]
+    fn datetime_timedelta_as_unit_match_pandas_70mbe() {
+        let dt = super::DatetimeIndex::new(vec![]);
+        assert!(dt.as_unit("ns").is_ok());
+        let bad = dt.as_unit("us").unwrap_err();
+        assert!(matches!(
+            bad,
+            super::IndexError::InvalidArgument(ref msg) if msg.contains("as_unit")
+        ));
+
+        let td = super::TimedeltaIndex::new(vec![]);
+        assert!(td.as_unit("ns").is_ok());
+        assert!(td.as_unit("ms").is_err());
     }
 
     #[test]
