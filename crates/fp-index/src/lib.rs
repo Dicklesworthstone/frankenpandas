@@ -5682,6 +5682,53 @@ impl RangeIndex {
         self.values().iter().map(|v| needle.contains(v)).collect()
     }
 
+    /// Replace positions where `cond` is `false` with `other`, matching
+    /// `pd.RangeIndex.where(cond, other)`. Returns flat Index because
+    /// the result is generally not a contiguous range.
+    pub fn r#where(&self, cond: &[bool], other: i64) -> Result<Index, IndexError> {
+        let values = self.values();
+        if cond.len() != values.len() {
+            return Err(IndexError::LengthMismatch {
+                expected: values.len(),
+                actual: cond.len(),
+                context: "where: cond length must match index length".to_owned(),
+            });
+        }
+        let labels: Vec<IndexLabel> = values
+            .into_iter()
+            .zip(cond.iter())
+            .map(|(v, &keep)| IndexLabel::Int64(if keep { v } else { other }))
+            .collect();
+        let mut out = Index::new(labels);
+        if let Some(name) = self.name() {
+            out = out.set_name(name);
+        }
+        Ok(out)
+    }
+
+    /// Replace positions where `mask` is `true` with `value`, matching
+    /// `pd.RangeIndex.putmask(mask, value)`.
+    pub fn putmask(&self, mask: &[bool], value: i64) -> Result<Index, IndexError> {
+        let values = self.values();
+        if mask.len() != values.len() {
+            return Err(IndexError::LengthMismatch {
+                expected: values.len(),
+                actual: mask.len(),
+                context: "putmask: mask length must match index length".to_owned(),
+            });
+        }
+        let labels: Vec<IndexLabel> = values
+            .into_iter()
+            .zip(mask.iter())
+            .map(|(v, &replace)| IndexLabel::Int64(if replace { value } else { v }))
+            .collect();
+        let mut out = Index::new(labels);
+        if let Some(name) = self.name() {
+            out = out.set_name(name);
+        }
+        Ok(out)
+    }
+
     fn set_op_via_int<F>(&self, other: &Self, op: F) -> Index
     where
         F: FnOnce(Vec<i64>, Vec<i64>) -> Vec<i64>,
@@ -14042,6 +14089,39 @@ mod tests {
         let empty = super::PeriodIndex::new(Vec::new());
         assert_eq!(empty.freqstr(), None);
         assert_eq!(empty.inferred_freq(), None);
+    }
+
+    #[test]
+    fn range_index_where_putmask_match_pandas_jw1kw() -> Result<(), super::IndexError> {
+        let r = super::RangeIndex::new(0, 5, 1).unwrap().set_name("r");
+
+        let labels = |idx: &super::Index| -> Vec<i64> {
+            idx.labels()
+                .iter()
+                .map(|label| match label {
+                    super::IndexLabel::Int64(v) => *v,
+                    _ => panic!("expected Int64 labels"),
+                })
+                .collect()
+        };
+
+        let masked = r.r#where(&[true, false, true, false, true], 99)?;
+        assert_eq!(labels(&masked), vec![0, 99, 2, 99, 4]);
+        assert_eq!(masked.name(), Some("r"));
+
+        let put = r.putmask(&[false, true, false, true, false], 99)?;
+        assert_eq!(labels(&put), vec![0, 99, 2, 99, 4]);
+
+        // Length mismatch.
+        assert!(matches!(
+            r.r#where(&[true, false], 0).unwrap_err(),
+            super::IndexError::LengthMismatch { .. }
+        ));
+        assert!(matches!(
+            r.putmask(&[true; 7], 0).unwrap_err(),
+            super::IndexError::LengthMismatch { .. }
+        ));
+        Ok(())
     }
 
     #[test]
