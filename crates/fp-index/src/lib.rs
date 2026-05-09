@@ -2909,6 +2909,20 @@ impl DatetimeIndex {
         None
     }
 
+    /// Storage resolution unit, matching `pd.DatetimeIndex.unit`. Always
+    /// `"ns"` because FrankenPandas stores Datetime64 as nanoseconds.
+    #[must_use]
+    pub fn unit(&self) -> &'static str {
+        "ns"
+    }
+
+    /// Resolution string, matching `pd.DatetimeIndex.resolution`. Always
+    /// `"nanosecond"` because the underlying storage is fixed at ns.
+    #[must_use]
+    pub fn resolution(&self) -> &'static str {
+        "nanosecond"
+    }
+
     /// Find positions of `[start, end]` for a label slice, matching
     /// `pd.DatetimeIndex.slice_locs(start, end)`. Requires the index to
     /// be monotonically increasing; non-monotonic input rejects.
@@ -3858,6 +3872,20 @@ impl TimedeltaIndex {
     #[must_use]
     pub fn inferred_freq(&self) -> Option<String> {
         None
+    }
+
+    /// Storage resolution unit, matching `pd.TimedeltaIndex.unit`. Always
+    /// `"ns"`.
+    #[must_use]
+    pub fn unit(&self) -> &'static str {
+        "ns"
+    }
+
+    /// Resolution string, matching `pd.TimedeltaIndex.resolution`.
+    /// Always `"nanosecond"`.
+    #[must_use]
+    pub fn resolution(&self) -> &'static str {
+        "nanosecond"
     }
 
     /// Find positions of `[start, end]` for a label slice, matching
@@ -13326,6 +13354,17 @@ mod tests {
             super::IndexError::InvalidArgument(ref message)
                 if message.contains("tz_convert")
         ));
+    }
+
+    #[test]
+    fn datetime_timedelta_unit_resolution_match_pandas_c50rv() {
+        let dt = super::DatetimeIndex::new(vec![]);
+        assert_eq!(dt.unit(), "ns");
+        assert_eq!(dt.resolution(), "nanosecond");
+
+        let td = super::TimedeltaIndex::new(vec![]);
+        assert_eq!(td.unit(), "ns");
+        assert_eq!(td.resolution(), "nanosecond");
     }
 
     #[test]
