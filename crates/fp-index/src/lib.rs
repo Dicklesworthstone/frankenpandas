@@ -2451,6 +2451,55 @@ impl DatetimeIndex {
         out
     }
 
+    /// Minimum non-NAT label, matching `pd.DatetimeIndex.min()`.
+    /// Returns `None` for empty or all-NAT inputs to mirror pandas' NaT.
+    #[must_use]
+    pub fn min(&self) -> Option<i64> {
+        self.index
+            .labels()
+            .iter()
+            .filter_map(|label| match label {
+                IndexLabel::Datetime64(n) if *n != i64::MIN => Some(*n),
+                _ => None,
+            })
+            .min()
+    }
+
+    /// Maximum non-NAT label, matching `pd.DatetimeIndex.max()`.
+    #[must_use]
+    pub fn max(&self) -> Option<i64> {
+        self.index
+            .labels()
+            .iter()
+            .filter_map(|label| match label {
+                IndexLabel::Datetime64(n) if *n != i64::MIN => Some(*n),
+                _ => None,
+            })
+            .max()
+    }
+
+    /// Sort labels ascending, matching `pd.DatetimeIndex.sort_values()`.
+    /// NAT sorts first because the underlying sentinel is `i64::MIN`,
+    /// matching pandas' `na_position='first'` default for datetime indexes.
+    #[must_use]
+    pub fn sort_values(&self) -> Self {
+        let mut nanos: Vec<i64> = self
+            .index
+            .labels()
+            .iter()
+            .filter_map(|label| match label {
+                IndexLabel::Datetime64(n) => Some(*n),
+                _ => None,
+            })
+            .collect();
+        nanos.sort_unstable();
+        let mut out = Self::new(nanos);
+        if let Some(name) = self.name() {
+            out = out.set_name(name);
+        }
+        out
+    }
+
     /// Remove the label at the given position, matching
     /// `pd.DatetimeIndex.delete(loc)`.
     pub fn delete(&self, loc: usize) -> Result<Self, IndexError> {
@@ -3275,6 +3324,54 @@ impl TimedeltaIndex {
         }));
         let mut out = Self::new(nanos);
         if let Some(name) = self.name().filter(|_| self.name() == other.name()) {
+            out = out.set_name(name);
+        }
+        out
+    }
+
+    /// Minimum non-NAT label, matching `pd.TimedeltaIndex.min()`.
+    #[must_use]
+    pub fn min(&self) -> Option<i64> {
+        self.index
+            .labels()
+            .iter()
+            .filter_map(|label| match label {
+                IndexLabel::Timedelta64(n) if *n != Timedelta::NAT => Some(*n),
+                _ => None,
+            })
+            .min()
+    }
+
+    /// Maximum non-NAT label, matching `pd.TimedeltaIndex.max()`.
+    #[must_use]
+    pub fn max(&self) -> Option<i64> {
+        self.index
+            .labels()
+            .iter()
+            .filter_map(|label| match label {
+                IndexLabel::Timedelta64(n) if *n != Timedelta::NAT => Some(*n),
+                _ => None,
+            })
+            .max()
+    }
+
+    /// Sort labels ascending, matching `pd.TimedeltaIndex.sort_values()`.
+    /// NAT sorts first (Timedelta::NAT sentinel) to match pandas
+    /// `na_position='first'` default.
+    #[must_use]
+    pub fn sort_values(&self) -> Self {
+        let mut nanos: Vec<i64> = self
+            .index
+            .labels()
+            .iter()
+            .filter_map(|label| match label {
+                IndexLabel::Timedelta64(n) => Some(*n),
+                _ => None,
+            })
+            .collect();
+        nanos.sort_unstable();
+        let mut out = Self::new(nanos);
+        if let Some(name) = self.name() {
             out = out.set_name(name);
         }
         out
@@ -11672,6 +11769,56 @@ mod tests {
                 None
             ]
         );
+    }
+
+    #[test]
+    fn datetime_index_min_max_sort_values_match_pandas_kastf() {
+        const NS: i64 = 1_000_000_000;
+        let a = 1_704_067_200_i64 * NS;
+        let b = 1_705_276_800_i64 * NS;
+        let c = 1_706_140_800_i64 * NS;
+        let dt = super::DatetimeIndex::new(vec![b, c, i64::MIN, a]).set_name("ts");
+
+        assert_eq!(dt.min(), Some(a));
+        assert_eq!(dt.max(), Some(c));
+
+        let sorted = dt.sort_values();
+        // NAT sorts first (na_position='first' default).
+        assert_eq!(sorted.values(), vec![None, Some(a), Some(b), Some(c)]);
+        assert_eq!(sorted.name(), Some("ts"));
+
+        let all_nat = super::DatetimeIndex::new(vec![i64::MIN, i64::MIN]);
+        assert_eq!(all_nat.min(), None);
+        assert_eq!(all_nat.max(), None);
+
+        let empty = super::DatetimeIndex::new(vec![]);
+        assert_eq!(empty.min(), None);
+        assert_eq!(empty.max(), None);
+        assert!(empty.sort_values().is_empty());
+    }
+
+    #[test]
+    fn timedelta_index_min_max_sort_values_match_pandas_kastf() {
+        let nat = fp_types::Timedelta::NAT;
+        let td = super::TimedeltaIndex::new(vec![300_i64, nat, 100, 200]).set_name("d");
+
+        assert_eq!(td.min(), Some(100));
+        assert_eq!(td.max(), Some(300));
+
+        let sorted = td.sort_values();
+        assert_eq!(
+            sorted.values(),
+            vec![None, Some(100), Some(200), Some(300)]
+        );
+        assert_eq!(sorted.name(), Some("d"));
+
+        let all_nat = super::TimedeltaIndex::new(vec![nat, nat]);
+        assert_eq!(all_nat.min(), None);
+        assert_eq!(all_nat.max(), None);
+
+        let empty = super::TimedeltaIndex::new(vec![]);
+        assert_eq!(empty.min(), None);
+        assert_eq!(empty.max(), None);
     }
 
     #[test]
