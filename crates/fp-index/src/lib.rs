@@ -6689,6 +6689,95 @@ impl CategoricalIndex {
         self.to_index().argsort()
     }
 
+    /// Concatenate with another CategoricalIndex, matching
+    /// `pd.CategoricalIndex.append(other)`. Categories merge
+    /// (other-only categories are appended) and the index name is
+    /// preserved when both operands share it.
+    #[must_use]
+    pub fn append(&self, other: &Self) -> Self {
+        let mut labels = self.labels.clone();
+        labels.extend_from_slice(&other.labels);
+        let mut categories = self.categories.clone();
+        for cat in &other.categories {
+            if !categories.contains(cat) {
+                categories.push(cat.clone());
+            }
+        }
+        let name = if self.name == other.name {
+            self.name.clone()
+        } else {
+            None
+        };
+        Self {
+            labels,
+            categories,
+            ordered: self.ordered && other.ordered,
+            name,
+        }
+    }
+
+    /// Remove the label at the given position, matching
+    /// `pd.CategoricalIndex.delete(loc)`. OOB raises.
+    pub fn delete(&self, loc: usize) -> Result<Self, IndexError> {
+        if loc >= self.labels.len() {
+            return Err(IndexError::OutOfBounds {
+                position: loc,
+                length: self.labels.len(),
+            });
+        }
+        let mut labels = self.labels.clone();
+        labels.remove(loc);
+        Ok(Self {
+            labels,
+            categories: self.categories.clone(),
+            ordered: self.ordered,
+            name: self.name.clone(),
+        })
+    }
+
+    /// Insert `value` at position `loc`, matching
+    /// `pd.CategoricalIndex.insert(loc, value)`. The value must be a
+    /// member of the categories list; OOB and not-a-category raise.
+    pub fn insert(&self, loc: usize, value: &str) -> Result<Self, IndexError> {
+        if loc > self.labels.len() {
+            return Err(IndexError::OutOfBounds {
+                position: loc,
+                length: self.labels.len(),
+            });
+        }
+        if !self.categories.iter().any(|cat| cat == value) {
+            return Err(IndexError::InvalidArgument(format!(
+                "insert: {value:?} is not a category"
+            )));
+        }
+        let mut labels = self.labels.clone();
+        labels.insert(loc, value.to_owned());
+        Ok(Self {
+            labels,
+            categories: self.categories.clone(),
+            ordered: self.ordered,
+            name: self.name.clone(),
+        })
+    }
+
+    /// Repeat each label `repeats` times, matching
+    /// `pd.CategoricalIndex.repeat(repeats)`.
+    #[must_use]
+    pub fn repeat(&self, repeats: usize) -> Self {
+        let mut labels = Vec::with_capacity(self.labels.len() * repeats);
+        for label in &self.labels {
+            for _ in 0..repeats {
+                labels.push(label.clone());
+            }
+        }
+        Self {
+            labels,
+            categories: self.categories.clone(),
+            ordered: self.ordered,
+            name: self.name.clone(),
+        }
+    }
+
     /// Pick labels at the given positions, matching
     /// `pd.CategoricalIndex.take(positions)`. Out-of-bounds positions
     /// raise [`IndexError::OutOfBounds`].
@@ -15040,6 +15129,65 @@ mod tests {
         let empty = super::CategoricalIndex::from_values(Vec::<String>::new(), false);
         assert_eq!(empty.isnull(), Vec::<bool>::new());
         assert!(!empty.hasnans());
+    }
+
+    #[test]
+    fn categorical_index_append_delete_insert_repeat_match_pandas_tns52()
+    -> Result<(), super::IndexError> {
+        let cat = super::CategoricalIndex::with_categories(
+            vec!["a".to_owned(), "b".to_owned(), "c".to_owned()],
+            vec!["a".to_owned(), "b".to_owned(), "c".to_owned(), "d".to_owned()],
+            false,
+        )?
+        .set_name("level");
+
+        // append: merge categories.
+        let other = super::CategoricalIndex::with_categories(
+            vec!["d".to_owned()],
+            vec!["d".to_owned(), "e".to_owned()],
+            false,
+        )?
+        .set_name("level");
+        let merged = cat.append(&other);
+        assert_eq!(
+            merged.labels(),
+            vec![
+                "a".to_owned(),
+                "b".to_owned(),
+                "c".to_owned(),
+                "d".to_owned()
+            ]
+            .as_slice()
+        );
+        assert_eq!(merged.name(), Some("level"));
+        assert!(merged.categories().contains(&"e".to_owned()));
+
+        // delete OOB.
+        assert!(matches!(
+            cat.delete(99).unwrap_err(),
+            super::IndexError::OutOfBounds { position: 99, length: 3 }
+        ));
+        let trimmed = cat.delete(0)?;
+        assert_eq!(
+            trimmed.labels(),
+            vec!["b".to_owned(), "c".to_owned()].as_slice()
+        );
+
+        // insert.
+        let inserted = cat.insert(1, "d")?;
+        assert_eq!(
+            inserted.labels(),
+            vec!["a".to_owned(), "d".to_owned(), "b".to_owned(), "c".to_owned()].as_slice()
+        );
+        assert!(cat.insert(1, "zzz").is_err());
+
+        // repeat.
+        let repeated = cat.repeat(2);
+        assert_eq!(repeated.labels().len(), 6);
+        assert_eq!(repeated.labels()[0], "a");
+        assert_eq!(repeated.labels()[1], "a");
+        assert_eq!(repeated.labels()[2], "b");
+        Ok(())
     }
 
     #[test]
