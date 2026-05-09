@@ -2743,6 +2743,32 @@ impl DatetimeIndex {
             .collect()
     }
 
+    /// Insert `value` at position `loc`, matching
+    /// `pd.DatetimeIndex.insert(loc, value)`. `loc == len()` appends;
+    /// `loc > len()` raises [`IndexError::OutOfBounds`].
+    pub fn insert(&self, loc: usize, value: i64) -> Result<Self, IndexError> {
+        let labels = self.index.labels();
+        if loc > labels.len() {
+            return Err(IndexError::OutOfBounds {
+                position: loc,
+                length: labels.len(),
+            });
+        }
+        let mut nanos: Vec<i64> = labels
+            .iter()
+            .filter_map(|label| match label {
+                IndexLabel::Datetime64(n) => Some(*n),
+                _ => None,
+            })
+            .collect();
+        nanos.insert(loc, value);
+        let mut out = Self::new(nanos);
+        if let Some(name) = self.name() {
+            out = out.set_name(name);
+        }
+        Ok(out)
+    }
+
     /// Stringify each label, matching `pd.DatetimeIndex.format()`.
     /// Non-NAT labels render as the chrono RFC3339 timestamp; NAT
     /// renders as the `NaT` literal pandas uses.
@@ -3667,6 +3693,32 @@ impl TimedeltaIndex {
             .searchsorted(&IndexLabel::Timedelta64(value), side)
     }
 
+    /// Insert `value` at position `loc`, matching
+    /// `pd.TimedeltaIndex.insert(loc, value)`. `loc == len()` appends;
+    /// `loc > len()` raises [`IndexError::OutOfBounds`].
+    pub fn insert(&self, loc: usize, value: i64) -> Result<Self, IndexError> {
+        let labels = self.index.labels();
+        if loc > labels.len() {
+            return Err(IndexError::OutOfBounds {
+                position: loc,
+                length: labels.len(),
+            });
+        }
+        let mut nanos: Vec<i64> = labels
+            .iter()
+            .filter_map(|label| match label {
+                IndexLabel::Timedelta64(n) => Some(*n),
+                _ => None,
+            })
+            .collect();
+        nanos.insert(loc, value);
+        let mut out = Self::new(nanos);
+        if let Some(name) = self.name() {
+            out = out.set_name(name);
+        }
+        Ok(out)
+    }
+
     /// Stringify each label, matching `pd.TimedeltaIndex.format()`.
     /// Non-NAT labels render as a signed nanosecond integer; NAT renders
     /// as the `NaT` literal.
@@ -4542,6 +4594,23 @@ impl PeriodIndex {
         Ok(lo)
     }
 
+    /// Insert `period` at position `loc`, matching
+    /// `pd.PeriodIndex.insert(loc, period)`.
+    pub fn insert(&self, loc: usize, period: Period) -> Result<Self, IndexError> {
+        if loc > self.values.len() {
+            return Err(IndexError::OutOfBounds {
+                position: loc,
+                length: self.values.len(),
+            });
+        }
+        let mut periods = self.values.clone();
+        periods.insert(loc, period);
+        Ok(Self {
+            values: periods,
+            name: self.name.clone(),
+        })
+    }
+
     /// Stringify each period via Display, matching `pd.PeriodIndex.format()`.
     #[must_use]
     pub fn format(&self) -> Vec<String> {
@@ -5240,6 +5309,26 @@ impl RangeIndex {
     pub fn isin(&self, values: &[i64]) -> Vec<bool> {
         let needle: HashSet<i64> = values.iter().copied().collect();
         self.values().iter().map(|v| needle.contains(v)).collect()
+    }
+
+    /// Insert `value` at position `loc`, matching
+    /// `pd.RangeIndex.insert(loc, value)`. Returns a flat [`Index`]
+    /// because the result is generally not a contiguous range.
+    pub fn insert(&self, loc: usize, value: i64) -> Result<Index, IndexError> {
+        let values = self.values();
+        if loc > values.len() {
+            return Err(IndexError::OutOfBounds {
+                position: loc,
+                length: values.len(),
+            });
+        }
+        let mut labels: Vec<IndexLabel> = values.into_iter().map(IndexLabel::Int64).collect();
+        labels.insert(loc, IndexLabel::Int64(value));
+        let mut out = Index::new(labels);
+        if let Some(name) = self.name() {
+            out = out.set_name(name);
+        }
+        Ok(out)
     }
 
     /// Concatenate with another RangeIndex, matching
@@ -12923,6 +13012,56 @@ mod tests {
                 None
             ]
         );
+    }
+
+    #[test]
+    fn index_variants_insert_match_pandas_veabb() -> Result<(), super::IndexError> {
+        const NS: i64 = 1_000_000_000;
+        let a = 1_704_067_200_i64 * NS;
+        let b = 1_705_276_800_i64 * NS;
+        let c = 1_706_140_800_i64 * NS;
+        let dt = super::DatetimeIndex::new(vec![a, c]).set_name("ts");
+
+        // Middle insertion.
+        let middle = dt.insert(1, b)?;
+        assert_eq!(middle.values(), vec![Some(a), Some(b), Some(c)]);
+        assert_eq!(middle.name(), Some("ts"));
+
+        // End insertion (loc == len()).
+        let end = dt.insert(dt.len(), b)?;
+        assert_eq!(end.values(), vec![Some(a), Some(c), Some(b)]);
+
+        // OOB.
+        assert!(matches!(
+            dt.insert(99, b).unwrap_err(),
+            super::IndexError::OutOfBounds { position: 99, length: 2 }
+        ));
+
+        let td = super::TimedeltaIndex::new(vec![100_i64, 300]).set_name("d");
+        let td_inserted = td.insert(1, 200)?;
+        assert_eq!(td_inserted.values(), vec![Some(100), Some(200), Some(300)]);
+        assert_eq!(td_inserted.name(), Some("d"));
+
+        use fp_types::{Period, PeriodFreq};
+        let p1 = Period::new(10, PeriodFreq::Monthly);
+        let p2 = Period::new(11, PeriodFreq::Monthly);
+        let p3 = Period::new(12, PeriodFreq::Monthly);
+        let pi = super::PeriodIndex::new(vec![p1, p3]).set_name("p");
+        let pi_inserted = pi.insert(1, p2)?;
+        assert_eq!(pi_inserted.values(), &[p1, p2, p3]);
+
+        let r = super::RangeIndex::new(0, 3, 1).unwrap();
+        let r_inserted = r.insert(1, 99)?;
+        let labels: Vec<i64> = r_inserted
+            .labels()
+            .iter()
+            .map(|label| match label {
+                super::IndexLabel::Int64(v) => *v,
+                _ => panic!("expected Int64 labels"),
+            })
+            .collect();
+        assert_eq!(labels, vec![0, 99, 1, 2]);
+        Ok(())
     }
 
     #[test]
