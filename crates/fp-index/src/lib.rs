@@ -2435,6 +2435,91 @@ impl DatetimeIndex {
         use chrono::Datelike;
         map_datetime_labels(self.index.labels(), |dt| dt.month() == 12 && dt.day() == 31)
     }
+
+    /// Full English month name, matching `pd.DatetimeIndex.month_name()`.
+    #[must_use]
+    pub fn month_name(&self) -> Vec<Option<String>> {
+        use chrono::Datelike;
+        map_datetime_labels(self.index.labels(), |dt| {
+            month_name_english(dt.month()).to_owned()
+        })
+    }
+
+    /// Full English weekday name, matching `pd.DatetimeIndex.day_name()`.
+    #[must_use]
+    pub fn day_name(&self) -> Vec<Option<String>> {
+        use chrono::Datelike;
+        map_datetime_labels(self.index.labels(), |dt| {
+            weekday_name_english(dt.weekday()).to_owned()
+        })
+    }
+
+    /// Truncate every timestamp to midnight UTC, matching
+    /// `pd.DatetimeIndex.normalize()`. NAT labels propagate.
+    #[must_use]
+    pub fn normalize(&self) -> Self {
+        let nanos: Vec<i64> = self
+            .index
+            .labels()
+            .iter()
+            .map(|label| match label {
+                IndexLabel::Datetime64(nanos) if *nanos != i64::MIN => {
+                    let secs_per_day: i64 = 86_400;
+                    let nanos_per_day: i64 = secs_per_day * 1_000_000_000;
+                    nanos.div_euclid(nanos_per_day) * nanos_per_day
+                }
+                _ => i64::MIN,
+            })
+            .collect();
+        let mut normalized = Self::new(nanos);
+        if let Some(name) = self.name() {
+            normalized = normalized.set_name(name);
+        }
+        normalized
+    }
+
+    /// Whether every label is at midnight UTC (NAT counts as normalized),
+    /// matching `pd.DatetimeIndex.is_normalized`.
+    #[must_use]
+    pub fn is_normalized(&self) -> bool {
+        let nanos_per_day: i64 = 86_400 * 1_000_000_000;
+        self.index.labels().iter().all(|label| match label {
+            IndexLabel::Datetime64(nanos) => {
+                *nanos == i64::MIN || nanos.rem_euclid(nanos_per_day) == 0
+            }
+            _ => true,
+        })
+    }
+}
+
+fn month_name_english(month: u32) -> &'static str {
+    match month {
+        1 => "January",
+        2 => "February",
+        3 => "March",
+        4 => "April",
+        5 => "May",
+        6 => "June",
+        7 => "July",
+        8 => "August",
+        9 => "September",
+        10 => "October",
+        11 => "November",
+        12 => "December",
+        _ => "",
+    }
+}
+
+fn weekday_name_english(weekday: chrono::Weekday) -> &'static str {
+    match weekday {
+        chrono::Weekday::Mon => "Monday",
+        chrono::Weekday::Tue => "Tuesday",
+        chrono::Weekday::Wed => "Wednesday",
+        chrono::Weekday::Thu => "Thursday",
+        chrono::Weekday::Fri => "Friday",
+        chrono::Weekday::Sat => "Saturday",
+        chrono::Weekday::Sun => "Sunday",
+    }
 }
 
 fn days_in_calendar_month(year: i32, month: u32) -> u32 {
@@ -10746,6 +10831,71 @@ mod tests {
                 None
             ]
         );
+    }
+
+    #[test]
+    fn datetime_index_month_name_and_day_name_match_pandas_fqkiu() {
+        // 2024-01-15 (Monday in January), 2024-12-31 (Tuesday in December),
+        // i64::MIN (NAT).
+        const NS: i64 = 1_000_000_000;
+        let mon_jan: i64 = 1_705_276_800_i64 * NS;
+        let tue_dec: i64 = 1_735_603_200_i64 * NS;
+        let dt = super::DatetimeIndex::new(vec![mon_jan, tue_dec, i64::MIN]);
+
+        assert_eq!(
+            dt.month_name(),
+            vec![
+                Some("January".to_owned()),
+                Some("December".to_owned()),
+                None
+            ]
+        );
+        assert_eq!(
+            dt.day_name(),
+            vec![
+                Some("Monday".to_owned()),
+                Some("Tuesday".to_owned()),
+                None
+            ]
+        );
+    }
+
+    #[test]
+    fn datetime_index_normalize_truncates_to_midnight_utc_fqkiu() {
+        const NS: i64 = 1_000_000_000;
+        // 2024-01-15 12:34:56.789Z plus midnight 2024-01-21Z plus NAT.
+        let mid_day: i64 = 1_705_276_800_i64 * NS + 12 * 3600 * NS + 34 * 60 * NS + 56 * NS + 789;
+        let midnight: i64 = 1_705_795_200_i64 * NS;
+        let nat = i64::MIN;
+
+        let dt = super::DatetimeIndex::new(vec![mid_day, midnight, nat]).set_name("when");
+        let normed = dt.normalize();
+
+        // Each non-NAT entry is now at midnight; NAT stays NAT; name preserved.
+        assert_eq!(
+            normed.values(),
+            vec![Some(1_705_276_800_i64 * NS), Some(midnight), None]
+        );
+        assert_eq!(normed.name(), Some("when"));
+        assert!(normed.is_normalized());
+    }
+
+    #[test]
+    fn datetime_index_is_normalized_returns_false_when_any_non_midnight_fqkiu() {
+        const NS: i64 = 1_000_000_000;
+        let mid_day: i64 = 1_705_276_800_i64 * NS + 1; // 1ns past midnight
+        let midnight: i64 = 1_705_795_200_i64 * NS;
+        let mixed = super::DatetimeIndex::new(vec![midnight, mid_day]);
+        assert!(!mixed.is_normalized());
+
+        let only_midnight = super::DatetimeIndex::new(vec![midnight]);
+        assert!(only_midnight.is_normalized());
+
+        let only_nat = super::DatetimeIndex::new(vec![i64::MIN, i64::MIN]);
+        assert!(only_nat.is_normalized());
+
+        let empty = super::DatetimeIndex::new(vec![]);
+        assert!(empty.is_normalized());
     }
 
     #[test]
