@@ -6095,6 +6095,102 @@ impl CategoricalIndex {
         self.clone()
     }
 
+    /// Positions that would sort labels ascending, matching
+    /// `pd.CategoricalIndex.argsort()`.
+    #[must_use]
+    pub fn argsort(&self) -> Vec<usize> {
+        self.to_index().argsort()
+    }
+
+    /// Pick labels at the given positions, matching
+    /// `pd.CategoricalIndex.take(positions)`. Out-of-bounds positions
+    /// raise [`IndexError::OutOfBounds`].
+    pub fn take(&self, positions: &[usize]) -> Result<Self, IndexError> {
+        for &p in positions {
+            if p >= self.labels.len() {
+                return Err(IndexError::OutOfBounds {
+                    position: p,
+                    length: self.labels.len(),
+                });
+            }
+        }
+        let labels: Vec<String> = positions.iter().map(|&p| self.labels[p].clone()).collect();
+        Ok(Self {
+            labels,
+            categories: self.categories.clone(),
+            ordered: self.ordered,
+            name: self.name.clone(),
+        })
+    }
+
+    /// Per-position membership mask, matching
+    /// `pd.CategoricalIndex.isin(values)`.
+    #[must_use]
+    pub fn isin(&self, values: &[String]) -> Vec<bool> {
+        let needle: HashSet<&String> = values.iter().collect();
+        self.labels.iter().map(|l| needle.contains(l)).collect()
+    }
+
+    /// First position of `value`, matching
+    /// `pd.CategoricalIndex.get_loc(value)`.
+    pub fn get_loc(&self, value: &str) -> Result<usize, IndexError> {
+        self.labels
+            .iter()
+            .position(|l| l == value)
+            .ok_or_else(|| {
+                IndexError::InvalidArgument(format!(
+                    "get_loc: {value:?} not in CategoricalIndex"
+                ))
+            })
+    }
+
+    /// Smallest label in category order when ordered, lexicographic when
+    /// unordered, matching `pd.CategoricalIndex.min()`. Empty returns
+    /// `None`.
+    #[must_use]
+    pub fn min(&self) -> Option<&str> {
+        if self.labels.is_empty() {
+            return None;
+        }
+        if self.ordered {
+            // Compare by category position.
+            let position = |label: &String| {
+                self.categories
+                    .iter()
+                    .position(|cat| cat == label)
+                    .unwrap_or(usize::MAX)
+            };
+            self.labels
+                .iter()
+                .min_by_key(|label| position(label))
+                .map(String::as_str)
+        } else {
+            self.labels.iter().min().map(String::as_str)
+        }
+    }
+
+    /// Largest label, matching `pd.CategoricalIndex.max()`.
+    #[must_use]
+    pub fn max(&self) -> Option<&str> {
+        if self.labels.is_empty() {
+            return None;
+        }
+        if self.ordered {
+            let position = |label: &String| {
+                self.categories
+                    .iter()
+                    .position(|cat| cat == label)
+                    .unwrap_or(0)
+            };
+            self.labels
+                .iter()
+                .max_by_key(|label| position(label))
+                .map(String::as_str)
+        } else {
+            self.labels.iter().max().map(String::as_str)
+        }
+    }
+
     /// First-seen unique labels, matching `pd.CategoricalIndex.unique()`.
     /// Categories are preserved (not narrowed to seen labels) and the
     /// ordered flag rolls through. The result keeps the index name.
@@ -14122,6 +14218,57 @@ mod tests {
         let (codes, uniques) = pi.factorize();
         assert!(codes.is_empty());
         assert!(uniques.is_empty());
+    }
+
+    #[test]
+    fn categorical_index_forwarders_match_pandas_e2p82() -> Result<(), super::IndexError> {
+        let cat = super::CategoricalIndex::with_categories(
+            vec!["b".to_owned(), "a".to_owned(), "c".to_owned(), "a".to_owned()],
+            vec!["a".to_owned(), "b".to_owned(), "c".to_owned()],
+            true,
+        )?;
+
+        // argsort: positions sorted by lexicographic label.
+        let positions = cat.argsort();
+        let labels: Vec<&str> = positions
+            .iter()
+            .map(|&p| cat.labels()[p].as_str())
+            .collect();
+        for w in labels.windows(2) {
+            assert!(w[0] <= w[1]);
+        }
+
+        // take swaps positions.
+        let taken = cat.take(&[2, 0, 0])?;
+        assert_eq!(
+            taken.labels(),
+            vec!["c".to_owned(), "b".to_owned(), "b".to_owned()].as_slice()
+        );
+        assert!(matches!(
+            cat.take(&[7]).unwrap_err(),
+            super::IndexError::OutOfBounds { position: 7, length: 4 }
+        ));
+
+        // isin membership.
+        assert_eq!(
+            cat.isin(&["a".to_owned(), "z".to_owned()]),
+            vec![false, true, false, true]
+        );
+
+        // get_loc finds first; missing rejects.
+        assert_eq!(cat.get_loc("c")?, 2);
+        assert!(cat.get_loc("zzz").is_err());
+
+        // min/max with ordered=true uses category order.
+        assert_eq!(cat.min(), Some("a"));
+        assert_eq!(cat.max(), Some("c"));
+
+        // Empty.
+        let empty = super::CategoricalIndex::from_values(Vec::<String>::new(), false);
+        assert_eq!(empty.min(), None);
+        assert_eq!(empty.max(), None);
+        assert!(empty.argsort().is_empty());
+        Ok(())
     }
 
     #[test]
