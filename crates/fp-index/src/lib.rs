@@ -6166,6 +6166,29 @@ impl CategoricalIndex {
         })
     }
 
+    /// Labels in either but not both, matching
+    /// `pd.CategoricalIndex.symmetric_difference(other)`.
+    #[must_use]
+    pub fn symmetric_difference(&self, other: &Self) -> Self {
+        self.set_op_via_string(other, |left, right| {
+            let left_set: HashSet<&&String> = left.iter().collect();
+            let right_set: HashSet<&&String> = right.iter().collect();
+            let mut seen = HashSet::<&String>::new();
+            let mut out = Vec::<String>::new();
+            for label in &left {
+                if !right_set.contains(label) && seen.insert(*label) {
+                    out.push((*label).clone());
+                }
+            }
+            for label in &right {
+                if !left_set.contains(label) && seen.insert(*label) {
+                    out.push((*label).clone());
+                }
+            }
+            out
+        })
+    }
+
     /// Self labels not in other, matching
     /// `pd.CategoricalIndex.difference(other)`.
     #[must_use]
@@ -14390,6 +14413,11 @@ mod tests {
         assert_eq!(
             cat.difference(&other).labels(),
             vec!["a".to_owned()].as_slice()
+        );
+        // symmetric_difference: a (only in cat) + d (only in other).
+        assert_eq!(
+            cat.symmetric_difference(&other).labels(),
+            vec!["a".to_owned(), "d".to_owned()].as_slice()
         );
         Ok(())
     }
