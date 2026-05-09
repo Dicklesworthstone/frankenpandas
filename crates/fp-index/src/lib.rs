@@ -3112,6 +3112,64 @@ impl RangeIndex {
     pub fn array(&self) -> Vec<i64> {
         self.values()
     }
+
+    /// Position of the maximum value, matching `pd.RangeIndex.argmax()`.
+    ///
+    /// `step > 0` makes the last position the maximum; `step < 0` makes
+    /// position 0 the maximum. Empty ranges raise the same
+    /// `attempt to get argmax of an empty sequence` error pandas surfaces.
+    pub fn argmax(&self) -> Result<usize, IndexError> {
+        if self.is_empty() {
+            return Err(IndexError::InvalidArgument(
+                "attempt to get argmax of an empty sequence".to_owned(),
+            ));
+        }
+        if self.step > 0 {
+            Ok(self.len() - 1)
+        } else {
+            Ok(0)
+        }
+    }
+
+    /// Position of the minimum value, matching `pd.RangeIndex.argmin()`.
+    pub fn argmin(&self) -> Result<usize, IndexError> {
+        if self.is_empty() {
+            return Err(IndexError::InvalidArgument(
+                "attempt to get argmin of an empty sequence".to_owned(),
+            ));
+        }
+        if self.step > 0 {
+            Ok(0)
+        } else {
+            Ok(self.len() - 1)
+        }
+    }
+
+    /// Positions that would sort the index ascending, matching
+    /// `pd.RangeIndex.argsort()`.
+    #[must_use]
+    pub fn argsort(&self) -> Vec<usize> {
+        let len = self.len();
+        if self.step >= 0 {
+            (0..len).collect()
+        } else {
+            (0..len).rev().collect()
+        }
+    }
+
+    /// RangeIndex enforces uniqueness, so every position is reported as a
+    /// non-duplicate, matching `pd.RangeIndex.duplicated(keep=...)`.
+    #[must_use]
+    pub fn duplicated(&self, _keep: DuplicateKeep) -> Vec<bool> {
+        vec![false; self.len()]
+    }
+
+    /// Drop duplicates, matching `pd.RangeIndex.drop_duplicates()`.
+    /// Returns a clone because RangeIndex never has duplicates.
+    #[must_use]
+    pub fn drop_duplicates(&self) -> Self {
+        self.clone()
+    }
 }
 
 /// Public pandas-style categorical index wrapper.
@@ -10256,6 +10314,73 @@ mod tests {
         }
 
         Ok(())
+    }
+
+    #[test]
+    fn range_index_argmax_argmin_handles_step_direction_mrchb() {
+        let asc = super::RangeIndex::new(0, 5, 1).unwrap();
+        assert_eq!(asc.argmax().unwrap(), 4);
+        assert_eq!(asc.argmin().unwrap(), 0);
+
+        let desc = super::RangeIndex::new(10, 0, -2).unwrap();
+        assert_eq!(desc.argmax().unwrap(), 0);
+        assert_eq!(desc.argmin().unwrap(), desc.len() - 1);
+
+        let big_step = super::RangeIndex::new(1, 100, 7).unwrap();
+        assert_eq!(big_step.argmax().unwrap(), big_step.len() - 1);
+        assert_eq!(big_step.argmin().unwrap(), 0);
+    }
+
+    #[test]
+    fn range_index_argmax_argmin_reject_empty_mrchb() {
+        let empty = super::RangeIndex::new(5, 5, 1).unwrap();
+        assert!(empty.is_empty());
+        let max_err = empty.argmax().unwrap_err();
+        assert!(matches!(
+            max_err,
+            super::IndexError::InvalidArgument(ref message)
+                if message == "attempt to get argmax of an empty sequence"
+        ));
+        let min_err = empty.argmin().unwrap_err();
+        assert!(matches!(
+            min_err,
+            super::IndexError::InvalidArgument(ref message)
+                if message == "attempt to get argmin of an empty sequence"
+        ));
+    }
+
+    #[test]
+    fn range_index_argsort_orientation_matches_step_sign_mrchb() {
+        let asc = super::RangeIndex::new(0, 5, 1).unwrap();
+        assert_eq!(asc.argsort(), vec![0, 1, 2, 3, 4]);
+
+        let desc = super::RangeIndex::new(10, 0, -2).unwrap();
+        assert_eq!(desc.argsort(), vec![4, 3, 2, 1, 0]);
+
+        let empty = super::RangeIndex::new(0, 0, 1).unwrap();
+        assert_eq!(empty.argsort(), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn range_index_duplicated_drop_duplicates_are_no_ops_mrchb() {
+        let asc = super::RangeIndex::new(0, 5, 1).unwrap();
+        for keep in [
+            super::DuplicateKeep::First,
+            super::DuplicateKeep::Last,
+            super::DuplicateKeep::None,
+        ] {
+            assert_eq!(asc.duplicated(keep), vec![false; asc.len()]);
+        }
+        let cloned = asc.drop_duplicates();
+        assert!(cloned.equals(&asc));
+        assert_eq!(cloned.len(), asc.len());
+
+        let empty = super::RangeIndex::new(0, 0, 1).unwrap();
+        assert_eq!(
+            empty.duplicated(super::DuplicateKeep::First),
+            Vec::<bool>::new()
+        );
+        assert!(empty.drop_duplicates().is_empty());
     }
 
     #[test]
