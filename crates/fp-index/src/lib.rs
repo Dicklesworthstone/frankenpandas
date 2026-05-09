@@ -2366,6 +2366,66 @@ impl DatetimeIndex {
         Self::from_index(self.index.drop_duplicates())
     }
 
+    /// Pick labels at the given positions, matching `pd.DatetimeIndex.take()`.
+    /// Out-of-bounds positions raise [`IndexError::OutOfBounds`].
+    pub fn take(&self, positions: &[usize]) -> Result<Self, IndexError> {
+        let labels = self.index.labels();
+        for &p in positions {
+            if p >= labels.len() {
+                return Err(IndexError::OutOfBounds {
+                    position: p,
+                    length: labels.len(),
+                });
+            }
+        }
+        let nanos: Vec<i64> = positions
+            .iter()
+            .map(|&p| match labels[p] {
+                IndexLabel::Datetime64(n) => n,
+                _ => i64::MIN,
+            })
+            .collect();
+        let mut out = Self::new(nanos);
+        if let Some(name) = self.name() {
+            out = out.set_name(name);
+        }
+        Ok(out)
+    }
+
+    /// Repeat each label `repeats` times, matching `pd.DatetimeIndex.repeat()`.
+    #[must_use]
+    pub fn repeat(&self, repeats: usize) -> Self {
+        let mut out = Vec::with_capacity(self.len() * repeats);
+        for label in self.index.labels() {
+            if let IndexLabel::Datetime64(n) = label {
+                for _ in 0..repeats {
+                    out.push(*n);
+                }
+            }
+        }
+        let mut result = Self::new(out);
+        if let Some(name) = self.name() {
+            result = result.set_name(name);
+        }
+        result
+    }
+
+    /// Per-position membership mask, matching `pd.DatetimeIndex.isin(values)`.
+    /// `values` is interpreted as a slice of nanoseconds-since-epoch; pass
+    /// `i64::MIN` to test for NAT.
+    #[must_use]
+    pub fn isin(&self, values: &[i64]) -> Vec<bool> {
+        let needle: HashSet<i64> = values.iter().copied().collect();
+        self.index
+            .labels()
+            .iter()
+            .map(|label| match label {
+                IndexLabel::Datetime64(n) => needle.contains(n),
+                _ => false,
+            })
+            .collect()
+    }
+
     /// Drop NAT labels, matching `pd.DatetimeIndex.dropna()`. Non-datetime
     /// labels (which the wrapper rejects on construction) and `i64::MIN`
     /// sentinels are removed; surviving labels keep their order.
@@ -3081,6 +3141,68 @@ impl TimedeltaIndex {
         }
         filtered
     }
+
+    /// Pick labels at the given positions, matching
+    /// `pd.TimedeltaIndex.take()`. Out-of-bounds positions raise
+    /// [`IndexError::OutOfBounds`].
+    pub fn take(&self, positions: &[usize]) -> Result<Self, IndexError> {
+        let labels = self.index.labels();
+        for &p in positions {
+            if p >= labels.len() {
+                return Err(IndexError::OutOfBounds {
+                    position: p,
+                    length: labels.len(),
+                });
+            }
+        }
+        let nanos: Vec<i64> = positions
+            .iter()
+            .map(|&p| match labels[p] {
+                IndexLabel::Timedelta64(n) => n,
+                _ => Timedelta::NAT,
+            })
+            .collect();
+        let mut out = Self::new(nanos);
+        if let Some(name) = self.name() {
+            out = out.set_name(name);
+        }
+        Ok(out)
+    }
+
+    /// Repeat each label `repeats` times, matching
+    /// `pd.TimedeltaIndex.repeat()`.
+    #[must_use]
+    pub fn repeat(&self, repeats: usize) -> Self {
+        let mut out = Vec::with_capacity(self.len() * repeats);
+        for label in self.index.labels() {
+            if let IndexLabel::Timedelta64(n) = label {
+                for _ in 0..repeats {
+                    out.push(*n);
+                }
+            }
+        }
+        let mut result = Self::new(out);
+        if let Some(name) = self.name() {
+            result = result.set_name(name);
+        }
+        result
+    }
+
+    /// Per-position membership mask, matching
+    /// `pd.TimedeltaIndex.isin(values)`. `values` is interpreted as a slice
+    /// of nanosecond durations; pass `Timedelta::NAT` to test for NAT.
+    #[must_use]
+    pub fn isin(&self, values: &[i64]) -> Vec<bool> {
+        let needle: HashSet<i64> = values.iter().copied().collect();
+        self.index
+            .labels()
+            .iter()
+            .map(|label| match label {
+                IndexLabel::Timedelta64(n) => needle.contains(n),
+                _ => false,
+            })
+            .collect()
+    }
 }
 
 /// Public pandas-style period index wrapper.
@@ -3424,6 +3546,48 @@ impl PeriodIndex {
         let mut pairs: Vec<(Period, usize)> = order.iter().map(|p| (**p, counts[*p])).collect();
         pairs.sort_by_key(|entry| std::cmp::Reverse(entry.1));
         pairs
+    }
+
+    /// Pick periods at the given positions, matching
+    /// `pd.PeriodIndex.take()`. Out-of-bounds positions raise
+    /// [`IndexError::OutOfBounds`].
+    pub fn take(&self, positions: &[usize]) -> Result<Self, IndexError> {
+        for &p in positions {
+            if p >= self.values.len() {
+                return Err(IndexError::OutOfBounds {
+                    position: p,
+                    length: self.values.len(),
+                });
+            }
+        }
+        let taken: Vec<Period> = positions.iter().map(|&p| self.values[p]).collect();
+        Ok(Self {
+            values: taken,
+            name: self.name.clone(),
+        })
+    }
+
+    /// Repeat each period `repeats` times, matching
+    /// `pd.PeriodIndex.repeat()`.
+    #[must_use]
+    pub fn repeat(&self, repeats: usize) -> Self {
+        let mut out = Vec::with_capacity(self.values.len() * repeats);
+        for &period in &self.values {
+            for _ in 0..repeats {
+                out.push(period);
+            }
+        }
+        Self {
+            values: out,
+            name: self.name.clone(),
+        }
+    }
+
+    /// Per-position membership mask, matching `pd.PeriodIndex.isin(values)`.
+    #[must_use]
+    pub fn isin(&self, values: &[Period]) -> Vec<bool> {
+        let needle: HashSet<Period> = values.iter().copied().collect();
+        self.values.iter().map(|p| needle.contains(p)).collect()
     }
 
     /// Factorize, matching `pd.PeriodIndex.factorize()`. Returns
@@ -3854,6 +4018,55 @@ impl RangeIndex {
     #[must_use]
     pub fn factorize(&self) -> (Vec<usize>, Self) {
         ((0..self.len()).collect(), self.clone())
+    }
+
+    /// Pick values at the given positions, matching
+    /// `pd.RangeIndex.take()`. Out-of-bounds positions raise
+    /// [`IndexError::OutOfBounds`].
+    pub fn take(&self, positions: &[usize]) -> Result<Index, IndexError> {
+        let values = self.values();
+        for &p in positions {
+            if p >= values.len() {
+                return Err(IndexError::OutOfBounds {
+                    position: p,
+                    length: values.len(),
+                });
+            }
+        }
+        let labels: Vec<IndexLabel> = positions
+            .iter()
+            .map(|&p| IndexLabel::Int64(values[p]))
+            .collect();
+        let mut idx = Index::new(labels);
+        if let Some(name) = self.name() {
+            idx = idx.set_name(name);
+        }
+        Ok(idx)
+    }
+
+    /// Repeat each value `repeats` times, matching `pd.RangeIndex.repeat()`.
+    /// Returns a flat [`Index`] because the result is generally not a
+    /// contiguous range.
+    #[must_use]
+    pub fn repeat(&self, repeats: usize) -> Index {
+        let mut labels = Vec::with_capacity(self.len() * repeats);
+        for value in self.values() {
+            for _ in 0..repeats {
+                labels.push(IndexLabel::Int64(value));
+            }
+        }
+        let mut idx = Index::new(labels);
+        if let Some(name) = self.name() {
+            idx = idx.set_name(name);
+        }
+        idx
+    }
+
+    /// Per-position membership mask, matching `pd.RangeIndex.isin(values)`.
+    #[must_use]
+    pub fn isin(&self, values: &[i64]) -> Vec<bool> {
+        let needle: HashSet<i64> = values.iter().copied().collect();
+        self.values().iter().map(|v| needle.contains(v)).collect()
     }
 }
 
@@ -11282,6 +11495,122 @@ mod tests {
                 None
             ]
         );
+    }
+
+    #[test]
+    fn datetime_index_take_repeat_isin_match_pandas_bbgg3() -> Result<(), super::IndexError> {
+        const NS: i64 = 1_000_000_000;
+        let a = 1_704_067_200_i64 * NS;
+        let b = 1_705_276_800_i64 * NS;
+        let c = 1_706_140_800_i64 * NS;
+        let dt = super::DatetimeIndex::new(vec![a, b, c]).set_name("ts");
+
+        let taken = dt.take(&[2, 0, 0])?;
+        assert_eq!(taken.values(), vec![Some(c), Some(a), Some(a)]);
+        assert_eq!(taken.name(), Some("ts"));
+
+        let oob = dt.take(&[3]).unwrap_err();
+        assert!(matches!(
+            oob,
+            super::IndexError::OutOfBounds { position: 3, length: 3 }
+        ));
+
+        let repeated = dt.repeat(2);
+        assert_eq!(
+            repeated.values(),
+            vec![Some(a), Some(a), Some(b), Some(b), Some(c), Some(c)]
+        );
+        assert_eq!(repeated.name(), Some("ts"));
+
+        let mask = dt.isin(&[a, c]);
+        assert_eq!(mask, vec![true, false, true]);
+
+        let nat_idx = super::DatetimeIndex::new(vec![i64::MIN, a]);
+        assert_eq!(nat_idx.isin(&[i64::MIN]), vec![true, false]);
+        Ok(())
+    }
+
+    #[test]
+    fn timedelta_index_take_repeat_isin_match_pandas_bbgg3() -> Result<(), super::IndexError> {
+        let td = super::TimedeltaIndex::new(vec![100_i64, 200, 300]).set_name("d");
+        let taken = td.take(&[2, 0])?;
+        assert_eq!(taken.values(), vec![Some(300), Some(100)]);
+        assert_eq!(taken.name(), Some("d"));
+
+        assert!(matches!(
+            td.take(&[7]).unwrap_err(),
+            super::IndexError::OutOfBounds { position: 7, length: 3 }
+        ));
+
+        let repeated = td.repeat(2);
+        assert_eq!(
+            repeated.values(),
+            vec![Some(100), Some(100), Some(200), Some(200), Some(300), Some(300)]
+        );
+
+        let mask = td.isin(&[200, 999]);
+        assert_eq!(mask, vec![false, true, false]);
+        Ok(())
+    }
+
+    #[test]
+    fn period_index_take_repeat_isin_match_pandas_bbgg3() -> Result<(), super::IndexError> {
+        use fp_types::{Period, PeriodFreq};
+        let p1 = Period::new(10, PeriodFreq::Monthly);
+        let p2 = Period::new(11, PeriodFreq::Monthly);
+        let p3 = Period::new(12, PeriodFreq::Monthly);
+        let pi = super::PeriodIndex::new(vec![p1, p2, p3]).set_name("pp");
+
+        let taken = pi.take(&[2, 1])?;
+        assert_eq!(taken.values(), &[p3, p2]);
+        assert_eq!(taken.name(), Some("pp"));
+
+        assert!(matches!(
+            pi.take(&[5]).unwrap_err(),
+            super::IndexError::OutOfBounds { position: 5, length: 3 }
+        ));
+
+        let repeated = pi.repeat(2);
+        assert_eq!(repeated.values(), &[p1, p1, p2, p2, p3, p3]);
+
+        let mask = pi.isin(&[p1, p3]);
+        assert_eq!(mask, vec![true, false, true]);
+        Ok(())
+    }
+
+    #[test]
+    fn range_index_take_repeat_isin_match_pandas_bbgg3() -> Result<(), super::IndexError> {
+        let r = super::RangeIndex::new(0, 5, 1).unwrap();
+        let taken = r.take(&[2, 4, 0])?;
+        let labels: Vec<i64> = taken
+            .labels()
+            .iter()
+            .map(|label| match label {
+                super::IndexLabel::Int64(v) => *v,
+                _ => panic!("expected Int64 labels"),
+            })
+            .collect();
+        assert_eq!(labels, vec![2, 4, 0]);
+
+        assert!(matches!(
+            r.take(&[10]).unwrap_err(),
+            super::IndexError::OutOfBounds { position: 10, length: 5 }
+        ));
+
+        let repeated = r.repeat(2);
+        let repeat_labels: Vec<i64> = repeated
+            .labels()
+            .iter()
+            .map(|label| match label {
+                super::IndexLabel::Int64(v) => *v,
+                _ => panic!("expected Int64 labels"),
+            })
+            .collect();
+        assert_eq!(repeat_labels, vec![0, 0, 1, 1, 2, 2, 3, 3, 4, 4]);
+
+        let mask = r.isin(&[1, 3, 99]);
+        assert_eq!(mask, vec![false, true, false, true, false]);
+        Ok(())
     }
 
     #[test]
