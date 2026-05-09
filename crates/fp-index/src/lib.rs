@@ -2380,6 +2380,61 @@ impl DatetimeIndex {
     pub fn daysinmonth(&self) -> Vec<Option<u32>> {
         self.days_in_month()
     }
+
+    /// Whether the day is the first of the month, matching
+    /// `pd.DatetimeIndex.is_month_start`.
+    #[must_use]
+    pub fn is_month_start(&self) -> Vec<Option<bool>> {
+        use chrono::Datelike;
+        map_datetime_labels(self.index.labels(), |dt| dt.day() == 1)
+    }
+
+    /// Whether the day is the last of the month, matching
+    /// `pd.DatetimeIndex.is_month_end`.
+    #[must_use]
+    pub fn is_month_end(&self) -> Vec<Option<bool>> {
+        use chrono::Datelike;
+        map_datetime_labels(self.index.labels(), |dt| {
+            dt.day() == days_in_calendar_month(dt.year(), dt.month())
+        })
+    }
+
+    /// Whether the timestamp is the first day of a quarter, matching
+    /// `pd.DatetimeIndex.is_quarter_start`. Quarter starts: Jan/Apr/Jul/Oct day 1.
+    #[must_use]
+    pub fn is_quarter_start(&self) -> Vec<Option<bool>> {
+        use chrono::Datelike;
+        map_datetime_labels(self.index.labels(), |dt| {
+            matches!(dt.month(), 1 | 4 | 7 | 10) && dt.day() == 1
+        })
+    }
+
+    /// Whether the timestamp is the last day of a quarter, matching
+    /// `pd.DatetimeIndex.is_quarter_end`. Quarter ends: Mar/Jun/Sep/Dec last day.
+    #[must_use]
+    pub fn is_quarter_end(&self) -> Vec<Option<bool>> {
+        use chrono::Datelike;
+        map_datetime_labels(self.index.labels(), |dt| {
+            matches!(dt.month(), 3 | 6 | 9 | 12)
+                && dt.day() == days_in_calendar_month(dt.year(), dt.month())
+        })
+    }
+
+    /// Whether the timestamp is January 1, matching
+    /// `pd.DatetimeIndex.is_year_start`.
+    #[must_use]
+    pub fn is_year_start(&self) -> Vec<Option<bool>> {
+        use chrono::Datelike;
+        map_datetime_labels(self.index.labels(), |dt| dt.month() == 1 && dt.day() == 1)
+    }
+
+    /// Whether the timestamp is December 31, matching
+    /// `pd.DatetimeIndex.is_year_end`.
+    #[must_use]
+    pub fn is_year_end(&self) -> Vec<Option<bool>> {
+        use chrono::Datelike;
+        map_datetime_labels(self.index.labels(), |dt| dt.month() == 12 && dt.day() == 31)
+    }
 }
 
 fn days_in_calendar_month(year: i32, month: u32) -> u32 {
@@ -10594,6 +10649,111 @@ mod tests {
             vec![Some(31), Some(31), Some(30), None]
         );
         assert_eq!(dt.daysinmonth(), dt.days_in_month());
+    }
+
+    #[test]
+    fn datetime_index_boundary_accessors_match_pandas_qy7yd() {
+        // 2024 is a leap year. Each entry is the 00:00:00Z second-of-epoch
+        // multiplied by 1_000_000_000.
+        const NS: i64 = 1_000_000_000;
+        let jan_01 = 1_704_067_200_i64 * NS;       // year/quarter/month start
+        let jan_31 = 1_706_659_200_i64 * NS;       // month end (Jan)
+        let feb_29 = 1_709_164_800_i64 * NS;       // leap-month end
+        let mar_31 = 1_711_843_200_i64 * NS;       // quarter/month end (Q1)
+        let apr_01 = 1_711_929_600_i64 * NS;       // quarter/month start (Q2)
+        let dec_31 = 1_735_603_200_i64 * NS;       // year/quarter/month end
+        let nat = i64::MIN;
+
+        let dt = super::DatetimeIndex::new(vec![
+            jan_01, jan_31, feb_29, mar_31, apr_01, dec_31, nat,
+        ]);
+
+        // is_year_start: only Jan 1.
+        assert_eq!(
+            dt.is_year_start(),
+            vec![
+                Some(true),
+                Some(false),
+                Some(false),
+                Some(false),
+                Some(false),
+                Some(false),
+                None
+            ]
+        );
+        // is_year_end: only Dec 31.
+        assert_eq!(
+            dt.is_year_end(),
+            vec![
+                Some(false),
+                Some(false),
+                Some(false),
+                Some(false),
+                Some(false),
+                Some(true),
+                None
+            ]
+        );
+        // is_quarter_start: Jan 1, Apr 1.
+        assert_eq!(
+            dt.is_quarter_start(),
+            vec![
+                Some(true),
+                Some(false),
+                Some(false),
+                Some(false),
+                Some(true),
+                Some(false),
+                None
+            ]
+        );
+        // is_quarter_end: Mar 31, Dec 31.
+        assert_eq!(
+            dt.is_quarter_end(),
+            vec![
+                Some(false),
+                Some(false),
+                Some(false),
+                Some(true),
+                Some(false),
+                Some(true),
+                None
+            ]
+        );
+        // is_month_start: Jan 1, Apr 1.
+        assert_eq!(
+            dt.is_month_start(),
+            vec![
+                Some(true),
+                Some(false),
+                Some(false),
+                Some(false),
+                Some(true),
+                Some(false),
+                None
+            ]
+        );
+        // is_month_end: Jan 31, Feb 29 (leap), Mar 31, Dec 31.
+        assert_eq!(
+            dt.is_month_end(),
+            vec![
+                Some(false),
+                Some(true),
+                Some(true),
+                Some(true),
+                Some(false),
+                Some(true),
+                None
+            ]
+        );
+    }
+
+    #[test]
+    fn datetime_index_feb_28_in_non_leap_year_is_month_end_qy7yd() {
+        // 2023-02-28 00:00:00Z is the month-end of February 2023 (28 days).
+        let feb_28_2023: i64 = 1_677_542_400_i64 * 1_000_000_000;
+        let dt = super::DatetimeIndex::new(vec![feb_28_2023]);
+        assert_eq!(dt.is_month_end(), vec![Some(true)]);
     }
 
     #[test]
