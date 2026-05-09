@@ -4706,6 +4706,18 @@ impl PeriodIndex {
         Ok(Some(first.freq))
     }
 
+    /// Sort periods by ordinal ascending, matching
+    /// `pd.PeriodIndex.sort_values()`. Mixed-frequency rejects.
+    pub fn sort_values(&self) -> Result<Self, IndexError> {
+        self.ensure_homogeneous_freq()?;
+        let mut periods = self.values.clone();
+        periods.sort_by_key(|period| period.ordinal);
+        Ok(Self {
+            values: periods,
+            name: self.name.clone(),
+        })
+    }
+
     /// Period with the smallest ordinal, matching `pd.PeriodIndex.min()`.
     /// Mixed-frequency input rejects because pandas requires same-freq
     /// comparisons; empty returns `Ok(None)` to mirror the pandas NaT result.
@@ -6093,6 +6105,24 @@ impl CategoricalIndex {
     #[must_use]
     pub fn infer_objects(&self) -> Self {
         self.clone()
+    }
+
+    /// Sort labels ascending, matching `pd.CategoricalIndex.sort_values()`.
+    /// `ordered=true` sorts by category position; `ordered=false` sorts
+    /// lexicographically. Categories list and ordered flag are preserved.
+    #[must_use]
+    pub fn sort_values(&self) -> Self {
+        let positions = self.argsort();
+        let labels: Vec<String> = positions
+            .iter()
+            .map(|&p| self.labels[p].clone())
+            .collect();
+        Self {
+            labels,
+            categories: self.categories.clone(),
+            ordered: self.ordered,
+            name: self.name.clone(),
+        }
     }
 
     /// Positions that would sort labels ascending, matching
@@ -13565,6 +13595,38 @@ mod tests {
         let empty = super::PeriodIndex::new(Vec::new());
         assert_eq!(empty.freqstr(), None);
         assert_eq!(empty.inferred_freq(), None);
+    }
+
+    #[test]
+    fn period_categorical_sort_values_match_pandas_482qd() -> Result<(), super::IndexError> {
+        use fp_types::{Period, PeriodFreq};
+        let p1 = Period::new(10, PeriodFreq::Monthly);
+        let p2 = Period::new(11, PeriodFreq::Monthly);
+        let p3 = Period::new(12, PeriodFreq::Monthly);
+        let pi = super::PeriodIndex::new(vec![p3, p1, p2]).set_name("p");
+        let sorted = pi.sort_values()?;
+        assert_eq!(sorted.values(), &[p1, p2, p3]);
+        assert_eq!(sorted.name(), Some("p"));
+
+        let mixed = super::PeriodIndex::new(vec![
+            Period::new(10, PeriodFreq::Monthly),
+            Period::new(10, PeriodFreq::Annual),
+        ]);
+        assert!(mixed.sort_values().is_err());
+
+        // CategoricalIndex with ordered=true uses category position.
+        let cat = super::CategoricalIndex::with_categories(
+            vec!["b".to_owned(), "a".to_owned(), "c".to_owned(), "a".to_owned()],
+            vec!["a".to_owned(), "b".to_owned(), "c".to_owned()],
+            true,
+        )?;
+        let cat_sorted = cat.sort_values();
+        assert_eq!(
+            cat_sorted.labels(),
+            vec!["a".to_owned(), "a".to_owned(), "b".to_owned(), "c".to_owned()].as_slice()
+        );
+
+        Ok(())
     }
 
     #[test]
