@@ -2997,6 +2997,20 @@ impl DatetimeIndex {
         map_datetime_labels(self.index.labels(), |dt| dt.nanosecond() % 1_000)
     }
 
+    /// ISO 8601 week-of-year (1..=53), matching `pd.DatetimeIndex.week`
+    /// (a deprecated pandas alias preserved for parity).
+    #[must_use]
+    pub fn week(&self) -> Vec<Option<u32>> {
+        use chrono::Datelike;
+        map_datetime_labels(self.index.labels(), |dt| dt.iso_week().week())
+    }
+
+    /// Alias for [`week`], matching `pd.DatetimeIndex.weekofyear`.
+    #[must_use]
+    pub fn weekofyear(&self) -> Vec<Option<u32>> {
+        self.week()
+    }
+
     /// Day of year (1..=366), matching `pd.DatetimeIndex.dayofyear`.
     #[must_use]
     pub fn dayofyear(&self) -> Vec<Option<u32>> {
@@ -12872,6 +12886,25 @@ mod tests {
         assert_eq!(dt.second(), vec![Some(56), None, Some(0)]);
         assert_eq!(dt.microsecond(), vec![Some(789_012), None, Some(0)]);
         assert_eq!(dt.nanosecond(), vec![Some(345), None, Some(0)]);
+    }
+
+    #[test]
+    fn datetime_index_week_weekofyear_match_pandas_e8xhb() {
+        const NS: i64 = 1_000_000_000;
+        // 2024-01-01 (Monday) is in ISO week 1 of 2024.
+        let jan_01 = 1_704_067_200_i64 * NS;
+        // 2024-12-30 (Monday) is in ISO week 1 of 2025 (yes: pandas/ chrono
+        // both report this as week 1).
+        let dec_30 = 1_735_516_800_i64 * NS;
+        let dt = super::DatetimeIndex::new(vec![jan_01, dec_30, i64::MIN]);
+
+        let weeks = dt.week();
+        assert_eq!(weeks[0], Some(1));
+        assert_eq!(weeks[1], Some(1));
+        assert_eq!(weeks[2], None);
+
+        // weekofyear is an alias.
+        assert_eq!(dt.weekofyear(), weeks);
     }
 
     #[test]
