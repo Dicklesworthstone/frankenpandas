@@ -4440,6 +4440,17 @@ impl PeriodIndex {
         Self { values, name: None }
     }
 
+    /// Construct a PeriodIndex from raw ordinal values and a frequency,
+    /// matching `pd.PeriodIndex.from_ordinals(ordinals, freq)`.
+    #[must_use]
+    pub fn from_ordinals(ordinals: &[i64], freq: PeriodFreq) -> Self {
+        let values: Vec<Period> = ordinals
+            .iter()
+            .map(|&ordinal| Period::new(ordinal, freq))
+            .collect();
+        Self { values, name: None }
+    }
+
     #[must_use]
     pub fn from_range(start: Period, periods: usize) -> Self {
         Self::new(fp_types::period_range(start, periods))
@@ -14847,6 +14858,21 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    #[test]
+    fn period_index_from_ordinals_match_pandas_baenb() {
+        use fp_types::PeriodFreq;
+        let pi = super::PeriodIndex::from_ordinals(&[10, 11, 12], PeriodFreq::Monthly);
+        assert_eq!(pi.values().len(), 3);
+        assert_eq!(pi.values()[0].ordinal, 10);
+        assert_eq!(pi.values()[2].ordinal, 12);
+        for period in pi.values() {
+            assert_eq!(period.freq, PeriodFreq::Monthly);
+        }
+
+        let empty = super::PeriodIndex::from_ordinals(&[], PeriodFreq::Annual);
+        assert!(empty.is_empty());
     }
 
     #[test]
