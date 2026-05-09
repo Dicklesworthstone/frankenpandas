@@ -4948,6 +4948,55 @@ impl PeriodIndex {
         })
     }
 
+    /// Position of the maximum ordinal, matching
+    /// `pd.PeriodIndex.argmax()`. Mixed-freq input rejects; empty
+    /// raises pandas-style "attempt to get argmax of an empty
+    /// sequence".
+    pub fn argmax(&self) -> Result<usize, IndexError> {
+        self.ensure_homogeneous_freq()?;
+        if self.values.is_empty() {
+            return Err(IndexError::InvalidArgument(
+                "attempt to get argmax of an empty sequence".to_owned(),
+            ));
+        }
+        let mut best = 0;
+        for (i, period) in self.values.iter().enumerate().skip(1) {
+            if period.ordinal > self.values[best].ordinal {
+                best = i;
+            }
+        }
+        Ok(best)
+    }
+
+    /// Position of the minimum ordinal, matching
+    /// `pd.PeriodIndex.argmin()`. Mixed-freq input rejects; empty
+    /// raises pandas-style "attempt to get argmin of an empty
+    /// sequence".
+    pub fn argmin(&self) -> Result<usize, IndexError> {
+        self.ensure_homogeneous_freq()?;
+        if self.values.is_empty() {
+            return Err(IndexError::InvalidArgument(
+                "attempt to get argmin of an empty sequence".to_owned(),
+            ));
+        }
+        let mut best = 0;
+        for (i, period) in self.values.iter().enumerate().skip(1) {
+            if period.ordinal < self.values[best].ordinal {
+                best = i;
+            }
+        }
+        Ok(best)
+    }
+
+    /// Positions that would sort the index by ordinal ascending,
+    /// matching `pd.PeriodIndex.argsort()`. Mixed-freq input rejects.
+    pub fn argsort(&self) -> Result<Vec<usize>, IndexError> {
+        self.ensure_homogeneous_freq()?;
+        let mut positions: Vec<usize> = (0..self.values.len()).collect();
+        positions.sort_by_key(|&i| self.values[i].ordinal);
+        Ok(positions)
+    }
+
     /// Period with the smallest ordinal, matching `pd.PeriodIndex.min()`.
     /// Mixed-frequency input rejects because pandas requires same-freq
     /// comparisons; empty returns `Ok(None)` to mirror the pandas NaT result.
@@ -14873,6 +14922,33 @@ mod tests {
 
         let empty = super::PeriodIndex::from_ordinals(&[], PeriodFreq::Annual);
         assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn period_index_argmax_argmin_argsort_match_pandas_qg8u5()
+    -> Result<(), super::IndexError> {
+        use fp_types::{Period, PeriodFreq};
+        let p1 = Period::new(10, PeriodFreq::Monthly);
+        let p2 = Period::new(11, PeriodFreq::Monthly);
+        let p3 = Period::new(12, PeriodFreq::Monthly);
+        let pi = super::PeriodIndex::new(vec![p2, p3, p1]);
+
+        assert_eq!(pi.argmax()?, 1);
+        assert_eq!(pi.argmin()?, 2);
+        assert_eq!(pi.argsort()?, vec![2, 0, 1]);
+
+        let empty = super::PeriodIndex::new(Vec::new());
+        assert!(empty.argmax().is_err());
+        assert!(empty.argmin().is_err());
+        assert!(empty.argsort()?.is_empty());
+
+        let mixed = super::PeriodIndex::new(vec![
+            p1,
+            Period::new(10, PeriodFreq::Annual),
+        ]);
+        assert!(mixed.argmax().is_err());
+        assert!(mixed.argsort().is_err());
+        Ok(())
     }
 
     #[test]
