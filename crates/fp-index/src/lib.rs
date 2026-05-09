@@ -3014,6 +3014,18 @@ impl DatetimeIndex {
         self.searchsorted(label, side)
     }
 
+    /// Half-open positional range for a label slice, matching
+    /// `pd.DatetimeIndex.slice_indexer(start, end)`. Wraps slice_locs
+    /// in a `std::ops::Range<usize>`.
+    pub fn slice_indexer(
+        &self,
+        start: i64,
+        end: i64,
+    ) -> Result<std::ops::Range<usize>, IndexError> {
+        let (left, right) = self.slice_locs(start, end)?;
+        Ok(left..right)
+    }
+
     /// Find positions of `[start, end]` for a label slice, matching
     /// `pd.DatetimeIndex.slice_locs(start, end)`. Requires the index to
     /// be monotonically increasing; non-monotonic input rejects.
@@ -4060,6 +4072,17 @@ impl TimedeltaIndex {
     /// `searchsorted(label, side)`.
     pub fn get_slice_bound(&self, label: i64, side: &str) -> Result<usize, IndexError> {
         self.searchsorted(label, side)
+    }
+
+    /// Half-open positional range for a label slice, matching
+    /// `pd.TimedeltaIndex.slice_indexer(start, end)`.
+    pub fn slice_indexer(
+        &self,
+        start: i64,
+        end: i64,
+    ) -> Result<std::ops::Range<usize>, IndexError> {
+        let (left, right) = self.slice_locs(start, end)?;
+        Ok(left..right)
     }
 
     /// Find positions of `[start, end]` for a label slice, matching
@@ -15185,6 +15208,21 @@ mod tests {
         let td = super::TimedeltaIndex::new(vec![100_i64, 200, 300]);
         assert_eq!(td.get_loc(200)?, 1);
         assert_eq!(td.get_indexer(&[300, 999, 100]), vec![2, -1, 0]);
+        Ok(())
+    }
+
+    #[test]
+    fn datetime_timedelta_slice_indexer_match_pandas_95eqf() -> Result<(), super::IndexError> {
+        const NS: i64 = 1_000_000_000;
+        let a = 1_704_067_200_i64 * NS;
+        let b = 1_705_276_800_i64 * NS;
+        let c = 1_706_140_800_i64 * NS;
+        let dt = super::DatetimeIndex::new(vec![a, b, c]);
+        assert_eq!(dt.slice_indexer(b, c)?, 1..3);
+        assert_eq!(dt.slice_indexer(a, c)?, 0..3);
+
+        let td = super::TimedeltaIndex::new(vec![100_i64, 200, 300]);
+        assert_eq!(td.slice_indexer(150, 250)?, 1..2);
         Ok(())
     }
 
