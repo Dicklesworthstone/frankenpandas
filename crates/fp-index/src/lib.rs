@@ -2311,6 +2311,86 @@ impl DatetimeIndex {
         use chrono::Timelike;
         map_datetime_labels(self.index.labels(), |dt| dt.nanosecond() % 1_000)
     }
+
+    /// Day of year (1..=366), matching `pd.DatetimeIndex.dayofyear`.
+    #[must_use]
+    pub fn dayofyear(&self) -> Vec<Option<u32>> {
+        use chrono::Datelike;
+        map_datetime_labels(self.index.labels(), |dt| dt.ordinal())
+    }
+
+    /// Alias for [`dayofyear`], matching `pd.DatetimeIndex.day_of_year`.
+    #[must_use]
+    pub fn day_of_year(&self) -> Vec<Option<u32>> {
+        self.dayofyear()
+    }
+
+    /// Weekday number (Monday=0..Sunday=6), matching
+    /// `pd.DatetimeIndex.dayofweek`.
+    #[must_use]
+    pub fn dayofweek(&self) -> Vec<Option<u32>> {
+        use chrono::Datelike;
+        map_datetime_labels(self.index.labels(), |dt| {
+            dt.weekday().num_days_from_monday()
+        })
+    }
+
+    /// Alias for [`dayofweek`], matching `pd.DatetimeIndex.day_of_week`.
+    #[must_use]
+    pub fn day_of_week(&self) -> Vec<Option<u32>> {
+        self.dayofweek()
+    }
+
+    /// Alias for [`dayofweek`], matching `pd.DatetimeIndex.weekday`.
+    #[must_use]
+    pub fn weekday(&self) -> Vec<Option<u32>> {
+        self.dayofweek()
+    }
+
+    /// Calendar quarter (1..=4), matching `pd.DatetimeIndex.quarter`.
+    #[must_use]
+    pub fn quarter(&self) -> Vec<Option<u32>> {
+        use chrono::Datelike;
+        map_datetime_labels(self.index.labels(), |dt| (dt.month() - 1) / 3 + 1)
+    }
+
+    /// Whether the year is a leap year, matching
+    /// `pd.DatetimeIndex.is_leap_year`.
+    #[must_use]
+    pub fn is_leap_year(&self) -> Vec<Option<bool>> {
+        use chrono::Datelike;
+        map_datetime_labels(self.index.labels(), |dt| {
+            chrono::NaiveDate::from_ymd_opt(dt.year(), 1, 1)
+                .is_some_and(|d| d.leap_year())
+        })
+    }
+
+    /// Number of days in the calendar month of each label,
+    /// matching `pd.DatetimeIndex.days_in_month`.
+    #[must_use]
+    pub fn days_in_month(&self) -> Vec<Option<u32>> {
+        use chrono::Datelike;
+        map_datetime_labels(self.index.labels(), |dt| {
+            days_in_calendar_month(dt.year(), dt.month())
+        })
+    }
+
+    /// Alias for [`days_in_month`], matching `pd.DatetimeIndex.daysinmonth`.
+    #[must_use]
+    pub fn daysinmonth(&self) -> Vec<Option<u32>> {
+        self.days_in_month()
+    }
+}
+
+fn days_in_calendar_month(year: i32, month: u32) -> u32 {
+    let next_month = if month == 12 { 1 } else { month + 1 };
+    let next_year = if month == 12 { year + 1 } else { year };
+    let first_of_next = chrono::NaiveDate::from_ymd_opt(next_year, next_month, 1);
+    let first_of_this = chrono::NaiveDate::from_ymd_opt(year, month, 1);
+    match (first_of_next, first_of_this) {
+        (Some(next), Some(this)) => (next - this).num_days() as u32,
+        _ => 0,
+    }
 }
 
 /// Public pandas-style timedelta index wrapper.
@@ -10471,6 +10551,69 @@ mod tests {
         assert_eq!(dt.second(), vec![Some(56), None, Some(0)]);
         assert_eq!(dt.microsecond(), vec![Some(789_012), None, Some(0)]);
         assert_eq!(dt.nanosecond(), vec![Some(345), None, Some(0)]);
+    }
+
+    #[test]
+    fn datetime_index_day_of_x_and_quarter_match_pandas_k860x() {
+        // 2024-01-15T00:00:00Z (a Monday).
+        let mon: i64 = 1_705_276_800 * 1_000_000_000;
+        // 2024-01-21T00:00:00Z (a Sunday).
+        let sun: i64 = 1_705_795_200 * 1_000_000_000;
+        // 2024-04-30T00:00:00Z (Apr -> 30 days; Q2).
+        let apr30: i64 = 1_714_435_200 * 1_000_000_000;
+        let dt = super::DatetimeIndex::new(vec![mon, sun, apr30, i64::MIN]);
+
+        // 2024 is a leap year. Jan 15 = ordinal 15. Jan 21 = ordinal 21.
+        // Apr 30 = 31+29+31+30 = 121.
+        assert_eq!(
+            dt.dayofyear(),
+            vec![Some(15), Some(21), Some(121), None]
+        );
+        assert_eq!(dt.day_of_year(), dt.dayofyear());
+
+        // Mon=0, Sun=6. Apr 30 2024 was a Tuesday → 1.
+        assert_eq!(
+            dt.dayofweek(),
+            vec![Some(0), Some(6), Some(1), None]
+        );
+        assert_eq!(dt.day_of_week(), dt.dayofweek());
+        assert_eq!(dt.weekday(), dt.dayofweek());
+
+        // Q1 / Q1 / Q2.
+        assert_eq!(dt.quarter(), vec![Some(1), Some(1), Some(2), None]);
+
+        // 2024 is a leap year.
+        assert_eq!(
+            dt.is_leap_year(),
+            vec![Some(true), Some(true), Some(true), None]
+        );
+
+        // Jan -> 31, Apr -> 30.
+        assert_eq!(
+            dt.days_in_month(),
+            vec![Some(31), Some(31), Some(30), None]
+        );
+        assert_eq!(dt.daysinmonth(), dt.days_in_month());
+    }
+
+    #[test]
+    fn datetime_index_leap_year_century_rule_k860x() {
+        // 2000-06-15 (leap), 2100-06-15 (not leap), 2024-02-15 (leap),
+        // 2023-02-15 (not leap), Feb in leap vs non-leap year.
+        let y2000: i64 = 960_076_800 * 1_000_000_000;
+        let y2100: i64 = 4_117_046_400 * 1_000_000_000;
+        let y2024feb: i64 = 1_708_002_000 * 1_000_000_000;
+        let y2023feb: i64 = 1_676_466_000 * 1_000_000_000;
+
+        let dt = super::DatetimeIndex::new(vec![y2000, y2100, y2024feb, y2023feb]);
+        assert_eq!(
+            dt.is_leap_year(),
+            vec![Some(true), Some(false), Some(true), Some(false)]
+        );
+        // Feb in leap year -> 29 days; non-leap -> 28.
+        let dim = dt.days_in_month();
+        assert_eq!(dim[2], Some(29));
+        assert_eq!(dim[3], Some(28));
     }
 
     #[test]
