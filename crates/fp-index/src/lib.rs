@@ -5621,6 +5621,82 @@ impl RangeIndex {
         self.values().iter().map(|v| needle.contains(v)).collect()
     }
 
+    fn set_op_via_int<F>(&self, other: &Self, op: F) -> Index
+    where
+        F: FnOnce(Vec<i64>, Vec<i64>) -> Vec<i64>,
+    {
+        let values = op(self.values(), other.values());
+        let labels: Vec<IndexLabel> = values.into_iter().map(IndexLabel::Int64).collect();
+        let mut idx = Index::new(labels);
+        if let Some(name) = self.name().filter(|_| self.name() == other.name()) {
+            idx = idx.set_name(name);
+        }
+        idx
+    }
+
+    /// Values present in both ranges, matching
+    /// `pd.RangeIndex.intersection(other)`. Returns flat Index because
+    /// the result may not be a contiguous range.
+    #[must_use]
+    pub fn intersection(&self, other: &Self) -> Index {
+        self.set_op_via_int(other, |left, right| {
+            let right_set: HashSet<i64> = right.into_iter().collect();
+            let mut seen = HashSet::<i64>::new();
+            left.into_iter()
+                .filter(|v| right_set.contains(v) && seen.insert(*v))
+                .collect()
+        })
+    }
+
+    /// Self values then other values not seen, matching
+    /// `pd.RangeIndex.union(other)`.
+    #[must_use]
+    pub fn union(&self, other: &Self) -> Index {
+        self.set_op_via_int(other, |left, right| {
+            let mut seen = HashSet::<i64>::new();
+            left.into_iter()
+                .chain(right)
+                .filter(|v| seen.insert(*v))
+                .collect()
+        })
+    }
+
+    /// Self values not in other, matching
+    /// `pd.RangeIndex.difference(other)`.
+    #[must_use]
+    pub fn difference(&self, other: &Self) -> Index {
+        self.set_op_via_int(other, |left, right| {
+            let right_set: HashSet<i64> = right.into_iter().collect();
+            let mut seen = HashSet::<i64>::new();
+            left.into_iter()
+                .filter(|v| !right_set.contains(v) && seen.insert(*v))
+                .collect()
+        })
+    }
+
+    /// Values in either but not both, matching
+    /// `pd.RangeIndex.symmetric_difference(other)`.
+    #[must_use]
+    pub fn symmetric_difference(&self, other: &Self) -> Index {
+        self.set_op_via_int(other, |left, right| {
+            let left_set: HashSet<i64> = left.iter().copied().collect();
+            let right_set: HashSet<i64> = right.iter().copied().collect();
+            let mut seen = HashSet::<i64>::new();
+            let mut out = Vec::new();
+            for v in left {
+                if !right_set.contains(&v) && seen.insert(v) {
+                    out.push(v);
+                }
+            }
+            for v in right {
+                if !left_set.contains(&v) && seen.insert(v) {
+                    out.push(v);
+                }
+            }
+            out
+        })
+    }
+
     /// Insert `value` at position `loc`, matching
     /// `pd.RangeIndex.insert(loc, value)`. Returns a flat [`Index`]
     /// because the result is generally not a contiguous range.
@@ -13799,6 +13875,39 @@ mod tests {
         let empty = super::PeriodIndex::new(Vec::new());
         assert_eq!(empty.freqstr(), None);
         assert_eq!(empty.inferred_freq(), None);
+    }
+
+    #[test]
+    fn range_index_set_ops_match_pandas_tz40f() {
+        let left = super::RangeIndex::new(0, 5, 1).unwrap().set_name("r");
+        let right = super::RangeIndex::new(3, 8, 1).unwrap().set_name("r");
+
+        let labels = |idx: &super::Index| -> Vec<i64> {
+            idx.labels()
+                .iter()
+                .map(|label| match label {
+                    super::IndexLabel::Int64(v) => *v,
+                    _ => panic!("expected Int64 labels"),
+                })
+                .collect()
+        };
+
+        let inter = left.intersection(&right);
+        assert_eq!(labels(&inter), vec![3, 4]);
+        assert_eq!(inter.name(), Some("r"));
+
+        let union = left.union(&right);
+        assert_eq!(labels(&union), vec![0, 1, 2, 3, 4, 5, 6, 7]);
+
+        let diff = left.difference(&right);
+        assert_eq!(labels(&diff), vec![0, 1, 2]);
+
+        let sym = left.symmetric_difference(&right);
+        assert_eq!(labels(&sym), vec![0, 1, 2, 5, 6, 7]);
+
+        // Mismatched names drop the name.
+        let other_name = super::RangeIndex::new(3, 6, 1).unwrap().set_name("other");
+        assert_eq!(left.union(&other_name).name(), None);
     }
 
     #[test]
