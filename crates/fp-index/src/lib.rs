@@ -2743,6 +2743,24 @@ impl DatetimeIndex {
             .collect()
     }
 
+    /// Stringify each label, matching `pd.DatetimeIndex.format()`.
+    /// Non-NAT labels render as the chrono RFC3339 timestamp; NAT
+    /// renders as the `NaT` literal pandas uses.
+    #[must_use]
+    pub fn format(&self) -> Vec<String> {
+        self.index
+            .labels()
+            .iter()
+            .map(|label| match label {
+                IndexLabel::Datetime64(nanos) => match datetime_from_nanos(*nanos) {
+                    Some(dt) => dt.to_rfc3339(),
+                    None => "NaT".to_owned(),
+                },
+                _ => "NaT".to_owned(),
+            })
+            .collect()
+    }
+
     /// Replace NAT positions with `value`, matching
     /// `pd.DatetimeIndex.fillna(value)`. Preserves the index name.
     #[must_use]
@@ -3649,6 +3667,21 @@ impl TimedeltaIndex {
             .searchsorted(&IndexLabel::Timedelta64(value), side)
     }
 
+    /// Stringify each label, matching `pd.TimedeltaIndex.format()`.
+    /// Non-NAT labels render as a signed nanosecond integer; NAT renders
+    /// as the `NaT` literal.
+    #[must_use]
+    pub fn format(&self) -> Vec<String> {
+        self.index
+            .labels()
+            .iter()
+            .map(|label| match label {
+                IndexLabel::Timedelta64(nanos) if *nanos != Timedelta::NAT => nanos.to_string(),
+                _ => "NaT".to_owned(),
+            })
+            .collect()
+    }
+
     /// Replace NAT positions with `value`, matching
     /// `pd.TimedeltaIndex.fillna(value)`. Preserves the index name.
     #[must_use]
@@ -4507,6 +4540,12 @@ impl PeriodIndex {
             }
         }
         Ok(lo)
+    }
+
+    /// Stringify each period via Display, matching `pd.PeriodIndex.format()`.
+    #[must_use]
+    pub fn format(&self) -> Vec<String> {
+        self.values.iter().map(Period::to_string).collect()
     }
 
     /// Frequency alias, matching `pd.PeriodIndex.freqstr`. Returns `None`
@@ -5553,6 +5592,13 @@ impl CategoricalIndex {
     #[must_use]
     pub fn to_index(&self) -> Index {
         Index::from_utf8(self.labels.clone()).set_names(self.name.as_deref())
+    }
+
+    /// Stringify each label, matching `pd.CategoricalIndex.format()`.
+    /// Labels are already strings so this clones them.
+    #[must_use]
+    pub fn format(&self) -> Vec<String> {
+        self.labels.clone()
     }
 
     /// Mark the categorical as ordered, matching
@@ -12876,6 +12922,32 @@ mod tests {
                 Some(true),
                 None
             ]
+        );
+    }
+
+    #[test]
+    fn index_variants_format_match_pandas_n31q2() {
+        const NS: i64 = 1_000_000_000;
+        let dt = super::DatetimeIndex::new(vec![1_704_067_200_i64 * NS, i64::MIN]);
+        let dt_fmt = dt.format();
+        assert!(dt_fmt[0].starts_with("2024-01-01"));
+        assert_eq!(dt_fmt[1], "NaT");
+
+        let td = super::TimedeltaIndex::new(vec![1_000_000_i64, fp_types::Timedelta::NAT]);
+        let td_fmt = td.format();
+        assert_eq!(td_fmt[0], "1000000");
+        assert_eq!(td_fmt[1], "NaT");
+
+        use fp_types::{Period, PeriodFreq};
+        let pi = super::PeriodIndex::new(vec![Period::new(10, PeriodFreq::Monthly)]);
+        let pi_fmt = pi.format();
+        assert!(!pi_fmt[0].is_empty());
+
+        let cat =
+            super::CategoricalIndex::from_values(vec!["a".to_owned(), "b".to_owned()], false);
+        assert_eq!(
+            cat.format(),
+            vec!["a".to_owned(), "b".to_owned()]
         );
     }
 
