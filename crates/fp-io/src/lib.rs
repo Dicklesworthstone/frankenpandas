@@ -163,6 +163,8 @@ pub enum IoError {
     Pickle(String),
     #[error("stata error: {0}")]
     Stata(String),
+    #[error("fwf error: {0}")]
+    Fwf(String),
     #[error("arrow ipc error: {0}")]
     Arrow(String),
     #[error("sql error: {0}")]
@@ -313,6 +315,169 @@ impl Default for CsvReadOptions {
             lineterminator: None,
         }
     }
+}
+
+/// Options for [`read_fwf_str`] and [`read_fwf`].
+///
+/// Phase A surface: callers MUST supply either `colspecs` (explicit
+/// `(start, end)` character ranges, end-exclusive, matching pandas) or
+/// `widths` (per-column character widths that get translated to
+/// cumulative colspecs). Auto-inference (`colspecs='infer'`) is deferred
+/// to a follow-up bead and currently rejects with [`IoError::Fwf`].
+#[derive(Debug, Clone)]
+pub struct FwfReadOptions {
+    /// Explicit `(start, end)` column ranges in characters. End is
+    /// exclusive, matching pandas. Mutually exclusive with `widths`.
+    pub colspecs: Option<Vec<(usize, usize)>>,
+    /// Per-column character widths. Translated to colspecs by cumulative
+    /// sum. Mutually exclusive with `colspecs`.
+    pub widths: Option<Vec<usize>>,
+    pub has_headers: bool,
+    pub na_values: Vec<String>,
+    pub keep_default_na: bool,
+    pub na_filter: bool,
+    pub index_col: Option<String>,
+    pub usecols: Option<Vec<String>>,
+    pub nrows: Option<usize>,
+    pub skiprows: usize,
+    pub dtype: Option<std::collections::HashMap<String, DType>>,
+    pub parse_dates: Option<Vec<String>>,
+    pub true_values: Vec<String>,
+    pub false_values: Vec<String>,
+    pub decimal: u8,
+    pub thousands: Option<u8>,
+    pub skipfooter: usize,
+}
+
+impl Default for FwfReadOptions {
+    fn default() -> Self {
+        Self {
+            colspecs: None,
+            widths: None,
+            has_headers: true,
+            na_values: Vec::new(),
+            keep_default_na: true,
+            na_filter: true,
+            index_col: None,
+            usecols: None,
+            nrows: None,
+            skiprows: 0,
+            dtype: None,
+            parse_dates: None,
+            true_values: Vec::new(),
+            false_values: Vec::new(),
+            decimal: b'.',
+            thousands: None,
+            skipfooter: 0,
+        }
+    }
+}
+
+fn resolve_fwf_colspecs(options: &FwfReadOptions) -> Result<Vec<(usize, usize)>, IoError> {
+    match (&options.colspecs, &options.widths) {
+        (Some(_), Some(_)) => Err(IoError::Fwf(
+            "You must specify only one of 'widths' and 'colspecs'".to_owned(),
+        )),
+        (Some(specs), None) => {
+            for &(start, end) in specs {
+                if start > end {
+                    return Err(IoError::Fwf(format!(
+                        "colspecs entry ({start}, {end}) is inverted"
+                    )));
+                }
+            }
+            Ok(specs.clone())
+        }
+        (None, Some(widths)) => {
+            let mut specs = Vec::with_capacity(widths.len());
+            let mut cursor = 0usize;
+            for &w in widths {
+                let next = cursor.checked_add(w).ok_or_else(|| {
+                    IoError::Fwf("widths overflow when computing colspecs".to_owned())
+                })?;
+                specs.push((cursor, next));
+                cursor = next;
+            }
+            Ok(specs)
+        }
+        (None, None) => Err(IoError::Fwf(
+            "colspecs='infer' is not supported in Phase A; supply explicit colspecs or widths"
+                .to_owned(),
+        )),
+    }
+}
+
+fn fwf_lines_to_csv(input: &str, colspecs: &[(usize, usize)]) -> String {
+    let mut out = String::new();
+    for line in input.split_terminator('\n') {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        let chars: Vec<char> = line.chars().collect();
+        let mut first = true;
+        for &(start, end) in colspecs {
+            if !first {
+                out.push(',');
+            }
+            first = false;
+            let slice: String = if start >= chars.len() {
+                String::new()
+            } else {
+                let real_end = end.min(chars.len());
+                chars[start..real_end].iter().collect()
+            };
+            let trimmed = slice.trim();
+            out.push('"');
+            for c in trimmed.chars() {
+                if c == '"' {
+                    out.push('"');
+                }
+                out.push(c);
+            }
+            out.push('"');
+        }
+        out.push('\n');
+    }
+    out
+}
+
+fn fwf_csv_options(options: &FwfReadOptions) -> CsvReadOptions {
+    CsvReadOptions {
+        delimiter: b',',
+        has_headers: options.has_headers,
+        na_values: options.na_values.clone(),
+        keep_default_na: options.keep_default_na,
+        na_filter: options.na_filter,
+        index_col: options.index_col.clone(),
+        usecols: options.usecols.clone(),
+        nrows: options.nrows,
+        skiprows: options.skiprows,
+        dtype: options.dtype.clone(),
+        parse_dates: options.parse_dates.clone(),
+        parse_date_combinations: None,
+        parse_date_combinations_named: None,
+        comment: None,
+        true_values: options.true_values.clone(),
+        false_values: options.false_values.clone(),
+        decimal: options.decimal,
+        on_bad_lines: CsvOnBadLines::Error,
+        thousands: options.thousands,
+        quotechar: b'"',
+        escapechar: None,
+        doublequote: true,
+        skipfooter: options.skipfooter,
+        lineterminator: None,
+    }
+}
+
+/// Parse a fixed-width string, matching `pd.read_fwf(io.StringIO(s), ...)`.
+///
+/// Phase A: explicit colspecs or widths are required. Tokens are sliced
+/// by character index, then trimmed of leading and trailing whitespace
+/// before being threaded through the standard CSV scalar-coercion path.
+pub fn read_fwf_str(input: &str, options: &FwfReadOptions) -> Result<DataFrame, IoError> {
+    let colspecs = resolve_fwf_colspecs(options)?;
+    let csv_input = fwf_lines_to_csv(input, &colspecs);
+    let csv_options = fwf_csv_options(options);
+    read_csv_with_options(&csv_input, &csv_options)
 }
 
 pub fn read_csv_str(input: &str) -> Result<DataFrame, IoError> {
@@ -2749,6 +2914,17 @@ pub fn read_table_with_options_path(
         effective.delimiter = b'\t';
     }
     read_csv_with_options_path(path, &effective)
+}
+
+// ── read_fwf (fixed-width file reader) ─────────────────────────────────
+
+/// Read a fixed-width file from disk, matching `pd.read_fwf(path, ...)`.
+///
+/// See [`read_fwf_str`] for the option semantics. Phase A requires
+/// explicit `colspecs` or `widths`; auto-inference is deferred.
+pub fn read_fwf(path: &Path, options: &FwfReadOptions) -> Result<DataFrame, IoError> {
+    let content = std::fs::read_to_string(path)?;
+    read_fwf_str(&content, options)
 }
 
 // ── File-based Markdown / LaTeX ────────────────────────────────────────
@@ -12036,6 +12212,105 @@ mod tests {
         let frame = super::read_table_with_options(input, &opts).expect("parse pipe");
         assert_eq!(frame.column("x").unwrap().values()[0], Scalar::Int64(1));
         assert_eq!(frame.column("y").unwrap().values()[1], Scalar::Int64(4));
+    }
+
+    // ── read_fwf 23n8u ─────────────────────────────────────────────────
+
+    #[test]
+    fn read_fwf_str_with_colspecs_parses_aligned_records_23n8u() {
+        let input = "name    age   active\nalice   30    true\nbob     25    false\n";
+        let opts = super::FwfReadOptions {
+            colspecs: Some(vec![(0, 8), (8, 14), (14, 20)]),
+            true_values: vec!["true".into()],
+            false_values: vec!["false".into()],
+            ..Default::default()
+        };
+        let frame = super::read_fwf_str(input, &opts).expect("parse fwf");
+        assert_eq!(frame.index().len(), 2);
+        assert_eq!(
+            frame.column("name").unwrap().values()[0],
+            Scalar::Utf8("alice".into())
+        );
+        assert_eq!(frame.column("age").unwrap().values()[0], Scalar::Int64(30));
+        assert_eq!(
+            frame.column("active").unwrap().values()[0],
+            Scalar::Bool(true)
+        );
+    }
+
+    #[test]
+    fn read_fwf_str_with_widths_derives_colspecs_23n8u() {
+        let input = "x  y \n1  2 \n3  4 \n";
+        let opts = super::FwfReadOptions {
+            widths: Some(vec![3, 3]),
+            ..Default::default()
+        };
+        let frame = super::read_fwf_str(input, &opts).expect("parse fwf widths");
+        assert_eq!(frame.column("x").unwrap().values()[0], Scalar::Int64(1));
+        assert_eq!(frame.column("y").unwrap().values()[1], Scalar::Int64(4));
+    }
+
+    #[test]
+    fn read_fwf_str_threads_na_handling_23n8u() {
+        let input = "id   val\nA    NA \nB    7  \n";
+        let opts = super::FwfReadOptions {
+            colspecs: Some(vec![(0, 5), (5, 9)]),
+            na_values: vec!["NA".into()],
+            ..Default::default()
+        };
+        let frame = super::read_fwf_str(input, &opts).expect("parse fwf na");
+        let col = frame.column("val").unwrap().values();
+        assert!(col[0].is_missing());
+        // NaN promotes the numeric column to Float64 to mirror pandas' nullable
+        // semantics on int columns containing missing markers.
+        assert_eq!(col[1], Scalar::Float64(7.0));
+    }
+
+    #[test]
+    fn read_fwf_rejects_both_colspecs_and_widths_23n8u() {
+        let opts = super::FwfReadOptions {
+            colspecs: Some(vec![(0, 3)]),
+            widths: Some(vec![3]),
+            ..Default::default()
+        };
+        let err = super::read_fwf_str("x\n1\n", &opts).expect_err("must reject");
+        match err {
+            super::IoError::Fwf(message) => {
+                assert!(message.contains("only one of"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_fwf_rejects_missing_specs_pending_infer_23n8u() {
+        let opts = super::FwfReadOptions::default();
+        let err = super::read_fwf_str("a b\n1 2\n", &opts).expect_err("must reject infer");
+        match err {
+            super::IoError::Fwf(message) => {
+                assert!(message.contains("infer"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_fwf_path_reads_fixed_width_file_23n8u() {
+        let input = "a   b\n1   2\n3   4\n";
+        let dir = std::env::temp_dir();
+        let path = dir.join("fp_io_test_read_fwf_23n8u.txt");
+        std::fs::write(&path, input).expect("write fixture");
+
+        let opts = super::FwfReadOptions {
+            colspecs: Some(vec![(0, 4), (4, 5)]),
+            ..Default::default()
+        };
+        let frame = super::read_fwf(&path, &opts).expect("read fwf path");
+        assert_eq!(frame.index().len(), 2);
+        assert_eq!(frame.column("a").unwrap().values()[1], Scalar::Int64(3));
+        assert_eq!(frame.column("b").unwrap().values()[0], Scalar::Int64(2));
+
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]
