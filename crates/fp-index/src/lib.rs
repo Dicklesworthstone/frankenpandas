@@ -6076,6 +6076,41 @@ impl CategoricalIndex {
         self.labels.clone()
     }
 
+    /// Alias for [`isna`], matching `pd.CategoricalIndex.isnull()`.
+    #[must_use]
+    pub fn isnull(&self) -> Vec<bool> {
+        self.isna()
+    }
+
+    /// Alias for [`notna`], matching `pd.CategoricalIndex.notnull()`.
+    #[must_use]
+    pub fn notnull(&self) -> Vec<bool> {
+        self.notna()
+    }
+
+    /// Whether any label is missing, matching
+    /// `pd.CategoricalIndex.hasnans`. Always `false` because the
+    /// FrankenPandas storage carries only non-null Strings.
+    #[must_use]
+    pub fn hasnans(&self) -> bool {
+        false
+    }
+
+    /// Drop missing positions, matching `pd.CategoricalIndex.dropna()`.
+    /// Returns a clone because there are no missing labels to drop.
+    #[must_use]
+    pub fn dropna(&self) -> Self {
+        self.clone()
+    }
+
+    /// Fill missing positions, matching `pd.CategoricalIndex.fillna(value)`.
+    /// Returns a clone because there are no missing labels to fill;
+    /// `value` is accepted for API parity but ignored.
+    #[must_use]
+    pub fn fillna(&self, _value: &str) -> Self {
+        self.clone()
+    }
+
     /// Mark the categorical as ordered, matching
     /// `pd.CategoricalIndex.as_ordered()`.
     #[must_use]
@@ -14621,6 +14656,25 @@ mod tests {
         let (codes, uniques) = pi.factorize();
         assert!(codes.is_empty());
         assert!(uniques.is_empty());
+    }
+
+    #[test]
+    fn categorical_index_missingness_methods_are_closed_form_c0knj() {
+        let cat = super::CategoricalIndex::from_values(
+            vec!["a".to_owned(), "b".to_owned(), "c".to_owned()],
+            false,
+        );
+        assert_eq!(cat.isnull(), vec![false, false, false]);
+        assert_eq!(cat.notnull(), vec![true, true, true]);
+        assert!(!cat.hasnans());
+        let dropped = cat.dropna();
+        assert_eq!(dropped.labels(), cat.labels());
+        let filled = cat.fillna("z");
+        assert_eq!(filled.labels(), cat.labels());
+
+        let empty = super::CategoricalIndex::from_values(Vec::<String>::new(), false);
+        assert_eq!(empty.isnull(), Vec::<bool>::new());
+        assert!(!empty.hasnans());
     }
 
     #[test]
