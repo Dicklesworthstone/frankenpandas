@@ -2936,6 +2936,37 @@ impl DatetimeIndex {
             })
     }
 
+    /// Locate every position matching each target, matching
+    /// `pd.DatetimeIndex.get_indexer_non_unique(targets)`. Returns
+    /// `(positions, missing)` where `positions` lists every source
+    /// position matching any target (in target order) and `missing`
+    /// lists target ordinals that had no match.
+    #[must_use]
+    pub fn get_indexer_non_unique(&self, targets: &[i64]) -> (Vec<isize>, Vec<usize>) {
+        let labels = self.index.labels();
+        let mut by_value = HashMap::<i64, Vec<usize>>::new();
+        for (i, label) in labels.iter().enumerate() {
+            if let IndexLabel::Datetime64(n) = label {
+                by_value.entry(*n).or_default().push(i);
+            }
+        }
+        let mut positions = Vec::<isize>::new();
+        let mut missing = Vec::<usize>::new();
+        for (idx, target) in targets.iter().enumerate() {
+            if let Some(matches) = by_value.get(target) {
+                positions.extend(
+                    matches
+                        .iter()
+                        .map(|p| isize::try_from(*p).unwrap_or(isize::MAX)),
+                );
+            } else {
+                positions.push(-1);
+                missing.push(idx);
+            }
+        }
+        (positions, missing)
+    }
+
     /// Alias for [`get_indexer`], matching
     /// `pd.DatetimeIndex.get_indexer_for(targets)`.
     #[must_use]
@@ -3944,6 +3975,34 @@ impl TimedeltaIndex {
             .ok_or_else(|| {
                 IndexError::InvalidArgument(format!("get_loc: {value} not in TimedeltaIndex"))
             })
+    }
+
+    /// Locate every position matching each target, matching
+    /// `pd.TimedeltaIndex.get_indexer_non_unique(targets)`.
+    #[must_use]
+    pub fn get_indexer_non_unique(&self, targets: &[i64]) -> (Vec<isize>, Vec<usize>) {
+        let labels = self.index.labels();
+        let mut by_value = HashMap::<i64, Vec<usize>>::new();
+        for (i, label) in labels.iter().enumerate() {
+            if let IndexLabel::Timedelta64(n) = label {
+                by_value.entry(*n).or_default().push(i);
+            }
+        }
+        let mut positions = Vec::<isize>::new();
+        let mut missing = Vec::<usize>::new();
+        for (idx, target) in targets.iter().enumerate() {
+            if let Some(matches) = by_value.get(target) {
+                positions.extend(
+                    matches
+                        .iter()
+                        .map(|p| isize::try_from(*p).unwrap_or(isize::MAX)),
+                );
+            } else {
+                positions.push(-1);
+                missing.push(idx);
+            }
+        }
+        (positions, missing)
     }
 
     /// Alias for [`get_indexer`], matching
@@ -14719,6 +14778,24 @@ mod tests {
         let desc = super::RangeIndex::new(10, 0, -2).unwrap();
         assert!(desc.searchsorted(4, "left").is_err());
         Ok(())
+    }
+
+    #[test]
+    fn datetime_timedelta_get_indexer_non_unique_match_pandas_sm32a() {
+        const NS: i64 = 1_000_000_000;
+        let a = 1_704_067_200_i64 * NS;
+        let b = 1_705_276_800_i64 * NS;
+        // 4-element index with a duplicated `a`.
+        let dt = super::DatetimeIndex::new(vec![a, b, a, b]);
+        let (positions, missing) = dt.get_indexer_non_unique(&[a, b + 99]);
+        // a matches positions 0 and 2; b+99 is missing.
+        assert_eq!(positions, vec![0, 2, -1]);
+        assert_eq!(missing, vec![1]);
+
+        let td = super::TimedeltaIndex::new(vec![100_i64, 200, 100]);
+        let (positions, missing) = td.get_indexer_non_unique(&[100, 999]);
+        assert_eq!(positions, vec![0, 2, -1]);
+        assert_eq!(missing, vec![1]);
     }
 
     #[test]
