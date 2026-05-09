@@ -2426,6 +2426,57 @@ impl DatetimeIndex {
             .collect()
     }
 
+    /// Concatenate with another DatetimeIndex, matching
+    /// `pd.DatetimeIndex.append(other)`. The index name is preserved when
+    /// both operands share it; otherwise pandas drops the name.
+    #[must_use]
+    pub fn append(&self, other: &Self) -> Self {
+        let mut nanos: Vec<i64> = self
+            .index
+            .labels()
+            .iter()
+            .filter_map(|label| match label {
+                IndexLabel::Datetime64(n) => Some(*n),
+                _ => None,
+            })
+            .collect();
+        nanos.extend(other.index.labels().iter().filter_map(|label| match label {
+            IndexLabel::Datetime64(n) => Some(*n),
+            _ => None,
+        }));
+        let mut out = Self::new(nanos);
+        if let Some(name) = self.name().filter(|_| self.name() == other.name()) {
+            out = out.set_name(name);
+        }
+        out
+    }
+
+    /// Remove the label at the given position, matching
+    /// `pd.DatetimeIndex.delete(loc)`.
+    pub fn delete(&self, loc: usize) -> Result<Self, IndexError> {
+        let labels = self.index.labels();
+        if loc >= labels.len() {
+            return Err(IndexError::OutOfBounds {
+                position: loc,
+                length: labels.len(),
+            });
+        }
+        let nanos: Vec<i64> = labels
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != loc)
+            .filter_map(|(_, label)| match label {
+                IndexLabel::Datetime64(n) => Some(*n),
+                _ => None,
+            })
+            .collect();
+        let mut out = Self::new(nanos);
+        if let Some(name) = self.name() {
+            out = out.set_name(name);
+        }
+        Ok(out)
+    }
+
     /// Drop NAT labels, matching `pd.DatetimeIndex.dropna()`. Non-datetime
     /// labels (which the wrapper rejects on construction) and `i64::MIN`
     /// sentinels are removed; surviving labels keep their order.
@@ -3203,6 +3254,57 @@ impl TimedeltaIndex {
             })
             .collect()
     }
+
+    /// Concatenate with another TimedeltaIndex, matching
+    /// `pd.TimedeltaIndex.append(other)`. Preserves the index name when both
+    /// operands share it; otherwise pandas drops the name.
+    #[must_use]
+    pub fn append(&self, other: &Self) -> Self {
+        let mut nanos: Vec<i64> = self
+            .index
+            .labels()
+            .iter()
+            .filter_map(|label| match label {
+                IndexLabel::Timedelta64(n) => Some(*n),
+                _ => None,
+            })
+            .collect();
+        nanos.extend(other.index.labels().iter().filter_map(|label| match label {
+            IndexLabel::Timedelta64(n) => Some(*n),
+            _ => None,
+        }));
+        let mut out = Self::new(nanos);
+        if let Some(name) = self.name().filter(|_| self.name() == other.name()) {
+            out = out.set_name(name);
+        }
+        out
+    }
+
+    /// Remove the label at the given position, matching
+    /// `pd.TimedeltaIndex.delete(loc)`.
+    pub fn delete(&self, loc: usize) -> Result<Self, IndexError> {
+        let labels = self.index.labels();
+        if loc >= labels.len() {
+            return Err(IndexError::OutOfBounds {
+                position: loc,
+                length: labels.len(),
+            });
+        }
+        let nanos: Vec<i64> = labels
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != loc)
+            .filter_map(|(_, label)| match label {
+                IndexLabel::Timedelta64(n) => Some(*n),
+                _ => None,
+            })
+            .collect();
+        let mut out = Self::new(nanos);
+        if let Some(name) = self.name() {
+            out = out.set_name(name);
+        }
+        Ok(out)
+    }
 }
 
 /// Public pandas-style period index wrapper.
@@ -3588,6 +3690,41 @@ impl PeriodIndex {
     pub fn isin(&self, values: &[Period]) -> Vec<bool> {
         let needle: HashSet<Period> = values.iter().copied().collect();
         self.values.iter().map(|p| needle.contains(p)).collect()
+    }
+
+    /// Concatenate with another PeriodIndex, matching
+    /// `pd.PeriodIndex.append(other)`. Preserves the index name when both
+    /// operands share it; otherwise the name is dropped.
+    #[must_use]
+    pub fn append(&self, other: &Self) -> Self {
+        let mut periods = self.values.clone();
+        periods.extend_from_slice(&other.values);
+        let name = if self.name == other.name {
+            self.name.clone()
+        } else {
+            None
+        };
+        Self {
+            values: periods,
+            name,
+        }
+    }
+
+    /// Remove the period at the given position, matching
+    /// `pd.PeriodIndex.delete(loc)`.
+    pub fn delete(&self, loc: usize) -> Result<Self, IndexError> {
+        if loc >= self.values.len() {
+            return Err(IndexError::OutOfBounds {
+                position: loc,
+                length: self.values.len(),
+            });
+        }
+        let mut periods = self.values.clone();
+        periods.remove(loc);
+        Ok(Self {
+            values: periods,
+            name: self.name.clone(),
+        })
     }
 
     /// Factorize, matching `pd.PeriodIndex.factorize()`. Returns
@@ -4067,6 +4204,46 @@ impl RangeIndex {
     pub fn isin(&self, values: &[i64]) -> Vec<bool> {
         let needle: HashSet<i64> = values.iter().copied().collect();
         self.values().iter().map(|v| needle.contains(v)).collect()
+    }
+
+    /// Concatenate with another RangeIndex, matching
+    /// `pd.RangeIndex.append(other)`. Returns a flat [`Index`] because the
+    /// resulting values are generally not a contiguous range; preserves
+    /// the index name when both operands share it.
+    #[must_use]
+    pub fn append(&self, other: &Self) -> Index {
+        let mut labels: Vec<IndexLabel> =
+            self.values().into_iter().map(IndexLabel::Int64).collect();
+        labels.extend(other.values().into_iter().map(IndexLabel::Int64));
+        let mut out = Index::new(labels);
+        if let Some(name) = self.name().filter(|_| self.name() == other.name()) {
+            out = out.set_name(name);
+        }
+        out
+    }
+
+    /// Remove the value at the given position, matching
+    /// `pd.RangeIndex.delete(loc)`. Returns a flat [`Index`] because the
+    /// residual values may no longer form a contiguous range.
+    pub fn delete(&self, loc: usize) -> Result<Index, IndexError> {
+        let values = self.values();
+        if loc >= values.len() {
+            return Err(IndexError::OutOfBounds {
+                position: loc,
+                length: values.len(),
+            });
+        }
+        let labels: Vec<IndexLabel> = values
+            .into_iter()
+            .enumerate()
+            .filter(|(i, _)| *i != loc)
+            .map(|(_, v)| IndexLabel::Int64(v))
+            .collect();
+        let mut out = Index::new(labels);
+        if let Some(name) = self.name() {
+            out = out.set_name(name);
+        }
+        Ok(out)
     }
 }
 
@@ -11495,6 +11672,111 @@ mod tests {
                 None
             ]
         );
+    }
+
+    #[test]
+    fn datetime_index_append_delete_match_pandas_834v9() -> Result<(), super::IndexError> {
+        const NS: i64 = 1_000_000_000;
+        let a = 1_704_067_200_i64 * NS;
+        let b = 1_705_276_800_i64 * NS;
+        let c = 1_706_140_800_i64 * NS;
+        let left = super::DatetimeIndex::new(vec![a, b]).set_name("ts");
+        let right = super::DatetimeIndex::new(vec![c]).set_name("ts");
+
+        let merged = left.append(&right);
+        assert_eq!(merged.values(), vec![Some(a), Some(b), Some(c)]);
+        assert_eq!(merged.name(), Some("ts"));
+
+        let mismatched = super::DatetimeIndex::new(vec![c]).set_name("other");
+        assert_eq!(left.append(&mismatched).name(), None);
+
+        let trimmed = left.append(&right).delete(1)?;
+        assert_eq!(trimmed.values(), vec![Some(a), Some(c)]);
+        assert_eq!(trimmed.name(), Some("ts"));
+
+        let oob = left.delete(5).unwrap_err();
+        assert!(matches!(
+            oob,
+            super::IndexError::OutOfBounds { position: 5, length: 2 }
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn timedelta_index_append_delete_match_pandas_834v9() -> Result<(), super::IndexError> {
+        let left = super::TimedeltaIndex::new(vec![1_i64, 2]).set_name("d");
+        let right = super::TimedeltaIndex::new(vec![3_i64]).set_name("d");
+        let merged = left.append(&right);
+        assert_eq!(merged.values(), vec![Some(1), Some(2), Some(3)]);
+        assert_eq!(merged.name(), Some("d"));
+
+        let trimmed = merged.delete(0)?;
+        assert_eq!(trimmed.values(), vec![Some(2), Some(3)]);
+
+        assert!(matches!(
+            left.delete(7).unwrap_err(),
+            super::IndexError::OutOfBounds { position: 7, length: 2 }
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn period_index_append_delete_match_pandas_834v9() -> Result<(), super::IndexError> {
+        use fp_types::{Period, PeriodFreq};
+        let p1 = Period::new(10, PeriodFreq::Monthly);
+        let p2 = Period::new(11, PeriodFreq::Monthly);
+        let p3 = Period::new(12, PeriodFreq::Monthly);
+        let left = super::PeriodIndex::new(vec![p1, p2]).set_name("p");
+        let right = super::PeriodIndex::new(vec![p3]).set_name("p");
+
+        let merged = left.append(&right);
+        assert_eq!(merged.values(), &[p1, p2, p3]);
+        assert_eq!(merged.name(), Some("p"));
+
+        let mismatched = super::PeriodIndex::new(vec![p3]).set_name("other");
+        assert_eq!(left.append(&mismatched).name(), None);
+
+        let trimmed = merged.delete(1)?;
+        assert_eq!(trimmed.values(), &[p1, p3]);
+
+        assert!(matches!(
+            left.delete(5).unwrap_err(),
+            super::IndexError::OutOfBounds { position: 5, length: 2 }
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn range_index_append_delete_match_pandas_834v9() -> Result<(), super::IndexError> {
+        let left = super::RangeIndex::new(0, 3, 1).unwrap();
+        let right = super::RangeIndex::new(10, 12, 1).unwrap();
+        let merged = left.append(&right);
+        let merged_labels: Vec<i64> = merged
+            .labels()
+            .iter()
+            .map(|label| match label {
+                super::IndexLabel::Int64(v) => *v,
+                _ => panic!("expected Int64 labels"),
+            })
+            .collect();
+        assert_eq!(merged_labels, vec![0, 1, 2, 10, 11]);
+
+        let trimmed = left.delete(1)?;
+        let trimmed_labels: Vec<i64> = trimmed
+            .labels()
+            .iter()
+            .map(|label| match label {
+                super::IndexLabel::Int64(v) => *v,
+                _ => panic!("expected Int64 labels"),
+            })
+            .collect();
+        assert_eq!(trimmed_labels, vec![0, 2]);
+
+        assert!(matches!(
+            left.delete(99).unwrap_err(),
+            super::IndexError::OutOfBounds { position: 99, length: 3 }
+        ));
+        Ok(())
     }
 
     #[test]
