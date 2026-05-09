@@ -4061,6 +4061,88 @@ impl CategoricalIndex {
     pub fn to_index(&self) -> Index {
         Index::from_utf8(self.labels.clone()).set_names(self.name.as_deref())
     }
+
+    /// First-seen unique labels, matching `pd.CategoricalIndex.unique()`.
+    /// Categories are preserved (not narrowed to seen labels) and the
+    /// ordered flag rolls through. The result keeps the index name.
+    #[must_use]
+    pub fn unique(&self) -> Self {
+        let mut seen = HashSet::<&String>::new();
+        let mut uniques = Vec::<String>::new();
+        for label in &self.labels {
+            if seen.insert(label) {
+                uniques.push(label.clone());
+            }
+        }
+        Self {
+            labels: uniques,
+            categories: self.categories.clone(),
+            ordered: self.ordered,
+            name: self.name.clone(),
+        }
+    }
+
+    /// Per-position duplicate mask, matching
+    /// `pd.CategoricalIndex.duplicated(keep)`.
+    #[must_use]
+    pub fn duplicated(&self, keep: DuplicateKeep) -> Vec<bool> {
+        self.to_index().duplicated(keep)
+    }
+
+    /// Drop duplicate labels (keep first), matching
+    /// `pd.CategoricalIndex.drop_duplicates()`. Categories and ordered
+    /// flag are preserved.
+    #[must_use]
+    pub fn drop_duplicates(&self) -> Self {
+        self.unique()
+    }
+
+    /// Value counts, matching `pd.CategoricalIndex.value_counts()`.
+    /// CategoricalIndex labels are non-null so the total equals `len()`.
+    #[must_use]
+    pub fn value_counts(&self) -> Vec<(String, usize)> {
+        let mut order = Vec::<&String>::new();
+        let mut counts = HashMap::<&String, usize>::new();
+        for label in &self.labels {
+            let entry = counts.entry(label).or_insert_with(|| {
+                order.push(label);
+                0
+            });
+            *entry += 1;
+        }
+        let mut pairs: Vec<(String, usize)> =
+            order.iter().map(|s| ((*s).clone(), counts[*s])).collect();
+        // Pandas sorts descending by count for value_counts.
+        pairs.sort_by_key(|entry| std::cmp::Reverse(entry.1));
+        pairs
+    }
+
+    /// Factorize, matching `pd.CategoricalIndex.factorize()`. Returns
+    /// `(codes, uniques)` where `uniques` is a CategoricalIndex with
+    /// the same categories list.
+    #[must_use]
+    pub fn factorize(&self) -> (Vec<isize>, Self) {
+        let mut positions = HashMap::<&String, isize>::new();
+        let mut uniques = Vec::<String>::new();
+        let mut codes = Vec::with_capacity(self.labels.len());
+        for label in &self.labels {
+            if let Some(code) = positions.get(label) {
+                codes.push(*code);
+            } else {
+                let code = isize::try_from(uniques.len()).unwrap_or(isize::MAX);
+                positions.insert(label, code);
+                uniques.push(label.clone());
+                codes.push(code);
+            }
+        }
+        let unique_index = Self {
+            labels: uniques,
+            categories: self.categories.clone(),
+            ordered: self.ordered,
+            name: self.name.clone(),
+        };
+        (codes, unique_index)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -11094,6 +11176,65 @@ mod tests {
                 None
             ]
         );
+    }
+
+    #[test]
+    fn categorical_index_forwarder_methods_match_pandas_i1q1c() {
+        let labels = vec![
+            "low".to_owned(),
+            "high".to_owned(),
+            "low".to_owned(),
+            "med".to_owned(),
+            "high".to_owned(),
+            "low".to_owned(),
+        ];
+        let categorical = super::CategoricalIndex::from_values(labels.clone(), false)
+            .set_name("level");
+
+        // unique: first-seen low, high, med.
+        let unique = categorical.unique();
+        assert_eq!(
+            unique.labels(),
+            vec!["low".to_owned(), "high".to_owned(), "med".to_owned()].as_slice()
+        );
+        assert_eq!(unique.name(), Some("level"));
+
+        // duplicated keep=First: positions 2, 4, 5 are duplicates of earlier.
+        let dup_first = categorical.duplicated(super::DuplicateKeep::First);
+        assert_eq!(dup_first, vec![false, false, true, false, true, true]);
+
+        // drop_duplicates returns same as unique.
+        let dropped = categorical.drop_duplicates();
+        assert_eq!(dropped.labels(), unique.labels());
+
+        // value_counts: low=3, high=2, med=1; total = 6 = len.
+        let counts = categorical.value_counts();
+        let total: usize = counts.iter().map(|(_, n)| n).sum();
+        assert_eq!(total, categorical.len());
+        let low_count = counts
+            .iter()
+            .find_map(|(label, n)| (label == "low").then_some(*n))
+            .expect("low should be counted");
+        assert_eq!(low_count, 3);
+        // First entry is the most frequent (descending sort).
+        assert_eq!(counts[0].1, 3);
+
+        // factorize: codes encode first-seen positions; uniques == unique().
+        let (codes, factor_uniques) = categorical.factorize();
+        assert_eq!(codes.len(), categorical.len());
+        assert_eq!(codes, vec![0, 1, 0, 2, 1, 0]);
+        assert_eq!(factor_uniques.labels(), unique.labels());
+    }
+
+    #[test]
+    fn categorical_index_unique_preserves_categories_and_ordered_i1q1c() {
+        let labels = vec!["a".to_owned(), "b".to_owned(), "a".to_owned()];
+        let categories = vec!["a".to_owned(), "b".to_owned(), "c".to_owned()];
+        let cat = super::CategoricalIndex::with_categories(labels, categories.clone(), true)
+            .expect("with_categories");
+        let unique = cat.unique();
+        assert_eq!(unique.categories(), categories.as_slice());
+        assert!(unique.ordered());
     }
 
     #[test]
