@@ -2274,6 +2274,43 @@ impl DatetimeIndex {
         use chrono::Datelike;
         map_datetime_labels(self.index.labels(), |dt| dt.day())
     }
+
+    /// Hour of day per label (0..=23), matching `pd.DatetimeIndex.hour`.
+    #[must_use]
+    pub fn hour(&self) -> Vec<Option<u32>> {
+        use chrono::Timelike;
+        map_datetime_labels(self.index.labels(), |dt| dt.hour())
+    }
+
+    /// Minute of hour per label (0..=59), matching `pd.DatetimeIndex.minute`.
+    #[must_use]
+    pub fn minute(&self) -> Vec<Option<u32>> {
+        use chrono::Timelike;
+        map_datetime_labels(self.index.labels(), |dt| dt.minute())
+    }
+
+    /// Second of minute per label (0..=59), matching `pd.DatetimeIndex.second`.
+    #[must_use]
+    pub fn second(&self) -> Vec<Option<u32>> {
+        use chrono::Timelike;
+        map_datetime_labels(self.index.labels(), |dt| dt.second())
+    }
+
+    /// Microsecond component (0..=999_999), matching `pd.DatetimeIndex.microsecond`.
+    /// Computed from the within-second nanosecond bucket: `nanos / 1_000`.
+    #[must_use]
+    pub fn microsecond(&self) -> Vec<Option<u32>> {
+        use chrono::Timelike;
+        map_datetime_labels(self.index.labels(), |dt| dt.nanosecond() / 1_000)
+    }
+
+    /// Nanosecond component (0..=999), matching `pd.DatetimeIndex.nanosecond`.
+    /// Computed from the within-second nanosecond bucket: `nanos % 1_000`.
+    #[must_use]
+    pub fn nanosecond(&self) -> Vec<Option<u32>> {
+        use chrono::Timelike;
+        map_datetime_labels(self.index.labels(), |dt| dt.nanosecond() % 1_000)
+    }
 }
 
 /// Public pandas-style timedelta index wrapper.
@@ -10418,6 +10455,32 @@ mod tests {
 
         let empty = super::RangeIndex::new(0, 0, 1).unwrap();
         assert_eq!(empty.argsort(), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn datetime_index_time_of_day_accessors_match_pandas_znejf() {
+        // 2024-01-01T12:34:56.789012345Z
+        // secs = 1704112496, subsec_nanos = 789_012_345
+        // total nanos = 1_704_112_496_000_000_000 + 789_012_345
+        //             = 1_704_112_496_789_012_345
+        let total: i64 = 1_704_112_496 * 1_000_000_000 + 789_012_345;
+        let dt = super::DatetimeIndex::new(vec![total, i64::MIN, 0]);
+
+        assert_eq!(dt.hour(), vec![Some(12), None, Some(0)]);
+        assert_eq!(dt.minute(), vec![Some(34), None, Some(0)]);
+        assert_eq!(dt.second(), vec![Some(56), None, Some(0)]);
+        assert_eq!(dt.microsecond(), vec![Some(789_012), None, Some(0)]);
+        assert_eq!(dt.nanosecond(), vec![Some(345), None, Some(0)]);
+    }
+
+    #[test]
+    fn datetime_index_time_of_day_accessors_handle_empty_znejf() {
+        let dt = super::DatetimeIndex::new(vec![]);
+        assert!(dt.hour().is_empty());
+        assert!(dt.minute().is_empty());
+        assert!(dt.second().is_empty());
+        assert!(dt.microsecond().is_empty());
+        assert!(dt.nanosecond().is_empty());
     }
 
     #[test]
