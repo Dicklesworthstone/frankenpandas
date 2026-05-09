@@ -2697,6 +2697,60 @@ pub fn write_csv(frame: &DataFrame, path: &Path) -> Result<(), IoError> {
     Ok(())
 }
 
+// ── read_table (tab-separated thin wrapper) ────────────────────────────
+
+/// Parse a tab-separated string, matching `pd.read_table(io.StringIO(s))`.
+///
+/// Equivalent to [`read_csv_str`] with `delimiter=b'\t'`. Other defaults
+/// match pandas `read_table`: `header='infer'`, default NA values, no
+/// index column promotion. Use [`read_table_with_options`] for full
+/// option control.
+pub fn read_table_str(input: &str) -> Result<DataFrame, IoError> {
+    let opts = CsvReadOptions {
+        delimiter: b'\t',
+        ..CsvReadOptions::default()
+    };
+    read_csv_with_options(input, &opts)
+}
+
+/// Parse a tab-separated string with explicit options. The caller-supplied
+/// `options.delimiter` is preserved when it differs from the comma default
+/// to allow override; otherwise it is forced to `b'\t'` so that the
+/// pandas `read_table` semantics survive `CsvReadOptions::default()`.
+pub fn read_table_with_options(
+    input: &str,
+    options: &CsvReadOptions,
+) -> Result<DataFrame, IoError> {
+    let mut effective = options.clone();
+    if effective.delimiter == b',' {
+        effective.delimiter = b'\t';
+    }
+    read_csv_with_options(input, &effective)
+}
+
+/// Read a tab-separated file from disk, matching `pd.read_table(path)`.
+pub fn read_table(path: &Path) -> Result<DataFrame, IoError> {
+    let opts = CsvReadOptions {
+        delimiter: b'\t',
+        ..CsvReadOptions::default()
+    };
+    read_csv_with_options_path(path, &opts)
+}
+
+/// Read a tab-separated file from disk with explicit options. The
+/// caller-supplied delimiter is honored when it has been overridden from
+/// the comma default; otherwise it is forced to `b'\t'`.
+pub fn read_table_with_options_path(
+    path: &Path,
+    options: &CsvReadOptions,
+) -> Result<DataFrame, IoError> {
+    let mut effective = options.clone();
+    if effective.delimiter == b',' {
+        effective.delimiter = b'\t';
+    }
+    read_csv_with_options_path(path, &effective)
+}
+
 // ── File-based Markdown / LaTeX ────────────────────────────────────────
 
 /// Write a DataFrame to a Markdown table file.
@@ -11946,6 +12000,72 @@ mod tests {
         super::write_json(&frame, &path, JsonOrient::Records).expect("write file");
         let frame2 = super::read_json(&path, JsonOrient::Records).expect("read file");
         assert_eq!(frame2.index().len(), 2);
+        std::fs::remove_file(&path).ok();
+    }
+
+    // ── read_table 4pwr9 ───────────────────────────────────────────────
+
+    #[test]
+    fn read_table_str_parses_tab_separated_4pwr9() {
+        let input = "a\tb\tc\n1\t2\t3\n4\t5\t6\n";
+        let frame = super::read_table_str(input).expect("parse tsv");
+        assert_eq!(frame.index().len(), 2);
+        assert_eq!(frame.column("a").unwrap().values()[0], Scalar::Int64(1));
+        assert_eq!(frame.column("c").unwrap().values()[1], Scalar::Int64(6));
+    }
+
+    #[test]
+    fn read_table_with_options_overrides_default_delimiter_4pwr9() {
+        let input = "x\ty\n1\tNA\n2\t3\n";
+        let opts = CsvReadOptions {
+            na_values: vec!["NA".into()],
+            ..Default::default()
+        };
+        let frame = super::read_table_with_options(input, &opts).expect("parse tsv with na");
+        assert!(frame.column("y").unwrap().values()[0].is_missing());
+        assert_eq!(frame.column("y").unwrap().values()[1], Scalar::Float64(3.0));
+    }
+
+    #[test]
+    fn read_table_with_options_honours_explicit_pipe_delimiter_4pwr9() {
+        let input = "x|y\n1|2\n3|4\n";
+        let opts = CsvReadOptions {
+            delimiter: b'|',
+            ..Default::default()
+        };
+        let frame = super::read_table_with_options(input, &opts).expect("parse pipe");
+        assert_eq!(frame.column("x").unwrap().values()[0], Scalar::Int64(1));
+        assert_eq!(frame.column("y").unwrap().values()[1], Scalar::Int64(4));
+    }
+
+    #[test]
+    fn read_table_path_roundtrips_through_read_csv_path_4pwr9() {
+        let input = "id\tval\na\t1\nb\t2\n";
+        let dir = std::env::temp_dir();
+        let path = dir.join("fp_io_test_read_table_4pwr9.tsv");
+        std::fs::write(&path, input).expect("write fixture");
+
+        let frame = super::read_table(&path).expect("read tsv");
+        assert_eq!(frame.index().len(), 2);
+        assert_eq!(
+            frame.column("id").unwrap().values()[0],
+            Scalar::Utf8("a".into())
+        );
+        assert_eq!(frame.column("val").unwrap().values()[1], Scalar::Int64(2));
+
+        let opts = CsvReadOptions {
+            index_col: Some("id".into()),
+            ..Default::default()
+        };
+        let frame2 =
+            super::read_table_with_options_path(&path, &opts).expect("read tsv with options");
+        assert!(frame2.column("id").is_none());
+        assert_eq!(
+            frame2.index().labels()[0],
+            fp_index::IndexLabel::Utf8("a".into())
+        );
+        assert_eq!(frame2.column("val").unwrap().values()[1], Scalar::Int64(2));
+
         std::fs::remove_file(&path).ok();
     }
 
