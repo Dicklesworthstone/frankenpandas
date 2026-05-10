@@ -156,6 +156,24 @@ fn perf_join_left_10k() {
 
 #[test]
 #[ignore]
+fn perf_join_right_10k() {
+    let n = 10_000;
+    let overlap = n / 2;
+    let left = make_numeric_series("left", n, 0);
+    let right = make_numeric_series("right", n, n - overlap);
+
+    let durations = bench_iters(
+        || {
+            let _ = join_series(&left, &right, JoinType::Right).unwrap();
+        },
+        50,
+    );
+
+    report_and_assert("join_right_10k (50% overlap)", &durations);
+}
+
+#[test]
+#[ignore]
 fn perf_join_outer_10k() {
     let n = 10_000;
     let overlap = n / 2;

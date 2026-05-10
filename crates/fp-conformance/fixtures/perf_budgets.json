@@ -8,6 +8,7 @@
   "join_inner_100k (50% overlap)": { "p95_secs": 1.7 },
   "join_inner_10k (50% overlap)": { "p95_secs": 0.18 },
   "join_left_10k (50% overlap)": { "p95_secs": 0.22 },
+  "join_right_10k (50% overlap)": { "p95_secs": 0.24 },
   "join_outer_100k (50% overlap)": { "p95_secs": 3.2 },
   "join_outer_10k (50% overlap)": { "p95_secs": 0.26 },
   "series_add_aligned_10k (50% overlap)": { "p95_secs": 0.25 },
