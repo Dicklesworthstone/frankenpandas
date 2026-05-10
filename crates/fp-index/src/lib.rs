@@ -5461,6 +5461,18 @@ impl PeriodIndex {
         })
     }
 
+    /// Shift each period by `n` units of its own frequency, matching
+    /// `pd.PeriodIndex.shift(periods)`. Mixed-frequency input rejects
+    /// via the existing ensure_homogeneous_freq guard.
+    pub fn shift(&self, n: i64) -> Result<Self, IndexError> {
+        self.ensure_homogeneous_freq()?;
+        let values: Vec<Period> = self.values.iter().map(|p| p.shift(n)).collect();
+        Ok(Self {
+            values,
+            name: self.name.clone(),
+        })
+    }
+
     /// Whether period ordinals form a contiguous run, matching
     /// `pd.PeriodIndex.is_full`. Empty and single-element indexes are
     /// trivially full. Mixed-frequency input returns `false` because the
@@ -15255,6 +15267,31 @@ mod tests {
         ]);
         assert!(mixed.argmax().is_err());
         assert!(mixed.argsort().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn period_index_shift_match_pandas_pnaui() -> Result<(), super::IndexError> {
+        use fp_types::{Period, PeriodFreq};
+        let p1 = Period::new(10, PeriodFreq::Monthly);
+        let p2 = Period::new(11, PeriodFreq::Monthly);
+        let pi = super::PeriodIndex::new(vec![p1, p2]).set_name("p");
+
+        let shifted = pi.shift(2)?;
+        assert_eq!(shifted.values()[0].ordinal, 12);
+        assert_eq!(shifted.values()[1].ordinal, 13);
+        assert_eq!(shifted.name(), Some("p"));
+
+        // Negative shift.
+        let back = pi.shift(-1)?;
+        assert_eq!(back.values()[0].ordinal, 9);
+
+        // Mixed-freq rejects.
+        let mixed = super::PeriodIndex::new(vec![
+            p1,
+            Period::new(10, PeriodFreq::Annual),
+        ]);
+        assert!(mixed.shift(1).is_err());
         Ok(())
     }
 
