@@ -50,10 +50,23 @@ def candidate_op_strings(class_alias: str, member_name: str) -> set[str]:
         f"{cls_snake}_{member_name}",
         f"{cls_snake.replace('_', '')}_{member_name}",
     }
-    # Ad-hoc aliases seen in pandas_oracle.py dispatch (groupby_sum etc.).
-    if cls_snake.endswith("group_by"):
-        alt = cls_snake.replace("_group_by", "groupby").replace("group_by", "groupby")
-        forms.add(f"{alt}_{member_name}")
+    # GroupBy packets use the oracle dispatch spellings rather than the
+    # literal pandas class names.
+    if cls_snake == "data_frame_group_by":
+        forms.update(
+            {
+                f"dataframe_groupby_{member_name}",
+                f"data_frame_groupby_{member_name}",
+            }
+        )
+    if cls_snake == "series_group_by":
+        forms.update(
+            {
+                f"groupby_{member_name}",
+                f"series_groupby_{member_name}",
+                f"series_group_by_{member_name}",
+            }
+        )
     if cls_snake == "series":
         forms.add(f"series_{member_name}")
     if cls_snake == "data_frame":
@@ -161,7 +174,11 @@ def main() -> int:
     listing_path = Path(args.listing)
     if not listing_path.is_absolute():
         listing_path = repo_root / listing_path
-    listing = json.loads(listing_path.read_text())
+    try:
+        with listing_path.open(encoding="utf-8") as listing_file:
+            listing = json.load(listing_file)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"failed to load pandas API listing {listing_path}: {exc}") from exc
 
     fixture_ops = load_fixture_ops(repo_root)
     breakdown, counts = classify(listing, fixture_ops)
