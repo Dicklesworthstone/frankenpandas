@@ -1,3 +1,5 @@
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use serde::{Deserialize, Serialize};
 
 use crate::asupersync::{
@@ -64,6 +66,17 @@ impl RecoveryPolicy for ConservativeRecoveryPolicy {
     }
 }
 
+fn current_unix_ms() -> u64 {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_millis());
+    u64::try_from(millis).unwrap_or(u64::MAX)
+}
+
+fn recovery_deadline_expired(deadline_unix_ms: u64) -> bool {
+    deadline_unix_ms != 0 && current_unix_ms() > deadline_unix_ms
+}
+
 pub fn recover_once<C, T, V, P>(
     codec: &C,
     transport: &T,
@@ -95,6 +108,13 @@ where
         attempt < plan.max_attempts && policy.should_retry(attempt, plan.max_attempts)
     };
     loop {
+        if recovery_deadline_expired(plan.deadline_unix_ms) {
+            return Err(AsupersyncError::RecoveryExhausted {
+                artifact_id: plan.artifact_id.clone(),
+                attempts,
+            });
+        }
+
         attempts = attempts.saturating_add(1);
 
         let encoded = match transport.receive(&plan.artifact_id, config) {
@@ -147,6 +167,8 @@ where
 
 #[cfg(test)]
 mod test_recover_once_bounded_loop_bc6fa4 {
+    use std::cell::Cell;
+
     use super::*;
     use crate::asupersync::{
         codec::{ArtifactPayload, EncodedArtifact},
@@ -185,6 +207,44 @@ mod test_recover_once_bounded_loop_bc6fa4 {
         ) -> Result<EncodedArtifact, AsupersyncError> {
             Err(AsupersyncError::Transport(
                 "always-failing receive".to_string(),
+            ))
+        }
+        fn required_capabilities(&self) -> CapabilitySet {
+            CapabilitySet::for_capability(CxCapability::Io)
+        }
+    }
+
+    struct CountingFailingTransport {
+        receive_calls: Cell<u32>,
+    }
+
+    impl CountingFailingTransport {
+        fn new() -> Self {
+            Self {
+                receive_calls: Cell::new(0),
+            }
+        }
+    }
+
+    impl TransportLayer for CountingFailingTransport {
+        fn send(
+            &self,
+            _artifact: EncodedArtifact,
+            _config: &AsupersyncConfig,
+        ) -> Result<crate::asupersync::transport::TransferReport, AsupersyncError> {
+            Err(AsupersyncError::Transport(
+                "counting-failing send".to_string(),
+            ))
+        }
+        fn receive(
+            &self,
+            _artifact_id: &str,
+            _config: &AsupersyncConfig,
+        ) -> Result<EncodedArtifact, AsupersyncError> {
+            self.receive_calls
+                .set(self.receive_calls.get().saturating_add(1));
+            Err(AsupersyncError::Transport(
+                "counting-failing receive".to_string(),
             ))
         }
         fn required_capabilities(&self) -> CapabilitySet {
@@ -283,5 +343,77 @@ mod test_recover_once_bounded_loop_bc6fa4 {
             "x",
         );
         assert!(matches!(result, Err(AsupersyncError::Configuration(_))));
+    }
+
+    #[test]
+    fn recover_once_expired_deadline_makes_zero_transport_attempts_ehn2c() {
+        let transport = CountingFailingTransport::new();
+        let plan = RecoveryPlan {
+            artifact_id: "expired-artifact".to_string(),
+            max_attempts: 3,
+            deadline_unix_ms: 1,
+        };
+        let config = AsupersyncConfig::default()
+            .with_capabilities(CapabilitySet::for_capability(CxCapability::Io));
+
+        let result = recover_once(
+            &StubCodec,
+            &transport,
+            &StubVerifier,
+            &AlwaysRetryPolicy,
+            &config,
+            &plan,
+            "any-digest",
+        );
+
+        assert!(
+            matches!(
+                &result,
+                Err(AsupersyncError::RecoveryExhausted {
+                    artifact_id,
+                    attempts,
+                }) if artifact_id == "expired-artifact" && *attempts == 0
+            ),
+            "expected deadline RecoveryExhausted, got {result:?}"
+        );
+        assert_eq!(
+            transport.receive_calls.get(),
+            0,
+            "expired recovery plans must fail before transport.receive"
+        );
+    }
+
+    #[test]
+    fn recover_once_future_deadline_preserves_retry_budget_ehn2c() {
+        let transport = CountingFailingTransport::new();
+        let plan = RecoveryPlan {
+            artifact_id: "future-artifact".to_string(),
+            max_attempts: 2,
+            deadline_unix_ms: current_unix_ms().saturating_add(60_000),
+        };
+        let config = AsupersyncConfig::default()
+            .with_capabilities(CapabilitySet::for_capability(CxCapability::Io));
+
+        let result = recover_once(
+            &StubCodec,
+            &transport,
+            &StubVerifier,
+            &AlwaysRetryPolicy,
+            &config,
+            &plan,
+            "any-digest",
+        );
+
+        assert!(
+            matches!(
+                &result,
+                Err(AsupersyncError::RecoveryExhausted {
+                    artifact_id,
+                    attempts,
+                }) if artifact_id == "future-artifact" && *attempts == 2
+            ),
+            "expected retry-budget RecoveryExhausted, got {result:?}"
+        );
+        assert_eq!(transport.receive_calls.get(), 2);
     }
 }
