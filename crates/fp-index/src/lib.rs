@@ -5079,6 +5079,17 @@ impl PeriodIndex {
         Ok(lo)
     }
 
+    /// Half-open positional range for a period slice, matching
+    /// `pd.PeriodIndex.slice_indexer(start, end)`.
+    pub fn slice_indexer(
+        &self,
+        start: Period,
+        end: Period,
+    ) -> Result<std::ops::Range<usize>, IndexError> {
+        let (left, right) = self.slice_locs(start, end)?;
+        Ok(left..right)
+    }
+
     /// Find positions of `[start, end]` for a period slice, matching
     /// `pd.PeriodIndex.slice_locs(start, end)`. Requires the index to
     /// be sorted ascending and the start/end periods to share its
@@ -5991,6 +6002,17 @@ impl RangeIndex {
     pub fn isin(&self, values: &[i64]) -> Vec<bool> {
         let needle: HashSet<i64> = values.iter().copied().collect();
         self.values().iter().map(|v| needle.contains(v)).collect()
+    }
+
+    /// Half-open positional range for a value slice, matching
+    /// `pd.RangeIndex.slice_indexer(start, end)`.
+    pub fn slice_indexer(
+        &self,
+        start: i64,
+        end: i64,
+    ) -> Result<std::ops::Range<usize>, IndexError> {
+        let (left, right) = self.slice_locs(start, end)?;
+        Ok(left..right)
     }
 
     /// Find positions of `[start, end]` for a value slice, matching
@@ -14692,6 +14714,24 @@ mod tests {
         // Mismatched names drop the name.
         let other_name = super::RangeIndex::new(3, 6, 1).unwrap().set_name("other");
         assert_eq!(left.union(&other_name).name(), None);
+    }
+
+    #[test]
+    fn period_range_slice_indexer_match_pandas_18kvv() -> Result<(), super::IndexError> {
+        use fp_types::{Period, PeriodFreq};
+        let pi = super::PeriodIndex::new(vec![
+            Period::new(10, PeriodFreq::Monthly),
+            Period::new(11, PeriodFreq::Monthly),
+            Period::new(12, PeriodFreq::Monthly),
+        ]);
+        assert_eq!(
+            pi.slice_indexer(Period::new(11, PeriodFreq::Monthly), Period::new(12, PeriodFreq::Monthly))?,
+            1..3
+        );
+
+        let r = super::RangeIndex::new(0, 10, 2).unwrap();
+        assert_eq!(r.slice_indexer(2, 6)?, 1..4);
+        Ok(())
     }
 
     #[test]
