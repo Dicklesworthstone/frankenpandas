@@ -4351,6 +4351,23 @@ impl TimedeltaIndex {
         i64::try_from(total / count).ok()
     }
 
+    /// Sum of non-NAT labels as nanosecond duration, matching
+    /// `pd.TimedeltaIndex.sum()`. Returns `Some(0)` for empty inputs to
+    /// match pandas. Sum is computed in `i128` to avoid overflow before
+    /// narrowing back to `i64`.
+    #[must_use]
+    pub fn sum(&self) -> Option<i64> {
+        let mut total: i128 = 0;
+        for label in self.index.labels() {
+            if let IndexLabel::Timedelta64(n) = label
+                && *n != Timedelta::NAT
+            {
+                total += i128::from(*n);
+            }
+        }
+        i64::try_from(total).ok()
+    }
+
     /// Sample standard deviation of non-NAT labels in nanoseconds,
     /// matching `pd.TimedeltaIndex.std(ddof=1)`. Returns `None` for
     /// fewer than two non-NAT entries.
@@ -15614,6 +15631,19 @@ mod tests {
 
         let sym = left.symmetric_difference(&right);
         assert_eq!(sym.values(), vec![Some(100), Some(400)]);
+    }
+
+    #[test]
+    fn timedelta_index_sum_match_pandas_qi04e() {
+        let nat = fp_types::Timedelta::NAT;
+        let td = super::TimedeltaIndex::new(vec![10_i64, 20, 30, nat]);
+        assert_eq!(td.sum(), Some(60));
+
+        let only_nat = super::TimedeltaIndex::new(vec![nat, nat]);
+        assert_eq!(only_nat.sum(), Some(0));
+
+        let empty = super::TimedeltaIndex::new(vec![]);
+        assert_eq!(empty.sum(), Some(0));
     }
 
     #[test]
