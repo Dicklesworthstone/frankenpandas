@@ -3242,6 +3242,11 @@ impl DatetimeIndex {
         self.to_flat_index().map(func)
     }
 
+    /// Cast datetime labels to a pandas dtype string, returning a flat Index.
+    pub fn astype(&self, dtype: &str) -> Result<Index, IndexError> {
+        self.to_flat_index().astype(dtype)
+    }
+
     /// Returns a clone, matching `pd.DatetimeIndex.view()`. FrankenPandas
     /// owns its label storage so view materializes a fresh clone instead
     /// of an aliasing reference.
@@ -4371,6 +4376,11 @@ impl TimedeltaIndex {
         F: Fn(&IndexLabel) -> IndexLabel,
     {
         self.to_flat_index().map(func)
+    }
+
+    /// Cast timedelta labels to a pandas dtype string, returning a flat Index.
+    pub fn astype(&self, dtype: &str) -> Result<Index, IndexError> {
+        self.to_flat_index().astype(dtype)
     }
 
     /// Returns a clone, matching `pd.TimedeltaIndex.view()`.
@@ -5816,6 +5826,11 @@ impl PeriodIndex {
         self.to_flat_index().map(func)
     }
 
+    /// Cast period labels to a pandas dtype string, returning a flat Index.
+    pub fn astype(&self, dtype: &str) -> Result<Index, IndexError> {
+        self.to_flat_index().astype(dtype)
+    }
+
     /// Returns a clone, matching `pd.PeriodIndex.view()`.
     #[must_use]
     pub fn view(&self) -> Self {
@@ -6588,6 +6603,11 @@ impl RangeIndex {
         F: Fn(&IndexLabel) -> IndexLabel,
     {
         self.to_flat_index().map(func)
+    }
+
+    /// Cast range labels to a pandas dtype string, returning a flat Index.
+    pub fn astype(&self, dtype: &str) -> Result<Index, IndexError> {
+        self.to_flat_index().astype(dtype)
     }
 
     /// Returns a clone, matching `pd.RangeIndex.view()`.
@@ -7559,6 +7579,11 @@ impl CategoricalIndex {
         F: Fn(&IndexLabel) -> IndexLabel,
     {
         self.to_flat_index().map(func)
+    }
+
+    /// Cast category labels to a pandas dtype string, returning a flat Index.
+    pub fn astype(&self, dtype: &str) -> Result<Index, IndexError> {
+        self.to_flat_index().astype(dtype)
     }
 
     /// Set the index name, matching `pd.CategoricalIndex.rename(name)`.
@@ -16453,6 +16478,47 @@ mod tests {
             cat.to_flat_index()
                 .map(|label| super::IndexLabel::Utf8(label.to_string().to_uppercase()))
         );
+    }
+
+    #[test]
+    fn index_variants_astype_forward_flat_and_preserve_name_o5pyg() {
+        const NS: i64 = 1_000_000_000;
+
+        let dt = super::DatetimeIndex::new(vec![NS, 2 * NS]).set_name("ts");
+        assert_eq!(
+            dt.astype("int64").unwrap(),
+            dt.to_flat_index().astype("int64").unwrap()
+        );
+        assert_eq!(dt.astype("int64").unwrap().name(), Some("ts"));
+        assert!(dt.astype("float64").is_err());
+
+        let td = super::TimedeltaIndex::new(vec![5, 10]).set_name("delta");
+        assert_eq!(
+            td.astype("string").unwrap(),
+            td.to_flat_index().astype("string").unwrap()
+        );
+        assert_eq!(td.astype("string").unwrap().name(), Some("delta"));
+
+        use fp_types::{Period, PeriodFreq};
+        let pi = super::PeriodIndex::new(vec![Period::new(1, PeriodFreq::Monthly)]);
+        assert_eq!(
+            pi.astype("object").unwrap(),
+            pi.to_flat_index().astype("object").unwrap()
+        );
+
+        let range = super::RangeIndex::new(1, 4, 1).unwrap().set_name("r");
+        assert_eq!(
+            range.astype("str").unwrap(),
+            range.to_flat_index().astype("str").unwrap()
+        );
+        assert_eq!(range.astype("str").unwrap().name(), Some("r"));
+
+        let cat = super::CategoricalIndex::from_values(vec!["7".to_owned()], false);
+        assert_eq!(
+            cat.astype("int").unwrap(),
+            cat.to_flat_index().astype("int").unwrap()
+        );
+        assert!(cat.astype("datetime64[ns]").is_err());
     }
 
     #[test]
