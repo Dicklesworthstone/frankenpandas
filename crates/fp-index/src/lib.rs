@@ -2746,6 +2746,12 @@ impl DatetimeIndex {
         out
     }
 
+    /// Alias for `sort_values`, matching `pd.DatetimeIndex.sort()`.
+    #[must_use]
+    pub fn sort(&self) -> Self {
+        self.sort_values()
+    }
+
     /// Remove the label at the given position, matching
     /// `pd.DatetimeIndex.delete(loc)`.
     pub fn delete(&self, loc: usize) -> Result<Self, IndexError> {
@@ -4731,6 +4737,12 @@ impl TimedeltaIndex {
         out
     }
 
+    /// Alias for `sort_values`, matching `pd.TimedeltaIndex.sort()`.
+    #[must_use]
+    pub fn sort(&self) -> Self {
+        self.sort_values()
+    }
+
     /// Remove the label at the given position, matching
     /// `pd.TimedeltaIndex.delete(loc)`.
     pub fn delete(&self, loc: usize) -> Result<Self, IndexError> {
@@ -5281,6 +5293,11 @@ impl PeriodIndex {
             values: periods,
             name: self.name.clone(),
         })
+    }
+
+    /// Alias for `sort_values`, matching `pd.PeriodIndex.sort()`.
+    pub fn sort(&self) -> Result<Self, IndexError> {
+        self.sort_values()
     }
 
     /// Position of the maximum ordinal, matching
@@ -6251,6 +6268,12 @@ impl RangeIndex {
             step: new_step,
             name: self.name.clone(),
         }
+    }
+
+    /// Alias for `sort_values`, matching `pd.RangeIndex.sort()`.
+    #[must_use]
+    pub fn sort(&self) -> Self {
+        self.sort_values()
     }
 
     /// Smallest value in the range, matching `pd.RangeIndex.min()`. Closed
@@ -7501,6 +7524,12 @@ impl CategoricalIndex {
             ordered: self.ordered,
             name: self.name.clone(),
         }
+    }
+
+    /// Alias for `sort_values`, matching `pd.CategoricalIndex.sort()`.
+    #[must_use]
+    pub fn sort(&self) -> Self {
+        self.sort_values()
     }
 
     /// Positions that would sort labels ascending, matching
@@ -15523,14 +15552,18 @@ mod tests {
         let p3 = Period::new(12, PeriodFreq::Monthly);
         let pi = super::PeriodIndex::new(vec![p3, p1, p2]).set_name("p");
         let sorted = pi.sort_values()?;
+        let sorted_alias = pi.sort()?;
         assert_eq!(sorted.values(), &[p1, p2, p3]);
+        assert_eq!(sorted_alias.values(), sorted.values());
         assert_eq!(sorted.name(), Some("p"));
+        assert_eq!(sorted_alias.name(), Some("p"));
 
         let mixed = super::PeriodIndex::new(vec![
             Period::new(10, PeriodFreq::Monthly),
             Period::new(10, PeriodFreq::Annual),
         ]);
         assert!(mixed.sort_values().is_err());
+        assert!(mixed.sort().is_err());
 
         // CategoricalIndex with ordered=true uses category position.
         let cat = super::CategoricalIndex::with_categories(
@@ -15544,6 +15577,7 @@ mod tests {
             true,
         )?;
         let cat_sorted = cat.sort_values();
+        let cat_sorted_alias = cat.sort();
         assert_eq!(
             cat_sorted.labels(),
             vec![
@@ -15554,6 +15588,7 @@ mod tests {
             ]
             .as_slice()
         );
+        assert_eq!(cat_sorted_alias.labels(), cat_sorted.labels());
 
         Ok(())
     }
@@ -15695,17 +15730,22 @@ mod tests {
     fn range_index_sort_values_closed_form_mhcge() {
         let asc = super::RangeIndex::new(0, 5, 1).unwrap();
         assert!(asc.sort_values().equals(&asc));
+        assert!(asc.sort().equals(&asc));
 
         let desc = super::RangeIndex::new(10, 0, -2).unwrap();
         // Original values 10, 8, 6, 4, 2 → sorted ascending 2, 4, 6, 8, 10.
         let sorted = desc.sort_values();
+        let sorted_alias = desc.sort();
         assert_eq!(sorted.values(), vec![2, 4, 6, 8, 10]);
+        assert_eq!(sorted_alias.values(), sorted.values());
 
         let empty = super::RangeIndex::new(0, 0, 1).unwrap();
         assert!(empty.sort_values().is_empty());
+        assert!(empty.sort().is_empty());
 
         let zero_step = super::RangeIndex::new(0, 5, 1).unwrap();
         assert!(zero_step.sort_values().equals(&zero_step));
+        assert!(zero_step.sort().equals(&zero_step));
     }
 
     #[test]
@@ -16229,9 +16269,12 @@ mod tests {
         assert_eq!(dt.max(), Some(c));
 
         let sorted = dt.sort_values();
+        let sorted_alias = dt.sort();
         // NAT sorts first (na_position='first' default).
         assert_eq!(sorted.values(), vec![None, Some(a), Some(b), Some(c)]);
+        assert_eq!(sorted_alias.values(), sorted.values());
         assert_eq!(sorted.name(), Some("ts"));
+        assert_eq!(sorted_alias.name(), Some("ts"));
 
         let all_nat = super::DatetimeIndex::new(vec![i64::MIN, i64::MIN]);
         assert_eq!(all_nat.min(), None);
@@ -16241,6 +16284,7 @@ mod tests {
         assert_eq!(empty.min(), None);
         assert_eq!(empty.max(), None);
         assert!(empty.sort_values().is_empty());
+        assert!(empty.sort().is_empty());
     }
 
     #[test]
@@ -16252,8 +16296,11 @@ mod tests {
         assert_eq!(td.max(), Some(300));
 
         let sorted = td.sort_values();
+        let sorted_alias = td.sort();
         assert_eq!(sorted.values(), vec![None, Some(100), Some(200), Some(300)]);
+        assert_eq!(sorted_alias.values(), sorted.values());
         assert_eq!(sorted.name(), Some("d"));
+        assert_eq!(sorted_alias.name(), Some("d"));
 
         let all_nat = super::TimedeltaIndex::new(vec![nat, nat]);
         assert_eq!(all_nat.min(), None);
@@ -16262,6 +16309,7 @@ mod tests {
         let empty = super::TimedeltaIndex::new(vec![]);
         assert_eq!(empty.min(), None);
         assert_eq!(empty.max(), None);
+        assert!(empty.sort().is_empty());
     }
 
     #[test]
