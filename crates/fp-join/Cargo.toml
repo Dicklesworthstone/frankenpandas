@@ -20,6 +20,10 @@ fp-index = { path = "../fp-index" }
 fp-types = { path = "../fp-types" }
 thiserror = { workspace = true }
 
+[[bin]]
+name = "fp-join"
+path = "src/bin.rs"
+
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
