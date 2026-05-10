@@ -2346,6 +2346,167 @@ fn period_qyear(period: Period) -> Result<i32, IndexError> {
         .map_err(period_date_error)
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct PeriodFields<'a> {
+    pub year: &'a [i32],
+    pub quarter: Option<&'a [u32]>,
+    pub month: Option<&'a [u32]>,
+    pub day: Option<&'a [u32]>,
+    pub hour: Option<&'a [u32]>,
+    pub minute: Option<&'a [u32]>,
+    pub second: Option<&'a [u32]>,
+    pub freq: Option<PeriodFreq>,
+}
+
+impl<'a> PeriodFields<'a> {
+    #[must_use]
+    pub const fn new(year: &'a [i32]) -> Self {
+        Self {
+            year,
+            quarter: None,
+            month: None,
+            day: None,
+            hour: None,
+            minute: None,
+            second: None,
+            freq: None,
+        }
+    }
+}
+
+fn period_fields_error(message: impl Into<String>) -> IndexError {
+    IndexError::InvalidArgument(format!(
+        "PeriodIndex.from_fields failed: {}",
+        message.into()
+    ))
+}
+
+fn period_fields_freq(fields: &PeriodFields<'_>) -> Result<PeriodFreq, IndexError> {
+    let freq = fields
+        .freq
+        .or_else(|| fields.quarter.map(|_| PeriodFreq::Quarterly))
+        .ok_or_else(|| {
+            period_fields_error("freq is required unless quarter fields imply quarterly periods")
+        })?;
+    if fields.quarter.is_some() && freq != PeriodFreq::Quarterly {
+        return Err(period_fields_error(
+            "quarter fields require quarterly frequency",
+        ));
+    }
+    Ok(freq)
+}
+
+fn validate_period_field_len(
+    name: &str,
+    values: Option<&[u32]>,
+    expected: usize,
+) -> Result<(), IndexError> {
+    if values.is_some_and(|items| items.len() != expected) {
+        return Err(period_fields_error(format!(
+            "Mismatched Period array lengths for {name}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_period_fields(fields: &PeriodFields<'_>) -> Result<(), IndexError> {
+    let expected = fields.year.len();
+    validate_period_field_len("quarter", fields.quarter, expected)?;
+    validate_period_field_len("month", fields.month, expected)?;
+    validate_period_field_len("day", fields.day, expected)?;
+    validate_period_field_len("hour", fields.hour, expected)?;
+    validate_period_field_len("minute", fields.minute, expected)?;
+    validate_period_field_len("second", fields.second, expected)
+}
+
+fn period_field_value(values: Option<&[u32]>, position: usize, default: u32) -> u32 {
+    values
+        .and_then(|items| items.get(position).copied())
+        .unwrap_or(default)
+}
+
+fn required_period_field(
+    values: Option<&[u32]>,
+    name: &str,
+    position: usize,
+) -> Result<u32, IndexError> {
+    values
+        .and_then(|items| items.get(position).copied())
+        .ok_or_else(|| period_fields_error(format!("{name} fields are required")))
+}
+
+fn quarter_start_month(quarter: u32) -> Result<u32, IndexError> {
+    if (1..=4).contains(&quarter) {
+        Ok((quarter - 1) * 3 + 1)
+    } else {
+        Err(period_fields_error(format!(
+            "quarter must be in 1..=4, got {quarter}"
+        )))
+    }
+}
+
+fn period_from_fields_at(
+    fields: &PeriodFields<'_>,
+    freq: PeriodFreq,
+    position: usize,
+) -> Result<Period, IndexError> {
+    let year = fields
+        .year
+        .get(position)
+        .copied()
+        .ok_or_else(|| period_fields_error("year fields are required"))?;
+    let month = if freq == PeriodFreq::Quarterly {
+        if let Some(quarters) = fields.quarter {
+            let quarter = quarters
+                .get(position)
+                .copied()
+                .ok_or_else(|| period_fields_error("quarter fields are required"))?;
+            quarter_start_month(quarter)?
+        } else {
+            required_period_field(fields.month, "month", position)?
+        }
+    } else {
+        if fields.quarter.is_some() && fields.month.is_none() {
+            return Err(period_fields_error(
+                "quarter fields require quarterly frequency unless month is also supplied",
+            ));
+        }
+        required_period_field(fields.month, "month", position)?
+    };
+    let day = if matches!(
+        freq,
+        PeriodFreq::Annual | PeriodFreq::Quarterly | PeriodFreq::Monthly
+    ) {
+        1
+    } else {
+        period_field_value(fields.day, position, 1)
+    };
+    let hour = if matches!(
+        freq,
+        PeriodFreq::Hourly | PeriodFreq::Minutely | PeriodFreq::Secondly
+    ) {
+        period_field_value(fields.hour, position, 0)
+    } else {
+        0
+    };
+    let minute = if matches!(freq, PeriodFreq::Minutely | PeriodFreq::Secondly) {
+        period_field_value(fields.minute, position, 0)
+    } else {
+        0
+    };
+    let second = if freq == PeriodFreq::Secondly {
+        period_field_value(fields.second, position, 0)
+    } else {
+        0
+    };
+    let date = chrono::NaiveDate::from_ymd_opt(year, month, day)
+        .ok_or_else(|| period_fields_error("invalid year/month/day combination"))?;
+    let time = chrono::NaiveTime::from_hms_opt(hour, minute, second)
+        .ok_or_else(|| period_fields_error("invalid hour/minute/second combination"))?;
+    let nanos = date_and_time_to_nanos(date, time_to_nanos(time)).map_err(period_date_error)?;
+    datetime_period_ordinal(nanos, freq).map(|ordinal| Period::new(ordinal, freq))
+}
+
 fn ensure_index_kind(
     index: &Index,
     predicate: impl Fn(&IndexLabel) -> bool,
@@ -5575,6 +5736,15 @@ impl PeriodIndex {
             .map(|&ordinal| Period::new(ordinal, freq))
             .collect();
         Self { values, name: None }
+    }
+
+    pub fn from_fields(fields: PeriodFields<'_>) -> Result<Self, IndexError> {
+        validate_period_fields(&fields)?;
+        let freq = period_fields_freq(&fields)?;
+        let values = (0..fields.year.len())
+            .map(|position| period_from_fields_at(&fields, freq, position))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self { values, name: None })
     }
 
     #[must_use]
@@ -12221,8 +12391,8 @@ mod tests {
     use fp_types::{Period, PeriodFreq, Scalar, Timedelta};
 
     use super::{
-        CategoricalIndex, DateOffset, DatetimeIndex, Index, IndexLabel, MultiIndex, PeriodIndex,
-        RangeIndex, TimedeltaIndex, align_union, apply_date_offset, bdate_range,
+        CategoricalIndex, DateOffset, DatetimeIndex, Index, IndexLabel, MultiIndex, PeriodFields,
+        PeriodIndex, RangeIndex, TimedeltaIndex, align_union, apply_date_offset, bdate_range,
         infer_freq_from_timestamps, validate_alignment_plan,
     };
 
@@ -12511,6 +12681,104 @@ mod tests {
                 Some("high".to_owned()),
                 Some(String::new())
             ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn period_index_from_fields_builds_period_ordinals_th1fd() -> Result<(), super::IndexError> {
+        let years = [2020, 2021];
+        let months = [1, 2];
+        let monthly = PeriodIndex::from_fields(PeriodFields {
+            month: Some(&months),
+            freq: Some(PeriodFreq::Monthly),
+            ..PeriodFields::new(&years)
+        })?;
+        assert_eq!(
+            monthly.values(),
+            &[
+                Period::new(600, PeriodFreq::Monthly),
+                Period::new(613, PeriodFreq::Monthly)
+            ]
+        );
+
+        let quarter_years = [2020];
+        let quarters = [2];
+        let quarterly = PeriodIndex::from_fields(PeriodFields {
+            quarter: Some(&quarters),
+            ..PeriodFields::new(&quarter_years)
+        })?;
+        assert_eq!(
+            quarterly.values(),
+            &[Period::new(201, PeriodFreq::Quarterly)]
+        );
+
+        let single_year = [2020];
+        let single_month = [1];
+        let days = [2];
+        let hours = [3];
+        let minutes = [4];
+        let seconds = [5];
+        let secondly = PeriodIndex::from_fields(PeriodFields {
+            month: Some(&single_month),
+            day: Some(&days),
+            hour: Some(&hours),
+            minute: Some(&minutes),
+            second: Some(&seconds),
+            freq: Some(PeriodFreq::Secondly),
+            ..PeriodFields::new(&single_year)
+        })?;
+        let expected_date = chrono::NaiveDate::from_ymd_opt(2020, 1, 2)
+            .ok_or_else(|| super::IndexError::InvalidArgument("invalid test date".to_owned()))?;
+        let expected_time = chrono::NaiveTime::from_hms_opt(3, 4, 5)
+            .ok_or_else(|| super::IndexError::InvalidArgument("invalid test time".to_owned()))?;
+        let expected_nanos =
+            super::date_and_time_to_nanos(expected_date, super::time_to_nanos(expected_time))
+                .map_err(super::period_date_error)?;
+        assert_eq!(
+            secondly.values(),
+            &[Period::new(
+                super::datetime_period_ordinal(expected_nanos, PeriodFreq::Secondly)?,
+                PeriodFreq::Secondly
+            )]
+        );
+
+        assert!(
+            PeriodIndex::from_fields(PeriodFields {
+                month: Some(&months),
+                freq: Some(PeriodFreq::Monthly),
+                ..PeriodFields::new(&single_year)
+            })
+            .is_err()
+        );
+        let invalid_month = [13];
+        assert!(
+            PeriodIndex::from_fields(PeriodFields {
+                month: Some(&invalid_month),
+                freq: Some(PeriodFreq::Monthly),
+                ..PeriodFields::new(&single_year)
+            })
+            .is_err()
+        );
+        let invalid_day = [99];
+        assert_eq!(
+            PeriodIndex::from_fields(PeriodFields {
+                month: Some(&single_month),
+                day: Some(&invalid_day),
+                freq: Some(PeriodFreq::Monthly),
+                ..PeriodFields::new(&single_year)
+            })?
+            .values(),
+            &[Period::new(600, PeriodFreq::Monthly)]
+        );
+        assert!(
+            PeriodIndex::from_fields(PeriodFields {
+                quarter: Some(&quarters),
+                month: Some(&single_month),
+                freq: Some(PeriodFreq::Monthly),
+                ..PeriodFields::new(&single_year)
+            })
+            .is_err()
         );
         Ok(())
     }
