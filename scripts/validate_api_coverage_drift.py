@@ -32,9 +32,10 @@ DEFAULT_ISSUES = REPO_ROOT / ".beads" / "issues.jsonl"
 
 BACKTICK_RE = re.compile(r"`([^`]+)`")
 METHOD_TOKEN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-PUB_FN_RE = re.compile(r"^\s*pub\s+fn\s+([A-Za-z_][A-Za-z0-9_]*)\b")
-FN_RE = re.compile(r"^\s*fn\s+([A-Za-z_][A-Za-z0-9_]*)\b")
-TOP_LEVEL_PUB_FN_RE = re.compile(r"^pub\s+fn\s+([A-Za-z_][A-Za-z0-9_]*)\b")
+RUST_FN_IDENT = r"((?:r#)?[A-Za-z_][A-Za-z0-9_]*)"
+PUB_FN_RE = re.compile(rf"^\s*pub\s+fn\s+{RUST_FN_IDENT}\b")
+FN_RE = re.compile(rf"^\s*fn\s+{RUST_FN_IDENT}\b")
+TOP_LEVEL_PUB_FN_RE = re.compile(rf"^pub\s+fn\s+{RUST_FN_IDENT}\b")
 
 IO_DATAFRAME_METHODS = {
     "to_clipboard",
@@ -77,6 +78,10 @@ STATIC_PANDAS_READERS = {
     "read_table",
     "read_xml",
 }
+
+
+def normalize_rust_identifier(name: str) -> str:
+    return name.removeprefix("r#")
 
 
 @dataclass(frozen=True)
@@ -316,14 +321,14 @@ def extract_impl_methods(path: Path, type_name: str, public_only: bool = True) -
                 in_impl = True
                 match = fn_re.search(line)
                 if match:
-                    methods.add(match.group(1))
+                    methods.add(normalize_rust_identifier(match.group(1)))
             continue
         if line == "}":
             in_impl = False
             continue
         match = fn_re.search(line)
         if match:
-            methods.add(match.group(1))
+            methods.add(normalize_rust_identifier(match.group(1)))
     return methods
 
 
@@ -338,14 +343,14 @@ def extract_trait_impl_methods(path: Path, trait_name: str, type_name: str) -> s
                 in_impl = True
                 match = FN_RE.search(line)
                 if match:
-                    methods.add(match.group(1))
+                    methods.add(normalize_rust_identifier(match.group(1)))
             continue
         if line == "}":
             in_impl = False
             continue
         match = FN_RE.search(line)
         if match:
-            methods.add(match.group(1))
+            methods.add(normalize_rust_identifier(match.group(1)))
     return methods
 
 
@@ -358,7 +363,7 @@ def extract_top_level_pub_functions(path: Path) -> set[str]:
         if depth == 0:
             match = TOP_LEVEL_PUB_FN_RE.search(code)
             if match:
-                methods.add(match.group(1))
+                methods.add(normalize_rust_identifier(match.group(1)))
         depth += code.count("{") - code.count("}")
         if depth < 0:
             depth = 0
