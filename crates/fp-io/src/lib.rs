@@ -2951,6 +2951,12 @@ fn deferred_reader_error(method: &str, reason: &str) -> IoError {
     ))
 }
 
+fn deferred_writer_error(method: &str, reason: &str) -> IoError {
+    IoError::Deferred(format!(
+        "{method}: in scope but deferred; {reason}. Use the pandas surface in the meantime."
+    ))
+}
+
 /// Reject-closed clipboard reader, matching `pd.read_clipboard()` shape.
 pub fn read_clipboard() -> Result<DataFrame, IoError> {
     Err(deferred_reader_error(
@@ -9435,6 +9441,12 @@ pub trait DataFrameIoExt {
         table_name: &str,
         options: &SqlWriteOptions,
     ) -> Result<(), IoError>;
+
+    /// Reject-closed clipboard writer, matching `pd.DataFrame.to_clipboard()` shape.
+    fn to_clipboard(&self) -> Result<(), IoError>;
+
+    /// Reject-closed BigQuery writer, matching `pd.DataFrame.to_gbq(destination_table, project_id)`.
+    fn to_gbq(&self, destination_table: &str, project_id: Option<&str>) -> Result<(), IoError>;
 }
 
 impl DataFrameIoExt for DataFrame {
@@ -9692,6 +9704,22 @@ impl DataFrameIoExt for DataFrame {
         options: &SqlWriteOptions,
     ) -> Result<(), IoError> {
         write_sql_with_options(self, conn, table_name, options)
+    }
+
+    fn to_clipboard(&self) -> Result<(), IoError> {
+        let _ = self;
+        Err(deferred_writer_error(
+            "to_clipboard",
+            "OS clipboard access requires GUI bindings outside FrankenPandas's headless charter",
+        ))
+    }
+
+    fn to_gbq(&self, _destination_table: &str, _project_id: Option<&str>) -> Result<(), IoError> {
+        let _ = self;
+        Err(deferred_writer_error(
+            "to_gbq",
+            "Google BigQuery integration is outside FrankenPandas's local file-format scope",
+        ))
     }
 }
 
@@ -12395,6 +12423,31 @@ mod tests {
             other => panic!("unexpected error: {other:?}"),
         }
         let no_project_err = super::read_gbq("SELECT 1", None).expect_err("must reject");
+        assert!(matches!(no_project_err, super::IoError::Deferred(_)));
+    }
+
+    #[test]
+    fn dataframe_deferred_writer_surfaces_report_method_names_e6jrk() {
+        use super::DataFrameIoExt;
+
+        let frame = make_test_dataframe();
+        let clipboard_err = frame
+            .to_clipboard()
+            .expect_err("must reject clipboard writer");
+        assert!(
+            matches!(&clipboard_err, super::IoError::Deferred(message) if message.contains("to_clipboard") && message.contains("headless"))
+        );
+
+        let gbq_err = frame
+            .to_gbq("dataset.table", Some("project"))
+            .expect_err("must reject BigQuery writer");
+        assert!(
+            matches!(&gbq_err, super::IoError::Deferred(message) if message.contains("to_gbq") && message.contains("BigQuery"))
+        );
+
+        let no_project_err = frame
+            .to_gbq("dataset.table", None)
+            .expect_err("must reject BigQuery writer without project");
         assert!(matches!(no_project_err, super::IoError::Deferred(_)));
     }
 
