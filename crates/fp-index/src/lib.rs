@@ -79,7 +79,7 @@ use std::{
     sync::OnceLock,
 };
 
-use fp_types::{Period, PeriodFreq, Scalar, Timedelta};
+use fp_types::{Period, PeriodFreq, Scalar, Timedelta, TimedeltaComponents};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -2005,6 +2005,32 @@ where
             | IndexLabel::Datetime64(_) => None,
         })
         .collect()
+}
+
+fn timedelta_components_for_index(nanos: i64) -> TimedeltaComponents {
+    let days = nanos.div_euclid(Timedelta::NANOS_PER_DAY);
+    let rem = nanos.rem_euclid(Timedelta::NANOS_PER_DAY);
+
+    let hours = rem / Timedelta::NANOS_PER_HOUR;
+    let rem = rem % Timedelta::NANOS_PER_HOUR;
+    let minutes = rem / Timedelta::NANOS_PER_MIN;
+    let rem = rem % Timedelta::NANOS_PER_MIN;
+    let seconds = rem / Timedelta::NANOS_PER_SEC;
+    let rem = rem % Timedelta::NANOS_PER_SEC;
+    let milliseconds = rem / Timedelta::NANOS_PER_MILLI;
+    let rem = rem % Timedelta::NANOS_PER_MILLI;
+    let microseconds = rem / Timedelta::NANOS_PER_MICRO;
+    let nanoseconds = rem % Timedelta::NANOS_PER_MICRO;
+
+    TimedeltaComponents {
+        days,
+        hours,
+        minutes,
+        seconds,
+        milliseconds,
+        microseconds,
+        nanoseconds,
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -4117,6 +4143,13 @@ impl TimedeltaIndex {
     #[must_use]
     pub fn total_seconds(&self) -> Vec<Option<f64>> {
         map_timedelta_labels(self.index.labels(), Timedelta::total_seconds)
+    }
+
+    /// Calendar-style component rows, matching `pd.TimedeltaIndex.components`.
+    /// NAT propagates as `None`.
+    #[must_use]
+    pub fn components(&self) -> Vec<Option<TimedeltaComponents>> {
+        map_timedelta_labels(self.index.labels(), timedelta_components_for_index)
     }
 
     /// Underlying nanosecond duration, matching `pd.TimedeltaIndex.asi8`.
@@ -18249,7 +18282,8 @@ mod tests {
     }
 
     #[test]
-    fn timedelta_index_asi8_microseconds_nanoseconds_match_pandas_teeck() {
+    fn timedelta_index_asi8_microseconds_nanoseconds_match_pandas_teeck() -> Result<(), &'static str>
+    {
         // 1 day + 2:34:56.789012345
         let one_day = fp_types::Timedelta::NANOS_PER_DAY;
         let extra = 2 * fp_types::Timedelta::NANOS_PER_HOUR
@@ -18257,13 +18291,63 @@ mod tests {
             + 56 * fp_types::Timedelta::NANOS_PER_SEC
             + 789_012_345;
         let total = one_day + extra;
-        let td = super::TimedeltaIndex::new(vec![total, fp_types::Timedelta::NAT, 0]);
+        let td = super::TimedeltaIndex::new(vec![total, fp_types::Timedelta::NAT, 0, -1]);
 
-        assert_eq!(td.asi8(), vec![total, fp_types::Timedelta::NAT, 0]);
+        assert_eq!(td.asi8(), vec![total, fp_types::Timedelta::NAT, 0, -1]);
         // microseconds: 789_012_345 % 1_000_000_000 / 1_000 == 789_012
-        assert_eq!(td.microseconds(), vec![Some(789_012), None, Some(0)]);
+        assert_eq!(
+            td.microseconds(),
+            vec![Some(789_012), None, Some(0), Some(999_999)]
+        );
         // nanoseconds: 789_012_345 % 1_000 == 345
-        assert_eq!(td.nanoseconds(), vec![Some(345), None, Some(0)]);
+        assert_eq!(td.nanoseconds(), vec![Some(345), None, Some(0), Some(999)]);
+
+        let components = td.components();
+        let positive = components
+            .first()
+            .copied()
+            .flatten()
+            .ok_or("positive components")?;
+        assert_eq!(positive.days, 1);
+        assert_eq!(positive.hours, 2);
+        assert_eq!(positive.minutes, 34);
+        assert_eq!(positive.seconds, 56);
+        assert_eq!(positive.milliseconds, 789);
+        assert_eq!(positive.microseconds, 12);
+        assert_eq!(positive.nanoseconds, 345);
+
+        assert_eq!(
+            components.get(1).copied().flatten().map(|row| row.days),
+            None
+        );
+
+        let zero = components
+            .get(2)
+            .copied()
+            .flatten()
+            .ok_or("zero components")?;
+        assert_eq!(zero.days, 0);
+        assert_eq!(zero.hours, 0);
+        assert_eq!(zero.minutes, 0);
+        assert_eq!(zero.seconds, 0);
+        assert_eq!(zero.milliseconds, 0);
+        assert_eq!(zero.microseconds, 0);
+        assert_eq!(zero.nanoseconds, 0);
+
+        let negative = components
+            .get(3)
+            .copied()
+            .flatten()
+            .ok_or("negative components")?;
+        assert_eq!(negative.days, -1);
+        assert_eq!(negative.hours, 23);
+        assert_eq!(negative.minutes, 59);
+        assert_eq!(negative.seconds, 59);
+        assert_eq!(negative.milliseconds, 999);
+        assert_eq!(negative.microseconds, 999);
+        assert_eq!(negative.nanoseconds, 999);
+
+        Ok(())
     }
 
     #[test]
