@@ -23446,6 +23446,25 @@ impl DataFrame {
         }
     }
 
+    /// Rename the row index axis.
+    ///
+    /// Matches `pd.DataFrame.rename_axis(name)` for flat row indexes.
+    pub fn rename_axis(&self, name: &str) -> Result<Self, FrameError> {
+        if self.row_multiindex.is_some() {
+            return Err(FrameError::CompatibilityRejected(
+                "DataFrame.rename_axis: scalar name requires a flat row index".to_owned(),
+            ));
+        }
+
+        Ok(Self {
+            columns: self.columns.clone(),
+            column_order: self.column_order.clone(),
+            index: self.index.set_name(name),
+            column_multiindex: self.column_multiindex.clone(),
+            row_multiindex: None,
+        })
+    }
+
     /// Add a prefix to all column names.
     ///
     /// Matches `df.add_prefix(prefix)`.
@@ -44016,6 +44035,51 @@ mod tests {
 
         assert!(
             matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("duplicate column"))
+        );
+    }
+
+    #[test]
+    fn dataframe_rename_axis_sets_flat_index_name() {
+        let df = DataFrame::from_dict_with_index(
+            vec![
+                ("city", vec![Scalar::Utf8("Boston".into())]),
+                ("sales", vec![Scalar::Int64(10)]),
+            ],
+            vec![IndexLabel::Utf8("row-1".into())],
+        )
+        .unwrap();
+
+        let renamed = df.rename_axis("row_id").unwrap();
+
+        assert_eq!(renamed.index().name(), Some("row_id"));
+        assert_eq!(df.index().name(), None);
+        assert_eq!(renamed.column_names(), vec!["city", "sales"]);
+        assert_eq!(
+            renamed.column("sales").unwrap().values(),
+            &[Scalar::Int64(10)]
+        );
+    }
+
+    #[test]
+    fn dataframe_rename_axis_rejects_scalar_for_row_multiindex() {
+        let row_multiindex = fp_index::MultiIndex::from_arrays(vec![
+            vec![IndexLabel::Utf8("east".into())],
+            vec![IndexLabel::Int64(2026)],
+        ])
+        .unwrap()
+        .set_names(vec![Some("region".into()), Some("year".into())]);
+        let flat_index = row_multiindex.to_flat_index("|").set_name("region|year");
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            "sales".to_string(),
+            Column::from_values(vec![Scalar::Int64(10)]).unwrap(),
+        );
+        let df = DataFrame::new_with_row_multiindex(flat_index, row_multiindex, columns).unwrap();
+
+        let err = df.rename_axis("row_id").unwrap_err();
+
+        assert!(
+            matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("flat row index"))
         );
     }
 
