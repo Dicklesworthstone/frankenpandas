@@ -33500,6 +33500,27 @@ impl DataFrame {
         regex: Option<&str>,
         axis: usize,
     ) -> Result<Self, FrameError> {
+        let arg_count = [items.is_some(), like.is_some(), regex.is_some()]
+            .iter()
+            .filter(|x| **x)
+            .count();
+        if arg_count != 1 {
+            return Err(FrameError::CompatibilityRejected(
+                "filter: exactly one of items, like, regex must be Some".to_owned(),
+            ));
+        }
+        if axis > 1 {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "filter: axis must be 0 or 1, got {axis}"
+            )));
+        }
+        let re = regex
+            .map(|pat| {
+                Regex::new(pat)
+                    .map_err(|e| FrameError::CompatibilityRejected(format!("invalid regex: {e}")))
+            })
+            .transpose()?;
+
         if axis == 1 {
             // Filter columns
             let selected: Vec<&str> = self
@@ -33512,12 +33533,10 @@ impl DataFrame {
                     if let Some(like) = like {
                         return name.contains(like);
                     }
-                    if let Some(regex) = regex
-                        && let Ok(re) = Regex::new(regex)
-                    {
+                    if let Some(re) = &re {
                         return re.is_match(name);
                     }
-                    true
+                    false
                 })
                 .map(String::as_str)
                 .collect();
@@ -33527,14 +33546,6 @@ impl DataFrame {
             self.select_columns(&selected)
         } else {
             // Filter rows by index label
-            let re = regex
-                .map(|pat| {
-                    Regex::new(pat).map_err(|e| {
-                        FrameError::CompatibilityRejected(format!("invalid regex: {e}"))
-                    })
-                })
-                .transpose()?;
-
             let mut keep_indices = Vec::new();
             for (i, label) in self.index.labels().iter().enumerate() {
                 let label_str = match label {
@@ -55927,6 +55938,56 @@ mod tests {
             filtered.column("v").unwrap().values(),
             &[Scalar::Int64(20), Scalar::Int64(30)]
         );
+    }
+
+    #[test]
+    fn dataframe_filter_labels_rejects_invalid_selector_contract_n33na() {
+        let df = DataFrame::from_dict_with_index(
+            vec![(
+                "v",
+                vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+            )],
+            vec![
+                IndexLabel::Utf8("foo".to_owned()),
+                IndexLabel::Utf8("bar".to_owned()),
+                IndexLabel::Utf8("baz".to_owned()),
+            ],
+        )
+        .unwrap();
+
+        let zero = df
+            .filter_labels(None, None, None, 1)
+            .expect_err("zero selectors must reject");
+        assert!(matches!(zero, FrameError::CompatibilityRejected(msg)
+            if msg.contains("exactly one")));
+
+        let multiple = df
+            .filter_labels(Some(&["v"]), Some("v"), None, 1)
+            .expect_err("multiple selectors must reject");
+        assert!(matches!(multiple, FrameError::CompatibilityRejected(msg)
+            if msg.contains("exactly one")));
+
+        let bad_column_regex = df
+            .filter_labels(None, None, Some("["), 1)
+            .expect_err("invalid column regex must reject");
+        assert!(
+            matches!(bad_column_regex, FrameError::CompatibilityRejected(msg)
+            if msg.contains("invalid regex"))
+        );
+
+        let bad_row_regex = df
+            .filter_labels(None, None, Some("["), 0)
+            .expect_err("invalid row regex must reject");
+        assert!(
+            matches!(bad_row_regex, FrameError::CompatibilityRejected(msg)
+            if msg.contains("invalid regex"))
+        );
+
+        let bad_axis = df
+            .filter_labels(None, Some("ba"), None, 2)
+            .expect_err("unsupported axis must reject");
+        assert!(matches!(bad_axis, FrameError::CompatibilityRejected(msg)
+            if msg.contains("axis must be 0 or 1")));
     }
 
     // --- Series.str additional methods tests ---
