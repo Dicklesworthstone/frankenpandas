@@ -3073,6 +3073,13 @@ impl DatetimeIndex {
             })
     }
 
+    /// Set the index name, matching `pd.DatetimeIndex.rename(name)`.
+    /// Alias for set_name.
+    #[must_use]
+    pub fn rename(&self, name: &str) -> Self {
+        self.set_name(name)
+    }
+
     /// Reindex against `target`, matching
     /// `pd.DatetimeIndex.reindex(target)`. Returns
     /// `(target.clone(), indexer)` where indexer is the per-target
@@ -4154,6 +4161,12 @@ impl TimedeltaIndex {
             .ok_or_else(|| {
                 IndexError::InvalidArgument(format!("get_loc: {value} not in TimedeltaIndex"))
             })
+    }
+
+    /// Set the index name, matching `pd.TimedeltaIndex.rename(name)`.
+    #[must_use]
+    pub fn rename(&self, name: &str) -> Self {
+        self.set_name(name)
     }
 
     /// Reindex against `target`, matching
@@ -5451,6 +5464,12 @@ impl PeriodIndex {
             })
     }
 
+    /// Set the index name, matching `pd.PeriodIndex.rename(name)`.
+    #[must_use]
+    pub fn rename(&self, name: &str) -> Self {
+        self.set_name(name)
+    }
+
     /// Reindex against `target`, matching
     /// `pd.PeriodIndex.reindex(target)`.
     #[must_use]
@@ -6458,6 +6477,12 @@ impl RangeIndex {
         Ok(pos as usize)
     }
 
+    /// Set the index name, matching `pd.RangeIndex.rename(name)`.
+    #[must_use]
+    pub fn rename(&self, name: &str) -> Self {
+        self.set_name(name)
+    }
+
     /// Reindex against `target`, matching `pd.RangeIndex.reindex(target)`.
     /// Returns `(target.clone(), indexer)`.
     #[must_use]
@@ -7291,6 +7316,12 @@ impl CategoricalIndex {
     #[must_use]
     pub fn to_flat_index(&self) -> Index {
         self.to_index()
+    }
+
+    /// Set the index name, matching `pd.CategoricalIndex.rename(name)`.
+    #[must_use]
+    pub fn rename(&self, name: &str) -> Self {
+        self.set_name(name)
     }
 
     /// Returns a clone, matching `pd.CategoricalIndex.view()`.
@@ -15263,6 +15294,26 @@ mod tests {
         let desc = super::RangeIndex::new(10, 0, -2).unwrap();
         assert!(desc.slice_locs(2, 6).is_err());
         Ok(())
+    }
+
+    #[test]
+    fn typed_index_variants_rename_alias_match_pandas_i8t6n() {
+        let dt = super::DatetimeIndex::new(vec![]);
+        assert_eq!(dt.rename("ts").name(), Some("ts"));
+
+        let td = super::TimedeltaIndex::new(vec![]);
+        assert_eq!(td.rename("d").name(), Some("d"));
+
+        use fp_types::PeriodFreq;
+        let pi = super::PeriodIndex::new(vec![]);
+        assert_eq!(pi.rename("p").name(), Some("p"));
+        let _ = PeriodFreq::Monthly; // suppress unused-import warning when no other test in scope
+
+        let r = super::RangeIndex::new(0, 0, 1).unwrap();
+        assert_eq!(r.rename("r").name(), Some("r"));
+
+        let cat = super::CategoricalIndex::from_values(vec!["a".to_owned()], false);
+        assert_eq!(cat.rename("c").name(), Some("c"));
     }
 
     #[test]
