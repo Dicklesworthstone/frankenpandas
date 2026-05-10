@@ -2486,6 +2486,33 @@ impl DatetimeIndex {
         i64::try_from(total / count).ok()
     }
 
+    /// Sample variance over non-NAT labels in nanoseconds-squared,
+    /// matching `pd.DatetimeIndex.var(ddof=1)`. Returns `None` for
+    /// fewer than two non-NAT entries.
+    #[must_use]
+    pub fn var(&self) -> Option<f64> {
+        let nanos: Vec<f64> = self
+            .index
+            .labels()
+            .iter()
+            .filter_map(|label| match label {
+                IndexLabel::Datetime64(n) if *n != i64::MIN => Some(*n as f64),
+                _ => None,
+            })
+            .collect();
+        if nanos.len() < 2 {
+            return None;
+        }
+        let mean = nanos.iter().sum::<f64>() / nanos.len() as f64;
+        Some(
+            nanos
+                .iter()
+                .map(|n| (n - mean).powi(2))
+                .sum::<f64>()
+                / (nanos.len() as f64 - 1.0),
+        )
+    }
+
     /// Sample standard deviation of non-NAT labels in nanoseconds,
     /// matching `pd.DatetimeIndex.std(ddof=1)`. Returns `None` for
     /// fewer than two non-NAT entries.
@@ -4366,6 +4393,33 @@ impl TimedeltaIndex {
             }
         }
         i64::try_from(total).ok()
+    }
+
+    /// Sample variance over non-NAT labels in nanoseconds-squared,
+    /// matching `pd.TimedeltaIndex.var(ddof=1)`. Returns `None` for
+    /// fewer than two non-NAT entries.
+    #[must_use]
+    pub fn var(&self) -> Option<f64> {
+        let nanos: Vec<f64> = self
+            .index
+            .labels()
+            .iter()
+            .filter_map(|label| match label {
+                IndexLabel::Timedelta64(n) if *n != Timedelta::NAT => Some(*n as f64),
+                _ => None,
+            })
+            .collect();
+        if nanos.len() < 2 {
+            return None;
+        }
+        let mean = nanos.iter().sum::<f64>() / nanos.len() as f64;
+        Some(
+            nanos
+                .iter()
+                .map(|n| (n - mean).powi(2))
+                .sum::<f64>()
+                / (nanos.len() as f64 - 1.0),
+        )
     }
 
     /// Sample standard deviation of non-NAT labels in nanoseconds,
@@ -15644,6 +15698,22 @@ mod tests {
 
         let empty = super::TimedeltaIndex::new(vec![]);
         assert_eq!(empty.sum(), Some(0));
+    }
+
+    #[test]
+    fn datetime_timedelta_var_match_pandas_pw5sn() {
+        // [10, 20, 30] sample variance with ddof=1: ((100 + 0 + 100)/2) = 100.
+        let td = super::TimedeltaIndex::new(vec![10_i64, 20, 30]);
+        assert!((td.var().unwrap() - 100.0).abs() < 1e-9);
+
+        // Single element: not enough data.
+        let one = super::TimedeltaIndex::new(vec![5_i64]);
+        assert_eq!(one.var(), None);
+
+        // DatetimeIndex spot check.
+        const NS: i64 = 1_000_000_000;
+        let dt = super::DatetimeIndex::new(vec![10 * NS, 20 * NS, 30 * NS]);
+        assert!(dt.var().is_some());
     }
 
     #[test]
