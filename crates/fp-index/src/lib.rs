@@ -6920,6 +6920,34 @@ impl CategoricalIndex {
             .searchsorted(&IndexLabel::Utf8(value.to_owned()), side)
     }
 
+    /// Find positions of `[start, end]` for a label slice, matching
+    /// `pd.CategoricalIndex.slice_locs(start, end)`. Requires labels to
+    /// be sorted lexicographically (so the searchsorted result lines up
+    /// with the slice boundary).
+    pub fn slice_locs(&self, start: &str, end: &str) -> Result<(usize, usize), IndexError> {
+        let labels_sorted = self.labels.windows(2).all(|w| w[0] <= w[1]);
+        if !labels_sorted {
+            return Err(IndexError::InvalidArgument(
+                "slice_locs requires a CategoricalIndex with labels sorted lexicographically"
+                    .to_owned(),
+            ));
+        }
+        let left = self.searchsorted(start, "left")?;
+        let right = self.searchsorted(end, "right")?;
+        Ok((left, right))
+    }
+
+    /// Half-open positional range for a label slice, matching
+    /// `pd.CategoricalIndex.slice_indexer(start, end)`.
+    pub fn slice_indexer(
+        &self,
+        start: &str,
+        end: &str,
+    ) -> Result<std::ops::Range<usize>, IndexError> {
+        let (l, r) = self.slice_locs(start, end)?;
+        Ok(l..r)
+    }
+
     fn set_op_via_string<F>(&self, other: &Self, op: F) -> Self
     where
         F: FnOnce(Vec<&String>, Vec<&String>) -> Vec<String>,
@@ -15841,6 +15869,26 @@ mod tests {
         assert_eq!(repeated.labels()[0], "a");
         assert_eq!(repeated.labels()[1], "a");
         assert_eq!(repeated.labels()[2], "b");
+        Ok(())
+    }
+
+    #[test]
+    fn categorical_index_slice_locs_indexer_match_pandas_y93vb() -> Result<(), super::IndexError> {
+        let cat = super::CategoricalIndex::with_categories(
+            vec!["a".to_owned(), "b".to_owned(), "c".to_owned(), "d".to_owned()],
+            vec!["a".to_owned(), "b".to_owned(), "c".to_owned(), "d".to_owned()],
+            true,
+        )?;
+        assert_eq!(cat.slice_locs("b", "c")?, (1, 3));
+        assert_eq!(cat.slice_indexer("b", "c")?, 1..3);
+        assert_eq!(cat.slice_locs("a", "d")?, (0, 4));
+
+        // Non-monotonic rejects.
+        let unsorted = super::CategoricalIndex::from_values(
+            vec!["c".to_owned(), "a".to_owned(), "b".to_owned()],
+            false,
+        );
+        assert!(unsorted.slice_locs("a", "c").is_err());
         Ok(())
     }
 
