@@ -342,7 +342,7 @@ fn fresh_missing_column_name(existing: &[String], salt: usize) -> String {
     let mut nonce = salt;
     loop {
         let candidate = format!("__missing_col_{nonce}");
-        if !existing.iter().any(|name| name == &candidate) {
+        if !existing.contains(&candidate) {
             return candidate;
         }
         nonce += 1;
@@ -1471,13 +1471,74 @@ fn int64_values(series: &Series) -> Result<Vec<i64>, String> {
         .collect()
 }
 
+fn value_counts_map(
+    series: &Series,
+) -> Result<std::collections::BTreeMap<IndexLabel, i64>, String> {
+    let counts = int64_values(series)?;
+    let labels = series.index().labels();
+    if labels.len() != counts.len() {
+        return Err(format!(
+            "value_counts labels/values length mismatch: {} labels, {} values",
+            labels.len(),
+            counts.len()
+        ));
+    }
+
+    let mut by_label = std::collections::BTreeMap::new();
+    for (label, count) in labels.iter().cloned().zip(counts) {
+        *by_label.entry(label).or_insert(0) += count;
+    }
+    Ok(by_label)
+}
+
+fn duplicate_series_rows(series: &Series) -> Series {
+    let mut values = series.values().to_vec();
+    values.extend(series.values().iter().cloned());
+    let labels = (0..values.len())
+        .map(|idx| IndexLabel::Int64(i64::try_from(idx).expect("series length must fit i64")))
+        .collect::<Vec<_>>();
+    Series::from_values(series.name().to_owned(), labels, values)
+        .expect("duplicated series rows must construct")
+}
+
+fn duplicate_dataframe_rows(df: &DataFrame) -> DataFrame {
+    let column_order = df.column_names().into_iter().cloned().collect::<Vec<_>>();
+    let mut columns = std::collections::BTreeMap::new();
+    for name in &column_order {
+        let column = df.column(name).expect("column listed in order must exist");
+        let mut values = column.values().to_vec();
+        values.extend(column.values().iter().cloned());
+        columns.insert(
+            name.clone(),
+            fp_columnar::Column::from_values(values)
+                .expect("duplicated dataframe column must construct"),
+        );
+    }
+    let labels = (0..(df.len() * 2))
+        .map(|idx| IndexLabel::Int64(i64::try_from(idx).expect("dataframe length must fit i64")))
+        .collect::<Vec<_>>();
+    DataFrame::new_with_column_order(Index::new(labels), columns, column_order)
+        .expect("duplicated dataframe rows must construct")
+}
+
+fn doubled_value_counts_match(baseline: &Series, doubled: &Series) -> Result<bool, String> {
+    let baseline = value_counts_map(baseline)?;
+    let doubled = value_counts_map(doubled)?;
+    if baseline.keys().collect::<Vec<_>>() != doubled.keys().collect::<Vec<_>>() {
+        return Ok(false);
+    }
+    Ok(baseline
+        .iter()
+        .all(|(label, count)| doubled.get(label).copied() == Some(count.saturating_mul(2))))
+}
+
 fn scalar_for_label<'a>(series: &'a Series, label: &IndexLabel) -> Option<&'a Scalar> {
     series
         .index()
         .labels()
         .iter()
         .zip(series.values())
-        .find_map(|(candidate, value)| (candidate == label).then_some(value))
+        .find_map(|(candidate, value)| candidate.eq(label).then_some(value))
 }
 
 fn expected_shifted_sum_series(sum: &Series, count: &Series, delta: f64) -> Series {
@@ -7645,6 +7706,71 @@ proptest! {
         prop_assert!(
             approx_equal_dataframe(&observed, &expected),
             "dataframe isin_dict(per_column) must equal per-column Series::isin()"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Property: value_counts metamorphic invariants
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(100))]
+
+    /// Duplicating every Series row must double each non-missing value_counts bucket.
+    #[test]
+    fn prop_series_value_counts_doubles_when_rows_are_duplicated(
+        series in arb_replace_numeric_series("value_counts", 12),
+    ) {
+        let baseline = series
+            .value_counts()
+            .expect("Series::value_counts() must succeed for numeric and missing values");
+        let doubled = duplicate_series_rows(&series)
+            .value_counts()
+            .expect("Series::value_counts() must succeed after duplicating rows");
+        let matches = doubled_value_counts_match(&baseline, &doubled)
+            .expect("Series::value_counts() output must be Int64-counted");
+        prop_assert!(
+            matches,
+            "duplicating Series rows must preserve the value_counts bucket set and double every count"
+        );
+    }
+
+    /// Duplicating every DataFrame row must double each full-row value_counts bucket.
+    #[test]
+    fn prop_dataframe_value_counts_doubles_when_rows_are_duplicated(
+        df in arb_replace_numeric_dataframe(8),
+    ) {
+        let baseline = df
+            .value_counts()
+            .expect("DataFrame::value_counts() must succeed for numeric and missing values");
+        let doubled = duplicate_dataframe_rows(&df)
+            .value_counts()
+            .expect("DataFrame::value_counts() must succeed after duplicating rows");
+        let matches = doubled_value_counts_match(&baseline, &doubled)
+            .expect("DataFrame::value_counts() output must be Int64-counted");
+        prop_assert!(
+            matches,
+            "duplicating DataFrame rows must preserve the full-row value_counts bucket set and double every count"
+        );
+    }
+
+    /// Duplicating rows must also double value_counts buckets for a selected subset.
+    #[test]
+    fn prop_dataframe_value_counts_subset_doubles_when_rows_are_duplicated(
+        df in arb_replace_numeric_dataframe(8),
+    ) {
+        let baseline = df
+            .value_counts_subset(&["a"])
+            .expect("DataFrame::value_counts_subset() must succeed for existing columns");
+        let doubled = duplicate_dataframe_rows(&df)
+            .value_counts_subset(&["a"])
+            .expect("DataFrame::value_counts_subset() must succeed after duplicating rows");
+        let matches = doubled_value_counts_match(&baseline, &doubled)
+            .expect("DataFrame::value_counts_subset() output must be Int64-counted");
+        prop_assert!(
+            matches,
+            "duplicating DataFrame rows must preserve subset value_counts buckets and double every count"
         );
     }
 }
