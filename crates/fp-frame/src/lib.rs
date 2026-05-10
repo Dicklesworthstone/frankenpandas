@@ -18399,7 +18399,7 @@ fn period_last_day_of_month(year: i32, month: u32) -> Option<u32> {
     } else {
         NaiveDate::from_ymd_opt(year, month + 1, 1)?
     };
-    Some((next_month - first).num_days() as u32)
+    u32::try_from((next_month - first).num_days()).ok()
 }
 
 fn period_datetime_at(
@@ -18421,9 +18421,7 @@ fn datetime64_label_from_naive(value: NaiveDateTime) -> Result<IndexLabel, Frame
 }
 
 fn parse_quarter_period_label(label: &str) -> Option<(i32, u32)> {
-    let (year, quarter) = label
-        .split_once('Q')
-        .or_else(|| label.split_once('q'))?;
+    let (year, quarter) = label.split_once('Q').or_else(|| label.split_once('q'))?;
     let year = year.parse::<i32>().ok()?;
     let quarter = quarter.parse::<u32>().ok()?;
     if (1..=4).contains(&quarter) {
@@ -18466,10 +18464,8 @@ fn period_label_to_timestamp(
             }
         }
         PeriodFreq::Quarterly => {
-            let (year, quarter) =
-                parse_quarter_period_label(trimmed).ok_or_else(|| {
-                    period_timestamp_parse_error(trimmed, freq)
-                })?;
+            let (year, quarter) = parse_quarter_period_label(trimmed)
+                .ok_or_else(|| period_timestamp_parse_error(trimmed, freq))?;
             let start_month = (quarter - 1) * 3 + 1;
             let (month, day, hour, minute, second, nanos) = if how == PeriodTimestampHow::Start {
                 (start_month, 1, 0, 0, 0, 0)
@@ -18539,6 +18535,11 @@ fn period_label_to_timestamp(
             }
         }
         PeriodFreq::Weekly | PeriodFreq::Business => {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "to_timestamp: frequency '{freq}' is not supported yet"
+            )));
+        }
+        _ => {
             return Err(FrameError::CompatibilityRejected(format!(
                 "to_timestamp: frequency '{freq}' is not supported yet"
             )));
@@ -23822,6 +23823,43 @@ impl DataFrame {
             .labels()
             .iter()
             .map(|label| period_index_label(label, period_freq))
+            .collect::<Result<Vec<_>, _>>()?;
+        let index = Index::new(labels).set_names(self.index.name());
+        Ok(Self {
+            index,
+            row_multiindex: None,
+            columns: self.columns.clone(),
+            column_order: self.column_order.clone(),
+            column_multiindex: self.column_multiindex.clone(),
+            allows_duplicate_labels: self.allows_duplicate_labels,
+        })
+    }
+
+    /// Convert period-style row index labels to timestamp labels.
+    ///
+    /// Matches the row-index default of `pd.DataFrame.to_timestamp(freq, how)`
+    /// for the supported `Y`, `Q`, `M`, `D`, `H`, `T`/`min`, and `S`
+    /// frequencies. Until FrankenPandas has a dedicated PeriodIndex label type,
+    /// this accepts the canonical period strings emitted by [`Self::to_period`].
+    pub fn to_timestamp(&self, freq: &str, how: &str) -> Result<Self, FrameError> {
+        if self.row_multiindex.is_some() {
+            return Err(FrameError::CompatibilityRejected(
+                "to_timestamp currently supports flat row indexes only".to_owned(),
+            ));
+        }
+
+        let period_freq = PeriodFreq::parse(freq).ok_or_else(|| {
+            FrameError::CompatibilityRejected(format!(
+                "to_timestamp: unsupported frequency '{freq}'"
+            ))
+        })?;
+        let how = normalize_period_timestamp_how(how)?;
+
+        let labels = self
+            .index
+            .labels()
+            .iter()
+            .map(|label| period_label_to_timestamp(label, period_freq, how))
             .collect::<Result<Vec<_>, _>>()?;
         let index = Index::new(labels).set_names(self.index.name());
         Ok(Self {
@@ -37508,8 +37546,8 @@ mod tests {
     use super::{
         DataFrame, DataFrameColumnInput, DataFrameCsvReadOptions, DataFrameDictAxisLabels,
         DropNaHow, DuplicateKeep, FrameError, IndexLabel, Series, TzAmbiguousPolicy,
-        TzLocalizeOptions, TzNonexistentPolicy, cut, index_to_frame, index_to_series, qcut,
-        to_numeric,
+        TzLocalizeOptions, TzNonexistentPolicy, cut, datetime64_label_from_naive, index_to_frame,
+        index_to_series, parse_naive_datetime_value, qcut, to_numeric,
     };
 
     fn assert_text_golden(golden_name: &str, actual: &str) {
@@ -78465,6 +78503,119 @@ mod tests {
         );
 
         let bad_freq = df.to_period("fortnight").unwrap_err();
+        assert!(
+            matches!(bad_freq, FrameError::CompatibilityRejected(msg) if msg.contains("unsupported frequency"))
+        );
+    }
+
+    // -- DataFrame.to_timestamp period index conversion (br-frankenpandas-4zwu2) --
+
+    fn dataframe_4zwu2_timestamp_label(value: &str) -> Result<IndexLabel, FrameError> {
+        let datetime = parse_naive_datetime_value(value)?;
+        datetime64_label_from_naive(datetime)
+    }
+
+    #[test]
+    fn dataframe_4zwu2_to_timestamp_converts_monthly_start_and_preserves_metadata() {
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            "value".to_owned(),
+            Column::from_values(vec![
+                Scalar::Int64(10),
+                Scalar::Int64(20),
+                Scalar::Int64(30),
+            ])
+            .unwrap(),
+        );
+        let df = DataFrame::new_with_column_order(
+            Index::from_utf8(vec![
+                "2001-03".to_owned(),
+                "2001-04".to_owned(),
+                "NaT".to_owned(),
+            ])
+            .set_names(Some("period")),
+            columns,
+            vec!["value".to_owned()],
+        )
+        .unwrap();
+
+        let out = df.to_timestamp("M", "start").unwrap();
+        let expected = vec![
+            dataframe_4zwu2_timestamp_label("2001-03-01 00:00:00").unwrap(),
+            dataframe_4zwu2_timestamp_label("2001-04-01 00:00:00").unwrap(),
+            IndexLabel::Datetime64(i64::MIN),
+        ];
+        assert_eq!(out.index().labels(), expected.as_slice());
+        assert_eq!(out.index().name(), Some("period"));
+        assert_eq!(
+            out.column("value").unwrap().values(),
+            df.column("value").unwrap().values()
+        );
+        assert_eq!(out.column_names(), vec!["value"]);
+    }
+
+    #[test]
+    fn dataframe_4zwu2_to_timestamp_converts_quarterly_end_alias() {
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            "amount".to_owned(),
+            Column::from_values(vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]).unwrap(),
+        );
+        let df = DataFrame::new_with_column_order(
+            Index::from_utf8(vec!["2001Q1".to_owned(), "2002Q2".to_owned()]),
+            columns,
+            vec!["amount".to_owned()],
+        )
+        .unwrap();
+
+        let out = df.to_timestamp("Q", "e").unwrap();
+        let expected = vec![
+            dataframe_4zwu2_timestamp_label("2001-03-31 23:59:59.999999999").unwrap(),
+            dataframe_4zwu2_timestamp_label("2002-06-30 23:59:59.999999999").unwrap(),
+        ];
+        assert_eq!(out.index().labels(), expected.as_slice());
+    }
+
+    #[test]
+    fn dataframe_4zwu2_to_timestamp_handles_empty_period_index() {
+        let df = DataFrame::new_with_column_order(
+            Index::from_utf8(Vec::<String>::new()).set_names(Some("period")),
+            BTreeMap::new(),
+            Vec::new(),
+        )
+        .unwrap();
+
+        let out = df.to_timestamp("M", "start").unwrap();
+        assert!(out.index().labels().is_empty());
+        assert_eq!(out.index().name(), Some("period"));
+        assert!(out.column_names().is_empty());
+    }
+
+    #[test]
+    fn dataframe_4zwu2_to_timestamp_rejects_invalid_labels_freq_and_how() {
+        let df = DataFrame::new_with_column_order(
+            Index::from_utf8(vec!["2001-13".to_owned()]),
+            BTreeMap::new(),
+            Vec::new(),
+        )
+        .unwrap();
+
+        let invalid_label = df.to_timestamp("M", "start").unwrap_err();
+        assert!(
+            matches!(invalid_label, FrameError::CompatibilityRejected(msg) if msg.contains("period-style"))
+        );
+
+        let invalid_how = df.to_timestamp("M", "middle").unwrap_err();
+        assert!(
+            matches!(invalid_how, FrameError::CompatibilityRejected(msg) if msg.contains("how"))
+        );
+
+        let unsupported = df.to_timestamp("B", "start").unwrap_err();
+        assert!(
+            matches!(unsupported, FrameError::CompatibilityRejected(msg) if msg.contains("not supported yet"))
+        );
+
+        let bad_freq = df.to_timestamp("fortnight", "start").unwrap_err();
         assert!(
             matches!(bad_freq, FrameError::CompatibilityRejected(msg) if msg.contains("unsupported frequency"))
         );
