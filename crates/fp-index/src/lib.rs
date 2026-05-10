@@ -1961,6 +1961,61 @@ where
         .collect()
 }
 
+#[derive(Clone, Copy)]
+enum TemporalRoundMode {
+    Floor,
+    Ceil,
+    Round,
+}
+
+fn parse_fixed_temporal_freq(freq: &str, context: &str) -> Result<i64, IndexError> {
+    let trimmed = freq.trim();
+    let unit_nanos = Timedelta::unit_to_nanos(trimmed)
+        .or_else(|| Timedelta::parse(trimmed).ok())
+        .ok_or_else(|| {
+            IndexError::InvalidArgument(format!("{context}: invalid frequency {freq:?}"))
+        })?;
+    if unit_nanos <= 0 {
+        return Err(IndexError::InvalidArgument(format!(
+            "{context}: frequency must be positive, got {freq:?}"
+        )));
+    }
+    Ok(unit_nanos)
+}
+
+fn round_nanos_to_unit(nanos: i64, unit_nanos: i64, mode: TemporalRoundMode) -> i64 {
+    match mode {
+        TemporalRoundMode::Floor => nanos.div_euclid(unit_nanos).saturating_mul(unit_nanos),
+        TemporalRoundMode::Ceil => {
+            let rem = nanos.rem_euclid(unit_nanos);
+            if rem == 0 {
+                nanos
+            } else {
+                nanos.saturating_add(unit_nanos - rem)
+            }
+        }
+        TemporalRoundMode::Round => {
+            let floor = nanos.div_euclid(unit_nanos);
+            let rem = nanos.rem_euclid(unit_nanos);
+            if rem == 0 {
+                return nanos;
+            }
+            let twice_rem = i128::from(rem) * 2;
+            let unit = i128::from(unit_nanos);
+            let chosen = if twice_rem < unit {
+                floor
+            } else if twice_rem > unit {
+                floor.saturating_add(1)
+            } else if floor % 2 == 0 {
+                floor
+            } else {
+                floor.saturating_add(1)
+            };
+            chosen.saturating_mul(unit_nanos)
+        }
+    }
+}
+
 fn ensure_index_kind(
     index: &Index,
     predicate: impl Fn(&IndexLabel) -> bool,
@@ -2484,6 +2539,47 @@ impl DatetimeIndex {
             out = out.set_name(name);
         }
         out
+    }
+
+    fn round_fixed_freq(&self, freq: &str, mode: TemporalRoundMode) -> Result<Self, IndexError> {
+        let unit_nanos = parse_fixed_temporal_freq(freq, "DatetimeIndex rounding")?;
+        let nanos: Vec<i64> = self
+            .index
+            .labels()
+            .iter()
+            .map(|label| match label {
+                IndexLabel::Datetime64(n) if *n != i64::MIN => {
+                    round_nanos_to_unit(*n, unit_nanos, mode)
+                }
+                _ => i64::MIN,
+            })
+            .collect();
+        let mut out = Self::new(nanos);
+        if let Some(name) = self.name() {
+            out = out.set_name(name);
+        }
+        Ok(out)
+    }
+
+    /// Round timestamps down to a fixed pandas frequency.
+    pub fn floor(&self, freq: &str) -> Result<Self, IndexError> {
+        self.round_fixed_freq(freq, TemporalRoundMode::Floor)
+    }
+
+    /// Round timestamps up to a fixed pandas frequency.
+    pub fn ceil(&self, freq: &str) -> Result<Self, IndexError> {
+        self.round_fixed_freq(freq, TemporalRoundMode::Ceil)
+    }
+
+    /// Round timestamps to the nearest fixed pandas frequency, using half-even ties.
+    pub fn round(&self, freq: &str) -> Result<Self, IndexError> {
+        self.round_fixed_freq(freq, TemporalRoundMode::Round)
+    }
+
+    /// Validate the frequency and return a clone, matching pandas DatetimeIndex.snap.
+    pub fn snap(&self, freq: &str) -> Result<Self, IndexError> {
+        parse_fixed_temporal_freq(freq, "DatetimeIndex.snap")?;
+        Ok(self.clone())
     }
 
     /// Average non-NAT label as nanoseconds-since-epoch, matching
@@ -4620,6 +4716,41 @@ impl TimedeltaIndex {
         out
     }
 
+    fn round_fixed_freq(&self, freq: &str, mode: TemporalRoundMode) -> Result<Self, IndexError> {
+        let unit_nanos = parse_fixed_temporal_freq(freq, "TimedeltaIndex rounding")?;
+        let nanos: Vec<i64> = self
+            .index
+            .labels()
+            .iter()
+            .map(|label| match label {
+                IndexLabel::Timedelta64(n) if *n != Timedelta::NAT => {
+                    round_nanos_to_unit(*n, unit_nanos, mode)
+                }
+                _ => Timedelta::NAT,
+            })
+            .collect();
+        let mut out = Self::new(nanos);
+        if let Some(name) = self.name() {
+            out = out.set_name(name);
+        }
+        Ok(out)
+    }
+
+    /// Round timedeltas down to a fixed pandas frequency.
+    pub fn floor(&self, freq: &str) -> Result<Self, IndexError> {
+        self.round_fixed_freq(freq, TemporalRoundMode::Floor)
+    }
+
+    /// Round timedeltas up to a fixed pandas frequency.
+    pub fn ceil(&self, freq: &str) -> Result<Self, IndexError> {
+        self.round_fixed_freq(freq, TemporalRoundMode::Ceil)
+    }
+
+    /// Round timedeltas to the nearest fixed pandas frequency, using half-even ties.
+    pub fn round(&self, freq: &str) -> Result<Self, IndexError> {
+        self.round_fixed_freq(freq, TemporalRoundMode::Round)
+    }
+
     /// Average non-NAT label as nanosecond duration, matching
     /// `pd.TimedeltaIndex.mean()`. Empty / all-NAT returns `None`.
     #[must_use]
@@ -5787,6 +5918,12 @@ impl PeriodIndex {
             values,
             name: self.name.clone(),
         })
+    }
+
+    /// Period labels are already discrete; pandas PeriodIndex.round returns a clone.
+    #[must_use]
+    pub fn round(&self, _freq: &str) -> Self {
+        self.clone()
     }
 
     /// Whether period ordinals form a contiguous run, matching
@@ -16761,6 +16898,47 @@ mod tests {
         assert_eq!(cat_order, flat_cat_order);
         let drop_cat = [super::IndexLabel::Utf8("b".to_owned())];
         assert_eq!(cat.drop(&drop_cat), cat.to_flat_index().drop(&drop_cat));
+    }
+
+    #[test]
+    fn index_variants_temporal_rounding_forwarders_dznxu() {
+        let hour = fp_types::Timedelta::NANOS_PER_HOUR;
+        let minute = fp_types::Timedelta::NANOS_PER_MIN;
+        let nat = fp_types::Timedelta::NAT;
+        let dt =
+            super::DatetimeIndex::new(vec![hour / 2, hour + 31 * minute, i64::MIN]).set_name("ts");
+
+        let dt_floor = dt.floor("h").unwrap();
+        assert_eq!(dt_floor.asi8(), vec![0, hour, i64::MIN]);
+        assert_eq!(dt_floor.name(), Some("ts"));
+
+        let dt_ceil = dt.ceil("h").unwrap();
+        assert_eq!(dt_ceil.asi8(), vec![hour, 2 * hour, i64::MIN]);
+
+        let dt_round = dt.round("h").unwrap();
+        assert_eq!(dt_round.asi8(), vec![0, 2 * hour, i64::MIN]);
+
+        let dt_snap = dt.snap("h").unwrap();
+        assert_eq!(dt_snap.asi8(), dt.asi8());
+        assert!(dt.floor("not-a-frequency").is_err());
+        assert!(dt.snap("not-a-frequency").is_err());
+
+        let td = super::TimedeltaIndex::new(vec![hour / 2, hour + 31 * minute, nat]).set_name("d");
+        assert_eq!(td.floor("h").unwrap().asi8(), vec![0, hour, nat]);
+        assert_eq!(td.ceil("h").unwrap().asi8(), vec![hour, 2 * hour, nat]);
+        assert_eq!(td.round("h").unwrap().asi8(), vec![0, 2 * hour, nat]);
+        assert_eq!(td.round("h").unwrap().name(), Some("d"));
+        assert!(td.ceil("not-a-frequency").is_err());
+
+        use fp_types::{Period, PeriodFreq};
+        let periods = super::PeriodIndex::new(vec![
+            Period::new(10, PeriodFreq::Monthly),
+            Period::new(11, PeriodFreq::Monthly),
+        ])
+        .set_name("p");
+        let rounded_periods = periods.round("not-a-frequency");
+        assert_eq!(rounded_periods.values(), periods.values());
+        assert_eq!(rounded_periods.name(), Some("p"));
     }
 
     #[test]
