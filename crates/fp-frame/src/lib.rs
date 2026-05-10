@@ -31819,6 +31819,11 @@ impl DataFrame {
     /// Matches `pd.DataFrame.first(offset)` where offset is a string like
     /// "3D" (days), "1M" (months), "2Y" (years). Selects all rows whose
     /// index label falls within the offset from the first index value.
+    pub fn first(&self, offset: &str) -> Result<Self, FrameError> {
+        self.first_offset(offset)
+    }
+
+    /// Explicit alias for [`Self::first`].
     pub fn first_offset(&self, offset: &str) -> Result<Self, FrameError> {
         if self.is_empty() {
             return Ok(self.clone());
@@ -31844,6 +31849,11 @@ impl DataFrame {
     ///
     /// Panics if the DataFrame reports non-empty but its index has no last
     /// label, which indicates internal index corruption.
+    pub fn last(&self, offset: &str) -> Result<Self, FrameError> {
+        self.last_offset(offset)
+    }
+
+    /// Explicit alias for [`Self::last`].
     pub fn last_offset(&self, offset: &str) -> Result<Self, FrameError> {
         if self.is_empty() {
             return Ok(self.clone());
@@ -73361,6 +73371,48 @@ mod tests {
         let result = df.last_offset("10D").unwrap();
         // 2024-01-15 - 10D = 2024-01-05, so include 01-05 and 01-15
         assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn dataframe_first_alias_matches_first_offset() {
+        let df = DataFrame::from_dict_with_index(
+            vec![(
+                "val",
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(2.0),
+                    Scalar::Float64(3.0),
+                ],
+            )],
+            vec![
+                "2024-01-01".into(),
+                "2024-01-05".into(),
+                "2024-01-15".into(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(df.first("7D").unwrap(), df.first_offset("7D").unwrap());
+    }
+
+    #[test]
+    fn dataframe_last_alias_matches_last_offset() {
+        let df = DataFrame::from_dict_with_index(
+            vec![(
+                "val",
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(2.0),
+                    Scalar::Float64(3.0),
+                ],
+            )],
+            vec![
+                "2024-01-01".into(),
+                "2024-01-05".into(),
+                "2024-01-15".into(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(df.last("10D").unwrap(), df.last_offset("10D").unwrap());
     }
 
     #[test]
