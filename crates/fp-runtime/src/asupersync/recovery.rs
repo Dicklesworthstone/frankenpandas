@@ -171,9 +171,10 @@ mod test_recover_once_bounded_loop_bc6fa4 {
 
     use super::*;
     use crate::asupersync::{
-        codec::{ArtifactPayload, EncodedArtifact},
+        codec::{ArtifactPayload, EncodedArtifact, PassthroughCodec},
         config::{AsupersyncConfig, CapabilitySet, CxCapability},
-        integrity::IntegrityProof,
+        integrity::{Fnv1aVerifier, IntegrityProof},
+        transport::InMemoryTransport,
     };
 
     /// A buggy policy that always says "retry" — without the hard ceiling fix
@@ -252,30 +253,9 @@ mod test_recover_once_bounded_loop_bc6fa4 {
         }
     }
 
-    /// Stub codec — never invoked because transport.receive always fails first,
-    /// but the trait must be satisfied for the recover_once signature.
-    struct StubCodec;
+    struct FailingVerifier;
 
-    impl ArtifactCodec for StubCodec {
-        fn encode(
-            &self,
-            _payload: &ArtifactPayload,
-            _config: &AsupersyncConfig,
-        ) -> Result<EncodedArtifact, AsupersyncError> {
-            Err(AsupersyncError::Codec("not implemented".to_string()))
-        }
-        fn decode(
-            &self,
-            _encoded: &EncodedArtifact,
-            _config: &AsupersyncConfig,
-        ) -> Result<ArtifactPayload, AsupersyncError> {
-            Err(AsupersyncError::Codec("not implemented".to_string()))
-        }
-    }
-
-    struct StubVerifier;
-
-    impl IntegrityVerifier for StubVerifier {
+    impl IntegrityVerifier for FailingVerifier {
         fn verify(
             &self,
             _artifact_id: &str,
@@ -283,11 +263,20 @@ mod test_recover_once_bounded_loop_bc6fa4 {
             _expected_digest: &str,
         ) -> Result<IntegrityProof, AsupersyncError> {
             Err(AsupersyncError::IntegrityMismatch {
-                artifact_id: "stub".to_string(),
+                artifact_id: "failing-verifier".to_string(),
                 expected: "x".to_string(),
                 observed: "y".to_string(),
             })
         }
+    }
+
+    fn fnv1a_hex_for_test(bytes: &[u8]) -> String {
+        let mut hash = 0xcbf29ce484222325_u64;
+        for byte in bytes {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        format!("{hash:016x}")
     }
 
     #[test]
@@ -301,27 +290,24 @@ mod test_recover_once_bounded_loop_bc6fa4 {
         let config = AsupersyncConfig::default()
             .with_capabilities(CapabilitySet::for_capability(CxCapability::Io));
         let result = recover_once(
-            &StubCodec,
+            &PassthroughCodec,
             &AlwaysFailingTransport,
-            &StubVerifier,
+            &FailingVerifier,
             &AlwaysRetryPolicy,
             &config,
             &plan,
             "any-digest",
         );
-        match result {
-            Err(AsupersyncError::RecoveryExhausted {
-                artifact_id,
-                attempts,
-            }) => {
-                assert_eq!(artifact_id, "test-artifact");
-                assert_eq!(
-                    attempts, 5,
-                    "loop should terminate exactly at max_attempts even when policy always returns true"
-                );
-            }
-            other => panic!("expected RecoveryExhausted, got {other:?}"),
-        }
+        assert!(
+            matches!(
+                &result,
+                Err(AsupersyncError::RecoveryExhausted {
+                    artifact_id,
+                    attempts,
+                }) if artifact_id == "test-artifact" && *attempts == 5
+            ),
+            "expected RecoveryExhausted after exactly 5 attempts, got {result:?}"
+        );
     }
 
     #[test]
@@ -334,9 +320,9 @@ mod test_recover_once_bounded_loop_bc6fa4 {
         let config = AsupersyncConfig::default()
             .with_capabilities(CapabilitySet::for_capability(CxCapability::Io));
         let result = recover_once(
-            &StubCodec,
+            &PassthroughCodec,
             &AlwaysFailingTransport,
-            &StubVerifier,
+            &FailingVerifier,
             &AlwaysRetryPolicy,
             &config,
             &plan,
@@ -357,9 +343,9 @@ mod test_recover_once_bounded_loop_bc6fa4 {
             .with_capabilities(CapabilitySet::for_capability(CxCapability::Io));
 
         let result = recover_once(
-            &StubCodec,
+            &PassthroughCodec,
             &transport,
-            &StubVerifier,
+            &FailingVerifier,
             &AlwaysRetryPolicy,
             &config,
             &plan,
@@ -395,9 +381,9 @@ mod test_recover_once_bounded_loop_bc6fa4 {
             .with_capabilities(CapabilitySet::for_capability(CxCapability::Io));
 
         let result = recover_once(
-            &StubCodec,
+            &PassthroughCodec,
             &transport,
-            &StubVerifier,
+            &FailingVerifier,
             &AlwaysRetryPolicy,
             &config,
             &plan,
@@ -415,5 +401,57 @@ mod test_recover_once_bounded_loop_bc6fa4 {
             "expected retry-budget RecoveryExhausted, got {result:?}"
         );
         assert_eq!(transport.receive_calls.get(), 2);
+    }
+
+    #[test]
+    fn recover_once_round_trips_real_codec_transport_and_verifier_2ryvf()
+    -> Result<(), AsupersyncError> {
+        let codec = PassthroughCodec;
+        let transport = InMemoryTransport::new();
+        let verifier = Fnv1aVerifier;
+        let config = AsupersyncConfig::default().with_capabilities(
+            CapabilitySet::for_capability(CxCapability::Io)
+                .union(CapabilitySet::for_capability(CxCapability::Remote)),
+        );
+        let bytes = b"recoverable artifact payload".to_vec();
+        let expected_digest = fnv1a_hex_for_test(&bytes);
+        let payload = ArtifactPayload {
+            artifact_id: "recoverable-artifact".to_string(),
+            bytes,
+            expected_digest: Some(expected_digest.clone()),
+        };
+        let encoded = codec.encode(&payload, &config)?;
+        transport.send(encoded, &config)?;
+
+        let plan = RecoveryPlan {
+            artifact_id: payload.artifact_id.clone(),
+            max_attempts: 3,
+            deadline_unix_ms: 0,
+        };
+        let report = recover_once(
+            &codec,
+            &transport,
+            &verifier,
+            &ConservativeRecoveryPolicy,
+            &config,
+            &plan,
+            &expected_digest,
+        )?;
+
+        assert_eq!(report.artifact_id, "recoverable-artifact");
+        assert_eq!(report.attempts, 1);
+        assert_eq!(report.outcome, RecoveryOutcome::Recovered);
+        assert_eq!(report.transfer_status, TransferStatus::Completed);
+        let Some(proof) = report.integrity else {
+            return Err(AsupersyncError::IntegrityMismatch {
+                artifact_id: "recoverable-artifact".to_string(),
+                expected: expected_digest,
+                observed: "<missing proof>".to_string(),
+            });
+        };
+        assert!(proof.verified);
+        assert_eq!(proof.algorithm, "fnv1a64");
+        assert_eq!(proof.expected_digest, proof.observed_digest);
+        Ok(())
     }
 }
