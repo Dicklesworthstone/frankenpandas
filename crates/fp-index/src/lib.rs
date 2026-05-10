@@ -1945,6 +1945,52 @@ where
         .collect()
 }
 
+fn time_to_nanos(time: chrono::NaiveTime) -> i64 {
+    use chrono::Timelike;
+    i64::from(time.num_seconds_from_midnight()) * 1_000_000_000 + i64::from(time.nanosecond())
+}
+
+fn parse_time_of_day_nanos(time: &str, context: &str) -> Result<i64, IndexError> {
+    let trimmed = time.trim();
+    for format in ["%H:%M:%S%.f", "%H:%M:%S", "%H:%M"] {
+        if let Ok(parsed) = chrono::NaiveTime::parse_from_str(trimmed, format) {
+            return Ok(time_to_nanos(parsed));
+        }
+    }
+    Err(IndexError::InvalidArgument(format!(
+        "{context}: invalid time {time:?}; expected HH:MM, HH:MM:SS, or fractional seconds"
+    )))
+}
+
+fn datetime_label_time_nanos(label: &IndexLabel) -> Option<i64> {
+    match label {
+        IndexLabel::Datetime64(nanos) => {
+            datetime_from_nanos(*nanos).map(|dt| time_to_nanos(dt.time()))
+        }
+        IndexLabel::Int64(_) | IndexLabel::Utf8(_) | IndexLabel::Timedelta64(_) => None,
+    }
+}
+
+fn time_nanos_in_between(
+    time: i64,
+    start: i64,
+    end: i64,
+    include_start: bool,
+    include_end: bool,
+) -> bool {
+    let after_start = if include_start {
+        time >= start
+    } else {
+        time > start
+    };
+    let before_end = if include_end { time <= end } else { time < end };
+    if start <= end {
+        after_start && before_end
+    } else {
+        after_start || before_end
+    }
+}
+
 fn map_timedelta_labels<T, F>(labels: &[IndexLabel], func: F) -> Vec<Option<T>>
 where
     F: Fn(i64) -> T,
@@ -3488,6 +3534,49 @@ impl DatetimeIndex {
     pub fn nanosecond(&self) -> Vec<Option<u32>> {
         use chrono::Timelike;
         map_datetime_labels(self.index.labels(), |dt| dt.nanosecond() % 1_000)
+    }
+
+    /// Integer positions whose clock time equals `time`, matching
+    /// `pd.DatetimeIndex.indexer_at_time(time)`.
+    pub fn indexer_at_time(&self, time: &str) -> Result<Vec<usize>, IndexError> {
+        let target = parse_time_of_day_nanos(time, "DatetimeIndex.indexer_at_time")?;
+        Ok(self
+            .index
+            .labels()
+            .iter()
+            .enumerate()
+            .filter_map(|(position, label)| {
+                (datetime_label_time_nanos(label) == Some(target)).then_some(position)
+            })
+            .collect())
+    }
+
+    /// Integer positions whose clock time falls between `start_time` and
+    /// `end_time`, matching `pd.DatetimeIndex.indexer_between_time`.
+    /// Ranges that cross midnight use pandas' wrap-around semantics.
+    pub fn indexer_between_time(
+        &self,
+        start_time: &str,
+        end_time: &str,
+        include_start: bool,
+        include_end: bool,
+    ) -> Result<Vec<usize>, IndexError> {
+        let start =
+            parse_time_of_day_nanos(start_time, "DatetimeIndex.indexer_between_time start_time")?;
+        let end = parse_time_of_day_nanos(end_time, "DatetimeIndex.indexer_between_time end_time")?;
+        Ok(self
+            .index
+            .labels()
+            .iter()
+            .enumerate()
+            .filter_map(|(position, label)| {
+                datetime_label_time_nanos(label)
+                    .filter(|time| {
+                        time_nanos_in_between(*time, start, end, include_start, include_end)
+                    })
+                    .map(|_| position)
+            })
+            .collect())
     }
 
     /// ISO 8601 week-of-year (1..=53), matching `pd.DatetimeIndex.week`
@@ -15325,6 +15414,47 @@ mod tests {
         assert_eq!(dt.second(), vec![Some(56), None, Some(0)]);
         assert_eq!(dt.microsecond(), vec![Some(789_012), None, Some(0)]);
         assert_eq!(dt.nanosecond(), vec![Some(345), None, Some(0)]);
+    }
+
+    #[test]
+    fn datetime_index_time_of_day_indexers_match_pandas_bwzmn() -> Result<(), super::IndexError> {
+        let hour = fp_types::Timedelta::NANOS_PER_HOUR;
+        let minute = fp_types::Timedelta::NANOS_PER_MIN;
+        let day = fp_types::Timedelta::NANOS_PER_DAY;
+        let dt = super::DatetimeIndex::new(vec![
+            9 * hour,
+            12 * hour + 30 * minute,
+            i64::MIN,
+            23 * hour + 30 * minute,
+            day + 30 * minute,
+        ]);
+
+        assert_eq!(dt.indexer_at_time("12:30")?, vec![1]);
+        assert_eq!(dt.indexer_at_time("12:30:00.000000000")?, vec![1]);
+        assert_eq!(dt.indexer_at_time("00:30:00")?, vec![4]);
+        assert!(dt.indexer_at_time("not-a-time").is_err());
+
+        assert_eq!(
+            dt.indexer_between_time("08:00", "13:00", true, true)?,
+            vec![0, 1]
+        );
+        assert_eq!(
+            dt.indexer_between_time("09:00", "13:00", false, true)?,
+            vec![1]
+        );
+        assert_eq!(
+            dt.indexer_between_time("23:00", "01:00", true, true)?,
+            vec![3, 4]
+        );
+        assert_eq!(
+            dt.indexer_between_time("23:30", "00:30", false, false)?,
+            Vec::<usize>::new()
+        );
+        assert!(
+            dt.indexer_between_time("09:00", "not-a-time", true, true)
+                .is_err()
+        );
+        Ok(())
     }
 
     #[test]
