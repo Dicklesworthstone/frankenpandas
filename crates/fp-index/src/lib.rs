@@ -3595,6 +3595,18 @@ impl DatetimeIndex {
         map_datetime_labels(self.index.labels(), |dt| dt.iso_week().week())
     }
 
+    /// ISO calendar `(year, week, weekday)` triples, matching
+    /// `pd.DatetimeIndex.isocalendar()`. Weekday uses pandas' Monday=1
+    /// through Sunday=7 convention.
+    #[must_use]
+    pub fn isocalendar(&self) -> Vec<Option<(i32, u32, u32)>> {
+        use chrono::Datelike;
+        map_datetime_labels(self.index.labels(), |dt| {
+            let iso = dt.iso_week();
+            (iso.year(), iso.week(), dt.weekday().number_from_monday())
+        })
+    }
+
     /// Alias for [`week`], matching `pd.DatetimeIndex.weekofyear`.
     #[must_use]
     pub fn weekofyear(&self) -> Vec<Option<u32>> {
@@ -15482,6 +15494,10 @@ mod tests {
 
         // weekofyear is an alias.
         assert_eq!(dt.weekofyear(), weeks);
+        assert_eq!(
+            dt.isocalendar(),
+            vec![Some((2024, 1, 1)), Some((2025, 1, 1)), None]
+        );
     }
 
     #[test]
