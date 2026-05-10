@@ -79,6 +79,7 @@ use std::{
     sync::OnceLock,
 };
 
+use chrono::Datelike;
 use fp_types::{Period, PeriodFreq, Scalar, Timedelta, TimedeltaComponents};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -2040,6 +2041,12 @@ enum TemporalRoundMode {
     Round,
 }
 
+#[derive(Clone, Copy)]
+enum PeriodBoundary {
+    Start,
+    End,
+}
+
 fn parse_fixed_temporal_freq(freq: &str, context: &str) -> Result<i64, IndexError> {
     let trimmed = freq.trim();
     let unit_nanos = Timedelta::unit_to_nanos(trimmed)
@@ -2132,6 +2139,146 @@ fn optional_diffs_to_timedelta_index(
         out = out.set_name(name);
     }
     out
+}
+
+fn period_timestamp_error(message: impl Into<String>) -> IndexError {
+    IndexError::InvalidArgument(format!(
+        "PeriodIndex timestamp conversion failed: {}",
+        message.into()
+    ))
+}
+
+fn period_date_error(err: DateRangeError) -> IndexError {
+    period_timestamp_error(err.to_string())
+}
+
+fn period_date_to_nanos(date: chrono::NaiveDate) -> Result<i64, IndexError> {
+    date_to_midnight_nanos(date).map_err(period_date_error)
+}
+
+fn period_checked_add_nanos(nanos: i64, delta: i64) -> Result<i64, IndexError> {
+    nanos
+        .checked_add(delta)
+        .ok_or_else(|| period_timestamp_error("nanosecond timestamp overflow"))
+}
+
+fn period_month_start(month_ordinal: i64) -> Result<chrono::NaiveDate, IndexError> {
+    let year = 1970_i64
+        .checked_add(month_ordinal.div_euclid(12))
+        .ok_or_else(|| period_timestamp_error("year overflow"))?;
+    let year = i32::try_from(year).map_err(|_| period_timestamp_error("year out of range"))?;
+    let month = u32::try_from(month_ordinal.rem_euclid(12) + 1)
+        .map_err(|_| period_timestamp_error("month out of range"))?;
+    chrono::NaiveDate::from_ymd_opt(year, month, 1)
+        .ok_or_else(|| period_timestamp_error("invalid month boundary"))
+}
+
+fn period_epoch_date(year: i32, month: u32, day: u32) -> Result<chrono::NaiveDate, IndexError> {
+    chrono::NaiveDate::from_ymd_opt(year, month, day)
+        .ok_or_else(|| period_timestamp_error("invalid epoch boundary"))
+}
+
+fn period_add_days(date: chrono::NaiveDate, days: i64) -> Result<chrono::NaiveDate, IndexError> {
+    let delta = chrono::Duration::try_days(days)
+        .ok_or_else(|| period_timestamp_error("day offset overflow"))?;
+    date.checked_add_signed(delta)
+        .ok_or_else(|| period_timestamp_error("date overflow"))
+}
+
+fn period_business_date(ordinal: i64) -> Result<chrono::NaiveDate, IndexError> {
+    let week = ordinal.div_euclid(5);
+    let day_offset = match ordinal.rem_euclid(5) {
+        0 => 0,
+        1 => 1,
+        2 => 4,
+        3 => 5,
+        4 => 6,
+        _ => {
+            return Err(period_timestamp_error(
+                "business-day remainder out of range",
+            ));
+        }
+    };
+    let calendar_days = week
+        .checked_mul(7)
+        .and_then(|days| days.checked_add(day_offset))
+        .ok_or_else(|| period_timestamp_error("business-day ordinal overflow"))?;
+    period_add_days(period_epoch_date(1970, 1, 1)?, calendar_days)
+}
+
+fn period_start_nanos(period: Period) -> Result<i64, IndexError> {
+    match period.freq {
+        PeriodFreq::Annual => {
+            let month_ordinal = period
+                .ordinal
+                .checked_mul(12)
+                .ok_or_else(|| period_timestamp_error("annual ordinal overflow"))?;
+            period_date_to_nanos(period_month_start(month_ordinal)?)
+        }
+        PeriodFreq::Quarterly => {
+            let month_ordinal = period
+                .ordinal
+                .checked_mul(3)
+                .ok_or_else(|| period_timestamp_error("quarterly ordinal overflow"))?;
+            period_date_to_nanos(period_month_start(month_ordinal)?)
+        }
+        PeriodFreq::Monthly => period_date_to_nanos(period_month_start(period.ordinal)?),
+        PeriodFreq::Weekly => {
+            let base = period_epoch_date(1969, 12, 22)?;
+            let days = period
+                .ordinal
+                .checked_mul(7)
+                .ok_or_else(|| period_timestamp_error("weekly ordinal overflow"))?;
+            period_date_to_nanos(period_add_days(base, days)?)
+        }
+        PeriodFreq::Daily => {
+            let base = period_epoch_date(1970, 1, 1)?;
+            period_date_to_nanos(period_add_days(base, period.ordinal)?)
+        }
+        PeriodFreq::Business => period_date_to_nanos(period_business_date(period.ordinal)?),
+        PeriodFreq::Hourly => period
+            .ordinal
+            .checked_mul(Timedelta::NANOS_PER_HOUR)
+            .ok_or_else(|| period_timestamp_error("hourly ordinal overflow")),
+        PeriodFreq::Minutely => period
+            .ordinal
+            .checked_mul(Timedelta::NANOS_PER_MIN)
+            .ok_or_else(|| period_timestamp_error("minutely ordinal overflow")),
+        PeriodFreq::Secondly => period
+            .ordinal
+            .checked_mul(Timedelta::NANOS_PER_SEC)
+            .ok_or_else(|| period_timestamp_error("secondly ordinal overflow")),
+        _ => Err(period_timestamp_error("unsupported period frequency")),
+    }
+}
+
+fn period_next_start_nanos(period: Period) -> Result<i64, IndexError> {
+    let next = Period {
+        ordinal: period
+            .ordinal
+            .checked_add(1)
+            .ok_or_else(|| period_timestamp_error("period ordinal overflow"))?,
+        freq: period.freq,
+    };
+    period_start_nanos(next)
+}
+
+fn period_end_nanos(period: Period) -> Result<i64, IndexError> {
+    period_checked_add_nanos(period_next_start_nanos(period)?, -1)
+}
+
+fn period_boundary_nanos(period: Period, boundary: PeriodBoundary) -> Result<i64, IndexError> {
+    match boundary {
+        PeriodBoundary::Start => period_start_nanos(period),
+        PeriodBoundary::End => period_end_nanos(period),
+    }
+}
+
+fn period_qyear(period: Period) -> Result<i32, IndexError> {
+    let end_nanos = period_end_nanos(period)?;
+    datetime_nanos_to_date(end_nanos)
+        .map(|date| date.year())
+        .map_err(period_date_error)
 }
 
 fn ensure_index_kind(
@@ -5690,6 +5837,60 @@ impl PeriodIndex {
         positional_diff(self.values.len(), periods, |current, previous| {
             self.values[current].diff(&self.values[previous])
         })
+    }
+
+    fn to_timestamp_boundary(&self, boundary: PeriodBoundary) -> Result<DatetimeIndex, IndexError> {
+        let nanos = self
+            .values
+            .iter()
+            .copied()
+            .map(|period| period_boundary_nanos(period, boundary))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut out = DatetimeIndex::new(nanos);
+        if let Some(name) = self.name() {
+            out = out.set_name(name);
+        }
+        Ok(out)
+    }
+
+    /// Timestamp at each period's start boundary.
+    ///
+    /// Matches `pd.PeriodIndex.start_time`.
+    pub fn start_time(&self) -> Result<DatetimeIndex, IndexError> {
+        self.to_timestamp_boundary(PeriodBoundary::Start)
+    }
+
+    /// Timestamp at each period's inclusive end boundary.
+    ///
+    /// Matches `pd.PeriodIndex.end_time`.
+    pub fn end_time(&self) -> Result<DatetimeIndex, IndexError> {
+        self.to_timestamp_boundary(PeriodBoundary::End)
+    }
+
+    /// Convert periods to timestamp labels at the requested boundary.
+    ///
+    /// Supported `how` values mirror pandas' common aliases:
+    /// `start` / `s` / `begin` and `end` / `e` / `finish`.
+    pub fn to_timestamp(&self, how: &str) -> Result<DatetimeIndex, IndexError> {
+        match how.trim().to_ascii_lowercase().as_str() {
+            "" | "s" | "start" | "begin" | "b" => self.start_time(),
+            "e" | "end" | "finish" => self.end_time(),
+            other => Err(IndexError::InvalidArgument(format!(
+                "to_timestamp how must be 'start' or 'end', got {other:?}"
+            ))),
+        }
+    }
+
+    /// Fiscal year for each period's ending boundary.
+    ///
+    /// For the currently supported unanchored frequencies this is the
+    /// calendar year of `end_time`, matching pandas' `PeriodIndex.qyear`.
+    pub fn qyear(&self) -> Result<Vec<i32>, IndexError> {
+        self.values
+            .iter()
+            .copied()
+            .map(period_qyear)
+            .collect::<Result<Vec<_>, _>>()
     }
 
     fn ensure_homogeneous_freq(&self) -> Result<Option<PeriodFreq>, IndexError> {
@@ -17292,6 +17493,89 @@ mod tests {
             super::IndexError::InvalidArgument(message)
                 if message.contains("Categorical has no 'diff' method")
         ));
+    }
+
+    #[test]
+    fn period_index_timestamp_boundaries_d44wh() -> Result<(), Box<dyn std::error::Error>> {
+        fn ns(value: &str) -> Result<i64, super::DateRangeError> {
+            super::parse_datetime_to_nanos(value)
+        }
+
+        use fp_types::{Period, PeriodFreq};
+
+        let monthly = super::PeriodIndex::new(vec![
+            Period::new(0, PeriodFreq::Monthly),
+            Period::new(1, PeriodFreq::Monthly),
+        ])
+        .set_name("period");
+        assert_eq!(
+            monthly.start_time()?.asi8(),
+            vec![ns("1970-01-01 00:00:00")?, ns("1970-02-01 00:00:00")?]
+        );
+        assert_eq!(
+            monthly.end_time()?.asi8(),
+            vec![
+                ns("1970-02-01 00:00:00")? - 1,
+                ns("1970-03-01 00:00:00")? - 1
+            ]
+        );
+        assert_eq!(
+            monthly.to_timestamp("start")?.asi8(),
+            monthly.start_time()?.asi8()
+        );
+        assert_eq!(
+            monthly.to_timestamp("end")?.asi8(),
+            monthly.end_time()?.asi8()
+        );
+        assert_eq!(monthly.to_timestamp("")?.name(), Some("period"));
+        assert_eq!(monthly.qyear()?, vec![1970, 1970]);
+        assert!(matches!(
+            monthly.to_timestamp("middle"),
+            Err(super::IndexError::InvalidArgument(message))
+                if message.contains("to_timestamp how must be 'start' or 'end'")
+        ));
+
+        let quarterly = super::PeriodIndex::new(vec![
+            Period::new(-1, PeriodFreq::Quarterly),
+            Period::new(0, PeriodFreq::Quarterly),
+        ]);
+        assert_eq!(
+            quarterly.start_time()?.asi8(),
+            vec![ns("1969-10-01 00:00:00")?, ns("1970-01-01 00:00:00")?]
+        );
+        assert_eq!(
+            quarterly.end_time()?.asi8(),
+            vec![
+                ns("1970-01-01 00:00:00")? - 1,
+                ns("1970-04-01 00:00:00")? - 1
+            ]
+        );
+        assert_eq!(quarterly.qyear()?, vec![1969, 1970]);
+
+        let mixed_freq = super::PeriodIndex::new(vec![
+            Period::new(1, PeriodFreq::Weekly),
+            Period::new(2, PeriodFreq::Business),
+            Period::new(1, PeriodFreq::Hourly),
+        ]);
+        assert_eq!(
+            mixed_freq.start_time()?.asi8(),
+            vec![
+                ns("1969-12-29 00:00:00")?,
+                ns("1970-01-05 00:00:00")?,
+                fp_types::Timedelta::NANOS_PER_HOUR
+            ]
+        );
+        assert_eq!(
+            mixed_freq.end_time()?.asi8(),
+            vec![
+                ns("1970-01-05 00:00:00")? - 1,
+                ns("1970-01-06 00:00:00")? - 1,
+                2 * fp_types::Timedelta::NANOS_PER_HOUR - 1
+            ]
+        );
+        assert_eq!(mixed_freq.qyear()?, vec![1970, 1970, 1970]);
+
+        Ok(())
     }
 
     #[test]
