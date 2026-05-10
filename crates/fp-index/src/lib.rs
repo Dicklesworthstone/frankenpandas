@@ -3222,6 +3222,11 @@ impl DatetimeIndex {
         self.to_flat_index().all()
     }
 
+    /// Get labels for a level. DatetimeIndex is flat and only accepts level 0.
+    pub fn get_level_values(&self, level: usize) -> Result<Index, IndexError> {
+        self.to_flat_index().get_level_values(level)
+    }
+
     /// Returns a clone, matching `pd.DatetimeIndex.view()`. FrankenPandas
     /// owns its label storage so view materializes a fresh clone instead
     /// of an aliasing reference.
@@ -4331,6 +4336,11 @@ impl TimedeltaIndex {
     #[must_use]
     pub fn all(&self) -> bool {
         self.to_flat_index().all()
+    }
+
+    /// Get labels for a level. TimedeltaIndex is flat and only accepts level 0.
+    pub fn get_level_values(&self, level: usize) -> Result<Index, IndexError> {
+        self.to_flat_index().get_level_values(level)
     }
 
     /// Returns a clone, matching `pd.TimedeltaIndex.view()`.
@@ -5756,6 +5766,11 @@ impl PeriodIndex {
         self.to_flat_index().all()
     }
 
+    /// Get labels for a level. PeriodIndex is flat and only accepts level 0.
+    pub fn get_level_values(&self, level: usize) -> Result<Index, IndexError> {
+        self.to_flat_index().get_level_values(level)
+    }
+
     /// Returns a clone, matching `pd.PeriodIndex.view()`.
     #[must_use]
     pub fn view(&self) -> Self {
@@ -6508,6 +6523,11 @@ impl RangeIndex {
     #[must_use]
     pub fn all(&self) -> bool {
         self.to_flat_index().all()
+    }
+
+    /// Get labels for a level. RangeIndex is flat and only accepts level 0.
+    pub fn get_level_values(&self, level: usize) -> Result<Index, IndexError> {
+        self.to_flat_index().get_level_values(level)
     }
 
     /// Returns a clone, matching `pd.RangeIndex.view()`.
@@ -7459,6 +7479,11 @@ impl CategoricalIndex {
     #[must_use]
     pub fn all(&self) -> bool {
         self.to_flat_index().all()
+    }
+
+    /// Get labels for a level. CategoricalIndex is flat and only accepts level 0.
+    pub fn get_level_values(&self, level: usize) -> Result<Index, IndexError> {
+        self.to_flat_index().get_level_values(level)
     }
 
     /// Set the index name, matching `pd.CategoricalIndex.rename(name)`.
@@ -16231,6 +16256,39 @@ mod tests {
         assert_eq!(cat.all(), cat_flat.all());
         assert!(cat.any());
         assert!(!cat.all());
+    }
+
+    #[test]
+    fn index_variants_get_level_values_forward_flat_xf0zn() -> Result<(), super::IndexError> {
+        const NS: i64 = 1_000_000_000;
+
+        let dt = super::DatetimeIndex::new(vec![NS, 2 * NS]).set_name("ts");
+        assert_eq!(dt.get_level_values(0)?, dt.to_flat_index());
+
+        let td = super::TimedeltaIndex::new(vec![5, 10]).set_name("delta");
+        assert_eq!(td.get_level_values(0)?, td.to_flat_index());
+
+        use fp_types::{Period, PeriodFreq};
+        let pi =
+            super::PeriodIndex::new(vec![Period::new(1, PeriodFreq::Monthly)]).set_name("period");
+        assert_eq!(pi.get_level_values(0)?, pi.to_flat_index());
+
+        let range = super::RangeIndex::new(1, 4, 1)?.set_name("row");
+        assert_eq!(range.get_level_values(0)?, range.to_flat_index());
+
+        let cat =
+            super::CategoricalIndex::from_values(vec!["a".to_owned()], false).set_name("category");
+        assert_eq!(cat.get_level_values(0)?, cat.to_flat_index());
+
+        assert!(matches!(
+            cat.get_level_values(1),
+            Err(super::IndexError::OutOfBounds {
+                position: 1,
+                length: 1
+            })
+        ));
+
+        Ok(())
     }
 
     #[test]
