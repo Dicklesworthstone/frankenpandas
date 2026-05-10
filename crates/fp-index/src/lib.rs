@@ -2088,6 +2088,52 @@ fn round_nanos_to_unit(nanos: i64, unit_nanos: i64, mode: TemporalRoundMode) -> 
     }
 }
 
+fn positional_diff<T>(
+    len: usize,
+    periods: i64,
+    mut diff_at: impl FnMut(usize, usize) -> Option<T>,
+) -> Vec<Option<T>> {
+    let mut out = (0..len).map(|_| None).collect::<Vec<_>>();
+    if periods == 0 {
+        for (position, slot) in out.iter_mut().enumerate() {
+            *slot = diff_at(position, position);
+        }
+        return out;
+    }
+    let Ok(offset) = usize::try_from(periods.unsigned_abs()) else {
+        return out;
+    };
+    if offset >= len {
+        return out;
+    }
+    if periods > 0 {
+        for (position, slot) in out.iter_mut().enumerate().skip(offset) {
+            *slot = diff_at(position, position - offset);
+        }
+    } else {
+        for (position, slot) in out.iter_mut().enumerate().take(len - offset) {
+            *slot = diff_at(position, position + offset);
+        }
+    }
+    out
+}
+
+fn optional_diffs_to_timedelta_index(
+    values: Vec<Option<i64>>,
+    name: Option<&str>,
+) -> TimedeltaIndex {
+    let mut out = TimedeltaIndex::new(
+        values
+            .into_iter()
+            .map(|value| value.unwrap_or(Timedelta::NAT))
+            .collect(),
+    );
+    if let Some(name) = name {
+        out = out.set_name(name);
+    }
+    out
+}
+
 fn ensure_index_kind(
     index: &Index,
     predicate: impl Fn(&IndexLabel) -> bool,
@@ -2611,6 +2657,29 @@ impl DatetimeIndex {
             out = out.set_name(name);
         }
         out
+    }
+
+    /// Positional first differences, matching `pd.DatetimeIndex.diff()`.
+    /// Datetime deltas materialize as a TimedeltaIndex; NAT inputs propagate
+    /// to NAT outputs, and signed `periods` follows pandas' forward/backward
+    /// lookup direction.
+    #[must_use]
+    pub fn diff(&self, periods: i64) -> TimedeltaIndex {
+        let labels = self.index.labels();
+        optional_diffs_to_timedelta_index(
+            positional_diff(labels.len(), periods, |current, previous| {
+                match (&labels[current], &labels[previous]) {
+                    (
+                        IndexLabel::Datetime64(current_nanos),
+                        IndexLabel::Datetime64(previous_nanos),
+                    ) if *current_nanos != i64::MIN && *previous_nanos != i64::MIN => {
+                        current_nanos.checked_sub(*previous_nanos)
+                    }
+                    _ => None,
+                }
+            }),
+            self.name(),
+        )
     }
 
     fn round_fixed_freq(&self, freq: &str, mode: TemporalRoundMode) -> Result<Self, IndexError> {
@@ -4858,6 +4927,28 @@ impl TimedeltaIndex {
         out
     }
 
+    /// Positional first differences, matching `pd.TimedeltaIndex.diff()`.
+    /// NAT inputs propagate and signed `periods` follows pandas' lookup
+    /// direction.
+    #[must_use]
+    pub fn diff(&self, periods: i64) -> Self {
+        let labels = self.index.labels();
+        optional_diffs_to_timedelta_index(
+            positional_diff(labels.len(), periods, |current, previous| {
+                match (&labels[current], &labels[previous]) {
+                    (
+                        IndexLabel::Timedelta64(current_nanos),
+                        IndexLabel::Timedelta64(previous_nanos),
+                    ) if *current_nanos != Timedelta::NAT && *previous_nanos != Timedelta::NAT => {
+                        current_nanos.checked_sub(*previous_nanos)
+                    }
+                    _ => None,
+                }
+            }),
+            self.name(),
+        )
+    }
+
     fn round_fixed_freq(&self, freq: &str, mode: TemporalRoundMode) -> Result<Self, IndexError> {
         let unit_nanos = parse_fixed_temporal_freq(freq, "TimedeltaIndex rounding")?;
         let nanos: Vec<i64> = self
@@ -5586,6 +5677,19 @@ impl PeriodIndex {
             values: out,
             name: self.name.clone(),
         }
+    }
+
+    /// Positional first differences in period-frequency units.
+    ///
+    /// Pandas returns frequency offset objects for `PeriodIndex.diff()`. The
+    /// Rust surface exposes the same semantic payload as ordinal deltas while
+    /// preserving null slots for positions without a comparison partner or
+    /// mixed-frequency pairs.
+    #[must_use]
+    pub fn diff(&self, periods: i64) -> Vec<Option<i64>> {
+        positional_diff(self.values.len(), periods, |current, previous| {
+            self.values[current].diff(&self.values[previous])
+        })
     }
 
     fn ensure_homogeneous_freq(&self) -> Result<Option<PeriodFreq>, IndexError> {
@@ -6572,6 +6676,15 @@ impl RangeIndex {
             .collect()
     }
 
+    /// Positional first differences for RangeIndex values.
+    #[must_use]
+    pub fn diff(&self, periods: i64) -> Vec<Option<i64>> {
+        let values = self.values();
+        positional_diff(values.len(), periods, |current, previous| {
+            values[current].checked_sub(values[previous])
+        })
+    }
+
     #[must_use]
     pub fn to_list(&self) -> Vec<i64> {
         self.values()
@@ -7489,6 +7602,15 @@ impl CategoricalIndex {
     #[must_use]
     pub fn notna(&self) -> Vec<bool> {
         vec![true; self.len()]
+    }
+
+    /// Categorical labels cannot be differenced without converting to a
+    /// numeric or datetime dtype, matching pandas' fail-closed behavior.
+    pub fn diff(&self, _periods: i64) -> Result<Vec<Option<i64>>, IndexError> {
+        Err(IndexError::InvalidArgument(
+            "Categorical has no 'diff' method; convert to a suitable dtype before calling diff"
+                .to_owned(),
+        ))
     }
 
     #[must_use]
@@ -17127,6 +17249,49 @@ mod tests {
         let rounded_periods = periods.round("not-a-frequency");
         assert_eq!(rounded_periods.values(), periods.values());
         assert_eq!(rounded_periods.name(), Some("p"));
+    }
+
+    #[test]
+    fn index_variants_diff_forwarders_lqs0a() {
+        let day = fp_types::Timedelta::NANOS_PER_DAY;
+        let nat = fp_types::Timedelta::NAT;
+
+        let dt = super::DatetimeIndex::new(vec![day, 3 * day, i64::MIN, 10 * day]).set_name("ts");
+        assert_eq!(dt.diff(1).asi8(), vec![nat, 2 * day, nat, nat]);
+        assert_eq!(dt.diff(-1).asi8(), vec![-2 * day, nat, nat, nat]);
+        assert_eq!(dt.diff(0).asi8(), vec![0, 0, nat, 0]);
+        assert_eq!(dt.diff(1).name(), Some("ts"));
+
+        let td = super::TimedeltaIndex::new(vec![day, 4 * day, nat, 9 * day]).set_name("delta");
+        assert_eq!(td.diff(2).asi8(), vec![nat, nat, nat, 5 * day]);
+        assert_eq!(td.diff(-1).asi8(), vec![-3 * day, nat, nat, nat]);
+        assert_eq!(td.diff(0).asi8(), vec![0, 0, nat, 0]);
+        assert_eq!(td.diff(1).name(), Some("delta"));
+
+        use fp_types::{Period, PeriodFreq};
+        let periods = super::PeriodIndex::new(vec![
+            Period::new(10, PeriodFreq::Monthly),
+            Period::new(12, PeriodFreq::Monthly),
+            Period::new(13, PeriodFreq::Quarterly),
+            Period::new(15, PeriodFreq::Quarterly),
+        ]);
+        assert_eq!(periods.diff(1), vec![None, Some(2), None, Some(2)]);
+        assert_eq!(periods.diff(-1), vec![Some(-2), None, Some(-2), None]);
+        assert_eq!(periods.diff(0), vec![Some(0), Some(0), Some(0), Some(0)]);
+
+        let range = super::RangeIndex::new(2, 10, 2).unwrap().set_name("r");
+        assert_eq!(range.diff(1), vec![None, Some(2), Some(2), Some(2)]);
+        assert_eq!(range.diff(-2), vec![Some(-4), Some(-4), None, None]);
+        assert_eq!(range.diff(0), vec![Some(0), Some(0), Some(0), Some(0)]);
+        assert_eq!(range.name(), Some("r"));
+
+        let cat = super::CategoricalIndex::from_values(vec!["a".to_owned(), "b".to_owned()], false);
+        let err = cat.diff(1).unwrap_err();
+        assert!(matches!(
+            err,
+            super::IndexError::InvalidArgument(message)
+                if message.contains("Categorical has no 'diff' method")
+        ));
     }
 
     #[test]
