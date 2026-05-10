@@ -3233,6 +3233,15 @@ impl DatetimeIndex {
         self.to_flat_index().groupby()
     }
 
+    /// Apply a function to each datetime label, returning a flat Index.
+    #[must_use]
+    pub fn map<F>(&self, func: F) -> Index
+    where
+        F: Fn(&IndexLabel) -> IndexLabel,
+    {
+        self.to_flat_index().map(func)
+    }
+
     /// Returns a clone, matching `pd.DatetimeIndex.view()`. FrankenPandas
     /// owns its label storage so view materializes a fresh clone instead
     /// of an aliasing reference.
@@ -4353,6 +4362,15 @@ impl TimedeltaIndex {
     #[must_use]
     pub fn groupby(&self) -> HashMap<IndexLabel, Vec<usize>> {
         self.to_flat_index().groupby()
+    }
+
+    /// Apply a function to each timedelta label, returning a flat Index.
+    #[must_use]
+    pub fn map<F>(&self, func: F) -> Index
+    where
+        F: Fn(&IndexLabel) -> IndexLabel,
+    {
+        self.to_flat_index().map(func)
     }
 
     /// Returns a clone, matching `pd.TimedeltaIndex.view()`.
@@ -5789,6 +5807,15 @@ impl PeriodIndex {
         self.to_flat_index().groupby()
     }
 
+    /// Apply a function to each period label, returning a flat Index.
+    #[must_use]
+    pub fn map<F>(&self, func: F) -> Index
+    where
+        F: Fn(&IndexLabel) -> IndexLabel,
+    {
+        self.to_flat_index().map(func)
+    }
+
     /// Returns a clone, matching `pd.PeriodIndex.view()`.
     #[must_use]
     pub fn view(&self) -> Self {
@@ -6552,6 +6579,15 @@ impl RangeIndex {
     #[must_use]
     pub fn groupby(&self) -> HashMap<IndexLabel, Vec<usize>> {
         self.to_flat_index().groupby()
+    }
+
+    /// Apply a function to each range label, returning a flat Index.
+    #[must_use]
+    pub fn map<F>(&self, func: F) -> Index
+    where
+        F: Fn(&IndexLabel) -> IndexLabel,
+    {
+        self.to_flat_index().map(func)
     }
 
     /// Returns a clone, matching `pd.RangeIndex.view()`.
@@ -7514,6 +7550,15 @@ impl CategoricalIndex {
     #[must_use]
     pub fn groupby(&self) -> HashMap<IndexLabel, Vec<usize>> {
         self.to_flat_index().groupby()
+    }
+
+    /// Apply a function to each category label, returning a flat Index.
+    #[must_use]
+    pub fn map<F>(&self, func: F) -> Index
+    where
+        F: Fn(&IndexLabel) -> IndexLabel,
+    {
+        self.to_flat_index().map(func)
     }
 
     /// Set the index name, matching `pd.CategoricalIndex.rename(name)`.
@@ -16352,6 +16397,61 @@ mod tests {
                 .get(&super::IndexLabel::Utf8("a".to_owned()))
                 .cloned(),
             Some(vec![0, 2])
+        );
+    }
+
+    #[test]
+    fn index_variants_map_forward_flat_and_preserve_name_vxlfs() {
+        const NS: i64 = 1_000_000_000;
+
+        let dt = super::DatetimeIndex::new(vec![NS, 2 * NS]).set_name("ts");
+        let dt_mapped = dt.map(|label| match label {
+            super::IndexLabel::Datetime64(nanos) => super::IndexLabel::Int64(*nanos / NS),
+            other => other.clone(),
+        });
+        assert_eq!(
+            dt_mapped.labels(),
+            &[super::IndexLabel::Int64(1), super::IndexLabel::Int64(2)]
+        );
+        assert_eq!(dt_mapped.name(), Some("ts"));
+
+        let td = super::TimedeltaIndex::new(vec![5, 10]).set_name("delta");
+        assert_eq!(
+            td.map(|label| match label {
+                super::IndexLabel::Timedelta64(nanos) => super::IndexLabel::Int64(*nanos * 2),
+                other => other.clone(),
+            }),
+            td.to_flat_index().map(|label| match label {
+                super::IndexLabel::Timedelta64(nanos) => super::IndexLabel::Int64(*nanos * 2),
+                other => other.clone(),
+            })
+        );
+
+        use fp_types::{Period, PeriodFreq};
+        let pi = super::PeriodIndex::new(vec![Period::new(1, PeriodFreq::Monthly)]);
+        assert_eq!(
+            pi.map(|label| super::IndexLabel::Utf8(format!("p:{label}"))),
+            pi.to_flat_index()
+                .map(|label| super::IndexLabel::Utf8(format!("p:{label}")))
+        );
+
+        let range = super::RangeIndex::new(1, 4, 1).unwrap();
+        assert_eq!(
+            range.map(|label| match label {
+                super::IndexLabel::Int64(v) => super::IndexLabel::Int64(*v + 10),
+                other => other.clone(),
+            }),
+            range.to_flat_index().map(|label| match label {
+                super::IndexLabel::Int64(v) => super::IndexLabel::Int64(*v + 10),
+                other => other.clone(),
+            })
+        );
+
+        let cat = super::CategoricalIndex::from_values(vec!["a".to_owned()], false);
+        assert_eq!(
+            cat.map(|label| super::IndexLabel::Utf8(label.to_string().to_uppercase())),
+            cat.to_flat_index()
+                .map(|label| super::IndexLabel::Utf8(label.to_string().to_uppercase()))
         );
     }
 
