@@ -3073,6 +3073,25 @@ impl DatetimeIndex {
             })
     }
 
+    /// Reindex against `target`, matching
+    /// `pd.DatetimeIndex.reindex(target)`. Returns
+    /// `(target.clone(), indexer)` where indexer is the per-target
+    /// position from get_indexer (with -1 for missing).
+    #[must_use]
+    pub fn reindex(&self, target: &Self) -> (Self, Vec<isize>) {
+        let labels: Vec<i64> = target
+            .index
+            .labels()
+            .iter()
+            .filter_map(|label| match label {
+                IndexLabel::Datetime64(n) => Some(*n),
+                _ => None,
+            })
+            .collect();
+        let indexer = self.get_indexer(&labels);
+        (target.clone(), indexer)
+    }
+
     /// Locate every position matching each target, matching
     /// `pd.DatetimeIndex.get_indexer_non_unique(targets)`. Returns
     /// `(positions, missing)` where `positions` lists every source
@@ -4135,6 +4154,23 @@ impl TimedeltaIndex {
             .ok_or_else(|| {
                 IndexError::InvalidArgument(format!("get_loc: {value} not in TimedeltaIndex"))
             })
+    }
+
+    /// Reindex against `target`, matching
+    /// `pd.TimedeltaIndex.reindex(target)`.
+    #[must_use]
+    pub fn reindex(&self, target: &Self) -> (Self, Vec<isize>) {
+        let labels: Vec<i64> = target
+            .index
+            .labels()
+            .iter()
+            .filter_map(|label| match label {
+                IndexLabel::Timedelta64(n) => Some(*n),
+                _ => None,
+            })
+            .collect();
+        let indexer = self.get_indexer(&labels);
+        (target.clone(), indexer)
     }
 
     /// Locate every position matching each target, matching
@@ -5415,6 +5451,14 @@ impl PeriodIndex {
             })
     }
 
+    /// Reindex against `target`, matching
+    /// `pd.PeriodIndex.reindex(target)`.
+    #[must_use]
+    pub fn reindex(&self, target: &Self) -> (Self, Vec<isize>) {
+        let indexer = self.get_indexer(target.values());
+        (target.clone(), indexer)
+    }
+
     /// Locate every position matching each target, matching
     /// `pd.PeriodIndex.get_indexer_non_unique(targets)`.
     #[must_use]
@@ -6412,6 +6456,14 @@ impl RangeIndex {
             )));
         }
         Ok(pos as usize)
+    }
+
+    /// Reindex against `target`, matching `pd.RangeIndex.reindex(target)`.
+    /// Returns `(target.clone(), indexer)`.
+    #[must_use]
+    pub fn reindex(&self, target: &Self) -> (Self, Vec<isize>) {
+        let indexer = self.get_indexer(&target.values());
+        (target.clone(), indexer)
     }
 
     /// Locate every position matching each target, matching
@@ -15211,6 +15263,36 @@ mod tests {
         let desc = super::RangeIndex::new(10, 0, -2).unwrap();
         assert!(desc.slice_locs(2, 6).is_err());
         Ok(())
+    }
+
+    #[test]
+    fn typed_index_variants_reindex_match_pandas_qm3nq() {
+        const NS: i64 = 1_000_000_000;
+        let a = 1_704_067_200_i64 * NS;
+        let b = 1_705_276_800_i64 * NS;
+        let dt = super::DatetimeIndex::new(vec![a, b]);
+        let target = super::DatetimeIndex::new(vec![b, a, 0]);
+        let (out, indexer) = dt.reindex(&target);
+        assert_eq!(out.values(), target.values());
+        assert_eq!(indexer, vec![1, 0, -1]);
+
+        let td = super::TimedeltaIndex::new(vec![100_i64, 200]);
+        let td_target = super::TimedeltaIndex::new(vec![200_i64, 999]);
+        let (_, td_indexer) = td.reindex(&td_target);
+        assert_eq!(td_indexer, vec![1, -1]);
+
+        use fp_types::{Period, PeriodFreq};
+        let p1 = Period::new(10, PeriodFreq::Monthly);
+        let p2 = Period::new(11, PeriodFreq::Monthly);
+        let pi = super::PeriodIndex::new(vec![p1, p2]);
+        let pi_target = super::PeriodIndex::new(vec![p2, Period::new(99, PeriodFreq::Monthly)]);
+        let (_, pi_indexer) = pi.reindex(&pi_target);
+        assert_eq!(pi_indexer, vec![1, -1]);
+
+        let r = super::RangeIndex::new(0, 5, 1).unwrap();
+        let r_target = super::RangeIndex::new(2, 6, 1).unwrap();
+        let (_, r_indexer) = r.reindex(&r_target);
+        assert_eq!(r_indexer, vec![2, 3, 4, -1]);
     }
 
     #[test]
