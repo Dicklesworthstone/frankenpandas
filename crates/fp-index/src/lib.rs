@@ -9771,6 +9771,8 @@ pub fn multi_way_align(indexes: &[&Index]) -> MultiAlignmentPlan {
 pub enum TimedeltaRangeError {
     #[error("must specify at least two of start, end, periods")]
     InsufficientParams,
+    #[error("must specify no more than two of start, end, periods")]
+    TooManyParams,
     #[error("freq must be positive")]
     NonPositiveFreq,
     #[error("cannot compute range: end < start with positive freq")]
@@ -9779,7 +9781,7 @@ pub enum TimedeltaRangeError {
 
 /// Create a TimedeltaIndex with evenly spaced values.
 ///
-/// Analogous to `pd.timedelta_range()`. Must specify at least two of:
+/// Analogous to `pd.timedelta_range()`. Must specify exactly two of:
 /// start, end, periods. Frequency defaults to 1 day (86_400_000_000_000 ns).
 ///
 /// # Examples
@@ -9820,15 +9822,7 @@ pub fn timedelta_range(
             let s = e - (p.saturating_sub(1) as i64) * freq;
             (s, p)
         }
-        (Some(s), Some(_e), Some(p)) => {
-            if p == 0 {
-                (s, 0)
-            } else if p == 1 {
-                (s, 1)
-            } else {
-                (s, p)
-            }
-        }
+        (Some(_), Some(_), Some(_)) => return Err(TimedeltaRangeError::TooManyParams),
         _ => return Err(TimedeltaRangeError::InsufficientParams),
     };
 
@@ -10248,7 +10242,7 @@ pub fn infer_freq_from_nanos(values: &[i64]) -> Result<Option<String>, DateRange
 
 /// Create a DatetimeIndex with evenly spaced values.
 ///
-/// Analogous to `pd.date_range()`. Must specify at least two of:
+/// Analogous to `pd.date_range()`. Must specify exactly two of:
 /// start, end, periods. Frequency defaults to 1 day.
 ///
 /// # Examples
@@ -10294,15 +10288,7 @@ pub fn date_range(
             let s = e.checked_sub(offset).ok_or(DateRangeError::InvalidRange)?;
             (s, p)
         }
-        (Some(s), Some(_e), Some(p)) => {
-            if p == 0 {
-                (s, 0)
-            } else if p == 1 {
-                (s, 1)
-            } else {
-                (s, p)
-            }
-        }
+        (Some(_), Some(_), Some(_)) => return Err(DateRangeError::TooManyParams),
         _ => return Err(DateRangeError::InsufficientParams),
     };
 
@@ -12479,8 +12465,9 @@ mod tests {
 
     use super::{
         CategoricalIndex, DateOffset, DateRangeError, DatetimeIndex, Index, IndexLabel, MultiIndex,
-        PeriodFields, PeriodIndex, RangeIndex, TimedeltaIndex, align_union, apply_date_offset,
-        bdate_range, date_range, infer_freq_from_timestamps, validate_alignment_plan,
+        PeriodFields, PeriodIndex, RangeIndex, TimedeltaIndex, TimedeltaRangeError, align_union,
+        apply_date_offset, bdate_range, date_range, infer_freq_from_timestamps, timedelta_range,
+        validate_alignment_plan,
     };
 
     /// Regression lock for br-frankenpandas-i3t8. `Index` must stay
@@ -12520,6 +12507,32 @@ mod tests {
             ]
         );
         assert_eq!(idx.name(), Some("biz"));
+    }
+
+    #[test]
+    fn timedelta_range_rejects_over_specified_parameters() {
+        let err = timedelta_range(
+            Some(Timedelta::NANOS_PER_DAY),
+            Some(3 * Timedelta::NANOS_PER_DAY),
+            Some(2),
+            Timedelta::NANOS_PER_DAY,
+            None,
+        )
+        .expect_err("start + end + periods with explicit freq must fail closed");
+        assert!(matches!(err, TimedeltaRangeError::TooManyParams));
+    }
+
+    #[test]
+    fn date_range_rejects_over_specified_parameters() {
+        let err = date_range(
+            Some("2020-01-01"),
+            Some("2020-01-03"),
+            Some(2),
+            Timedelta::NANOS_PER_DAY,
+            None,
+        )
+        .expect_err("start + end + periods with explicit freq must fail closed");
+        assert!(matches!(err, DateRangeError::TooManyParams));
     }
 
     #[test]

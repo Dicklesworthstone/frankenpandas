@@ -10,7 +10,7 @@ use std::{
 };
 
 use fp_index::{
-    DateOffset, Index, IndexLabel, apply_date_offset, bdate_range, date_range,
+    DateOffset, DateRangeError, Index, IndexLabel, apply_date_offset, bdate_range, date_range,
     infer_freq_from_timestamps,
 };
 use fp_types::Timedelta;
@@ -178,9 +178,16 @@ print(json.dumps({
             format!("write pandas {pandas_function_for_err} oracle payload failed: {err}")
         })?;
     if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("AttributeError: module 'pandas' has no attribute") {
+            eprintln!(
+                "live pandas unavailable; skipping tseries conformance test {case_id}: {stderr}"
+            );
+            return Ok(None);
+        }
         return Err(format!(
             "pandas {pandas_function} oracle failed for {case_id}: {}",
-            String::from_utf8_lossy(&output.stderr)
+            stderr
         ));
     }
 
@@ -463,6 +470,57 @@ fn assert_date_range_matches_pandas(case: DateRangeCase<'_>) -> Result<(), Strin
     Ok(())
 }
 
+fn assert_date_range_rejects_like_pandas<F>(
+    case: DateRangeCase<'_>,
+    expected_pandas_error: &str,
+    matches_fp_error: F,
+) -> Result<(), String>
+where
+    F: FnOnce(&DateRangeError) -> bool,
+{
+    let config = HarnessConfig::default_paths();
+    match pandas_date_range_or_skip(&config, case) {
+        Ok(None) => return Ok(()),
+        Ok(Some(expected)) => {
+            return Err(format!(
+                "pandas date_range unexpectedly accepted {} with values {:?}",
+                case.case_id, expected.values
+            ));
+        }
+        Err(err) if err.contains(expected_pandas_error) => {}
+        Err(err) => {
+            return Err(format!(
+                "pandas date_range rejected {} with unexpected error: {err}",
+                case.case_id
+            ));
+        }
+    }
+
+    let actual = date_range(
+        case.start,
+        case.end,
+        case.periods,
+        case.rust_freq_nanos,
+        case.name,
+    );
+    let actual_err = match actual {
+        Ok(index) => {
+            return Err(format!(
+                "fp date_range unexpectedly accepted {} with labels {:?}",
+                case.case_id,
+                index.labels()
+            ));
+        }
+        Err(err) => err,
+    };
+    assert!(
+        matches_fp_error(&actual_err),
+        "pandas.tseries date_range error parity drift for {}: fp returned {actual_err:?}",
+        case.case_id
+    );
+    Ok(())
+}
+
 fn assert_bdate_range_matches_pandas(case: BusinessDateRangeCase<'_>) -> Result<(), String> {
     let config = HarnessConfig::default_paths();
     let Some(expected) = pandas_bdate_range_or_skip(&config, case)? else {
@@ -595,6 +653,23 @@ fn conformance_tseries_date_range_preserves_name() -> Result<(), String> {
         rust_freq_nanos: Timedelta::NANOS_PER_DAY,
         name: Some("when"),
     })
+}
+
+#[test]
+fn conformance_tseries_date_range_rejects_over_specified_params() -> Result<(), String> {
+    assert_date_range_rejects_like_pandas(
+        DateRangeCase {
+            case_id: "tseries_date_range_rejects_over_specified_params",
+            start: Some("2020-01-01"),
+            end: Some("2020-01-03"),
+            periods: Some(2),
+            pandas_freq: "D",
+            rust_freq_nanos: Timedelta::NANOS_PER_DAY,
+            name: None,
+        },
+        "ValueError",
+        |err| matches!(err, DateRangeError::TooManyParams),
+    )
 }
 
 #[test]
