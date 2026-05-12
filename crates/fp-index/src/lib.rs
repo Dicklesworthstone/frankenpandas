@@ -9867,19 +9867,27 @@ fn parse_datetime_to_nanos(s: &str) -> Result<i64, DateRangeError> {
 
     // Try full datetime format
     if let Ok(dt) = NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%d %H:%M:%S") {
-        return Ok(dt.and_utc().timestamp_nanos_opt().unwrap_or(i64::MIN));
+        return datetime_to_nanos(dt);
     }
     if let Ok(dt) = NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%dT%H:%M:%S") {
-        return Ok(dt.and_utc().timestamp_nanos_opt().unwrap_or(i64::MIN));
+        return datetime_to_nanos(dt);
     }
 
     // Try date-only format (midnight)
     if let Ok(date) = chrono::NaiveDate::parse_from_str(trimmed, "%Y-%m-%d") {
-        let dt = date.and_hms_opt(0, 0, 0).unwrap();
-        return Ok(dt.and_utc().timestamp_nanos_opt().unwrap_or(i64::MIN));
+        let dt = date
+            .and_hms_opt(0, 0, 0)
+            .ok_or(DateRangeError::InvalidRange)?;
+        return datetime_to_nanos(dt);
     }
 
     Err(DateRangeError::ParseError(trimmed.to_owned()))
+}
+
+fn datetime_to_nanos(dt: chrono::NaiveDateTime) -> Result<i64, DateRangeError> {
+    dt.and_utc()
+        .timestamp_nanos_opt()
+        .ok_or(DateRangeError::InvalidRange)
 }
 
 fn datetime_nanos_to_date(nanos: i64) -> Result<chrono::NaiveDate, DateRangeError> {
@@ -10276,12 +10284,14 @@ pub fn date_range(
             if e < s {
                 return Err(DateRangeError::InvalidRange);
             }
-            let n = ((e - s) / freq + 1) as usize;
+            let span = e.checked_sub(s).ok_or(DateRangeError::InvalidRange)?;
+            let n = (span / freq + 1) as usize;
             (s, n)
         }
         (Some(s), None, Some(p)) => (s, p),
         (None, Some(e), Some(p)) => {
-            let s = e - (p.saturating_sub(1) as i64) * freq;
+            let offset = checked_date_range_offset(p.saturating_sub(1), freq)?;
+            let s = e.checked_sub(offset).ok_or(DateRangeError::InvalidRange)?;
             (s, p)
         }
         (Some(s), Some(_e), Some(p)) => {
@@ -10296,12 +10306,29 @@ pub fn date_range(
         _ => return Err(DateRangeError::InsufficientParams),
     };
 
-    let nanos: Vec<i64> = (0..count).map(|i| start_val + (i as i64) * freq).collect();
+    let last_offset = checked_date_range_offset(count.saturating_sub(1), freq)?;
+    start_val
+        .checked_add(last_offset)
+        .ok_or(DateRangeError::InvalidRange)?;
+
+    let nanos: Vec<i64> = (0..count)
+        .map(|i| {
+            let offset = checked_date_range_offset(i, freq)?;
+            start_val
+                .checked_add(offset)
+                .ok_or(DateRangeError::InvalidRange)
+        })
+        .collect::<Result<_, _>>()?;
     let mut idx = Index::from_datetime64(nanos);
     if let Some(n) = name {
         idx = idx.set_name(n);
     }
     Ok(idx)
+}
+
+fn checked_date_range_offset(steps: usize, freq: i64) -> Result<i64, DateRangeError> {
+    let steps = i64::try_from(steps).map_err(|_| DateRangeError::InvalidRange)?;
+    steps.checked_mul(freq).ok_or(DateRangeError::InvalidRange)
 }
 
 /// Create a DatetimeIndex with default weekday-only business-day values.
@@ -12451,9 +12478,9 @@ mod tests {
     use fp_types::{Period, PeriodFreq, Scalar, Timedelta};
 
     use super::{
-        CategoricalIndex, DateOffset, DatetimeIndex, Index, IndexLabel, MultiIndex, PeriodFields,
-        PeriodIndex, RangeIndex, TimedeltaIndex, align_union, apply_date_offset, bdate_range,
-        infer_freq_from_timestamps, validate_alignment_plan,
+        CategoricalIndex, DateOffset, DateRangeError, DatetimeIndex, Index, IndexLabel, MultiIndex,
+        PeriodFields, PeriodIndex, RangeIndex, TimedeltaIndex, align_union, apply_date_offset,
+        bdate_range, date_range, infer_freq_from_timestamps, validate_alignment_plan,
     };
 
     /// Regression lock for br-frankenpandas-i3t8. `Index` must stay
@@ -12493,6 +12520,45 @@ mod tests {
             ]
         );
         assert_eq!(idx.name(), Some("biz"));
+    }
+
+    #[test]
+    fn date_range_rejects_generated_timestamp_overflow() {
+        let err = date_range(
+            Some("2262-04-11 23:47:16"),
+            None,
+            Some(3),
+            Timedelta::NANOS_PER_SEC,
+            None,
+        )
+        .expect_err("overflow past i64::MAX nanos must fail closed");
+        assert!(matches!(err, DateRangeError::InvalidRange));
+    }
+
+    #[test]
+    fn date_range_rejects_backfilled_timestamp_underflow() {
+        let err = date_range(
+            None,
+            Some("1677-09-21 00:12:44"),
+            Some(3),
+            Timedelta::NANOS_PER_SEC,
+            None,
+        )
+        .expect_err("underflow before i64::MIN nanos must fail closed");
+        assert!(matches!(err, DateRangeError::InvalidRange));
+    }
+
+    #[test]
+    fn date_range_rejects_out_of_bounds_timestamp_parse() {
+        let err = date_range(
+            Some("2263-01-01"),
+            None,
+            Some(1),
+            Timedelta::NANOS_PER_DAY,
+            None,
+        )
+        .expect_err("out-of-bounds timestamps must not be coerced to i64::MIN");
+        assert!(matches!(err, DateRangeError::InvalidRange));
     }
 
     #[test]
