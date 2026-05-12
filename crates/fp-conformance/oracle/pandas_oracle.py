@@ -1635,6 +1635,34 @@ def op_series_filter(pd, payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def op_dataframe_filter(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    frame_payload = payload.get("frame")
+    if frame_payload is None:
+        raise OracleError("dataframe_filter requires frame payload")
+
+    axis = payload.get("filter_axis", 1)
+    if axis not in (0, 1):
+        raise OracleError(f"dataframe_filter filter_axis must be 0 or 1 (got {axis!r})")
+
+    items_raw = payload.get("filter_items")
+    like = payload.get("filter_like")
+    regex = payload.get("filter_regex")
+
+    items = None
+    if items_raw is not None:
+        if not isinstance(items_raw, list):
+            raise OracleError("dataframe_filter filter_items must be a list when provided")
+        items = [str(item) for item in items_raw]
+
+    frame = dataframe_from_json(pd, frame_payload)
+    try:
+        out = frame.filter(items=items, like=like, regex=regex, axis=axis)
+    except Exception as exc:
+        raise OracleError(f"dataframe_filter failed: {exc}") from exc
+
+    return {"expected_frame": dataframe_to_json(out)}
+
+
 def op_series_head(pd, payload: dict[str, Any]) -> dict[str, Any]:
     left = payload.get("left")
     head_n = payload.get("head_n")
@@ -6113,6 +6141,8 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_series_between_time(pd, payload)
     if op == "series_filter":
         return op_series_filter(pd, payload)
+    if op in {"dataframe_filter", "data_frame_filter"}:
+        return op_dataframe_filter(pd, payload)
     if op == "series_head":
         return op_series_head(pd, payload)
     if op == "series_tail":

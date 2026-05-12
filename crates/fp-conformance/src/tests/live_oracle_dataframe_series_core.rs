@@ -9025,6 +9025,321 @@ fn live_oracle_series_filter_mostly_true() {
 }
 
 #[test]
+fn live_oracle_dataframe_filter_axis1_items() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DFILTER-AXIS1",
+        "case_id": "dataframe_filter_axis1_items",
+        "mode": "strict",
+        "operation": "dataframe_filter",
+        "oracle_source": "live_legacy_pandas",
+        "filter_axis": 1,
+        "filter_items": ["gamma", "missing", "alpha", "gamma"],
+        "frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 }
+            ],
+            "column_order": ["alpha", "beta", "gamma"],
+            "columns": {
+                "alpha": [
+                    { "kind": "int64", "value": 10 },
+                    { "kind": "int64", "value": 20 }
+                ],
+                "beta": [
+                    { "kind": "int64", "value": 30 },
+                    { "kind": "int64", "value": 40 }
+                ],
+                "gamma": [
+                    { "kind": "int64", "value": 50 },
+                    { "kind": "int64", "value": 60 }
+                ]
+            }
+        },
+        "expected_frame": {
+            "index": [
+                { "kind": "int64", "value": 0 },
+                { "kind": "int64", "value": 1 }
+            ],
+            "column_order": ["gamma", "alpha"],
+            "columns": {
+                "gamma": [
+                    { "kind": "int64", "value": 50 },
+                    { "kind": "int64", "value": 60 }
+                ],
+                "alpha": [
+                    { "kind": "int64", "value": 10 },
+                    { "kind": "int64", "value": 20 }
+                ]
+            }
+        }
+    }))
+    .expect("fixture");
+
+    let actual = super::execute_dataframe_fixture_operation(&fixture).expect("dataframe filter");
+    let expected_fixture = fixture.expected_frame.as_ref().expect("expected frame");
+    super::compare_dataframe_expected(&actual, expected_fixture).expect("fixture parity");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!("live pandas unavailable; skipping dataframe_filter axis=1 test: {message}");
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Frame(_)),
+        "expected live oracle frame payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Frame(expected) = expected else {
+        return;
+    };
+
+    super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
+
+    let diff = super::run_differential_fixture(
+        &cfg,
+        &fixture,
+        &super::SuiteOptions {
+            packet_filter: None,
+            oracle_mode: super::OracleMode::LiveLegacyPandas,
+        },
+    )
+    .expect("differential report");
+    assert_eq!(diff.status, super::CaseStatus::Pass);
+    assert!(
+        diff.drift_records.is_empty(),
+        "expected no drift for dataframe filter axis=1 parity: {diff:?}"
+    );
+}
+
+#[test]
+fn live_oracle_dataframe_filter_axis0_items() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DFILTER-AXIS0-ITEMS",
+        "case_id": "dataframe_filter_axis0_items",
+        "mode": "strict",
+        "operation": "dataframe_filter",
+        "oracle_source": "live_legacy_pandas",
+        "filter_axis": 0,
+        "filter_items": ["row_c", "missing", "row_a", "row_c"],
+        "frame": {
+            "index": [
+                { "kind": "utf8", "value": "row_a" },
+                { "kind": "utf8", "value": "row_b" },
+                { "kind": "utf8", "value": "row_c" }
+            ],
+            "column_order": ["alpha", "beta"],
+            "columns": {
+                "alpha": [
+                    { "kind": "int64", "value": 10 },
+                    { "kind": "int64", "value": 20 },
+                    { "kind": "int64", "value": 30 }
+                ],
+                "beta": [
+                    { "kind": "int64", "value": 100 },
+                    { "kind": "int64", "value": 200 },
+                    { "kind": "int64", "value": 300 }
+                ]
+            }
+        },
+        "expected_frame": {
+            "index": [
+                { "kind": "utf8", "value": "row_c" },
+                { "kind": "utf8", "value": "row_a" }
+            ],
+            "column_order": ["alpha", "beta"],
+            "columns": {
+                "alpha": [
+                    { "kind": "int64", "value": 30 },
+                    { "kind": "int64", "value": 10 }
+                ],
+                "beta": [
+                    { "kind": "int64", "value": 300 },
+                    { "kind": "int64", "value": 100 }
+                ]
+            }
+        }
+    }))
+    .expect("fixture");
+
+    let actual = super::execute_dataframe_fixture_operation(&fixture).expect("dataframe filter");
+    let expected_fixture = fixture.expected_frame.as_ref().expect("expected frame");
+    super::compare_dataframe_expected(&actual, expected_fixture).expect("fixture parity");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!(
+            "live pandas unavailable; skipping dataframe_filter axis=0 items test: {message}"
+        );
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Frame(_)),
+        "expected live oracle frame payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Frame(expected) = expected else {
+        return;
+    };
+
+    super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_dataframe_filter_axis0_regex() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DFILTER-AXIS0-REGEX",
+        "case_id": "dataframe_filter_axis0_regex",
+        "mode": "strict",
+        "operation": "dataframe_filter",
+        "oracle_source": "live_legacy_pandas",
+        "filter_axis": 0,
+        "filter_regex": "^row_[ac]$",
+        "frame": {
+            "index": [
+                { "kind": "utf8", "value": "row_a" },
+                { "kind": "utf8", "value": "row_b" },
+                { "kind": "utf8", "value": "other_c" },
+                { "kind": "utf8", "value": "row_c" }
+            ],
+            "column_order": ["alpha", "beta"],
+            "columns": {
+                "alpha": [
+                    { "kind": "int64", "value": 10 },
+                    { "kind": "int64", "value": 20 },
+                    { "kind": "int64", "value": 30 },
+                    { "kind": "int64", "value": 40 }
+                ],
+                "beta": [
+                    { "kind": "int64", "value": 100 },
+                    { "kind": "int64", "value": 200 },
+                    { "kind": "int64", "value": 300 },
+                    { "kind": "int64", "value": 400 }
+                ]
+            }
+        },
+        "expected_frame": {
+            "index": [
+                { "kind": "utf8", "value": "row_a" },
+                { "kind": "utf8", "value": "row_c" }
+            ],
+            "column_order": ["alpha", "beta"],
+            "columns": {
+                "alpha": [
+                    { "kind": "int64", "value": 10 },
+                    { "kind": "int64", "value": 40 }
+                ],
+                "beta": [
+                    { "kind": "int64", "value": 100 },
+                    { "kind": "int64", "value": 400 }
+                ]
+            }
+        }
+    }))
+    .expect("fixture");
+
+    let actual = super::execute_dataframe_fixture_operation(&fixture).expect("dataframe filter");
+    let expected_fixture = fixture.expected_frame.as_ref().expect("expected frame");
+    super::compare_dataframe_expected(&actual, expected_fixture).expect("fixture parity");
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!(
+            "live pandas unavailable; skipping dataframe_filter axis=0 regex test: {message}"
+        );
+        return;
+    }
+    let expected = expected_result.expect("live oracle expected");
+    assert!(
+        matches!(&expected, super::ResolvedExpected::Frame(_)),
+        "expected live oracle frame payload, got {expected:?}"
+    );
+    let super::ResolvedExpected::Frame(expected) = expected else {
+        return;
+    };
+
+    super::compare_dataframe_expected(&actual, &expected).expect("pandas parity");
+}
+
+#[test]
+fn live_oracle_dataframe_filter_axis0_items_duplicate_index_rejects() {
+    let mut cfg = super::HarnessConfig::default_paths();
+    cfg.allow_system_pandas_fallback = false;
+
+    let fixture: super::PacketFixture = serde_json::from_value(serde_json::json!({
+        "packet_id": "FP-P2D-LIVE-DFILTER-AXIS0-DUP-INDEX",
+        "case_id": "dataframe_filter_axis0_items_duplicate_index_rejects",
+        "mode": "strict",
+        "operation": "dataframe_filter",
+        "oracle_source": "live_legacy_pandas",
+        "filter_axis": 0,
+        "filter_items": ["dup"],
+        "expected_error_contains": "duplicate labels",
+        "frame": {
+            "index": [
+                { "kind": "utf8", "value": "dup" },
+                { "kind": "utf8", "value": "dup" },
+                { "kind": "utf8", "value": "solo" }
+            ],
+            "column_order": ["alpha"],
+            "columns": {
+                "alpha": [
+                    { "kind": "int64", "value": 10 },
+                    { "kind": "int64", "value": 20 },
+                    { "kind": "int64", "value": 30 }
+                ]
+            }
+        }
+    }))
+    .expect("fixture");
+
+    let err = super::execute_dataframe_fixture_operation(&fixture)
+        .expect_err("duplicate row labels should reject item filtering");
+    assert!(
+        err.contains("duplicate labels"),
+        "expected duplicate-label rejection, got {err}"
+    );
+
+    let expected_result = super::capture_live_oracle_expected(&cfg, &fixture);
+    if let Err(super::HarnessError::OracleUnavailable(message)) = &expected_result {
+        eprintln!(
+            "live pandas unavailable; skipping dataframe_filter duplicate-index oracle test: {message}"
+        );
+        return;
+    }
+    assert!(
+        matches!(
+            expected_result.expect("live oracle expected"),
+            super::ResolvedExpected::ErrorAny
+        ),
+        "expected live oracle duplicate-index rejection"
+    );
+
+    let diff = super::run_differential_fixture(
+        &cfg,
+        &fixture,
+        &super::SuiteOptions {
+            packet_filter: None,
+            oracle_mode: super::OracleMode::LiveLegacyPandas,
+        },
+    )
+    .expect("differential report");
+    assert_eq!(diff.status, super::CaseStatus::Pass);
+    assert!(
+        diff.drift_records.is_empty(),
+        "expected no drift for dataframe filter duplicate-index parity: {diff:?}"
+    );
+}
+
+#[test]
 fn live_oracle_series_filter_all_true() {
     let mut cfg = super::HarnessConfig::default_paths();
     cfg.allow_system_pandas_fallback = false;

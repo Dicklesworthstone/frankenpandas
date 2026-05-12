@@ -903,6 +903,8 @@ pub enum FixtureOperation {
     DataFrameIloc,
     #[serde(rename = "dataframe_take", alias = "data_frame_take")]
     DataFrameTake,
+    #[serde(rename = "dataframe_filter", alias = "data_frame_filter")]
+    DataFrameFilter,
     #[serde(rename = "dataframe_groupby_sum", alias = "data_frame_groupby_sum")]
     DataFrameGroupBySum,
     #[serde(
@@ -1495,6 +1497,7 @@ impl FixtureOperation {
             Self::DataFrameIdentity => "dataframe_identity",
             Self::DataFrameIloc => "dataframe_iloc",
             Self::DataFrameTake => "dataframe_take",
+            Self::DataFrameFilter => "dataframe_filter",
             Self::DataFrameGroupBySum => "dataframe_groupby_sum",
             Self::DataFrameGroupByAggMulti => "dataframe_groupby_agg_multi",
             Self::DataFrameGroupByIdxMin => "dataframe_groupby_idxmin",
@@ -2021,6 +2024,14 @@ pub struct PacketFixture {
     pub iloc_positions: Option<Vec<i64>>,
     #[serde(default)]
     pub take_indices: Option<Vec<i64>>,
+    #[serde(default)]
+    pub filter_items: Option<Vec<String>>,
+    #[serde(default)]
+    pub filter_like: Option<String>,
+    #[serde(default)]
+    pub filter_regex: Option<String>,
+    #[serde(default)]
+    pub filter_axis: Option<usize>,
     #[serde(default)]
     pub repeat_n: Option<i64>,
     #[serde(default)]
@@ -2597,6 +2608,7 @@ fn compat_contract_rows_for_operation(operation: FixtureOperation) -> &'static [
         | FixtureOperation::DataFrameIdentity
         | FixtureOperation::DataFrameIloc
         | FixtureOperation::DataFrameTake
+        | FixtureOperation::DataFrameFilter
         | FixtureOperation::DataFrameGroupBySum
         | FixtureOperation::DataFrameGroupByAggMulti
         | FixtureOperation::DataFrameGroupByIdxMin
@@ -3417,6 +3429,14 @@ struct OracleRequest {
     iloc_positions: Option<Vec<i64>>,
     #[serde(default)]
     take_indices: Option<Vec<i64>>,
+    #[serde(default)]
+    filter_items: Option<Vec<String>>,
+    #[serde(default)]
+    filter_like: Option<String>,
+    #[serde(default)]
+    filter_regex: Option<String>,
+    #[serde(default)]
+    filter_axis: Option<usize>,
     #[serde(default)]
     repeat_n: Option<i64>,
     #[serde(default)]
@@ -11359,6 +11379,31 @@ fn run_fixture_operation(
                 ),
             }
         }
+        FixtureOperation::DataFrameFilter => {
+            let actual = execute_dataframe_fixture_operation(fixture);
+            match expected {
+                ResolvedExpected::Frame(frame) => compare_dataframe_expected(&actual?, &frame),
+                ResolvedExpected::ErrorContains(substr) => match actual {
+                    Err(message) if message.contains(&substr) => Ok(()),
+                    Err(message) => Err(format!(
+                        "expected dataframe_filter error containing '{substr}', got '{message}'"
+                    )),
+                    Ok(_) => Err(format!(
+                        "expected dataframe_filter to fail with error containing '{substr}'"
+                    )),
+                },
+                ResolvedExpected::ErrorAny => {
+                    if actual.is_err() {
+                        Ok(())
+                    } else {
+                        Err("expected dataframe_filter to fail but operation succeeded".to_owned())
+                    }
+                }
+                _ => Err(
+                    "expected_frame or expected_error is required for dataframe_filter".to_owned(),
+                ),
+            }
+        }
         FixtureOperation::DataFrameXs => {
             let actual = execute_dataframe_fixture_operation(fixture);
             match expected {
@@ -12615,6 +12660,7 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
         | FixtureOperation::SeriesStrGetDummies
         | FixtureOperation::DataFrameIloc
         | FixtureOperation::DataFrameTake
+        | FixtureOperation::DataFrameFilter
         | FixtureOperation::DataFrameXs
         | FixtureOperation::DataFrameGroupBySum
         | FixtureOperation::DataFrameGroupByAggMulti
@@ -12921,6 +12967,10 @@ fn capture_live_oracle_expected(
         loc_labels: fixture.loc_labels.clone(),
         iloc_positions: fixture.iloc_positions.clone(),
         take_indices: fixture.take_indices.clone(),
+        filter_items: fixture.filter_items.clone(),
+        filter_like: fixture.filter_like.clone(),
+        filter_regex: fixture.filter_regex.clone(),
+        filter_axis: fixture.filter_axis,
         repeat_n: fixture.repeat_n,
         repeat_counts: fixture.repeat_counts.clone(),
         group_name: fixture.group_name.clone(),
@@ -13295,6 +13345,7 @@ fn capture_live_oracle_expected(
         | FixtureOperation::SeriesStrGetDummies
         | FixtureOperation::DataFrameIloc
         | FixtureOperation::DataFrameTake
+        | FixtureOperation::DataFrameFilter
         | FixtureOperation::DataFrameXs
         | FixtureOperation::DataFrameGroupBySum
         | FixtureOperation::DataFrameGroupByAggMulti
@@ -14240,6 +14291,15 @@ fn resolve_take_axis(fixture: &PacketFixture) -> Result<usize, String> {
         axis @ (0 | 1) => Ok(axis),
         axis => Err(format!(
             "take_axis must be 0 or 1 for dataframe_take (got {axis})"
+        )),
+    }
+}
+
+fn resolve_filter_axis(fixture: &PacketFixture) -> Result<usize, String> {
+    match fixture.filter_axis.unwrap_or(1) {
+        axis @ (0 | 1) => Ok(axis),
+        axis => Err(format!(
+            "filter_axis must be 0 or 1 for dataframe_filter (got {axis})"
         )),
     }
 }
@@ -15816,6 +15876,22 @@ fn execute_dataframe_fixture_operation(fixture: &PacketFixture) -> Result<DataFr
             let indices = require_take_indices(fixture)?;
             let axis = resolve_take_axis(fixture)?;
             frame.take(indices, axis).map_err(|err| err.to_string())
+        }
+        FixtureOperation::DataFrameFilter => {
+            let frame = build_dataframe(require_frame(fixture)?)
+                .map_err(|err| format!("frame build failed: {err}"))?;
+            let item_refs = fixture
+                .filter_items
+                .as_ref()
+                .map(|items| items.iter().map(String::as_str).collect::<Vec<_>>());
+            frame
+                .filter_axis(
+                    item_refs.as_deref(),
+                    fixture.filter_like.as_deref(),
+                    fixture.filter_regex.as_deref(),
+                    resolve_filter_axis(fixture)?,
+                )
+                .map_err(|err| err.to_string())
         }
         FixtureOperation::DataFrameLoc => {
             let frame = build_dataframe(require_frame(fixture)?)
@@ -21799,6 +21875,7 @@ fn execute_and_compare_differential(
         | FixtureOperation::DataFrameGroupByResampleCount
         | FixtureOperation::DataFrameGroupByResampleFirst
         | FixtureOperation::DataFrameGroupByResampleLast
+        | FixtureOperation::DataFrameFilter
         | FixtureOperation::DataFrameCombineFirst => {
             let actual = match fixture.operation {
                 FixtureOperation::DataFrameGroupByRollingMean
