@@ -124,10 +124,86 @@ pub enum FrameError {
     Index(#[from] IndexError),
 }
 
-fn plotting_deferred(method: &str) -> FrameError {
-    FrameError::CompatibilityRejected(format!(
-        "{method}: plotting is in scope but deferred; planned integration target is plotters or charming"
-    ))
+/// Logical plot kind requested by a pandas-style plotting hook.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PlotKind {
+    Line,
+    Histogram,
+    Box,
+}
+
+/// One logical series ready for a future plotting backend.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlotSeriesSpec {
+    pub name: String,
+    pub dtype: DType,
+    pub index: Vec<IndexLabel>,
+    pub values: Vec<Scalar>,
+    pub group_key: Option<Vec<Scalar>>,
+}
+
+/// Backend-neutral plot request produced by `plot()` hooks.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlotSpec {
+    pub method: String,
+    pub kind: PlotKind,
+    pub series: Vec<PlotSeriesSpec>,
+}
+
+/// Backend-neutral histogram request produced by `hist()` hooks.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HistogramSpec {
+    pub method: String,
+    pub bins: usize,
+    pub series: Vec<PlotSeriesSpec>,
+}
+
+/// Backend-neutral boxplot request produced by `boxplot()` hooks.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BoxPlotSpec {
+    pub method: String,
+    pub series: Vec<PlotSeriesSpec>,
+}
+
+fn plot_series_spec(
+    name: impl Into<String>,
+    index: Vec<IndexLabel>,
+    dtype: DType,
+    values: Vec<Scalar>,
+    group_key: Option<Vec<Scalar>>,
+) -> PlotSeriesSpec {
+    PlotSeriesSpec {
+        name: name.into(),
+        dtype,
+        index,
+        values,
+        group_key,
+    }
+}
+
+fn scalar_plot_label(value: &Scalar) -> String {
+    match value {
+        Scalar::Null(_) => "NaN".to_owned(),
+        Scalar::Bool(value) => {
+            if *value {
+                "True".to_owned()
+            } else {
+                "False".to_owned()
+            }
+        }
+        Scalar::Int64(value) => value.to_string(),
+        Scalar::Float64(value) => value.to_string(),
+        Scalar::Utf8(value) => value.clone(),
+        Scalar::Timedelta64(value) => Timedelta::format(*value),
+    }
+}
+
+fn group_key_label(group_key: &[Scalar]) -> String {
+    group_key
+        .iter()
+        .map(scalar_plot_label)
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 fn normalize_describe_percentiles(percentiles: &[f64]) -> Result<Vec<f64>, FrameError> {
@@ -1911,20 +1987,34 @@ impl Series {
         Self::from_values(name, labels, values)
     }
 
-    /// Deferred pandas-style plotting hook.
-    ///
-    /// Matches `pd.Series.plot()` as an explicit in-scope but unimplemented
-    /// API surface.
-    pub fn plot(&self) -> Result<(), FrameError> {
-        Err(plotting_deferred("Series.plot"))
+    /// Return a backend-neutral pandas-style plotting request.
+    pub fn plot(&self) -> Result<PlotSpec, FrameError> {
+        Ok(PlotSpec {
+            method: "Series.plot".to_owned(),
+            kind: PlotKind::Line,
+            series: vec![plot_series_spec(
+                self.name(),
+                self.index.labels().to_vec(),
+                self.column.dtype(),
+                self.column.values().to_vec(),
+                None,
+            )],
+        })
     }
 
-    /// Deferred pandas-style histogram hook.
-    ///
-    /// Matches `pd.Series.hist()` as an explicit in-scope but unimplemented
-    /// API surface.
-    pub fn hist(&self) -> Result<(), FrameError> {
-        Err(plotting_deferred("Series.hist"))
+    /// Return a backend-neutral pandas-style histogram request.
+    pub fn hist(&self) -> Result<HistogramSpec, FrameError> {
+        Ok(HistogramSpec {
+            method: "Series.hist".to_owned(),
+            bins: 10,
+            series: vec![plot_series_spec(
+                self.name(),
+                self.index.labels().to_vec(),
+                self.column.dtype(),
+                self.column.values().to_vec(),
+                None,
+            )],
+        })
     }
 
     /// Pretty-print the Series as a string table.
@@ -12738,20 +12828,51 @@ impl SeriesGroupBy<'_> {
         None
     }
 
-    /// Deferred pandas-style grouped plotting hook.
-    ///
-    /// Matches `pd.Series.groupby(...).plot()` as an explicit in-scope but
-    /// unimplemented API surface.
-    pub fn plot(&self) -> Result<(), FrameError> {
-        Err(plotting_deferred("SeriesGroupBy.plot"))
+    fn plot_series_specs(&self) -> Vec<PlotSeriesSpec> {
+        let (labels, order_keys, groups) = self.build_groups();
+        let mut specs = Vec::with_capacity(order_keys.len());
+        for (label, key) in labels.into_iter().zip(order_keys) {
+            let positions = groups
+                .get(&key)
+                .expect("group key listed in order must exist");
+            let group_key = positions
+                .first()
+                .map(|&position| vec![self.by.column.values()[position].clone()]);
+            let index = positions
+                .iter()
+                .map(|&position| self.series.index.labels()[position].clone())
+                .collect();
+            let values = positions
+                .iter()
+                .map(|&position| self.series.column.values()[position].clone())
+                .collect();
+            specs.push(plot_series_spec(
+                format!("{}[{label}]", self.series.name()),
+                index,
+                self.series.column.dtype(),
+                values,
+                group_key,
+            ));
+        }
+        specs
     }
 
-    /// Deferred pandas-style grouped histogram hook.
-    ///
-    /// Matches `pd.Series.groupby(...).hist()` as an explicit in-scope but
-    /// unimplemented API surface.
-    pub fn hist(&self) -> Result<(), FrameError> {
-        Err(plotting_deferred("SeriesGroupBy.hist"))
+    /// Return a backend-neutral pandas-style grouped plotting request.
+    pub fn plot(&self) -> Result<PlotSpec, FrameError> {
+        Ok(PlotSpec {
+            method: "SeriesGroupBy.plot".to_owned(),
+            kind: PlotKind::Line,
+            series: self.plot_series_specs(),
+        })
+    }
+
+    /// Return a backend-neutral pandas-style grouped histogram request.
+    pub fn hist(&self) -> Result<HistogramSpec, FrameError> {
+        Ok(HistogramSpec {
+            method: "SeriesGroupBy.hist".to_owned(),
+            bins: 10,
+            series: self.plot_series_specs(),
+        })
     }
 
     /// Number of groups.
@@ -21726,28 +21847,49 @@ impl DataFrame {
         Self::new_with_axes(index, Some(row_multiindex), columns, column_order, None)
     }
 
-    /// Deferred pandas-style plotting hook.
-    ///
-    /// Matches `pd.DataFrame.plot()` as an explicit in-scope but unimplemented
-    /// API surface.
-    pub fn plot(&self) -> Result<(), FrameError> {
-        Err(plotting_deferred("DataFrame.plot"))
+    fn plot_series_specs(&self) -> Vec<PlotSeriesSpec> {
+        self.column_order
+            .iter()
+            .map(|name| {
+                let column = self
+                    .columns
+                    .get(name)
+                    .expect("column name listed in order must exist");
+                plot_series_spec(
+                    name.clone(),
+                    self.index.labels().to_vec(),
+                    column.dtype(),
+                    column.values().to_vec(),
+                    None,
+                )
+            })
+            .collect()
     }
 
-    /// Deferred pandas-style histogram hook.
-    ///
-    /// Matches `pd.DataFrame.hist()` as an explicit in-scope but unimplemented
-    /// API surface.
-    pub fn hist(&self) -> Result<(), FrameError> {
-        Err(plotting_deferred("DataFrame.hist"))
+    /// Return a backend-neutral pandas-style plotting request.
+    pub fn plot(&self) -> Result<PlotSpec, FrameError> {
+        Ok(PlotSpec {
+            method: "DataFrame.plot".to_owned(),
+            kind: PlotKind::Line,
+            series: self.plot_series_specs(),
+        })
     }
 
-    /// Deferred pandas-style boxplot hook.
-    ///
-    /// Matches `pd.DataFrame.boxplot()` as an explicit in-scope but
-    /// unimplemented API surface.
-    pub fn boxplot(&self) -> Result<(), FrameError> {
-        Err(plotting_deferred("DataFrame.boxplot"))
+    /// Return a backend-neutral pandas-style histogram request.
+    pub fn hist(&self) -> Result<HistogramSpec, FrameError> {
+        Ok(HistogramSpec {
+            method: "DataFrame.hist".to_owned(),
+            bins: 10,
+            series: self.plot_series_specs(),
+        })
+    }
+
+    /// Return a backend-neutral pandas-style boxplot request.
+    pub fn boxplot(&self) -> Result<BoxPlotSpec, FrameError> {
+        Ok(BoxPlotSpec {
+            method: "DataFrame.boxplot".to_owned(),
+            series: self.plot_series_specs(),
+        })
     }
 
     /// AG-05: Pre-compute N-way union index across all series first, then
@@ -34769,28 +34911,75 @@ impl DataFrameGroupBy<'_> {
         self.format_output(result_cols, col_order, labels, &group_order, &groups)
     }
 
-    /// Deferred pandas-style grouped plotting hook.
-    ///
-    /// Matches `pd.DataFrame.groupby(...).plot()` as an explicit in-scope but
-    /// unimplemented API surface.
-    pub fn plot(&self) -> Result<(), FrameError> {
-        Err(plotting_deferred("DataFrameGroupBy.plot"))
+    fn plot_series_specs(&self) -> Vec<PlotSeriesSpec> {
+        let (group_order, groups) = self.build_groups();
+        let mut specs = Vec::new();
+        for key in group_order {
+            let positions = groups
+                .get(&key)
+                .expect("group key listed in order must exist");
+            let group_key = positions.first().map(|&position| {
+                self.by
+                    .iter()
+                    .map(|name| self.df.columns[name].values()[position].clone())
+                    .collect::<Vec<_>>()
+            });
+            let group_label = group_key
+                .as_ref()
+                .map_or_else(String::new, |values| group_key_label(values));
+            let index = positions
+                .iter()
+                .map(|&position| self.df.index.labels()[position].clone())
+                .collect::<Vec<_>>();
+            for name in &self.df.column_order {
+                if self.by.contains(name) {
+                    continue;
+                }
+                let column = self
+                    .df
+                    .columns
+                    .get(name)
+                    .expect("column name listed in order must exist");
+                let values = positions
+                    .iter()
+                    .map(|&position| column.values()[position].clone())
+                    .collect::<Vec<_>>();
+                specs.push(plot_series_spec(
+                    format!("{name}[{group_label}]"),
+                    index.clone(),
+                    column.dtype(),
+                    values,
+                    group_key.clone(),
+                ));
+            }
+        }
+        specs
     }
 
-    /// Deferred pandas-style grouped histogram hook.
-    ///
-    /// Matches `pd.DataFrame.groupby(...).hist()` as an explicit in-scope but
-    /// unimplemented API surface.
-    pub fn hist(&self) -> Result<(), FrameError> {
-        Err(plotting_deferred("DataFrameGroupBy.hist"))
+    /// Return a backend-neutral pandas-style grouped plotting request.
+    pub fn plot(&self) -> Result<PlotSpec, FrameError> {
+        Ok(PlotSpec {
+            method: "DataFrameGroupBy.plot".to_owned(),
+            kind: PlotKind::Line,
+            series: self.plot_series_specs(),
+        })
     }
 
-    /// Deferred pandas-style grouped boxplot hook.
-    ///
-    /// Matches `pd.DataFrame.groupby(...).boxplot()` as an explicit in-scope
-    /// but unimplemented API surface.
-    pub fn boxplot(&self) -> Result<(), FrameError> {
-        Err(plotting_deferred("DataFrameGroupBy.boxplot"))
+    /// Return a backend-neutral pandas-style grouped histogram request.
+    pub fn hist(&self) -> Result<HistogramSpec, FrameError> {
+        Ok(HistogramSpec {
+            method: "DataFrameGroupBy.hist".to_owned(),
+            bins: 10,
+            series: self.plot_series_specs(),
+        })
+    }
+
+    /// Return a backend-neutral pandas-style grouped boxplot request.
+    pub fn boxplot(&self) -> Result<BoxPlotSpec, FrameError> {
+        Ok(BoxPlotSpec {
+            method: "DataFrameGroupBy.boxplot".to_owned(),
+            series: self.plot_series_specs(),
+        })
     }
 
     /// GroupBy any (returns True if any value is truthy per group).
@@ -77891,43 +78080,77 @@ mod tests {
         assert!(result.values()[1].is_missing());
     }
 
-    // ── Deferred plotting stubs (frankenpandas-hci9o) ────────────────
-
-    fn assert_plotting_deferred(result: Result<(), FrameError>, method: &str) {
-        let err = result.expect_err("plotting method should be explicitly deferred");
-        assert!(matches!(err, FrameError::CompatibilityRejected(msg)
-            if msg.contains(method)
-                && msg.contains("plotting is in scope but deferred")
-                && msg.contains("plotters")
-                && msg.contains("charming")));
-    }
+    // ── Backend-neutral plotting specs (br-frankenpandas-ftrdy) ──────
 
     #[test]
-    fn dataframe_plotting_methods_are_explicitly_deferred() {
+    fn dataframe_plotting_methods_return_specs() {
         let df = nk54a_df();
-        assert_plotting_deferred(df.plot(), "DataFrame.plot");
-        assert_plotting_deferred(df.hist(), "DataFrame.hist");
-        assert_plotting_deferred(df.boxplot(), "DataFrame.boxplot");
+        let plot = df.plot().unwrap();
+        assert_eq!(plot.method, "DataFrame.plot");
+        assert_eq!(plot.kind, super::PlotKind::Line);
+        assert_eq!(plot.series.len(), 3);
+        assert_eq!(plot.series[0].name, "a");
+        assert_eq!(plot.series[0].dtype, DType::Int64);
+        assert_eq!(plot.series[0].index, df.index().labels());
+        assert_eq!(
+            plot.series[0].values,
+            vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)]
+        );
+
+        let hist = df.hist().unwrap();
+        assert_eq!(hist.method, "DataFrame.hist");
+        assert_eq!(hist.bins, 10);
+        assert_eq!(hist.series.len(), 3);
+
+        let boxplot = df.boxplot().unwrap();
+        assert_eq!(boxplot.method, "DataFrame.boxplot");
+        assert_eq!(boxplot.series.len(), 3);
     }
 
     #[test]
-    fn series_plotting_methods_are_explicitly_deferred() {
+    fn series_plotting_methods_return_specs() {
         let series = m785r_series();
-        assert_plotting_deferred(series.plot(), "Series.plot");
-        assert_plotting_deferred(series.hist(), "Series.hist");
+        let plot = series.plot().unwrap();
+        assert_eq!(plot.method, "Series.plot");
+        assert_eq!(plot.kind, super::PlotKind::Line);
+        assert_eq!(plot.series.len(), 1);
+        assert_eq!(plot.series[0].name, "vals");
+        assert_eq!(plot.series[0].index, series.index().labels());
+        assert_eq!(plot.series[0].values, series.values());
+
+        let hist = series.hist().unwrap();
+        assert_eq!(hist.method, "Series.hist");
+        assert_eq!(hist.bins, 10);
+        assert_eq!(hist.series[0].name, "vals");
     }
 
     #[test]
-    fn dataframe_groupby_plotting_methods_are_explicitly_deferred() {
+    fn dataframe_groupby_plotting_methods_return_specs() {
         let df = nk54a_df();
         let grouped = df.groupby(&["secret"]).unwrap();
-        assert_plotting_deferred(grouped.plot(), "DataFrameGroupBy.plot");
-        assert_plotting_deferred(grouped.hist(), "DataFrameGroupBy.hist");
-        assert_plotting_deferred(grouped.boxplot(), "DataFrameGroupBy.boxplot");
+        let plot = grouped.plot().unwrap();
+        assert_eq!(plot.method, "DataFrameGroupBy.plot");
+        assert_eq!(plot.kind, super::PlotKind::Line);
+        assert_eq!(plot.series.len(), 6);
+        assert_eq!(plot.series[0].name, "a[x]");
+        assert_eq!(
+            plot.series[0].group_key,
+            Some(vec![Scalar::Utf8("x".into())])
+        );
+        assert_eq!(plot.series[0].values, vec![Scalar::Int64(10)]);
+
+        let hist = grouped.hist().unwrap();
+        assert_eq!(hist.method, "DataFrameGroupBy.hist");
+        assert_eq!(hist.bins, 10);
+        assert_eq!(hist.series.len(), 6);
+
+        let boxplot = grouped.boxplot().unwrap();
+        assert_eq!(boxplot.method, "DataFrameGroupBy.boxplot");
+        assert_eq!(boxplot.series.len(), 6);
     }
 
     #[test]
-    fn series_groupby_plotting_methods_are_explicitly_deferred() {
+    fn series_groupby_plotting_methods_return_specs() {
         let series = m785r_series();
         let by = Series::from_values(
             "group",
@@ -77940,8 +78163,24 @@ mod tests {
         )
         .unwrap();
         let grouped = series.groupby(&by).unwrap();
-        assert_plotting_deferred(grouped.plot(), "SeriesGroupBy.plot");
-        assert_plotting_deferred(grouped.hist(), "SeriesGroupBy.hist");
+        let plot = grouped.plot().unwrap();
+        assert_eq!(plot.method, "SeriesGroupBy.plot");
+        assert_eq!(plot.kind, super::PlotKind::Line);
+        assert_eq!(plot.series.len(), 2);
+        assert_eq!(plot.series[0].name, "vals[a]");
+        assert_eq!(
+            plot.series[0].group_key,
+            Some(vec![Scalar::Utf8("a".into())])
+        );
+        assert_eq!(
+            plot.series[0].values,
+            vec![Scalar::Int64(10), Scalar::Int64(20)]
+        );
+
+        let hist = grouped.hist().unwrap();
+        assert_eq!(hist.method, "SeriesGroupBy.hist");
+        assert_eq!(hist.bins, 10);
+        assert_eq!(hist.series.len(), 2);
     }
 
     // ── agg_named tests ──
