@@ -5765,9 +5765,22 @@ impl Series {
 
             let result = match prev_idx {
                 Some(j) if !vals[i].is_missing() && !vals[j].is_missing() => {
-                    match (vals[i].to_f64(), vals[j].to_f64()) {
-                        (Ok(a), Ok(b)) => Scalar::Float64(a - b),
-                        _ => Scalar::Null(NullKind::NaN),
+                    // Per br-frankenpandas-q82t4: Timedelta64 diff preserves
+                    // Timedelta dtype matching pandas. (a_ns - b_ns) with
+                    // NaT propagation.
+                    if let (Scalar::Timedelta64(a_ns), Scalar::Timedelta64(b_ns)) =
+                        (&vals[i], &vals[j])
+                    {
+                        if *a_ns == Timedelta::NAT || *b_ns == Timedelta::NAT {
+                            Scalar::Null(NullKind::NaT)
+                        } else {
+                            Scalar::Timedelta64(a_ns.saturating_sub(*b_ns))
+                        }
+                    } else {
+                        match (vals[i].to_f64(), vals[j].to_f64()) {
+                            (Ok(a), Ok(b)) => Scalar::Float64(a - b),
+                            _ => Scalar::Null(NullKind::NaN),
+                        }
                     }
                 }
                 _ => Scalar::Null(NullKind::NaN),
@@ -13567,6 +13580,16 @@ impl SeriesGroupBy<'_> {
                     let previous = &vals[idx - periods];
                     if value.is_missing() || previous.is_missing() {
                         return Scalar::Null(NullKind::NaN);
+                    }
+                    // Per br-frankenpandas-q82t4: Timedelta64 diff preserves
+                    // Timedelta dtype matching pandas. NaT propagates.
+                    if let (Scalar::Timedelta64(cur_ns), Scalar::Timedelta64(prev_ns)) =
+                        (value, previous)
+                    {
+                        if *cur_ns == Timedelta::NAT || *prev_ns == Timedelta::NAT {
+                            return Scalar::Null(NullKind::NaT);
+                        }
+                        return Scalar::Timedelta64(cur_ns.saturating_sub(*prev_ns));
                     }
                     if let (Ok(current), Ok(prev)) = (value.to_f64(), previous.to_f64()) {
                         Scalar::Float64(current - prev)
@@ -36559,6 +36582,15 @@ impl DataFrameGroupBy<'_> {
                     if v.is_missing() || prev.is_missing() {
                         return Scalar::Null(NullKind::NaN);
                     }
+                    // Per br-frankenpandas-q82t4: Timedelta64 diff preserves
+                    // Timedelta dtype matching pandas. NaT propagates.
+                    if let (Scalar::Timedelta64(cur_ns), Scalar::Timedelta64(prev_ns)) = (v, prev)
+                    {
+                        if *cur_ns == Timedelta::NAT || *prev_ns == Timedelta::NAT {
+                            return Scalar::Null(NullKind::NaT);
+                        }
+                        return Scalar::Timedelta64(cur_ns.saturating_sub(*prev_ns));
+                    }
                     if let (Ok(a), Ok(b)) = (v.to_f64(), prev.to_f64()) {
                         Scalar::Float64(a - b)
                     } else {
@@ -46362,6 +46394,55 @@ mod tests {
         assert!(result.values()[0].is_missing());
         assert!(result.values()[1].is_missing()); // NaT current → NaN
         assert!(result.values()[2].is_missing()); // NaT previous → NaN
+    }
+
+    #[test]
+    fn series_diff_timedelta64_returns_timedelta_q82t4() {
+        // Per br-frankenpandas-q82t4: diff on Timedelta64 returns Timedelta64
+        // differences (preserves dtype), not Float64. Was silently NaN before
+        // via the to_f64-else-NaN catch-all.
+        let one_hour = 3_600 * 1_000_000_000_i64;
+        let s = Series::from_values(
+            "x",
+            vec!["a".into(), "b".into(), "c".into()],
+            vec![
+                Scalar::Timedelta64(one_hour),
+                Scalar::Timedelta64(3 * one_hour),
+                Scalar::Timedelta64(2 * one_hour),
+            ],
+        )
+        .unwrap();
+
+        let result = s.diff(1).unwrap();
+        assert!(result.values()[0].is_missing()); // first row → NaN
+        match &result.values()[1] {
+            Scalar::Timedelta64(ns) => assert_eq!(*ns, 2 * one_hour),
+            other => panic!("expected Timedelta64(2h), got {:?}", other),
+        }
+        match &result.values()[2] {
+            Scalar::Timedelta64(ns) => assert_eq!(*ns, -one_hour),
+            other => panic!("expected Timedelta64(-1h), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn series_diff_timedelta64_nat_propagates_q82t4() {
+        let one_hour = 3_600 * 1_000_000_000_i64;
+        let s = Series::from_values(
+            "x",
+            vec!["a".into(), "b".into(), "c".into()],
+            vec![
+                Scalar::Timedelta64(one_hour),
+                Scalar::Timedelta64(fp_types::Timedelta::NAT),
+                Scalar::Timedelta64(2 * one_hour),
+            ],
+        )
+        .unwrap();
+
+        let result = s.diff(1).unwrap();
+        assert!(result.values()[0].is_missing());
+        assert!(result.values()[1].is_missing()); // NaT current → NaT
+        assert!(result.values()[2].is_missing()); // NaT previous → NaT
     }
 
     #[test]
@@ -61065,6 +61146,47 @@ mod tests {
         assert!((f1 - 1.0).abs() < 1e-10); // (2h-1h)/1h = 1.0
         let f2 = expect_float64(&v.values()[2]);
         assert!((f2 - 1.0).abs() < 1e-10); // (4h-2h)/2h = 1.0
+    }
+
+    #[test]
+    fn groupby_diff_timedelta64_returns_timedelta_q82t4() {
+        // Per br-frankenpandas-q82t4: groupby diff on Timedelta64 returns
+        // Timedelta64 differences (preserves dtype), not Float64.
+        let one_hour = 3_600 * 1_000_000_000_i64;
+        let df = DataFrame::from_dict(
+            &["g", "v"],
+            vec![
+                (
+                    "g",
+                    vec![
+                        Scalar::Utf8("a".to_owned()),
+                        Scalar::Utf8("a".to_owned()),
+                        Scalar::Utf8("a".to_owned()),
+                    ],
+                ),
+                (
+                    "v",
+                    vec![
+                        Scalar::Timedelta64(one_hour),
+                        Scalar::Timedelta64(3 * one_hour),
+                        Scalar::Timedelta64(2 * one_hour),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let result = df.groupby(&["g"]).unwrap().diff(1).unwrap();
+        let v = result.column_as_series("v").unwrap();
+        assert!(v.values()[0].is_missing());
+        match &v.values()[1] {
+            Scalar::Timedelta64(ns) => assert_eq!(*ns, 2 * one_hour),
+            other => panic!("expected Timedelta64(2h), got {:?}", other),
+        }
+        match &v.values()[2] {
+            Scalar::Timedelta64(ns) => assert_eq!(*ns, -one_hour),
+            other => panic!("expected Timedelta64(-1h), got {:?}", other),
+        }
     }
 
     // ── GroupBy value_counts tests ──
