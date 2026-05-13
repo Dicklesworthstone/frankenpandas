@@ -33358,6 +33358,11 @@ impl DataFrame {
     }
 
     /// Explicit alias for [`Self::last`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if the DataFrame reports non-empty but its index has no last
+    /// label, which indicates internal index corruption.
     pub fn last_offset(&self, offset: &str) -> Result<Self, FrameError> {
         if self.is_empty() {
             return Ok(self.clone());
