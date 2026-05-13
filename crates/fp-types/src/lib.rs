@@ -1487,10 +1487,89 @@ pub fn nanprod(values: &[Scalar]) -> Scalar {
 
 /// Cumulative sum respecting null propagation.
 ///
+/// Per br-frankenpandas-x0x91: detect uniformly-Timedelta64 input
+/// (allowing Null/NAT missing markers). Returns true when at least one
+/// non-missing value is Timedelta64 and no other dtype appears.
+fn is_timedelta_input(values: &[Scalar]) -> bool {
+    let mut saw_td = false;
+    for v in values {
+        if v.is_missing() {
+            continue;
+        }
+        match v {
+            Scalar::Timedelta64(_) => saw_td = true,
+            _ => return false,
+        }
+    }
+    saw_td
+}
+
+/// Per br-frankenpandas-x0x91: cumulative running aggregation over a
+/// uniformly-Timedelta64 input. NaT/Null positions emit NaT and skip
+/// the accumulator. Saturating i128 keeps overflow contained at i64
+/// bounds when emitting.
+fn timedelta_cumulative<F>(values: &[Scalar], init: i128, mut step: F) -> Vec<Scalar>
+where
+    F: FnMut(i128, i128) -> i128,
+{
+    let mut out = Vec::with_capacity(values.len());
+    let mut running: i128 = init;
+    for v in values {
+        if v.is_missing() {
+            out.push(Scalar::Null(NullKind::NaT));
+            continue;
+        }
+        if let Scalar::Timedelta64(ns) = v {
+            running = step(running, i128::from(*ns));
+            let clamped = running.clamp(i128::from(i64::MIN), i128::from(i64::MAX));
+            out.push(Scalar::Timedelta64(clamped as i64));
+        } else {
+            out.push(Scalar::Null(NullKind::NaT));
+        }
+    }
+    out
+}
+
+/// Per br-frankenpandas-x0x91: running extrema (min/max) over a
+/// uniformly-Timedelta64 input. `sentinel` is the identity element
+/// (i64::MAX for min, i64::MIN for max) used until the first
+/// non-missing value initializes the accumulator.
+fn timedelta_cumulative_extrema<F>(values: &[Scalar], sentinel: i64, mut step: F) -> Vec<Scalar>
+where
+    F: FnMut(i64, i64) -> i64,
+{
+    let mut out = Vec::with_capacity(values.len());
+    let mut running: Option<i64> = None;
+    for v in values {
+        if v.is_missing() {
+            out.push(Scalar::Null(NullKind::NaT));
+            continue;
+        }
+        if let Scalar::Timedelta64(ns) = v {
+            let new_val = match running {
+                Some(prev) => step(prev, *ns),
+                None => *ns,
+            };
+            running = Some(new_val);
+            out.push(Scalar::Timedelta64(new_val));
+        } else {
+            out.push(Scalar::Null(NullKind::NaT));
+        }
+    }
+    let _ = sentinel; // silence unused warning if closure ignores it
+    out
+}
+
 /// Matches `np.nancumsum` / `pd.Series.cumsum()`. Missing input positions
 /// pass through as `Null(NaN)` in the output; the running sum ignores
 /// those positions when accumulating.
 pub fn nancumsum(values: &[Scalar]) -> Vec<Scalar> {
+    // Per br-frankenpandas-x0x91: when input is uniformly Timedelta64 (with
+    // optional NaT/Null missing markers), preserve Timedelta dtype to match
+    // pandas td_series.cumsum() returning Timedelta64.
+    if is_timedelta_input(values) {
+        return timedelta_cumulative(values, 0_i128, |acc, x| acc.saturating_add(x));
+    }
     let mut out = Vec::with_capacity(values.len());
     let mut running = 0.0_f64;
     for v in values {
@@ -1538,6 +1617,10 @@ pub fn nancumprod(values: &[Scalar]) -> Vec<Scalar> {
 /// `Null(NaN)` without updating the running maximum. The first
 /// non-missing value initializes the running maximum.
 pub fn nancummax(values: &[Scalar]) -> Vec<Scalar> {
+    // Per br-frankenpandas-x0x91: Timedelta64 preserves dtype.
+    if is_timedelta_input(values) {
+        return timedelta_cumulative_extrema(values, i64::MAX, |acc, x| acc.max(x));
+    }
     let mut out = Vec::with_capacity(values.len());
     let mut running: Option<f64> = None;
     for v in values {
@@ -1564,6 +1647,10 @@ pub fn nancummax(values: &[Scalar]) -> Vec<Scalar> {
 ///
 /// Matches `pd.Series.cummin()`. Symmetric to `nancummax`.
 pub fn nancummin(values: &[Scalar]) -> Vec<Scalar> {
+    // Per br-frankenpandas-x0x91: Timedelta64 preserves dtype.
+    if is_timedelta_input(values) {
+        return timedelta_cumulative_extrema(values, i64::MIN, |acc, x| acc.min(x));
+    }
     let mut out = Vec::with_capacity(values.len());
     let mut running: Option<f64> = None;
     for v in values {
@@ -2809,6 +2896,58 @@ mod tests {
         assert!(out[2].is_missing());
         assert_eq!(out[3], Scalar::Float64(3.0));
         assert_eq!(out[4], Scalar::Float64(1.0));
+    }
+
+    #[test]
+    fn nancumsum_timedelta64_preserves_dtype_x0x91() {
+        // Per br-frankenpandas-x0x91: pandas td_series.cumsum() returns
+        // Timedelta64 running sums. Was silently NaN before.
+        let one_hour = 3_600 * 1_000_000_000_i64;
+        let values = vec![
+            Scalar::Timedelta64(one_hour),
+            Scalar::Timedelta64(2 * one_hour),
+            Scalar::Timedelta64(3 * one_hour),
+        ];
+        let out = super::nancumsum(&values);
+        assert_eq!(out[0], Scalar::Timedelta64(one_hour));
+        assert_eq!(out[1], Scalar::Timedelta64(3 * one_hour));
+        assert_eq!(out[2], Scalar::Timedelta64(6 * one_hour));
+    }
+
+    #[test]
+    fn nancummax_nancummin_timedelta64_preserves_dtype_x0x91() {
+        let one_hour = 3_600 * 1_000_000_000_i64;
+        let values = vec![
+            Scalar::Timedelta64(2 * one_hour),
+            Scalar::Timedelta64(5 * one_hour),
+            Scalar::Timedelta64(one_hour),
+            Scalar::Timedelta64(3 * one_hour),
+        ];
+        let mx = super::nancummax(&values);
+        assert_eq!(mx[0], Scalar::Timedelta64(2 * one_hour));
+        assert_eq!(mx[1], Scalar::Timedelta64(5 * one_hour));
+        assert_eq!(mx[2], Scalar::Timedelta64(5 * one_hour));
+        assert_eq!(mx[3], Scalar::Timedelta64(5 * one_hour));
+
+        let mn = super::nancummin(&values);
+        assert_eq!(mn[0], Scalar::Timedelta64(2 * one_hour));
+        assert_eq!(mn[1], Scalar::Timedelta64(2 * one_hour));
+        assert_eq!(mn[2], Scalar::Timedelta64(one_hour));
+        assert_eq!(mn[3], Scalar::Timedelta64(one_hour));
+    }
+
+    #[test]
+    fn nancumulative_timedelta64_skips_nat_x0x91() {
+        let one_hour = 3_600 * 1_000_000_000_i64;
+        let values = vec![
+            Scalar::Timedelta64(one_hour),
+            Scalar::Timedelta64(Timedelta::NAT),
+            Scalar::Timedelta64(2 * one_hour),
+        ];
+        let cs = super::nancumsum(&values);
+        assert_eq!(cs[0], Scalar::Timedelta64(one_hour));
+        assert!(cs[1].is_missing());
+        assert_eq!(cs[2], Scalar::Timedelta64(3 * one_hour));
     }
 
     #[test]
