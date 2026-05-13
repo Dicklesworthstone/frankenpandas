@@ -1252,6 +1252,15 @@ pub fn nanmin(values: &[Scalar]) -> Scalar {
                     min = Some(v)
                 }
             }
+            // Per br-frankenpandas-yic5m: Timedelta64.to_f64() errors, so
+            // the catch-all below would silently return NaN. Compare ns
+            // representations directly; NAT is already filtered by
+            // is_missing() above.
+            (Some(Scalar::Timedelta64(a)), Scalar::Timedelta64(b)) => {
+                if b < a {
+                    min = Some(v)
+                }
+            }
             (Some(a), b) => match (a.to_f64(), b.to_f64()) {
                 (Ok(af), Ok(bf)) if bf < af => min = Some(v),
                 (Ok(_), Ok(_)) => {}
@@ -1289,6 +1298,14 @@ pub fn nanmax(values: &[Scalar]) -> Scalar {
                 }
             }
             (Some(Scalar::Bool(a)), Scalar::Bool(b)) => {
+                if b > a {
+                    max = Some(v)
+                }
+            }
+            // Per br-frankenpandas-yic5m: Timedelta64.to_f64() errors, so
+            // the catch-all below would silently return NaN. Compare ns
+            // representations directly; NAT is already filtered above.
+            (Some(Scalar::Timedelta64(a)), Scalar::Timedelta64(b)) => {
                 if b > a {
                     max = Some(v)
                 }
@@ -2363,6 +2380,34 @@ mod tests {
         let vals = vec![Scalar::Int64(5), Scalar::Float64(3.0), Scalar::Bool(true)];
         assert_eq!(super::nanmin(&vals), Scalar::Bool(true));
         assert_eq!(super::nanmax(&vals), Scalar::Int64(5));
+    }
+
+    #[test]
+    fn nanmin_nanmax_timedelta64_returns_timedelta_yic5m() {
+        // Per br-frankenpandas-yic5m: nanmin/nanmax on Timedelta64 returns
+        // the smallest/largest Timedelta64 — was silently NaN before
+        // because Timedelta64.to_f64() errors and the catch-all swallowed it.
+        let one_hour = 3_600 * 1_000_000_000_i64;
+        let vals = vec![
+            Scalar::Timedelta64(3 * one_hour),
+            Scalar::Timedelta64(one_hour),
+            Scalar::Timedelta64(2 * one_hour),
+        ];
+        assert_eq!(super::nanmin(&vals), Scalar::Timedelta64(one_hour));
+        assert_eq!(super::nanmax(&vals), Scalar::Timedelta64(3 * one_hour));
+    }
+
+    #[test]
+    fn nanmin_nanmax_timedelta64_skips_nat_yic5m() {
+        let one_hour = 3_600 * 1_000_000_000_i64;
+        let vals = vec![
+            Scalar::Timedelta64(Timedelta::NAT),
+            Scalar::Timedelta64(one_hour),
+            Scalar::Timedelta64(2 * one_hour),
+            Scalar::Timedelta64(Timedelta::NAT),
+        ];
+        assert_eq!(super::nanmin(&vals), Scalar::Timedelta64(one_hour));
+        assert_eq!(super::nanmax(&vals), Scalar::Timedelta64(2 * one_hour));
     }
 
     #[test]
