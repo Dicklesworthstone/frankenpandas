@@ -3326,14 +3326,32 @@ impl Column {
     /// a type error. Result dtype is always Float64.
     pub fn diff(&self, periods: i64) -> Result<Self, ColumnError> {
         let len = self.values.len();
+        // Per br-frankenpandas-e607u: Timedelta64 diff preserves dtype
+        // matching pandas, instead of forcing Float64 output and NaN-ing
+        // via the to_f64-else catch-all.
+        let out_dtype = if self.dtype == DType::Timedelta64 {
+            DType::Timedelta64
+        } else {
+            DType::Float64
+        };
         if len == 0 || periods == 0 {
-            return Self::new(DType::Float64, vec![Scalar::Null(NullKind::NaN); len]);
+            let null = if out_dtype == DType::Timedelta64 {
+                Scalar::Null(NullKind::NaT)
+            } else {
+                Scalar::Null(NullKind::NaN)
+            };
+            return Self::new(out_dtype, vec![null; len]);
         }
         let abs = periods.unsigned_abs() as usize;
         let mut out: Vec<Scalar> = Vec::with_capacity(len);
+        let null_scalar = if out_dtype == DType::Timedelta64 {
+            Scalar::Null(NullKind::NaT)
+        } else {
+            Scalar::Null(NullKind::NaN)
+        };
         for i in 0..len {
             if (periods > 0 && i < abs) || (periods < 0 && i + abs >= len) {
-                out.push(Scalar::Null(NullKind::NaN));
+                out.push(null_scalar.clone());
                 continue;
             }
             let (cur, prev) = if periods > 0 {
@@ -3342,7 +3360,15 @@ impl Column {
                 (&self.values[i], &self.values[i + abs])
             };
             if cur.is_missing() || prev.is_missing() {
-                out.push(Scalar::Null(NullKind::NaN));
+                out.push(null_scalar.clone());
+                continue;
+            }
+            if let (Scalar::Timedelta64(cur_ns), Scalar::Timedelta64(prev_ns)) = (cur, prev) {
+                if *cur_ns == Timedelta::NAT || *prev_ns == Timedelta::NAT {
+                    out.push(Scalar::Null(NullKind::NaT));
+                } else {
+                    out.push(Scalar::Timedelta64(cur_ns.saturating_sub(*prev_ns)));
+                }
                 continue;
             }
             match (cur.to_f64(), prev.to_f64()) {
@@ -3350,7 +3376,7 @@ impl Column {
                 _ => out.push(Scalar::Null(NullKind::NaN)),
             }
         }
-        Self::new(DType::Float64, out)
+        Self::new(out_dtype, out)
     }
 
     /// Per-row boolean flag for duplicated values (keep='first').
@@ -6133,6 +6159,47 @@ mod tests {
             assert_eq!(d.values()[0], Scalar::Float64(-3.0));
             assert_eq!(d.values()[1], Scalar::Float64(-2.0));
             assert!(d.values()[2].is_missing());
+        }
+
+        #[test]
+        fn diff_timedelta64_returns_timedelta_e607u() {
+            // Per br-frankenpandas-e607u: Column::diff on Timedelta64 preserves
+            // Timedelta dtype (was forced to Float64 NaN before via to_f64 catch-all).
+            let one_hour = 3_600 * 1_000_000_000_i64;
+            let col = Column::from_values(vec![
+                Scalar::Timedelta64(one_hour),
+                Scalar::Timedelta64(3 * one_hour),
+                Scalar::Timedelta64(2 * one_hour),
+            ])
+            .expect("col");
+            let d = col.diff(1).expect("diff");
+            assert_eq!(d.dtype(), DType::Timedelta64);
+            assert!(d.values()[0].is_missing()); // first row → NaT
+            match &d.values()[1] {
+                Scalar::Timedelta64(ns) => assert_eq!(*ns, 2 * one_hour),
+                other => panic!("expected Timedelta64(2h), got {:?}", other),
+            }
+            match &d.values()[2] {
+                Scalar::Timedelta64(ns) => assert_eq!(*ns, -one_hour),
+                other => panic!("expected Timedelta64(-1h), got {:?}", other),
+            }
+        }
+
+        #[test]
+        fn diff_timedelta64_nat_propagates_e607u() {
+            use fp_types::Timedelta;
+            let one_hour = 3_600 * 1_000_000_000_i64;
+            let col = Column::from_values(vec![
+                Scalar::Timedelta64(one_hour),
+                Scalar::Timedelta64(Timedelta::NAT),
+                Scalar::Timedelta64(2 * one_hour),
+            ])
+            .expect("col");
+            let d = col.diff(1).expect("diff");
+            assert_eq!(d.dtype(), DType::Timedelta64);
+            assert!(d.values()[0].is_missing());
+            assert!(d.values()[1].is_missing()); // NaT current → NaT
+            assert!(d.values()[2].is_missing()); // NaT previous → NaT
         }
 
         #[test]
