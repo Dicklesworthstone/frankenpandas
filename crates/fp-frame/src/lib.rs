@@ -36343,13 +36343,11 @@ impl DataFrameGroupBy<'_> {
     {
         let (group_order, groups) = self.build_groups();
 
-        let value_cols: Vec<String> = self
-            .df
-            .column_order
-            .iter()
-            .filter(|c| !self.by.contains(c))
-            .cloned()
-            .collect();
+        // Per br-frankenpandas-2bqwh: pandas passes the FULL group DataFrame
+        // (including the groupby key columns) to the predicate so checks like
+        // `g["key"].iloc[0] == "x"` are usable. Previously the key columns
+        // were filtered out, breaking any predicate that referenced them.
+        let value_cols: Vec<String> = self.df.column_order.clone();
 
         let mut keep_indices: Vec<usize> = Vec::new();
 
@@ -52638,6 +52636,46 @@ mod tests {
         assert_eq!(result.len(), 2);
         assert_eq!(result.columns["val"].values()[0], Scalar::Float64(10.0));
         assert_eq!(result.columns["val"].values()[1], Scalar::Float64(20.0));
+    }
+
+    #[test]
+    fn dataframe_groupby_filter_predicate_sees_group_key_columns_2bqwh() {
+        // Per br-frankenpandas-2bqwh: pandas passes the full group DataFrame
+        // (including the groupby key columns) to the predicate. Before, the
+        // key columns were filtered out so a predicate referencing them
+        // would fail to find the column.
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "k",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("b".into()),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "v",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let saw_key = std::cell::RefCell::new(false);
+        let _ = df
+            .groupby(&["k"])
+            .unwrap()
+            .filter(|group_df| {
+                if group_df.column("k").is_some() {
+                    *saw_key.borrow_mut() = true;
+                }
+                Ok(true)
+            })
+            .unwrap();
+        assert!(*saw_key.borrow(), "group DataFrame must include the groupby key column");
     }
 
     #[test]
