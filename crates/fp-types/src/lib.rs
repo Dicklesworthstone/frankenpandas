@@ -1362,7 +1362,53 @@ pub fn nanmax(values: &[Scalar]) -> Scalar {
     }
 }
 
+/// Per br-frankenpandas-j8ntk: harvest ns values from a uniformly-Timedelta64
+/// input as f64 (the f64 representation has 53 bits of mantissa, sufficient
+/// for ns spans up to ~104 days exactly; beyond that pandas itself loses
+/// precision the same way). Returns None if any non-missing value is not
+/// Timedelta64.
+fn collect_timedelta_ns_f64(values: &[Scalar]) -> Option<Vec<f64>> {
+    let mut out = Vec::with_capacity(values.len());
+    let mut saw_td = false;
+    for v in values {
+        if v.is_missing() {
+            continue;
+        }
+        match v {
+            Scalar::Timedelta64(ns) => {
+                saw_td = true;
+                out.push(*ns as f64);
+            }
+            _ => return None,
+        }
+    }
+    if saw_td { Some(out) } else { None }
+}
+
+/// Clamp an f64 result into i64 range and wrap as Scalar::Timedelta64.
+fn float_ns_to_timedelta(value: f64) -> Scalar {
+    if !value.is_finite() {
+        return Scalar::Timedelta64(Timedelta::NAT);
+    }
+    let clamped = value.clamp(i64::MIN as f64, i64::MAX as f64);
+    Scalar::Timedelta64(clamped as i64)
+}
+
 pub fn nanmedian(values: &[Scalar]) -> Scalar {
+    // Per br-frankenpandas-j8ntk: Timedelta64 median preserves dtype.
+    if let Some(mut td) = collect_timedelta_ns_f64(values) {
+        if td.is_empty() {
+            return Scalar::Timedelta64(Timedelta::NAT);
+        }
+        td.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let mid = td.len() / 2;
+        let median_ns = if td.len().is_multiple_of(2) {
+            (td[mid - 1] + td[mid]) / 2.0
+        } else {
+            td[mid]
+        };
+        return float_ns_to_timedelta(median_ns);
+    }
     let mut nums = collect_finite(values);
     if nums.is_empty() {
         return Scalar::Null(NullKind::NaN);
@@ -1377,6 +1423,16 @@ pub fn nanmedian(values: &[Scalar]) -> Scalar {
 }
 
 pub fn nanvar(values: &[Scalar], ddof: usize) -> Scalar {
+    // Per br-frankenpandas-j8ntk: Timedelta64 var preserves dtype — pandas
+    // returns Timedelta even though variance is ns² conceptually; matching.
+    if let Some(td) = collect_timedelta_ns_f64(values) {
+        if td.len() <= ddof {
+            return Scalar::Timedelta64(Timedelta::NAT);
+        }
+        let mean: f64 = td.iter().sum::<f64>() / td.len() as f64;
+        let sum_sq: f64 = td.iter().map(|x| (x - mean).powi(2)).sum();
+        return float_ns_to_timedelta(sum_sq / (td.len() - ddof) as f64);
+    }
     let nums = collect_finite(values);
     if nums.len() <= ddof {
         return Scalar::Null(NullKind::NaN);
@@ -1387,6 +1443,16 @@ pub fn nanvar(values: &[Scalar], ddof: usize) -> Scalar {
 }
 
 pub fn nanstd(values: &[Scalar], ddof: usize) -> Scalar {
+    // Per br-frankenpandas-j8ntk: Timedelta64 std preserves dtype.
+    if let Some(td) = collect_timedelta_ns_f64(values) {
+        if td.len() <= ddof {
+            return Scalar::Timedelta64(Timedelta::NAT);
+        }
+        let mean: f64 = td.iter().sum::<f64>() / td.len() as f64;
+        let sum_sq: f64 = td.iter().map(|x| (x - mean).powi(2)).sum();
+        let var = sum_sq / (td.len() - ddof) as f64;
+        return float_ns_to_timedelta(var.sqrt());
+    }
     match nanvar(values, ddof) {
         Scalar::Float64(v) => Scalar::Float64(v.sqrt()),
         other => other,
@@ -1399,6 +1465,17 @@ pub fn nanstd(values: &[Scalar], ddof: usize) -> Scalar {
 /// `std(values, ddof) / sqrt(n)` where `n` is the non-missing count.
 /// Returns `Null(NaN)` when `n <= ddof`.
 pub fn nansem(values: &[Scalar], ddof: usize) -> Scalar {
+    // Per br-frankenpandas-j8ntk: Timedelta64 sem preserves dtype.
+    if let Some(td) = collect_timedelta_ns_f64(values) {
+        if td.len() <= ddof {
+            return Scalar::Timedelta64(Timedelta::NAT);
+        }
+        let mean: f64 = td.iter().sum::<f64>() / td.len() as f64;
+        let sum_sq: f64 = td.iter().map(|x| (x - mean).powi(2)).sum();
+        let var = sum_sq / (td.len() - ddof) as f64;
+        let std = var.sqrt();
+        return float_ns_to_timedelta(std / (td.len() as f64).sqrt());
+    }
     let nums = collect_finite(values);
     if nums.len() <= ddof {
         return Scalar::Null(NullKind::NaN);
@@ -2657,6 +2734,56 @@ mod tests {
         assert!(matches!(std, Scalar::Float64(_)), "expected Float64");
         if let Scalar::Float64(v) = std {
             assert!((v - 2.0).abs() < 1e-10);
+        }
+    }
+
+    #[test]
+    fn nanmedian_timedelta64_preserves_dtype_j8ntk() {
+        // Per br-frankenpandas-j8ntk: pandas td_series.median() returns
+        // Timedelta64; was silently NaN before via collect_finite.
+        let one_hour = 3_600 * 1_000_000_000_i64;
+        let vals = vec![
+            Scalar::Timedelta64(one_hour),
+            Scalar::Timedelta64(2 * one_hour),
+            Scalar::Timedelta64(3 * one_hour),
+        ];
+        assert_eq!(super::nanmedian(&vals), Scalar::Timedelta64(2 * one_hour));
+    }
+
+    #[test]
+    fn nanstd_timedelta64_preserves_dtype_j8ntk() {
+        // Per br-frankenpandas-j8ntk: pandas td_series.std() returns
+        // Timedelta64. Check Timedelta64 output and reasonable magnitude
+        // for population std of [1h, 2h, 3h] = sqrt(2/3) * 1h.
+        let one_hour: i64 = 3_600 * 1_000_000_000;
+        let vals = vec![
+            Scalar::Timedelta64(one_hour),
+            Scalar::Timedelta64(2 * one_hour),
+            Scalar::Timedelta64(3 * one_hour),
+        ];
+        let std = super::nanstd(&vals, 0);
+        match std {
+            Scalar::Timedelta64(ns) => {
+                let expected = (2.0_f64 / 3.0).sqrt() * one_hour as f64;
+                assert!((ns as f64 - expected).abs() < 1e6,
+                    "expected ~{expected} ns, got {ns}");
+            }
+            other => panic!("expected Timedelta64, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nanstd_nansem_timedelta64_insufficient_returns_nat_j8ntk() {
+        let one_hour = 3_600 * 1_000_000_000_i64;
+        let vals = vec![Scalar::Timedelta64(one_hour)];
+        // ddof=1 with n=1 → underflow, returns NaT
+        match super::nanstd(&vals, 1) {
+            Scalar::Timedelta64(v) => assert_eq!(v, Timedelta::NAT),
+            other => panic!("expected Timedelta64 NAT, got {other:?}"),
+        }
+        match super::nansem(&vals, 1) {
+            Scalar::Timedelta64(v) => assert_eq!(v, Timedelta::NAT),
+            other => panic!("expected Timedelta64 NAT, got {other:?}"),
         }
     }
 
