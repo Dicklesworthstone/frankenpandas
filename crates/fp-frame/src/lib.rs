@@ -3046,9 +3046,13 @@ impl Series {
             out_values.push(self.column.values()[position].clone());
         }
 
+        // Per br-frankenpandas-43269: pandas preserves the index name
+        // through iloc/loc/take/sort_values/sort_index and other operations
+        // that route through this helper. Was lost because Index::new(...)
+        // builds an unnamed Index.
         Ok(Self {
             name: self.name.clone(),
-            index: Index::new(out_labels),
+            index: Index::new(out_labels).rename_index(self.index.name()),
             column: Column::new(self.column.dtype(), out_values)?,
             categorical: self.categorical.clone(),
             sparse: self.sparse.clone(),
@@ -3899,7 +3903,10 @@ impl Series {
         let take = normalize_head_take(n, self.len());
         let labels = self.index.labels()[..take].to_vec();
         let values = self.values()[..take].to_vec();
-        Self::from_values(self.name.clone(), labels, values)
+        // Per br-frankenpandas-43269: preserve index name.
+        let index = Index::new(labels).rename_index(self.index.name());
+        let column = Column::from_values(values)?;
+        Self::new(self.name.clone(), index, column)
     }
 
     /// Return the last `n` rows.
@@ -3910,7 +3917,10 @@ impl Series {
         let (start, _) = normalize_tail_window(n, self.len());
         let labels = self.index.labels()[start..].to_vec();
         let values = self.values()[start..].to_vec();
-        Self::from_values(self.name.clone(), labels, values)
+        // Per br-frankenpandas-43269: preserve index name.
+        let index = Index::new(labels).rename_index(self.index.name());
+        let column = Column::from_values(values)?;
+        Self::new(self.name.clone(), index, column)
     }
 
     // --- Missing Data Operations ---
@@ -41066,6 +41076,42 @@ mod tests {
         assert_eq!(result.values()[0], Scalar::Int64(10));
         assert_eq!(result.values()[1], Scalar::Int64(30));
         assert_eq!(result.index().labels(), &[1_i64.into(), 3_i64.into()]);
+    }
+
+    #[test]
+    fn series_reorder_methods_preserve_index_name_43269() {
+        // Per br-frankenpandas-43269: pandas preserves the index name
+        // through iloc/sort_values/sort_index/head/take/filter and other
+        // operations that route through Series::reorder_by_positions.
+        let s = Series::from_values(
+            "vals",
+            vec!["a".into(), "b".into(), "c".into(), "d".into()],
+            vec![
+                Scalar::Int64(3),
+                Scalar::Int64(1),
+                Scalar::Int64(4),
+                Scalar::Int64(1),
+            ],
+        )
+        .unwrap()
+        .rename_axis("myidx")
+        .unwrap();
+
+        // head preserves name
+        let h = s.head(2).unwrap();
+        assert_eq!(h.index().name(), Some("myidx"));
+
+        // tail preserves name
+        let t = s.tail(2).unwrap();
+        assert_eq!(t.index().name(), Some("myidx"));
+
+        // sort_values preserves name
+        let sv = s.sort_values(true).unwrap();
+        assert_eq!(sv.index().name(), Some("myidx"));
+
+        // sort_index preserves name
+        let si = s.sort_index(false).unwrap();
+        assert_eq!(si.index().name(), Some("myidx"));
     }
 
     #[test]
