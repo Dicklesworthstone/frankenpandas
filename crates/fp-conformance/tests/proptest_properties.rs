@@ -3537,12 +3537,19 @@ proptest! {
         }
     }
 
-    /// Casting a missing scalar to any dtype produces a missing scalar.
+    /// Casting a missing scalar to a non-Utf8 dtype produces a missing scalar.
+    ///
+    /// Per br-frankenpandas-p7cnd: Utf8 is excluded because pandas
+    /// `astype(str)` emits literal string spellings ("None", "nan", "NaT")
+    /// rather than preserving the missing marker — locked in by
+    /// fp_types::tests::cast_scalar_to_utf8_uses_pandas_string_spellings
+    /// (br-x1k8c).
     #[test]
     fn prop_cast_missing_stays_missing(
         kind in prop_oneof![Just(NullKind::Null), Just(NullKind::NaN), Just(NullKind::NaT)],
         target in arb_dtype(),
     ) {
+        prop_assume!(target != fp_types::DType::Utf8);
         let scalar = Scalar::Null(kind);
         let result = fp_types::cast_scalar(&scalar, target);
         match result {
