@@ -8364,15 +8364,18 @@ impl Series {
     ///
     /// Matches `pd.Series.last(offset)`.
     ///
-    /// # Panics
-    ///
-    /// Panics if the Series reports non-empty but its index has no last label,
-    /// which indicates internal index corruption.
+    /// Per br-frankenpandas-a79h9: the missing-last-label case is reported
+    /// as a CompatibilityRejected error rather than a panic, so callers
+    /// can recover from inconsistent series state instead of crashing.
     pub fn last_offset(&self, offset: &str) -> Result<Self, FrameError> {
         if self.is_empty() {
             return Ok(self.clone());
         }
-        let last_label = self.index.labels().last().unwrap();
+        let last_label = self.index.labels().last().ok_or_else(|| {
+            FrameError::CompatibilityRejected(
+                "last_offset: Series reports non-empty but index has no last label".to_owned(),
+            )
+        })?;
         let cutoff = sub_offset_from_label(last_label, offset)?;
         let labels = self.index.labels();
         let start = labels
@@ -33359,15 +33362,18 @@ impl DataFrame {
 
     /// Explicit alias for [`Self::last`].
     ///
-    /// # Panics
-    ///
-    /// Panics if the DataFrame reports non-empty but its index has no last
-    /// label, which indicates internal index corruption.
+    /// Per br-frankenpandas-a79h9: the missing-last-label case is reported
+    /// as a CompatibilityRejected error rather than a panic, so callers
+    /// can recover from inconsistent frame state instead of crashing.
     pub fn last_offset(&self, offset: &str) -> Result<Self, FrameError> {
         if self.is_empty() {
             return Ok(self.clone());
         }
-        let last_label = self.index.labels().last().unwrap();
+        let last_label = self.index.labels().last().ok_or_else(|| {
+            FrameError::CompatibilityRejected(
+                "last_offset: DataFrame reports non-empty but index has no last label".to_owned(),
+            )
+        })?;
         let cutoff = sub_offset_from_label(last_label, offset)?;
         // Select rows where label >= cutoff
         let labels = self.index.labels();

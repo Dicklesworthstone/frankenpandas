@@ -26823,12 +26823,16 @@ mod tests {
             source.contains("#![warn(rustdoc::broken_intra_doc_links)]"),
             "expected fp-frame to opt into rustdoc broken link warnings"
         );
+        // Per br-frankenpandas-a79h9: Series::last_offset and
+        // DataFrame::last_offset no longer panic on inconsistent
+        // non-empty/labels state — they return CompatibilityRejected
+        // instead. The two corresponding panic-contract snippets are
+        // removed from this list. The remaining functions still document
+        // their panic contracts.
         for snippet in [
-            "/// # Panics\n    ///\n    /// Panics if the Series reports non-empty but its index has no last label,\n    /// which indicates internal index corruption.\n    pub fn last_offset(&self, offset: &str) -> Result<Self, FrameError> {",
             "/// # Panics\n    ///\n    /// Panics if `self.column_order` references a column that is absent from\n    /// `self.columns`, which indicates internal DataFrame metadata corruption.\n    pub fn items(&self) -> Result<Vec<(String, Series)>, FrameError> {",
             "/// # Panics\n    ///\n    /// Panics if any column length no longer matches the DataFrame index\n    /// length, which indicates internal DataFrame corruption.\n    pub fn to_series_dict(&self) -> BTreeMap<String, Series> {",
             "/// # Panics\n    ///\n    /// Panics if the squeezed output cannot be represented as a valid Series\n    /// because the DataFrame's internal index or column metadata has already\n    /// diverged from its column storage.\n    #[allow(clippy::result_large_err)]\n    pub fn squeeze_to_series(&self, axis: usize) -> Result<Series, Self> {",
-            "/// # Panics\n    ///\n    /// Panics if the DataFrame reports non-empty but its index has no last\n    /// label, which indicates internal index corruption.\n    pub fn last_offset(&self, offset: &str) -> Result<Self, FrameError> {",
         ] {
             assert!(
                 source.contains(snippet),
