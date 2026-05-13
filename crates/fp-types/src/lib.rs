@@ -1491,6 +1491,24 @@ pub fn nansem(values: &[Scalar], ddof: usize) -> Scalar {
 /// Matches `np.ptp` behavior on nan-safe inputs. Returns `Null(NaN)`
 /// for empty or all-missing inputs.
 pub fn nanptp(values: &[Scalar]) -> Scalar {
+    // Per br-frankenpandas-u2g0r: Timedelta64 peak-to-peak returns
+    // Timedelta64 (max - min in ns). collect_timedelta_ns_f64 is defined
+    // in the cumulative-aggregations section below.
+    if let Some(td) = collect_timedelta_ns_f64(values) {
+        if td.is_empty() {
+            return Scalar::Timedelta64(Timedelta::NAT);
+        }
+        let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+        for x in &td {
+            if *x < lo {
+                lo = *x;
+            }
+            if *x > hi {
+                hi = *x;
+            }
+        }
+        return float_ns_to_timedelta(hi - lo);
+    }
     let nums = collect_finite(values);
     if nums.is_empty() {
         return Scalar::Null(NullKind::NaN);
@@ -1555,6 +1573,15 @@ pub fn nankurt(values: &[Scalar]) -> Scalar {
 
 /// Product of non-missing values. Returns 1.0 for empty input (matching pandas).
 pub fn nanprod(values: &[Scalar]) -> Scalar {
+    // Per br-frankenpandas-szq6a: pandas raises TypeError on
+    // td_series.prod() because Timedelta² has no dimension. Returning the
+    // misleading Float64(1.0) (empty-iterator default after collect_finite
+    // drops every Timedelta64) is worse than surfacing missing. NaT
+    // propagates the "type-incompatible" signal in lieu of a Result-level
+    // error.
+    if is_timedelta_input(values) {
+        return Scalar::Null(NullKind::NaN);
+    }
     let nums = collect_finite(values);
     if nums.is_empty() {
         return Scalar::Float64(1.0);
@@ -1805,6 +1832,26 @@ pub fn nanquantile(values: &[Scalar], q: f64) -> Scalar {
 /// Matches `np.nanargmax`. Returns `None` if every value is missing.
 /// Ties resolve to the first position seen (matching numpy).
 pub fn nanargmax(values: &[Scalar]) -> Option<usize> {
+    // Per br-frankenpandas-ql1t5: Timedelta64.to_f64() errors, so the
+    // generic path would silently skip every Timedelta64 value and
+    // return None. Pandas td_series.argmax() returns the position of
+    // the largest Timedelta — compare i64 ns directly.
+    if is_timedelta_input(values) {
+        let mut best: Option<(usize, i64)> = None;
+        for (i, v) in values.iter().enumerate() {
+            if v.is_missing() {
+                continue;
+            }
+            if let Scalar::Timedelta64(ns) = v {
+                match best {
+                    None => best = Some((i, *ns)),
+                    Some((_, cur)) if *ns > cur => best = Some((i, *ns)),
+                    _ => {}
+                }
+            }
+        }
+        return best.map(|(i, _)| i);
+    }
     let mut best: Option<(usize, f64)> = None;
     for (i, v) in values.iter().enumerate() {
         if v.is_missing() {
@@ -1828,6 +1875,23 @@ pub fn nanargmax(values: &[Scalar]) -> Option<usize> {
 ///
 /// Matches `np.nanargmin`. Returns `None` if every value is missing.
 pub fn nanargmin(values: &[Scalar]) -> Option<usize> {
+    // Per br-frankenpandas-ql1t5: Timedelta64 argmin via i64 ns compare.
+    if is_timedelta_input(values) {
+        let mut best: Option<(usize, i64)> = None;
+        for (i, v) in values.iter().enumerate() {
+            if v.is_missing() {
+                continue;
+            }
+            if let Scalar::Timedelta64(ns) = v {
+                match best {
+                    None => best = Some((i, *ns)),
+                    Some((_, cur)) if *ns < cur => best = Some((i, *ns)),
+                    _ => {}
+                }
+            }
+        }
+        return best.map(|(i, _)| i);
+    }
     let mut best: Option<(usize, f64)> = None;
     for (i, v) in values.iter().enumerate() {
         if v.is_missing() {
@@ -3234,6 +3298,46 @@ mod tests {
     fn nanptp_empty_returns_null() {
         assert!(super::nanptp(&[]).is_missing());
         assert!(super::nanptp(&[Scalar::Null(NullKind::NaN)]).is_missing());
+    }
+
+    #[test]
+    fn nanptp_timedelta64_preserves_dtype_u2g0r() {
+        // Per br-frankenpandas-u2g0r: ptp on Timedelta64 returns Timedelta64.
+        let one_hour: i64 = 3_600 * 1_000_000_000;
+        let values = vec![
+            Scalar::Timedelta64(one_hour),
+            Scalar::Timedelta64(5 * one_hour),
+            Scalar::Timedelta64(2 * one_hour),
+        ];
+        assert_eq!(super::nanptp(&values), Scalar::Timedelta64(4 * one_hour));
+    }
+
+    #[test]
+    fn nanargmax_nanargmin_timedelta64_compare_by_ns_ql1t5() {
+        // Per br-frankenpandas-ql1t5: argmax/argmin on Timedelta64 compare
+        // i64 ns directly instead of silently skipping via to_f64.
+        let one_hour: i64 = 3_600 * 1_000_000_000;
+        let values = vec![
+            Scalar::Timedelta64(2 * one_hour),
+            Scalar::Timedelta64(5 * one_hour),
+            Scalar::Timedelta64(one_hour),
+            Scalar::Timedelta64(3 * one_hour),
+        ];
+        assert_eq!(super::nanargmax(&values), Some(1));
+        assert_eq!(super::nanargmin(&values), Some(2));
+    }
+
+    #[test]
+    fn nanprod_timedelta64_returns_null_szq6a() {
+        // Per br-frankenpandas-szq6a: pandas raises on Timedelta prod
+        // (dimensionally undefined). We surface Null instead of the
+        // misleading Float64(1.0) the old empty-iterator default emitted.
+        let one_hour: i64 = 3_600 * 1_000_000_000;
+        let values = vec![
+            Scalar::Timedelta64(2 * one_hour),
+            Scalar::Timedelta64(3 * one_hour),
+        ];
+        assert!(super::nanprod(&values).is_missing());
     }
 
     #[test]
