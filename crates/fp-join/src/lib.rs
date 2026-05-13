@@ -1212,6 +1212,16 @@ fn merge_dataframes_cross(
     indicator_name: Option<&str>,
     suffixes: &ResolvedMergeSuffixes,
 ) -> Result<MergedDataFrame, JoinError> {
+    // Per br-frankenpandas-glsam: pandas raises
+    // `ValueError: how='cross' does not support the indicator option`.
+    // Without this guard, the indicator column was filled entirely with
+    // the "both" sentinel (every cross-product row had Some() positions
+    // on both sides), providing no usable information.
+    if indicator_name.is_some() {
+        return Err(JoinError::Frame(FrameError::CompatibilityRejected(
+            "merge: indicator parameter is not supported for cross join".to_owned(),
+        )));
+    }
     let left_rows = left.index().len();
     let right_rows = right.index().len();
     let out_rows = left_rows.saturating_mul(right_rows);
@@ -3964,7 +3974,11 @@ mod tests {
     }
 
     #[test]
-    fn merge_cross_indicator_marks_all_rows_both() {
+    fn merge_cross_with_indicator_rejects_glsam() {
+        // Per br-frankenpandas-glsam: pandas raises
+        // `ValueError: how='cross' does not support the indicator option`.
+        // Before, the indicator column was filled entirely with "both" since
+        // cross-product rows have Some() positions on both sides — useless.
         let left = DataFrame::from_dict(
             &["l"],
             vec![("l", vec![Scalar::Int64(1), Scalar::Int64(2)])],
@@ -3972,7 +3986,7 @@ mod tests {
         .unwrap();
         let right = DataFrame::from_dict(&["r"], vec![("r", vec![Scalar::Int64(9)])]).unwrap();
 
-        let merged = merge_dataframes_on_with_options(
+        let err = merge_dataframes_on_with_options(
             &left,
             &right,
             &["ignored"],
@@ -3983,14 +3997,14 @@ mod tests {
                 ..MergeExecutionOptions::default()
             },
         )
-        .expect("cross merge");
-        assert_eq!(
-            merged.columns.get("_merge").expect("indicator").values(),
-            &[
-                Scalar::Utf8("both".to_owned()),
-                Scalar::Utf8("both".to_owned())
-            ]
-        );
+        .expect_err("cross merge with indicator must reject");
+        match err {
+            JoinError::Frame(FrameError::CompatibilityRejected(msg)) => {
+                assert!(msg.contains("indicator") && msg.contains("cross"),
+                    "expected cross+indicator rejection, got {msg}");
+            }
+            other => panic!("expected CompatibilityRejected, got {other:?}"),
+        }
     }
 
     #[test]
