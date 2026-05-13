@@ -31189,12 +31189,16 @@ impl DataFrame {
     where
         F: Fn(&[f64]) -> f64,
     {
+        // Per br-frankenpandas-d3tdy: pandas treats Bool columns as 0/1
+        // numerics in row-axis reductions. Excluding Bool silently dropped
+        // valid contributions; Bool.to_f64() already returns Ok(0.0/1.0),
+        // so allowing the dtype through the filter is sufficient.
         let numeric_cols: Vec<&str> = self
             .column_order
             .iter()
             .filter(|c| {
                 let dt = self.columns[c.as_str()].dtype();
-                dt == DType::Int64 || dt == DType::Float64
+                dt == DType::Int64 || dt == DType::Float64 || dt == DType::Bool
             })
             .map(|s| s.as_str())
             .collect();
@@ -65168,6 +65172,27 @@ mod tests {
         let result = df.sum_axis1().unwrap();
         assert_eq!(result.column().values()[0], Scalar::Float64(4.0));
         assert_eq!(result.column().values()[1], Scalar::Float64(6.0));
+    }
+
+    #[test]
+    fn df_sum_axis1_includes_bool_columns_d3tdy() {
+        // Per br-frankenpandas-d3tdy: pandas counts Bool as 0/1 in row-axis
+        // reductions. Bool columns were previously dropped by the
+        // numeric-cols filter.
+        let df = DataFrame::from_dict(
+            &["a", "b", "c"],
+            vec![
+                ("a", vec![Scalar::Bool(true), Scalar::Bool(false)]),
+                ("b", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                ("c", vec![Scalar::Bool(true), Scalar::Bool(true)]),
+            ],
+        )
+        .unwrap();
+        let result = df.sum_axis1().unwrap();
+        // row 0: True+1+True = 1+1+1 = 3
+        // row 1: False+2+True = 0+2+1 = 3
+        assert_eq!(result.column().values()[0], Scalar::Float64(3.0));
+        assert_eq!(result.column().values()[1], Scalar::Float64(3.0));
     }
 
     #[test]
