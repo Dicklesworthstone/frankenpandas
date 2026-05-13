@@ -1541,7 +1541,19 @@ fn coerce_scalar(val: &Scalar, dtype: DType) -> Scalar {
         },
         DType::Int64 => match val {
             Scalar::Int64(_) => val.clone(),
-            Scalar::Float64(f) => Scalar::Int64(*f as i64),
+            // Per br-frankenpandas-lo7bq: pandas raises OverflowError /
+            // IntCastingNaNError on astype('int64') of non-finite or
+            // out-of-i64-range values. Unchecked `*f as i64` previously
+            // clamped INFINITY → i64::MAX, NEG_INFINITY → i64::MIN, NaN → 0,
+            // and silently truncated values past 2^63 — masking data
+            // corruption.
+            Scalar::Float64(f) => {
+                if f.is_finite() && *f >= i64::MIN as f64 && *f < 9223372036854775808.0 {
+                    Scalar::Int64(*f as i64)
+                } else {
+                    Scalar::Null(NullKind::NaN)
+                }
+            }
             Scalar::Utf8(s) => match s.parse::<i64>() {
                 Ok(n) => Scalar::Int64(n),
                 Err(_) => Scalar::Null(NullKind::NaN),
@@ -59113,6 +59125,43 @@ mod tests {
 
         // "raise" mode should error
         assert!(s.astype_safe(DType::Int64, "raise").is_err());
+    }
+
+    #[test]
+    fn series_astype_safe_coerce_infinity_to_int_yields_null_lo7bq() {
+        // Per br-frankenpandas-lo7bq: pandas raises on astype(int64) of
+        // non-finite Float64; in coerce mode our implementation should
+        // surface Null instead of silently clamping to i64::MAX / 0.
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Float64(f64::INFINITY),
+                Scalar::Float64(f64::NEG_INFINITY),
+                Scalar::Float64(f64::NAN),
+                Scalar::Float64(1e30), // > i64::MAX
+            ],
+        )
+        .unwrap();
+        let result = s.astype_safe(DType::Int64, "coerce").unwrap();
+        assert!(result.values()[0].is_missing(), "INFINITY → Null");
+        assert!(result.values()[1].is_missing(), "NEG_INFINITY → Null");
+        assert!(result.values()[2].is_missing(), "NaN → Null");
+        assert!(result.values()[3].is_missing(), "out-of-range → Null");
+    }
+
+    #[test]
+    fn series_astype_safe_coerce_in_range_float_to_int_still_works_lo7bq() {
+        // Regression: in-range finite Float64 still converts cleanly.
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Float64(42.0), Scalar::Float64(-7.0)],
+        )
+        .unwrap();
+        let result = s.astype_safe(DType::Int64, "coerce").unwrap();
+        assert_eq!(result.values()[0], Scalar::Int64(42));
+        assert_eq!(result.values()[1], Scalar::Int64(-7));
     }
 
     // ── sort_values_multi ──
