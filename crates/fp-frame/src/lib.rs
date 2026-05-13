@@ -280,6 +280,28 @@ pub struct Series {
     sparse: Option<SparseDType>,
 }
 
+/// Per br-frankenpandas-g3jqn: between_time/at_time require a DatetimeIndex.
+/// Pandas raises TypeError if called on a non-datetime index. We approximate
+/// by requiring the index to contain Datetime64 labels, or Utf8 labels that
+/// parse as datetime strings — the two storage formats this crate uses for
+/// datetime indices. Empty indices are accepted (operation is a no-op).
+fn require_datetime_index(labels: &[IndexLabel], op: &str) -> Result<(), FrameError> {
+    if labels.is_empty() {
+        return Ok(());
+    }
+    let has_datetime_like = labels.iter().any(|label| match label {
+        IndexLabel::Datetime64(_) => true,
+        IndexLabel::Utf8(s) => s.contains('T') || (s.contains('-') && s.contains(':')),
+        _ => false,
+    });
+    if !has_datetime_like {
+        return Err(FrameError::CompatibilityRejected(format!(
+            "{op}: index must be a DatetimeIndex"
+        )));
+    }
+    Ok(())
+}
+
 fn normalize_iloc_position(position: i64, len: usize) -> Result<usize, FrameError> {
     let len_i128 = i128::try_from(len).map_err(|_| {
         FrameError::CompatibilityRejected(format!(
@@ -8313,6 +8335,11 @@ impl Series {
     ///
     /// Matches `s.at_time(time)`.
     pub fn at_time(&self, time: &str) -> Result<Self, FrameError> {
+        // Per br-frankenpandas-g3jqn: pandas raises TypeError when the
+        // index is not a DatetimeIndex. We approximate by requiring that
+        // at least one label parses as a datetime string (the storage
+        // format used for datetime indices in this crate).
+        require_datetime_index(self.index.labels(), "at_time")?;
         let labels = self.index.labels();
         let mut keep = Vec::new();
 
@@ -8334,6 +8361,8 @@ impl Series {
     ///
     /// Matches `s.between_time(start_time, end_time)`.
     pub fn between_time(&self, start: &str, end: &str) -> Result<Self, FrameError> {
+        // Per br-frankenpandas-g3jqn: see Series::at_time.
+        require_datetime_index(self.index.labels(), "between_time")?;
         let labels = self.index.labels();
         let mut keep = Vec::new();
 
@@ -28347,6 +28376,8 @@ impl DataFrame {
     /// Matches `df.between_time(start_time, end_time)`.
     /// Index labels should be datetime-like strings with time component (HH:MM or HH:MM:SS).
     pub fn between_time(&self, start: &str, end: &str) -> Result<Self, FrameError> {
+        // Per br-frankenpandas-g3jqn: pandas raises TypeError on non-DatetimeIndex.
+        require_datetime_index(self.index.labels(), "between_time")?;
         let labels = self.index.labels();
         let mut keep = Vec::new();
 
@@ -28369,6 +28400,8 @@ impl DataFrame {
     ///
     /// Matches `df.at_time(time)`.
     pub fn at_time(&self, time: &str) -> Result<Self, FrameError> {
+        // Per br-frankenpandas-g3jqn: pandas raises TypeError on non-DatetimeIndex.
+        require_datetime_index(self.index.labels(), "at_time")?;
         let labels = self.index.labels();
         let mut keep = Vec::new();
 
@@ -57887,6 +57920,30 @@ mod tests {
             &["2024-01-01T10:00:00".into(), "2024-01-02T10:00:00".into()]
         );
         assert_eq!(result.values(), &[Scalar::Int64(1), Scalar::Int64(2)]);
+    }
+
+    #[test]
+    fn series_between_time_at_time_reject_non_datetime_index_g3jqn() {
+        // Per br-frankenpandas-g3jqn: pandas raises TypeError when index is
+        // not DatetimeIndex. Was silently returning empty before.
+        let s = Series::from_values(
+            "x",
+            vec!["a".into(), "b".into(), "c".into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+        )
+        .unwrap();
+        match s.between_time("09:00", "17:00") {
+            Err(FrameError::CompatibilityRejected(msg)) => {
+                assert!(msg.contains("DatetimeIndex"));
+            }
+            other => panic!("expected CompatibilityRejected, got {other:?}"),
+        }
+        match s.at_time("12:00") {
+            Err(FrameError::CompatibilityRejected(msg)) => {
+                assert!(msg.contains("DatetimeIndex"));
+            }
+            other => panic!("expected CompatibilityRejected, got {other:?}"),
+        }
     }
 
     #[test]
