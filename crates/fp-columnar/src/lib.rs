@@ -2164,6 +2164,22 @@ impl Column {
                 out.push(Scalar::Null(NullKind::NaN));
                 continue;
             }
+            // Per br-frankenpandas-mcu90: Timedelta64 pct_change matches
+            // pandas — ns deltas divide as dimensionless f64. Was silently
+            // NaN before via the catch-all (Timedelta64.to_f64() errors).
+            if let (Scalar::Timedelta64(cur_ns), Scalar::Timedelta64(prev_ns)) = (cur, prev) {
+                if *cur_ns == Timedelta::NAT || *prev_ns == Timedelta::NAT {
+                    out.push(Scalar::Null(NullKind::NaN));
+                    continue;
+                }
+                let prev_f = *prev_ns as f64;
+                if prev_f.abs() < f64::EPSILON {
+                    out.push(Scalar::Null(NullKind::NaN));
+                } else {
+                    out.push(Scalar::Float64((*cur_ns as f64 - prev_f) / prev_f));
+                }
+                continue;
+            }
             match (cur.to_f64(), prev.to_f64()) {
                 (Ok(c), Ok(p)) => {
                     if p == 0.0 || p.is_nan() || c.is_nan() {
@@ -7117,6 +7133,48 @@ mod tests {
                 Column::from_values(vec![Scalar::Float64(0.0), Scalar::Float64(5.0)]).expect("col");
             let r = col.pct_change(1).expect("pct_change");
             assert!(r.values()[1].is_missing());
+        }
+
+        #[test]
+        fn pct_change_timedelta64_matches_pandas_mcu90() {
+            // Per br-frankenpandas-mcu90: pct_change on Timedelta64 returns
+            // dimensionless f64 ratios; was silently NaN before via the
+            // to_f64-else catch-all (Timedelta64.to_f64() errors).
+            let one_hour = 3_600 * 1_000_000_000_i64;
+            let col = Column::from_values(vec![
+                Scalar::Timedelta64(one_hour),
+                Scalar::Timedelta64(2 * one_hour),
+                Scalar::Timedelta64(4 * one_hour),
+            ])
+            .expect("col");
+            let r = col.pct_change(1).expect("pct_change");
+            assert!(r.values()[0].is_missing());
+            assert!(
+                matches!(&r.values()[1], Scalar::Float64(v) if (*v - 1.0).abs() < 1e-10),
+                "expected Float64(1.0), got {:?}",
+                r.values()[1]
+            );
+            assert!(
+                matches!(&r.values()[2], Scalar::Float64(v) if (*v - 1.0).abs() < 1e-10),
+                "expected Float64(1.0), got {:?}",
+                r.values()[2]
+            );
+        }
+
+        #[test]
+        fn pct_change_timedelta64_nat_propagates_mcu90() {
+            use fp_types::Timedelta;
+            let one_hour = 3_600 * 1_000_000_000_i64;
+            let col = Column::from_values(vec![
+                Scalar::Timedelta64(one_hour),
+                Scalar::Timedelta64(Timedelta::NAT),
+                Scalar::Timedelta64(2 * one_hour),
+            ])
+            .expect("col");
+            let r = col.pct_change(1).expect("pct_change");
+            assert!(r.values()[0].is_missing());
+            assert!(r.values()[1].is_missing()); // NaT current → NaN
+            assert!(r.values()[2].is_missing()); // NaT previous → NaN
         }
 
         #[test]
