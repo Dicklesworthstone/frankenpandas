@@ -24568,7 +24568,7 @@ impl DataFrame {
         } else {
             let pattern = regex.expect("regex Some checked above");
             let re = regex::Regex::new(pattern).map_err(|e| {
-                FrameError::CompatibilityRejected(format!("filter regex invalid: {e}"))
+                FrameError::CompatibilityRejected(format!("filter: invalid regex: {e}"))
             })?;
             self.column_order
                 .iter()
