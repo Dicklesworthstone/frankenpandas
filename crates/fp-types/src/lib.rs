@@ -654,7 +654,15 @@ impl Timedelta {
             let multiplier = Self::unit_to_nanos(unit)
                 .ok_or_else(|| TimedeltaError::InvalidFormat(s.to_string()))?;
 
-            let nanos = (num * multiplier as f64).round() as i64;
+            // Per br-frankenpandas-zw3mg: pandas raises OverflowError on
+            // huge scientific-notation Timedeltas like "1e100 days". The
+            // raw `as i64` cast silently saturated to i64::MAX, masking
+            // overflow before checked_add could catch it.
+            let product = num * multiplier as f64;
+            if !product.is_finite() || product.abs() >= 9223372036854775808.0 {
+                return Err(TimedeltaError::Overflow);
+            }
+            let nanos = product.round() as i64;
             total = total.checked_add(nanos).ok_or(TimedeltaError::Overflow)?;
         }
 
@@ -2957,6 +2965,22 @@ mod tests {
         let err = Timedelta::parse("9223372036854775807:00")
             .expect_err("oversized hour component must reject");
         assert!(matches!(err, TimedeltaError::InvalidFormat(_)));
+    }
+
+    #[test]
+    fn timedelta_parse_rejects_huge_value_overflow_zw3mg() {
+        // Per br-frankenpandas-zw3mg: the compound parser used a raw
+        // `as i64` cast that silently saturated to i64::MAX when the
+        // product of (decimal-digit f64) × unit multiplier overflows.
+        // Use a large literal (no scientific notation — the lexer only
+        // accepts digits, '.', '-'). 1e18 days × NANOS_PER_DAY (~8.64e13)
+        // overflows i64.
+        use super::{Timedelta, TimedeltaError};
+        let huge = format!("{} days", "9".repeat(18));
+        assert!(matches!(
+            Timedelta::parse(&huge).expect_err("9...(18 9s) days must overflow"),
+            TimedeltaError::Overflow
+        ));
     }
 
     #[test]
