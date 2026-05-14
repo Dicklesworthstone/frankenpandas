@@ -28193,12 +28193,18 @@ impl DataFrame {
                     }
                     col_order.push(col_name);
                 }
+                // Per br-frankenpandas-hn794: reindex_axis(axis=1) rebuilds
+                // only the column set — the rows (and row_multiindex) are
+                // untouched and should pass through. column_multiindex is
+                // dropped because the column set is entirely rebuilt with
+                // new labels, leaving any prior column MultiIndex
+                // size-mismatched.
                 Ok(Self {
                     columns: result_cols,
                     column_order: col_order,
                     index: self.index.clone(),
                     column_multiindex: None,
-                    row_multiindex: None,
+                    row_multiindex: self.row_multiindex.clone(),
                     allows_duplicate_labels: self.allows_duplicate_labels,
                 })
             }
