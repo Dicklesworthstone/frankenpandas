@@ -30117,10 +30117,12 @@ impl DataFrame {
             .map(|&i| self.index.labels()[i].clone())
             .collect();
 
+        // Per br-frankenpandas-omjaw: pandas preserves the index name
+        // through sample. Was lost via Index::new without rename_index.
         Ok(Self {
             columns: result_cols,
             column_order: self.column_order.clone(),
-            index: Index::new(new_labels),
+            index: Index::new(new_labels).rename_index(self.index.name()),
             column_multiindex: self.column_multiindex.clone(),
             row_multiindex: None,
             allows_duplicate_labels: self.allows_duplicate_labels,
@@ -41262,6 +41264,24 @@ mod tests {
         // head also routes through take_rows_by_positions
         let h = df.head(2).unwrap();
         assert_eq!(h.index().name(), Some("myidx"));
+    }
+
+    #[test]
+    fn dataframe_sample_preserves_index_name_omjaw() {
+        // Per br-frankenpandas-omjaw: pandas preserves the index name
+        // through DataFrame.sample. Was lost via Index::new in sample's
+        // direct construction path (sample_weights routes through
+        // take_rows_by_positions which was fixed in lhzot).
+        let df = DataFrame::from_dict_with_index(
+            vec![("v", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)])],
+            vec!["a".into(), "b".into(), "c".into()],
+        )
+        .unwrap()
+        .rename_axis("myidx")
+        .unwrap();
+        let out = df.sample(Some(2), None, false, Some(42)).unwrap();
+        assert_eq!(out.index().name(), Some("myidx"));
+        assert_eq!(out.len(), 2);
     }
 
     #[test]
