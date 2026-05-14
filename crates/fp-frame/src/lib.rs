@@ -6496,7 +6496,10 @@ impl Series {
             .collect();
         let values: Vec<Scalar> = indexed.iter().map(|(_, v)| (*v).clone()).collect();
 
-        Self::from_values(self.name.clone(), labels, values)
+        // Per br-frankenpandas-0trpd: preserve index name through nlargest.
+        let index = Index::new(labels).rename_index(self.index.name());
+        let column = Column::from_values(values)?;
+        Self::new(self.name.clone(), index, column)
     }
 
     /// Return the `n` smallest values as a new Series, sorted ascending.
@@ -6524,7 +6527,10 @@ impl Series {
             .collect();
         let values: Vec<Scalar> = indexed.iter().map(|(_, v)| (*v).clone()).collect();
 
-        Self::from_values(self.name.clone(), labels, values)
+        // Per br-frankenpandas-0trpd: preserve index name through nsmallest.
+        let index = Index::new(labels).rename_index(self.index.name());
+        let column = Column::from_values(values)?;
+        Self::new(self.name.clone(), index, column)
     }
 
     /// Return the `n` smallest values with `keep` parameter.
@@ -6628,7 +6634,11 @@ impl Series {
             .collect();
         let values: Vec<Scalar> = indexed.iter().map(|(_, v)| (*v).clone()).collect();
 
-        Self::from_values(self.name.clone(), labels, values)
+        // Per br-frankenpandas-0trpd: preserve index name through
+        // nlargest_keep/nsmallest_keep variants.
+        let index = Index::new(labels).rename_index(self.index.name());
+        let column = Column::from_values(values)?;
+        Self::new(self.name.clone(), index, column)
     }
 
     // ── Positional indexing ──────────────────────────────────────
@@ -41355,6 +41365,31 @@ mod tests {
         // sort_index preserves name
         let si = s.sort_index(false).unwrap();
         assert_eq!(si.index().name(), Some("myidx"));
+    }
+
+    #[test]
+    fn series_nlargest_nsmallest_preserve_index_name_0trpd() {
+        // Per br-frankenpandas-0trpd: pandas preserves the index name
+        // through nlargest/nsmallest.
+        let s = Series::from_values(
+            "v",
+            vec!["a".into(), "b".into(), "c".into(), "d".into()],
+            vec![
+                Scalar::Int64(3),
+                Scalar::Int64(1),
+                Scalar::Int64(4),
+                Scalar::Int64(2),
+            ],
+        )
+        .unwrap()
+        .rename_axis("myidx")
+        .unwrap();
+        let l = s.nlargest(2).unwrap();
+        assert_eq!(l.index().name(), Some("myidx"));
+        let n = s.nsmallest(2).unwrap();
+        assert_eq!(n.index().name(), Some("myidx"));
+        let lk = s.nlargest_keep(2, "first").unwrap();
+        assert_eq!(lk.index().name(), Some("myidx"));
     }
 
     #[test]
