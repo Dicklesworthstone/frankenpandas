@@ -10694,7 +10694,11 @@ impl Ewm<'_> {
         let mut nobs = 0_usize;
 
         for val in vals {
-            if val.is_missing() || val.to_f64().is_ok_and(f64::is_nan) {
+            // Per br-frankenpandas-ntoqd: skip not-just-NaN but also any
+            // to_f64() error (Utf8, Timedelta64, etc.) so the unwrap
+            // below can't panic on non-numeric inputs. Matches the
+            // pattern used by ewm_mean and ewm_cov.
+            if val.is_missing() || val.to_f64().map_or(true, |v| v.is_nan()) {
                 out.push(Scalar::Null(NullKind::NaN));
                 continue;
             }
@@ -83456,6 +83460,31 @@ mod tests {
         assert!(matches!(&err_above,
             FrameError::CompatibilityRejected(msg)
                 if msg.contains("alpha")));
+    }
+
+    #[test]
+    fn series_ewm_sum_does_not_panic_on_utf8_ntoqd() {
+        // Per br-frankenpandas-ntoqd: ewm.sum's guard used
+        // is_ok_and(f64::is_nan), which let Utf8 inputs slip through
+        // to the unwrap below, panicking. Now Utf8 rows emit Null.
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Utf8("oops".to_owned()),
+                Scalar::Float64(3.0),
+            ],
+        )
+        .unwrap();
+        let result = s.ewm(None, Some(0.5)).sum().unwrap();
+        let vals = result.column().values();
+        // First numeric → emits Float64
+        assert!(matches!(vals[0], Scalar::Float64(_)));
+        // Utf8 row → Null
+        assert!(vals[1].is_missing());
+        // Numeric resumes (running sum continues for surviving observations)
+        assert!(matches!(vals[2], Scalar::Float64(_)));
     }
 
     #[test]
