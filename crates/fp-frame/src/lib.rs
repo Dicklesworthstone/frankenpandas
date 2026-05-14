@@ -33648,7 +33648,16 @@ impl DataFrame {
                 "column '{name}' already exists; use with_column to overwrite"
             )));
         }
-        let loc = loc.min(self.column_order.len());
+        // Per br-frankenpandas-wmucs: pandas raises ValueError when loc
+        // exceeds the column count. Was silently clamping loc.min(ncols),
+        // masking out-of-range inserts. loc == ncols is still valid
+        // (append at end), matching pandas.
+        if loc > self.column_order.len() {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "insert: loc {loc} out of bounds for DataFrame with {} columns",
+                self.column_order.len()
+            )));
+        }
         let mut column_order = self.column_order.clone();
         column_order.insert(loc, name.clone());
         let mut columns = self.columns.clone();
@@ -55420,6 +55429,34 @@ mod tests {
 
         let col = Column::from_values(vec![Scalar::Int64(99)]).unwrap();
         assert!(df.insert(0, "b", col).is_err());
+    }
+
+    #[test]
+    fn dataframe_insert_loc_out_of_bounds_rejects_wmucs() {
+        // Per br-frankenpandas-wmucs: pandas raises ValueError on loc > ncols.
+        // Was silently clamping to ncols.
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                ("b", vec![Scalar::Int64(3), Scalar::Int64(4)]),
+            ],
+        )
+        .unwrap();
+
+        let col = Column::from_values(vec![Scalar::Int64(10), Scalar::Int64(20)]).unwrap();
+        // loc=5 is out of bounds for a 2-column frame.
+        let err = df.insert(5, "c", col.clone()).expect_err("loc=5 must reject");
+        match err {
+            FrameError::CompatibilityRejected(msg) => {
+                assert!(msg.contains("out of bounds"));
+            }
+            other => panic!("expected CompatibilityRejected, got {other:?}"),
+        }
+        // loc=2 (== ncols) is still valid (append).
+        let out = df.insert(2, "c", col).unwrap();
+        let names = out.column_names();
+        assert_eq!(names.last().map(|s| s.as_str()), Some("c"));
     }
 
     #[test]
