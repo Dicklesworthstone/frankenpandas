@@ -1998,6 +1998,22 @@ impl Series {
         Self::new(name, index, column)
     }
 
+    /// Per br-frankenpandas-07yrq: helper that builds a new Series from
+    /// labels+values, preserving `self`'s index name. Use this for any
+    /// transform method that produces a result with the same/derived
+    /// index whose name should follow the source — pandas preserves
+    /// the index name through most Series transforms (fillna, ffill,
+    /// bfill, interpolate, abs, round, clip, shift, etc.).
+    fn with_labels_and_values_preserving_name(
+        &self,
+        index_labels: Vec<IndexLabel>,
+        values: Vec<Scalar>,
+    ) -> Result<Self, FrameError> {
+        let index = Index::new(index_labels).rename_index(self.index.name());
+        let column = Column::from_values(values)?;
+        Self::new(self.name.clone(), index, column)
+    }
+
     /// Construct a Series from key-value pairs (dict-style).
     ///
     /// Keys become the index labels, values become the column.
@@ -2963,7 +2979,7 @@ impl Series {
             };
             out.push(result);
         }
-        Self::from_values(self.name.clone(), self.index.labels().to_vec(), out)
+        self.with_labels_and_values_preserving_name(self.index.labels().to_vec(), out)
     }
 
     // ── Timedelta Comparison ──
@@ -3957,7 +3973,7 @@ impl Series {
             }
         }
 
-        Self::from_values(self.name.clone(), self.index.labels().to_vec(), out)
+        self.with_labels_and_values_preserving_name(self.index.labels().to_vec(), out)
     }
 
     /// Forward-fill missing values (propagate last valid observation forward).
@@ -3989,7 +4005,7 @@ impl Series {
             }
         }
 
-        Self::from_values(self.name.clone(), self.index.labels().to_vec(), out)
+        self.with_labels_and_values_preserving_name(self.index.labels().to_vec(), out)
     }
 
     /// Back-fill missing values (propagate next valid observation backward).
@@ -4022,7 +4038,7 @@ impl Series {
             }
         }
 
-        Self::from_values(self.name.clone(), self.index.labels().to_vec(), out)
+        self.with_labels_and_values_preserving_name(self.index.labels().to_vec(), out)
     }
 
     /// Deprecated pandas alias for [`Self::ffill`]. Matches
@@ -4090,7 +4106,7 @@ impl Series {
             }
         }
 
-        Self::from_values(self.name.clone(), self.index.labels().to_vec(), out)
+        self.with_labels_and_values_preserving_name(self.index.labels().to_vec(), out)
     }
 
     /// Interpolate missing values using the specified method.
@@ -4146,7 +4162,7 @@ impl Series {
                     }
                 }
 
-                Self::from_values(self.name.clone(), self.index.labels().to_vec(), out)
+                self.with_labels_and_values_preserving_name(self.index.labels().to_vec(), out)
             }
             "zero" | "pad" => {
                 let vals = self.column.values();
@@ -4163,7 +4179,7 @@ impl Series {
                     }
                 }
 
-                Self::from_values(self.name.clone(), self.index.labels().to_vec(), out)
+                self.with_labels_and_values_preserving_name(self.index.labels().to_vec(), out)
             }
             other => Err(FrameError::CompatibilityRejected(format!(
                 "unsupported interpolation method: '{other}'"
@@ -4732,7 +4748,7 @@ impl Series {
             };
             out.push(mapped.unwrap_or(Scalar::Null(NullKind::NaN)));
         }
-        Self::from_values(self.name.clone(), self.index.labels().to_vec(), out)
+        self.with_labels_and_values_preserving_name(self.index.labels().to_vec(), out)
     }
 
     /// Map values by applying a user function element-wise.
@@ -4753,7 +4769,7 @@ impl Series {
                 out.push(func(val));
             }
         }
-        Self::from_values(self.name.clone(), self.index.labels().to_vec(), out)
+        self.with_labels_and_values_preserving_name(self.index.labels().to_vec(), out)
     }
 
     /// Map values using a lookup table with a default for unmapped keys.
@@ -4784,7 +4800,7 @@ impl Series {
             };
             out.push(mapped.unwrap_or_else(|| default.clone()));
         }
-        Self::from_values(self.name.clone(), self.index.labels().to_vec(), out)
+        self.with_labels_and_values_preserving_name(self.index.labels().to_vec(), out)
     }
 
     /// Map values using another Series as a lookup table.
@@ -4836,7 +4852,7 @@ impl Series {
                 .unwrap_or(Scalar::Null(NullKind::NaN));
             out.push(mapped);
         }
-        Self::from_values(self.name.clone(), self.index.labels().to_vec(), out)
+        self.with_labels_and_values_preserving_name(self.index.labels().to_vec(), out)
     }
 
     /// Replace specific values with substitutions.
@@ -4858,7 +4874,7 @@ impl Series {
             };
             out.push(replaced.unwrap_or_else(|| val.clone()));
         }
-        Self::from_values(self.name.clone(), self.index.labels().to_vec(), out)
+        self.with_labels_and_values_preserving_name(self.index.labels().to_vec(), out)
     }
 
     /// Replace values using a HashMap mapping.
@@ -4877,7 +4893,7 @@ impl Series {
                 out.push(val.clone());
             }
         }
-        Self::from_values(self.name.clone(), self.index.labels().to_vec(), out)
+        self.with_labels_and_values_preserving_name(self.index.labels().to_vec(), out)
     }
 
     /// Replace string values matching a regex pattern.
@@ -4896,7 +4912,7 @@ impl Series {
                 other => out.push(other.clone()),
             }
         }
-        Self::from_values(self.name.clone(), self.index.labels().to_vec(), out)
+        self.with_labels_and_values_preserving_name(self.index.labels().to_vec(), out)
     }
 
     /// Compute the q-th quantile (0.0 to 1.0) using linear interpolation.
@@ -4974,7 +4990,7 @@ impl Series {
                     .iter()
                     .map(|val| coerce_scalar(val, dtype))
                     .collect();
-                Self::from_values(self.name.clone(), self.index.labels().to_vec(), out)
+                self.with_labels_and_values_preserving_name(self.index.labels().to_vec(), out)
             }
             other => Err(FrameError::CompatibilityRejected(format!(
                 "astype: errors must be 'raise', 'ignore', or 'coerce', got '{other}'"
@@ -5051,7 +5067,7 @@ impl Series {
             }
             out.push(Scalar::Float64(clamped));
         }
-        Self::from_values(self.name.clone(), self.index.labels().to_vec(), out)
+        self.with_labels_and_values_preserving_name(self.index.labels().to_vec(), out)
     }
 
     /// Clip values below a threshold.
@@ -5165,7 +5181,7 @@ impl Series {
             }
             out.push(Scalar::Float64(result));
         }
-        Self::from_values(self.name.clone(), self.index.labels().to_vec(), out)
+        self.with_labels_and_values_preserving_name(self.index.labels().to_vec(), out)
     }
 
     /// Return a new Series with prefixed index labels.
@@ -5823,7 +5839,7 @@ impl Series {
             }
         }
 
-        Self::from_values(self.name.clone(), self.index.labels().to_vec(), out)
+        self.with_labels_and_values_preserving_name(self.index.labels().to_vec(), out)
     }
 
     /// Element-wise difference with the previous element.
@@ -5869,7 +5885,7 @@ impl Series {
             out.push(result);
         }
 
-        Self::from_values(self.name.clone(), self.index.labels().to_vec(), out)
+        self.with_labels_and_values_preserving_name(self.index.labels().to_vec(), out)
     }
 
     /// Cumulative sum, skipping NaN.
@@ -5886,7 +5902,7 @@ impl Series {
                     out.push(Scalar::Int64(acc));
                 }
             }
-            return Self::from_values(self.name.clone(), self.index.labels().to_vec(), out);
+            return self.with_labels_and_values_preserving_name(self.index.labels().to_vec(), out);
         }
         if !values.is_empty() && values.iter().all(|value| matches!(value, Scalar::Bool(_))) {
             let mut acc = 0_i64;
@@ -5897,7 +5913,7 @@ impl Series {
                     out.push(Scalar::Int64(acc));
                 }
             }
-            return Self::from_values(self.name.clone(), self.index.labels().to_vec(), out);
+            return self.with_labels_and_values_preserving_name(self.index.labels().to_vec(), out);
         }
         // Per br-frankenpandas-4e050: pandas cumsum on Utf8 concatenates
         // strings cumulatively. Sister to cummin/cummax Utf8 fix in c4898.
@@ -5920,7 +5936,7 @@ impl Series {
                     _ => out.push(Scalar::Null(NullKind::NaN)),
                 }
             }
-            return Self::from_values(self.name.clone(), self.index.labels().to_vec(), out);
+            return self.with_labels_and_values_preserving_name(self.index.labels().to_vec(), out);
         }
 
         let mut acc = 0.0_f64;
@@ -5933,7 +5949,7 @@ impl Series {
                 out.push(Scalar::Float64(acc));
             }
         }
-        Self::from_values(self.name.clone(), self.index.labels().to_vec(), out)
+        self.with_labels_and_values_preserving_name(self.index.labels().to_vec(), out)
     }
 
     /// Cumulative product, skipping NaN.
@@ -5950,7 +5966,7 @@ impl Series {
                     out.push(Scalar::Int64(acc));
                 }
             }
-            return Self::from_values(self.name.clone(), self.index.labels().to_vec(), out);
+            return self.with_labels_and_values_preserving_name(self.index.labels().to_vec(), out);
         }
         if !values.is_empty() && values.iter().all(|value| matches!(value, Scalar::Bool(_))) {
             let mut acc = 1_i64;
@@ -5961,7 +5977,7 @@ impl Series {
                     out.push(Scalar::Int64(acc));
                 }
             }
-            return Self::from_values(self.name.clone(), self.index.labels().to_vec(), out);
+            return self.with_labels_and_values_preserving_name(self.index.labels().to_vec(), out);
         }
 
         let mut acc = 1.0_f64;
@@ -5974,7 +5990,7 @@ impl Series {
                 out.push(Scalar::Float64(acc));
             }
         }
-        Self::from_values(self.name.clone(), self.index.labels().to_vec(), out)
+        self.with_labels_and_values_preserving_name(self.index.labels().to_vec(), out)
     }
 
     /// Cumulative minimum, skipping NaN.
@@ -5991,7 +6007,7 @@ impl Series {
                     out.push(Scalar::Int64(acc));
                 }
             }
-            return Self::from_values(self.name.clone(), self.index.labels().to_vec(), out);
+            return self.with_labels_and_values_preserving_name(self.index.labels().to_vec(), out);
         }
         if !values.is_empty() && values.iter().all(|value| matches!(value, Scalar::Bool(_))) {
             let mut acc = true;
@@ -6002,7 +6018,7 @@ impl Series {
                     out.push(Scalar::Bool(acc));
                 }
             }
-            return Self::from_values(self.name.clone(), self.index.labels().to_vec(), out);
+            return self.with_labels_and_values_preserving_name(self.index.labels().to_vec(), out);
         }
         // Per br-frankenpandas-c4898: pandas supports cummin on Utf8
         // (lexicographic). Was previously falling through to to_f64
@@ -6030,7 +6046,7 @@ impl Series {
                     _ => out.push(Scalar::Null(NullKind::NaN)),
                 }
             }
-            return Self::from_values(self.name.clone(), self.index.labels().to_vec(), out);
+            return self.with_labels_and_values_preserving_name(self.index.labels().to_vec(), out);
         }
 
         let mut acc = f64::INFINITY;
@@ -6046,7 +6062,7 @@ impl Series {
                 out.push(Scalar::Float64(acc));
             }
         }
-        Self::from_values(self.name.clone(), self.index.labels().to_vec(), out)
+        self.with_labels_and_values_preserving_name(self.index.labels().to_vec(), out)
     }
 
     /// Cumulative maximum, skipping NaN.
@@ -6063,7 +6079,7 @@ impl Series {
                     out.push(Scalar::Int64(acc));
                 }
             }
-            return Self::from_values(self.name.clone(), self.index.labels().to_vec(), out);
+            return self.with_labels_and_values_preserving_name(self.index.labels().to_vec(), out);
         }
         if !values.is_empty() && values.iter().all(|value| matches!(value, Scalar::Bool(_))) {
             let mut acc = false;
@@ -6074,7 +6090,7 @@ impl Series {
                     out.push(Scalar::Bool(acc));
                 }
             }
-            return Self::from_values(self.name.clone(), self.index.labels().to_vec(), out);
+            return self.with_labels_and_values_preserving_name(self.index.labels().to_vec(), out);
         }
         // Per br-frankenpandas-c4898: pandas supports cummax on Utf8
         // (lexicographic). Match pandas.
@@ -6101,7 +6117,7 @@ impl Series {
                     _ => out.push(Scalar::Null(NullKind::NaN)),
                 }
             }
-            return Self::from_values(self.name.clone(), self.index.labels().to_vec(), out);
+            return self.with_labels_and_values_preserving_name(self.index.labels().to_vec(), out);
         }
 
         let mut acc = f64::NEG_INFINITY;
@@ -6117,7 +6133,7 @@ impl Series {
                 out.push(Scalar::Float64(acc));
             }
         }
-        Self::from_values(self.name.clone(), self.index.labels().to_vec(), out)
+        self.with_labels_and_values_preserving_name(self.index.labels().to_vec(), out)
     }
 
     /// Keep values where `cond` is True; replace others with `other`.
@@ -7578,7 +7594,7 @@ impl Series {
             }
         }
 
-        Self::from_values(self.name.clone(), self.index.labels().to_vec(), out)
+        self.with_labels_and_values_preserving_name(self.index.labels().to_vec(), out)
     }
 
     /// Percentage change with optional null fill before computation.
@@ -8284,7 +8300,7 @@ impl Series {
             };
             out.push(mapped.unwrap_or(Scalar::Null(NullKind::NaN)));
         }
-        Self::from_values(self.name.clone(), self.index.labels().to_vec(), out)
+        self.with_labels_and_values_preserving_name(self.index.labels().to_vec(), out)
     }
 
     /// Conditional value assignment.
@@ -41370,6 +41386,44 @@ mod tests {
         // sort_index preserves name
         let si = s.sort_index(false).unwrap();
         assert_eq!(si.index().name(), Some("myidx"));
+    }
+
+    #[test]
+    fn series_transforms_preserve_index_name_07yrq() {
+        // Per br-frankenpandas-07yrq: pandas preserves the index name
+        // through Series transforms (fillna, shift, diff, abs, etc.).
+        let s = Series::from_values(
+            "v",
+            vec!["a".into(), "b".into(), "c".into()],
+            vec![
+                Scalar::Int64(1),
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(3),
+            ],
+        )
+        .unwrap()
+        .rename_axis("myidx")
+        .unwrap();
+
+        // fillna preserves index name
+        let filled = s.fillna(&Scalar::Int64(0)).unwrap();
+        assert_eq!(filled.index().name(), Some("myidx"));
+
+        // ffill preserves index name
+        let f = s.ffill(None).unwrap();
+        assert_eq!(f.index().name(), Some("myidx"));
+
+        // abs preserves index name (on numeric Series)
+        let nums = Series::from_values(
+            "v",
+            vec!["a".into(), "b".into()],
+            vec![Scalar::Float64(-1.5), Scalar::Float64(2.5)],
+        )
+        .unwrap()
+        .rename_axis("myidx")
+        .unwrap();
+        let absed = nums.abs().unwrap();
+        assert_eq!(absed.index().name(), Some("myidx"));
     }
 
     #[test]
