@@ -24972,10 +24972,14 @@ impl DataFrame {
         F: Fn(&IndexLabel) -> IndexLabel,
     {
         let new_labels: Vec<IndexLabel> = self.index.labels().iter().map(func).collect();
+        // Per br-frankenpandas-789xi: pandas preserves the index name through
+        // label-transforming operations (rename_index, add_prefix_axis(0),
+        // add_suffix_axis(0)). Was lost because Index::new(...) builds an
+        // unnamed Index.
         Self {
             columns: self.columns.clone(),
             column_order: self.column_order.clone(),
-            index: Index::new(new_labels),
+            index: Index::new(new_labels).rename_index(self.index.name()),
             column_multiindex: self.column_multiindex.clone(),
             row_multiindex: None,
             allows_duplicate_labels: self.allows_duplicate_labels,
@@ -41258,6 +41262,23 @@ mod tests {
         // head also routes through take_rows_by_positions
         let h = df.head(2).unwrap();
         assert_eq!(h.index().name(), Some("myidx"));
+    }
+
+    #[test]
+    fn dataframe_rename_index_paths_preserve_name_789xi() {
+        // Per br-frankenpandas-789xi: rename_index_with and its callers
+        // (add_prefix_axis(0)/add_suffix_axis(0)) preserve the index name.
+        let df = DataFrame::from_dict_with_index(
+            vec![("v", vec![Scalar::Int64(1), Scalar::Int64(2)])],
+            vec!["a".into(), "b".into()],
+        )
+        .unwrap()
+        .rename_axis("myidx")
+        .unwrap();
+        let out = df.add_prefix_axis("p_", 0).unwrap();
+        assert_eq!(out.index().name(), Some("myidx"));
+        let out2 = df.add_suffix_axis("_s", 0).unwrap();
+        assert_eq!(out2.index().name(), Some("myidx"));
     }
 
     #[test]
