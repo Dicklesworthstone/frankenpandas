@@ -3202,7 +3202,9 @@ impl Series {
                 "reindex cannot handle duplicate index labels".to_owned(),
             ));
         }
-        let new_index = Index::new(new_labels);
+        // Per br-frankenpandas-1lo93: pandas preserves the index name when
+        // reindexing with a flat label list. Was lost via Index::new.
+        let new_index = Index::new(new_labels).rename_index(self.index.name());
         let current_map = self.index.position_map_first();
 
         let positions: Vec<Option<usize>> = new_index
@@ -28142,7 +28144,9 @@ impl DataFrame {
             result_cols.insert(col_name.clone(), Column::new(col.dtype(), new_vals)?);
         }
 
-        let index = Index::new(new_labels);
+        // Per br-frankenpandas-1lo93: pandas preserves the index name when
+        // reindexing with a flat label list.
+        let index = Index::new(new_labels).rename_index(self.index.name());
         Self::validate_duplicate_label_policy(
             self.allows_duplicate_labels,
             &index,
@@ -28233,7 +28237,9 @@ impl DataFrame {
             }
             result_cols.insert(col_name.clone(), Column::from_values(new_vals)?);
         }
-        let index = Index::new(new_labels);
+        // Per br-frankenpandas-1lo93: pandas preserves the index name when
+        // reindexing with a flat label list.
+        let index = Index::new(new_labels).rename_index(self.index.name());
         Self::validate_duplicate_label_policy(
             self.allows_duplicate_labels,
             &index,
@@ -83601,6 +83607,33 @@ mod tests {
 
         let mixed = super::concat_series(&[&s1, &s3]).unwrap();
         assert!(mixed.index().name().is_none());
+    }
+
+    #[test]
+    fn reindex_preserves_index_name_1lo93() {
+        // Per br-frankenpandas-1lo93: pandas preserves index name when
+        // reindexing with a flat label list.
+        let s = Series::from_values(
+            "v",
+            vec!["a".into(), "b".into(), "c".into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+        )
+        .unwrap()
+        .rename_axis("myidx")
+        .unwrap();
+        let out = s.reindex(vec!["a".into(), "c".into(), "d".into()]).unwrap();
+        assert_eq!(out.index().name(), Some("myidx"));
+        assert_eq!(out.len(), 3);
+
+        let df = DataFrame::from_dict_with_index(
+            vec![("v", vec![Scalar::Int64(1), Scalar::Int64(2)])],
+            vec!["a".into(), "b".into()],
+        )
+        .unwrap()
+        .rename_axis("idx")
+        .unwrap();
+        let out2 = df.reindex(vec!["a".into(), "c".into()]).unwrap();
+        assert_eq!(out2.index().name(), Some("idx"));
     }
 
     #[test]
