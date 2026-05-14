@@ -20800,7 +20800,27 @@ pub fn concat_series_with_ignore_index(
         "concat".to_owned()
     };
 
-    Series::from_values(name, labels, values)
+    // Per br-frankenpandas-6c7ja: pandas preserves the index name when all
+    // concatenated series share it; drops to None when they differ. Skip
+    // for the ignore_index=true integer-range path (no source name to keep).
+    let result = Series::from_values(name, labels, values)?;
+    if ignore_index {
+        return Ok(result);
+    }
+    let first_name = series_list.first().and_then(|s| s.index().name());
+    let shared_name: Option<&str> = if series_list
+        .iter()
+        .all(|s| s.index().name() == first_name)
+    {
+        first_name
+    } else {
+        None
+    };
+    let index = result
+        .index()
+        .clone()
+        .rename_index(shared_name);
+    Series::new(result.name().to_owned(), index, result.column().clone())
 }
 
 /// Concatenate DataFrames along axis 0 (row-wise).
@@ -83547,6 +83567,40 @@ mod tests {
         assert!(matches!(&err_above,
             FrameError::CompatibilityRejected(msg)
                 if msg.contains("alpha")));
+    }
+
+    #[test]
+    fn series_concat_preserves_shared_index_name_6c7ja() {
+        let s1 = Series::from_values(
+            "v",
+            vec!["a".into(), "b".into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2)],
+        )
+        .unwrap()
+        .rename_axis("myidx")
+        .unwrap();
+        let s2 = Series::from_values(
+            "v",
+            vec!["c".into(), "d".into()],
+            vec![Scalar::Int64(3), Scalar::Int64(4)],
+        )
+        .unwrap()
+        .rename_axis("myidx")
+        .unwrap();
+        let s3 = Series::from_values(
+            "v",
+            vec!["e".into()],
+            vec![Scalar::Int64(5)],
+        )
+        .unwrap()
+        .rename_axis("other")
+        .unwrap();
+
+        let same = super::concat_series(&[&s1, &s2]).unwrap();
+        assert_eq!(same.index().name(), Some("myidx"));
+
+        let mixed = super::concat_series(&[&s1, &s3]).unwrap();
+        assert!(mixed.index().name().is_none());
     }
 
     #[test]
