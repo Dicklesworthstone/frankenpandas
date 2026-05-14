@@ -8116,7 +8116,7 @@ impl Series {
         }
 
         let bool_flags: Vec<Scalar> = flags.into_iter().map(Scalar::Bool).collect();
-        Self::from_values(self.name.clone(), self.index.labels().to_vec(), bool_flags)
+        self.with_labels_and_values_preserving_name(self.index.labels().to_vec(), bool_flags)
     }
 
     /// Remove duplicate values, keeping the first occurrence.
@@ -8257,7 +8257,7 @@ impl Series {
                 _ => converted.push(val.clone()),
             }
         }
-        Self::from_values(self.name.clone(), self.index.labels().to_vec(), converted)
+        self.with_labels_and_values_preserving_name(self.index.labels().to_vec(), converted)
     }
 
     /// Infer object dtypes to best-possible scalar dtypes.
@@ -8339,7 +8339,7 @@ impl Series {
                 }
             }
         }
-        Self::from_values(self.name.clone(), self.index.labels().to_vec(), result)
+        self.with_labels_and_values_preserving_name(self.index.labels().to_vec(), result)
     }
 
     /// Rename the Series (return a copy with a new name).
