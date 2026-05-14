@@ -33692,8 +33692,10 @@ impl DataFrame {
                     )
                 })
                 .collect();
+            // Per br-frankenpandas-oygjj: preserve index name through
+            // DataFrame::truncate (sister to br-5cc2t Series::truncate).
             return Self::new_with_column_order(
-                Index::new(Vec::new()),
+                Index::new(Vec::new()).rename_index(self.index.name()),
                 empty_cols,
                 self.column_order.clone(),
             );
@@ -33705,7 +33707,12 @@ impl DataFrame {
             let vals: Vec<Scalar> = col.values()[start..end].to_vec();
             columns.insert(name.clone(), Column::from_values(vals)?);
         }
-        Self::new_with_column_order(Index::new(new_labels), columns, self.column_order.clone())
+        // Per br-frankenpandas-oygjj: preserve index name.
+        Self::new_with_column_order(
+            Index::new(new_labels).rename_index(self.index.name()),
+            columns,
+            self.column_order.clone(),
+        )
     }
 
     /// Select rows from the start of a DatetimeIndex up to an offset.
@@ -83607,6 +83614,21 @@ mod tests {
 
         let mixed = super::concat_series(&[&s1, &s3]).unwrap();
         assert!(mixed.index().name().is_none());
+    }
+
+    #[test]
+    fn dataframe_truncate_preserves_index_name_oygjj() {
+        // Per br-frankenpandas-oygjj: pandas preserves index name through
+        // DataFrame.truncate (sister to br-5cc2t for Series).
+        let df = DataFrame::from_dict_with_index(
+            vec![("v", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)])],
+            vec!["a".into(), "b".into(), "c".into()],
+        )
+        .unwrap()
+        .rename_axis("myidx")
+        .unwrap();
+        let out = df.truncate(Some(&"a".into()), Some(&"b".into())).unwrap();
+        assert_eq!(out.index().name(), Some("myidx"));
     }
 
     #[test]
