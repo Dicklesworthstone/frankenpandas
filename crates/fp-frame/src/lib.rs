@@ -3649,7 +3649,7 @@ impl Series {
                 }
             }
 
-            return Self::from_values(self.name.clone(), new_labels, new_values);
+            return self.with_labels_and_values_preserving_name(new_labels, new_values);
         }
 
         // Align mask to the Series index (pandas behavior: extra mask labels are ignored).
@@ -3670,7 +3670,7 @@ impl Series {
             }
         }
 
-        Self::from_values(self.name.clone(), new_labels, new_values)
+        self.with_labels_and_values_preserving_name(new_labels, new_values)
     }
 
     /// Label-based selection for a list of labels.
@@ -6694,13 +6694,13 @@ impl Series {
                     ));
                 }
             }
-            return Self::from_values(self.name.clone(), self.index.labels().to_vec(), out_vals);
+            return self.with_labels_and_values_preserving_name(self.index.labels().to_vec(), out_vals);
         }
         order.sort_by(|&a, &b| compare_scalars_with_na_last(&vals[a], &vals[b], ascending));
 
         let labels = self.index.labels().to_vec();
         let out_vals: Vec<Scalar> = order.into_iter().map(|i| Scalar::Int64(i as i64)).collect();
-        Self::from_values(self.name.clone(), labels, out_vals)
+        self.with_labels_and_values_preserving_name(labels, out_vals)
     }
 
     /// Return the integer position of the minimum value.
@@ -6787,7 +6787,7 @@ impl Series {
             labels.push(self.index.labels()[normalized].clone());
             values.push(self.column.values()[normalized].clone());
         }
-        Self::from_values(self.name.clone(), labels, values)
+        self.with_labels_and_values_preserving_name(labels, values)
     }
 
     /// Find insertion points to maintain sorted order.
@@ -8057,7 +8057,7 @@ impl Series {
                 seen.insert(key, ());
             }
         }
-        Self::from_values(self.name.clone(), self.index.labels().to_vec(), flags)
+        self.with_labels_and_values_preserving_name(self.index.labels().to_vec(), flags)
     }
 
     /// Mark duplicate values with control over which occurrence to keep.
@@ -8478,7 +8478,7 @@ impl Series {
             .unwrap_or(1);
         let new_labels = labels[..end].to_vec();
         let new_values = self.column.values()[..end].to_vec();
-        Self::from_values(self.name.clone(), new_labels, new_values)
+        self.with_labels_and_values_preserving_name(new_labels, new_values)
     }
 
     /// Select final rows from a DatetimeIndex backward by an offset.
@@ -8505,7 +8505,7 @@ impl Series {
             .unwrap_or(labels.len().saturating_sub(1));
         let new_labels = labels[start..].to_vec();
         let new_values = self.column.values()[start..].to_vec();
-        Self::from_values(self.name.clone(), new_labels, new_values)
+        self.with_labels_and_values_preserving_name(new_labels, new_values)
     }
 
     /// Combine two Series element-wise using a function.
@@ -41388,6 +41388,40 @@ mod tests {
         // sort_index preserves name
         let si = s.sort_index(false).unwrap();
         assert_eq!(si.index().name(), Some("myidx"));
+    }
+
+    #[test]
+    fn series_take_argsort_duplicated_filter_preserve_index_name_1n25m() {
+        // Per br-frankenpandas-1n25m: take/argsort/duplicated/filter all
+        // route Self::from_values; now preserve the source index name.
+        let s = Series::from_values(
+            "v",
+            vec!["a".into(), "b".into(), "c".into(), "d".into()],
+            vec![
+                Scalar::Int64(3),
+                Scalar::Int64(1),
+                Scalar::Int64(3),
+                Scalar::Int64(2),
+            ],
+        )
+        .unwrap()
+        .rename_axis("myidx")
+        .unwrap();
+        assert_eq!(s.take(&[0, 2]).unwrap().index().name(), Some("myidx"));
+        assert_eq!(s.argsort(true).unwrap().index().name(), Some("myidx"));
+        assert_eq!(s.duplicated().unwrap().index().name(), Some("myidx"));
+        let mask = Series::from_values(
+            "m",
+            vec!["a".into(), "b".into(), "c".into(), "d".into()],
+            vec![
+                Scalar::Bool(true),
+                Scalar::Bool(false),
+                Scalar::Bool(true),
+                Scalar::Bool(false),
+            ],
+        )
+        .unwrap();
+        assert_eq!(s.filter(&mask).unwrap().index().name(), Some("myidx"));
     }
 
     #[test]
