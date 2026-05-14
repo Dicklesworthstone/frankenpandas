@@ -9556,8 +9556,19 @@ impl Rolling<'_> {
 
     /// Rolling maximum.
     pub fn max(&self) -> Result<Series, FrameError> {
+        // Per br-frankenpandas-5m7r1: with min_periods=0, an all-missing
+        // window reaches the fold with empty `nums`, where the identity
+        // f64::NEG_INFINITY would be returned. Pandas returns NaN for that
+        // case; emit NaN explicitly. Rolling::min already has the same
+        // guard via its inline implementation.
         self.apply_rolling(
-            |nums| nums.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+            |nums| {
+                if nums.is_empty() {
+                    f64::NAN
+                } else {
+                    nums.iter().copied().fold(f64::NEG_INFINITY, f64::max)
+                }
+            },
             self.series.name(),
         )
     }
@@ -9751,7 +9762,19 @@ impl Rolling<'_> {
 
     /// Rolling product.
     pub fn prod(&self) -> Result<Series, FrameError> {
-        self.apply_rolling(|nums| nums.iter().product(), self.series.name())
+        // Per br-frankenpandas-5m7r1: empty product would yield 1.0
+        // (multiplicative identity); pandas returns NaN for the
+        // "no observations" case.
+        self.apply_rolling(
+            |nums| {
+                if nums.is_empty() {
+                    f64::NAN
+                } else {
+                    nums.iter().product()
+                }
+            },
+            self.series.name(),
+        )
     }
 
     /// Rolling quantile.
@@ -83467,6 +83490,31 @@ mod tests {
         assert!(matches!(&err_above,
             FrameError::CompatibilityRejected(msg)
                 if msg.contains("alpha")));
+    }
+
+    #[test]
+    fn series_rolling_max_prod_empty_window_returns_nan_5m7r1() {
+        // Per br-frankenpandas-5m7r1: with min_periods=0 and an all-NaN
+        // window, max should return NaN (not -∞) and prod should return
+        // NaN (not the multiplicative identity 1.0). Pandas-faithful.
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Float64(f64::NAN),
+                Scalar::Float64(f64::NAN),
+                Scalar::Float64(f64::NAN),
+            ],
+        )
+        .unwrap();
+        let m = s.rolling(2, Some(0)).max().unwrap();
+        for v in m.column().values() {
+            assert!(v.is_missing(), "max should be NaN, got {v:?}");
+        }
+        let p = s.rolling(2, Some(0)).prod().unwrap();
+        for v in p.column().values() {
+            assert!(v.is_missing(), "prod should be NaN, got {v:?}");
+        }
     }
 
     #[test]
