@@ -7557,7 +7557,9 @@ impl Series {
         F: Fn(&Scalar) -> Scalar,
     {
         let new_values: Vec<Scalar> = self.column.values().iter().map(&func).collect();
-        Self::from_values(self.name(), self.index.labels().to_vec(), new_values)
+        // Per br-frankenpandas-vzhf7: preserve index name through transform,
+        // matching pandas Series.transform behavior.
+        self.with_labels_and_values_preserving_name(self.index.labels().to_vec(), new_values)
     }
 
     /// Percentage change between current and prior element.
