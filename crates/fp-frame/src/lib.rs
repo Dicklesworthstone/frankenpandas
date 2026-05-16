@@ -11072,11 +11072,12 @@ impl Ewm<'_> {
             }
         }
 
-        Series::from_values(
-            self.series.name(),
-            self.series.index().labels().to_vec(),
-            out,
-        )
+        // Per br-frankenpandas-72avi: pandas Series.ewm(...).var preserves
+        // source axis name.
+        let index = Index::new(self.series.index().labels().to_vec())
+            .rename_index(self.series.index().name());
+        let column = Column::from_values(out)?;
+        Series::new(self.series.name(), index, column)
     }
 
     // ── pandas API parity additions (br-frankenpandas-mvynk) ─────────
