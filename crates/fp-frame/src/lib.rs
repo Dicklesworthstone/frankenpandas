@@ -12626,7 +12626,11 @@ impl DataFrameResample<'_> {
             .iter()
             .map(|key| Scalar::Int64(groups[key].len() as i64))
             .collect();
-        Series::from_values("size", labels, values)
+        // Per br-frankenpandas-otkty: pandas Resampler.size returns a Series
+        // whose index.name == source df.index.name (the resampled date axis).
+        let index = Index::new(labels).rename_index(self.df.index.name());
+        let column = Column::from_values(values)?;
+        Series::new("size", index, column)
     }
 
     /// Count unique non-missing values per bucket for every column.
