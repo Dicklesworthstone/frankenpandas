@@ -10832,11 +10832,12 @@ impl Ewm<'_> {
             out.push(Scalar::Float64(ewm_sum));
         }
 
-        Series::from_values(
-            self.series.name(),
-            self.series.index().labels().to_vec(),
-            out,
-        )
+        // Per br-frankenpandas-7wflo: pandas Series.ewm(...).sum preserves
+        // source axis name.
+        let index = Index::new(self.series.index().labels().to_vec())
+            .rename_index(self.series.index().name());
+        let column = Column::from_values(out)?;
+        Series::new(self.series.name(), index, column)
     }
 
     /// EWM covariance with another Series (sample, ddof=1).
