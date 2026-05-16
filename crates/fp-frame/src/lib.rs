@@ -3044,11 +3044,17 @@ impl Series {
             };
             out.push(result);
         }
-        Self::from_values(
-            format!("{}_{}", self.name, name),
-            self.index.labels().to_vec(),
-            out,
-        )
+        // Per br-frankenpandas-itdsf: pandas td comparison ops preserve the
+        // shared axis name (preserved when both operands agree, None
+        // when they differ).
+        let shared_index_name = if self.index.name() == other.index.name() {
+            self.index.name()
+        } else {
+            None
+        };
+        let index = Index::new(self.index.labels().to_vec()).rename_index(shared_index_name);
+        let column = Column::from_values(out)?;
+        Self::new(format!("{}_{}", self.name, name), index, column)
     }
 
     /// Return the number of elements in this Series.
