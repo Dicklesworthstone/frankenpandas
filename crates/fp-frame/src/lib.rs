@@ -30813,7 +30813,9 @@ impl DataFrame {
             columns.insert(name, Column::from_values(vals)?);
         }
 
-        let index = Index::new(row_labels);
+        // Per br-frankenpandas-xb0ra: pandas sets the result's index.name
+        // to the name of the source column used as the pivot index.
+        let index = Index::new(row_labels).rename_index(Some(index_col));
         Ok(Self {
             index,
             column_order,
