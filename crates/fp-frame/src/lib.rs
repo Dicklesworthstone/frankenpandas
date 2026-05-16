@@ -9694,11 +9694,12 @@ impl Rolling<'_> {
             }
         }
 
-        Series::from_values(
-            self.series.name(),
-            self.series.index().labels().to_vec(),
-            out,
-        )
+        // Per br-frankenpandas-i9t7h: pandas rolling().count preserves source
+        // axis name. Inline impl, not via apply_rolling.
+        let index = Index::new(self.series.index().labels().to_vec())
+            .rename_index(self.series.index().name());
+        let column = Column::from_values(out)?;
+        Series::new(self.series.name(), index, column)
     }
 
     /// Rolling sample variance (ddof=1).
