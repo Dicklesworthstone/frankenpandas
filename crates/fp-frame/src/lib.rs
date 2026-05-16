@@ -6329,11 +6329,8 @@ impl Series {
             })
             .collect();
 
-        Self::from_values(
-            self.name.clone(),
-            plan.union_index.labels().to_vec(),
-            values,
-        )
+        // Per br-frankenpandas-xfdn2: pandas Series.mask preserves index name.
+        self.with_labels_and_values_preserving_name(plan.union_index.labels().to_vec(), values)
     }
 
     /// Test whether each element is contained in a set of values.
