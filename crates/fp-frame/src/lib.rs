@@ -11283,7 +11283,12 @@ impl Resample<'_> {
             out_vals.push(agg(&group_vals));
         }
 
-        Series::from_values(self.series.name(), out_labels, out_vals)
+        // Per br-frankenpandas-ur5fl: pandas Resampler.<agg>() returns a
+        // Series whose index.name == source.index.name (the new bucket
+        // axis inherits the source axis name).
+        let index = Index::new(out_labels).rename_index(self.series.index().name());
+        let column = Column::from_values(out_vals)?;
+        Series::new(self.series.name(), index, column)
     }
 
     /// Resample sum.
