@@ -2584,7 +2584,18 @@ impl Series {
             format!("{}{op_sym}{}", self.name, other.name)
         };
 
-        Self::from_values(&out_name, plan.union_index.labels().to_vec(), out)
+        // Per br-frankenpandas-aed1h: pandas Series arithmetic preserves
+        // the shared index name when both operands agree (and clears it
+        // when they differ).
+        let shared_index_name = if self.index.name() == other.index.name() {
+            self.index.name()
+        } else {
+            None
+        };
+        let index =
+            Index::new(plan.union_index.labels().to_vec()).rename_index(shared_index_name);
+        let column = Column::from_values(out)?;
+        Self::new(out_name, index, column)
     }
 
     /// Add with fill_value for NaN handling.
