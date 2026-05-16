@@ -13028,11 +13028,16 @@ impl SeriesGroupBy<'_> {
         labels: Vec<IndexLabel>,
         values: Vec<Scalar>,
     ) -> Result<Series, FrameError> {
+        // Per br-frankenpandas-biy1v: pandas SeriesGroupBy.apply (same-shape
+        // return) preserves source index name on both empty and non-empty
+        // result paths.
+        let index = Index::new(labels).rename_index(self.series.index().name());
         if values.is_empty() {
             let column = Column::new(self.series.dtype(), values)?;
-            Series::new(name, Index::new(labels), column)
+            Series::new(name, index, column)
         } else {
-            Series::from_values(name, labels, values)
+            let column = Column::from_values(values)?;
+            Series::new(name, index, column)
         }
     }
 
