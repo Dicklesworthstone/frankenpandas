@@ -10259,7 +10259,13 @@ impl Expanding<'_> {
             }
         }
 
-        Series::from_values(name, self.series.index().labels().to_vec(), out)
+        // Per br-frankenpandas-gnzg2: pandas Series.expanding().<agg>() preserves
+        // source axis name. Covers sum/mean/std/var/min/max/skew/kurt that
+        // route through apply_expanding.
+        let index = Index::new(self.series.index().labels().to_vec())
+            .rename_index(self.series.index().name());
+        let column = Column::from_values(out)?;
+        Series::new(name, index, column)
     }
 
     /// Expanding sum.
