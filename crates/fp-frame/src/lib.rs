@@ -30293,6 +30293,15 @@ impl DataFrame {
             )));
         }
 
+        // Per br-frankenpandas-s7o17: pandas raises ValueError on any
+        // negative weight (regardless of whether positives dominate the
+        // sum). The sum-check below only catches all-zero or negative-sum
+        // cases.
+        if let Some(neg) = weights.iter().find(|w| **w < 0.0 || w.is_nan()) {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "sample_weights: weights cannot include negative or NaN values (got {neg})"
+            )));
+        }
         // Normalize weights to cumulative distribution
         let w_sum: f64 = weights.iter().sum();
         if w_sum <= 0.0 {
