@@ -26615,10 +26615,12 @@ impl DataFrame {
         // Build index from idx_order
         let new_labels = idx_labels;
 
+        // Per br-frankenpandas-15kfm: pandas pivot_table sets index name
+        // to the pivot index column name. Sister to br-xb0ra (pivot).
         Ok(Self {
             columns: result_cols,
             column_order: result_col_order,
-            index: Index::new(new_labels),
+            index: Index::new(new_labels).rename_index(Some(index_col)),
             column_multiindex: None,
             row_multiindex: None,
             allows_duplicate_labels: self.allows_duplicate_labels,
