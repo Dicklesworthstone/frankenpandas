@@ -6252,11 +6252,9 @@ impl Series {
             })
             .collect();
 
-        Self::from_values(
-            self.name.clone(),
-            plan.union_index.labels().to_vec(),
-            values,
-        )
+        // Per br-frankenpandas-v295h: pandas Series.where with Series-typed
+        // other preserves self.index.name on the left-aligned result.
+        self.with_labels_and_values_preserving_name(plan.union_index.labels().to_vec(), values)
     }
 
     /// Pandas-named Series replacement alias for [`Self::where_cond_series`].
