@@ -10595,11 +10595,12 @@ impl Expanding<'_> {
             out.push(Scalar::Float64(cov));
         }
 
-        Series::from_values(
-            self.series.name(),
-            self.series.index().labels().to_vec(),
-            out,
-        )
+        // Per br-frankenpandas-6ns0e: pandas expanding().cov preserves source
+        // axis name.
+        let index = Index::new(self.series.index().labels().to_vec())
+            .rename_index(self.series.index().name());
+        let column = Column::from_values(out)?;
+        Series::new(self.series.name(), index, column)
     }
 
     /// Expanding standard error of the mean.
