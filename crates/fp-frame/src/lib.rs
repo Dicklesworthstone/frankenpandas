@@ -1088,20 +1088,11 @@ fn scalar_to_json_value(value: &Scalar) -> Value {
     }
 }
 
-fn column_promotes_int_json_values_to_float(column: &Column) -> bool {
-    let mut saw_int = false;
-    let mut saw_missing = false;
-
-    for value in column.values() {
-        match value {
-            Scalar::Int64(_) => saw_int = true,
-            Scalar::Null(_) => saw_missing = true,
-            Scalar::Float64(_) => {}
-            Scalar::Bool(_) | Scalar::Utf8(_) | Scalar::Timedelta64(_) => return false,
-        }
-    }
-
-    saw_int && saw_missing
+fn column_promotes_int_json_values_to_float(_column: &Column) -> bool {
+    // Per br-frankenpandas-vz57j: pandas Int64Dtype (nullable Int) emits
+    // integer literals (`1`), not floats (`1.0`), in to_json records.
+    // We no longer upcast Int64+Null mixes to Float64 on emission.
+    false
 }
 
 fn scalar_to_json_value_with_column_promotion(value: &Scalar, promote_int_to_float: bool) -> Value {
@@ -57875,7 +57866,10 @@ mod tests {
     }
 
     #[test]
-    fn dataframe_to_json_records_promotes_nullable_int_column_to_float() {
+    fn dataframe_to_json_records_emits_int_for_nullable_int_column() {
+        // Per br-frankenpandas-vz57j: pandas Int64Dtype keeps integer JSON
+        // literals when nulls are present (1, null), rather than promoting
+        // every value to Float64 (1.0, null).
         let df = DataFrame::from_dict_with_index(
             vec![("a", vec![Scalar::Int64(1), Scalar::Null(NullKind::Null)])],
             vec!["row".into(), "row".into()],
@@ -57884,7 +57878,7 @@ mod tests {
 
         let json = df.to_json("records").unwrap();
         let parsed: Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed, serde_json::json!([{"a": 1.0}, {"a": null}]));
+        assert_eq!(parsed, serde_json::json!([{"a": 1}, {"a": null}]));
     }
 
     #[test]
