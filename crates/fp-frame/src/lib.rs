@@ -23756,7 +23756,9 @@ impl DataFrame {
             .iter()
             .map(scalar_to_index_label)
             .collect::<Result<Vec<_>, _>>()?;
-        let index = Index::new(labels);
+        // Per br-frankenpandas-fuzon: pandas set_index(col) sets the new
+        // index name to col.
+        let index = Index::new(labels).rename_index(Some(column));
 
         if verify_integrity && index.has_duplicates() {
             return Err(FrameError::CompatibilityRejected(
