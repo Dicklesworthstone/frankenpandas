@@ -2895,7 +2895,10 @@ impl Series {
             };
             out.push(result);
         }
-        Self::from_values(format!("-{}", self.name), self.index.labels().to_vec(), out)
+        // Per br-frankenpandas-bziar: pandas -td preserves self.index.name.
+        let index = Index::new(self.index.labels().to_vec()).rename_index(self.index.name());
+        let column = Column::from_values(out)?;
+        Self::new(format!("-{}", self.name), index, column)
     }
 
     /// Absolute value of Timedelta64 Series.
