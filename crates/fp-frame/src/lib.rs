@@ -8908,7 +8908,8 @@ impl Series {
             pct,
         );
 
-        Self::from_values(self.name(), self.index().labels().to_vec(), ranked)
+        // Per br-frankenpandas-op4vb: pandas Series.rank preserves index name.
+        self.with_labels_and_values_preserving_name(self.index().labels().to_vec(), ranked)
     }
 
     /// Compute the Pearson correlation with another Series.
