@@ -7233,7 +7233,9 @@ impl Series {
             }
         }
 
-        Self::from_values(self.name(), labels, values)
+        // Per br-frankenpandas-6g5tj: pandas Series.repeat preserves index
+        // name; repeated labels keep the source axis name.
+        self.with_labels_and_values_preserving_name(labels, values)
     }
 
     /// Extract the single boolean value from a single-element Series.
