@@ -25075,10 +25075,12 @@ impl DataFrame {
                 None => lbl.clone(),
             })
             .collect();
+        // Per br-frankenpandas-saitv: pandas preserves the index axis name
+        // through rename(index=mapping). Sister to br-789xi (rename_index_with).
         Self {
             columns: self.columns.clone(),
             column_order: self.column_order.clone(),
-            index: Index::new(new_labels),
+            index: Index::new(new_labels).rename_index(self.index.name()),
             column_multiindex: self.column_multiindex.clone(),
             row_multiindex: None,
             allows_duplicate_labels: self.allows_duplicate_labels,
