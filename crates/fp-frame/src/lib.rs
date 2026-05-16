@@ -8199,7 +8199,9 @@ impl Series {
             .map(|&i| self.index.labels()[i].clone())
             .collect();
         let values: Vec<Scalar> = indices.iter().map(|&i| vals[i].clone()).collect();
-        Self::from_values(self.name.clone(), labels, values)
+        // Per br-frankenpandas-bhcg2: pandas Series.drop_duplicates preserves
+        // index name.
+        self.with_labels_and_values_preserving_name(labels, values)
     }
 
     /// Compare this Series with another, showing only differing values.
