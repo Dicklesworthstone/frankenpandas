@@ -9465,7 +9465,8 @@ impl Series {
                     .unwrap_or(Scalar::Null(NullKind::NaN))
             })
             .collect();
-        Self::from_values(self.name(), self.index().labels().to_vec(), new_vals)
+        // Per br-frankenpandas-dvlkx: pandas Series.map(dict) preserves index name.
+        self.with_labels_and_values_preserving_name(self.index().labels().to_vec(), new_vals)
     }
 }
 
