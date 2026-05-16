@@ -2920,11 +2920,10 @@ impl Series {
             };
             out.push(result);
         }
-        Self::from_values(
-            format!("abs({})", self.name),
-            self.index.labels().to_vec(),
-            out,
-        )
+        // Per br-frankenpandas-xm888: pandas td.abs() preserves self.index.name.
+        let index = Index::new(self.index.labels().to_vec()).rename_index(self.index.name());
+        let column = Column::from_values(out)?;
+        Self::new(format!("abs({})", self.name), index, column)
     }
 
     /// Per br-frankenpandas-46658d: gate the td_* family on Timedelta64 dtype
