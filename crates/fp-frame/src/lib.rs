@@ -17910,7 +17910,11 @@ impl DatetimeAccessor<'_> {
                 _ => Ok(Scalar::Null(NullKind::NaN)),
             })
             .collect::<Result<Vec<_>, FrameError>>()?;
-        Series::from_values(name.to_string(), self.series.index().labels().to_vec(), out)
+        // Per br-frankenpandas-mt223: pandas .dt.<x> preserves source axis name.
+        let index = Index::new(self.series.index().labels().to_vec())
+            .rename_index(self.series.index().name());
+        let column = Column::from_values(out)?;
+        Series::new(name.to_string(), index, column)
     }
 
     /// Extract year component.
