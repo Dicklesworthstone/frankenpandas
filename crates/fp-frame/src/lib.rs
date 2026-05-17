@@ -32065,7 +32065,10 @@ impl DataFrame {
             };
             out.push(Scalar::Float64(value));
         }
-        Series::from_values("quantile", self.index.labels().to_vec(), out)
+        // Per br-frankenpandas-jhhml: pandas df.quantile(q, axis=1) preserves row index name.
+        let index = Index::new(self.index.labels().to_vec()).rename_index(self.index.name());
+        let column = Column::from_values(out)?;
+        Series::new("quantile", index, column)
     }
 
     /// Per-row index label of the first smallest numeric value.
