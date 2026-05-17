@@ -15964,7 +15964,13 @@ impl StringAccessor<'_> {
                 _ => v.clone(),
             })
             .collect();
-        Series::from_values(name, self.series.index().labels().to_vec(), out)
+        // Per br-frankenpandas-dfjzf: pandas Series.str.<x> preserves source
+        // axis name. apply_str backs many str.* methods (lower, upper,
+        // capitalize, title, join, strip, lstrip, rstrip, slice, etc.).
+        let index = Index::new(self.series.index().labels().to_vec())
+            .rename_index(self.series.index().name());
+        let column = Column::from_values(out)?;
+        Series::new(name, index, column)
     }
 
     /// Convert strings to lowercase.
