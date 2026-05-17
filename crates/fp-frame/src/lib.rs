@@ -35229,10 +35229,12 @@ impl DataFrame {
             })
             .collect();
 
+        // Per br-frankenpandas-wibui: pandas swaplevel preserves index axis
+        // name on the flat-string path.
         DataFrame {
             columns: self.columns.clone(),
             column_order: self.column_order.clone(),
-            index: Index::new(new_labels),
+            index: Index::new(new_labels).rename_index(self.index.name()),
             column_multiindex: self.column_multiindex.clone(),
             row_multiindex: None,
             allows_duplicate_labels: self.allows_duplicate_labels,
