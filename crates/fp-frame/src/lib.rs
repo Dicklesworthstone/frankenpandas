@@ -33841,7 +33841,14 @@ impl DataFrame {
 
         let mut new_labels = self.index.labels().to_vec();
         new_labels.extend_from_slice(other.index.labels());
-        let index = Index::new(new_labels);
+        // Per br-frankenpandas-5uc2r: pandas df.append preserves shared
+        // row-axis name (or None on mismatch).
+        let shared_name = if self.index.name() == other.index.name() {
+            self.index.name()
+        } else {
+            None
+        };
+        let index = Index::new(new_labels).rename_index(shared_name);
 
         Ok(Self {
             index,
