@@ -28832,7 +28832,14 @@ impl DataFrame {
                 union_labels.push(l.clone());
             }
         }
-        let union_index = Index::new(union_labels);
+        // Per br-frankenpandas-hnawi: pandas DataFrame.combine preserves
+        // shared index name on the union axis.
+        let shared_name = if self.index.name() == other.index.name() {
+            self.index.name()
+        } else {
+            None
+        };
+        let union_index = Index::new(union_labels).rename_index(shared_name);
 
         let mut result_cols = BTreeMap::new();
         for name in &union_cols {
