@@ -13308,7 +13308,12 @@ impl SeriesGroupBy<'_> {
                 values.push(Scalar::Float64(func(&nums)));
             }
         }
-        Series::from_values(name, labels, values)
+        // Per br-frankenpandas-b5ijf: sister to agg_scalar fix (p6y8q).
+        let by_name = self.by.name();
+        let idx_name = if by_name.is_empty() { None } else { Some(by_name) };
+        let index = Index::new(labels).rename_index(idx_name);
+        let column = Column::from_values(values)?;
+        Series::new(name, index, column)
     }
 
     fn utf8_extreme(values: &[Scalar], largest: bool) -> Scalar {
