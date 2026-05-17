@@ -13588,7 +13588,12 @@ impl SeriesGroupBy<'_> {
             }
         }
 
-        Series::from_values(self.series.name(), out_labels, out_values)
+        // Per br-frankenpandas-99iel: sister to p6y8q. Apply by-Series name.
+        let by_name = self.by.name();
+        let idx_name = if by_name.is_empty() { None } else { Some(by_name) };
+        let index = Index::new(out_labels).rename_index(idx_name);
+        let column = Column::from_values(out_values)?;
+        Series::new(self.series.name(), index, column)
     }
 
     /// Open-high-low-close per group.
