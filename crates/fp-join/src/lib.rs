@@ -543,8 +543,15 @@ fn join_series_with_arena(
             .reindex_by_positions(right_positions.as_slice())?
     };
 
+    // Per br-frankenpandas-ceces: pandas Series.join preserves shared
+    // index name. Sister to join_series fix (wp0n6).
+    let shared_name = if left.index().name() == right.index().name() {
+        left.index().name().map(str::to_owned)
+    } else {
+        None
+    };
     Ok(JoinedSeries {
-        index: Index::new(out_labels),
+        index: Index::new(out_labels).rename_index(shared_name.as_deref()),
         left_values,
         right_values,
     })
