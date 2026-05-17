@@ -37896,11 +37896,12 @@ impl DataFrameGroupBy<'_> {
             }
         }
 
-        Series::from_values(
-            "cumcount".to_owned(),
-            self.df.index().labels().to_vec(),
-            out,
-        )
+        // Per br-frankenpandas-pqvd2: pandas groupby.cumcount preserves
+        // source row-axis name. Sister to br-i72df SeriesGroupBy fix.
+        let index = Index::new(self.df.index().labels().to_vec())
+            .rename_index(self.df.index().name());
+        let column = Column::from_values(out)?;
+        Series::new("cumcount".to_owned(), index, column)
     }
 
     /// Assign group number to each row.
@@ -37933,7 +37934,12 @@ impl DataFrameGroupBy<'_> {
             }
         }
 
-        Series::from_values("ngroup".to_owned(), self.df.index().labels().to_vec(), out)
+        // Per br-frankenpandas-pqvd2: pandas groupby.ngroup preserves source
+        // row-axis name. Sister to cumcount fix above.
+        let index = Index::new(self.df.index().labels().to_vec())
+            .rename_index(self.df.index().name());
+        let column = Column::from_values(out)?;
+        Series::new("ngroup".to_owned(), index, column)
     }
 
     /// Pipe the GroupBy through a function.
