@@ -15063,7 +15063,11 @@ impl SeriesGroupByExpanding<'_, '_> {
             }
         }
 
-        Series::from_values(series.name(), series.index().labels().to_vec(), out)
+        // Per br-frankenpandas-o1i9m: pandas groupby().expanding().<agg>()
+        // preserves source axis name.
+        let index = Index::new(series.index().labels().to_vec()).rename_index(series.index().name());
+        let column = Column::from_values(out)?;
+        Series::new(series.name(), index, column)
     }
 
     /// Grouped expanding sum.
