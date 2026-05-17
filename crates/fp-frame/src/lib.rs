@@ -18925,11 +18925,12 @@ impl DatetimeAccessor<'_> {
                         _ => Scalar::Null(NullKind::NaN),
                     })
                     .collect();
-                Series::from_values(
-                    self.series.name().to_owned(),
-                    self.series.index().labels().to_vec(),
-                    values,
-                )
+                // Per br-frankenpandas-s135l: pandas Series.dt.tz_localize(None)
+                // preserves source axis name on the tz-stripped result.
+                let index = Index::new(self.series.index().labels().to_vec())
+                    .rename_index(self.series.index().name());
+                let column = Column::from_values(values)?;
+                Series::new(self.series.name().to_owned(), index, column)
             }
         }
     }
