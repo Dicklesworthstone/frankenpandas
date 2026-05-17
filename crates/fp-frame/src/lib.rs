@@ -13644,8 +13644,12 @@ impl SeriesGroupBy<'_> {
         columns.insert("low".to_owned(), Column::from_values(lows)?);
         columns.insert("close".to_owned(), Column::from_values(closes)?);
 
+        // Per br-frankenpandas-midpz: pandas Series.groupby(by).ohlc() returns
+        // a DataFrame whose .index.name == by.name.
+        let by_name = self.by.name();
+        let idx_name = if by_name.is_empty() { None } else { Some(by_name) };
         DataFrame::new_with_column_order(
-            Index::new(order),
+            Index::new(order).rename_index(idx_name),
             columns,
             vec![
                 "open".to_owned(),
