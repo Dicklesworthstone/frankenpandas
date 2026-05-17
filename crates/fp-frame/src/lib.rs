@@ -8301,7 +8301,12 @@ impl Series {
     ///
     /// Matches `pd.Series.reindex_like(other)`.
     pub fn reindex_like(&self, other: &Self) -> Result<Self, FrameError> {
-        self.reindex(other.index.labels().to_vec())
+        // Per br-frankenpandas-95646: pandas reindex_like adopts OTHER's index
+        // (labels AND name), not self's. reindex(labels) preserves self.name,
+        // so we apply the rename after.
+        let result = self.reindex(other.index.labels().to_vec())?;
+        let new_index = result.index().clone().rename_index(other.index.name());
+        Self::new(result.name().to_owned(), new_index, result.column().clone())
     }
 
     /// Convert dtypes to best-possible types.
