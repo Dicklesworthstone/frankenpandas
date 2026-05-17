@@ -7916,7 +7916,11 @@ impl Series {
             col_order.push(ck.clone());
         }
 
-        DataFrame::new_with_column_order(Index::new(labels), columns, col_order)
+        // Per br-frankenpandas-8nh42: pandas Series.unstack preserves the
+        // source axis name on the result row index (when the source is
+        // string-composite, the source axis name is the only signal we have).
+        let index = Index::new(labels).rename_index(self.index.name());
+        DataFrame::new_with_column_order(index, columns, col_order)
     }
 
     /// Convert Series to a vector of scalars.
