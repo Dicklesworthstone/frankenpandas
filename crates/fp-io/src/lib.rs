@@ -2850,7 +2850,9 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
                 }
             })
             .collect();
-        let index = Index::new(index_labels);
+        // Per br-frankenpandas-l0vbr: pandas pd.read_csv(index_col='col')
+        // sets result.index.name = 'col'.
+        let index = Index::new(index_labels).set_name(idx_col_name);
 
         let mut out_columns = BTreeMap::new();
         let mut column_order = Vec::with_capacity(headers.len() - 1);
