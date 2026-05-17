@@ -21298,6 +21298,14 @@ fn concat_dataframes_axis1(
         return DataFrame::new(Index::new(Vec::new()), BTreeMap::new());
     }
 
+    // Per br-frankenpandas-nfja5: pandas concat axis=1 preserves shared
+    // index name across frames (= None if any differ).
+    let first_axis_name = frames.first().and_then(|f| f.index().name());
+    let shared_axis_name = if frames.iter().all(|f| f.index().name() == first_axis_name) {
+        first_axis_name
+    } else {
+        None
+    };
     let target_index = match join {
         ConcatJoin::Outer => {
             let all_indexes_equal = frames
@@ -21317,7 +21325,7 @@ fn concat_dataframes_axis1(
                         }
                     }
                 }
-                Index::new(labels)
+                Index::new(labels).rename_index(shared_axis_name)
             }
         }
         ConcatJoin::Inner => {
@@ -21332,7 +21340,7 @@ fn concat_dataframes_axis1(
                 let positions = frame.index().position_map_first();
                 labels.retain(|label| positions.contains_key(label));
             }
-            Index::new(labels)
+            Index::new(labels).rename_index(shared_axis_name)
         }
     };
 
