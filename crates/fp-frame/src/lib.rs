@@ -12575,7 +12575,10 @@ impl DataFrameResample<'_> {
             }
         }
 
-        let index = result_index.unwrap_or_else(|| Index::new(Vec::new()));
+        // Per br-frankenpandas-yrk6i: pandas resample.agg preserves source
+        // axis name even when no numeric columns produce results.
+        let index = result_index
+            .unwrap_or_else(|| Index::new(Vec::new()).rename_index(self.df.index.name()));
         Ok(DataFrame {
             columns: result_cols,
             column_order: col_order,
