@@ -17523,9 +17523,25 @@ impl StringAccessor<'_> {
             }
         }
 
-        let s1 = Series::from_values(format!("{}_0", self.series.name()), labels.clone(), before)?;
-        let s2 = Series::from_values(format!("{}_1", self.series.name()), labels.clone(), sep_out)?;
-        let s3 = Series::from_values(format!("{}_2", self.series.name()), labels, after)?;
+        // Per br-frankenpandas-o5vvx: pandas Series.str.rpartition preserves
+        // source axis name on each of the three result Series.
+        let name_owner = self.series.index().name().map(str::to_owned);
+        let idx_name = name_owner.as_deref();
+        let s1 = Series::new(
+            format!("{}_0", self.series.name()),
+            Index::new(labels.clone()).rename_index(idx_name),
+            Column::from_values(before)?,
+        )?;
+        let s2 = Series::new(
+            format!("{}_1", self.series.name()),
+            Index::new(labels.clone()).rename_index(idx_name),
+            Column::from_values(sep_out)?,
+        )?;
+        let s3 = Series::new(
+            format!("{}_2", self.series.name()),
+            Index::new(labels).rename_index(idx_name),
+            Column::from_values(after)?,
+        )?;
         Ok((s1, s2, s3))
     }
 
