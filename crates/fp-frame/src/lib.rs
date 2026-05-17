@@ -13420,7 +13420,12 @@ impl SeriesGroupBy<'_> {
                 values.push(Scalar::Timedelta64(clamped as i64));
             }
         }
-        Series::from_values(self.series.name(), labels, values)
+        // Per br-frankenpandas-1iqhe: sister to p6y8q. Apply by-Series name.
+        let by_name = self.by.name();
+        let idx_name = if by_name.is_empty() { None } else { Some(by_name) };
+        let index = Index::new(labels).rename_index(idx_name);
+        let column = Column::from_values(values)?;
+        Series::new(self.series.name(), index, column)
     }
 
     /// Count of non-null values in each group.
