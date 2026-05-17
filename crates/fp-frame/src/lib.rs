@@ -27743,7 +27743,11 @@ impl DataFrame {
                     }
                 }
 
-                Series::from_values("corrwith".to_string(), labels, values)
+                // Per br-frankenpandas-hrsc3: pandas df.corrwith(other, axis=1)
+                // preserves df.index.name on the row-wise correlation result.
+                let index = Index::new(labels).rename_index(self.index.name());
+                let column = Column::from_values(values)?;
+                Series::new("corrwith".to_string(), index, column)
             }
             _ => Err(FrameError::CompatibilityRejected(format!(
                 "corrwith: axis must be 0 or 1, got {axis}"
