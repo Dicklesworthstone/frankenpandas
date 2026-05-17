@@ -31176,7 +31176,11 @@ impl DataFrame {
                 distinct_values(&row_values, dropna).len() as i64
             ));
         }
-        Series::from_values("nunique".to_owned(), self.index.labels().to_vec(), values)
+        // Per br-frankenpandas-ngoic: pandas df.nunique(axis=1) preserves
+        // df.index.name on the per-row unique-count result.
+        let index = Index::new(self.index.labels().to_vec()).rename_index(self.index.name());
+        let column = Column::from_values(values)?;
+        Series::new("nunique".to_owned(), index, column)
     }
 
     /// Count unique non-null values per row (axis=1).
