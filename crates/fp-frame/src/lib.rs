@@ -20546,11 +20546,11 @@ pub fn to_timedelta_with_options(
         converted.push(result);
     }
 
-    Series::from_values(
-        series.name().to_owned(),
-        series.index().labels().to_vec(),
-        converted,
-    )
+    // Per br-frankenpandas-zkbqo: pandas pd.to_timedelta preserves source axis name.
+    let index =
+        Index::new(series.index().labels().to_vec()).rename_index(series.index().name());
+    let column = Column::from_values(converted)?;
+    Series::new(series.name().to_owned(), index, column)
 }
 
 /// Resolve timedelta unit string to nanoseconds multiplier.
