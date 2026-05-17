@@ -31267,7 +31267,11 @@ impl DataFrame {
                 None => values.push(Scalar::Null(NullKind::NaN)),
             }
         }
-        Series::from_values("idxmin", self.index.labels().to_vec(), values)
+        // Per br-frankenpandas-bt0kp: pandas df.idxmin(axis=1) preserves
+        // df.index.name on the per-row result.
+        let index = Index::new(self.index.labels().to_vec()).rename_index(self.index.name());
+        let column = Column::from_values(values)?;
+        Series::new("idxmin", index, column)
     }
 
     /// Column label of the maximum value per row (axis=1).
@@ -31296,7 +31300,11 @@ impl DataFrame {
                 None => values.push(Scalar::Null(NullKind::NaN)),
             }
         }
-        Series::from_values("idxmax", self.index.labels().to_vec(), values)
+        // Per br-frankenpandas-bt0kp: pandas df.idxmax(axis=1) preserves
+        // df.index.name on the per-row result.
+        let index = Index::new(self.index.labels().to_vec()).rename_index(self.index.name());
+        let column = Column::from_values(values)?;
+        Series::new("idxmax", index, column)
     }
 
     /// Whether all non-null values are truthy, per column.
