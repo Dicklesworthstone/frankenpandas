@@ -12955,7 +12955,11 @@ impl SeriesGroupBy<'_> {
         } else {
             Column::from_values(values)?
         };
-        Series::new(self.series.name().to_owned(), Index::new(labels), column)
+        // Per br-frankenpandas-4zzw1: pandas SeriesGroupBy selectors (nlargest,
+        // nsmallest, etc.) preserve source axis name on the take-positions
+        // subset.
+        let index = Index::new(labels).rename_index(self.series.index.name());
+        Series::new(self.series.name().to_owned(), index, column)
     }
 
     fn transform_groups<F>(&self, func: F) -> Result<Series, FrameError>
