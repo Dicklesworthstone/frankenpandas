@@ -436,8 +436,15 @@ fn join_series_with_global_allocator(
         right.column().reindex_by_positions(&right_positions)?
     };
 
+    // Per br-frankenpandas-wp0n6: pandas Series.join preserves shared
+    // index name (preserved when both operands agree, None when they differ).
+    let shared_name = if left.index().name() == right.index().name() {
+        left.index().name().map(str::to_owned)
+    } else {
+        None
+    };
     Ok(JoinedSeries {
-        index: Index::new(out_labels),
+        index: Index::new(out_labels).rename_index(shared_name.as_deref()),
         left_values,
         right_values,
     })
