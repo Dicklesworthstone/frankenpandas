@@ -28359,10 +28359,12 @@ impl DataFrame {
             let vals: Vec<Scalar> = indices.iter().map(|&i| col.values()[i].clone()).collect();
             result_cols.insert(col_name.clone(), Column::from_values(vals)?);
         }
+        // Per br-frankenpandas-9kbnz: pandas df.take(indices) preserves
+        // row-axis name.
         Ok(Self {
             columns: result_cols,
             column_order: self.column_order.clone(),
-            index: Index::new(new_labels),
+            index: Index::new(new_labels).rename_index(self.index.name()),
             column_multiindex: self.column_multiindex.clone(),
             row_multiindex,
             allows_duplicate_labels: self.allows_duplicate_labels,
