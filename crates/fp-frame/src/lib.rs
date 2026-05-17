@@ -38946,10 +38946,13 @@ impl GroupByResample<'_> {
             col_order.push(col_name.clone());
         }
 
+        // Per br-frankenpandas-orv6u: pandas groupby().resample() preserves
+        // the source date-axis name (within the MultiIndex level corresponding
+        // to the resampled timestamps).
         Ok(DataFrame {
             columns: cols,
             column_order: col_order,
-            index: Index::new(all_labels),
+            index: Index::new(all_labels).rename_index(self.groupby.df.index.name()),
             column_multiindex: None,
             row_multiindex: None,
             allows_duplicate_labels: self.groupby.df.allows_duplicate_labels,
