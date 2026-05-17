@@ -20763,12 +20763,12 @@ pub fn cut(series: &Series, bins: usize) -> Result<Series, FrameError> {
 
     let valid: Vec<f64> = floats.iter().filter_map(|v| *v).collect();
     if valid.is_empty() {
+        // Per br-frankenpandas-23d91: pandas pd.cut preserves source axis name.
         let nans = vec![Scalar::Null(NullKind::NaN); series.len()];
-        return Series::from_values(
-            series.name().to_string(),
-            series.index().labels().to_vec(),
-            nans,
-        );
+        let index =
+            Index::new(series.index().labels().to_vec()).rename_index(series.index().name());
+        let column = Column::from_values(nans)?;
+        return Series::new(series.name().to_string(), index, column);
     }
 
     let min_val = valid.iter().copied().fold(f64::INFINITY, f64::min);
@@ -20819,11 +20819,11 @@ pub fn cut(series: &Series, bins: usize) -> Result<Series, FrameError> {
         })
         .collect();
 
-    Series::from_values(
-        series.name().to_string(),
-        series.index().labels().to_vec(),
-        labels,
-    )
+    // Per br-frankenpandas-23d91: pandas pd.cut preserves source axis name.
+    let index =
+        Index::new(series.index().labels().to_vec()).rename_index(series.index().name());
+    let column = Column::from_values(labels)?;
+    Series::new(series.name().to_string(), index, column)
 }
 
 /// Quantile-based binning.
