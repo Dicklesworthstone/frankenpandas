@@ -11681,8 +11681,11 @@ impl Resample<'_> {
             ("low".to_owned(), Column::from_values(lows)?),
             ("close".to_owned(), Column::from_values(closes)?),
         ]);
+        // Per br-frankenpandas-pvops: pandas Resampler.ohlc preserves source
+        // axis name on the bucket-axis index.
+        let index = Index::new(labels).rename_index(self.series.index().name());
         DataFrame::new_with_column_order(
-            Index::new(labels),
+            index,
             columns,
             vec![
                 "open".to_owned(),
