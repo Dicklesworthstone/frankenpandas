@@ -17888,7 +17888,11 @@ impl DatetimeAccessor<'_> {
                 _ => Scalar::Null(NullKind::NaN),
             })
             .collect();
-        Series::from_values(name.to_string(), self.series.index().labels().to_vec(), out)
+        // Per br-frankenpandas-8pyft: pandas .dt.<x> preserves source axis name.
+        let index = Index::new(self.series.index().labels().to_vec())
+            .rename_index(self.series.index().name());
+        let column = Column::from_values(out)?;
+        Series::new(name.to_string(), index, column)
     }
 
     /// Helper: apply a fallible datetime transform to each value.
