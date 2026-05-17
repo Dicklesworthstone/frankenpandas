@@ -1667,7 +1667,20 @@ fn align_union_duplicate_aware(
         }
     }
 
-    (Index::new(out_labels), left_positions, right_positions)
+    // Per br-frankenpandas-hq7j9: pandas outer alignment preserves shared
+    // index name even when duplicate labels exist (preserved when both
+    // operands agree, None when they differ). Mirrors align_union /
+    // align_inner / align_non_unique handling for unique-labels paths.
+    let shared_name = if left.name() == right.name() {
+        left.name()
+    } else {
+        None
+    };
+    (
+        Index::new(out_labels).rename_index(shared_name),
+        left_positions,
+        right_positions,
+    )
 }
 
 fn align_union_plan(left: &Index, right: &Index) -> AlignmentPlan {
