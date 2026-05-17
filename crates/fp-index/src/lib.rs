@@ -9776,7 +9776,16 @@ pub fn multi_way_align(indexes: &[&Index]) -> MultiAlignmentPlan {
             }
         }
     }
-    let union = Index::new(union_labels);
+    // Per br-frankenpandas-nrhjq: pandas multi-index union sets name to
+    // the shared name across all inputs (= None if any differ).
+    let first_name = indexes.first().and_then(|idx| idx.name()).map(str::to_owned);
+    let shared_name = if indexes.iter().all(|idx| idx.name() == first_name.as_deref()) {
+        first_name
+    } else {
+        None
+    };
+    let mut union = Index::new(union_labels);
+    union.name = shared_name;
 
     // Build position maps for each input
     let maps: Vec<HashMap<&IndexLabel, usize>> = indexes
