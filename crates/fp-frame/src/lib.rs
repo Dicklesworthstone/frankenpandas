@@ -21260,7 +21260,17 @@ pub fn concat_dataframes_with_keys(
         columns.insert(col_name.clone(), Column::from_values(values)?);
     }
 
-    DataFrame::new_with_column_order(Index::new(labels), columns, union_columns)
+    // Per br-frankenpandas-3k1qf: concat with keys produces a MultiIndex in
+    // pandas. Our flat-composite fallback preserves at least the shared
+    // source axis name across all input frames.
+    let first_name = frames.first().and_then(|f| f.index().name());
+    let shared_name = if frames.iter().all(|f| f.index().name() == first_name) {
+        first_name
+    } else {
+        None
+    };
+    let index = Index::new(labels).rename_index(shared_name);
+    DataFrame::new_with_column_order(index, columns, union_columns)
 }
 
 fn concat_dataframes_axis0_inner(frames: &[&DataFrame]) -> Result<DataFrame, FrameError> {
