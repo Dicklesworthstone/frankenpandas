@@ -2691,7 +2691,7 @@ No operation in FrankenPandas reads from `/dev/urandom`, `getrandom()`, or any O
 | **Identity-alignment fast path (AG-11)** | When both operands of a binary op share an `Index` value (same `Arc`-identity) and the index has no duplicates, the alignment planner is skipped entirely. O(1) check. The single biggest groupby speedup in the codebase. |
 | **Borrowed-key HashMap (AG-02)** | The alignment planner builds its position map using `&IndexLabel` references rather than cloning the label. Eliminates O(n) string allocations in the join build phase. |
 | **Source-index referencing (AG-08)** | GroupBy's HashMap path stores `(source_row_index, accumulator)` instead of `(key_scalar_clone, accumulator)`. The original `IndexLabel` is reconstructed at output time from the source position, avoiding per-group `Scalar::Utf8` clones. |
-| **Compatibility issue** | An ambiguous input encountered at runtime: an unknown protocol field, a join admission outside policy, a malformed input. Each is a `(IssueKind, subject, context)` triple that gets passed to the Bayesian decision layer. |
+| **Compatibility issue** | An ambiguous input encountered at runtime: an unknown protocol field, a join admission outside policy, a malformed input. Each is a `CompatibilityIssue { kind: IssueKind, subject: String, detail: String }` value that gets passed to the Bayesian decision layer. |
 | **Decision record** | An entry in the `EvidenceLedger`. Carries the prior, posterior, evidence terms, loss matrix, expected losses, and chosen action. Replayable. |
 | **Decision card** | Compact human-readable rendering of a decision record. Produced by `decision_to_card`. Used in CLI output and TUI dashboards. |
 
