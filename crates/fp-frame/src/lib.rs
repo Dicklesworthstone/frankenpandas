@@ -15615,11 +15615,12 @@ impl ListAccessor<'_> {
                 })
             })
             .collect::<Result<_, _>>()?;
-        Series::from_values(
-            self.series.name(),
-            self.series.index().labels().to_vec(),
-            out,
-        )
+        // Per br-frankenpandas-oq481: pandas Series.list.len preserves source
+        // axis name.
+        let index = Index::new(self.series.index().labels().to_vec())
+            .rename_index(self.series.index().name());
+        let column = Column::from_values(out)?;
+        Series::new(self.series.name(), index, column)
     }
 
     /// Extract one element from each list value.
