@@ -145,6 +145,12 @@ repro_*.rs
 # Nested crate build artifacts
 crates/*/target/
 
+# Remote compilation helper per-job target shards (target-set + job-id +
+# nanos + retry counter) — created by concurrent `rch` cargo invocations.
+.rch-target/
+.rch-target-*/
+.rch-deploy-root/
+
 # cargo-fuzz output
 fuzz/artifacts/*
 !fuzz/artifacts/README.md
