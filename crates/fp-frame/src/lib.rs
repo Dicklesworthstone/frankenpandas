@@ -13860,11 +13860,12 @@ impl SeriesGroupBy<'_> {
             }
         }
 
-        Series::from_values(
-            self.series.name(),
-            self.series.index.labels().to_vec(),
-            ranks,
-        )
+        // Per br-frankenpandas-l5iyj: pandas SeriesGroupBy.rank preserves
+        // source row-axis name (per-row result, same shape as source).
+        let index =
+            Index::new(self.series.index.labels().to_vec()).rename_index(self.series.index.name());
+        let column = Column::from_values(ranks)?;
+        Series::new(self.series.name(), index, column)
     }
 
     /// Standard deviation of each group (ddof=1).
