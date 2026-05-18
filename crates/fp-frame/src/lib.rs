@@ -14448,8 +14448,12 @@ impl SeriesGroupBy<'_> {
         columns.insert("75%".to_owned(), Column::from_values(q75s)?);
         columns.insert("max".to_owned(), Column::from_values(maxs)?);
 
+        // Per br-frankenpandas-e1xcz: pandas SeriesGroupBy.describe result
+        // DataFrame's row index is named after by-Series.
+        let by_name = self.by.name();
+        let idx_name = if by_name.is_empty() { None } else { Some(by_name) };
         DataFrame::new_with_column_order(
-            Index::new(order),
+            Index::new(order).rename_index(idx_name),
             columns,
             vec![
                 "count".to_owned(),
