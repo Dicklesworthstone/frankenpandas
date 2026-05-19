@@ -31839,7 +31839,13 @@ impl DataFrame {
         let mut values = Vec::new();
         for name in &self.column_order {
             let col = &self.columns[name];
-            if col.dtype() != DType::Int64 && col.dtype() != DType::Float64 {
+            // Per br-frankenpandas-qin9h: Series::std_ddof preserves
+            // Timedelta64 dtype (br-e686u); allow Timedelta64 columns
+            // through. Sister to reduce_numeric br-vpeoh.
+            if !matches!(
+                col.dtype(),
+                DType::Int64 | DType::Float64 | DType::Timedelta64
+            ) {
                 continue;
             }
             let s = self.column_as_series(name)?;
@@ -31857,7 +31863,11 @@ impl DataFrame {
         let mut values = Vec::new();
         for name in &self.column_order {
             let col = &self.columns[name];
-            if col.dtype() != DType::Int64 && col.dtype() != DType::Float64 {
+            // Per br-frankenpandas-qin9h: sister to std_agg_ddof above.
+            if !matches!(
+                col.dtype(),
+                DType::Int64 | DType::Float64 | DType::Timedelta64
+            ) {
                 continue;
             }
             let s = self.column_as_series(name)?;
