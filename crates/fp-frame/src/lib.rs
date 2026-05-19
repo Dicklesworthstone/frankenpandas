@@ -5684,6 +5684,45 @@ impl Series {
     ///
     /// Matches `pd.Series.median()`.
     pub fn median(&self) -> Result<Scalar, FrameError> {
+        // Per br-frankenpandas-rbt10: pandas pd.Series([td1, td2,
+        // td3]).median() returns a Timedelta scalar. Sister to
+        // Series::quantile br-ppc2r and fp-types nanmedian br-j8ntk.
+        let has_td = self
+            .column
+            .values()
+            .iter()
+            .any(|v| matches!(v, Scalar::Timedelta64(ns) if *ns != Timedelta::NAT));
+        let all_td_or_missing = self.column.values().iter().all(|v| {
+            v.is_missing()
+                || matches!(v, Scalar::Timedelta64(_))
+                || matches!(v, Scalar::Null(NullKind::NaT))
+        });
+        if has_td && all_td_or_missing {
+            let mut nums: Vec<f64> = self
+                .column
+                .values()
+                .iter()
+                .filter_map(|v| match v {
+                    Scalar::Timedelta64(ns) if *ns != Timedelta::NAT => Some(*ns as f64),
+                    _ => None,
+                })
+                .collect();
+            if nums.is_empty() {
+                return Ok(Scalar::Timedelta64(Timedelta::NAT));
+            }
+            nums.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let mid = nums.len() / 2;
+            let median_ns = if nums.len().is_multiple_of(2) {
+                (nums[mid - 1] + nums[mid]) / 2.0
+            } else {
+                nums[mid]
+            };
+            if !median_ns.is_finite() {
+                return Ok(Scalar::Timedelta64(Timedelta::NAT));
+            }
+            let clamped = median_ns.clamp(i64::MIN as f64, i64::MAX as f64);
+            return Ok(Scalar::Timedelta64(clamped as i64));
+        }
         let mut vals: Vec<f64> = Vec::new();
         for val in self.column.values() {
             if !val.is_missing() {
