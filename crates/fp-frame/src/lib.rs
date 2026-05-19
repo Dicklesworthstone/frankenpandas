@@ -5946,6 +5946,11 @@ impl Series {
                 }
                 return Ok(Scalar::Int64(product));
             }
+            // Per br-frankenpandas-mpw1f: pandas pd.Series([td]).prod()
+            // raises TypeError because Timedelta² has no dimension. Mirror
+            // fp-types nanprod (br-szq6a): return NaT to preserve the
+            // type-incompatible signal without erroring.
+            DType::Timedelta64 => return Ok(Scalar::Timedelta64(Timedelta::NAT)),
             _ => {}
         }
 
