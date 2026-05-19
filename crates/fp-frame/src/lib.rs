@@ -28329,12 +28329,15 @@ impl DataFrame {
     }
 
     fn corr_candidate_columns(&self, _numeric_only: bool) -> Vec<String> {
+        // Per br-frankenpandas-qk3s0: include Timedelta64 columns. pandas
+        // df.corr() / df.cov() returns f64 statistics for Timedelta cols
+        // by treating their ns counts as ordered numerics.
         self.column_order
             .iter()
             .filter(|name| {
                 matches!(
                     self.columns[name.as_str()].dtype(),
-                    DType::Bool | DType::Int64 | DType::Float64
+                    DType::Bool | DType::Int64 | DType::Float64 | DType::Timedelta64
                 )
             })
             .cloned()
@@ -28356,7 +28359,13 @@ impl DataFrame {
             .map(|name| {
                 let col = &self.columns[name];
                 (0..len)
-                    .map(|i| col.values()[i].to_f64().unwrap_or(f64::NAN))
+                    .map(|i| match &col.values()[i] {
+                        // Per br-frankenpandas-qk3s0: extract ns for
+                        // Timedelta64 before falling through to to_f64.
+                        Scalar::Timedelta64(ns) if *ns != Timedelta::NAT => *ns as f64,
+                        Scalar::Timedelta64(_) => f64::NAN,
+                        other => other.to_f64().unwrap_or(f64::NAN),
+                    })
                     .collect()
             })
             .collect();
