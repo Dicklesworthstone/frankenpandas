@@ -14885,7 +14885,11 @@ impl SeriesGroupBy<'_> {
             col_order.push(func.to_string());
         }
 
-        let index = Index::new(order);
+        // Per br-frankenpandas-0dc6p: pandas Series.groupby(by).agg([...])
+        // returns DataFrame whose .index.name == by.name.
+        let by_name = self.by.name();
+        let idx_name = if by_name.is_empty() { None } else { Some(by_name) };
+        let index = Index::new(order).rename_index(idx_name);
         Ok(DataFrame {
             columns: result_cols,
             column_order: col_order,
