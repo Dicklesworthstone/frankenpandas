@@ -5691,7 +5691,37 @@ impl Series {
     pub fn var(&self) -> Result<Scalar, FrameError> {
         let count = self.count();
         if count < 2 {
+            // Per br-frankenpandas-yy0ks: pandas pd.Series([td]).var() on
+            // length-1 Timedelta returns NaT; mirror that surface here.
+            if matches!(self.column.dtype(), DType::Timedelta64) {
+                return Ok(Scalar::Timedelta64(Timedelta::NAT));
+            }
             return Ok(Scalar::Float64(f64::NAN));
+        }
+        // Per br-frankenpandas-yy0ks: Timedelta64 var preserves dtype to
+        // match pandas (and fp-types nanvar j8ntk path). Variance is
+        // conceptually ns² but pandas reports the result as Timedelta.
+        if matches!(self.column.dtype(), DType::Timedelta64) {
+            let mut ns_vals: Vec<f64> = Vec::with_capacity(count);
+            for val in self.column.values() {
+                if let Scalar::Timedelta64(ns) = val {
+                    if *ns == Timedelta::NAT {
+                        continue;
+                    }
+                    ns_vals.push(*ns as f64);
+                }
+            }
+            if ns_vals.len() < 2 {
+                return Ok(Scalar::Timedelta64(Timedelta::NAT));
+            }
+            let mean_ns: f64 = ns_vals.iter().sum::<f64>() / ns_vals.len() as f64;
+            let sum_sq: f64 = ns_vals.iter().map(|x| (x - mean_ns).powi(2)).sum();
+            let var_ns = sum_sq / (ns_vals.len() - 1) as f64;
+            if !var_ns.is_finite() {
+                return Ok(Scalar::Timedelta64(Timedelta::NAT));
+            }
+            let clamped = var_ns.clamp(i64::MIN as f64, i64::MAX as f64);
+            return Ok(Scalar::Timedelta64(clamped as i64));
         }
         let mean_val = match self.mean()? {
             Scalar::Float64(v) => v,
