@@ -28524,12 +28524,13 @@ impl DataFrame {
             };
             let dt_s = sc.dtype();
             let dt_o = oc.dtype();
-            // Per br-frankenpandas-ncuvp: include Timedelta64. Series::corr
-            // now handles Timedelta pairs via br-of7v2.
-            let numeric_or_td = |dt: DType| {
-                matches!(dt, DType::Int64 | DType::Float64 | DType::Timedelta64)
-            };
-            if !numeric_or_td(dt_s) || !numeric_or_td(dt_o) {
+            if matches!(dt_s, DType::Timedelta64) || matches!(dt_o, DType::Timedelta64) {
+                return Err(FrameError::CompatibilityRejected(
+                    "corrwith: pandas rejects shared Timedelta64 columns".into(),
+                ));
+            }
+            let numeric = |dt: DType| matches!(dt, DType::Int64 | DType::Float64);
+            if !numeric(dt_s) || !numeric(dt_o) {
                 continue;
             }
 
@@ -28555,8 +28556,20 @@ impl DataFrame {
             1 => {
                 // Row-wise correlation: for each row index present in both,
                 // compute correlation across numeric columns
-                // Per br-frankenpandas-ncuvp: include Timedelta64 columns
-                // — Series::corr handles Timedelta pairs via br-of7v2.
+                for name in &self.column_order {
+                    let Some(other_col) = other.columns.get(name) else {
+                        continue;
+                    };
+                    let self_dtype = self.columns[name.as_str()].dtype();
+                    let other_dtype = other_col.dtype();
+                    if matches!(self_dtype, DType::Timedelta64)
+                        || matches!(other_dtype, DType::Timedelta64)
+                    {
+                        return Err(FrameError::CompatibilityRejected(
+                            "corrwith axis=1: pandas rejects shared Timedelta64 columns".into(),
+                        ));
+                    }
+                }
                 let shared_cols: Vec<String> = self
                     .column_order
                     .iter()
@@ -28564,11 +28577,11 @@ impl DataFrame {
                         other.columns.contains_key(name.as_str())
                             && matches!(
                                 self.columns[name.as_str()].dtype(),
-                                DType::Int64 | DType::Float64 | DType::Timedelta64
+                                DType::Int64 | DType::Float64
                             )
                             && matches!(
                                 other.columns[name.as_str()].dtype(),
-                                DType::Int64 | DType::Float64 | DType::Timedelta64
+                                DType::Int64 | DType::Float64
                             )
                     })
                     .cloned()
@@ -67461,6 +67474,44 @@ mod tests {
     }
 
     #[test]
+    fn df_corrwith_rejects_shared_timedelta_columns() {
+        let day = Timedelta::NANOS_PER_DAY;
+        let df1 = DataFrame::from_dict(
+            &["td"],
+            vec![(
+                "td",
+                vec![
+                    Scalar::Timedelta64(day),
+                    Scalar::Timedelta64(2 * day),
+                    Scalar::Timedelta64(3 * day),
+                ],
+            )],
+        )
+        .unwrap();
+        let df2 = DataFrame::from_dict(
+            &["td"],
+            vec![(
+                "td",
+                vec![
+                    Scalar::Timedelta64(3 * day),
+                    Scalar::Timedelta64(2 * day),
+                    Scalar::Timedelta64(day),
+                ],
+            )],
+        )
+        .unwrap();
+
+        let err = df1
+            .corrwith(&df2)
+            .expect_err("pandas corrwith rejects Timedelta64 columns");
+        assert!(matches!(
+            err,
+            FrameError::CompatibilityRejected(message)
+                if message.contains("corrwith") && message.contains("Timedelta64")
+        ));
+    }
+
+    #[test]
     fn df_dot() {
         // [1 2]   [5 6]   [1*5+2*7  1*6+2*8]   [19 22]
         // [3 4] × [7 8] = [3*5+4*7  3*6+4*8] = [43 50]
@@ -72743,6 +72794,42 @@ mod tests {
         // Each row has perfectly correlated pairs: [1,2] vs [3,6] and [10,20] vs [30,60]
         let corr_row0 = result.values()[0].to_f64().unwrap();
         assert!((corr_row0 - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn dataframe_corrwith_axis1_rejects_shared_timedelta_columns() {
+        let day = Timedelta::NANOS_PER_DAY;
+        let df1 = DataFrame::from_dict(
+            &["a", "td"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
+                (
+                    "td",
+                    vec![Scalar::Timedelta64(day), Scalar::Timedelta64(2 * day)],
+                ),
+            ],
+        )
+        .unwrap();
+        let df2 = DataFrame::from_dict(
+            &["a", "td"],
+            vec![
+                ("a", vec![Scalar::Float64(2.0), Scalar::Float64(4.0)]),
+                (
+                    "td",
+                    vec![Scalar::Timedelta64(day), Scalar::Timedelta64(3 * day)],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let err = df1
+            .corrwith_axis(&df2, 1)
+            .expect_err("pandas corrwith(axis=1) rejects Timedelta64 columns");
+        assert!(matches!(
+            err,
+            FrameError::CompatibilityRejected(message)
+                if message.contains("axis=1") && message.contains("Timedelta64")
+        ));
     }
 
     // ── Series.map_with_default ────────────────────────────────
