@@ -9637,13 +9637,21 @@ impl Series {
         let b_vals = other.column().values();
         let len = a_vals.len().min(b_vals.len());
 
+        // Per br-frankenpandas-xekug: pandas Spearman/Kendall on Timedelta
+        // ranks by ns order and returns f64. Extract ns for Timedelta64
+        // values; to_f64() errors on them so the fallback silently drops
+        // every Timedelta pair.
+        let extract_f64 = |v: &Scalar| -> Option<f64> {
+            match v {
+                Scalar::Timedelta64(ns) if *ns != Timedelta::NAT => Some(*ns as f64),
+                _ => v.to_f64().ok().filter(|x| !x.is_nan()),
+            }
+        };
+
         // Collect valid pairs
         let mut pairs: Vec<(f64, f64)> = Vec::new();
         for i in 0..len {
-            if let (Ok(x), Ok(y)) = (a_vals[i].to_f64(), b_vals[i].to_f64())
-                && !x.is_nan()
-                && !y.is_nan()
-            {
+            if let (Some(x), Some(y)) = (extract_f64(&a_vals[i]), extract_f64(&b_vals[i])) {
                 pairs.push((x, y));
             }
         }
@@ -9667,12 +9675,18 @@ impl Series {
         let b_vals = other.column().values();
         let len = a_vals.len().min(b_vals.len());
 
+        // Per br-frankenpandas-xekug: extract ns for Timedelta64 so Kendall
+        // ranks pairs by ns order rather than silently dropping them.
+        let extract_f64 = |v: &Scalar| -> Option<f64> {
+            match v {
+                Scalar::Timedelta64(ns) if *ns != Timedelta::NAT => Some(*ns as f64),
+                _ => v.to_f64().ok().filter(|x| !x.is_nan()),
+            }
+        };
+
         let mut pairs: Vec<(f64, f64)> = Vec::new();
         for i in 0..len {
-            if let (Ok(x), Ok(y)) = (a_vals[i].to_f64(), b_vals[i].to_f64())
-                && !x.is_nan()
-                && !y.is_nan()
-            {
+            if let (Some(x), Some(y)) = (extract_f64(&a_vals[i]), extract_f64(&b_vals[i])) {
                 pairs.push((x, y));
             }
         }
