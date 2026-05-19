@@ -38936,6 +38936,10 @@ impl DataFrameGroupBy<'_> {
     /// Matches `groupby.sem()`. Computed as std / sqrt(count).
     pub fn sem(&self) -> Result<DataFrame, FrameError> {
         let (group_order, groups) = self.build_groups();
+        // Per br-frankenpandas-5fbpy: allow Timedelta64 columns through.
+        // pandas df.groupby(k).sem() on Timedelta64 column returns
+        // Timedelta sem (fp-types nansem handles dtype preservation per
+        // br-j8ntk).
         let value_cols: Vec<String> = self
             .df
             .column_names()
@@ -38944,8 +38948,10 @@ impl DataFrameGroupBy<'_> {
                 if self.by.contains(c) {
                     return false;
                 }
-                let dt = self.df.columns[c.as_str()].dtype();
-                dt == DType::Int64 || dt == DType::Float64
+                matches!(
+                    self.df.columns[c.as_str()].dtype(),
+                    DType::Int64 | DType::Float64 | DType::Timedelta64
+                )
             })
             .map(|s| s.to_string())
             .collect();
@@ -38965,27 +38971,13 @@ impl DataFrameGroupBy<'_> {
 
             for gkey in &group_order {
                 let row_indices = &groups[gkey];
-                let group_vals: Vec<f64> = row_indices
+                // Per br-frankenpandas-5fbpy: route through fp_types::
+                // nansem which handles Timedelta dtype preservation.
+                let group_scalars: Vec<Scalar> = row_indices
                     .iter()
-                    .filter_map(|&i| {
-                        let v = &col.values()[i];
-                        if v.is_missing() {
-                            None
-                        } else {
-                            v.to_f64().ok()
-                        }
-                    })
+                    .map(|&i| col.values()[i].clone())
                     .collect();
-
-                let count = group_vals.len();
-                if count < 2 {
-                    vals.push(Scalar::Float64(f64::NAN));
-                } else {
-                    let mean = group_vals.iter().sum::<f64>() / count as f64;
-                    let var = group_vals.iter().map(|x| (x - mean).powi(2)).sum::<f64>()
-                        / (count - 1) as f64;
-                    vals.push(Scalar::Float64(var.sqrt() / (count as f64).sqrt()));
-                }
+                vals.push(fp_types::nansem(&group_scalars, 1));
             }
 
             result_cols.insert(col_name.clone(), Column::from_values(vals)?);
