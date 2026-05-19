@@ -4127,6 +4127,61 @@ impl Series {
         let n = vals.len();
         let mut out: Vec<Scalar> = vals.to_vec();
 
+        // Per br-frankenpandas-wax2l: pandas interpolates Timedelta64 in ns
+        // space and emits Timedelta. The default to_f64() path errors on
+        // Timedelta so left/right are always None, leaving every NaT gap
+        // unfilled. Detect uniformly-Timedelta column and use a typed path.
+        let is_timedelta = matches!(self.column.dtype(), DType::Timedelta64)
+            || (vals.iter().any(|v| matches!(v, Scalar::Timedelta64(ns) if *ns != Timedelta::NAT))
+                && vals
+                    .iter()
+                    .all(|v| matches!(v, Scalar::Timedelta64(_)) || v.is_missing()));
+        if is_timedelta {
+            let mut i = 0;
+            while i < n {
+                if out[i].is_missing() {
+                    let gap_start = i;
+                    let left = if gap_start > 0 {
+                        match &out[gap_start - 1] {
+                            Scalar::Timedelta64(ns) if *ns != Timedelta::NAT => Some(*ns as f64),
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
+                    let mut j = i;
+                    while j < n && out[j].is_missing() {
+                        j += 1;
+                    }
+                    let right = if j < n {
+                        match &out[j] {
+                            Scalar::Timedelta64(ns) if *ns != Timedelta::NAT => Some(*ns as f64),
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
+                    if let (Some(lv), Some(rv)) = (left, right) {
+                        let gap_len = j - gap_start + 1;
+                        for (offset, slot) in out[gap_start..j].iter_mut().enumerate() {
+                            let t = (offset + 1) as f64 / gap_len as f64;
+                            let interp = lv + t * (rv - lv);
+                            if interp.is_finite() {
+                                let clamped = interp.clamp(i64::MIN as f64, i64::MAX as f64);
+                                *slot = Scalar::Timedelta64(clamped as i64);
+                            } else {
+                                *slot = Scalar::Timedelta64(Timedelta::NAT);
+                            }
+                        }
+                    }
+                    i = j + 1;
+                } else {
+                    i += 1;
+                }
+            }
+            return self.with_labels_and_values_preserving_name(self.index.labels().to_vec(), out);
+        }
+
         let mut i = 0;
         while i < n {
             if out[i].is_missing() {
