@@ -5972,7 +5972,14 @@ impl Series {
     /// returns NaN if any value is missing.
     pub fn sum_skipna(&self, skipna: bool) -> Result<Scalar, FrameError> {
         if !skipna && self.column.values().iter().any(Scalar::is_missing) {
-            return Ok(Scalar::Float64(f64::NAN));
+            // Per br-frankenpandas-fsrfm: pandas pd.Series([td, NaT])
+            // .sum(skipna=False) returns NaT, not NaN. Match output dtype
+            // to the source column.
+            return Ok(if matches!(self.column.dtype(), DType::Timedelta64) {
+                Scalar::Timedelta64(Timedelta::NAT)
+            } else {
+                Scalar::Float64(f64::NAN)
+            });
         }
         self.sum()
     }
@@ -5980,7 +5987,11 @@ impl Series {
     /// Mean with skipna control.
     pub fn mean_skipna(&self, skipna: bool) -> Result<Scalar, FrameError> {
         if !skipna && self.column.values().iter().any(Scalar::is_missing) {
-            return Ok(Scalar::Float64(f64::NAN));
+            return Ok(if matches!(self.column.dtype(), DType::Timedelta64) {
+                Scalar::Timedelta64(Timedelta::NAT)
+            } else {
+                Scalar::Float64(f64::NAN)
+            });
         }
         self.mean()
     }
@@ -5988,7 +5999,11 @@ impl Series {
     /// Min with skipna control.
     pub fn min_skipna(&self, skipna: bool) -> Result<Scalar, FrameError> {
         if !skipna && self.column.values().iter().any(Scalar::is_missing) {
-            return Ok(Scalar::Float64(f64::NAN));
+            return Ok(if matches!(self.column.dtype(), DType::Timedelta64) {
+                Scalar::Timedelta64(Timedelta::NAT)
+            } else {
+                Scalar::Float64(f64::NAN)
+            });
         }
         self.min()
     }
@@ -5996,7 +6011,11 @@ impl Series {
     /// Max with skipna control.
     pub fn max_skipna(&self, skipna: bool) -> Result<Scalar, FrameError> {
         if !skipna && self.column.values().iter().any(Scalar::is_missing) {
-            return Ok(Scalar::Float64(f64::NAN));
+            return Ok(if matches!(self.column.dtype(), DType::Timedelta64) {
+                Scalar::Timedelta64(Timedelta::NAT)
+            } else {
+                Scalar::Float64(f64::NAN)
+            });
         }
         self.max()
     }
@@ -6004,7 +6023,11 @@ impl Series {
     /// Std with skipna control.
     pub fn std_skipna(&self, skipna: bool) -> Result<Scalar, FrameError> {
         if !skipna && self.column.values().iter().any(Scalar::is_missing) {
-            return Ok(Scalar::Float64(f64::NAN));
+            return Ok(if matches!(self.column.dtype(), DType::Timedelta64) {
+                Scalar::Timedelta64(Timedelta::NAT)
+            } else {
+                Scalar::Float64(f64::NAN)
+            });
         }
         self.std()
     }
@@ -6012,7 +6035,11 @@ impl Series {
     /// Var with skipna control.
     pub fn var_skipna(&self, skipna: bool) -> Result<Scalar, FrameError> {
         if !skipna && self.column.values().iter().any(Scalar::is_missing) {
-            return Ok(Scalar::Float64(f64::NAN));
+            return Ok(if matches!(self.column.dtype(), DType::Timedelta64) {
+                Scalar::Timedelta64(Timedelta::NAT)
+            } else {
+                Scalar::Float64(f64::NAN)
+            });
         }
         self.var()
     }
@@ -6020,7 +6047,11 @@ impl Series {
     /// Median with skipna control.
     pub fn median_skipna(&self, skipna: bool) -> Result<Scalar, FrameError> {
         if !skipna && self.column.values().iter().any(Scalar::is_missing) {
-            return Ok(Scalar::Float64(f64::NAN));
+            return Ok(if matches!(self.column.dtype(), DType::Timedelta64) {
+                Scalar::Timedelta64(Timedelta::NAT)
+            } else {
+                Scalar::Float64(f64::NAN)
+            });
         }
         self.median()
     }
@@ -6028,7 +6059,11 @@ impl Series {
     /// Prod with skipna control.
     pub fn prod_skipna(&self, skipna: bool) -> Result<Scalar, FrameError> {
         if !skipna && self.column.values().iter().any(Scalar::is_missing) {
-            return Ok(Scalar::Float64(f64::NAN));
+            return Ok(if matches!(self.column.dtype(), DType::Timedelta64) {
+                Scalar::Timedelta64(Timedelta::NAT)
+            } else {
+                Scalar::Float64(f64::NAN)
+            });
         }
         self.prod()
     }
