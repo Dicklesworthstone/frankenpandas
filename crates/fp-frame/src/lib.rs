@@ -32035,7 +32035,18 @@ impl DataFrame {
         let mut values = Vec::new();
         for name in &self.column_order {
             let col = &self.columns[name];
-            if col.dtype() != DType::Int64 && col.dtype() != DType::Float64 {
+            // Per br-frankenpandas-vpeoh: Series sum/mean/min/max/std/var/
+            // median/prod preserve Timedelta64 dtype (br-28lgk/edmsd/erobu/
+            // 7iz85/j0ilf/yy0ks/rbt10). Allow Timedelta64 columns through for
+            // those funcs; skew/kurtosis/sem still return f64 and remain
+            // restricted to numeric dtypes.
+            let timedelta_safe = matches!(
+                func,
+                "sum" | "mean" | "min" | "max" | "std" | "var" | "median" | "prod"
+            );
+            let allowed = matches!(col.dtype(), DType::Int64 | DType::Float64)
+                || (timedelta_safe && matches!(col.dtype(), DType::Timedelta64));
+            if !allowed {
                 continue;
             }
             let s = self.column_as_series(name)?;
