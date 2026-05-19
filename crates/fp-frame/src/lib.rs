@@ -14432,6 +14432,28 @@ impl SeriesGroupBy<'_> {
 
     /// GroupBy cumulative sum.
     pub fn cumsum(&self) -> Result<Series, FrameError> {
+        // Per br-frankenpandas-v6j38: Timedelta64 cumsum preserves dtype.
+        // Sister to br-gqrmf (Series::cumsum) and br-c1bxu (groupby sum).
+        if self.column_is_timedelta() {
+            return self.transform_groups(|vals| {
+                let mut acc: i64 = 0;
+                let mut started = false;
+                vals.iter()
+                    .map(|value| match value {
+                        Scalar::Timedelta64(ns) if *ns != fp_types::Timedelta::NAT => {
+                            acc = if started {
+                                fp_types::Timedelta::add(acc, *ns)
+                            } else {
+                                *ns
+                            };
+                            started = true;
+                            Scalar::Timedelta64(acc)
+                        }
+                        _ => Scalar::Timedelta64(fp_types::Timedelta::NAT),
+                    })
+                    .collect()
+            });
+        }
         self.transform_groups(|vals| {
             let mut acc = 0.0_f64;
             vals.iter()
@@ -14451,6 +14473,16 @@ impl SeriesGroupBy<'_> {
 
     /// GroupBy cumulative product.
     pub fn cumprod(&self) -> Result<Series, FrameError> {
+        // Per br-frankenpandas-v6j38: pandas raises TypeError on
+        // td.groupby(...).cumprod() (Timedelta² dimensionless). Mirror
+        // Series::cumprod (br-v36qy) by emitting NaT per position.
+        if self.column_is_timedelta() {
+            return self.transform_groups(|vals| {
+                vals.iter()
+                    .map(|_| Scalar::Timedelta64(fp_types::Timedelta::NAT))
+                    .collect()
+            });
+        }
         self.transform_groups(|vals| {
             let mut acc = 1.0_f64;
             vals.iter()
@@ -14470,6 +14502,22 @@ impl SeriesGroupBy<'_> {
 
     /// GroupBy cumulative minimum.
     pub fn cummin(&self) -> Result<Series, FrameError> {
+        // Per br-frankenpandas-v6j38: Timedelta64 cummin preserves dtype.
+        // Sister to br-v7spg (Series::cummin) and br-tgm2i (groupby min).
+        if self.column_is_timedelta() {
+            return self.transform_groups(|vals| {
+                let mut acc: Option<i64> = None;
+                vals.iter()
+                    .map(|value| match value {
+                        Scalar::Timedelta64(ns) if *ns != fp_types::Timedelta::NAT => {
+                            acc = Some(acc.map_or(*ns, |a| a.min(*ns)));
+                            Scalar::Timedelta64(acc.unwrap())
+                        }
+                        _ => Scalar::Timedelta64(fp_types::Timedelta::NAT),
+                    })
+                    .collect()
+            });
+        }
         self.transform_groups(|vals| {
             let mut acc = f64::INFINITY;
             vals.iter()
@@ -14491,6 +14539,21 @@ impl SeriesGroupBy<'_> {
 
     /// GroupBy cumulative maximum.
     pub fn cummax(&self) -> Result<Series, FrameError> {
+        // Per br-frankenpandas-v6j38: Timedelta64 cummax preserves dtype.
+        if self.column_is_timedelta() {
+            return self.transform_groups(|vals| {
+                let mut acc: Option<i64> = None;
+                vals.iter()
+                    .map(|value| match value {
+                        Scalar::Timedelta64(ns) if *ns != fp_types::Timedelta::NAT => {
+                            acc = Some(acc.map_or(*ns, |a| a.max(*ns)));
+                            Scalar::Timedelta64(acc.unwrap())
+                        }
+                        _ => Scalar::Timedelta64(fp_types::Timedelta::NAT),
+                    })
+                    .collect()
+            });
+        }
         self.transform_groups(|vals| {
             let mut acc = f64::NEG_INFINITY;
             vals.iter()
