@@ -4226,12 +4226,72 @@ impl Series {
     /// - `nearest`: use the nearest valid value
     /// - `zero`: use the left bounding value (step function / zero-order hold)
     pub fn interpolate_method(&self, method: &str) -> Result<Self, FrameError> {
+        // Per br-frankenpandas-1xtur: detect uniformly-Timedelta source so
+        // nearest/zero arms operate in ns and emit Scalar::Timedelta64.
+        // Sister to br-wax2l (interpolate linear Timedelta surgery).
+        let is_timedelta = matches!(self.column.dtype(), DType::Timedelta64)
+            || (self
+                .column
+                .values()
+                .iter()
+                .any(|v| matches!(v, Scalar::Timedelta64(ns) if *ns != Timedelta::NAT))
+                && self
+                    .column
+                    .values()
+                    .iter()
+                    .all(|v| matches!(v, Scalar::Timedelta64(_)) || v.is_missing()));
+        let td_value = |v: &Scalar| -> Option<i64> {
+            match v {
+                Scalar::Timedelta64(ns) if *ns != Timedelta::NAT => Some(*ns),
+                _ => None,
+            }
+        };
         match method {
             "linear" => self.interpolate(),
             "nearest" => {
                 let vals = self.column.values();
                 let n = vals.len();
                 let mut out: Vec<Scalar> = vals.to_vec();
+
+                if is_timedelta {
+                    let mut i = 0;
+                    while i < n {
+                        if out[i].is_missing() {
+                            let gap_start = i;
+                            let left = if gap_start > 0 {
+                                td_value(&out[gap_start - 1])
+                            } else {
+                                None
+                            };
+                            let mut j = i;
+                            while j < n && out[j].is_missing() {
+                                j += 1;
+                            }
+                            let right = if j < n { td_value(&out[j]) } else { None };
+                            for (offset, slot) in out[gap_start..j].iter_mut().enumerate() {
+                                let dist_left = offset + 1;
+                                let dist_right = j - gap_start - offset;
+                                *slot = match (left, right) {
+                                    (Some(lv), Some(rv)) => {
+                                        if dist_left <= dist_right {
+                                            Scalar::Timedelta64(lv)
+                                        } else {
+                                            Scalar::Timedelta64(rv)
+                                        }
+                                    }
+                                    (Some(lv), None) => Scalar::Timedelta64(lv),
+                                    (None, Some(rv)) => Scalar::Timedelta64(rv),
+                                    (None, None) => Scalar::Timedelta64(Timedelta::NAT),
+                                };
+                            }
+                            i = j + 1;
+                        } else {
+                            i += 1;
+                        }
+                    }
+                    return self
+                        .with_labels_and_values_preserving_name(self.index.labels().to_vec(), out);
+                }
 
                 let mut i = 0;
                 while i < n {
@@ -4277,6 +4337,21 @@ impl Series {
             "zero" | "pad" => {
                 let vals = self.column.values();
                 let mut out: Vec<Scalar> = vals.to_vec();
+
+                if is_timedelta {
+                    let mut last_valid: Option<i64> = None;
+                    for slot in &mut out {
+                        if let Some(ns) = td_value(slot) {
+                            last_valid = Some(ns);
+                        } else if slot.is_missing() {
+                            if let Some(lv) = last_valid {
+                                *slot = Scalar::Timedelta64(lv);
+                            }
+                        }
+                    }
+                    return self
+                        .with_labels_and_values_preserving_name(self.index.labels().to_vec(), out);
+                }
 
                 let mut last_valid: Option<f64> = None;
                 for slot in &mut out {
