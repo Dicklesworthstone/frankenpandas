@@ -37815,10 +37815,18 @@ impl DataFrameGroupBy<'_> {
         let mut result_cols = BTreeMap::new();
         result_cols.insert("count".to_string(), Column::from_values(out_counts)?);
 
+        // Per br-frankenpandas-k8kdx: pandas df.groupby(by).value_counts
+        // result is MultiIndex with [by-name, value-col-name]. Flat fallback
+        // preserves by-name for the single-by case.
+        let by_name = if self.by.len() == 1 {
+            Some(self.by[0].as_str())
+        } else {
+            None
+        };
         Ok(DataFrame {
             columns: result_cols,
             column_order: vec!["count".to_string()],
-            index: Index::new(out_labels),
+            index: Index::new(out_labels).rename_index(by_name),
             column_multiindex: None,
             row_multiindex: None,
             allows_duplicate_labels: self.df.allows_duplicate_labels,
