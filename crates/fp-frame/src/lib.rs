@@ -38450,8 +38450,15 @@ impl DataFrameGroupBy<'_> {
             col_order.push(format!("{prefix}close"));
         }
 
+        // Per br-frankenpandas-5u5sq: pandas groupby.ohlc result has by-name
+        // on the group-key axis.
+        let by_name = if self.by.len() == 1 {
+            Some(self.by[0].as_str())
+        } else {
+            None
+        };
         DataFrame::new_with_column_order_and_multiindex(
-            Index::new(out_labels),
+            Index::new(out_labels).rename_index(by_name),
             result_cols,
             col_order,
             Some(self.ohlc_column_multiindex()?),
