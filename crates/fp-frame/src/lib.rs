@@ -5760,7 +5760,36 @@ impl Series {
     pub fn var_ddof(&self, ddof: usize) -> Result<Scalar, FrameError> {
         let count = self.count();
         if count <= ddof {
+            // Per br-frankenpandas-e686u: mirror var() (br-yy0ks) Timedelta
+            // NaT surface for ddof variant.
+            if matches!(self.column.dtype(), DType::Timedelta64) {
+                return Ok(Scalar::Timedelta64(Timedelta::NAT));
+            }
             return Ok(Scalar::Float64(f64::NAN));
+        }
+        // Per br-frankenpandas-e686u: sister to var() br-yy0ks. Timedelta64
+        // var with configurable ddof — mirrors fp-types nanvar (br-j8ntk).
+        if matches!(self.column.dtype(), DType::Timedelta64) {
+            let mut ns_vals: Vec<f64> = Vec::with_capacity(count);
+            for val in self.column.values() {
+                if let Scalar::Timedelta64(ns) = val {
+                    if *ns == Timedelta::NAT {
+                        continue;
+                    }
+                    ns_vals.push(*ns as f64);
+                }
+            }
+            if ns_vals.len() <= ddof {
+                return Ok(Scalar::Timedelta64(Timedelta::NAT));
+            }
+            let mean_ns: f64 = ns_vals.iter().sum::<f64>() / ns_vals.len() as f64;
+            let sum_sq: f64 = ns_vals.iter().map(|x| (x - mean_ns).powi(2)).sum();
+            let var_ns = sum_sq / (ns_vals.len() - ddof) as f64;
+            if !var_ns.is_finite() {
+                return Ok(Scalar::Timedelta64(Timedelta::NAT));
+            }
+            let clamped = var_ns.clamp(i64::MIN as f64, i64::MAX as f64);
+            return Ok(Scalar::Timedelta64(clamped as i64));
         }
         let mean_val = match self.mean()? {
             Scalar::Float64(v) => v,
@@ -5783,6 +5812,19 @@ impl Series {
     pub fn std_ddof(&self, ddof: usize) -> Result<Scalar, FrameError> {
         match self.var_ddof(ddof)? {
             Scalar::Float64(v) => Ok(Scalar::Float64(v.sqrt())),
+            // Per br-frankenpandas-e686u: mirror std() br-j0ilf — sqrt of
+            // Timedelta64 variance, clamped back into i64 ns.
+            Scalar::Timedelta64(ns_var) => {
+                if ns_var == Timedelta::NAT {
+                    return Ok(Scalar::Timedelta64(Timedelta::NAT));
+                }
+                let std_ns = (ns_var as f64).sqrt();
+                if !std_ns.is_finite() {
+                    return Ok(Scalar::Timedelta64(Timedelta::NAT));
+                }
+                let clamped = std_ns.clamp(i64::MIN as f64, i64::MAX as f64);
+                Ok(Scalar::Timedelta64(clamped as i64))
+            }
             other => Ok(other),
         }
     }
