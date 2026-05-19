@@ -14359,6 +14359,13 @@ impl SeriesGroupBy<'_> {
 
     /// Product of each group.
     pub fn prod(&self) -> Result<Series, FrameError> {
+        // Per br-frankenpandas-s13rm: pandas raises TypeError on
+        // td_series.groupby(...).prod() because Timedelta² has no dimension.
+        // Mirror fp-types nanprod (br-szq6a) and Series::prod (br-mpw1f) by
+        // emitting NaT per group.
+        if self.column_is_timedelta() {
+            return self.agg_timedelta_values(|_| fp_types::Timedelta::NAT);
+        }
         self.agg_numeric(|nums| nums.iter().product(), self.series.name())
     }
 
