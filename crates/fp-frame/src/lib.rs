@@ -5497,6 +5497,23 @@ impl Series {
                     None => Scalar::Float64(f64::NAN),
                 });
             }
+            // Per br-frankenpandas-erobu: pandas pd.Series([td1, td2]).min()
+            // returns a Timedelta scalar. f64 fallback errors via to_f64() on
+            // Timedelta64. Find the min ns (skipping NaT); empty/all-NaT
+            // returns Timedelta::NAT. Sister to br-28lgk (sum), rbt10
+            // (median), ppc2r (quantile).
+            DType::Timedelta64 => {
+                let mut best: Option<i64> = None;
+                for val in self.column.values() {
+                    if let Scalar::Timedelta64(ns) = val {
+                        if *ns == Timedelta::NAT {
+                            continue;
+                        }
+                        best = Some(best.map_or(*ns, |b| b.min(*ns)));
+                    }
+                }
+                return Ok(Scalar::Timedelta64(best.unwrap_or(Timedelta::NAT)));
+            }
             _ => {}
         }
 
