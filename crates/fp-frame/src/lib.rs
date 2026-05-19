@@ -32090,7 +32090,14 @@ impl DataFrame {
         let mut values = Vec::new();
         for name in &self.column_order {
             let col = &self.columns[name];
-            if col.dtype() != DType::Int64 && col.dtype() != DType::Float64 {
+            // Per br-frankenpandas-4zg55: skipna variants delegate to
+            // sum/mean/etc which now preserve Timedelta64 (br-28lgk family).
+            // Allow Timedelta64 columns through. Sister to br-vpeoh and
+            // br-qin9h.
+            if !matches!(
+                col.dtype(),
+                DType::Int64 | DType::Float64 | DType::Timedelta64
+            ) {
                 continue;
             }
             let s = self.column_as_series(name)?;
