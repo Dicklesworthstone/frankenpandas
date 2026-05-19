@@ -5,8 +5,8 @@
   "operation": "groupby_min",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "80308a6f7a63a001ddf654b27d1603f82a7e85aff347c4896684588ac44983e4",
-    "generated_at": "2026-05-19T22:51:29Z"
+    "oracle_script_sha256": "c8667cf60cfe2e8998eaf9ec0b66794010a4de972f781b2c95791983362e7acb",
+    "generated_at": "2026-05-19T23:12:50Z"
   },
   "left": {
     "name": "key",

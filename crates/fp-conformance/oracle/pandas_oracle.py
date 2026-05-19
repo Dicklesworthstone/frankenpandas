@@ -261,15 +261,14 @@ def series_dtype_for_payload_values(values: list[dict[str, Any]]) -> str | None:
         str(item.get("value")) for item in values if item.get("kind") == "null"
     ]
     has_null = bool(null_markers)
-    has_nan_marker = any(marker in {"nan", "na_n"} for marker in null_markers)
 
     if kinds == {"int64"}:
         if has_null:
-            return "float64" if has_nan_marker else "Int64"
+            return "Int64"
         return "int64"
     if kinds == {"bool"}:
         if has_null:
-            return "object" if has_nan_marker else "boolean"
+            return "boolean"
         return "bool"
     if kinds <= {"bool", "int64", "float64"}:
         return "float64"
@@ -843,7 +842,10 @@ def fixture_series_from_payload(pd, payload: dict[str, Any], op_name: str):
         raise OracleError(f"{op_name} requires series payload")
     index = [label_from_json(item) for item in payload["index"]]
     values = [scalar_from_json(item) for item in payload["values"]]
-    return pd.Series(values, index=index, name=payload.get("name", "series"))
+    dtype = series_dtype_for_payload_values(payload["values"])
+    return pd.Series(
+        values, index=index, name=payload.get("name", "series"), dtype=dtype
+    )
 
 
 def op_series_categorical_from_codes(pd, payload: dict[str, Any]) -> dict[str, Any]:
@@ -2495,7 +2497,7 @@ def dataframe_from_json(pd, payload: dict[str, Any]):
         raise OracleError("frame payload requires columns object")
 
     index = [label_from_json(item) for item in index_raw]
-    columns: dict[str, list[Any]] = {}
+    columns: dict[str, Any] = {}
     for name, values in columns_raw.items():
         if not isinstance(values, list):
             raise OracleError(f"frame column {name!r} must be a list")
@@ -2504,7 +2506,8 @@ def dataframe_from_json(pd, payload: dict[str, Any]):
             raise OracleError(
                 f"frame column {name!r} length {len(parsed)} does not match index length {len(index)}"
             )
-        columns[str(name)] = parsed
+        dtype = series_dtype_for_payload_values(values)
+        columns[str(name)] = pd.Series(parsed, index=index, dtype=dtype)
 
     input_order = [str(name) for name in columns.keys()]
     if column_order_raw is None:
@@ -5574,9 +5577,7 @@ def op_series_abs(pd, payload: dict[str, Any]) -> dict[str, Any]:
     if left is None:
         raise OracleError("series_abs requires left payload")
 
-    index = [label_from_json(item) for item in left["index"]]
-    values = [scalar_from_json(item) for item in left["values"]]
-    series = pd.Series(values, index=index, name=left.get("name", "series"))
+    series = fixture_series_from_payload(pd, left, "series_abs")
 
     try:
         out = series.abs()

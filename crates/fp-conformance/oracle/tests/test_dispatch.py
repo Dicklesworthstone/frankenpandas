@@ -132,6 +132,76 @@ def test_groupby_first_encodes_nullable_integer_missing_values(oracle, pd):
     ]
 
 
+def test_groupby_min_encodes_nan_marker_nullable_integer_missing_values(oracle, pd):
+    payload = {
+        "operation": "groupby_min",
+        "left": {
+            "index": [{"kind": "int64", "value": i} for i in range(3)],
+            "values": [
+                {"kind": "utf8", "value": value} for value in ["x", "x", "y"]
+            ],
+        },
+        "right": {
+            "index": [{"kind": "int64", "value": i} for i in range(3)],
+            "values": [
+                {"kind": "int64", "value": 10},
+                {"kind": "null", "value": "na_n"},
+                {"kind": "int64", "value": 3},
+            ],
+        },
+    }
+    response = oracle.dispatch(pd, payload)
+    values = response["expected_series"]["values"]
+    assert values == [
+        {"kind": "int64", "value": 10},
+        {"kind": "int64", "value": 3},
+    ]
+
+
+def test_series_abs_encodes_nullable_integer_missing_values(oracle, pd):
+    payload = {
+        "operation": "series_abs",
+        "left": {
+            "index": [{"kind": "int64", "value": i} for i in range(3)],
+            "values": [
+                {"kind": "int64", "value": -7},
+                {"kind": "null", "value": "na_n"},
+                {"kind": "int64", "value": 4},
+            ],
+        },
+    }
+    response = oracle.dispatch(pd, payload)
+    values = response["expected_series"]["values"]
+    assert values == [
+        {"kind": "int64", "value": 7},
+        {"kind": "null", "value": "null"},
+        {"kind": "int64", "value": 4},
+    ]
+
+
+def test_dataframe_abs_encodes_nullable_integer_columns(oracle, pd):
+    payload = {
+        "operation": "dataframe_abs",
+        "frame": {
+            "index": [{"kind": "int64", "value": i} for i in range(3)],
+            "columns": {
+                "nums": [
+                    {"kind": "int64", "value": -7},
+                    {"kind": "null", "value": "na_n"},
+                    {"kind": "int64", "value": 4},
+                ]
+            },
+        },
+    }
+    response = oracle.dispatch(pd, payload)
+    values = response["expected_frame"]["columns"]["nums"]
+    assert values == [
+        {"kind": "int64", "value": 7},
+        {"kind": "null", "value": "null"},
+        {"kind": "int64", "value": 4},
+    ]
+
+
 @pytest.mark.parametrize(
     ("operation", "expected"),
     [

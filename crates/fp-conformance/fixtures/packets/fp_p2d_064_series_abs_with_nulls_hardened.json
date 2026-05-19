@@ -5,36 +5,84 @@
   "operation": "series_abs",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "f38b2fca36d3f10acdeb5fb41213653c2250ca347046ceaea93ef3d4926f4919",
-    "generated_at": "2026-04-22T21:02:48Z"
+    "oracle_script_sha256": "c8667cf60cfe2e8998eaf9ec0b66794010a4de972f781b2c95791983362e7acb",
+    "generated_at": "2026-05-19T23:12:53Z"
   },
   "left": {
     "name": "nums",
     "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 2 },
-      { "kind": "int64", "value": 3 }
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      },
+      {
+        "kind": "int64",
+        "value": 2
+      },
+      {
+        "kind": "int64",
+        "value": 3
+      }
     ],
     "values": [
-      { "kind": "int64", "value": -7 },
-      { "kind": "null", "value": "na_n" },
-      { "kind": "int64", "value": 4 },
-      { "kind": "null", "value": "na_n" }
+      {
+        "kind": "int64",
+        "value": -7
+      },
+      {
+        "kind": "null",
+        "value": "na_n"
+      },
+      {
+        "kind": "int64",
+        "value": 4
+      },
+      {
+        "kind": "null",
+        "value": "na_n"
+      }
     ]
   },
   "expected_series": {
     "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 2 },
-      { "kind": "int64", "value": 3 }
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      },
+      {
+        "kind": "int64",
+        "value": 2
+      },
+      {
+        "kind": "int64",
+        "value": 3
+      }
     ],
     "values": [
-      { "kind": "float64", "value": 7.0 },
-      { "kind": "null", "value": "na_n" },
-      { "kind": "float64", "value": 4.0 },
-      { "kind": "null", "value": "na_n" }
+      {
+        "kind": "int64",
+        "value": 7
+      },
+      {
+        "kind": "null",
+        "value": "null"
+      },
+      {
+        "kind": "int64",
+        "value": 4
+      },
+      {
+        "kind": "null",
+        "value": "null"
+      }
     ]
   }
 }
