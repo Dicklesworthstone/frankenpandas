@@ -37025,25 +37025,46 @@ impl DataFrameGroupBy<'_> {
 
         for col_name in &value_cols {
             let col = &self.df.columns[col_name];
+            // Per br-frankenpandas-41rnd: Timedelta64 idxmin compares ns
+            // directly. to_f64() errors on Timedelta so the f64 loop below
+            // returns NaN for every group; pandas returns the original
+            // label of the per-group min Timedelta.
+            let is_timedelta = matches!(col.dtype(), DType::Timedelta64);
             let mut agg_vals = Vec::with_capacity(n_groups);
 
             for gkey in &group_order {
                 let row_indices = &groups[gkey];
-                let mut best_idx: Option<usize> = None;
-                let mut best_val = f64::INFINITY;
-
-                for &idx in row_indices {
-                    let val = &col.values()[idx];
-                    if val.is_missing() {
-                        continue;
+                let best_idx = if is_timedelta {
+                    let mut best: Option<(usize, i64)> = None;
+                    for &idx in row_indices {
+                        if let Scalar::Timedelta64(ns) = &col.values()[idx] {
+                            if *ns == Timedelta::NAT {
+                                continue;
+                            }
+                            best = Some(match best {
+                                Some((_, prev)) if prev <= *ns => best.unwrap(),
+                                _ => (idx, *ns),
+                            });
+                        }
                     }
-                    if let Ok(v) = val.to_f64()
-                        && v < best_val
-                    {
-                        best_val = v;
-                        best_idx = Some(idx);
+                    best.map(|(i, _)| i)
+                } else {
+                    let mut best_idx: Option<usize> = None;
+                    let mut best_val = f64::INFINITY;
+                    for &idx in row_indices {
+                        let val = &col.values()[idx];
+                        if val.is_missing() {
+                            continue;
+                        }
+                        if let Ok(v) = val.to_f64()
+                            && v < best_val
+                        {
+                            best_val = v;
+                            best_idx = Some(idx);
+                        }
                     }
-                }
+                    best_idx
+                };
 
                 if let Some(idx) = best_idx {
                     agg_vals.push(Scalar::Utf8(orig_labels[idx].to_string()));
@@ -37084,25 +37105,43 @@ impl DataFrameGroupBy<'_> {
 
         for col_name in &value_cols {
             let col = &self.df.columns[col_name];
+            // Per br-frankenpandas-41rnd: sister to idxmin above.
+            let is_timedelta = matches!(col.dtype(), DType::Timedelta64);
             let mut agg_vals = Vec::with_capacity(n_groups);
 
             for gkey in &group_order {
                 let row_indices = &groups[gkey];
-                let mut best_idx: Option<usize> = None;
-                let mut best_val = f64::NEG_INFINITY;
-
-                for &idx in row_indices {
-                    let val = &col.values()[idx];
-                    if val.is_missing() {
-                        continue;
+                let best_idx = if is_timedelta {
+                    let mut best: Option<(usize, i64)> = None;
+                    for &idx in row_indices {
+                        if let Scalar::Timedelta64(ns) = &col.values()[idx] {
+                            if *ns == Timedelta::NAT {
+                                continue;
+                            }
+                            best = Some(match best {
+                                Some((_, prev)) if prev >= *ns => best.unwrap(),
+                                _ => (idx, *ns),
+                            });
+                        }
                     }
-                    if let Ok(v) = val.to_f64()
-                        && v > best_val
-                    {
-                        best_val = v;
-                        best_idx = Some(idx);
+                    best.map(|(i, _)| i)
+                } else {
+                    let mut best_idx: Option<usize> = None;
+                    let mut best_val = f64::NEG_INFINITY;
+                    for &idx in row_indices {
+                        let val = &col.values()[idx];
+                        if val.is_missing() {
+                            continue;
+                        }
+                        if let Ok(v) = val.to_f64()
+                            && v > best_val
+                        {
+                            best_val = v;
+                            best_idx = Some(idx);
+                        }
                     }
-                }
+                    best_idx
+                };
 
                 if let Some(idx) = best_idx {
                     agg_vals.push(Scalar::Utf8(orig_labels[idx].to_string()));
