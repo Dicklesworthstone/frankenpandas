@@ -5392,6 +5392,23 @@ impl Series {
                 }
                 return Ok(Scalar::Utf8(total));
             }
+            // Per br-frankenpandas-28lgk: pandas pd.Series([td1, td2]).sum()
+            // returns a Timedelta scalar. The f64 fallback below errors via
+            // to_f64() on Timedelta64. Accumulate in i64 ns with
+            // Timedelta::add (NaT propagation + saturation). Sister to
+            // br-qrn2w (groupby_sum Timedelta path).
+            DType::Timedelta64 => {
+                let mut total: i64 = 0;
+                for val in self.column.values() {
+                    if let Scalar::Timedelta64(ns) = val {
+                        if *ns == Timedelta::NAT {
+                            continue;
+                        }
+                        total = Timedelta::add(total, *ns);
+                    }
+                }
+                return Ok(Scalar::Timedelta64(total));
+            }
             _ => {}
         }
 
