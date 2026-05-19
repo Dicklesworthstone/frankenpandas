@@ -100,9 +100,7 @@ use fp_index::{
 use fp_runtime::{
     DecisionAction, EvidenceLedger, RuntimePolicy, SemanticIndexIdentity, SemanticWitnessRecord,
 };
-use fp_types::{
-    DType, NullKind, PeriodFreq, Scalar, SparseDType, Timedelta, cast_scalar_owned, common_dtype,
-};
+use fp_types::{DType, NullKind, PeriodFreq, Scalar, SparseDType, Timedelta, common_dtype};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -22180,27 +22178,7 @@ fn reindex_concat_axis1_column(
     column: &Column,
     positions: &[Option<usize>],
 ) -> Result<Column, FrameError> {
-    let has_missing = positions
-        .iter()
-        .any(|slot| slot.is_none_or(|idx| idx >= column.len()));
-    if !has_missing || !matches!(column.dtype(), DType::Int64 | DType::Float64) {
-        return Ok(column.reindex_by_positions(positions)?);
-    }
-
-    let values = positions
-        .iter()
-        .map(|slot| match slot {
-            Some(idx) => column
-                .values()
-                .get(*idx)
-                .cloned()
-                .unwrap_or(Scalar::Null(NullKind::NaN)),
-            None => Scalar::Null(NullKind::NaN),
-        })
-        .map(|value| cast_scalar_owned(value, DType::Float64).map_err(ColumnError::from))
-        .collect::<Result<Vec<_>, ColumnError>>()?;
-
-    Ok(Column::new(DType::Float64, values)?)
+    Ok(column.reindex_by_positions(positions)?)
 }
 
 /// Column-wise DataFrame concat with deterministic outer index alignment.
@@ -41809,17 +41787,17 @@ mod tests {
         assert_eq!(
             out.column("a").unwrap().values(),
             &[
-                Scalar::Float64(1.0),
-                Scalar::Float64(2.0),
-                Scalar::Null(NullKind::NaN)
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Null(NullKind::Null)
             ]
         );
         assert_eq!(
             out.column("b").unwrap().values(),
             &[
-                Scalar::Null(NullKind::NaN),
-                Scalar::Float64(10.0),
-                Scalar::Float64(20.0)
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(10),
+                Scalar::Int64(20)
             ]
         );
     }
