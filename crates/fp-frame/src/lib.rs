@@ -38278,10 +38278,16 @@ impl DataFrameGroupBy<'_> {
             col_order.push(col_name.clone());
         }
 
+        // Per br-frankenpandas-rpbjy: groupby.skew result has by-name.
+        let by_name = if self.by.len() == 1 {
+            Some(self.by[0].as_str())
+        } else {
+            None
+        };
         Ok(DataFrame {
             columns: result_cols,
             column_order: col_order,
-            index: Index::new(out_labels),
+            index: Index::new(out_labels).rename_index(by_name),
             column_multiindex: None,
             row_multiindex: None,
             allows_duplicate_labels: self.df.allows_duplicate_labels,
