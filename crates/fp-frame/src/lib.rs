@@ -10472,14 +10472,9 @@ impl Rolling<'_> {
     /// correlation over each rolling window.
     pub fn corr(&self, other: &Series) -> Result<Series, FrameError> {
         self.validate()?;
-        if self.series.len() != other.len() {
-            return Err(FrameError::LengthMismatch {
-                index_len: self.series.len(),
-                column_len: other.len(),
-            });
-        }
         let a_vals = self.series.column().values();
-        let b_vals = other.column().values();
+        let (_, aligned_other) = self.series.align(other, AlignMode::Left)?;
+        let b_vals = aligned_other.column().values();
         let len = a_vals.len();
         let mut out = Vec::with_capacity(len);
 
@@ -10491,16 +10486,8 @@ impl Rolling<'_> {
             }
             let pairs: Vec<(f64, f64)> = (start..=i)
                 .filter_map(|j| {
-                    let a = if a_vals[j].is_missing() {
-                        None
-                    } else {
-                        a_vals[j].to_f64().ok()
-                    };
-                    let b = if b_vals[j].is_missing() {
-                        None
-                    } else {
-                        b_vals[j].to_f64().ok()
-                    };
+                    let a = Series::pairwise_numeric_value(&a_vals[j]);
+                    let b = Series::pairwise_numeric_value(&b_vals[j]);
                     a.zip(b)
                 })
                 .collect();
@@ -10541,14 +10528,9 @@ impl Rolling<'_> {
     /// covariance (ddof=1) over each rolling window.
     pub fn cov(&self, other: &Series) -> Result<Series, FrameError> {
         self.validate()?;
-        if self.series.len() != other.len() {
-            return Err(FrameError::LengthMismatch {
-                index_len: self.series.len(),
-                column_len: other.len(),
-            });
-        }
         let a_vals = self.series.column().values();
-        let b_vals = other.column().values();
+        let (_, aligned_other) = self.series.align(other, AlignMode::Left)?;
+        let b_vals = aligned_other.column().values();
         let len = a_vals.len();
         let mut out = Vec::with_capacity(len);
 
@@ -10560,16 +10542,8 @@ impl Rolling<'_> {
             }
             let pairs: Vec<(f64, f64)> = (start..=i)
                 .filter_map(|j| {
-                    let a = if a_vals[j].is_missing() {
-                        None
-                    } else {
-                        a_vals[j].to_f64().ok()
-                    };
-                    let b = if b_vals[j].is_missing() {
-                        None
-                    } else {
-                        b_vals[j].to_f64().ok()
-                    };
+                    let a = Series::pairwise_numeric_value(&a_vals[j]);
+                    let b = Series::pairwise_numeric_value(&b_vals[j]);
                     a.zip(b)
                 })
                 .collect();
@@ -71042,6 +71016,40 @@ mod tests {
         // cov([1,2,3],[10,20,30]) = 10.0
         let v = result.values()[2].to_f64().unwrap();
         assert!((v - 10.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn rolling_corr_and_cov_align_other_by_index() {
+        let a = Series::from_values(
+            "a",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+            ],
+        )
+        .unwrap();
+        let b = Series::from_values(
+            "b",
+            vec![2_i64.into(), 1_i64.into(), 0_i64.into()],
+            vec![
+                Scalar::Float64(10.0),
+                Scalar::Float64(20.0),
+                Scalar::Float64(30.0),
+            ],
+        )
+        .unwrap();
+
+        let corr = a.rolling(2, None).corr(&b).unwrap();
+        assert!(corr.values()[0].is_missing());
+        assert!((corr.values()[1].to_f64().unwrap() + 1.0).abs() < 1e-10);
+        assert!((corr.values()[2].to_f64().unwrap() + 1.0).abs() < 1e-10);
+
+        let cov = a.rolling(2, None).cov(&b).unwrap();
+        assert!(cov.values()[0].is_missing());
+        assert!((cov.values()[1].to_f64().unwrap() + 5.0).abs() < 1e-10);
+        assert!((cov.values()[2].to_f64().unwrap() + 5.0).abs() < 1e-10);
     }
 
     #[test]
