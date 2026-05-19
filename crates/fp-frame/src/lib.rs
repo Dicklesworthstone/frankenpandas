@@ -4343,10 +4343,10 @@ impl Series {
                     for slot in &mut out {
                         if let Some(ns) = td_value(slot) {
                             last_valid = Some(ns);
-                        } else if slot.is_missing() {
-                            if let Some(lv) = last_valid {
-                                *slot = Scalar::Timedelta64(lv);
-                            }
+                        } else if slot.is_missing()
+                            && let Some(lv) = last_valid
+                        {
+                            *slot = Scalar::Timedelta64(lv);
                         }
                     }
                     return self
@@ -9570,15 +9570,21 @@ impl Series {
         let a_vals = self.column().values();
         let b_vals = other.column().values();
         let len = a_vals.len().min(b_vals.len());
+
+        let extract_f64 = |value: &Scalar| -> Option<f64> {
+            match value {
+                Scalar::Timedelta64(ns) if *ns != Timedelta::NAT => Some(*ns as f64),
+                Scalar::Timedelta64(_) => None,
+                other => other.to_f64().ok().filter(|v| !v.is_nan()),
+            }
+        };
+
         let mut sum_x = 0.0_f64;
         let mut sum_y = 0.0_f64;
         let mut sum_xy = 0.0_f64;
         let mut count = 0_usize;
         for i in 0..len {
-            if let (Ok(x), Ok(y)) = (a_vals[i].to_f64(), b_vals[i].to_f64())
-                && !x.is_nan()
-                && !y.is_nan()
-            {
+            if let (Some(x), Some(y)) = (extract_f64(&a_vals[i]), extract_f64(&b_vals[i])) {
                 sum_x += x;
                 sum_y += y;
                 sum_xy += x * y;
@@ -28444,8 +28450,10 @@ impl DataFrame {
             .column_order
             .iter()
             .filter(|name| {
-                let dt = self.columns[name.as_str()].dtype();
-                dt == DType::Int64 || dt == DType::Float64
+                matches!(
+                    self.columns[name.as_str()].dtype(),
+                    DType::Bool | DType::Int64 | DType::Float64 | DType::Timedelta64
+                )
             })
             .cloned()
             .collect();
@@ -28458,7 +28466,11 @@ impl DataFrame {
             .map(|name| {
                 let col = &self.columns[name];
                 (0..len)
-                    .map(|i| col.values()[i].to_f64().unwrap_or(f64::NAN))
+                    .map(|i| match &col.values()[i] {
+                        Scalar::Timedelta64(ns) if *ns != Timedelta::NAT => *ns as f64,
+                        Scalar::Timedelta64(_) => f64::NAN,
+                        other => other.to_f64().unwrap_or(f64::NAN),
+                    })
                     .collect()
             })
             .collect();
@@ -33031,10 +33043,10 @@ impl DataFrame {
         for row_idx in 0..self.len() {
             let mut ns_vals: Vec<i64> = Vec::with_capacity(self.column_order.len());
             for col_name in &self.column_order {
-                if let Scalar::Timedelta64(ns) = &self.columns[col_name].values()[row_idx] {
-                    if *ns != Timedelta::NAT {
-                        ns_vals.push(*ns);
-                    }
+                if let Scalar::Timedelta64(ns) = &self.columns[col_name].values()[row_idx]
+                    && *ns != Timedelta::NAT
+                {
+                    ns_vals.push(*ns);
                 }
             }
             values.push(Scalar::Timedelta64(op(&ns_vals)));
@@ -51656,6 +51668,55 @@ mod tests {
         assert!((cov_matrix.columns["a"].values()[0].to_f64().unwrap() - 1.0).abs() < 1e-10);
         assert!((cov_matrix.columns["b"].values()[1].to_f64().unwrap() - 4.0).abs() < 1e-10);
         assert!((cov_matrix.columns["a"].values()[1].to_f64().unwrap() - 2.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn dataframe_cov_includes_bool_and_timedelta_columns() {
+        let day = fp_types::Timedelta::NANOS_PER_DAY;
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "td",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![
+                    Scalar::Timedelta64(day),
+                    Scalar::Timedelta64(2 * day),
+                    Scalar::Timedelta64(3 * day),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "flag",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![Scalar::Bool(false), Scalar::Bool(true), Scalar::Bool(false)],
+            )
+            .unwrap(),
+            Series::from_values(
+                "x",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let cov_matrix = df.cov().unwrap();
+        let names: Vec<String> = cov_matrix.column_names().into_iter().cloned().collect();
+        assert_eq!(
+            names,
+            vec!["td".to_string(), "flag".to_string(), "x".to_string()]
+        );
+
+        let day_f = day as f64;
+        let td_var = cov_matrix.columns["td"].values()[0].to_f64().unwrap();
+        let td_x = cov_matrix.columns["x"].values()[0].to_f64().unwrap();
+        let flag_var = cov_matrix.columns["flag"].values()[1].to_f64().unwrap();
+
+        assert!(((td_var - day_f * day_f) / (day_f * day_f)).abs() < 1e-12);
+        assert!(((td_x - day_f) / day_f).abs() < 1e-12);
+        assert!((flag_var - (1.0 / 3.0)).abs() < 1e-12);
+
+        let gated = df.cov_min_periods(4).unwrap();
+        assert!(gated.columns["td"].values()[0].to_f64().unwrap().is_nan());
     }
 
     // ── nlargest/nsmallest tests ──
@@ -88775,6 +88836,12 @@ mod test_cov_with_options_9ac700 {
         Series::from_values(name, labels, vals).unwrap()
     }
 
+    fn tds(name: &str, vs: &[i64]) -> Series {
+        let labels: Vec<IndexLabel> = (0..vs.len()).map(|i| IndexLabel::Int64(i as i64)).collect();
+        let vals: Vec<Scalar> = vs.iter().map(|&v| Scalar::Timedelta64(v)).collect();
+        Series::from_values(name, labels, vals).unwrap()
+    }
+
     #[test]
     fn cov_default_matches_ddof_one() {
         // [1,2,3,4] vs [1,2,3,4]: mean=2.5; deviations square to 5.0, /3 = 1.6666...
@@ -88859,6 +88926,21 @@ mod test_cov_with_options_9ac700 {
         let a = fs("a", &[1.0, 2.0]);
         let result = a.cov_with_options(&a, None, 2).unwrap();
         assert!(result.is_nan());
+    }
+
+    #[test]
+    fn cov_timedelta_uses_nanosecond_values() {
+        let day = fp_types::Timedelta::NANOS_PER_DAY;
+        let td = tds("td", &[day, 2 * day, 3 * day]);
+        let x = fs("x", &[1.0, 2.0, 3.0]);
+
+        let td_var = td.cov(&td).unwrap();
+        let td_x = td.cov_with_options(&x, Some(3), 1).unwrap();
+        let day_f = day as f64;
+
+        assert!(((td_var - day_f * day_f) / (day_f * day_f)).abs() < 1e-12);
+        assert!(((td_x - day_f) / day_f).abs() < 1e-12);
+        assert!(td.cov_with_options(&x, Some(4), 1).unwrap().is_nan());
     }
 }
 
