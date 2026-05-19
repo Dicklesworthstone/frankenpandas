@@ -14242,6 +14242,8 @@ impl SeriesGroupBy<'_> {
         // series the to_f64 path silently drops every value; do lex comparison
         // instead.
         let is_utf8 = matches!(self.series.column.dtype(), DType::Utf8);
+        // Per br-frankenpandas-q6nxh: Timedelta64 compares ns directly.
+        let is_timedelta = matches!(self.series.column.dtype(), DType::Timedelta64);
         self.agg_scalar(self.series.name(), |indices| {
             let mut best_idx: Option<usize> = None;
             if is_utf8 {
@@ -14251,6 +14253,19 @@ impl SeriesGroupBy<'_> {
                         let s_ref = s.as_str();
                         if best_idx.is_none() || s_ref < best.unwrap() {
                             best = Some(s_ref);
+                            best_idx = Some(idx);
+                        }
+                    }
+                }
+            } else if is_timedelta {
+                let mut best_ns: i64 = i64::MAX;
+                for &idx in indices {
+                    if let Scalar::Timedelta64(ns) = &self.series.column.values()[idx] {
+                        if *ns == Timedelta::NAT {
+                            continue;
+                        }
+                        if best_idx.is_none() || *ns < best_ns {
+                            best_ns = *ns;
                             best_idx = Some(idx);
                         }
                     }
@@ -14282,6 +14297,8 @@ impl SeriesGroupBy<'_> {
     pub fn idxmax(&self) -> Result<Series, FrameError> {
         // Per br-frankenpandas-e9aba4: Utf8 lex path mirrors idxmin above.
         let is_utf8 = matches!(self.series.column.dtype(), DType::Utf8);
+        // Per br-frankenpandas-q6nxh: Timedelta64 compares ns directly.
+        let is_timedelta = matches!(self.series.column.dtype(), DType::Timedelta64);
         self.agg_scalar(self.series.name(), |indices| {
             let mut best_idx: Option<usize> = None;
             if is_utf8 {
@@ -14291,6 +14308,19 @@ impl SeriesGroupBy<'_> {
                         let s_ref = s.as_str();
                         if best_idx.is_none() || s_ref > best.unwrap() {
                             best = Some(s_ref);
+                            best_idx = Some(idx);
+                        }
+                    }
+                }
+            } else if is_timedelta {
+                let mut best_ns: i64 = i64::MIN;
+                for &idx in indices {
+                    if let Scalar::Timedelta64(ns) = &self.series.column.values()[idx] {
+                        if *ns == Timedelta::NAT {
+                            continue;
+                        }
+                        if best_idx.is_none() || *ns > best_ns {
+                            best_ns = *ns;
                             best_idx = Some(idx);
                         }
                     }
