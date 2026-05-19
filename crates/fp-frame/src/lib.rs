@@ -32207,20 +32207,39 @@ impl DataFrame {
     /// Matches `pd.DataFrame.idxmin(axis=1)`. Returns a Series with one
     /// entry per row, containing the column name of the minimum value.
     pub fn idxmin_axis1(&self) -> Result<Series, FrameError> {
+        // Per br-frankenpandas-dvzw1: Timedelta-DataFrame axis=1 idxmin
+        // compares ns directly. to_f64 below errors on every Timedelta
+        // value so best_col stays None and all rows would be NaN.
+        let all_td = self.all_columns_timedelta();
         let mut values = Vec::with_capacity(self.len());
         for row_idx in 0..self.len() {
             let mut best_col: Option<&str> = None;
-            let mut best_val = f64::INFINITY;
-            for col_name in &self.column_order {
-                let val = &self.columns[col_name].values()[row_idx];
-                if val.is_missing() {
-                    continue;
+            if all_td {
+                let mut best_ns: i64 = i64::MAX;
+                for col_name in &self.column_order {
+                    if let Scalar::Timedelta64(ns) = &self.columns[col_name].values()[row_idx] {
+                        if *ns == Timedelta::NAT {
+                            continue;
+                        }
+                        if best_col.is_none() || *ns < best_ns {
+                            best_ns = *ns;
+                            best_col = Some(col_name);
+                        }
+                    }
                 }
-                if let Ok(v) = val.to_f64()
-                    && v < best_val
-                {
-                    best_val = v;
-                    best_col = Some(col_name);
+            } else {
+                let mut best_val = f64::INFINITY;
+                for col_name in &self.column_order {
+                    let val = &self.columns[col_name].values()[row_idx];
+                    if val.is_missing() {
+                        continue;
+                    }
+                    if let Ok(v) = val.to_f64()
+                        && v < best_val
+                    {
+                        best_val = v;
+                        best_col = Some(col_name);
+                    }
                 }
             }
             match best_col {
@@ -32240,20 +32259,37 @@ impl DataFrame {
     /// Matches `pd.DataFrame.idxmax(axis=1)`. Returns a Series with one
     /// entry per row, containing the column name of the maximum value.
     pub fn idxmax_axis1(&self) -> Result<Series, FrameError> {
+        // Per br-frankenpandas-dvzw1: sister to idxmin_axis1 above.
+        let all_td = self.all_columns_timedelta();
         let mut values = Vec::with_capacity(self.len());
         for row_idx in 0..self.len() {
             let mut best_col: Option<&str> = None;
-            let mut best_val = f64::NEG_INFINITY;
-            for col_name in &self.column_order {
-                let val = &self.columns[col_name].values()[row_idx];
-                if val.is_missing() {
-                    continue;
+            if all_td {
+                let mut best_ns: i64 = i64::MIN;
+                for col_name in &self.column_order {
+                    if let Scalar::Timedelta64(ns) = &self.columns[col_name].values()[row_idx] {
+                        if *ns == Timedelta::NAT {
+                            continue;
+                        }
+                        if best_col.is_none() || *ns > best_ns {
+                            best_ns = *ns;
+                            best_col = Some(col_name);
+                        }
+                    }
                 }
-                if let Ok(v) = val.to_f64()
-                    && v > best_val
-                {
-                    best_val = v;
-                    best_col = Some(col_name);
+            } else {
+                let mut best_val = f64::NEG_INFINITY;
+                for col_name in &self.column_order {
+                    let val = &self.columns[col_name].values()[row_idx];
+                    if val.is_missing() {
+                        continue;
+                    }
+                    if let Ok(v) = val.to_f64()
+                        && v > best_val
+                    {
+                        best_val = v;
+                        best_col = Some(col_name);
+                    }
                 }
             }
             match best_col {
