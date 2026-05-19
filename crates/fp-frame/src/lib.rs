@@ -32834,10 +32834,65 @@ impl DataFrame {
         })
     }
 
+    /// Per br-frankenpandas-bktp1: detect uniformly-Timedelta64 DataFrame.
+    /// The f64 cumulative_axis1 helper errors via to_f64() on Timedelta64
+    /// columns.
+    fn all_columns_timedelta(&self) -> bool {
+        !self.column_order.is_empty()
+            && self
+                .column_order
+                .iter()
+                .all(|name| matches!(self.columns[name].dtype(), DType::Timedelta64))
+    }
+
+    /// Per br-frankenpandas-bktp1: typed-i64 cumulative axis=1 reducer for
+    /// uniformly-Timedelta DataFrames. Op operates on i64 ns; missing
+    /// positions don't advance the accumulator. Emits Scalar::Timedelta64.
+    fn cumulative_axis1_timedelta<Op>(&self, init: i64, op: Op) -> Result<Self, FrameError>
+    where
+        Op: Fn(i64, i64) -> i64,
+    {
+        let mut per_column: Vec<Vec<Scalar>> = self
+            .column_order
+            .iter()
+            .map(|_| Vec::with_capacity(self.len()))
+            .collect();
+        for row_idx in 0..self.len() {
+            let mut acc = init;
+            let mut started = false;
+            for (col_idx, col_name) in self.column_order.iter().enumerate() {
+                let value = &self.columns[col_name].values()[row_idx];
+                match value {
+                    Scalar::Timedelta64(ns) if *ns != Timedelta::NAT => {
+                        acc = if started { op(acc, *ns) } else { *ns };
+                        started = true;
+                        per_column[col_idx].push(Scalar::Timedelta64(acc));
+                    }
+                    _ => per_column[col_idx].push(Scalar::Timedelta64(Timedelta::NAT)),
+                }
+            }
+        }
+        let mut columns = BTreeMap::new();
+        for (name, values) in self.column_order.iter().cloned().zip(per_column) {
+            columns.insert(name, Column::new(DType::Timedelta64, values)?);
+        }
+        Ok(Self {
+            columns,
+            column_order: self.column_order.clone(),
+            index: self.index.clone(),
+            column_multiindex: self.column_multiindex.clone(),
+            row_multiindex: self.row_multiindex.clone(),
+            allows_duplicate_labels: self.allows_duplicate_labels,
+        })
+    }
+
     /// Cumulative sum across columns, computed row-wise.
     ///
     /// Matches `pd.DataFrame.cumsum(axis=1, skipna=True)`.
     pub fn cumsum_axis1(&self) -> Result<Self, FrameError> {
+        if self.all_columns_timedelta() {
+            return self.cumulative_axis1_timedelta(0, Timedelta::add);
+        }
         self.cumulative_axis1(0.0, |acc, x| acc + x)
     }
 
@@ -32845,6 +32900,27 @@ impl DataFrame {
     ///
     /// Matches `pd.DataFrame.cumprod(axis=1, skipna=True)`.
     pub fn cumprod_axis1(&self) -> Result<Self, FrameError> {
+        // Per br-frankenpandas-bktp1: pandas raises TypeError on
+        // td_df.cumprod(axis=1); mirror Series::cumprod br-v36qy by emitting
+        // all-NaT for uniformly-Timedelta DataFrames.
+        if self.all_columns_timedelta() {
+            let mut columns = BTreeMap::new();
+            for name in &self.column_order {
+                let len = self.len();
+                let vals: Vec<Scalar> = (0..len)
+                    .map(|_| Scalar::Timedelta64(Timedelta::NAT))
+                    .collect();
+                columns.insert(name.clone(), Column::new(DType::Timedelta64, vals)?);
+            }
+            return Ok(Self {
+                columns,
+                column_order: self.column_order.clone(),
+                index: self.index.clone(),
+                column_multiindex: self.column_multiindex.clone(),
+                row_multiindex: self.row_multiindex.clone(),
+                allows_duplicate_labels: self.allows_duplicate_labels,
+            });
+        }
         self.cumulative_axis1(1.0, |acc, x| acc * x)
     }
 
@@ -32852,6 +32928,10 @@ impl DataFrame {
     ///
     /// Matches `pd.DataFrame.cummin(axis=1, skipna=True)`.
     pub fn cummin_axis1(&self) -> Result<Self, FrameError> {
+        // Per br-frankenpandas-bktp1: sister to cumsum_axis1 above.
+        if self.all_columns_timedelta() {
+            return self.cumulative_axis1_timedelta(i64::MAX, |a, b| a.min(b));
+        }
         self.cumulative_axis1(f64::INFINITY, f64::min)
     }
 
@@ -32859,6 +32939,10 @@ impl DataFrame {
     ///
     /// Matches `pd.DataFrame.cummax(axis=1, skipna=True)`.
     pub fn cummax_axis1(&self) -> Result<Self, FrameError> {
+        // Per br-frankenpandas-bktp1: sister to cumsum_axis1 above.
+        if self.all_columns_timedelta() {
+            return self.cumulative_axis1_timedelta(i64::MIN, |a, b| a.max(b));
+        }
         self.cumulative_axis1(f64::NEG_INFINITY, f64::max)
     }
 
