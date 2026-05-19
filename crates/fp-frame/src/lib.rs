@@ -5591,6 +5591,20 @@ impl Series {
                     None => Scalar::Float64(f64::NAN),
                 });
             }
+            // Per br-frankenpandas-7iz85: sister to br-erobu (Series::min).
+            // pandas pd.Series([td1, td2]).max() returns a Timedelta scalar.
+            DType::Timedelta64 => {
+                let mut best: Option<i64> = None;
+                for val in self.column.values() {
+                    if let Scalar::Timedelta64(ns) = val {
+                        if *ns == Timedelta::NAT {
+                            continue;
+                        }
+                        best = Some(best.map_or(*ns, |b| b.max(*ns)));
+                    }
+                }
+                return Ok(Scalar::Timedelta64(best.unwrap_or(Timedelta::NAT)));
+            }
             _ => {}
         }
 
