@@ -5403,6 +5403,47 @@ impl Series {
                 out.push(Scalar::Timedelta64(clipped));
                 continue;
             }
+            // Pandas Series.clip(lower=lo_series, upper=hi_series)
+            // preserves Int64 dtype when both the input and all relevant
+            // bound values are integers; matches FP-P2D-025
+            // series_clip_array_bounds_strict oracle output.
+            if let Scalar::Int64(iv) = val {
+                let lo_val = lower
+                    .as_ref()
+                    .filter(|lo| i < lo.len())
+                    .and_then(|lo| match &lo.column.values()[i] {
+                        Scalar::Int64(x) => Some(*x),
+                        _ => None,
+                    });
+                let hi_val = upper
+                    .as_ref()
+                    .filter(|hi| i < hi.len())
+                    .and_then(|hi| match &hi.column.values()[i] {
+                        Scalar::Int64(x) => Some(*x),
+                        _ => None,
+                    });
+                // Float bounds (or any non-Int64 bound dtype) demote the
+                // output to Float64 — fall through to the f64 path.
+                let lower_is_int = lower
+                    .as_ref()
+                    .filter(|lo| i < lo.len())
+                    .is_none_or(|lo| matches!(&lo.column.values()[i], Scalar::Int64(_) | Scalar::Null(_)));
+                let upper_is_int = upper
+                    .as_ref()
+                    .filter(|hi| i < hi.len())
+                    .is_none_or(|hi| matches!(&hi.column.values()[i], Scalar::Int64(_) | Scalar::Null(_)));
+                if lower_is_int && upper_is_int {
+                    let mut result = *iv;
+                    if let Some(lo) = lo_val {
+                        result = result.max(lo);
+                    }
+                    if let Some(hi) = hi_val {
+                        result = result.min(hi);
+                    }
+                    out.push(Scalar::Int64(result));
+                    continue;
+                }
+            }
             let Ok(v) = val.to_f64() else {
                 out.push(val.clone());
                 continue;
