@@ -13108,6 +13108,48 @@ impl DataFrameResample<'_> {
         self.apply_resample(|s, freq| s.resample(freq).last())
     }
 
+    /// Resample standard deviation (ddof=1) across all numeric columns.
+    ///
+    /// Matches `df.resample(freq).std()`. Closes parity gap — pandas
+    /// exposes std/var/median/skew/kurt on DataFrame.resample(); the
+    /// fp-frame impl only had sum/mean/min/max/first/last/sem before.
+    pub fn std(&self) -> Result<DataFrame, FrameError> {
+        self.apply_resample(|s, freq| s.resample(freq).std())
+    }
+
+    /// Resample variance (ddof=1) across all numeric columns.
+    ///
+    /// Matches `df.resample(freq).var()`.
+    pub fn var(&self) -> Result<DataFrame, FrameError> {
+        self.apply_resample(|s, freq| s.resample(freq).var())
+    }
+
+    /// Resample median across all numeric columns.
+    ///
+    /// Matches `df.resample(freq).median()`.
+    pub fn median(&self) -> Result<DataFrame, FrameError> {
+        self.apply_resample(|s, freq| s.resample(freq).median())
+    }
+
+    /// Resample skewness (Fisher's definition, bias=False).
+    ///
+    /// Matches `df.resample(freq).skew()`.
+    pub fn skew(&self) -> Result<DataFrame, FrameError> {
+        self.apply_resample(|s, freq| s.resample(freq).skew())
+    }
+
+    /// Resample excess kurtosis (Fisher's definition, bias=False).
+    ///
+    /// Matches `df.resample(freq).kurt()`.
+    pub fn kurt(&self) -> Result<DataFrame, FrameError> {
+        self.apply_resample(|s, freq| s.resample(freq).kurt())
+    }
+
+    /// Alias for `kurt()` — pandas exposes both spellings.
+    pub fn kurtosis(&self) -> Result<DataFrame, FrameError> {
+        self.kurt()
+    }
+
     /// Aggregate with multiple functions, producing prefixed column names.
     ///
     /// Matches `df.resample(freq).agg(['sum', 'mean'])`. Each numeric column
