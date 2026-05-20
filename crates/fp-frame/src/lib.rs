@@ -14232,6 +14232,22 @@ impl SeriesGroupBy<'_> {
         self.agg_values_scalar(self.series.name(), fp_types::nanskew)
     }
 
+    /// Excess kurtosis (Fisher's definition, bias=False) of each group.
+    ///
+    /// Matches `pd.Series.groupby(...).kurtosis()`. Mirrors fp_types::nankurt
+    /// which requires at least 4 non-missing values per group; returns
+    /// Null(NaN) otherwise and when the sample standard deviation is zero.
+    pub fn kurtosis(&self) -> Result<Series, FrameError> {
+        self.agg_values_scalar(self.series.name(), fp_types::nankurt)
+    }
+
+    /// Alias for `kurtosis()` — pandas exposes both `.kurt()` and
+    /// `.kurtosis()` on Series.groupby aggregations, and parity with that
+    /// surface requires both spellings.
+    pub fn kurt(&self) -> Result<Series, FrameError> {
+        self.kurtosis()
+    }
+
     /// Original index label of the minimum value in each group.
     pub fn idxmin(&self) -> Result<Series, FrameError> {
         // Per br-frankenpandas-e9aba4: sister to br-7db78 Series fix. On Utf8
