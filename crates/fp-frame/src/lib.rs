@@ -32141,6 +32141,18 @@ impl DataFrame {
             .collect();
         let mut values = Vec::with_capacity(labels.len());
         for name in &self.column_order {
+            // pandas 2.2.3 DataFrame.idxmin treats non-numeric (object/Utf8)
+            // columns as having no computable idxmin and returns NaN for
+            // them. Series::idxmin alone supports Utf8 lex via br-7db78,
+            // but at the DataFrame level pandas does NOT call into the
+            // lex path. Match the oracle behavior (FP-P2D-148).
+            if !matches!(
+                self.columns[name].dtype(),
+                DType::Bool | DType::Int64 | DType::Float64 | DType::Timedelta64
+            ) {
+                values.push(Scalar::Null(NullKind::NaN));
+                continue;
+            }
             let s = self.column_as_series(name)?;
             match s.idxmin() {
                 Ok(label) => values.push(index_label_to_scalar(&label)),
@@ -32161,6 +32173,15 @@ impl DataFrame {
             .collect();
         let mut values = Vec::with_capacity(labels.len());
         for name in &self.column_order {
+            // Sister to idxmin above: pandas DataFrame.idxmax skips
+            // non-numeric columns (returns NaN). FP-P2D-148.
+            if !matches!(
+                self.columns[name].dtype(),
+                DType::Bool | DType::Int64 | DType::Float64 | DType::Timedelta64
+            ) {
+                values.push(Scalar::Null(NullKind::NaN));
+                continue;
+            }
             let s = self.column_as_series(name)?;
             match s.idxmax() {
                 Ok(label) => values.push(index_label_to_scalar(&label)),
@@ -40198,7 +40219,7 @@ mod tests {
     use fp_columnar::Column;
     use fp_index::{AlignMode, Index};
     use fp_runtime::{EvidenceLedger, RuntimePolicy};
-    use fp_types::{DType, NullKind, Scalar};
+    use fp_types::{DType, NullKind, Scalar, Timedelta};
     use serde_json::Value;
 
     use super::{
