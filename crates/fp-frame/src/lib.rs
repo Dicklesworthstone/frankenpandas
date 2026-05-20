@@ -32887,6 +32887,12 @@ impl DataFrame {
         self.reduce_numeric("kurtosis")
     }
 
+    /// Alias for `kurtosis_agg()` — pandas exposes `df.kurt()` and
+    /// `df.kurtosis()` as equivalents at the column-aggregate level.
+    pub fn kurt_agg(&self) -> Result<Series, FrameError> {
+        self.kurtosis_agg()
+    }
+
     /// Standard error of the mean per column.
     ///
     /// Matches `pd.DataFrame.sem()`.
