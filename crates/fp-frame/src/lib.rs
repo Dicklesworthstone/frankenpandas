@@ -39537,6 +39537,12 @@ impl DataFrameGroupBy<'_> {
         })
     }
 
+    /// Alias for `kurtosis()` — pandas exposes both `df.groupby(by).kurt()`
+    /// and `.kurtosis()`. Parity requires both spellings.
+    pub fn kurt(&self) -> Result<DataFrame, FrameError> {
+        self.kurtosis()
+    }
+
     /// Open-High-Low-Close per group.
     ///
     /// Matches the current FrankenPandas `groupby.ohlc()` data contract.
