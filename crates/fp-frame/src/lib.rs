@@ -12200,6 +12200,30 @@ impl Resample<'_> {
         self.aggregate_scalar(|vals| fp_types::nansem(vals, 1))
     }
 
+    /// Resample skewness (Fisher's definition, bias=False).
+    ///
+    /// Matches `pd.Series.resample(freq).skew()`. Mirrors
+    /// fp_types::nanskew which returns Null(NaN) for buckets with fewer
+    /// than 3 non-missing values or zero sample variance.
+    pub fn skew(&self) -> Result<Series, FrameError> {
+        self.aggregate_scalar(fp_types::nanskew)
+    }
+
+    /// Resample excess kurtosis (Fisher's definition, bias=False).
+    ///
+    /// Matches `pd.Series.resample(freq).kurt()` / `.kurtosis()`. Mirrors
+    /// fp_types::nankurt which returns Null(NaN) for buckets with fewer
+    /// than 4 non-missing values or zero sample variance.
+    pub fn kurt(&self) -> Result<Series, FrameError> {
+        self.aggregate_scalar(fp_types::nankurt)
+    }
+
+    /// Alias for `kurt()` — pandas exposes both spellings on resampled
+    /// aggregations.
+    pub fn kurtosis(&self) -> Result<Series, FrameError> {
+        self.kurt()
+    }
+
     /// Resample bucket sizes including missing values.
     pub fn size(&self) -> Result<Series, FrameError> {
         self.aggregate_scalar(|vals| Scalar::Int64(vals.len() as i64))
