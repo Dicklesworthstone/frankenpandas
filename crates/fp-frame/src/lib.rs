@@ -7475,6 +7475,57 @@ impl Series {
         self.prod()
     }
 
+    /// Alias for sum, matching np.nansum.
+    pub fn nansum(&self) -> Result<Scalar, FrameError> {
+        self.sum()
+    }
+
+    /// Alias for mean, matching np.nanmean.
+    pub fn nanmean(&self) -> Result<Scalar, FrameError> {
+        self.mean()
+    }
+
+    /// Alias for min, matching np.nanmin.
+    pub fn nanmin(&self) -> Result<Scalar, FrameError> {
+        self.min()
+    }
+
+    /// Alias for max, matching np.nanmax.
+    pub fn nanmax(&self) -> Result<Scalar, FrameError> {
+        self.max()
+    }
+
+    /// Alias for prod, matching np.nanprod.
+    pub fn nanprod(&self) -> Result<Scalar, FrameError> {
+        self.prod()
+    }
+
+    /// Alias for std_ddof, matching np.nanstd.
+    pub fn nanstd(&self, ddof: usize) -> Result<Scalar, FrameError> {
+        self.std_ddof(ddof)
+    }
+
+    /// Alias for var_ddof, matching np.nanvar.
+    pub fn nanvar(&self, ddof: usize) -> Result<Scalar, FrameError> {
+        self.var_ddof(ddof)
+    }
+
+    /// Alias for median, matching np.nanmedian.
+    pub fn nanmedian(&self) -> Result<Scalar, FrameError> {
+        self.median()
+    }
+
+    /// Element-wise least common multiple.
+    ///
+    /// Matches `np.lcm(x, y)`.
+    pub fn lcm(&self, other: &Self) -> Result<Self, FrameError> {
+        Self::new(
+            self.name.clone(),
+            self.index.clone(),
+            self.column.lcm(other.column())?,
+        )
+    }
+
     /// Most frequently occurring value(s).
     ///
     /// Matches `pd.Series.mode()`. Returns a new Series containing
@@ -93483,5 +93534,43 @@ mod test_select_columns_perf_76e1fd {
         assert_eq!(int.name(), "x_int");
         assert!((frac.values()[0].to_f64().unwrap() - 0.5).abs() < 1e-10);
         assert!((int.values()[0].to_f64().unwrap() - 3.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn series_nansum() {
+        let s = Series::from_pairs(
+            "x",
+            vec![
+                (0_i64.into(), Scalar::Float64(1.0)),
+                (1_i64.into(), Scalar::Float64(f64::NAN)),
+                (2_i64.into(), Scalar::Float64(3.0)),
+            ],
+        )
+        .unwrap();
+        let result = s.nansum().unwrap();
+        assert!((result.to_f64().unwrap() - 4.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn series_lcm() {
+        let a = Series::from_pairs(
+            "a",
+            vec![
+                (0_i64.into(), Scalar::Int64(4)),
+                (1_i64.into(), Scalar::Int64(6)),
+            ],
+        )
+        .unwrap();
+        let b = Series::from_pairs(
+            "b",
+            vec![
+                (0_i64.into(), Scalar::Int64(6)),
+                (1_i64.into(), Scalar::Int64(8)),
+            ],
+        )
+        .unwrap();
+        let result = a.lcm(&b).unwrap();
+        assert_eq!(result.values()[0], Scalar::Int64(12));
+        assert_eq!(result.values()[1], Scalar::Int64(24));
     }
 }
