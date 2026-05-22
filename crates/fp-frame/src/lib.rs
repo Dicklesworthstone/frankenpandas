@@ -5792,6 +5792,41 @@ impl Series {
         Self::new(self.name.clone(), self.index.clone(), self.column.arctanh()?)
     }
 
+    /// Element-wise exp(x) - 1 with improved precision for small x.
+    ///
+    /// Matches `np.expm1(series)`. NaN values pass through.
+    pub fn expm1(&self) -> Result<Self, FrameError> {
+        Self::new(self.name.clone(), self.index.clone(), self.column.expm1()?)
+    }
+
+    /// Element-wise log(1 + x) with improved precision for small x.
+    ///
+    /// Matches `np.log1p(series)`. NaN values pass through.
+    pub fn log1p(&self) -> Result<Self, FrameError> {
+        Self::new(self.name.clone(), self.index.clone(), self.column.log1p()?)
+    }
+
+    /// Element-wise cube root.
+    ///
+    /// Matches `np.cbrt(series)`. NaN values pass through.
+    pub fn cbrt(&self) -> Result<Self, FrameError> {
+        Self::new(self.name.clone(), self.index.clone(), self.column.cbrt()?)
+    }
+
+    /// Element-wise sign (-1, 0, or 1).
+    ///
+    /// Matches `np.sign(series)`. NaN values pass through.
+    pub fn sign(&self) -> Result<Self, FrameError> {
+        Self::new(self.name.clone(), self.index.clone(), self.column.sign()?)
+    }
+
+    /// Element-wise sign bit (true if negative).
+    ///
+    /// Matches `np.signbit(series)`. NaN values pass through.
+    pub fn signbit(&self) -> Result<Self, FrameError> {
+        Self::new(self.name.clone(), self.index.clone(), self.column.signbit()?)
+    }
+
     // --- Descriptive Statistics ---
 
     #[must_use]
@@ -35226,6 +35261,41 @@ impl DataFrame {
     /// Matches `np.arctanh(df)`. NaN values pass through.
     pub fn arctanh(&self) -> Result<Self, FrameError> {
         self.apply_per_column(|s| s.arctanh())
+    }
+
+    /// Element-wise exp(x) - 1 with improved precision for small x.
+    ///
+    /// Matches `np.expm1(df)`. NaN values pass through.
+    pub fn expm1(&self) -> Result<Self, FrameError> {
+        self.apply_per_column(|s| s.expm1())
+    }
+
+    /// Element-wise log(1 + x) with improved precision for small x.
+    ///
+    /// Matches `np.log1p(df)`. NaN values pass through.
+    pub fn log1p(&self) -> Result<Self, FrameError> {
+        self.apply_per_column(|s| s.log1p())
+    }
+
+    /// Element-wise cube root.
+    ///
+    /// Matches `np.cbrt(df)`. NaN values pass through.
+    pub fn cbrt(&self) -> Result<Self, FrameError> {
+        self.apply_per_column(|s| s.cbrt())
+    }
+
+    /// Element-wise sign (-1, 0, or 1).
+    ///
+    /// Matches `np.sign(df)`. NaN values pass through.
+    pub fn sign(&self) -> Result<Self, FrameError> {
+        self.apply_per_column(|s| s.sign())
+    }
+
+    /// Element-wise sign bit (true if negative).
+    ///
+    /// Matches `np.signbit(df)`. NaN values pass through.
+    pub fn signbit(&self) -> Result<Self, FrameError> {
+        self.apply_per_column(|s| s.signbit())
     }
 
     /// Add a scalar to all numeric columns.
