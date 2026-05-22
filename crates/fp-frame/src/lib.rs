@@ -2383,6 +2383,42 @@ impl Series {
         Self::new(name, idx, col)
     }
 
+    /// Generate a Hann (Hanning) window Series.
+    ///
+    /// Matches `np.hanning(M)`.
+    pub fn hanning(name: impl Into<String>, m: usize) -> Result<Self, FrameError> {
+        let col = Column::hanning(m)?;
+        let idx = Index::from_range(0, m as i64, 1);
+        Self::new(name, idx, col)
+    }
+
+    /// Generate a Hamming window Series.
+    ///
+    /// Matches `np.hamming(M)`.
+    pub fn hamming(name: impl Into<String>, m: usize) -> Result<Self, FrameError> {
+        let col = Column::hamming(m)?;
+        let idx = Index::from_range(0, m as i64, 1);
+        Self::new(name, idx, col)
+    }
+
+    /// Generate a Blackman window Series.
+    ///
+    /// Matches `np.blackman(M)`.
+    pub fn blackman(name: impl Into<String>, m: usize) -> Result<Self, FrameError> {
+        let col = Column::blackman(m)?;
+        let idx = Index::from_range(0, m as i64, 1);
+        Self::new(name, idx, col)
+    }
+
+    /// Generate a Bartlett (triangular) window Series.
+    ///
+    /// Matches `np.bartlett(M)`.
+    pub fn bartlett(name: impl Into<String>, m: usize) -> Result<Self, FrameError> {
+        let col = Column::bartlett(m)?;
+        let idx = Index::from_range(0, m as i64, 1);
+        Self::new(name, idx, col)
+    }
+
     /// Return a backend-neutral pandas-style plotting request.
     pub fn plot(&self) -> Result<PlotSpec, FrameError> {
         Ok(PlotSpec {
