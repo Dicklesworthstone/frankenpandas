@@ -2110,6 +2110,11 @@ impl Column {
         Self::new(DType::Bool, out)
     }
 
+    /// Alias for [`isnull`](Self::isnull), matching `pd.Series.isna()`.
+    pub fn isna(&self) -> Result<Self, ColumnError> {
+        self.isnull()
+    }
+
     /// Per-row non-missing flag (Bool column).
     ///
     /// Matches `pd.Series.notna()` / `notnull()`.
@@ -2120,6 +2125,11 @@ impl Column {
             .map(|v| Scalar::Bool(!v.is_missing()))
             .collect();
         Self::new(DType::Bool, out)
+    }
+
+    /// Alias for [`notnull`](Self::notnull), matching `pd.Series.notna()`.
+    pub fn notna(&self) -> Result<Self, ColumnError> {
+        self.notnull()
     }
 
     /// Sample variance (ddof-parameterized).
@@ -7602,10 +7612,12 @@ mod tests {
                 is_null.values(),
                 &[Scalar::Bool(false), Scalar::Bool(true), Scalar::Bool(false),]
             );
+            assert_eq!(col.isna(), col.isnull());
             assert_eq!(
                 not_null.values(),
                 &[Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true),]
             );
+            assert_eq!(col.notna(), col.notnull());
         }
 
         #[test]
