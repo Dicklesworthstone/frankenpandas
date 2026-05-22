@@ -1983,6 +1983,32 @@ impl Column {
         self.pow(right)
     }
 
+    /// Float power, always returning Float64.
+    ///
+    /// Matches np.float_power(x, y). Unlike power(), this always returns
+    /// Float64 and returns NaN for negative bases with non-integer exponents
+    /// (where the result would be complex).
+    pub fn float_power(&self, right: &Self) -> Result<Self, ColumnError> {
+        if self.len() != right.len() {
+            return Err(ColumnError::LengthMismatch {
+                left: self.len(),
+                right: right.len(),
+            });
+        }
+        let mut out = Vec::with_capacity(self.values.len());
+        for (base, exp) in self.values.iter().zip(&right.values) {
+            if base.is_missing() || exp.is_missing() {
+                out.push(Scalar::Float64(f64::NAN));
+                continue;
+            }
+            let b = base.to_f64().map_err(ColumnError::Type)?;
+            let e = exp.to_f64().map_err(ColumnError::Type)?;
+            let result = b.powf(e);
+            out.push(Scalar::Float64(result));
+        }
+        Self::new(DType::Float64, out)
+    }
+
     /// Alias for mod, matching NumPy naming.
     pub fn remainder(&self, right: &Self) -> Result<Self, ColumnError> {
         self.r#mod(right)
