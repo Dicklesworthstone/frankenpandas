@@ -4632,6 +4632,80 @@ impl Column {
         Self::new(out_dtype, out)
     }
 
+    /// Consecutive differences with optional prepend/append values.
+    ///
+    /// Matches np.ediff1d(). Prepend/append scalars are added at boundaries.
+    pub fn ediff1d(
+        &self,
+        to_begin: Option<Scalar>,
+        to_end: Option<Scalar>,
+    ) -> Result<Self, ColumnError> {
+        let mut out = Vec::new();
+        if let Some(v) = to_begin {
+            out.push(v);
+        }
+        for i in 1..self.values.len() {
+            let cur = &self.values[i];
+            let prev = &self.values[i - 1];
+            if cur.is_missing() || prev.is_missing() {
+                out.push(Scalar::Float64(f64::NAN));
+                continue;
+            }
+            let cf = cur.to_f64().map_err(ColumnError::Type)?;
+            let pf = prev.to_f64().map_err(ColumnError::Type)?;
+            out.push(Scalar::Float64(cf - pf));
+        }
+        if let Some(v) = to_end {
+            out.push(v);
+        }
+        Self::new(DType::Float64, out)
+    }
+
+    /// Numerical gradient using central differences.
+    ///
+    /// Matches np.gradient() with uniform spacing.
+    pub fn gradient(&self) -> Result<Self, ColumnError> {
+        let n = self.values.len();
+        if n == 0 {
+            return Self::new(DType::Float64, Vec::new());
+        }
+        if n == 1 {
+            return Self::new(DType::Float64, vec![Scalar::Float64(0.0)]);
+        }
+        let vals: Vec<f64> = self
+            .values
+            .iter()
+            .map(|v| v.to_f64().unwrap_or(f64::NAN))
+            .collect();
+        let mut out = Vec::with_capacity(n);
+        out.push(Scalar::Float64(vals[1] - vals[0]));
+        for i in 1..n - 1 {
+            out.push(Scalar::Float64((vals[i + 1] - vals[i - 1]) / 2.0));
+        }
+        out.push(Scalar::Float64(vals[n - 1] - vals[n - 2]));
+        Self::new(DType::Float64, out)
+    }
+
+    /// Trapezoidal numerical integration.
+    ///
+    /// Matches np.trapz(). Returns scalar result of integral.
+    pub fn trapz(&self, dx: f64) -> Result<Scalar, ColumnError> {
+        let n = self.values.len();
+        if n < 2 {
+            return Ok(Scalar::Float64(0.0));
+        }
+        let vals: Vec<f64> = self
+            .values
+            .iter()
+            .map(|v| v.to_f64().unwrap_or(0.0))
+            .collect();
+        let mut sum = 0.0;
+        for i in 1..n {
+            sum += (vals[i - 1] + vals[i]) / 2.0 * dx;
+        }
+        Ok(Scalar::Float64(sum))
+    }
+
     /// Per-row boolean flag for duplicated values (keep='first').
     ///
     /// Matches `pd.Series.duplicated()` — all but the first occurrence
