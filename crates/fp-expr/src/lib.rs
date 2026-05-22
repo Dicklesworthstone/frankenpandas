@@ -149,6 +149,11 @@ pub enum Expr {
         left: Scalar,
         right: Scalar,
     },
+    Clip {
+        expr: Box<Expr>,
+        lower: f64,
+        upper: f64,
+    },
     Compare {
         left: Box<Expr>,
         right: Box<Expr>,
@@ -357,6 +362,12 @@ pub fn evaluate(
         Expr::Between { expr, left, right } => {
             let input = evaluate(expr, context, policy, ledger)?;
             input.between(left, right, "both").map_err(ExprError::from)
+        }
+        Expr::Clip { expr, lower, upper } => {
+            let input = evaluate(expr, context, policy, ledger)?;
+            input
+                .clip(Some(*lower), Some(*upper))
+                .map_err(ExprError::from)
         }
         Expr::Compare { left, right, op } => {
             evaluate_comparison(left, right, *op, context, policy, ledger)
@@ -736,6 +747,7 @@ impl MaterializedView {
             Expr::Not { expr } | Expr::Abs { expr } => Self::extract_series(expr, series_set),
             Expr::IsNull { expr, .. } => Self::extract_series(expr, series_set),
             Expr::Between { expr, .. } => Self::extract_series(expr, series_set),
+            Expr::Clip { expr, .. } => Self::extract_series(expr, series_set),
             Expr::Literal { .. } => {}
         }
     }
@@ -858,6 +870,12 @@ fn evaluate_delta(
             let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
             input.between(left, right, "both").map_err(ExprError::from)
         }
+        Expr::Clip { expr, lower, upper } => {
+            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
+            input
+                .clip(Some(*lower), Some(*upper))
+                .map_err(ExprError::from)
+        }
         Expr::Compare { left, right, op } => {
             evaluate_delta_comparison(left, right, *op, delta_ctx, delta, policy, ledger)
         }
@@ -922,7 +940,8 @@ fn evaluate_delta_comparison(
 //   - Membership operators: in, not in (with scalar list literals)
 //   - Logical operators: and, or, not
 //   - Unary function calls: abs(expr)
-//   - Series method calls: .isin([...]), .between(left, right), .isna(), .notna(), .isnull(), .notnull()
+//   - Series method calls: .isin([...]), .between(left, right), .clip(lower, upper),
+//     .isna(), .notna(), .isnull(), .notnull()
 //   - Arithmetic operators: +, -, *, /, //, %, **
 //   - Parenthesized sub-expressions
 
@@ -1496,6 +1515,16 @@ fn parse_scalar_literal(tokens: &[Token], pos: &mut usize) -> Result<Scalar, Exp
     Ok(scalar)
 }
 
+fn parse_numeric_literal(tokens: &[Token], pos: &mut usize) -> Result<f64, ExprError> {
+    match parse_scalar_literal(tokens, pos)? {
+        Scalar::Int64(value) => Ok(value as f64),
+        Scalar::Float64(value) => Ok(value),
+        other => Err(ExprError::ParseError(format!(
+            "expected numeric literal, got {other:?}"
+        ))),
+    }
+}
+
 fn parse_add(tokens: &[Token], pos: &mut usize) -> Result<Expr, ExprError> {
     let mut left = parse_mul(tokens, pos)?;
     while *pos < tokens.len() {
@@ -1737,6 +1766,28 @@ fn parse_postfix(mut expr: Expr, tokens: &[Token], pos: &mut usize) -> Result<Ex
                     expr: Box::new(expr),
                     left,
                     right,
+                };
+                *pos = arg_pos + 1;
+            }
+            "clip" => {
+                let mut arg_pos = *pos + 3;
+                let lower = parse_numeric_literal(tokens, &mut arg_pos)?;
+                if tokens.get(arg_pos) != Some(&Token::Comma) {
+                    return Err(ExprError::ParseError(
+                        "expected ',' between clip() bounds".into(),
+                    ));
+                }
+                arg_pos += 1;
+                let upper = parse_numeric_literal(tokens, &mut arg_pos)?;
+                if tokens.get(arg_pos) != Some(&Token::RParen) {
+                    return Err(ExprError::ParseError(
+                        "expected ')' after clip() bounds".into(),
+                    ));
+                }
+                expr = Expr::Clip {
+                    expr: Box::new(expr),
+                    lower,
+                    upper,
                 };
                 *pos = arg_pos + 1;
             }
@@ -3219,6 +3270,28 @@ mod tests {
     }
 
     #[test]
+    fn parse_clip_method_call_numeric_bounds() -> Result<(), ExprError> {
+        let expr = super::parse_expr("a.clip(2, 8)")?;
+        let Expr::Clip {
+            expr: inner,
+            lower,
+            upper,
+        } = expr
+        else {
+            return Err(ExprError::ParseError("expected Clip expression".into()));
+        };
+        assert_eq!(
+            inner.as_ref(),
+            &Expr::Series {
+                name: SeriesRef("a".into())
+            }
+        );
+        assert_eq!(lower, 2.0);
+        assert_eq!(upper, 8.0);
+        Ok(())
+    }
+
+    #[test]
     fn parse_backtick_identifier() {
         let expr = super::parse_expr("`gross margin` + normal").unwrap();
         assert!(matches!(&expr, Expr::Add { .. }));
@@ -3838,6 +3911,33 @@ mod tests {
             filtered.columns()["a"].values(),
             &[Scalar::Int64(2), Scalar::Int64(8)]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn eval_and_query_str_accept_clip_method_call() -> Result<(), ExprError> {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "a",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![Scalar::Int64(1), Scalar::Int64(4), Scalar::Int64(9)],
+            )
+            .map_err(ExprError::from)?,
+        ])
+        .map_err(ExprError::from)?;
+
+        let clipped = super::eval_str("a.clip(2, 8)", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            clipped.values(),
+            &[Scalar::Int64(2), Scalar::Int64(4), Scalar::Int64(8)]
+        );
+
+        let filtered = super::query_str("a.clip(2, 8) == 8", &frame, &policy, &mut ledger)?;
+        assert_eq!(filtered.index().labels(), &[2_i64.into()]);
+        assert_eq!(filtered.columns()["a"].values(), &[Scalar::Int64(9)]);
         Ok(())
     }
 
