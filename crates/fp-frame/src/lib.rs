@@ -8240,6 +8240,12 @@ impl Series {
             .collect()
     }
 
+    /// Alias for items (deprecated in pandas but kept for compatibility).
+    #[deprecated(note = "use items() instead")]
+    pub fn iteritems(&self) -> Vec<(IndexLabel, Scalar)> {
+        self.items()
+    }
+
     /// Access a scalar value by integer position.
     ///
     /// Matches `pd.Series.iat[i]`.
@@ -28427,6 +28433,12 @@ impl DataFrame {
             result.push((col_name.clone(), series));
         }
         Ok(result)
+    }
+
+    /// Alias for items (deprecated in pandas but kept for compatibility).
+    #[deprecated(note = "use items() instead")]
+    pub fn iteritems(&self) -> Result<Vec<(String, Series)>, FrameError> {
+        self.items()
     }
 
     /// Assign new or overwrite existing columns.
