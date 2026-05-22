@@ -17189,6 +17189,34 @@ impl ListAccessor<'_> {
         Series::new(self.series.name(), index, Column::from_values(out)?)
     }
 
+    /// Join list elements with a separator.
+    pub fn join(&self, sep: &str) -> Result<Series, FrameError> {
+        let values = self.list_values()?;
+        let out: Vec<Scalar> = values
+            .into_iter()
+            .map(|opt_list| {
+                opt_list
+                    .map(|list| {
+                        let parts: Vec<String> = list
+                            .iter()
+                            .filter_map(|s| match s {
+                                Scalar::Utf8(v) => Some(v.clone()),
+                                Scalar::Int64(n) => Some(n.to_string()),
+                                Scalar::Float64(f) => Some(f.to_string()),
+                                Scalar::Bool(b) => Some(b.to_string()),
+                                _ => None,
+                            })
+                            .collect();
+                        Scalar::Utf8(parts.join(sep))
+                    })
+                    .unwrap_or(Scalar::Null(NullKind::NaN))
+            })
+            .collect();
+        let index = Index::new(self.series.index().labels().to_vec())
+            .rename_index(self.series.index().name());
+        Series::new(self.series.name(), index, Column::from_values(out)?)
+    }
+
     fn parsed_lists(&self) -> Result<(), FrameError> {
         self.list_values().map(|_| ())
     }
@@ -90651,5 +90679,21 @@ mod test_select_columns_perf_76e1fd {
         let ridx = s.str().rindex("abc").unwrap();
         let ridx_of = s.str().rindex_of("abc").unwrap();
         assert_eq!(ridx.column().values(), ridx_of.column().values());
+    }
+
+    #[test]
+    fn series_list_accessor_join() {
+        let s = Series::from_values(
+            "lists",
+            vec![IndexLabel::Int64(0), IndexLabel::Int64(1)],
+            vec![
+                Scalar::Utf8("[\"a\", \"b\", \"c\"]".into()),
+                Scalar::Utf8("[1, 2, 3]".into()),
+            ],
+        )
+        .unwrap();
+        let result = s.list().join("-").unwrap();
+        assert_eq!(result.column().values()[0], Scalar::Utf8("a-b-c".into()));
+        assert_eq!(result.column().values()[1], Scalar::Utf8("1-2-3".into()));
     }
 }
