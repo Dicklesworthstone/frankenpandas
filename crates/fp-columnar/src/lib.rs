@@ -1245,6 +1245,27 @@ impl Column {
         self.clone()
     }
 
+    /// One-dimensional transpose is identity.
+    ///
+    /// Matches `pd.Series.transpose()` at the column storage layer.
+    #[must_use]
+    pub fn transpose(&self) -> Self {
+        self.clone()
+    }
+
+    /// Lowercase alias for [`transpose`](Self::transpose).
+    #[must_use]
+    pub fn t(&self) -> Self {
+        self.transpose()
+    }
+
+    /// Uppercase pandas spelling for [`transpose`](Self::transpose).
+    #[allow(non_snake_case)]
+    #[must_use]
+    pub fn T(&self) -> Self {
+        self.transpose()
+    }
+
     #[must_use]
     pub fn values(&self) -> &[Scalar] {
         &self.values
@@ -6231,10 +6252,15 @@ mod tests {
             let col = Column::from_values(vec![Scalar::Int64(5), Scalar::Int64(6)]).expect("col");
             let copied = col.copy();
             let viewed = col.view();
+            let transposed = col.transpose();
             assert_eq!(copied, col);
             assert_eq!(viewed, col);
+            assert_eq!(transposed, col);
+            assert_eq!(col.t(), transposed);
+            assert_eq!(col.T(), transposed);
             assert_ne!(copied.values().as_ptr(), col.values().as_ptr());
             assert_ne!(viewed.values().as_ptr(), col.values().as_ptr());
+            assert_ne!(transposed.values().as_ptr(), col.values().as_ptr());
         }
 
         #[test]
