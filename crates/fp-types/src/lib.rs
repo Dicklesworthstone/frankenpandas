@@ -1452,6 +1452,33 @@ impl Timestamp {
         self.month().map(|m| (m - 1) / 3 + 1)
     }
 
+    /// Return the ISO week number (1-53).
+    ///
+    /// Matches `pd.Timestamp.week`. Returns None for NaT.
+    #[must_use]
+    pub fn weekofyear(&self) -> Option<i64> {
+        if self.is_nat() {
+            return None;
+        }
+        let doy = self.dayofyear()?;
+        let dow = self.dayofweek()?;
+        let iso_dow = if dow == 6 { 7 } else { dow + 1 };
+        let week = (doy - iso_dow + 10) / 7;
+        if week < 1 {
+            Some(52)
+        } else if week > 52 {
+            Some(1)
+        } else {
+            Some(week)
+        }
+    }
+
+    /// Alias for weekofyear(). Matches `pd.Timestamp.week`.
+    #[must_use]
+    pub fn week(&self) -> Option<i64> {
+        self.weekofyear()
+    }
+
     /// Whether the year is a leap year.
     ///
     /// Matches `pd.Timestamp.is_leap_year`. Returns None for NaT.
@@ -5244,5 +5271,18 @@ mod tests {
         assert_eq!(feb_non_leap.days_in_month(), Some(28));
 
         assert_eq!(Timestamp::nat().days_in_month(), None);
+    }
+
+    #[test]
+    fn timestamp_weekofyear() {
+        let jan1 = Timestamp::from_nanos(0);
+        assert_eq!(jan1.weekofyear(), Some(1));
+        assert_eq!(jan1.week(), Some(1));
+
+        let jan8 = Timestamp::from_nanos(Timedelta::NANOS_PER_DAY * 7);
+        assert_eq!(jan8.weekofyear(), Some(2));
+
+        assert_eq!(Timestamp::nat().weekofyear(), None);
+        assert_eq!(Timestamp::nat().week(), None);
     }
 }
