@@ -5893,6 +5893,47 @@ impl PeriodIndex {
         vec![self.dtype()]
     }
 
+    /// Whether any period label is missing.
+    ///
+    /// FrankenPandas `Period` currently has no NaT sentinel, so this is
+    /// always false until native period missing values are introduced.
+    #[must_use]
+    pub fn hasnans(&self) -> bool {
+        false
+    }
+
+    /// Missing-value mask, matching `pd.PeriodIndex.isna()`.
+    #[must_use]
+    pub fn isna(&self) -> Vec<bool> {
+        vec![false; self.len()]
+    }
+
+    /// Alias for [`isna`](Self::isna), matching `pd.PeriodIndex.isnull()`.
+    #[must_use]
+    pub fn isnull(&self) -> Vec<bool> {
+        self.isna()
+    }
+
+    /// Non-missing mask, matching `pd.PeriodIndex.notna()`.
+    #[must_use]
+    pub fn notna(&self) -> Vec<bool> {
+        vec![true; self.len()]
+    }
+
+    /// Alias for [`notna`](Self::notna), matching `pd.PeriodIndex.notnull()`.
+    #[must_use]
+    pub fn notnull(&self) -> Vec<bool> {
+        self.notna()
+    }
+
+    /// Drop missing labels, matching `pd.PeriodIndex.dropna()`.
+    ///
+    /// With no native Period NaT sentinel, this is a name-preserving clone.
+    #[must_use]
+    pub fn dropna(&self) -> Self {
+        self.clone()
+    }
+
     #[must_use]
     pub fn memory_usage(&self, deep: bool) -> usize {
         let name_bytes = if deep {
@@ -17356,6 +17397,21 @@ mod tests {
         let empty = super::PeriodIndex::from_ordinals(&[], PeriodFreq::Annual);
         assert!(empty.is_empty());
         assert!(empty.asi8().is_empty());
+    }
+
+    #[test]
+    fn period_index_missing_value_accessors_are_all_present() {
+        use fp_types::PeriodFreq;
+        let pi = super::PeriodIndex::from_ordinals(&[10, 11, 12], PeriodFreq::Monthly)
+            .set_name("periods");
+        assert!(!pi.hasnans());
+        assert_eq!(pi.isna(), vec![false, false, false]);
+        assert_eq!(pi.isnull(), pi.isna());
+        assert_eq!(pi.notna(), vec![true, true, true]);
+        assert_eq!(pi.notnull(), pi.notna());
+        let dropped = pi.dropna();
+        assert_eq!(dropped.values(), pi.values());
+        assert_eq!(dropped.name(), Some("periods"));
     }
 
     #[test]

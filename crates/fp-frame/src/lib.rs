@@ -17239,6 +17239,33 @@ impl ListAccessor<'_> {
         Series::new(self.series.name(), index, Column::from_values(out)?)
     }
 
+    /// Get unique elements within each list, preserving order.
+    pub fn unique(&self) -> Result<Series, FrameError> {
+        let values = self.list_values()?;
+        let out: Vec<Scalar> = values
+            .into_iter()
+            .map(|opt_list| {
+                opt_list
+                    .map(|list| {
+                        let mut seen = std::collections::HashSet::new();
+                        let unique: Vec<Scalar> = list
+                            .into_iter()
+                            .filter(|s| {
+                                let key = format!("{:?}", s);
+                                seen.insert(key)
+                            })
+                            .collect();
+                        let json = serde_json::to_string(&unique).unwrap_or_else(|_| "[]".into());
+                        Scalar::Utf8(json)
+                    })
+                    .unwrap_or(Scalar::Null(NullKind::NaN))
+            })
+            .collect();
+        let index = Index::new(self.series.index().labels().to_vec())
+            .rename_index(self.series.index().name());
+        Series::new(self.series.name(), index, Column::from_values(out)?)
+    }
+
     fn parsed_lists(&self) -> Result<(), FrameError> {
         self.list_values().map(|_| ())
     }
@@ -90913,5 +90940,25 @@ mod test_select_columns_perf_76e1fd {
         let result = s.list().contains(&Scalar::Int64(2)).unwrap();
         assert_eq!(result.column().values()[0], Scalar::Bool(true));
         assert_eq!(result.column().values()[1], Scalar::Bool(false));
+    }
+
+    #[test]
+    fn series_list_accessor_unique() {
+        let s = Series::from_values(
+            "lists",
+            vec![IndexLabel::Int64(0), IndexLabel::Int64(1)],
+            vec![
+                Scalar::Utf8("[1, 2, 2, 3, 1]".into()),
+                Scalar::Utf8("[\"a\", \"b\", \"a\"]".into()),
+            ],
+        )
+        .unwrap();
+        let result = s.list().unique().unwrap();
+        let v0 = match &result.column().values()[0] {
+            Scalar::Utf8(s) => s.clone(),
+            _ => panic!("expected Utf8"),
+        };
+        assert!(v0.contains("1") && v0.contains("2") && v0.contains("3"));
+        assert!(!v0.contains("2,2") && !v0.contains("1,1"));
     }
 }
