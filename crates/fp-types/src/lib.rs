@@ -13,8 +13,9 @@
 //! ## Core value types
 //!
 //! - [`DType`]: the dtype enum — `Null`, `Bool`, `Int64`, `Float64`,
-//!   `Utf8`, `Categorical`, `Timedelta64`, `Sparse`. Drives column /
-//!   series storage decisions across the workspace.
+//!   `Utf8`, `Categorical`, `Timedelta64`, `Datetime64`, `Period`,
+//!   `Interval`, `Sparse`. Drives column / series storage decisions
+//!   across the workspace.
 //! - [`Scalar`]: the per-cell value enum, parameterized by `DType`.
 //!   Each variant holds the actual data (`Int64(i64)`, `Float64(f64)`,
 //!   `Utf8(String)`, ...) plus the `Null(NullKind)` variant for
@@ -76,6 +77,10 @@ pub enum DType {
     Timedelta64,
     /// Nanosecond-precision datetime since Unix epoch. Matches pandas `datetime64[ns]`.
     Datetime64,
+    /// Period ordinal. Matches pandas `period[freq]`. Stores ordinal + frequency code.
+    Period,
+    /// Numeric interval value. Matches pandas `interval[float64]`.
+    Interval,
     Sparse,
 }
 
@@ -130,6 +135,10 @@ pub enum Scalar {
     /// Nanoseconds since Unix epoch. Matches pandas `datetime64[ns]`.
     /// Uses `Timestamp::NAT` (i64::MIN) for missing values.
     Datetime64(i64),
+    /// Period ordinal. Uses i64::MIN for NaT (missing value).
+    Period(i64),
+    /// Numeric interval value. Missing values remain `Scalar::Null`.
+    Interval(Interval),
 }
 
 impl std::fmt::Display for Scalar {
@@ -150,6 +159,14 @@ impl std::fmt::Display for Scalar {
                     write!(f, "Timestamp[{nanos}]")
                 }
             }
+            Self::Period(ordinal) => {
+                if *ordinal == i64::MIN {
+                    write!(f, "NaT")
+                } else {
+                    write!(f, "Period[{ordinal}]")
+                }
+            }
+            Self::Interval(interval) => write!(f, "{interval}"),
         }
     }
 }
@@ -204,6 +221,8 @@ impl Scalar {
             Self::Utf8(_) => DType::Utf8,
             Self::Timedelta64(_) => DType::Timedelta64,
             Self::Datetime64(_) => DType::Datetime64,
+            Self::Period(_) => DType::Period,
+            Self::Interval(_) => DType::Interval,
         }
     }
 
@@ -214,6 +233,7 @@ impl Scalar {
             Self::Float64(v) => v.is_nan(),
             Self::Timedelta64(v) => *v == Timedelta::NAT,
             Self::Datetime64(v) => *v == Timestamp::NAT,
+            Self::Period(v) => *v == i64::MIN,
             _ => false,
         }
     }
@@ -229,10 +249,14 @@ impl Scalar {
             DType::Float64 => Self::Null(NullKind::NaN),
             DType::Timedelta64 => Self::Timedelta64(Timedelta::NAT),
             DType::Datetime64 => Self::Datetime64(Timestamp::NAT),
+            DType::Period => Self::Period(i64::MIN),
             DType::Null => Self::Null(NullKind::Null),
-            DType::Bool | DType::Int64 | DType::Utf8 | DType::Categorical | DType::Sparse => {
-                Self::Null(NullKind::Null)
-            }
+            DType::Bool
+            | DType::Int64
+            | DType::Utf8
+            | DType::Categorical
+            | DType::Interval
+            | DType::Sparse => Self::Null(NullKind::Null),
         }
     }
 
@@ -325,6 +349,23 @@ impl Scalar {
                     a.cmp(b)
                 }
             }
+            (Self::Period(a), Self::Period(b)) => {
+                if *a == i64::MIN || *b == i64::MIN {
+                    std::cmp::Ordering::Equal
+                } else {
+                    a.cmp(b)
+                }
+            }
+            (Self::Interval(a), Self::Interval(b)) => a
+                .left
+                .partial_cmp(&b.left)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| {
+                    a.right
+                        .partial_cmp(&b.right)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .then_with(|| a.closed.cmp(&b.closed)),
             // Cross-numeric comparison
             (Self::Int64(a), Self::Float64(b)) => (*a as f64)
                 .partial_cmp(b)
@@ -360,6 +401,17 @@ impl Scalar {
             Self::Datetime64(v) => Err(TypeError::NonNumericValue {
                 value: format!("Timestamp[{v}]"),
                 dtype: DType::Datetime64,
+            }),
+            Self::Period(v) if *v == i64::MIN => Err(TypeError::ValueIsMissing {
+                kind: NullKind::NaT,
+            }),
+            Self::Period(v) => Err(TypeError::NonNumericValue {
+                value: format!("Period[{v}]"),
+                dtype: DType::Period,
+            }),
+            Self::Interval(v) => Err(TypeError::NonNumericValue {
+                value: v.to_string(),
+                dtype: DType::Interval,
             }),
         }
     }
@@ -540,6 +592,11 @@ pub fn cast_scalar_owned(value: Scalar, target: DType) -> Result<Scalar, TypeErr
             Scalar::Int64(v) => Ok(Scalar::Datetime64(*v)),
             _ => Err(TypeError::InvalidCast { from, to: target }),
         },
+        DType::Period => match &value {
+            Scalar::Int64(v) => Ok(Scalar::Period(*v)),
+            _ => Err(TypeError::InvalidCast { from, to: target }),
+        },
+        DType::Interval => Err(TypeError::InvalidCast { from, to: target }),
         DType::Sparse => Err(TypeError::InvalidCast { from, to: target }),
     }
 }
@@ -558,6 +615,9 @@ fn scalar_to_string_for_astype(value: Scalar) -> String {
         Scalar::Timedelta64(v) => Timedelta::format(v),
         Scalar::Datetime64(v) if v == Timestamp::NAT => "NaT".to_owned(),
         Scalar::Datetime64(v) => format!("Timestamp[{v}]"),
+        Scalar::Period(v) if v == i64::MIN => "NaT".to_owned(),
+        Scalar::Period(v) => format!("Period[{v}]"),
+        Scalar::Interval(v) => v.to_string(),
     }
 }
 
@@ -1994,6 +2054,8 @@ pub fn nannunique(values: &[Scalar]) -> Scalar {
         Utf8(&'a str),
         Timedelta64(i64),
         Datetime64(i64),
+        Period(i64),
+        Interval(u64, u64, IntervalClosed),
     }
 
     let mut seen = HashSet::new();
@@ -2011,11 +2073,22 @@ pub fn nannunique(values: &[Scalar]) -> Scalar {
             Scalar::Utf8(v) => ScalarKey::Utf8(v.as_str()),
             Scalar::Timedelta64(v) => ScalarKey::Timedelta64(*v),
             Scalar::Datetime64(v) => ScalarKey::Datetime64(*v),
+            Scalar::Period(v) => ScalarKey::Period(*v),
+            Scalar::Interval(v) => ScalarKey::Interval(
+                normalized_float_bits(v.left),
+                normalized_float_bits(v.right),
+                v.closed,
+            ),
             Scalar::Null(_) => continue,
         };
         seen.insert(key);
     }
     Scalar::Int64(seen.len() as i64)
+}
+
+fn normalized_float_bits(value: f64) -> u64 {
+    let normalized = if value == 0.0 { 0.0 } else { value };
+    normalized.to_bits()
 }
 
 // ── Interval types (br-frankenpandas-j8k4 Phase 1) ──────────────────────
@@ -2037,7 +2110,9 @@ pub fn nannunique(values: &[Scalar]) -> Scalar {
 ///
 /// Matches pandas `pd.Interval.closed` / `pd.IntervalDtype.closed` string
 /// values ("left" / "right" / "both" / "neither").
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default, Serialize, Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum IntervalClosed {
@@ -2432,7 +2507,10 @@ pub fn period_range(start: Period, periods: usize) -> Vec<Period> {
 
 #[cfg(test)]
 mod tests {
-    use super::{DType, NullKind, Scalar, SparseDType, cast_scalar, common_dtype, infer_dtype};
+    use super::{
+        DType, Interval, IntervalClosed, NullKind, Scalar, SparseDType, cast_scalar, common_dtype,
+        infer_dtype,
+    };
 
     /// br-frankenpandas-esjjy / fd90.182: ergonomic From impls for Scalar.
     #[test]
@@ -2463,6 +2541,34 @@ mod tests {
         assert_eq!(
             infer_dtype(&values).expect("dtype should infer"),
             DType::Float64
+        );
+    }
+
+    #[test]
+    fn interval_scalar_has_dtype_storage_and_unique_semantics_5g5uj() {
+        let left = Scalar::Interval(Interval::new(0.0, 1.0, IntervalClosed::Right));
+        let right = Scalar::Interval(Interval::new(1.0, 2.0, IntervalClosed::Right));
+        assert_eq!(left.dtype(), DType::Interval);
+        assert!(!left.is_missing());
+        assert_eq!(
+            infer_dtype(&[left.clone(), right.clone()]).expect("interval dtype"),
+            DType::Interval
+        );
+        assert_eq!(
+            common_dtype(DType::Interval, DType::Interval).expect("same interval dtype"),
+            DType::Interval
+        );
+        assert_eq!(
+            cast_scalar(&Scalar::Null(NullKind::Null), DType::Interval).expect("missing casts"),
+            Scalar::Null(NullKind::Null)
+        );
+        assert_eq!(
+            cast_scalar(&left, DType::Utf8).expect("interval string cast"),
+            Scalar::Utf8("(0, 1]".to_owned())
+        );
+        assert_eq!(
+            super::nannunique(&[left.clone(), right, left, Scalar::Null(NullKind::Null)]),
+            Scalar::Int64(2)
         );
     }
 
@@ -3512,8 +3618,6 @@ mod tests {
     }
 
     // ── Interval tests (br-frankenpandas-j8k4) ──────────────────────────
-
-    use super::{Interval, IntervalClosed};
 
     #[test]
     fn interval_default_closed_is_right() {

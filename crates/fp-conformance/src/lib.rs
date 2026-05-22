@@ -6302,6 +6302,12 @@ fn fuzz_feather_scalar_for_dtype(dtype: DType, bytes: &[u8]) -> Scalar {
         DType::Datetime64 => {
             Scalar::Datetime64(i64::from(payload % 100) * 1_000_000_000)
         }
+        DType::Period => Scalar::Period(i64::from(payload % 100)),
+        DType::Interval => Scalar::Interval(fp_types::Interval {
+            left: f64::from(payload % 10),
+            right: f64::from(payload % 10 + 5),
+            closed: fp_types::IntervalClosed::Both,
+        }),
     }
 }
 
@@ -17109,6 +17115,13 @@ fn encode_groupby_composite_key(values: &[Scalar]) -> Result<String, String> {
                 }
                 format!("dt:{v}")
             }
+            Scalar::Period(v) => {
+                if *v == i64::MIN {
+                    return Err("groupby composite key component cannot be NaT".to_owned());
+                }
+                format!("pd:{v}")
+            }
+            Scalar::Interval(iv) => format!("iv:{iv}"),
             Scalar::Null(_) => {
                 return Err("groupby composite key component cannot be null".to_owned());
             }

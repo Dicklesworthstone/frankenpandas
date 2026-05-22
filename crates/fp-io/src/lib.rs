@@ -1218,6 +1218,14 @@ fn html_scalar_string(scalar: &Scalar, options: &HtmlWriteOptions) -> String {
                 html_text(&format_datetime_ns(*value), options.escape)
             }
         }
+        Scalar::Period(value) => {
+            if *value == i64::MIN {
+                html_text(&options.na_rep, options.escape)
+            } else {
+                html_text(&format!("Period[{value}]"), options.escape)
+            }
+        }
+        Scalar::Interval(iv) => html_text(&format!("{iv}"), options.escape),
     }
 }
 
@@ -2175,6 +2183,14 @@ fn scalar_to_xml_value(scalar: &Scalar) -> Option<String> {
                 Some(format_datetime_ns(*value))
             }
         }
+        Scalar::Period(value) => {
+            if *value == i64::MIN {
+                None
+            } else {
+                Some(format!("Period[{value}]"))
+            }
+        }
+        Scalar::Interval(iv) => Some(format!("{iv}")),
     }
 }
 
@@ -2433,6 +2449,14 @@ fn scalar_to_csv(scalar: &Scalar) -> String {
                 format_datetime_ns(*v)
             }
         }
+        Scalar::Period(v) => {
+            if *v == i64::MIN {
+                String::new()
+            } else {
+                format!("Period[{v}]")
+            }
+        }
+        Scalar::Interval(iv) => format!("{iv}"),
     }
 }
 
@@ -2645,7 +2669,7 @@ fn apply_sql_coerce_float(columns: &mut [Vec<Scalar>]) {
                 Scalar::Null(_) | Scalar::Int64(_) | Scalar::Float64(_) => {
                     parsed_values.push(None);
                 }
-                Scalar::Bool(_) | Scalar::Timedelta64(_) | Scalar::Datetime64(_) => {
+                Scalar::Bool(_) | Scalar::Timedelta64(_) | Scalar::Datetime64(_) | Scalar::Period(_) | Scalar::Interval(_) => {
                     saw_text_float = false;
                     parsed_values.clear();
                     break;
@@ -2774,7 +2798,7 @@ fn pandas_csv_numeric_column_requires_float(values: &[Scalar]) -> bool {
                 saw_float = true;
             }
             Scalar::Null(_) => saw_missing = true,
-            Scalar::Bool(_) | Scalar::Utf8(_) | Scalar::Timedelta64(_) | Scalar::Datetime64(_) => {
+            Scalar::Bool(_) | Scalar::Utf8(_) | Scalar::Timedelta64(_) | Scalar::Datetime64(_) | Scalar::Period(_) | Scalar::Interval(_) => {
                 return false;
             }
         }
@@ -3095,6 +3119,14 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
                         fp_index::IndexLabel::Utf8(format_datetime_ns(v))
                     }
                 }
+                Scalar::Period(v) => {
+                    if v == i64::MIN {
+                        fp_index::IndexLabel::Utf8("<NaT>".to_owned())
+                    } else {
+                        fp_index::IndexLabel::Utf8(format!("Period[{v}]"))
+                    }
+                }
+                Scalar::Interval(iv) => fp_index::IndexLabel::Utf8(format!("{iv}")),
             })
             .collect();
         // Per br-frankenpandas-l0vbr: pandas pd.read_csv(index_col='col')
@@ -3540,6 +3572,14 @@ fn scalar_to_json(scalar: &Scalar) -> serde_json::Value {
                 serde_json::Value::String(format_datetime_ns(*v))
             }
         }
+        Scalar::Period(v) => {
+            if *v == i64::MIN {
+                serde_json::Value::Null
+            } else {
+                serde_json::Value::String(format!("Period[{v}]"))
+            }
+        }
+        Scalar::Interval(iv) => serde_json::Value::String(format!("{iv}")),
     }
 }
 
@@ -3552,7 +3592,7 @@ fn column_promotes_int_json_values_to_float(values: &[Scalar]) -> bool {
             Scalar::Int64(_) => saw_int = true,
             Scalar::Null(_) => saw_missing = true,
             Scalar::Float64(_) => {}
-            Scalar::Bool(_) | Scalar::Utf8(_) | Scalar::Timedelta64(_) | Scalar::Datetime64(_) => {
+            Scalar::Bool(_) | Scalar::Utf8(_) | Scalar::Timedelta64(_) | Scalar::Datetime64(_) | Scalar::Period(_) | Scalar::Interval(_) => {
                 return false;
             }
         }
@@ -4509,6 +4549,8 @@ fn dtype_to_arrow(dtype: DType) -> ArrowDataType {
         DType::Null => ArrowDataType::Utf8, // fallback: null-only columns as string
         DType::Timedelta64 => ArrowDataType::Int64, // store as nanoseconds
         DType::Datetime64 => ArrowDataType::Int64, // store as nanoseconds
+        DType::Period => ArrowDataType::Int64, // store as ordinal
+        DType::Interval => ArrowDataType::Utf8, // store as string until arrow interval lands
         DType::Sparse => ArrowDataType::Utf8, // marker fallback until sparse arrays land
     }
 }
@@ -4593,6 +4635,34 @@ fn column_to_arrow_array(column: &Column) -> Result<Arc<dyn Array>, IoError> {
                             builder.append_value(*nanos);
                         }
                     }
+                    _ if value.is_missing() => builder.append_null(),
+                    _ => builder.append_null(),
+                }
+            }
+            Arc::new(builder.finish())
+        }
+        DType::Period => {
+            let mut builder = Int64Builder::with_capacity(column.len());
+            for value in column.values() {
+                match value {
+                    Scalar::Period(ordinal) => {
+                        if *ordinal == i64::MIN {
+                            builder.append_null();
+                        } else {
+                            builder.append_value(*ordinal);
+                        }
+                    }
+                    _ if value.is_missing() => builder.append_null(),
+                    _ => builder.append_null(),
+                }
+            }
+            Arc::new(builder.finish())
+        }
+        DType::Interval => {
+            let mut builder = StringBuilder::with_capacity(column.len(), column.len() * 32);
+            for value in column.values() {
+                match value {
+                    Scalar::Interval(iv) => builder.append_value(format!("{iv}")),
                     _ if value.is_missing() => builder.append_null(),
                     _ => builder.append_null(),
                 }
@@ -5686,6 +5756,18 @@ fn write_excel_scalar(
                     .write_string(excel_row, excel_col, format_datetime_ns(*v))
                     .map_err(|e| IoError::Excel(format!("write datetime: {e}")))?;
             }
+        }
+        Scalar::Period(v) => {
+            if *v != i64::MIN {
+                worksheet
+                    .write_string(excel_row, excel_col, format!("Period[{v}]"))
+                    .map_err(|e| IoError::Excel(format!("write period: {e}")))?;
+            }
+        }
+        Scalar::Interval(iv) => {
+            worksheet
+                .write_string(excel_row, excel_col, format!("{iv}"))
+                .map_err(|e| IoError::Excel(format!("write interval: {e}")))?;
         }
         Scalar::Float64(_) | Scalar::Null(_) => {}
     }
@@ -6945,6 +7027,8 @@ fn dtype_to_sql(dtype: DType) -> &'static str {
         DType::Null => "TEXT",
         DType::Timedelta64 => "INTEGER", // store as nanoseconds
         DType::Datetime64 => "INTEGER",  // store as nanoseconds
+        DType::Period => "INTEGER",      // store as ordinal
+        DType::Interval => "TEXT",       // store as string
         DType::Sparse => "TEXT",
     }
 }
@@ -7003,6 +7087,14 @@ fn sql_value_from_scalar(scalar: &Scalar) -> rusqlite::types::Value {
                 rusqlite::types::Value::Integer(*v)
             }
         }
+        Scalar::Period(v) => {
+            if *v == i64::MIN {
+                rusqlite::types::Value::Null
+            } else {
+                rusqlite::types::Value::Integer(*v)
+            }
+        }
+        Scalar::Interval(iv) => rusqlite::types::Value::Text(format!("{iv}")),
     }
 }
 

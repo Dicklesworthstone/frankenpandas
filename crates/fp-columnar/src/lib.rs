@@ -55,10 +55,11 @@
 //!   level storage.
 
 use fp_types::{
-    DType, NullKind, Scalar, SparseDType, Timedelta, Timestamp, TypeError, cast_scalar,
-    cast_scalar_owned, common_dtype, infer_dtype, nanall, nanany, nanargmax, nanargmin, nancummax,
-    nancummin, nancumprod, nancumsum, nankurt, nanmax, nanmean, nanmedian, nanmin, nannunique,
-    nanprod, nanptp, nanquantile, nansem, nanskew, nanstd, nansum, nanvar,
+    DType, Interval, IntervalClosed, NullKind, Scalar, SparseDType, Timedelta, Timestamp,
+    TypeError, cast_scalar, cast_scalar_owned, common_dtype, infer_dtype, nanall, nanany,
+    nanargmax, nanargmin, nancummax, nancummin, nancumprod, nancumsum, nankurt, nanmax, nanmean,
+    nanmedian, nanmin, nannunique, nanprod, nanptp, nanquantile, nansem, nanskew, nanstd, nansum,
+    nanvar,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -331,6 +332,8 @@ pub enum ColumnData {
     Utf8(Vec<String>),
     Timedelta64(Vec<i64>),
     Datetime64(Vec<i64>),
+    Period(Vec<i64>),
+    Interval(Vec<Interval>),
 }
 
 impl ColumnData {
@@ -420,6 +423,27 @@ impl ColumnData {
                     .collect();
                 Self::Datetime64(data)
             }
+            DType::Period => {
+                let data: Vec<i64> = values
+                    .iter()
+                    .map(|v| match v {
+                        Scalar::Period(n) => *n,
+                        Scalar::Int64(i) => *i,
+                        _ => i64::MIN, // NaT sentinel for Period
+                    })
+                    .collect();
+                Self::Period(data)
+            }
+            DType::Interval => {
+                let data: Vec<Interval> = values
+                    .iter()
+                    .map(|v| match v {
+                        Scalar::Interval(interval) => *interval,
+                        _ => Interval::new(0.0, 0.0, IntervalClosed::Right),
+                    })
+                    .collect();
+                Self::Interval(data)
+            }
         }
     }
 
@@ -493,6 +517,28 @@ impl ColumnData {
                     }
                 })
                 .collect(),
+            Self::Period(data) => data
+                .iter()
+                .enumerate()
+                .map(|(i, v)| {
+                    if !validity.get(i) || *v == i64::MIN {
+                        Scalar::Period(i64::MIN)
+                    } else {
+                        Scalar::Period(*v)
+                    }
+                })
+                .collect(),
+            Self::Interval(data) => data
+                .iter()
+                .enumerate()
+                .map(|(i, v)| {
+                    if !validity.get(i) {
+                        Scalar::missing_for_dtype(dtype)
+                    } else {
+                        Scalar::Interval(*v)
+                    }
+                })
+                .collect(),
         }
     }
 
@@ -505,6 +551,8 @@ impl ColumnData {
             Self::Utf8(d) => d.len(),
             Self::Timedelta64(d) => d.len(),
             Self::Datetime64(d) => d.len(),
+            Self::Period(d) => d.len(),
+            Self::Interval(d) => d.len(),
         }
     }
 
@@ -897,6 +945,19 @@ fn compare_scalars_na_last(left: &Scalar, right: &Scalar, ascending: bool) -> st
             if ascending { ord } else { ord.reverse() }
         }
     }
+}
+
+fn normalized_float_bits(value: f64) -> u64 {
+    let normalized = if value == 0.0 { 0.0 } else { value };
+    normalized.to_bits()
+}
+
+fn interval_key(interval: &Interval) -> (u64, u64, IntervalClosed) {
+    (
+        normalized_float_bits(interval.left),
+        normalized_float_bits(interval.right),
+        interval.closed,
+    )
 }
 
 #[derive(Debug, Error, Clone, PartialEq)]
@@ -2134,6 +2195,8 @@ impl Column {
             Utf8(&'a str),
             Timedelta64(i64),
             Datetime64(i64),
+            Period(i64),
+            Interval(u64, u64, IntervalClosed),
         }
         let mut seen: HashSet<Key<'_>> = HashSet::new();
         for v in &self.values {
@@ -2150,6 +2213,11 @@ impl Column {
                 Scalar::Utf8(s) => Key::Utf8(s.as_str()),
                 Scalar::Timedelta64(v) => Key::Timedelta64(*v),
                 Scalar::Datetime64(v) => Key::Datetime64(*v),
+                Scalar::Period(v) => Key::Period(*v),
+                Scalar::Interval(v) => {
+                    let (left, right, closed) = interval_key(v);
+                    Key::Interval(left, right, closed)
+                }
                 Scalar::Null(_) => continue,
             };
             if !seen.insert(key) {
@@ -2644,6 +2712,8 @@ impl Column {
             Utf8(&'a str),
             Timedelta64(i64),
             Datetime64(i64),
+            Period(i64),
+            Interval(u64, u64, IntervalClosed),
         }
         fn key_of(v: &Scalar) -> Option<Key<'_>> {
             if v.is_missing() {
@@ -2659,6 +2729,11 @@ impl Column {
                 Scalar::Utf8(s) => Key::Utf8(s.as_str()),
                 Scalar::Timedelta64(v) => Key::Timedelta64(*v),
                 Scalar::Datetime64(v) => Key::Datetime64(*v),
+                Scalar::Period(v) => Key::Period(*v),
+                Scalar::Interval(v) => {
+                    let (left, right, closed) = interval_key(v);
+                    Key::Interval(left, right, closed)
+                }
                 Scalar::Null(_) => return None,
             })
         }
@@ -2987,6 +3062,8 @@ impl Column {
                 Scalar::Utf8(s) => !s.is_empty(),
                 Scalar::Timedelta64(x) => *x != 0,
                 Scalar::Datetime64(x) => *x != Timestamp::NAT,
+                Scalar::Period(x) => *x != i64::MIN,
+                Scalar::Interval(_) => true,
                 Scalar::Null(_) => false,
             };
             if truthy {
@@ -3424,6 +3501,8 @@ impl Column {
             Utf8(&'a str),
             Timedelta64(i64),
             Datetime64(i64),
+            Period(i64),
+            Interval(u64, u64, IntervalClosed),
         }
         fn key_of(v: &Scalar) -> Key<'_> {
             if v.is_missing() {
@@ -3439,6 +3518,11 @@ impl Column {
                 Scalar::Utf8(s) => Key::Utf8(s.as_str()),
                 Scalar::Timedelta64(v) => Key::Timedelta64(*v),
                 Scalar::Datetime64(v) => Key::Datetime64(*v),
+                Scalar::Period(v) => Key::Period(*v),
+                Scalar::Interval(v) => {
+                    let (left, right, closed) = interval_key(v);
+                    Key::Interval(left, right, closed)
+                }
                 Scalar::Null(_) => Key::Null,
             }
         }
@@ -3515,6 +3599,8 @@ impl Column {
             Utf8(&'a str),
             Timedelta64(i64),
             Datetime64(i64),
+            Period(i64),
+            Interval(u64, u64, IntervalClosed),
         }
         fn key_of(s: &Scalar) -> Option<LocalKey<'_>> {
             match s {
@@ -3543,6 +3629,17 @@ impl Column {
                     } else {
                         Some(LocalKey::Datetime64(*t))
                     }
+                }
+                Scalar::Period(p) => {
+                    if *p == i64::MIN {
+                        None
+                    } else {
+                        Some(LocalKey::Period(*p))
+                    }
+                }
+                Scalar::Interval(interval) => {
+                    let (left, right, closed) = interval_key(interval);
+                    Some(LocalKey::Interval(left, right, closed))
                 }
             }
         }
@@ -3765,6 +3862,8 @@ impl Column {
             Utf8(&'a str),
             Timedelta64(i64),
             Datetime64(i64),
+            Period(i64),
+            Interval(u64, u64, IntervalClosed),
         }
         fn key_of(v: &Scalar) -> Option<Key<'_>> {
             if v.is_missing() {
@@ -3780,6 +3879,11 @@ impl Column {
                 Scalar::Utf8(s) => Key::Utf8(s.as_str()),
                 Scalar::Timedelta64(v) => Key::Timedelta64(*v),
                 Scalar::Datetime64(v) => Key::Datetime64(*v),
+                Scalar::Period(v) => Key::Period(*v),
+                Scalar::Interval(v) => {
+                    let (left, right, closed) = interval_key(v);
+                    Key::Interval(left, right, closed)
+                }
                 Scalar::Null(_) => return None,
             })
         }
@@ -3817,6 +3921,8 @@ impl Column {
             Utf8(&'a str),
             Timedelta64(i64),
             Datetime64(i64),
+            Period(i64),
+            Interval(u64, u64, IntervalClosed),
         }
 
         let mut seen: HashSet<Key<'_>> = HashSet::new();
@@ -3835,6 +3941,11 @@ impl Column {
                 Scalar::Utf8(s) => Key::Utf8(s.as_str()),
                 Scalar::Timedelta64(v) => Key::Timedelta64(*v),
                 Scalar::Datetime64(v) => Key::Datetime64(*v),
+                Scalar::Period(v) => Key::Period(*v),
+                Scalar::Interval(v) => {
+                    let (left, right, closed) = interval_key(v);
+                    Key::Interval(left, right, closed)
+                }
                 Scalar::Null(_) => continue,
             };
             if seen.insert(key) {
@@ -4136,7 +4247,7 @@ impl CrackIndex {
 
 #[cfg(test)]
 mod tests {
-    use fp_types::{DType, NullKind, Scalar, SparseDType};
+    use fp_types::{DType, Interval, IntervalClosed, NullKind, Scalar, SparseDType};
 
     use super::{ArithmeticOp, Column, SparseColumn, ValidityMask};
 
@@ -4594,6 +4705,35 @@ mod tests {
         assert_eq!(back[0], Scalar::Int64(10));
         assert!(back[1].is_missing());
         assert_eq!(back[2], Scalar::Int64(30));
+    }
+
+    #[test]
+    fn column_data_interval_roundtrip_and_column_uniques_5g5uj() {
+        let first = Interval::new(0.0, 1.0, IntervalClosed::Right);
+        let second = Interval::new(1.0, 2.0, IntervalClosed::Right);
+        let values = vec![
+            Scalar::Interval(first),
+            Scalar::Null(NullKind::Null),
+            Scalar::Interval(second),
+            Scalar::Interval(first),
+        ];
+        let validity = ValidityMask::from_values(&values);
+        let data = super::ColumnData::from_scalars(&values, DType::Interval);
+        assert_eq!(data.len(), 4);
+        let back = data.to_scalars(DType::Interval, &validity);
+        assert_eq!(back[0], Scalar::Interval(first));
+        assert!(back[1].is_missing());
+        assert_eq!(back[2], Scalar::Interval(second));
+        assert_eq!(back[3], Scalar::Interval(first));
+
+        let column = Column::new(DType::Interval, values).expect("interval column");
+        assert_eq!(column.dtype(), DType::Interval);
+        assert!(column.has_duplicates());
+        let uniques = column.unique().expect("unique intervals");
+        assert_eq!(
+            uniques.values(),
+            &[Scalar::Interval(first), Scalar::Interval(second)]
+        );
     }
 
     #[test]

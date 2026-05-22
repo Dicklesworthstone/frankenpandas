@@ -798,8 +798,8 @@ struct ResolvedMergeSuffixes {
 impl Default for ResolvedMergeSuffixes {
     fn default() -> Self {
         Self {
-            left: Some("_left".to_owned()),
-            right: Some("_right".to_owned()),
+            left: Some("_x".to_owned()),
+            right: Some("_y".to_owned()),
         }
     }
 }
@@ -924,7 +924,7 @@ fn ensure_indicator_name_available(
 /// Matches `pd.merge(left, right, left_on=left_keys, right_on=right_keys, how=join_type)`.
 /// - Key columns are used for matching rows (hash join).
 /// - Non-key columns are carried through and reindexed.
-/// - Column name conflicts use configurable suffixes (default `_left`/`_right`).
+/// - Column name conflicts use configurable suffixes (default `_x`/`_y`).
 /// - The output index is auto-generated (0..n RangeIndex-style).
 pub fn merge_dataframes_on_with(
     left: &fp_frame::DataFrame,
@@ -2950,14 +2950,14 @@ mod tests {
         .unwrap();
 
         let merged = merge_dataframes(&left, &right, "id", JoinType::Inner).unwrap();
-        assert!(merged.columns.contains_key("val_left"));
-        assert!(merged.columns.contains_key("val_right"));
+        assert!(merged.columns.contains_key("val_x"));
+        assert!(merged.columns.contains_key("val_y"));
         assert_eq!(
-            merged.columns.get("val_left").unwrap().values(),
+            merged.columns.get("val_x").unwrap().values(),
             &[Scalar::Int64(10)]
         );
         assert_eq!(
-            merged.columns.get("val_right").unwrap().values(),
+            merged.columns.get("val_y").unwrap().values(),
             &[Scalar::Int64(99)]
         );
     }
@@ -3409,13 +3409,13 @@ mod tests {
 
         let merged = merge_dataframes(&left, &right, "unused_key", JoinType::Cross).unwrap();
 
-        assert_eq!(merged.columns.get("id_left").unwrap().len(), 9);
+        assert_eq!(merged.columns.get("id_x").unwrap().len(), 9);
         assert_eq!(
-            &merged.columns.get("id_left").unwrap().values()[0..3],
+            &merged.columns.get("id_x").unwrap().values()[0..3],
             &[Scalar::Int64(1), Scalar::Int64(1), Scalar::Int64(1)]
         );
         assert_eq!(
-            &merged.columns.get("id_right").unwrap().values()[0..3],
+            &merged.columns.get("id_y").unwrap().values()[0..3],
             &[Scalar::Int64(2), Scalar::Int64(3), Scalar::Int64(4)]
         );
         assert_eq!(
@@ -3435,7 +3435,7 @@ mod tests {
 
         let merged =
             merge_dataframes(&left, &right, "definitely_missing", JoinType::Cross).unwrap();
-        assert_eq!(merged.columns.get("id_left").unwrap().len(), 9);
+        assert_eq!(merged.columns.get("id_x").unwrap().len(), 9);
     }
 
     #[test]
@@ -3967,8 +3967,8 @@ mod tests {
         )
         .expect("merge");
 
-        assert!(merged.columns.contains_key("val_left"));
-        assert!(merged.columns.contains_key("val_right"));
+        assert!(merged.columns.contains_key("val_x"));
+        assert!(merged.columns.contains_key("val_y"));
         assert_eq!(
             merged.columns.get("origin").expect("indicator").values(),
             &[
@@ -4632,8 +4632,8 @@ mod tests {
         .unwrap();
 
         let result = super::merge_asof(&left, &right, "time", AsofDirection::Backward).unwrap();
-        let shared_left = result.columns.get("shared_left").unwrap().values();
-        let shared_right = result.columns.get("shared_right").unwrap().values();
+        let shared_left = result.columns.get("shared_x").unwrap().values();
+        let shared_right = result.columns.get("shared_y").unwrap().values();
 
         assert_eq!(shared_left[0], Scalar::Int64(10));
         assert_eq!(shared_left[1], Scalar::Int64(20));
@@ -4666,14 +4666,14 @@ mod tests {
 
         let result = super::merge_asof(&left, &right, "time", AsofDirection::Backward).unwrap();
         // Overlapping columns should receive default merge suffixes.
-        assert!(result.columns.contains_key("val_left"));
-        assert!(result.columns.contains_key("val_right"));
+        assert!(result.columns.contains_key("val_x"));
+        assert!(result.columns.contains_key("val_y"));
         assert_eq!(
-            result.columns.get("val_left").unwrap().values()[0],
+            result.columns.get("val_x").unwrap().values()[0],
             Scalar::Float64(10.0)
         );
         assert_eq!(
-            result.columns.get("val_right").unwrap().values()[0],
+            result.columns.get("val_y").unwrap().values()[0],
             Scalar::Float64(99.0)
         );
     }

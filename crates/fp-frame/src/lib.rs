@@ -100,7 +100,7 @@ use fp_index::{
 use fp_runtime::{
     DecisionAction, EvidenceLedger, RuntimePolicy, SemanticIndexIdentity, SemanticWitnessRecord,
 };
-use fp_types::{DType, NullKind, PeriodFreq, Scalar, SparseDType, Timedelta, common_dtype};
+use fp_types::{DType, Interval, NullKind, PeriodFreq, Scalar, SparseDType, Timedelta, common_dtype};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -194,6 +194,8 @@ fn scalar_plot_label(value: &Scalar) -> String {
         Scalar::Utf8(value) => value.clone(),
         Scalar::Timedelta64(value) => Timedelta::format(*value),
         Scalar::Datetime64(value) => format_datetime_ns(*value),
+        Scalar::Period(ordinal) => format!("Period[{ordinal}]"),
+        Scalar::Interval(interval) => format!("{interval}"),
     }
 }
 
@@ -334,7 +336,9 @@ fn dtype_memory_width(dtype: DType) -> usize {
         | DType::Float64
         | DType::Categorical
         | DType::Timedelta64
-        | DType::Datetime64 => 8,
+        | DType::Datetime64
+        | DType::Period => 8,
+        DType::Interval => 24,
         DType::Utf8 => std::mem::size_of::<usize>(),
         DType::Null | DType::Sparse => 0,
     }
@@ -464,6 +468,8 @@ fn scalar_to_value_counts_index_label(value: &Scalar) -> IndexLabel {
         Scalar::Float64(v) => IndexLabel::Utf8(format!("{v:?}")),
         Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
         Scalar::Datetime64(v) => IndexLabel::Utf8(format_datetime_ns(*v)),
+        Scalar::Period(ordinal) => IndexLabel::Utf8(format!("Period[{ordinal}]")),
+        Scalar::Interval(interval) => IndexLabel::Utf8(format!("{interval}")),
         Scalar::Null(_) => IndexLabel::Utf8("<null>".to_owned()),
     }
 }
@@ -585,6 +591,8 @@ enum ScalarKey<'a> {
     Utf8(&'a str),
     Timedelta64(i64),
     Datetime64(i64),
+    Period(i64),
+    Interval(u64, u64, fp_types::IntervalClosed),
 }
 
 type GroupKey<'a> = Vec<ScalarKey<'a>>;
@@ -618,6 +626,18 @@ fn scalar_key_allow_missing(value: &Scalar) -> ScalarKey<'_> {
                 ScalarKey::Datetime64(*v)
             }
         }
+        Scalar::Period(v) => {
+            if *v == i64::MIN {
+                ScalarKey::Null(NullKind::NaT)
+            } else {
+                ScalarKey::Period(*v)
+            }
+        }
+        Scalar::Interval(interval) => ScalarKey::Interval(
+            interval.left.to_bits(),
+            interval.right.to_bits(),
+            interval.closed,
+        ),
     }
 }
 
@@ -667,6 +687,8 @@ struct IsinIndex<'a> {
     utf8s: HashSet<&'a str>,
     timedeltas: HashSet<i64>,
     datetimes: HashSet<i64>,
+    periods: HashSet<i64>,
+    intervals: HashSet<(u64, u64, fp_types::IntervalClosed)>,
     any_missing: bool,
 }
 
@@ -679,6 +701,8 @@ impl<'a> IsinIndex<'a> {
             utf8s: HashSet::new(),
             timedeltas: HashSet::new(),
             datetimes: HashSet::new(),
+            periods: HashSet::new(),
+            intervals: HashSet::new(),
             any_missing: false,
         };
         for tv in test_values {
@@ -704,6 +728,16 @@ impl<'a> IsinIndex<'a> {
                 }
                 Scalar::Datetime64(t) => {
                     idx.datetimes.insert(*t);
+                }
+                Scalar::Period(t) => {
+                    idx.periods.insert(*t);
+                }
+                Scalar::Interval(interval) => {
+                    idx.intervals.insert((
+                        interval.left.to_bits(),
+                        interval.right.to_bits(),
+                        interval.closed,
+                    ));
                 }
                 Scalar::Null(_) => {}
             }
@@ -772,6 +806,12 @@ impl<'a> IsinIndex<'a> {
             Scalar::Utf8(s) => self.utf8s.contains(s.as_str()),
             Scalar::Timedelta64(t) => self.timedeltas.contains(t),
             Scalar::Datetime64(t) => self.datetimes.contains(t),
+            Scalar::Period(t) => self.periods.contains(t),
+            Scalar::Interval(interval) => self.intervals.contains(&(
+                interval.left.to_bits(),
+                interval.right.to_bits(),
+                interval.closed,
+            )),
             Scalar::Null(_) => false,
         }
     }
@@ -841,6 +881,8 @@ enum ModeKey<'a> {
     Utf8(&'a str),
     Timedelta(i64),
     Datetime(i64),
+    Period(i64),
+    Interval(u64, u64, fp_types::IntervalClosed),
 }
 
 fn mode_key(scalar: &Scalar) -> ModeKey<'_> {
@@ -865,6 +907,12 @@ fn mode_key(scalar: &Scalar) -> ModeKey<'_> {
         Scalar::Utf8(s) => ModeKey::Utf8(s.as_str()),
         Scalar::Timedelta64(ns) => ModeKey::Timedelta(*ns),
         Scalar::Datetime64(ns) => ModeKey::Datetime(*ns),
+        Scalar::Period(ordinal) => ModeKey::Period(*ordinal),
+        Scalar::Interval(interval) => ModeKey::Interval(
+            interval.left.to_bits(),
+            interval.right.to_bits(),
+            interval.closed,
+        ),
     }
 }
 
@@ -985,7 +1033,7 @@ fn null_kind_rank(kind: NullKind) -> u8 {
 }
 
 fn scalar_key_cmp(a: &ScalarKey<'_>, b: &ScalarKey<'_>) -> Ordering {
-    use ScalarKey::{Bool, Datetime64, FloatBits, Int64, Null, Timedelta64, Utf8};
+    use ScalarKey::{Bool, Datetime64, FloatBits, Int64, Interval, Null, Period, Timedelta64, Utf8};
     match (a, b) {
         (Null(a_kind), Null(b_kind)) => null_kind_rank(*a_kind).cmp(&null_kind_rank(*b_kind)),
         (Null(_), _) => Ordering::Greater,
@@ -998,6 +1046,13 @@ fn scalar_key_cmp(a: &ScalarKey<'_>, b: &ScalarKey<'_>) -> Ordering {
         (Utf8(a_val), Utf8(b_val)) => a_val.cmp(b_val),
         (Timedelta64(a_val), Timedelta64(b_val)) => a_val.cmp(b_val),
         (Datetime64(a_val), Datetime64(b_val)) => a_val.cmp(b_val),
+        (Period(a_val), Period(b_val)) => a_val.cmp(b_val),
+        (Interval(al, ar, ac), Interval(bl, br, bc)) => {
+            f64::from_bits(*al)
+                .total_cmp(&f64::from_bits(*bl))
+                .then_with(|| f64::from_bits(*ar).total_cmp(&f64::from_bits(*br)))
+                .then_with(|| ac.cmp(bc))
+        }
         (Bool(a_val), Int64(b_val)) => {
             let ord = i64::from(*a_val).cmp(b_val);
             if ord == Ordering::Equal {
@@ -1046,10 +1101,14 @@ fn scalar_key_cmp(a: &ScalarKey<'_>, b: &ScalarKey<'_>) -> Ordering {
                 ord
             }
         }
+        (Interval(_, _, _), _) => Ordering::Greater,
+        (_, Interval(_, _, _)) => Ordering::Less,
         (Timedelta64(_), _) => Ordering::Greater,
         (_, Timedelta64(_)) => Ordering::Less,
         (Datetime64(_), _) => Ordering::Greater,
         (_, Datetime64(_)) => Ordering::Less,
+        (Period(_), _) => Ordering::Greater,
+        (_, Period(_)) => Ordering::Less,
         (Utf8(_), _) => Ordering::Greater,
         (_, Utf8(_)) => Ordering::Less,
     }
@@ -1128,6 +1187,9 @@ fn scalar_to_json_value(value: &Scalar) -> Value {
         Scalar::Timedelta64(v) => Value::String(Timedelta::format(*v)),
         Scalar::Datetime64(v) if *v == Timedelta::NAT => Value::Null,
         Scalar::Datetime64(v) => Value::String(format_datetime_ns(*v)),
+        Scalar::Period(v) if *v == i64::MIN => Value::Null,
+        Scalar::Period(v) => Value::String(format!("Period[{v}]")),
+        Scalar::Interval(interval) => Value::String(format!("{interval}")),
     }
 }
 
@@ -1181,6 +1243,7 @@ fn dtype_to_table_schema_type(dtype: DType) -> &'static str {
         DType::Utf8 | DType::Categorical => "string",
         DType::Timedelta64 => "duration",
         DType::Datetime64 => "datetime",
+        DType::Period | DType::Interval => "string",
         DType::Null | DType::Sparse => "any",
     }
 }
@@ -1650,6 +1713,15 @@ fn coerce_scalar(val: &Scalar, dtype: DType) -> Scalar {
                 Scalar::Datetime64(Timedelta::NAT)
             }
             _ => Scalar::Datetime64(Timedelta::NAT),
+        },
+        DType::Period => match val {
+            Scalar::Period(_) => val.clone(),
+            Scalar::Int64(n) => Scalar::Period(*n),
+            _ => Scalar::Period(i64::MIN),
+        },
+        DType::Interval => match val {
+            Scalar::Interval(_) => val.clone(),
+            _ => Scalar::Null(NullKind::NaN),
         },
     }
 }
@@ -2165,6 +2237,8 @@ impl Series {
                 Scalar::Utf8(s) => s.clone(),
                 Scalar::Timedelta64(v) => Timedelta::format(*v),
                 Scalar::Datetime64(v) => format_datetime_ns(*v),
+                Scalar::Period(ordinal) => format!("Period[{ordinal}]"),
+                Scalar::Interval(interval) => format!("{interval}"),
             };
             lines.push(format!("{lbl_str:<label_width$}    {val_str}"));
         }
@@ -5573,6 +5647,8 @@ impl Series {
             Scalar::Utf8(v) => !v.is_empty(),
             Scalar::Timedelta64(v) => *v != Timedelta::NAT && *v != 0,
             Scalar::Datetime64(v) => *v != Timedelta::NAT && *v != 0,
+            Scalar::Period(v) => *v != i64::MIN && *v != 0,
+            Scalar::Interval(_) => true,
         }
     }
 
@@ -8602,6 +8678,9 @@ impl Series {
                 Scalar::Timedelta64(v) => Timedelta::format(*v),
                 Scalar::Datetime64(v) if *v == Timedelta::NAT => String::new(),
                 Scalar::Datetime64(v) => format_datetime_ns(*v),
+                Scalar::Period(v) if *v == i64::MIN => String::new(),
+                Scalar::Period(v) => format!("Period[{v}]"),
+                Scalar::Interval(interval) => format!("{interval}"),
             }
         }
 
@@ -10116,6 +10195,11 @@ impl Series {
                         return Scalar::Null(NullKind::NaT);
                     }
                     Scalar::Datetime64(n) => format_datetime_ns(*n),
+                    Scalar::Period(n) if *n == i64::MIN => {
+                        return Scalar::Null(NullKind::NaT);
+                    }
+                    Scalar::Period(n) => format!("Period[{n}]"),
+                    Scalar::Interval(interval) => format!("{interval}"),
                     Scalar::Null(_) => return Scalar::Null(NullKind::NaN),
                 };
                 mapping
@@ -21699,6 +21783,24 @@ pub fn to_timedelta_with_options(
                 ToTimedeltaErrors::Coerce => Scalar::Timedelta64(fp_types::Timedelta::NAT),
                 ToTimedeltaErrors::Ignore => val.clone(),
             },
+            Scalar::Period(_) => match options.errors {
+                ToTimedeltaErrors::Raise => {
+                    return Err(FrameError::CompatibilityRejected(
+                        "cannot convert period to timedelta".to_owned(),
+                    ));
+                }
+                ToTimedeltaErrors::Coerce => Scalar::Timedelta64(fp_types::Timedelta::NAT),
+                ToTimedeltaErrors::Ignore => val.clone(),
+            },
+            Scalar::Interval(_) => match options.errors {
+                ToTimedeltaErrors::Raise => {
+                    return Err(FrameError::CompatibilityRejected(
+                        "cannot convert interval to timedelta".to_owned(),
+                    ));
+                }
+                ToTimedeltaErrors::Coerce => Scalar::Timedelta64(fp_types::Timedelta::NAT),
+                ToTimedeltaErrors::Ignore => val.clone(),
+            },
         };
         converted.push(result);
     }
@@ -24181,6 +24283,20 @@ impl DataFrame {
                                     col_names[idx]
                                 )));
                             }
+                            DType::Period => {
+                                // TODO: parse period string
+                                return Err(FrameError::CompatibilityRejected(format!(
+                                    "cannot parse period value '{raw}' in column '{}'",
+                                    col_names[idx]
+                                )));
+                            }
+                            DType::Interval => {
+                                // TODO: parse interval string
+                                return Err(FrameError::CompatibilityRejected(format!(
+                                    "cannot parse interval value '{raw}' in column '{}'",
+                                    col_names[idx]
+                                )));
+                            }
                         }
                     }
                 } else if is_na {
@@ -24237,6 +24353,8 @@ impl DataFrame {
                     Scalar::Null(_) => IndexLabel::Utf8("<null>".to_owned()),
                     Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(v)),
                     Scalar::Datetime64(v) => IndexLabel::Utf8(format_datetime_ns(v)),
+                    Scalar::Period(v) => IndexLabel::Utf8(format!("Period[{v}]")),
+                    Scalar::Interval(interval) => IndexLabel::Utf8(format!("{interval}")),
                 })
                 .collect::<Vec<_>>();
 
@@ -25190,6 +25308,8 @@ impl DataFrame {
                             Scalar::Null(_) => IndexLabel::Utf8(String::new()),
                             Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
                             Scalar::Datetime64(v) => IndexLabel::Utf8(format_datetime_ns(*v)),
+                            Scalar::Period(v) => IndexLabel::Utf8(format!("Period[{v}]")),
+                            Scalar::Interval(interval) => IndexLabel::Utf8(format!("{interval}")),
                         })
                         .unwrap_or(IndexLabel::Utf8(String::new()))
                 })
@@ -25874,6 +25994,8 @@ impl DataFrame {
                         Scalar::Utf8(s) => Scalar::Utf8(s),
                         Scalar::Timedelta64(v) => Scalar::Utf8(Timedelta::format(v)),
                         Scalar::Datetime64(v) => Scalar::Utf8(format_datetime_ns(v)),
+                        Scalar::Period(v) => Scalar::Utf8(format!("Period[{v}]")),
+                        Scalar::Interval(interval) => Scalar::Utf8(format!("{interval}")),
                     })
                     .collect();
                 Series::from_values(name, labels, utf8_values)
@@ -30199,6 +30321,8 @@ impl DataFrame {
                 Scalar::Utf8(s) => s.clone(),
                 Scalar::Timedelta64(v) => Timedelta::format(*v),
                 Scalar::Datetime64(v) => format_datetime_ns(*v),
+                Scalar::Period(v) => format!("Period[{v}]"),
+                Scalar::Interval(interval) => format!("{interval}"),
             }
         }
 
@@ -30298,6 +30422,8 @@ impl DataFrame {
                 Scalar::Utf8(s) => escape_html(s),
                 Scalar::Timedelta64(v) => escape_html(&Timedelta::format(*v)),
                 Scalar::Datetime64(v) => escape_html(&format_datetime_ns(*v)),
+                Scalar::Period(v) => format!("Period[{v}]"),
+                Scalar::Interval(interval) => escape_html(&format!("{interval}")),
             }
         }
 
@@ -30745,6 +30871,9 @@ impl DataFrame {
                     Scalar::Timedelta64(v) => out.push_str(&Timedelta::format(*v)),
                     Scalar::Datetime64(v) if *v == Timedelta::NAT => {}
                     Scalar::Datetime64(v) => out.push_str(&format_datetime_ns(*v)),
+                    Scalar::Period(v) if *v == i64::MIN => {}
+                    Scalar::Period(v) => out.push_str(&format!("Period[{v}]")),
+                    Scalar::Interval(interval) => out.push_str(&format!("{interval}")),
                 }
             }
             out.push('\n');
@@ -30827,6 +30956,9 @@ impl DataFrame {
                     Scalar::Timedelta64(v) => out.push_str(&Timedelta::format(*v)),
                     Scalar::Datetime64(v) if *v == Timedelta::NAT => out.push_str(&na_rep_escaped),
                     Scalar::Datetime64(v) => out.push_str(&format_datetime_ns(*v)),
+                    Scalar::Period(v) if *v == i64::MIN => out.push_str(&na_rep_escaped),
+                    Scalar::Period(v) => out.push_str(&format!("Period[{v}]")),
+                    Scalar::Interval(interval) => out.push_str(&format!("{interval}")),
                 }
             }
             out.push('\n');
@@ -31084,6 +31216,8 @@ impl DataFrame {
                 Scalar::Utf8(s) => s.clone(),
                 Scalar::Timedelta64(v) => Timedelta::format(*v),
                 Scalar::Datetime64(v) => format_datetime_ns(*v),
+                Scalar::Period(v) => format!("Period[{v}]"),
+                Scalar::Interval(interval) => format!("{interval}"),
             }
         }
 
@@ -31215,6 +31349,8 @@ impl DataFrame {
                 Scalar::Utf8(s) => s.clone(),
                 Scalar::Timedelta64(v) => Timedelta::format(*v),
                 Scalar::Datetime64(v) => format_datetime_ns(*v),
+                Scalar::Period(v) => format!("Period[{v}]"),
+                Scalar::Interval(interval) => format!("{interval}"),
             }
         }
 
@@ -31285,6 +31421,8 @@ impl DataFrame {
                 Scalar::Utf8(s) => s.clone(),
                 Scalar::Timedelta64(v) => Timedelta::format(*v),
                 Scalar::Datetime64(v) => format_datetime_ns(*v),
+                Scalar::Period(v) => format!("Period[{v}]"),
+                Scalar::Interval(interval) => format!("{interval}"),
             }
         }
 
@@ -33388,6 +33526,8 @@ impl DataFrame {
                     Scalar::Utf8(s) => !s.is_empty(),
                     Scalar::Timedelta64(v) => *v != 0 && *v != Timedelta::NAT,
                     Scalar::Datetime64(v) => *v != 0 && *v != Timedelta::NAT,
+                    Scalar::Period(v) => *v != 0 && *v != i64::MIN,
+                    Scalar::Interval(_) => true,
                 }
             });
             values.push(Scalar::Bool(result));
@@ -33414,6 +33554,8 @@ impl DataFrame {
                     Scalar::Utf8(s) => !s.is_empty(),
                     Scalar::Timedelta64(v) => *v != 0 && *v != Timedelta::NAT,
                     Scalar::Datetime64(v) => *v != 0 && *v != Timedelta::NAT,
+                    Scalar::Period(v) => *v != 0 && *v != i64::MIN,
+                    Scalar::Interval(_) => true,
                 }
             });
             values.push(Scalar::Bool(result));

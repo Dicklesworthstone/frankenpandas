@@ -367,6 +367,8 @@ fn emit_groupby_result<'a>(
             Scalar::Float64(v) => IndexLabel::Utf8(v.to_string()),
             Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
             Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
+            Scalar::Period(v) => IndexLabel::Utf8(format!("Period[{v}]")),
+            Scalar::Interval(iv) => IndexLabel::Utf8(format!("{iv}")),
         });
         out_values.push(Scalar::Float64(sum));
     }
@@ -384,6 +386,8 @@ enum GroupKeyRef<'a> {
     Null(NullKind),
     Timedelta64(i64),
     Datetime64(i64),
+    Period(i64),
+    Interval(u64, u64, fp_types::IntervalClosed),
 }
 
 impl<'a> GroupKeyRef<'a> {
@@ -414,6 +418,16 @@ impl<'a> GroupKeyRef<'a> {
                 } else {
                     Self::Datetime64(*v)
                 }
+            }
+            Scalar::Period(v) => {
+                if *v == i64::MIN {
+                    Self::Null(NullKind::NaT)
+                } else {
+                    Self::Period(*v)
+                }
+            }
+            Scalar::Interval(iv) => {
+                Self::Interval(iv.left.to_bits(), iv.right.to_bits(), iv.closed)
             }
         }
     }
@@ -517,6 +531,8 @@ fn groupby_sum_timedelta64(
             Scalar::Float64(v) => IndexLabel::Utf8(v.to_string()),
             Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
             Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
+            Scalar::Period(v) => IndexLabel::Utf8(format!("Period[{v}]")),
+            Scalar::Interval(iv) => IndexLabel::Utf8(format!("{iv}")),
         });
         out_values.push(Scalar::Timedelta64(sum));
     }
@@ -820,6 +836,8 @@ pub fn groupby_agg(
             Scalar::Float64(v) => IndexLabel::Utf8(v.to_string()),
             Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
             Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
+            Scalar::Period(v) => IndexLabel::Utf8(format!("Period[{v}]")),
+            Scalar::Interval(iv) => IndexLabel::Utf8(format!("{iv}")),
         });
 
         let agg_value = match func {
@@ -1035,6 +1053,8 @@ fn scalar_to_hash_bits(value: &Scalar) -> u64 {
         Scalar::Null(_) => 0,
         Scalar::Timedelta64(v) => *v as u64,
         Scalar::Datetime64(v) => *v as u64,
+        Scalar::Period(v) => *v as u64,
+        Scalar::Interval(iv) => iv.left.to_bits() ^ iv.right.to_bits(),
     }
 }
 
