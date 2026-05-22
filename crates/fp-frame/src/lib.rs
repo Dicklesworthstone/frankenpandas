@@ -17557,6 +17557,72 @@ impl ListAccessor<'_> {
         Series::new(self.series.name(), index, Column::from_values(out)?)
     }
 
+    /// Index of minimum element within each list.
+    pub fn argmin(&self) -> Result<Series, FrameError> {
+        let values = self.list_values()?;
+        let out: Vec<Scalar> = values
+            .into_iter()
+            .map(|opt_list| {
+                opt_list
+                    .map(|list| {
+                        let mut min_idx: Option<usize> = None;
+                        let mut min_val: Option<f64> = None;
+                        for (i, val) in list.iter().enumerate() {
+                            let v = match val {
+                                Scalar::Int64(n) => Some(*n as f64),
+                                Scalar::Float64(f) if !f.is_nan() => Some(*f),
+                                _ => None,
+                            };
+                            if let Some(v) = v {
+                                if min_val.is_none() || v < min_val.unwrap() {
+                                    min_val = Some(v);
+                                    min_idx = Some(i);
+                                }
+                            }
+                        }
+                        min_idx.map(|i| Scalar::Int64(i as i64)).unwrap_or(Scalar::Null(NullKind::NaN))
+                    })
+                    .unwrap_or(Scalar::Null(NullKind::NaN))
+            })
+            .collect();
+        let index = Index::new(self.series.index().labels().to_vec())
+            .rename_index(self.series.index().name());
+        Series::new(self.series.name(), index, Column::from_values(out)?)
+    }
+
+    /// Index of maximum element within each list.
+    pub fn argmax(&self) -> Result<Series, FrameError> {
+        let values = self.list_values()?;
+        let out: Vec<Scalar> = values
+            .into_iter()
+            .map(|opt_list| {
+                opt_list
+                    .map(|list| {
+                        let mut max_idx: Option<usize> = None;
+                        let mut max_val: Option<f64> = None;
+                        for (i, val) in list.iter().enumerate() {
+                            let v = match val {
+                                Scalar::Int64(n) => Some(*n as f64),
+                                Scalar::Float64(f) if !f.is_nan() => Some(*f),
+                                _ => None,
+                            };
+                            if let Some(v) = v {
+                                if max_val.is_none() || v > max_val.unwrap() {
+                                    max_val = Some(v);
+                                    max_idx = Some(i);
+                                }
+                            }
+                        }
+                        max_idx.map(|i| Scalar::Int64(i as i64)).unwrap_or(Scalar::Null(NullKind::NaN))
+                    })
+                    .unwrap_or(Scalar::Null(NullKind::NaN))
+            })
+            .collect();
+        let index = Index::new(self.series.index().labels().to_vec())
+            .rename_index(self.series.index().name());
+        Series::new(self.series.name(), index, Column::from_values(out)?)
+    }
+
     /// Join list elements with a separator.
     pub fn join(&self, sep: &str) -> Result<Series, FrameError> {
         let values = self.list_values()?;
@@ -91392,5 +91458,24 @@ mod test_select_columns_perf_76e1fd {
         let result = s.list().nunique().unwrap();
         assert_eq!(result.column().values()[0], Scalar::Int64(3));
         assert_eq!(result.column().values()[1], Scalar::Int64(1));
+    }
+
+    #[test]
+    fn series_list_accessor_argmin_argmax() {
+        let s = Series::from_values(
+            "lists",
+            vec![IndexLabel::Int64(0), IndexLabel::Int64(1)],
+            vec![
+                Scalar::Utf8("[3, 1, 4, 1, 5]".into()),
+                Scalar::Utf8("[9, 2, 6]".into()),
+            ],
+        )
+        .unwrap();
+        let argmin = s.list().argmin().unwrap();
+        assert_eq!(argmin.column().values()[0], Scalar::Int64(1));
+        assert_eq!(argmin.column().values()[1], Scalar::Int64(1));
+        let argmax = s.list().argmax().unwrap();
+        assert_eq!(argmax.column().values()[0], Scalar::Int64(4));
+        assert_eq!(argmax.column().values()[1], Scalar::Int64(0));
     }
 }
