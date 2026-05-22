@@ -17415,6 +17415,38 @@ impl ListAccessor<'_> {
         Series::new(self.series.name(), index, Column::from_values(out)?)
     }
 
+    /// Get the first element of each list.
+    pub fn first(&self) -> Result<Series, FrameError> {
+        let values = self.list_values()?;
+        let out: Vec<Scalar> = values
+            .into_iter()
+            .map(|opt_list| {
+                opt_list
+                    .and_then(|list| list.into_iter().next())
+                    .unwrap_or(Scalar::Null(NullKind::NaN))
+            })
+            .collect();
+        let index = Index::new(self.series.index().labels().to_vec())
+            .rename_index(self.series.index().name());
+        Series::new(self.series.name(), index, Column::from_values(out)?)
+    }
+
+    /// Get the last element of each list.
+    pub fn last(&self) -> Result<Series, FrameError> {
+        let values = self.list_values()?;
+        let out: Vec<Scalar> = values
+            .into_iter()
+            .map(|opt_list| {
+                opt_list
+                    .and_then(|list| list.into_iter().last())
+                    .unwrap_or(Scalar::Null(NullKind::NaN))
+            })
+            .collect();
+        let index = Index::new(self.series.index().labels().to_vec())
+            .rename_index(self.series.index().name());
+        Series::new(self.series.name(), index, Column::from_values(out)?)
+    }
+
     /// Join list elements with a separator.
     pub fn join(&self, sep: &str) -> Result<Series, FrameError> {
         let values = self.list_values()?;
@@ -91164,5 +91196,24 @@ mod test_select_columns_perf_76e1fd {
         let result = s.list().count().unwrap();
         assert_eq!(result.column().values()[0], Scalar::Int64(4));
         assert_eq!(result.column().values()[1], Scalar::Int64(2));
+    }
+
+    #[test]
+    fn series_list_accessor_first_last() {
+        let s = Series::from_values(
+            "lists",
+            vec![IndexLabel::Int64(0), IndexLabel::Int64(1)],
+            vec![
+                Scalar::Utf8("[10, 20, 30]".into()),
+                Scalar::Utf8("[5, 6, 7, 8]".into()),
+            ],
+        )
+        .unwrap();
+        let first_result = s.list().first().unwrap();
+        assert_eq!(first_result.column().values()[0], Scalar::Int64(10));
+        assert_eq!(first_result.column().values()[1], Scalar::Int64(5));
+        let last_result = s.list().last().unwrap();
+        assert_eq!(last_result.column().values()[0], Scalar::Int64(30));
+        assert_eq!(last_result.column().values()[1], Scalar::Int64(8));
     }
 }
