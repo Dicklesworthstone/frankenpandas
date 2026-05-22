@@ -60528,6 +60528,31 @@ mod tests {
     }
 
     #[test]
+    fn dataframe_to_latex_mixed_dtypes_golden() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "name",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![
+                    Scalar::Utf8("Alice".to_string()),
+                    Scalar::Utf8("Bob".to_string()),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "score",
+                vec![0_i64.into(), 1_i64.into()],
+                vec![Scalar::Float64(95.5), Scalar::Null(NullKind::NaN)],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+        let output = df.to_latex(true);
+        let normalized = output.trim_end_matches('\n');
+        assert_text_golden("dataframe_to_latex_mixed.txt", normalized);
+    }
+
+    #[test]
     fn dataframe_display() {
         let df = DataFrame::from_series(vec![
             Series::from_values(

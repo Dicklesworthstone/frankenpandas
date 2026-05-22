@@ -1,0 +1,8 @@
+\begin{tabular}{rrr}
+\toprule
+ & name & score \\
+\midrule
+0 & Alice & 95.5 \\
+1 & Bob & NaN \\
+\bottomrule
+\end{tabular}
