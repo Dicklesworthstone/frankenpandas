@@ -1,4 +1,4 @@
-index,name,amount,active
+,name,amount,active
 0,plain,2.5,True
 1,"has, comma",NA,False
 2,"has ""quote"" and

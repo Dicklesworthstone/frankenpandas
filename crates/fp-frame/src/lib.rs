@@ -8760,6 +8760,11 @@ impl Series {
         // Header
         if include_header {
             if include_index {
+                out.push_str(&csv_escape_with_lineterminator(
+                    self.index.name().unwrap_or(""),
+                    sep,
+                    lineterminator,
+                ));
                 out.push(sep);
                 out.push_str(&csv_escape_with_lineterminator(
                     &self.name,
@@ -32646,7 +32651,7 @@ impl DataFrame {
         if include_header {
             if include_index {
                 out.push_str(&csv_escape_with_lineterminator(
-                    "index",
+                    self.index.name().unwrap_or(""),
                     sep,
                     lineterminator,
                 ));
@@ -32782,7 +32787,7 @@ impl DataFrame {
         if include_header {
             if include_index {
                 out.push_str(&csv_escape_with_lineterminator(
-                    "index",
+                    self.index.name().unwrap_or(""),
                     sep,
                     lineterminator,
                 ));
@@ -62205,7 +62210,19 @@ mod tests {
         let df = DataFrame::from_dict(&["a"], vec![("a", vec![Scalar::Int64(10)])]).unwrap();
 
         let csv = df.to_csv(',', true);
-        assert!(csv.starts_with("index,a\n"));
+        assert!(csv.starts_with(",a\n"));
+        assert!(csv.contains("0,10\n"));
+    }
+
+    #[test]
+    fn dataframe_to_csv_with_named_index_header() {
+        let df = DataFrame::from_dict(&["a"], vec![("a", vec![Scalar::Int64(10)])])
+            .unwrap()
+            .rename_axis("idx")
+            .unwrap();
+
+        let csv = df.to_csv(',', true);
+        assert!(csv.starts_with("idx,a\n"));
         assert!(csv.contains("0,10\n"));
     }
 
@@ -62218,7 +62235,7 @@ mod tests {
         .unwrap();
 
         let csv = df.to_csv(',', true);
-        assert!(csv.starts_with("index,\"a,b\"\n"));
+        assert!(csv.starts_with(",\"a,b\"\n"));
         assert!(csv.contains("\"id,1\",\"x,y\"\n"));
     }
 
@@ -70439,6 +70456,18 @@ mod tests {
         assert!(csv.contains(",val"));
         assert!(csv.contains("0,10"));
         assert!(csv.contains("1,20"));
+    }
+
+    #[test]
+    fn series_to_csv_with_named_index_header() {
+        let s = Series::from_values("val", vec![0_i64.into()], vec![Scalar::Int64(10)])
+            .unwrap()
+            .rename_axis("idx")
+            .unwrap();
+
+        let csv = s.to_csv(',', true);
+        assert!(csv.starts_with("idx,val\n"));
+        assert!(csv.contains("0,10\n"));
     }
 
     #[test]
