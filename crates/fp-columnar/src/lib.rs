@@ -1303,6 +1303,86 @@ impl Column {
         Self::new(DType::Float64, values)
     }
 
+    /// Generate a Hann (Hanning) window.
+    ///
+    /// Matches np.hanning(M). Returns a raised cosine window of length M.
+    pub fn hanning(m: usize) -> Result<Self, ColumnError> {
+        if m == 0 {
+            return Self::new(DType::Float64, vec![]);
+        }
+        if m == 1 {
+            return Self::new(DType::Float64, vec![Scalar::Float64(1.0)]);
+        }
+        let values: Vec<Scalar> = (0..m)
+            .map(|n| {
+                let val = 0.5 - 0.5 * (2.0 * std::f64::consts::PI * n as f64 / (m - 1) as f64).cos();
+                Scalar::Float64(val)
+            })
+            .collect();
+        Self::new(DType::Float64, values)
+    }
+
+    /// Generate a Hamming window.
+    ///
+    /// Matches np.hamming(M). Returns a Hamming window of length M.
+    pub fn hamming(m: usize) -> Result<Self, ColumnError> {
+        if m == 0 {
+            return Self::new(DType::Float64, vec![]);
+        }
+        if m == 1 {
+            return Self::new(DType::Float64, vec![Scalar::Float64(1.0)]);
+        }
+        let values: Vec<Scalar> = (0..m)
+            .map(|n| {
+                let val = 0.54 - 0.46 * (2.0 * std::f64::consts::PI * n as f64 / (m - 1) as f64).cos();
+                Scalar::Float64(val)
+            })
+            .collect();
+        Self::new(DType::Float64, values)
+    }
+
+    /// Generate a Blackman window.
+    ///
+    /// Matches np.blackman(M). Returns a Blackman window of length M.
+    pub fn blackman(m: usize) -> Result<Self, ColumnError> {
+        if m == 0 {
+            return Self::new(DType::Float64, vec![]);
+        }
+        if m == 1 {
+            return Self::new(DType::Float64, vec![Scalar::Float64(1.0)]);
+        }
+        let values: Vec<Scalar> = (0..m)
+            .map(|n| {
+                let x = n as f64 / (m - 1) as f64;
+                let val = 0.42
+                    - 0.5 * (2.0 * std::f64::consts::PI * x).cos()
+                    + 0.08 * (4.0 * std::f64::consts::PI * x).cos();
+                Scalar::Float64(val)
+            })
+            .collect();
+        Self::new(DType::Float64, values)
+    }
+
+    /// Generate a Bartlett (triangular) window.
+    ///
+    /// Matches np.bartlett(M). Returns a triangular window of length M.
+    pub fn bartlett(m: usize) -> Result<Self, ColumnError> {
+        if m == 0 {
+            return Self::new(DType::Float64, vec![]);
+        }
+        if m == 1 {
+            return Self::new(DType::Float64, vec![Scalar::Float64(1.0)]);
+        }
+        let half = (m - 1) as f64 / 2.0;
+        let values: Vec<Scalar> = (0..m)
+            .map(|n| {
+                let val = 1.0 - ((n as f64 - half) / half).abs();
+                Scalar::Float64(val)
+            })
+            .collect();
+        Self::new(DType::Float64, values)
+    }
+
     #[must_use]
     pub fn dtype(&self) -> DType {
         self.dtype
