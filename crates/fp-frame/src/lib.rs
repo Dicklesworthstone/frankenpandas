@@ -16866,6 +16866,19 @@ impl SparseAccessor<'_> {
             .count()
     }
 
+    /// Return the non-fill values as a Vec.
+    ///
+    /// Matches `pd.Series.sparse.sp_values` (returns underlying non-fill data).
+    #[must_use]
+    pub fn sp_values(&self) -> Vec<Scalar> {
+        self.series
+            .values()
+            .iter()
+            .filter(|value| !value.semantic_eq(&self.dtype.fill_value))
+            .cloned()
+            .collect()
+    }
+
     /// Return non-fill density as `npoints / len`.
     ///
     /// Matches `pd.Series.sparse.density`.
@@ -56571,6 +56584,10 @@ mod tests {
         assert_eq!(sparse.fill_value(), &Scalar::Int64(0));
         assert_eq!(sparse.npoints(), 2);
         assert_eq!(sparse.density(), 0.5);
+        let sp_vals = sparse.sp_values();
+        assert_eq!(sp_vals.len(), 2);
+        assert_eq!(sp_vals[0], Scalar::Int64(5));
+        assert_eq!(sp_vals[1], Scalar::Int64(7));
     }
 
     #[test]
