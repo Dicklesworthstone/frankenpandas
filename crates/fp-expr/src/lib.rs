@@ -172,6 +172,10 @@ pub enum Expr {
     Abs {
         expr: Box<Expr>,
     },
+    Round {
+        expr: Box<Expr>,
+        decimals: i32,
+    },
     IsNull {
         expr: Box<Expr>,
         negated: bool,
@@ -383,6 +387,10 @@ pub fn evaluate(
         Expr::Abs { expr } => {
             let input = evaluate(expr, context, policy, ledger)?;
             input.abs().map_err(ExprError::from)
+        }
+        Expr::Round { expr, decimals } => {
+            let input = evaluate(expr, context, policy, ledger)?;
+            input.round(*decimals).map_err(ExprError::from)
         }
         Expr::IsNull { expr, negated } => {
             let input = evaluate(expr, context, policy, ledger)?;
@@ -784,7 +792,9 @@ impl MaterializedView {
                 Self::extract_series(right, series_set);
             }
             Expr::IsIn { left, .. } => Self::extract_series(left, series_set),
-            Expr::Not { expr } | Expr::Abs { expr } => Self::extract_series(expr, series_set),
+            Expr::Not { expr } | Expr::Abs { expr } | Expr::Round { expr, .. } => {
+                Self::extract_series(expr, series_set);
+            }
             Expr::IsNull { expr, .. } => Self::extract_series(expr, series_set),
             Expr::Between { expr, .. } => Self::extract_series(expr, series_set),
             Expr::Clip { expr, .. } => Self::extract_series(expr, series_set),
@@ -898,6 +908,10 @@ fn evaluate_delta(
             let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
             input.abs().map_err(ExprError::from)
         }
+        Expr::Round { expr, decimals } => {
+            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
+            input.round(*decimals).map_err(ExprError::from)
+        }
         Expr::IsNull { expr, negated } => {
             let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
             if *negated {
@@ -988,7 +1002,8 @@ fn evaluate_delta_comparison(
 //   - Logical operators: and, or, not
 //   - Unary function calls: abs(expr)
 //   - Series method calls: .isin([...]), .between(left, right, inclusive=...),
-//     .clip(lower, upper), .isna(), .notna(), .isnull(), .notnull()
+//     .clip(lower, upper), .round(decimals), .isna(), .notna(), .isnull(),
+//     .notnull()
 //   - Arithmetic operators: +, -, *, /, //, %, **
 //   - Parenthesized sub-expressions
 
@@ -1573,6 +1588,17 @@ fn parse_numeric_literal(tokens: &[Token], pos: &mut usize) -> Result<f64, ExprE
     }
 }
 
+fn parse_i32_literal(tokens: &[Token], pos: &mut usize, context: &str) -> Result<i32, ExprError> {
+    let value = parse_scalar_literal(tokens, pos)?;
+    let Scalar::Int64(value) = value else {
+        return Err(ExprError::ParseError(format!(
+            "{context} must be an integer literal, got {value:?}"
+        )));
+    };
+    i32::try_from(value)
+        .map_err(|_| ExprError::ParseError(format!("{context} is outside the i32 range: {value}")))
+}
+
 fn parse_add(tokens: &[Token], pos: &mut usize) -> Result<Expr, ExprError> {
     let mut left = parse_mul(tokens, pos)?;
     while *pos < tokens.len() {
@@ -1858,6 +1884,34 @@ fn parse_postfix(mut expr: Expr, tokens: &[Token], pos: &mut usize) -> Result<Ex
                     expr: Box::new(expr),
                     lower,
                     upper,
+                };
+                *pos = arg_pos + 1;
+            }
+            "round" => {
+                let mut arg_pos = *pos + 3;
+                let decimals = if tokens.get(arg_pos) == Some(&Token::RParen) {
+                    0
+                } else {
+                    if let Some(Token::Ident(keyword)) = tokens.get(arg_pos)
+                        && tokens.get(arg_pos + 1) == Some(&Token::Assign)
+                    {
+                        if keyword != "decimals" {
+                            return Err(ExprError::ParseError(format!(
+                                "unexpected round() keyword argument: {keyword}"
+                            )));
+                        }
+                        arg_pos += 2;
+                    }
+                    parse_i32_literal(tokens, &mut arg_pos, "round() decimals")?
+                };
+                if tokens.get(arg_pos) != Some(&Token::RParen) {
+                    return Err(ExprError::ParseError(
+                        "expected ')' after round() arguments".into(),
+                    ));
+                }
+                expr = Expr::Round {
+                    expr: Box::new(expr),
+                    decimals,
                 };
                 *pos = arg_pos + 1;
             }
@@ -3383,6 +3437,38 @@ mod tests {
     }
 
     #[test]
+    fn parse_round_method_call_optional_decimals() -> Result<(), ExprError> {
+        let expr = super::parse_expr("a.round()")?;
+        let Expr::Round {
+            expr: inner,
+            decimals,
+        } = expr
+        else {
+            return Err(ExprError::ParseError("expected Round expression".into()));
+        };
+        assert_eq!(
+            inner.as_ref(),
+            &Expr::Series {
+                name: SeriesRef("a".into())
+            }
+        );
+        assert_eq!(decimals, 0);
+
+        let positional = super::parse_expr("a.round(-1)")?;
+        let Expr::Round { decimals, .. } = positional else {
+            return Err(ExprError::ParseError("expected Round expression".into()));
+        };
+        assert_eq!(decimals, -1);
+
+        let keyword = super::parse_expr("a.round(decimals=1)")?;
+        let Expr::Round { decimals, .. } = keyword else {
+            return Err(ExprError::ParseError("expected Round expression".into()));
+        };
+        assert_eq!(decimals, 1);
+        Ok(())
+    }
+
+    #[test]
     fn parse_backtick_identifier() {
         let expr = super::parse_expr("`gross margin` + normal").unwrap();
         assert!(matches!(&expr, Expr::Add { .. }));
@@ -4065,6 +4151,51 @@ mod tests {
         let filtered = super::query_str("a.clip(2, 8) == 8", &frame, &policy, &mut ledger)?;
         assert_eq!(filtered.index().labels(), &[2_i64.into()]);
         assert_eq!(filtered.columns()["a"].values(), &[Scalar::Int64(9)]);
+        Ok(())
+    }
+
+    #[test]
+    fn eval_and_query_str_accept_round_method_call() -> Result<(), ExprError> {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "a",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![
+                    Scalar::Float64(1.25),
+                    Scalar::Float64(2.75),
+                    Scalar::Float64(8.25),
+                ],
+            )
+            .map_err(ExprError::from)?,
+        ])
+        .map_err(ExprError::from)?;
+
+        let rounded = super::eval_str("a.round()", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            rounded.values(),
+            &[
+                Scalar::Float64(1.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(8.0)
+            ]
+        );
+
+        let one_decimal = super::eval_str("a.round(decimals=1)", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            one_decimal.values(),
+            &[
+                Scalar::Float64(1.2),
+                Scalar::Float64(2.8),
+                Scalar::Float64(8.2)
+            ]
+        );
+
+        let filtered = super::query_str("a.round(-1) >= 10", &frame, &policy, &mut ledger)?;
+        assert_eq!(filtered.index().labels(), &[2_i64.into()]);
+        assert_eq!(filtered.columns()["a"].values(), &[Scalar::Float64(8.25)]);
         Ok(())
     }
 
