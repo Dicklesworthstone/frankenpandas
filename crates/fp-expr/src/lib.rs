@@ -204,6 +204,11 @@ pub enum Expr {
         expr: Box<Expr>,
         dropna: bool,
     },
+    HeadTail {
+        expr: Box<Expr>,
+        n: i64,
+        tail: bool,
+    },
     TopN {
         expr: Box<Expr>,
         n: usize,
@@ -513,6 +518,14 @@ pub fn evaluate(
         Expr::Mode { expr, dropna } => {
             let input = evaluate(expr, context, policy, ledger)?;
             input.mode_with_dropna(*dropna).map_err(ExprError::from)
+        }
+        Expr::HeadTail { expr, n, tail } => {
+            let input = evaluate(expr, context, policy, ledger)?;
+            if *tail {
+                input.tail(*n).map_err(ExprError::from)
+            } else {
+                input.head(*n).map_err(ExprError::from)
+            }
         }
         Expr::TopN {
             expr,
@@ -1052,6 +1065,7 @@ impl MaterializedView {
             Expr::SortIndex { expr, .. } => Self::extract_series(expr, series_set),
             Expr::ArgSort { expr } => Self::extract_series(expr, series_set),
             Expr::Mode { expr, .. } => Self::extract_series(expr, series_set),
+            Expr::HeadTail { expr, .. } => Self::extract_series(expr, series_set),
             Expr::TopN { expr, .. } => Self::extract_series(expr, series_set),
             Expr::Replace { expr, .. } => Self::extract_series(expr, series_set),
             Expr::Astype { expr, .. } => Self::extract_series(expr, series_set),
@@ -1228,6 +1242,14 @@ fn evaluate_delta(
         Expr::Mode { expr, dropna } => {
             let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
             input.mode_with_dropna(*dropna).map_err(ExprError::from)
+        }
+        Expr::HeadTail { expr, n, tail } => {
+            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
+            if *tail {
+                input.tail(*n).map_err(ExprError::from)
+            } else {
+                input.head(*n).map_err(ExprError::from)
+            }
         }
         Expr::TopN {
             expr,
@@ -1427,11 +1449,11 @@ fn evaluate_delta_comparison(
 //     .shift(periods), .diff(periods), .cumsum(), .cumprod(), .cummin(),
 //     .cummax(), .pct_change(periods), .round(decimals), .dropna(),
 //     .sort_values(ascending=..., na_position=...), .sort_index(ascending=...),
-//     .argsort(axis, kind, order, stable), .mode(dropna), .replace(to_replace,
-//     value), .nlargest(n, keep), .nsmallest(n, keep), .astype(dtype),
-//     .combine_first(other), .rank(method=..., ascending=..., na_option=...),
-//     .where(cond, other), .mask(cond, other), .isna(), .notna(), .isnull(),
-//     .notnull()
+//     .argsort(axis, kind, order, stable), .mode(dropna), .head(n), .tail(n),
+//     .replace(to_replace, value), .nlargest(n, keep), .nsmallest(n, keep),
+//     .astype(dtype), .combine_first(other), .rank(method=..., ascending=...,
+//     na_option=...), .where(cond, other), .mask(cond, other), .isna(),
+//     .notna(), .isnull(), .notnull()
 //   - Arithmetic operators: +, -, *, /, //, %, **
 //   - Parenthesized sub-expressions
 
@@ -2966,6 +2988,100 @@ fn parse_postfix(mut expr: Expr, tokens: &[Token], pos: &mut usize) -> Result<Ex
                 expr = Expr::Mode {
                     expr: Box::new(expr),
                     dropna,
+                };
+                *pos = arg_pos + 1;
+            }
+            "head" | "tail" => {
+                let mut arg_pos = *pos + 3;
+                let mut n = 5_i64;
+                let mut n_seen = false;
+                let mut positional_count = 0_usize;
+                let mut keyword_seen = false;
+
+                while tokens.get(arg_pos) != Some(&Token::RParen) {
+                    if arg_pos >= tokens.len() {
+                        return Err(ExprError::ParseError(format!(
+                            "unterminated {method}() arguments"
+                        )));
+                    }
+
+                    if let Some(Token::Ident(keyword)) = tokens.get(arg_pos)
+                        && tokens.get(arg_pos + 1) == Some(&Token::Assign)
+                    {
+                        keyword_seen = true;
+                        let keyword = keyword.clone();
+                        arg_pos += 2;
+                        match keyword.as_str() {
+                            "n" => {
+                                if n_seen {
+                                    return Err(ExprError::ParseError(format!(
+                                        "{method}() n argument was provided more than once"
+                                    )));
+                                }
+                                n = parse_i64_literal_argument(
+                                    tokens,
+                                    &mut arg_pos,
+                                    "head/tail n",
+                                )?;
+                                n_seen = true;
+                            }
+                            other => {
+                                return Err(ExprError::ParseError(format!(
+                                    "unexpected {method}() keyword argument: {other}"
+                                )));
+                            }
+                        }
+                    } else {
+                        if keyword_seen {
+                            return Err(ExprError::ParseError(format!(
+                                "{method}() positional arguments cannot follow keyword arguments"
+                            )));
+                        }
+                        match positional_count {
+                            0 => {
+                                if n_seen {
+                                    return Err(ExprError::ParseError(format!(
+                                        "{method}() n argument was provided more than once"
+                                    )));
+                                }
+                                n = parse_i64_literal_argument(
+                                    tokens,
+                                    &mut arg_pos,
+                                    "head/tail n",
+                                )?;
+                                n_seen = true;
+                            }
+                            _ => {
+                                return Err(ExprError::ParseError(format!(
+                                    "{method}() accepts at most one n argument"
+                                )));
+                            }
+                        }
+                        positional_count += 1;
+                    }
+
+                    match tokens.get(arg_pos) {
+                        Some(Token::Comma) => {
+                            arg_pos += 1;
+                            if tokens.get(arg_pos) == Some(&Token::RParen) {
+                                return Err(ExprError::ParseError(format!(
+                                    "{method}() arguments cannot end with ','"
+                                )));
+                            }
+                        }
+                        Some(Token::RParen) => {}
+                        other => {
+                            return Err(ExprError::ParseError(format!(
+                                "expected ',' or ')' in {method}() arguments, got {other:?}"
+                            )));
+                        }
+                    }
+                }
+
+                expr = Expr::HeadTail {
+                    expr: Box::new(expr),
+                    n,
+                    tail: method == "tail",
                 };
                 *pos = arg_pos + 1;
             }
@@ -6555,6 +6671,79 @@ mod tests {
         assert!(super::parse_expr("a.mode(dropna=False, True)").is_err());
         assert!(super::parse_expr("a.mode(skipna=False)").is_err());
         assert!(super::parse_expr("a.mode(dropna='no')").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn eval_and_query_str_accept_head_tail_method_calls() -> Result<(), ExprError> {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let labels = vec![
+            10_i64.into(),
+            7_i64.into(),
+            12_i64.into(),
+            11_i64.into(),
+            8_i64.into(),
+        ];
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "a",
+                labels.clone(),
+                vec![
+                    Scalar::Int64(3),
+                    Scalar::Null(fp_types::NullKind::NaN),
+                    Scalar::Int64(1),
+                    Scalar::Int64(2),
+                    Scalar::Int64(3),
+                ],
+            )
+            .map_err(ExprError::from)?,
+            fp_frame::Series::from_values(
+                "b",
+                labels,
+                vec![
+                    Scalar::Int64(30),
+                    Scalar::Int64(40),
+                    Scalar::Int64(10),
+                    Scalar::Int64(20),
+                    Scalar::Int64(50),
+                ],
+            )
+            .map_err(ExprError::from)?,
+        ])
+        .map_err(ExprError::from)?;
+
+        let head = super::eval_str("a.head(2)", &frame, &policy, &mut ledger)?;
+        assert_eq!(head.index().labels(), &[10_i64.into(), 7_i64.into()]);
+        assert_eq!(
+            head.values(),
+            &[Scalar::Int64(3), Scalar::Null(fp_types::NullKind::NaN)]
+        );
+
+        let head_negative = super::eval_str("a.head(n=-1)", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            head_negative.index().labels(),
+            &[10_i64.into(), 7_i64.into(), 12_i64.into(), 11_i64.into()]
+        );
+
+        let tail = super::eval_str("a.tail(2)", &frame, &policy, &mut ledger)?;
+        assert_eq!(tail.index().labels(), &[11_i64.into(), 8_i64.into()]);
+        assert_eq!(tail.values(), &[Scalar::Int64(2), Scalar::Int64(3)]);
+
+        let tail_negative = super::eval_str("a.tail(n=-1)", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            tail_negative.index().labels(),
+            &[7_i64.into(), 12_i64.into(), 11_i64.into(), 8_i64.into()]
+        );
+
+        let filtered =
+            super::query_str("a.head().gt(1) and b.gt(20)", &frame, &policy, &mut ledger)?;
+        assert_eq!(filtered.index().labels(), &[10_i64.into(), 8_i64.into()]);
+
+        assert!(super::parse_expr("a.head(1, 2)").is_err());
+        assert!(super::parse_expr("a.tail(n=1, 2)").is_err());
+        assert!(super::parse_expr("a.head(skipna=True)").is_err());
         Ok(())
     }
 
