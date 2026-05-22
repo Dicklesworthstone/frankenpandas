@@ -1212,6 +1212,12 @@ impl Column {
         (self.len(),)
     }
 
+    /// Number of array dimensions, matching `pd.Series.ndim`.
+    #[must_use]
+    pub fn ndim(&self) -> usize {
+        1
+    }
+
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.values.is_empty()
@@ -8404,6 +8410,7 @@ mod tests {
 
             assert_eq!(col.size(), col.len());
             assert_eq!(col.shape(), (col.len(),));
+            assert_eq!(col.ndim(), 1);
             assert_eq!(col.empty(), col.is_empty());
             assert_eq!(col.to_list(), col.to_vec());
             assert_eq!(col.tolist(), col.to_vec());
