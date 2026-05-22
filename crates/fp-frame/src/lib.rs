@@ -502,6 +502,7 @@ fn pivot_table_agg_value(aggfunc: &str, vals: &[f64]) -> Result<f64, FrameError>
         "min" => vals.iter().copied().fold(f64::INFINITY, f64::min),
         "max" => vals.iter().copied().fold(f64::NEG_INFINITY, f64::max),
         "first" => vals.first().copied().unwrap_or(f64::NAN),
+        "last" => vals.last().copied().unwrap_or(f64::NAN),
         "prod" => vals.iter().product(),
         "median" => {
             if vals.is_empty() {
@@ -27965,7 +27966,7 @@ impl DataFrame {
     /// `values`: column containing values to aggregate
     /// `index_col`: column to use as the new row index
     /// `columns_col`: column whose unique values become new columns
-    /// `aggfunc`: aggregation function ("mean", "sum", "count", "size", "min", "max", "first")
+    /// `aggfunc`: aggregation function ("mean", "sum", "count", "size", "min", "max", "first", "last")
     pub fn pivot_table(
         &self,
         values: &str,
@@ -50864,6 +50865,53 @@ mod tests {
         assert_eq!(pivoted.columns["x"].values()[0], Scalar::Float64(2.0));
         assert_eq!(pivoted.columns["y"].values()[0], Scalar::Float64(1.0));
         assert_eq!(pivoted.columns["x"].values()[1], Scalar::Float64(1.0));
+        assert!(pivoted.columns["y"].values()[1].is_missing());
+    }
+
+    #[test]
+    fn dataframe_pivot_table_last_uses_last_non_null_value() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "row",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("b".into()),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "col",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Utf8("x".into()),
+                    Scalar::Utf8("x".into()),
+                    Scalar::Utf8("y".into()),
+                    Scalar::Utf8("x".into()),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "val",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Null(NullKind::NaN),
+                    Scalar::Float64(3.0),
+                    Scalar::Null(NullKind::NaN),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let pivoted = df.pivot_table("val", "row", "col", "last").unwrap();
+
+        assert_eq!(pivoted.columns["x"].values()[0], Scalar::Float64(1.0));
+        assert_eq!(pivoted.columns["y"].values()[0], Scalar::Float64(3.0));
+        assert!(pivoted.columns["x"].values()[1].is_missing());
         assert!(pivoted.columns["y"].values()[1].is_missing());
     }
 
