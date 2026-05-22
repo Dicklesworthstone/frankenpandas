@@ -16655,6 +16655,71 @@ impl CategoricalAccessor<'_> {
         })
     }
 
+    /// Reorder categories according to the specified order.
+    ///
+    /// Matches `pd.Series.cat.reorder_categories(new_categories)`.
+    /// The new order must contain exactly the same categories.
+    pub fn reorder_categories(&self, new_order: Vec<Scalar>) -> Result<Series, FrameError> {
+        // Validate that new_order contains exactly the same categories.
+        if new_order.len() != self.meta.categories.len() {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "reorder_categories: new order has {} categories, expected {}",
+                new_order.len(),
+                self.meta.categories.len()
+            )));
+        }
+        let old_set: HashSet<ScalarKey<'_>> = self
+            .meta
+            .categories
+            .iter()
+            .map(scalar_key_allow_missing)
+            .collect();
+        let new_set: HashSet<ScalarKey<'_>> =
+            new_order.iter().map(scalar_key_allow_missing).collect();
+        if old_set != new_set {
+            return Err(FrameError::CompatibilityRejected(
+                "reorder_categories: new order must contain the same categories".to_owned(),
+            ));
+        }
+
+        // Build old-value -> new-code mapping.
+        let mut new_code_map: HashMap<ScalarKey<'_>, i64> = HashMap::new();
+        for (i, cat) in new_order.iter().enumerate() {
+            new_code_map.insert(scalar_key_allow_missing(cat), i as i64);
+        }
+
+        // Remap codes.
+        let new_codes: Vec<Scalar> = self
+            .series
+            .column
+            .values()
+            .iter()
+            .map(|val| {
+                if let Scalar::Int64(code) = val
+                    && *code >= 0
+                    && (*code as usize) < self.meta.categories.len()
+                {
+                    let cat = &self.meta.categories[*code as usize];
+                    let key = scalar_key_allow_missing(cat);
+                    Scalar::Int64(*new_code_map.get(&key).unwrap_or(&-1))
+                } else {
+                    val.clone()
+                }
+            })
+            .collect();
+
+        Ok(Series {
+            name: self.series.name.clone(),
+            index: self.series.index.clone(),
+            column: Column::from_values(new_codes)?,
+            categorical: Some(CategoricalMetadata {
+                categories: new_order,
+                ordered: self.meta.ordered,
+            }),
+            sparse: None,
+        })
+    }
+
     /// Set the categories to a new list, remapping codes accordingly.
     ///
     /// Matches `pd.Series.cat.set_categories(new_categories)`.
@@ -76940,6 +77005,36 @@ mod tests {
             .unwrap();
         assert_eq!(result.cat().unwrap().categories().len(), 2);
         assert_eq!(result.column().values()[1], Scalar::Int64(-1));
+    }
+
+    #[test]
+    fn test_cat_reorder_categories() {
+        let s = Series::from_categorical(
+            "cat",
+            vec![
+                Scalar::Utf8("a".to_string()),
+                Scalar::Utf8("b".to_string()),
+                Scalar::Utf8("c".to_string()),
+            ],
+            false,
+        )
+        .unwrap();
+        let result = s
+            .cat()
+            .unwrap()
+            .reorder_categories(vec![
+                Scalar::Utf8("c".to_string()),
+                Scalar::Utf8("b".to_string()),
+                Scalar::Utf8("a".to_string()),
+            ])
+            .unwrap();
+        let cat_accessor = result.cat().unwrap();
+        let cats = cat_accessor.categories();
+        assert_eq!(cats[0], Scalar::Utf8("c".to_string()));
+        assert_eq!(cats[1], Scalar::Utf8("b".to_string()));
+        assert_eq!(cats[2], Scalar::Utf8("a".to_string()));
+        assert_eq!(result.column().values()[0], Scalar::Int64(2));
+        assert_eq!(result.column().values()[2], Scalar::Int64(0));
     }
 
     #[test]
