@@ -24517,7 +24517,8 @@ pub enum DataFrameColumnInput {
 #[derive(Debug, Clone, PartialEq)]
 pub struct DataFrameDictSplit {
     pub columns: Vec<Scalar>,
-    pub index: Vec<Scalar>,
+    /// Row index labels when pandas includes the `index` key.
+    pub index: Option<Vec<Scalar>>,
     pub data: Vec<Vec<Scalar>>,
 }
 
@@ -24530,16 +24531,16 @@ pub enum DataFrameDictAxisLabels {
 /// Pandas 2.2 `to_dict(orient='tight')` payload.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DataFrameDictTight {
-    /// Row index labels, in row order.
-    pub index: Vec<Scalar>,
+    /// Row index labels, in row order, when pandas includes the `index` key.
+    pub index: Option<Vec<Scalar>>,
     /// Column labels, in column order. Flat columns stay flat; MultiIndex
     /// columns are emitted as tuples of level labels.
     pub columns: DataFrameDictAxisLabels,
     /// Row-major nested data: `data[row][col]`.
     pub data: Vec<Vec<Scalar>>,
-    /// Names of each index level (pandas emits `[None]` for an
-    /// unnamed single-level index).
-    pub index_names: Vec<Option<String>>,
+    /// Names of each index level when pandas includes the `index_names` key.
+    /// Pandas emits `[None]` for an unnamed single-level index.
+    pub index_names: Option<Vec<Option<String>>>,
     /// Names of each column level (always `[None]` until MultiIndex
     /// columns land).
     pub column_names: Vec<Option<String>>,
@@ -32167,7 +32168,27 @@ impl DataFrame {
     /// - `"index"`: `{index -> {column -> value}}`
     /// - `"series"`: `{column -> Series}`
     /// - `"split"`: `{index, columns, data}`
+    /// - `"tight"`: `{index, columns, data, index_names, column_names}`
     pub fn to_dict(&self, orient: &str) -> Result<DataFrameDictResult, FrameError> {
+        self.to_dict_with_index(orient, true)
+    }
+
+    /// Convert DataFrame to a nested dictionary with explicit index-key control.
+    ///
+    /// Matches `pd.DataFrame.to_dict(orient=..., index=...)`. Pandas only
+    /// accepts `index=False` for `orient='split'` and `orient='tight'`;
+    /// other orients reject it.
+    pub fn to_dict_with_index(
+        &self,
+        orient: &str,
+        include_index: bool,
+    ) -> Result<DataFrameDictResult, FrameError> {
+        if !include_index && !matches!(orient, "split" | "tight") {
+            return Err(FrameError::CompatibilityRejected(
+                "index=False is only valid when orient is 'split' or 'tight'".to_owned(),
+            ));
+        }
+
         match orient {
             "dict" => {
                 // pandas rejects duplicate index for orient='dict' — the
@@ -32248,12 +32269,17 @@ impl DataFrame {
                     .iter()
                     .map(|name| Scalar::Utf8(name.clone()))
                     .collect();
-                let index = self
-                    .index
-                    .labels()
-                    .iter()
-                    .map(Self::index_label_to_scalar)
-                    .collect();
+                let index = if include_index {
+                    Some(
+                        self.index
+                            .labels()
+                            .iter()
+                            .map(Self::index_label_to_scalar)
+                            .collect(),
+                    )
+                } else {
+                    None
+                };
                 let data = self.row_major_values();
                 Ok(DataFrameDictResult::Split(DataFrameDictSplit {
                     columns,
@@ -32265,17 +32291,22 @@ impl DataFrame {
                 // Tight orient: pandas 2.2 payload = {index, columns,
                 // data (row-major nested list), index_names, column_names}.
                 let columns = self.tight_column_labels()?;
-                let index: Vec<Scalar> = self
-                    .index
-                    .labels()
-                    .iter()
-                    .map(|label| match label {
-                        IndexLabel::Int64(v) => Scalar::Int64(*v),
-                        IndexLabel::Utf8(s) => Scalar::Utf8(s.clone()),
-                        IndexLabel::Timedelta64(ns) => Scalar::Timedelta64(*ns),
-                        IndexLabel::Datetime64(ns) => Scalar::Utf8(format_datetime_ns(*ns)),
-                    })
-                    .collect();
+                let index = if include_index {
+                    Some(
+                        self.index
+                            .labels()
+                            .iter()
+                            .map(|label| match label {
+                                IndexLabel::Int64(v) => Scalar::Int64(*v),
+                                IndexLabel::Utf8(s) => Scalar::Utf8(s.clone()),
+                                IndexLabel::Timedelta64(ns) => Scalar::Timedelta64(*ns),
+                                IndexLabel::Datetime64(ns) => Scalar::Utf8(format_datetime_ns(*ns)),
+                            })
+                            .collect(),
+                    )
+                } else {
+                    None
+                };
                 let data: Vec<Vec<Scalar>> = (0..self.index.labels().len())
                     .map(|row_idx| {
                         self.column_order
@@ -32284,7 +32315,11 @@ impl DataFrame {
                             .collect()
                     })
                     .collect();
-                let index_names = vec![self.index.name().map(str::to_owned)];
+                let index_names = if include_index {
+                    Some(vec![self.index.name().map(str::to_owned)])
+                } else {
+                    None
+                };
                 let column_names = self
                     .column_multiindex
                     .as_ref()
@@ -58085,12 +58120,42 @@ mod tests {
             result.columns,
             vec![Scalar::Utf8("b".into()), Scalar::Utf8("a".into())]
         );
-        assert_eq!(result.index, vec![Scalar::Int64(0), Scalar::Int64(1)]);
+        assert_eq!(result.index, Some(vec![Scalar::Int64(0), Scalar::Int64(1)]));
         assert_eq!(
             result.data,
             vec![
                 vec![Scalar::Utf8("x".into()), Scalar::Int64(10)],
                 vec![Scalar::Utf8("y".into()), Scalar::Null(NullKind::NaN)],
+            ]
+        );
+    }
+
+    #[test]
+    fn dataframe_to_dict_split_can_omit_index() {
+        let df = DataFrame::from_dict(
+            &["b", "a"],
+            vec![
+                (
+                    "b",
+                    vec![Scalar::Utf8("x".into()), Scalar::Utf8("y".into())],
+                ),
+                ("a", vec![Scalar::Int64(10), Scalar::Int64(20)]),
+            ],
+        )
+        .unwrap();
+
+        let result = df.to_dict_with_index("split", false).unwrap();
+        let split = result.as_split().expect("split orient");
+        assert_eq!(
+            split.columns,
+            vec![Scalar::Utf8("b".into()), Scalar::Utf8("a".into())]
+        );
+        assert_eq!(split.index, None);
+        assert_eq!(
+            split.data,
+            vec![
+                vec![Scalar::Utf8("x".into()), Scalar::Int64(10)],
+                vec![Scalar::Utf8("y".into()), Scalar::Int64(20)],
             ]
         );
     }
@@ -58421,7 +58486,7 @@ mod tests {
                 vec![Scalar::Utf8("x".into()), Scalar::Utf8("y".into()),]
             )
         );
-        assert_eq!(tight.index, vec![Scalar::Int64(0), Scalar::Int64(1)]);
+        assert_eq!(tight.index, Some(vec![Scalar::Int64(0), Scalar::Int64(1)]));
         // Row-major data: row 0 = [1, "a"], row 1 = [2, "b"]
         assert_eq!(tight.data.len(), 2);
         assert_eq!(
@@ -58432,8 +58497,45 @@ mod tests {
             tight.data[1],
             vec![Scalar::Int64(2), Scalar::Utf8("b".into())]
         );
-        assert_eq!(tight.index_names, vec![None]);
+        assert_eq!(tight.index_names, Some(vec![None]));
         assert_eq!(tight.column_names, vec![None]);
+    }
+
+    #[test]
+    fn dataframe_to_dict_tight_can_omit_index_and_index_names() {
+        let index = Index::from_i64(vec![10, 20]).set_name("row_id");
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            "x".to_string(),
+            Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2)]).unwrap(),
+        );
+        let df = DataFrame::new_with_column_order(index, columns, vec!["x".to_string()]).unwrap();
+
+        let result = df.to_dict_with_index("tight", false).unwrap();
+        let tight = result.as_tight().expect("tight orient");
+        assert_eq!(
+            tight.columns,
+            DataFrameDictAxisLabels::Flat(vec![Scalar::Utf8("x".into())])
+        );
+        assert_eq!(tight.index, None);
+        assert_eq!(tight.index_names, None);
+        assert_eq!(tight.column_names, vec![None]);
+        assert_eq!(
+            tight.data,
+            vec![vec![Scalar::Int64(1)], vec![Scalar::Int64(2)]]
+        );
+    }
+
+    #[test]
+    fn dataframe_to_dict_index_false_rejects_non_split_tight_orients() {
+        let df = DataFrame::from_dict(&["a"], vec![("a", vec![Scalar::Int64(1)])]).unwrap();
+
+        for orient in ["dict", "list", "records", "index", "series"] {
+            let err = df.to_dict_with_index(orient, false).unwrap_err();
+            assert!(
+                matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("index=False"))
+            );
+        }
     }
 
     #[test]
@@ -58447,7 +58549,7 @@ mod tests {
         let df = DataFrame::new_with_column_order(index, columns, vec!["a".to_string()]).unwrap();
         let result = df.to_dict("tight").unwrap();
         let tight = result.as_tight().expect("tight");
-        assert_eq!(tight.index_names, vec![Some("row_id".to_owned())]);
+        assert_eq!(tight.index_names, Some(vec![Some("row_id".to_owned())]));
     }
 
     #[test]
