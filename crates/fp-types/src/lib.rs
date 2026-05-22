@@ -1452,6 +1452,88 @@ impl Timestamp {
         self.month().map(|m| (m - 1) / 3 + 1)
     }
 
+    /// Whether the year is a leap year.
+    ///
+    /// Matches `pd.Timestamp.is_leap_year`. Returns None for NaT.
+    #[must_use]
+    pub fn is_leap_year(&self) -> Option<bool> {
+        self.year().map(|y| (y % 4 == 0 && y % 100 != 0) || y % 400 == 0)
+    }
+
+    /// Whether the day is the first day of the month.
+    ///
+    /// Matches `pd.Timestamp.is_month_start`. Returns None for NaT.
+    #[must_use]
+    pub fn is_month_start(&self) -> Option<bool> {
+        self.day().map(|d| d == 1)
+    }
+
+    /// Whether the day is the last day of the month.
+    ///
+    /// Matches `pd.Timestamp.is_month_end`. Returns None for NaT.
+    #[must_use]
+    pub fn is_month_end(&self) -> Option<bool> {
+        let y = self.year()?;
+        let m = self.month()?;
+        let d = self.day()?;
+        let is_leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+        let days_in_month: [i64; 12] = [
+            31,
+            if is_leap { 29 } else { 28 },
+            31,
+            30,
+            31,
+            30,
+            31,
+            31,
+            30,
+            31,
+            30,
+            31,
+        ];
+        Some(d == days_in_month[(m - 1) as usize])
+    }
+
+    /// Whether the day is the first day of a quarter.
+    ///
+    /// Matches `pd.Timestamp.is_quarter_start`. Returns None for NaT.
+    #[must_use]
+    pub fn is_quarter_start(&self) -> Option<bool> {
+        let m = self.month()?;
+        let d = self.day()?;
+        Some(d == 1 && (m == 1 || m == 4 || m == 7 || m == 10))
+    }
+
+    /// Whether the day is the last day of a quarter.
+    ///
+    /// Matches `pd.Timestamp.is_quarter_end`. Returns None for NaT.
+    #[must_use]
+    pub fn is_quarter_end(&self) -> Option<bool> {
+        let m = self.month()?;
+        let d = self.day()?;
+        Some((m == 3 && d == 31) || (m == 6 && d == 30) || (m == 9 && d == 30) || (m == 12 && d == 31))
+    }
+
+    /// Whether the day is the first day of the year (Jan 1).
+    ///
+    /// Matches `pd.Timestamp.is_year_start`. Returns None for NaT.
+    #[must_use]
+    pub fn is_year_start(&self) -> Option<bool> {
+        let m = self.month()?;
+        let d = self.day()?;
+        Some(m == 1 && d == 1)
+    }
+
+    /// Whether the day is the last day of the year (Dec 31).
+    ///
+    /// Matches `pd.Timestamp.is_year_end`. Returns None for NaT.
+    #[must_use]
+    pub fn is_year_end(&self) -> Option<bool> {
+        let m = self.month()?;
+        let d = self.day()?;
+        Some(m == 12 && d == 31)
+    }
+
     /// Normalize to midnight/day boundary, matching `pd.Timestamp.normalize()`.
     #[must_use]
     pub fn normalize(&self) -> Self {
@@ -5098,5 +5180,26 @@ mod tests {
         assert_eq!(Timestamp::nat().dayofweek(), None);
         assert_eq!(Timestamp::nat().dayofyear(), None);
         assert_eq!(Timestamp::nat().quarter(), None);
+    }
+
+    #[test]
+    fn timestamp_is_boundary_methods() {
+        let jan1 = Timestamp::from_nanos(0);
+        assert_eq!(jan1.is_leap_year(), Some(false));
+        assert_eq!(jan1.is_month_start(), Some(true));
+        assert_eq!(jan1.is_month_end(), Some(false));
+        assert_eq!(jan1.is_quarter_start(), Some(true));
+        assert_eq!(jan1.is_quarter_end(), Some(false));
+        assert_eq!(jan1.is_year_start(), Some(true));
+        assert_eq!(jan1.is_year_end(), Some(false));
+
+        let dec31 = Timestamp::from_nanos(Timedelta::NANOS_PER_DAY * 364);
+        assert_eq!(dec31.is_month_start(), Some(false));
+        assert_eq!(dec31.is_month_end(), Some(true));
+        assert_eq!(dec31.is_quarter_end(), Some(true));
+        assert_eq!(dec31.is_year_end(), Some(true));
+
+        assert_eq!(Timestamp::nat().is_leap_year(), None);
+        assert_eq!(Timestamp::nat().is_month_start(), None);
     }
 }
