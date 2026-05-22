@@ -5967,6 +5967,16 @@ impl Column {
         Self::new(self.dtype, out)
     }
 
+    /// Alias for abs, matching np.fabs.
+    pub fn fabs(&self) -> Result<Self, ColumnError> {
+        self.abs()
+    }
+
+    /// Alias for abs, matching np.absolute.
+    pub fn absolute(&self) -> Result<Self, ColumnError> {
+        self.abs()
+    }
+
     /// Negate numeric values. Matches numpy's negative ufunc.
     pub fn neg(&self) -> Result<Self, ColumnError> {
         let mut out = Vec::with_capacity(self.values.len());
