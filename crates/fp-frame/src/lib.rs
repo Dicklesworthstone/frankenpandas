@@ -7526,6 +7526,60 @@ impl Series {
         )
     }
 
+    /// Peak-to-peak range (max − min) over non-missing values.
+    ///
+    /// Matches `np.ptp`.
+    #[must_use]
+    pub fn ptp(&self) -> Scalar {
+        self.column.ptp()
+    }
+
+    /// Indices of non-zero/truthy elements.
+    ///
+    /// Matches `np.nonzero()`.
+    #[must_use]
+    pub fn nonzero(&self) -> Vec<usize> {
+        self.column.nonzero()
+    }
+
+    /// Return the next representable floating-point value after x toward y.
+    ///
+    /// Matches `np.nextafter(x, y)`.
+    pub fn nextafter(&self, other: &Self) -> Result<Self, FrameError> {
+        Self::new(
+            self.name.clone(),
+            self.index.clone(),
+            self.column.nextafter(other.column())?,
+        )
+    }
+
+    /// Percentile of non-missing values.
+    ///
+    /// Matches `np.percentile()`. Takes percentile p in [0, 100].
+    #[must_use]
+    pub fn percentile(&self, p: f64) -> Scalar {
+        self.column.percentile(p)
+    }
+
+    /// Alias for quantile, matching np.nanquantile.
+    pub fn nanquantile(&self, q: f64) -> Result<Scalar, FrameError> {
+        self.quantile(q)
+    }
+
+    /// Alias for percentile, matching np.nanpercentile.
+    #[must_use]
+    pub fn nanpercentile(&self, p: f64) -> Scalar {
+        self.percentile(p)
+    }
+
+    /// Replace elements at specified indices with given values.
+    ///
+    /// Matches `np.put()`. Returns a new Series with values replaced at indices.
+    pub fn put(&self, indices: &[usize], values: &[Scalar]) -> Result<Self, FrameError> {
+        let col = self.column.put(indices, values)?;
+        Self::new(self.name.clone(), self.index.clone(), col)
+    }
+
     /// Most frequently occurring value(s).
     ///
     /// Matches `pd.Series.mode()`. Returns a new Series containing
@@ -93572,5 +93626,51 @@ mod test_select_columns_perf_76e1fd {
         let result = a.lcm(&b).unwrap();
         assert_eq!(result.values()[0], Scalar::Int64(12));
         assert_eq!(result.values()[1], Scalar::Int64(24));
+    }
+
+    #[test]
+    fn series_ptp() {
+        let s = Series::from_pairs(
+            "x",
+            vec![
+                (0_i64.into(), Scalar::Float64(1.0)),
+                (1_i64.into(), Scalar::Float64(5.0)),
+                (2_i64.into(), Scalar::Float64(3.0)),
+            ],
+        )
+        .unwrap();
+        let result = s.ptp();
+        assert!((result.to_f64().unwrap() - 4.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn series_nonzero() {
+        let s = Series::from_pairs(
+            "x",
+            vec![
+                (0_i64.into(), Scalar::Int64(0)),
+                (1_i64.into(), Scalar::Int64(5)),
+                (2_i64.into(), Scalar::Int64(0)),
+                (3_i64.into(), Scalar::Int64(3)),
+            ],
+        )
+        .unwrap();
+        let result = s.nonzero();
+        assert_eq!(result, vec![1, 3]);
+    }
+
+    #[test]
+    fn series_put() {
+        let s = Series::from_pairs(
+            "x",
+            vec![
+                (0_i64.into(), Scalar::Int64(1)),
+                (1_i64.into(), Scalar::Int64(2)),
+                (2_i64.into(), Scalar::Int64(3)),
+            ],
+        )
+        .unwrap();
+        let result = s.put(&[1], &[Scalar::Int64(99)]).unwrap();
+        assert_eq!(result.values()[1], Scalar::Int64(99));
     }
 }
