@@ -221,6 +221,14 @@ pub enum Expr {
         lower: Option<f64>,
         upper: Option<f64>,
     },
+    Shift {
+        expr: Box<Expr>,
+        periods: i64,
+    },
+    Diff {
+        expr: Box<Expr>,
+        periods: i64,
+    },
     Compare {
         left: Box<Expr>,
         right: Box<Expr>,
@@ -518,6 +526,14 @@ pub fn evaluate(
         Expr::Clip { expr, lower, upper } => {
             let input = evaluate(expr, context, policy, ledger)?;
             input.clip(*lower, *upper).map_err(ExprError::from)
+        }
+        Expr::Shift { expr, periods } => {
+            let input = evaluate(expr, context, policy, ledger)?;
+            input.shift(*periods).map_err(ExprError::from)
+        }
+        Expr::Diff { expr, periods } => {
+            let input = evaluate(expr, context, policy, ledger)?;
+            input.diff(*periods).map_err(ExprError::from)
         }
         Expr::Compare { left, right, op } => {
             evaluate_comparison(left, right, *op, context, policy, ledger)
@@ -915,7 +931,9 @@ impl MaterializedView {
                 }
             }
             Expr::Between { expr, .. } => Self::extract_series(expr, series_set),
-            Expr::Clip { expr, .. } => Self::extract_series(expr, series_set),
+            Expr::Clip { expr, .. } | Expr::Shift { expr, .. } | Expr::Diff { expr, .. } => {
+                Self::extract_series(expr, series_set)
+            }
             Expr::Literal { .. } => {}
         }
     }
@@ -1127,6 +1145,14 @@ fn evaluate_delta(
             let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
             input.clip(*lower, *upper).map_err(ExprError::from)
         }
+        Expr::Shift { expr, periods } => {
+            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
+            input.shift(*periods).map_err(ExprError::from)
+        }
+        Expr::Diff { expr, periods } => {
+            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
+            input.diff(*periods).map_err(ExprError::from)
+        }
         Expr::Compare { left, right, op } => {
             evaluate_delta_comparison(left, right, *op, delta_ctx, delta, policy, ledger)
         }
@@ -1196,7 +1222,7 @@ fn evaluate_delta_comparison(
 //     .div(other), .truediv(other), .floordiv(other), .mod(other),
 //     .pow(other), reflected arithmetic variants, .eq(other), .ne(other),
 //     .gt(other), .ge(other), .lt(other), .le(other), .clip(lower, upper),
-//     .round(decimals), .replace(to_replace, value), .astype(dtype),
+//     .shift(periods), .diff(periods), .round(decimals), .replace(to_replace, value), .astype(dtype),
 //     .combine_first(other), .rank(method=..., ascending=..., na_option=...),
 //     .where(cond, other), .mask(cond, other), .isna(), .notna(), .isnull(),
 //     .notnull()
@@ -1808,6 +1834,20 @@ fn parse_i32_literal(tokens: &[Token], pos: &mut usize, context: &str) -> Result
     };
     i32::try_from(value)
         .map_err(|_| ExprError::ParseError(format!("{context} is outside the i32 range: {value}")))
+}
+
+fn parse_i64_literal_argument(
+    tokens: &[Token],
+    pos: &mut usize,
+    context: &str,
+) -> Result<i64, ExprError> {
+    let value = parse_scalar_literal(tokens, pos)?;
+    let Scalar::Int64(value) = value else {
+        return Err(ExprError::ParseError(format!(
+            "{context} must be an integer literal, got {value:?}"
+        )));
+    };
+    Ok(value)
 }
 
 fn parse_dtype_alias(value: &str) -> Result<DType, ExprError> {
@@ -2593,6 +2633,76 @@ fn parse_postfix(mut expr: Expr, tokens: &[Token], pos: &mut usize) -> Result<Ex
                     expr: Box::new(expr),
                     lower,
                     upper,
+                };
+                *pos = arg_pos + 1;
+            }
+            "shift" | "diff" => {
+                let mut arg_pos = *pos + 3;
+                let mut periods = 1_i64;
+                let mut periods_seen = false;
+
+                while tokens.get(arg_pos) != Some(&Token::RParen) {
+                    if arg_pos >= tokens.len() {
+                        return Err(ExprError::ParseError(format!(
+                            "unterminated {method}() arguments"
+                        )));
+                    }
+
+                    if let Some(Token::Ident(keyword)) = tokens.get(arg_pos)
+                        && tokens.get(arg_pos + 1) == Some(&Token::Assign)
+                    {
+                        if keyword != "periods" {
+                            return Err(ExprError::ParseError(format!(
+                                "unexpected {method}() keyword argument: {keyword}"
+                            )));
+                        }
+                        if periods_seen {
+                            return Err(ExprError::ParseError(format!(
+                                "{method}() periods argument was provided more than once"
+                            )));
+                        }
+                        arg_pos += 2;
+                    } else if periods_seen {
+                        return Err(ExprError::ParseError(format!(
+                            "{method}() accepts only one periods argument"
+                        )));
+                    }
+
+                    periods = parse_i64_literal_argument(
+                        tokens,
+                        &mut arg_pos,
+                        &format!("{method}() periods"),
+                    )?;
+                    periods_seen = true;
+
+                    match tokens.get(arg_pos) {
+                        Some(Token::Comma) => {
+                            arg_pos += 1;
+                            if tokens.get(arg_pos) == Some(&Token::RParen) {
+                                return Err(ExprError::ParseError(format!(
+                                    "{method}() arguments cannot end with ','"
+                                )));
+                            }
+                        }
+                        Some(Token::RParen) => {}
+                        other => {
+                            return Err(ExprError::ParseError(format!(
+                                "expected ',' or ')' in {method}() arguments, got {other:?}"
+                            )));
+                        }
+                    }
+                }
+
+                expr = if method == "shift" {
+                    Expr::Shift {
+                        expr: Box::new(expr),
+                        periods,
+                    }
+                } else {
+                    Expr::Diff {
+                        expr: Box::new(expr),
+                        periods,
+                    }
                 };
                 *pos = arg_pos + 1;
             }
@@ -4248,6 +4358,38 @@ mod tests {
     }
 
     #[test]
+    fn parse_shift_and_diff_method_call_periods() -> Result<(), ExprError> {
+        let shift_default = super::parse_expr("a.shift()")?;
+        let Expr::Shift { periods, .. } = shift_default else {
+            return Err(ExprError::ParseError("expected Shift expression".into()));
+        };
+        assert_eq!(periods, 1);
+
+        let shift_keyword = super::parse_expr("a.shift(periods=-1)")?;
+        let Expr::Shift { periods, .. } = shift_keyword else {
+            return Err(ExprError::ParseError("expected Shift expression".into()));
+        };
+        assert_eq!(periods, -1);
+
+        let diff_positional = super::parse_expr("a.diff(2)")?;
+        let Expr::Diff {
+            expr: inner,
+            periods,
+        } = diff_positional
+        else {
+            return Err(ExprError::ParseError("expected Diff expression".into()));
+        };
+        assert_eq!(
+            inner.as_ref(),
+            &Expr::Series {
+                name: SeriesRef("a".into())
+            }
+        );
+        assert_eq!(periods, 2);
+        Ok(())
+    }
+
+    #[test]
     fn parse_round_method_call_optional_decimals() -> Result<(), ExprError> {
         let expr = super::parse_expr("a.round()")?;
         let Expr::Round {
@@ -5402,6 +5544,69 @@ mod tests {
             keyword_filtered.columns()["a"].values(),
             &[Scalar::Int64(9)]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn eval_and_query_str_accept_shift_and_diff_method_calls() -> Result<(), ExprError> {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "a",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![Scalar::Int64(1), Scalar::Int64(4), Scalar::Int64(9)],
+            )
+            .map_err(ExprError::from)?,
+        ])
+        .map_err(ExprError::from)?;
+
+        let shifted = super::eval_str("a.shift()", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            shifted.values(),
+            &[
+                Scalar::Null(NullKind::NaN),
+                Scalar::Int64(1),
+                Scalar::Int64(4)
+            ]
+        );
+
+        let shifted_two = super::eval_str("a.shift(periods=2)", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            shifted_two.values(),
+            &[
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Int64(1)
+            ]
+        );
+
+        let diffed = super::eval_str("a.diff()", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            diffed.values(),
+            &[
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(3.0),
+                Scalar::Float64(5.0)
+            ]
+        );
+
+        let diffed_two = super::eval_str("a.diff(2)", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            diffed_two.values(),
+            &[
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(8.0)
+            ]
+        );
+
+        let shifted_filtered = super::query_str("a.shift().isna()", &frame, &policy, &mut ledger)?;
+        assert_eq!(shifted_filtered.index().labels(), &[0_i64.into()]);
+
+        let diff_filtered = super::query_str("a.diff().gt(4)", &frame, &policy, &mut ledger)?;
+        assert_eq!(diff_filtered.index().labels(), &[2_i64.into()]);
         Ok(())
     }
 
