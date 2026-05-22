@@ -32583,6 +32583,25 @@ impl DataFrame {
     ///
     /// Matches `pd.DataFrame.to_json(orient=...)`.
     pub fn to_json(&self, orient: &str) -> Result<String, FrameError> {
+        self.to_json_with_index(orient, true)
+    }
+
+    /// Matches `pd.DataFrame.to_json(orient=..., index=...)`.
+    ///
+    /// Pandas accepts `index=false` only for `split`, `table`, `records`, and
+    /// `values` orientations.
+    pub fn to_json_with_index(
+        &self,
+        orient: &str,
+        include_index: bool,
+    ) -> Result<String, FrameError> {
+        if !include_index && !matches!(orient, "split" | "table" | "records" | "values") {
+            return Err(FrameError::CompatibilityRejected(
+                "index=False is only valid when orient is 'split', 'table', 'records', or 'values'"
+                    .to_owned(),
+            ));
+        }
+
         match orient {
             "records" => {
                 let column_float_promotions = self
@@ -32670,11 +32689,13 @@ impl DataFrame {
                         )
                     })
                     .collect();
-                serialize_json_value(&Value::Object(Map::from_iter([
-                    ("columns".to_owned(), Value::Array(columns)),
-                    ("index".to_owned(), Value::Array(index)),
-                    ("data".to_owned(), Value::Array(data)),
-                ])))
+                let mut object = Map::new();
+                object.insert("columns".to_owned(), Value::Array(columns));
+                if include_index {
+                    object.insert("index".to_owned(), Value::Array(index));
+                }
+                object.insert("data".to_owned(), Value::Array(data));
+                serialize_json_value(&Value::Object(object))
             }
             "values" => {
                 let data = (0..self.len())
@@ -32698,28 +32719,35 @@ impl DataFrame {
                     ));
                 }
 
-                let index_name = match self.index.name() {
-                    Some(name) => {
-                        if self.columns.contains_key(name) {
-                            return Err(FrameError::CompatibilityRejected(format!(
-                                "to_json orient 'table' cannot serialize index name {name:?} because it collides with a column label"
-                            )));
+                let index_name = if include_index {
+                    Some(match self.index.name() {
+                        Some(name) => {
+                            if self.columns.contains_key(name) {
+                                return Err(FrameError::CompatibilityRejected(format!(
+                                    "to_json orient 'table' cannot serialize index name {name:?} because it collides with a column label"
+                                )));
+                            }
+                            name.to_owned()
                         }
-                        name.to_owned()
-                    }
-                    None => self.reset_index_column_name()?,
+                        None => self.reset_index_column_name()?,
+                    })
+                } else {
+                    None
                 };
 
-                let mut fields = Vec::with_capacity(self.column_order.len() + 1);
-                fields.push(Value::Object(Map::from_iter([
-                    ("name".to_owned(), Value::String(index_name.clone())),
-                    (
-                        "type".to_owned(),
-                        Value::String(
-                            index_labels_to_table_schema_type(self.index.labels()).to_owned(),
+                let mut fields =
+                    Vec::with_capacity(self.column_order.len() + usize::from(include_index));
+                if let Some(index_name) = &index_name {
+                    fields.push(Value::Object(Map::from_iter([
+                        ("name".to_owned(), Value::String(index_name.clone())),
+                        (
+                            "type".to_owned(),
+                            Value::String(
+                                index_labels_to_table_schema_type(self.index.labels()).to_owned(),
+                            ),
                         ),
-                    ),
-                ])));
+                    ])));
+                }
                 for (col_idx, name) in self.column_order.iter().enumerate() {
                     let column = &self.columns[name];
                     fields.push(Value::Object(Map::from_iter([
@@ -32737,10 +32765,12 @@ impl DataFrame {
                 let data = (0..self.len())
                     .map(|row_idx| {
                         let mut row = Map::new();
-                        row.insert(
-                            index_name.clone(),
-                            index_label_to_json_value(&self.index.labels()[row_idx]),
-                        );
+                        if let Some(index_name) = &index_name {
+                            row.insert(
+                                index_name.clone(),
+                                index_label_to_json_value(&self.index.labels()[row_idx]),
+                            );
+                        }
                         for (col_idx, name) in self.column_order.iter().enumerate() {
                             row.insert(
                                 self.table_column_name(col_idx)?,
@@ -32751,21 +32781,21 @@ impl DataFrame {
                     })
                     .collect::<Result<Vec<_>, FrameError>>()?;
 
+                let mut schema = Map::new();
+                schema.insert("fields".to_owned(), Value::Array(fields));
+                if let Some(index_name) = index_name {
+                    schema.insert(
+                        "primaryKey".to_owned(),
+                        Value::Array(vec![Value::String(index_name)]),
+                    );
+                }
+                schema.insert(
+                    "pandas_version".to_owned(),
+                    Value::String("1.4.0".to_owned()),
+                );
+
                 serialize_json_value(&Value::Object(Map::from_iter([
-                    (
-                        "schema".to_owned(),
-                        Value::Object(Map::from_iter([
-                            ("fields".to_owned(), Value::Array(fields)),
-                            (
-                                "primaryKey".to_owned(),
-                                Value::Array(vec![Value::String(index_name)]),
-                            ),
-                            (
-                                "pandas_version".to_owned(),
-                                Value::String("1.4.0".to_owned()),
-                            ),
-                        ])),
-                    ),
+                    ("schema".to_owned(), Value::Object(schema)),
                     ("data".to_owned(), Value::Array(data)),
                 ])))
             }
@@ -61996,6 +62026,25 @@ mod tests {
     }
 
     #[test]
+    fn dataframe_to_json_split_with_index_false_omits_index() {
+        let df = DataFrame::from_dict_with_index(
+            vec![("x", vec![Scalar::Int64(10), Scalar::Int64(20)])],
+            vec!["row0".into(), "row1".into()],
+        )
+        .unwrap();
+
+        let json = df.to_json_with_index("split", false).unwrap();
+        let parsed: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            parsed,
+            serde_json::json!({
+                "columns": ["x"],
+                "data": [[10], [20]]
+            })
+        );
+    }
+
+    #[test]
     fn dataframe_to_json_values() {
         let df = DataFrame::from_dict(
             &["x", "y"],
@@ -62009,6 +62058,23 @@ mod tests {
         let json = df.to_json("values").unwrap();
         let parsed: Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, serde_json::json!([[10.0, true], [null, false]]));
+    }
+
+    #[test]
+    fn dataframe_to_json_index_false_allows_index_free_orients() {
+        let df = DataFrame::from_dict_with_index(
+            vec![("x", vec![Scalar::Int64(10), Scalar::Int64(20)])],
+            vec!["row0".into(), "row1".into()],
+        )
+        .unwrap();
+
+        let records: Value =
+            serde_json::from_str(&df.to_json_with_index("records", false).unwrap()).unwrap();
+        assert_eq!(records, serde_json::json!([{"x": 10}, {"x": 20}]));
+
+        let values: Value =
+            serde_json::from_str(&df.to_json_with_index("values", false).unwrap()).unwrap();
+        assert_eq!(values, serde_json::json!([[10], [20]]));
     }
 
     #[test]
@@ -62051,6 +62117,62 @@ mod tests {
                 ]
             })
         );
+    }
+
+    #[test]
+    fn dataframe_to_json_table_with_index_false_omits_index_metadata() {
+        let index = Index::from_i64(vec![10, 20]).set_names(Some("row_id"));
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            "x".to_owned(),
+            Column::from_values(vec![Scalar::Int64(1), Scalar::Null(NullKind::Null)]).unwrap(),
+        );
+        columns.insert(
+            "y".to_owned(),
+            Column::from_values(vec![
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Utf8("b".to_owned()),
+            ])
+            .unwrap(),
+        );
+        let df =
+            DataFrame::new_with_column_order(index, columns, vec!["x".to_owned(), "y".to_owned()])
+                .unwrap();
+
+        let json = df.to_json_with_index("table", false).unwrap();
+        let parsed: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            parsed,
+            serde_json::json!({
+                "schema": {
+                    "fields": [
+                        {"name": "x", "type": "integer"},
+                        {"name": "y", "type": "string"}
+                    ],
+                    "pandas_version": "1.4.0"
+                },
+                "data": [
+                    {"x": 1, "y": "a"},
+                    {"x": null, "y": "b"}
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn dataframe_to_json_index_false_rejects_index_dependent_orients() {
+        let df = DataFrame::from_dict_with_index(
+            vec![("x", vec![Scalar::Int64(10), Scalar::Int64(20)])],
+            vec!["row0".into(), "row1".into()],
+        )
+        .unwrap();
+
+        for orient in ["columns", "index"] {
+            let err = df.to_json_with_index(orient, false).unwrap_err();
+            assert!(
+                matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("index=False"))
+            );
+        }
     }
 
     #[test]
