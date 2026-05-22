@@ -2553,9 +2553,15 @@ impl Timestamp {
         if ts.is_nan() || ts.is_infinite() {
             return Self::nat();
         }
-        let nanos = (ts * 1_000_000_000.0) as i64;
+        let nanos_f64 = ts * 1_000_000_000.0;
+        // Check for overflow before casting - i64 range is roughly ±9.2e18
+        const MAX_NANOS: f64 = i64::MAX as f64;
+        const MIN_NANOS: f64 = i64::MIN as f64;
+        if nanos_f64 > MAX_NANOS || nanos_f64 < MIN_NANOS {
+            return Self::nat();
+        }
         Self {
-            nanos,
+            nanos: nanos_f64 as i64,
             tz: tz.map(String::from),
         }
     }
