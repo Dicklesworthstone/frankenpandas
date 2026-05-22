@@ -1907,6 +1907,12 @@ impl Column {
         nanprod(&self.values)
     }
 
+    /// Alias for [`prod`](Self::prod), matching `pd.Series.product()`.
+    #[must_use]
+    pub fn product(&self) -> Scalar {
+        self.prod()
+    }
+
     fn skipna_false_missing_result(&self, skipna: bool) -> Option<Scalar> {
         if skipna || !self.values.iter().any(Scalar::is_missing) {
             return None;
@@ -2307,6 +2313,12 @@ impl Column {
     #[must_use]
     pub fn kurt(&self) -> Scalar {
         nankurt(&self.values)
+    }
+
+    /// Alias for [`kurt`](Self::kurt), matching `pd.Series.kurtosis()`.
+    #[must_use]
+    pub fn kurtosis(&self) -> Scalar {
+        self.kurt()
     }
 
     /// Peak-to-peak range (max − min) over non-missing values.
@@ -7055,6 +7067,17 @@ mod tests {
         }
 
         #[test]
+        fn product_alias_matches_prod() {
+            let col = Column::from_values(vec![
+                Scalar::Float64(2.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(3.0),
+            ])
+            .expect("col");
+            assert_eq!(col.product(), col.prod());
+        }
+
+        #[test]
         fn skipna_false_aggregate_variants_propagate_nan() {
             let col = Column::from_values(vec![
                 Scalar::Float64(2.0),
@@ -8062,6 +8085,19 @@ mod tests {
                 Scalar::Float64(v) => assert!((v + 1.2).abs() < 1e-9),
                 other => unreachable!("expected Float64, got {other:?}"),
             }
+        }
+
+        #[test]
+        fn kurtosis_alias_matches_kurt() {
+            let col = Column::from_values(vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(4.0),
+                Scalar::Float64(5.0),
+            ])
+            .expect("col");
+            assert_eq!(col.kurtosis(), col.kurt());
         }
 
         #[test]
