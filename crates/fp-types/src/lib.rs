@@ -944,13 +944,24 @@ pub fn cast_scalar_owned(value: Scalar, target: DType) -> Result<Scalar, TypeErr
         },
         DType::Datetime64 => match &value {
             Scalar::Int64(v) => Ok(Scalar::Datetime64(*v)),
+            Scalar::Utf8(s) => Timestamp::parse(s)
+                .map(|timestamp| Scalar::Datetime64(timestamp.nanos))
+                .map_err(|_| TypeError::InvalidCast { from, to: target }),
             _ => Err(TypeError::InvalidCast { from, to: target }),
         },
         DType::Period => match &value {
             Scalar::Int64(v) => Ok(Scalar::Period(*v)),
+            Scalar::Utf8(s) => Period::parse(s)
+                .map(|period| Scalar::Period(period.ordinal))
+                .map_err(|_| TypeError::InvalidCast { from, to: target }),
             _ => Err(TypeError::InvalidCast { from, to: target }),
         },
-        DType::Interval => Err(TypeError::InvalidCast { from, to: target }),
+        DType::Interval => match &value {
+            Scalar::Utf8(s) => Interval::parse(s)
+                .map(Scalar::Interval)
+                .map_err(|_| TypeError::InvalidCast { from, to: target }),
+            _ => Err(TypeError::InvalidCast { from, to: target }),
+        },
         DType::Sparse => Err(TypeError::InvalidCast { from, to: target }),
     }
 }
@@ -1462,11 +1473,7 @@ impl Timedelta {
         let negative = nanos < 0;
         let abs_nanos = nanos.saturating_abs();
         let floored = (abs_nanos / unit_nanos) * unit_nanos;
-        if negative {
-            -floored
-        } else {
-            floored
-        }
+        if negative { -floored } else { floored }
     }
 
     /// Rounds up to the nearest frequency unit.
@@ -1486,11 +1493,7 @@ impl Timedelta {
         let negative = nanos < 0;
         let abs_nanos = nanos.saturating_abs();
         let ceiled = ((abs_nanos + unit_nanos - 1) / unit_nanos) * unit_nanos;
-        if negative {
-            -ceiled
-        } else {
-            ceiled
-        }
+        if negative { -ceiled } else { ceiled }
     }
 
     /// Rounds to the nearest frequency unit.
@@ -1528,11 +1531,7 @@ impl Timedelta {
             }
         };
 
-        if negative {
-            -rounded
-        } else {
-            rounded
-        }
+        if negative { -rounded } else { rounded }
     }
 }
 
@@ -1543,6 +1542,29 @@ impl Timedelta {
 // to Phase 3 which pulls chrono_tz into fp-types; Phase 2 stores the
 // tz name as opaque metadata and performs arithmetic on the absolute
 // nanos axis only.
+
+/// Number of days in a given month (1-12) of a given year.
+fn days_in_month(year: i64, month: u32) -> Option<u32> {
+    if !(1..=12).contains(&month) {
+        return None;
+    }
+    let is_leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    let days: [u32; 12] = [
+        31,
+        if is_leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+    Some(days[(month - 1) as usize])
+}
 
 /// A nanosecond-precision point in time, Unix-epoch anchored.
 ///
@@ -1876,7 +1898,7 @@ impl Timestamp {
         }
         let total_secs = self.nanos / Timedelta::NANOS_PER_SEC;
         let days_since_epoch = total_secs / 86400;
-        let mut days = days_since_epoch + 719_468;
+        let days = days_since_epoch + 719_468;
         let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
         let doe = days - era * 146_097;
         let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
@@ -2072,39 +2094,11 @@ impl Timestamp {
     #[must_use]
     pub fn fromordinal(ordinal: i64) -> Self {
         if ordinal <= 0 {
-            return Self { nanos: Self::NAT, tz: None };
+            return Self {
+                nanos: Self::NAT,
+                tz: None,
+            };
         }
-        // Count total days from year 1 to this ordinal
-        // Using a direct calculation algorithm
-        let mut days = ordinal;
-        // Estimate year (rough approximation, then adjust)
-        let mut y = (days * 400) / 146097 + 1;
-        loop {
-            let y_m1 = y - 1;
-            let start_of_year = y_m1 * 365 + y_m1 / 4 - y_m1 / 100 + y_m1 / 400 + 1;
-            let is_leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
-            let year_days = if is_leap { 366 } else { 365 };
-            if days < start_of_year {
-                y -= 1;
-            } else if days >= start_of_year + year_days {
-                y += 1;
-            } else {
-                days -= start_of_year - 1;
-                break;
-            }
-        }
-        // Now `days` is the day of year (1-indexed)
-        let is_leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
-        let days_in_months: [i64; 12] = [31, if is_leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-        let mut m = 1_i64;
-        for &dm in &days_in_months {
-            if days <= dm {
-                break;
-            }
-            days -= dm;
-            m += 1;
-        }
-        let d = days;
         // Convert y/m/d to days since Unix epoch, then to nanos
         // Unix epoch is 1970-01-01, which is ordinal 719163
         let days_since_epoch = ordinal - 719163;
@@ -2135,7 +2129,8 @@ impl Timestamp {
         let s = self.second().unwrap_or(0) as f64;
         let us = self.microsecond().unwrap_or(0) as f64;
         let ns = self.nanosecond().unwrap_or(0) as f64;
-        let frac_day = (h + m / 60.0 + s / 3600.0 + us / 3_600_000_000.0 + ns / 3_600_000_000_000.0) / 24.0;
+        let frac_day =
+            (h + m / 60.0 + s / 3600.0 + us / 3_600_000_000.0 + ns / 3_600_000_000_000.0) / 24.0;
         // Julian day at midnight of ordinal 1 is 1721424.5
         1721424.5 + ordinal as f64 + frac_day
     }
@@ -2198,7 +2193,8 @@ impl Timestamp {
     /// Matches `pd.Timestamp.is_leap_year`. Returns None for NaT.
     #[must_use]
     pub fn is_leap_year(&self) -> Option<bool> {
-        self.year().map(|y| (y % 4 == 0 && y % 100 != 0) || y % 400 == 0)
+        self.year()
+            .map(|y| (y % 4 == 0 && y % 100 != 0) || y % 400 == 0)
     }
 
     /// Whether the day is the first day of the month.
@@ -2252,7 +2248,12 @@ impl Timestamp {
     pub fn is_quarter_end(&self) -> Option<bool> {
         let m = self.month()?;
         let d = self.day()?;
-        Some((m == 3 && d == 31) || (m == 6 && d == 30) || (m == 9 && d == 30) || (m == 12 && d == 31))
+        Some(
+            (m == 3 && d == 31)
+                || (m == 6 && d == 30)
+                || (m == 9 && d == 30)
+                || (m == 12 && d == 31),
+        )
     }
 
     /// Whether the day is the first day of the year (Jan 1).
@@ -2316,6 +2317,7 @@ impl Timestamp {
     ///
     /// Matches pd.Timestamp.replace(). None values keep the existing component.
     #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub fn replace(
         &self,
         year: Option<i64>,
@@ -2383,7 +2385,7 @@ impl Timestamp {
         let days_since_epoch = total_secs / 86400;
         let secs_of_day = (total_secs % 86400 + 86400) % 86400;
 
-        let mut days = days_since_epoch + 719_468;
+        let days = days_since_epoch + 719_468;
         let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
         let doe = days - era * 146_097;
         let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
@@ -2445,7 +2447,9 @@ impl Timestamp {
                     value: s.to_string(),
                     target: "Timestamp".to_string(),
                 })?
-        } else if datetime_part.contains(' ') && datetime_part.chars().filter(|&c| c == ' ').count() == 1 {
+        } else if datetime_part.contains(' ')
+            && datetime_part.chars().filter(|&c| c == ' ').count() == 1
+        {
             datetime_part
                 .split_once(' ')
                 .ok_or_else(|| TypeError::ValueNotParseable {
@@ -2456,19 +2460,17 @@ impl Timestamp {
             (datetime_part, "00:00:00")
         };
 
-        let (year, month, day) = Self::parse_date(date_part).ok_or_else(|| {
-            TypeError::ValueNotParseable {
+        let (year, month, day) =
+            Self::parse_date(date_part).ok_or_else(|| TypeError::ValueNotParseable {
                 value: s.to_string(),
                 target: "Timestamp".to_string(),
-            }
-        })?;
+            })?;
 
-        let (hour, minute, second, nanos) = Self::parse_time(time_part).ok_or_else(|| {
-            TypeError::ValueNotParseable {
+        let (hour, minute, second, nanos) =
+            Self::parse_time(time_part).ok_or_else(|| TypeError::ValueNotParseable {
                 value: s.to_string(),
                 target: "Timestamp".to_string(),
-            }
-        })?;
+            })?;
 
         let total_nanos = Self::ymd_hms_to_nanos(year, month, day, hour, minute, second, nanos);
 
@@ -2480,8 +2482,8 @@ impl Timestamp {
     }
 
     fn split_timezone(s: &str) -> (&str, Option<String>) {
-        if s.ends_with('Z') {
-            (&s[..s.len() - 1], Some("UTC".to_string()))
+        if let Some(stripped) = s.strip_suffix('Z') {
+            (stripped, Some("UTC".to_string()))
         } else if let Some(idx) = s.rfind('+') {
             if idx > 10 {
                 (&s[..idx], Some(s[idx..].to_string()))
@@ -2507,7 +2509,7 @@ impl Timestamp {
         let year: i64 = parts[0].parse().ok()?;
         let month: u32 = parts[1].parse().ok()?;
         let day: u32 = parts[2].parse().ok()?;
-        if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        if !(1..=days_in_month(year, month)?).contains(&day) {
             return None;
         }
         Some((year, month, day))
@@ -2537,7 +2539,15 @@ impl Timestamp {
         Some((hour, minute, second, nanos))
     }
 
-    fn ymd_hms_to_nanos(year: i64, month: u32, day: u32, hour: u32, minute: u32, second: u32, sub_nanos: u64) -> i64 {
+    fn ymd_hms_to_nanos(
+        year: i64,
+        month: u32,
+        day: u32,
+        hour: u32,
+        minute: u32,
+        second: u32,
+        sub_nanos: u64,
+    ) -> i64 {
         let m = month as i64;
         let d = day as i64;
 
@@ -2548,7 +2558,10 @@ impl Timestamp {
         let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
         let days_since_epoch = era * 146_097 + doe - 719_468;
 
-        let total_seconds = days_since_epoch * 86400 + (hour as i64) * 3600 + (minute as i64) * 60 + (second as i64);
+        let total_seconds = days_since_epoch * 86400
+            + (hour as i64) * 3600
+            + (minute as i64) * 60
+            + (second as i64);
         total_seconds * Timedelta::NANOS_PER_SEC + sub_nanos as i64
     }
 
@@ -2568,7 +2581,7 @@ impl Timestamp {
         let days_since_epoch = total_secs / 86400;
         let secs_of_day = (total_secs % 86400 + 86400) % 86400;
 
-        let mut days = days_since_epoch + 719_468;
+        let days = days_since_epoch + 719_468;
         let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
         let doe = days - era * 146_097;
         let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
@@ -2640,7 +2653,7 @@ impl Timestamp {
         }
         let total_secs = self.nanos / Timedelta::NANOS_PER_SEC;
         let days_since_epoch = total_secs / 86400;
-        let mut days = days_since_epoch + 719_468;
+        let days = days_since_epoch + 719_468;
         let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
         let doe = days - era * 146_097;
         let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
@@ -2694,7 +2707,7 @@ impl Timestamp {
         // Check for overflow before casting - i64 range is roughly ±9.2e18
         const MAX_NANOS: f64 = i64::MAX as f64;
         const MIN_NANOS: f64 = i64::MIN as f64;
-        if nanos_f64 > MAX_NANOS || nanos_f64 < MIN_NANOS {
+        if !(MIN_NANOS..=MAX_NANOS).contains(&nanos_f64) {
             return Self::nat();
         }
         Self {
@@ -3762,6 +3775,80 @@ impl Interval {
         }
         true
     }
+
+    /// Parse an interval string. Supports bracket notation:
+    /// - '[0, 1]' -> closed on both ends
+    /// - '(0, 1)' -> open on both ends
+    /// - '[0, 1)' -> closed left, open right (pandas default)
+    /// - '(0, 1]' -> open left, closed right
+    pub fn parse(s: &str) -> Result<Self, TypeError> {
+        let s = s.trim();
+        if s.len() < 5 {
+            return Err(TypeError::ValueNotParseable {
+                value: s.to_string(),
+                target: "Interval".to_string(),
+            });
+        }
+
+        let first_char = s.chars().next().unwrap();
+        let last_char = s.chars().last().unwrap();
+
+        let left_closed = match first_char {
+            '[' => true,
+            '(' => false,
+            _ => {
+                return Err(TypeError::ValueNotParseable {
+                    value: s.to_string(),
+                    target: "Interval".to_string(),
+                });
+            }
+        };
+
+        let right_closed = match last_char {
+            ']' => true,
+            ')' => false,
+            _ => {
+                return Err(TypeError::ValueNotParseable {
+                    value: s.to_string(),
+                    target: "Interval".to_string(),
+                });
+            }
+        };
+
+        let closed = match (left_closed, right_closed) {
+            (true, true) => IntervalClosed::Both,
+            (true, false) => IntervalClosed::Left,
+            (false, true) => IntervalClosed::Right,
+            (false, false) => IntervalClosed::Neither,
+        };
+
+        let inner = &s[1..s.len() - 1];
+        let parts: Vec<&str> = inner.split(',').collect();
+        if parts.len() != 2 {
+            return Err(TypeError::ValueNotParseable {
+                value: s.to_string(),
+                target: "Interval".to_string(),
+            });
+        }
+
+        let left: f64 = parts[0]
+            .trim()
+            .parse()
+            .map_err(|_| TypeError::ValueNotParseable {
+                value: s.to_string(),
+                target: "Interval".to_string(),
+            })?;
+
+        let right: f64 = parts[1]
+            .trim()
+            .parse()
+            .map_err(|_| TypeError::ValueNotParseable {
+                value: s.to_string(),
+                target: "Interval".to_string(),
+            })?;
+
+        Ok(Self::new(left, right, closed))
+    }
 }
 
 impl std::fmt::Display for Interval {
@@ -4015,6 +4102,105 @@ impl Period {
         }
         Some(self.ordinal.saturating_sub(other.ordinal))
     }
+
+    /// Parse common pandas `Period(...)` strings and infer the frequency.
+    ///
+    /// Supported forms mirror pandas' unambiguous scalar constructor cases:
+    /// annual (`"2024"`), quarterly (`"2024Q1"`), monthly (`"2024-01"`),
+    /// and daily (`"2024-01-15"`). The ordinal axes match pandas:
+    /// 1970, 1970Q1, 1970-01, and 1970-01-01 all have ordinal 0.
+    pub fn parse(s: &str) -> Result<Self, TypeError> {
+        let trimmed = s.trim();
+        if trimmed.eq_ignore_ascii_case("nat") {
+            return Ok(Self::new(i64::MIN, PeriodFreq::Daily));
+        }
+
+        if let Some((year, quarter)) = parse_quarter_period(trimmed) {
+            let ordinal = year
+                .checked_sub(1970)
+                .and_then(|offset| offset.checked_mul(4))
+                .and_then(|base| base.checked_add(i64::from(quarter) - 1))
+                .ok_or_else(|| TypeError::ValueNotParseable {
+                    value: s.to_owned(),
+                    target: "Period".to_owned(),
+                })?;
+            return Ok(Self::new(ordinal, PeriodFreq::Quarterly));
+        }
+
+        if let Some((year, month, day)) = parse_ymd_period(trimmed) {
+            let ordinal = Timestamp::days_from_ymd(year, i64::from(month), i64::from(day));
+            return Ok(Self::new(ordinal, PeriodFreq::Daily));
+        }
+
+        if let Some((year, month)) = parse_year_month_period(trimmed) {
+            let ordinal = year
+                .checked_sub(1970)
+                .and_then(|offset| offset.checked_mul(12))
+                .and_then(|base| base.checked_add(i64::from(month) - 1))
+                .ok_or_else(|| TypeError::ValueNotParseable {
+                    value: s.to_owned(),
+                    target: "Period".to_owned(),
+                })?;
+            return Ok(Self::new(ordinal, PeriodFreq::Monthly));
+        }
+
+        if let Some(year) = parse_annual_period(trimmed) {
+            let ordinal = year
+                .checked_sub(1970)
+                .ok_or_else(|| TypeError::ValueNotParseable {
+                    value: s.to_owned(),
+                    target: "Period".to_owned(),
+                })?;
+            return Ok(Self::new(ordinal, PeriodFreq::Annual));
+        }
+
+        Err(TypeError::ValueNotParseable {
+            value: s.to_owned(),
+            target: "Period".to_owned(),
+        })
+    }
+}
+
+fn parse_annual_period(value: &str) -> Option<i64> {
+    (value.len() == 4 && value.chars().all(|ch| ch.is_ascii_digit()))
+        .then(|| value.parse::<i64>().ok())
+        .flatten()
+}
+
+fn parse_year_month_period(value: &str) -> Option<(i64, u32)> {
+    let (year, month) = value.split_once('-')?;
+    if year.len() != 4 || month.len() != 2 {
+        return None;
+    }
+    let year = year.parse::<i64>().ok()?;
+    let month = month.parse::<u32>().ok()?;
+    (1..=12).contains(&month).then_some((year, month))
+}
+
+fn parse_ymd_period(value: &str) -> Option<(i64, u32, u32)> {
+    let mut parts = value.split('-');
+    let year = parts.next()?;
+    let month = parts.next()?;
+    let day = parts.next()?;
+    if parts.next().is_some() || year.len() != 4 || month.len() != 2 || day.len() != 2 {
+        return None;
+    }
+    let year = year.parse::<i64>().ok()?;
+    let month = month.parse::<u32>().ok()?;
+    let day = day.parse::<u32>().ok()?;
+    (1..=days_in_month(year, month)?)
+        .contains(&day)
+        .then_some((year, month, day))
+}
+
+fn parse_quarter_period(value: &str) -> Option<(i64, u32)> {
+    let (year, quarter) = value.split_once('Q').or_else(|| value.split_once('q'))?;
+    if year.len() != 4 || quarter.len() != 1 {
+        return None;
+    }
+    let year = year.parse::<i64>().ok()?;
+    let quarter = quarter.parse::<u32>().ok()?;
+    (1..=4).contains(&quarter).then_some((year, quarter))
 }
 
 impl std::fmt::Display for Period {
@@ -4052,8 +4238,8 @@ pub fn period_range(start: Period, periods: usize) -> Vec<Period> {
 #[cfg(test)]
 mod tests {
     use super::{
-        DType, Interval, IntervalClosed, NullKind, Scalar, SparseDType, cast_scalar, common_dtype,
-        infer_dtype,
+        DType, Interval, IntervalClosed, NullKind, Period, PeriodFreq, Scalar, SparseDType,
+        cast_scalar, common_dtype, infer_dtype,
     };
 
     /// br-frankenpandas-esjjy / fd90.182: ergonomic From impls for Scalar.
@@ -4113,6 +4299,30 @@ mod tests {
         assert_eq!(
             super::nannunique(&[left.clone(), right, left, Scalar::Null(NullKind::Null)]),
             Scalar::Int64(2)
+        );
+    }
+
+    #[test]
+    fn cast_scalar_parses_temporal_extension_strings_avm08() {
+        let expected_nanos = super::Timestamp::parse("2024-01-15T10:30:45")
+            .expect("timestamp parse")
+            .nanos;
+        assert_eq!(
+            cast_scalar(
+                &Scalar::Utf8("2024-01-15T10:30:45".to_owned()),
+                DType::Datetime64
+            )
+            .expect("datetime cast"),
+            Scalar::Datetime64(expected_nanos)
+        );
+        assert_eq!(
+            cast_scalar(&Scalar::Utf8("2024Q1".to_owned()), DType::Period).expect("period cast"),
+            Scalar::Period(216)
+        );
+        assert_eq!(
+            cast_scalar(&Scalar::Utf8("(0, 1]".to_owned()), DType::Interval)
+                .expect("interval cast"),
+            Scalar::Interval(Interval::new(0.0, 1.0, IntervalClosed::Right))
         );
     }
 
@@ -5349,8 +5559,6 @@ mod tests {
 
     // ── Period tests (br-frankenpandas-epoj) ────────────────────────────
 
-    use super::{Period, PeriodFreq};
-
     #[test]
     fn period_freq_parses_canonical_aliases() {
         assert_eq!(PeriodFreq::parse("A"), Some(PeriodFreq::Annual));
@@ -5429,6 +5637,27 @@ mod tests {
         assert_eq!(period.ordinal(), 600);
         assert_eq!(period.freq(), PeriodFreq::Monthly);
         assert_eq!(period.freqstr(), "M");
+    }
+
+    #[test]
+    fn period_parse_common_pandas_ordinals_avm08() {
+        assert_eq!(
+            Period::parse("2024").unwrap(),
+            Period::new(54, PeriodFreq::Annual)
+        );
+        assert_eq!(
+            Period::parse("2024Q1").unwrap(),
+            Period::new(216, PeriodFreq::Quarterly)
+        );
+        assert_eq!(
+            Period::parse("2024-01").unwrap(),
+            Period::new(648, PeriodFreq::Monthly)
+        );
+        assert_eq!(
+            Period::parse("2024-01-15").unwrap(),
+            Period::new(19_737, PeriodFreq::Daily)
+        );
+        assert!(Period::parse("216").is_err());
     }
 
     #[test]
@@ -6469,5 +6698,81 @@ mod tests {
         assert!(Timestamp::parse("not a date").is_err());
         assert!(Timestamp::parse("2024-13-01").is_err()); // invalid month
         assert!(Timestamp::parse("2024-01-32").is_err()); // invalid day
+    }
+
+    #[test]
+    fn period_parse_annual() {
+        let p = Period::parse("2024").unwrap();
+        assert_eq!(p.freq(), PeriodFreq::Annual);
+        assert_eq!(p.ordinal(), 2024 - 1970);
+    }
+
+    #[test]
+    fn period_parse_quarterly() {
+        let p = Period::parse("2024Q1").unwrap();
+        assert_eq!(p.freq(), PeriodFreq::Quarterly);
+        assert_eq!(p.ordinal(), (2024 - 1970) * 4);
+
+        let p2 = Period::parse("2024q3").unwrap();
+        assert_eq!(p2.freq(), PeriodFreq::Quarterly);
+        assert_eq!(p2.ordinal(), (2024 - 1970) * 4 + 2);
+    }
+
+    #[test]
+    fn period_parse_monthly() {
+        let p = Period::parse("2024-01").unwrap();
+        assert_eq!(p.freq(), PeriodFreq::Monthly);
+        assert_eq!(p.ordinal(), (2024 - 1970) * 12);
+
+        let p2 = Period::parse("2024-12").unwrap();
+        assert_eq!(p2.freq(), PeriodFreq::Monthly);
+        assert_eq!(p2.ordinal(), (2024 - 1970) * 12 + 11);
+    }
+
+    #[test]
+    fn period_parse_nat() {
+        let p = Period::parse("NaT").unwrap();
+        assert_eq!(p.ordinal(), i64::MIN);
+    }
+
+    #[test]
+    fn period_parse_invalid() {
+        assert!(Period::parse("not a period").is_err());
+        assert!(Period::parse("2024Q5").is_err()); // invalid quarter
+        assert!(Period::parse("2024-13").is_err()); // invalid month
+    }
+
+    #[test]
+    fn interval_parse_basic() {
+        let i = Interval::parse("[0, 1]").unwrap();
+        assert_eq!(i.left, 0.0);
+        assert_eq!(i.right, 1.0);
+        assert_eq!(i.closed, IntervalClosed::Both);
+
+        let i2 = Interval::parse("(0, 1)").unwrap();
+        assert_eq!(i2.left, 0.0);
+        assert_eq!(i2.right, 1.0);
+        assert_eq!(i2.closed, IntervalClosed::Neither);
+
+        let i3 = Interval::parse("[0, 1)").unwrap();
+        assert_eq!(i3.closed, IntervalClosed::Left);
+
+        let i4 = Interval::parse("(0, 1]").unwrap();
+        assert_eq!(i4.closed, IntervalClosed::Right);
+    }
+
+    #[test]
+    fn interval_parse_floats() {
+        let i = Interval::parse("[-1.5, 2.5)").unwrap();
+        assert_eq!(i.left, -1.5);
+        assert_eq!(i.right, 2.5);
+        assert_eq!(i.closed, IntervalClosed::Left);
+    }
+
+    #[test]
+    fn interval_parse_invalid() {
+        assert!(Interval::parse("invalid").is_err());
+        assert!(Interval::parse("[0]").is_err());
+        assert!(Interval::parse("0, 1").is_err()); // missing brackets
     }
 }

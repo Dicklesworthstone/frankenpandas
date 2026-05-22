@@ -5807,33 +5807,21 @@ impl Series {
     ///
     /// Matches `np.floor(series)`. NaN values pass through.
     pub fn floor(&self) -> Result<Self, FrameError> {
-        Self::new(
-            self.name.clone(),
-            self.index.clone(),
-            self.column.floor()?,
-        )
+        Self::new(self.name.clone(), self.index.clone(), self.column.floor()?)
     }
 
     /// Ceiling of each element (round toward positive infinity).
     ///
     /// Matches `np.ceil(series)`. NaN values pass through.
     pub fn ceil(&self) -> Result<Self, FrameError> {
-        Self::new(
-            self.name.clone(),
-            self.index.clone(),
-            self.column.ceil()?,
-        )
+        Self::new(self.name.clone(), self.index.clone(), self.column.ceil()?)
     }
 
     /// Truncate each element toward zero.
     ///
     /// Matches `np.trunc(series)`. NaN values pass through.
     pub fn trunc(&self) -> Result<Self, FrameError> {
-        Self::new(
-            self.name.clone(),
-            self.index.clone(),
-            self.column.trunc()?,
-        )
+        Self::new(self.name.clone(), self.index.clone(), self.column.trunc()?)
     }
 
     /// Element-wise square root.
@@ -5938,21 +5926,33 @@ impl Series {
     ///
     /// Matches `np.arcsinh(series)`. NaN values pass through.
     pub fn arcsinh(&self) -> Result<Self, FrameError> {
-        Self::new(self.name.clone(), self.index.clone(), self.column.arcsinh()?)
+        Self::new(
+            self.name.clone(),
+            self.index.clone(),
+            self.column.arcsinh()?,
+        )
     }
 
     /// Element-wise inverse hyperbolic cosine.
     ///
     /// Matches `np.arccosh(series)`. NaN values pass through.
     pub fn arccosh(&self) -> Result<Self, FrameError> {
-        Self::new(self.name.clone(), self.index.clone(), self.column.arccosh()?)
+        Self::new(
+            self.name.clone(),
+            self.index.clone(),
+            self.column.arccosh()?,
+        )
     }
 
     /// Element-wise inverse hyperbolic tangent.
     ///
     /// Matches `np.arctanh(series)`. NaN values pass through.
     pub fn arctanh(&self) -> Result<Self, FrameError> {
-        Self::new(self.name.clone(), self.index.clone(), self.column.arctanh()?)
+        Self::new(
+            self.name.clone(),
+            self.index.clone(),
+            self.column.arctanh()?,
+        )
     }
 
     /// Alias for `arcsin`. Matches Rust/math convention.
@@ -6017,14 +6017,22 @@ impl Series {
     ///
     /// Matches `np.signbit(series)`. NaN values pass through.
     pub fn signbit(&self) -> Result<Self, FrameError> {
-        Self::new(self.name.clone(), self.index.clone(), self.column.signbit()?)
+        Self::new(
+            self.name.clone(),
+            self.index.clone(),
+            self.column.signbit()?,
+        )
     }
 
     /// Convert angles from degrees to radians.
     ///
     /// Matches `np.radians(series)` / `np.deg2rad(series)`.
     pub fn radians(&self) -> Result<Self, FrameError> {
-        Self::new(self.name.clone(), self.index.clone(), self.column.radians()?)
+        Self::new(
+            self.name.clone(),
+            self.index.clone(),
+            self.column.radians()?,
+        )
     }
 
     /// Alias for radians(). Matches `np.deg2rad(series)`.
@@ -6036,7 +6044,11 @@ impl Series {
     ///
     /// Matches `np.degrees(series)` / `np.rad2deg(series)`.
     pub fn degrees(&self) -> Result<Self, FrameError> {
-        Self::new(self.name.clone(), self.index.clone(), self.column.degrees()?)
+        Self::new(
+            self.name.clone(),
+            self.index.clone(),
+            self.column.degrees()?,
+        )
     }
 
     /// Alias for degrees(). Matches `np.rad2deg(series)`.
@@ -6048,7 +6060,11 @@ impl Series {
     ///
     /// Matches `np.reciprocal(series)`. NaN values pass through.
     pub fn reciprocal(&self) -> Result<Self, FrameError> {
-        Self::new(self.name.clone(), self.index.clone(), self.column.reciprocal()?)
+        Self::new(
+            self.name.clone(),
+            self.index.clone(),
+            self.column.reciprocal()?,
+        )
     }
 
     /// Element-wise square (x^2).
@@ -6076,7 +6092,11 @@ impl Series {
     ///
     /// Matches `np.isfinite(series)`. Returns boolean Series.
     pub fn isfinite(&self) -> Result<Self, FrameError> {
-        Self::new(self.name.clone(), self.index.clone(), self.column.isfinite()?)
+        Self::new(
+            self.name.clone(),
+            self.index.clone(),
+            self.column.isfinite()?,
+        )
     }
 
     /// Element-wise check for infinite values.
@@ -6097,21 +6117,33 @@ impl Series {
     ///
     /// Matches `np.isneginf(series)`. Returns boolean Series.
     pub fn isneginf(&self) -> Result<Self, FrameError> {
-        Self::new(self.name.clone(), self.index.clone(), self.column.isneginf()?)
+        Self::new(
+            self.name.clone(),
+            self.index.clone(),
+            self.column.isneginf()?,
+        )
     }
 
     /// Element-wise check for positive infinity.
     ///
     /// Matches `np.isposinf(series)`. Returns boolean Series.
     pub fn isposinf(&self) -> Result<Self, FrameError> {
-        Self::new(self.name.clone(), self.index.clone(), self.column.isposinf()?)
+        Self::new(
+            self.name.clone(),
+            self.index.clone(),
+            self.column.isposinf()?,
+        )
     }
 
     /// Replace NaN with zero and infinity with large finite numbers.
     ///
     /// Matches `np.nan_to_num(series)`.
     pub fn nan_to_num(&self) -> Result<Self, FrameError> {
-        Self::new(self.name.clone(), self.index.clone(), self.column.nan_to_num()?)
+        Self::new(
+            self.name.clone(),
+            self.index.clone(),
+            self.column.nan_to_num()?,
+        )
     }
 
     /// Element-wise negation (-x).
@@ -6130,14 +6162,22 @@ impl Series {
     ///
     /// Matches `np.positive(series)` / `+series`.
     pub fn positive(&self) -> Result<Self, FrameError> {
-        Self::new(self.name.clone(), self.index.clone(), self.column.positive()?)
+        Self::new(
+            self.name.clone(),
+            self.index.clone(),
+            self.column.positive()?,
+        )
     }
 
     /// Reverse the order of elements.
     ///
     /// Matches `series[::-1]` / `np.flip(series)`.
     pub fn reverse(&self) -> Result<Self, FrameError> {
-        Self::new(self.name.clone(), self.index.clone(), self.column.reverse()?)
+        Self::new(
+            self.name.clone(),
+            self.index.clone(),
+            self.column.reverse()?,
+        )
     }
 
     /// Alias for reverse(). Matches `np.flip(series)`.
@@ -6150,14 +6190,22 @@ impl Series {
     /// Matches `np.roll(series, shift)`. Elements shifted off
     /// one end wrap around to the other.
     pub fn roll(&self, shift: i64) -> Result<Self, FrameError> {
-        Self::new(self.name.clone(), self.index.clone(), self.column.roll(shift)?)
+        Self::new(
+            self.name.clone(),
+            self.index.clone(),
+            self.column.roll(shift)?,
+        )
     }
 
     /// Tile (repeat) the series a given number of times.
     ///
     /// Matches `np.tile(series, reps)`.
     pub fn tile(&self, reps: usize) -> Result<Self, FrameError> {
-        Self::new(self.name.clone(), self.index.clone(), self.column.tile(reps)?)
+        Self::new(
+            self.name.clone(),
+            self.index.clone(),
+            self.column.tile(reps)?,
+        )
     }
 
     /// Element-wise maximum of two Series.
@@ -92133,7 +92181,11 @@ mod test_select_columns_perf_76e1fd {
         )
         .unwrap();
         let result = s1.hypot(&s2).unwrap();
-        let vals: Vec<f64> = result.values().iter().map(|s| s.to_f64().unwrap()).collect();
+        let vals: Vec<f64> = result
+            .values()
+            .iter()
+            .map(|s| s.to_f64().unwrap())
+            .collect();
         assert!((vals[0] - 5.0).abs() < 1e-10);
         assert!((vals[1] - 0.0).abs() < 1e-10);
         assert!((vals[2] - 13.0).abs() < 1e-10);
@@ -92160,7 +92212,11 @@ mod test_select_columns_perf_76e1fd {
         )
         .unwrap();
         let result = y.atan2(&x).unwrap();
-        let vals: Vec<f64> = result.values().iter().map(|s| s.to_f64().unwrap()).collect();
+        let vals: Vec<f64> = result
+            .values()
+            .iter()
+            .map(|s| s.to_f64().unwrap())
+            .collect();
         let pi = std::f64::consts::PI;
         assert!((vals[0] - pi / 4.0).abs() < 1e-10);
         assert!((vals[1] - 0.0).abs() < 1e-10);
@@ -92197,7 +92253,11 @@ mod test_select_columns_perf_76e1fd {
         )
         .unwrap();
         let result = mag.copysign(&sign).unwrap();
-        let vals: Vec<f64> = result.values().iter().map(|s| s.to_f64().unwrap()).collect();
+        let vals: Vec<f64> = result
+            .values()
+            .iter()
+            .map(|s| s.to_f64().unwrap())
+            .collect();
         assert!((vals[0] + 3.0).abs() < 1e-10);
         assert!((vals[1] - 2.0).abs() < 1e-10);
         assert!((vals[2] + 5.0).abs() < 1e-10);
