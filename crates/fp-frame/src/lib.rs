@@ -92815,7 +92815,7 @@ mod test_select_columns_perf_76e1fd {
             "x",
             vec![
                 (0_i64.into(), Scalar::Float64(1.0)),
-                (1_i64.into(), Scalar::Null(NullKind::Float64)),
+                (1_i64.into(), Scalar::Float64(f64::NAN)),
                 (2_i64.into(), Scalar::Float64(3.0)),
             ],
         )
