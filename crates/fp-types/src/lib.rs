@@ -1534,6 +1534,37 @@ impl Timestamp {
         Some(m == 12 && d == 31)
     }
 
+    /// Return the number of days in the month of this timestamp.
+    ///
+    /// Matches `pd.Timestamp.days_in_month`. Returns None for NaT.
+    #[must_use]
+    pub fn days_in_month(&self) -> Option<i64> {
+        let y = self.year()?;
+        let m = self.month()?;
+        let is_leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+        let days: [i64; 12] = [
+            31,
+            if is_leap { 29 } else { 28 },
+            31,
+            30,
+            31,
+            30,
+            31,
+            31,
+            30,
+            31,
+            30,
+            31,
+        ];
+        Some(days[(m - 1) as usize])
+    }
+
+    /// Alias for days_in_month(). Matches `pd.Timestamp.daysinmonth`.
+    #[must_use]
+    pub fn daysinmonth(&self) -> Option<i64> {
+        self.days_in_month()
+    }
+
     /// Normalize to midnight/day boundary, matching `pd.Timestamp.normalize()`.
     #[must_use]
     pub fn normalize(&self) -> Self {
@@ -5201,5 +5232,17 @@ mod tests {
 
         assert_eq!(Timestamp::nat().is_leap_year(), None);
         assert_eq!(Timestamp::nat().is_month_start(), None);
+    }
+
+    #[test]
+    fn timestamp_days_in_month() {
+        let jan = Timestamp::from_nanos(0);
+        assert_eq!(jan.days_in_month(), Some(31));
+        assert_eq!(jan.daysinmonth(), Some(31));
+
+        let feb_non_leap = Timestamp::from_nanos(Timedelta::NANOS_PER_DAY * 31);
+        assert_eq!(feb_non_leap.days_in_month(), Some(28));
+
+        assert_eq!(Timestamp::nat().days_in_month(), None);
     }
 }
