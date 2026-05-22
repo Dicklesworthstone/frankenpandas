@@ -5940,6 +5940,18 @@ impl Series {
         Self::new(self.name.clone(), self.index.clone(), self.column.positive()?)
     }
 
+    /// Reverse the order of elements.
+    ///
+    /// Matches `series[::-1]` / `np.flip(series)`.
+    pub fn reverse(&self) -> Result<Self, FrameError> {
+        Self::new(self.name.clone(), self.index.clone(), self.column.reverse()?)
+    }
+
+    /// Alias for reverse(). Matches `np.flip(series)`.
+    pub fn flip(&self) -> Result<Self, FrameError> {
+        self.reverse()
+    }
+
     // --- Descriptive Statistics ---
 
     #[must_use]
@@ -35522,6 +35534,18 @@ impl DataFrame {
     /// Matches `np.positive(df)` / `+df`.
     pub fn positive(&self) -> Result<Self, FrameError> {
         self.apply_per_column(|s| s.positive())
+    }
+
+    /// Reverse the order of elements in each column.
+    ///
+    /// Matches `df[::-1]` / `np.flip(df, axis=0)`.
+    pub fn reverse(&self) -> Result<Self, FrameError> {
+        self.apply_per_column(|s| s.reverse())
+    }
+
+    /// Alias for reverse(). Matches `np.flip(df, axis=0)`.
+    pub fn flip(&self) -> Result<Self, FrameError> {
+        self.reverse()
     }
 
     /// Add a scalar to all numeric columns.
