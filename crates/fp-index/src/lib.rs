@@ -6082,6 +6082,23 @@ impl PeriodIndex {
         self.values.first().map(|period| period.freq)
     }
 
+    /// Frequency resolution label, matching `pd.PeriodIndex.resolution`.
+    #[must_use]
+    pub fn resolution(&self) -> Option<&'static str> {
+        let freq = self.freq()?;
+        Some(match freq {
+            PeriodFreq::Annual => "year",
+            PeriodFreq::Quarterly => "quarter",
+            PeriodFreq::Monthly => "month",
+            PeriodFreq::Weekly => "week",
+            PeriodFreq::Daily | PeriodFreq::Business => "day",
+            PeriodFreq::Hourly => "hour",
+            PeriodFreq::Minutely => "minute",
+            PeriodFreq::Secondly => "second",
+            _ => return None,
+        })
+    }
+
     /// Raw period ordinals, matching `pd.PeriodIndex.asi8`.
     #[must_use]
     pub fn asi8(&self) -> Vec<i64> {
@@ -18785,6 +18802,30 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    #[test]
+    fn period_index_resolution_matches_frequency_ippo8() {
+        use fp_types::{Period, PeriodFreq};
+
+        let cases = [
+            (PeriodFreq::Annual, "year"),
+            (PeriodFreq::Quarterly, "quarter"),
+            (PeriodFreq::Monthly, "month"),
+            (PeriodFreq::Weekly, "week"),
+            (PeriodFreq::Daily, "day"),
+            (PeriodFreq::Business, "day"),
+            (PeriodFreq::Hourly, "hour"),
+            (PeriodFreq::Minutely, "minute"),
+            (PeriodFreq::Secondly, "second"),
+        ];
+        for (freq, resolution) in cases {
+            let index = super::PeriodIndex::new(vec![Period::new(0, freq)]);
+            assert_eq!(index.resolution(), Some(resolution));
+        }
+
+        let empty = super::PeriodIndex::new(Vec::new());
+        assert_eq!(empty.resolution(), None);
     }
 
     #[test]
