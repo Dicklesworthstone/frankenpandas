@@ -791,6 +791,8 @@ pub enum TypeError {
     InvalidIntervalStep { step: f64 },
     #[error("interval_range step {step} does not evenly divide range end-start={span}")]
     IntervalStepDoesNotDivide { step: f64, span: f64 },
+    #[error("cannot parse '{value}' as {target}")]
+    ValueNotParseable { value: String, target: String },
 }
 
 pub fn common_dtype(left: DType, right: DType) -> Result<DType, TypeError> {
@@ -2413,6 +2415,141 @@ impl Timestamp {
     #[must_use]
     pub fn to_iso8601(&self) -> String {
         self.isoformat()
+    }
+
+    /// Parse a datetime string into a Timestamp.
+    ///
+    /// Supports ISO 8601 formats:
+    /// - "2024-01-15" (date only, time defaults to 00:00:00)
+    /// - "2024-01-15T10:30:00" (datetime)
+    /// - "2024-01-15 10:30:00" (space separator)
+    /// - "2024-01-15T10:30:00.123456" (with fractional seconds)
+    /// - "2024-01-15T10:30:00Z" (UTC timezone)
+    /// - "2024-01-15T10:30:00+05:30" (offset timezone)
+    /// - "NaT" (Not a Timestamp)
+    ///
+    /// Matches `pd.Timestamp()` constructor behavior.
+    pub fn parse(s: &str) -> Result<Self, TypeError> {
+        let s = s.trim();
+
+        if s.eq_ignore_ascii_case("nat") {
+            return Ok(Self::nat());
+        }
+
+        let (datetime_part, tz) = Self::split_timezone(s);
+
+        let (date_part, time_part) = if datetime_part.contains('T') {
+            datetime_part
+                .split_once('T')
+                .ok_or_else(|| TypeError::ValueNotParseable {
+                    value: s.to_string(),
+                    target: "Timestamp".to_string(),
+                })?
+        } else if datetime_part.contains(' ') && datetime_part.chars().filter(|&c| c == ' ').count() == 1 {
+            datetime_part
+                .split_once(' ')
+                .ok_or_else(|| TypeError::ValueNotParseable {
+                    value: s.to_string(),
+                    target: "Timestamp".to_string(),
+                })?
+        } else {
+            (datetime_part, "00:00:00")
+        };
+
+        let (year, month, day) = Self::parse_date(date_part).ok_or_else(|| {
+            TypeError::ValueNotParseable {
+                value: s.to_string(),
+                target: "Timestamp".to_string(),
+            }
+        })?;
+
+        let (hour, minute, second, nanos) = Self::parse_time(time_part).ok_or_else(|| {
+            TypeError::ValueNotParseable {
+                value: s.to_string(),
+                target: "Timestamp".to_string(),
+            }
+        })?;
+
+        let total_nanos = Self::ymd_hms_to_nanos(year, month, day, hour, minute, second, nanos);
+
+        Ok(if let Some(tz_name) = tz {
+            Self::from_nanos_tz(total_nanos, tz_name)
+        } else {
+            Self::from_nanos(total_nanos)
+        })
+    }
+
+    fn split_timezone(s: &str) -> (&str, Option<String>) {
+        if s.ends_with('Z') {
+            (&s[..s.len() - 1], Some("UTC".to_string()))
+        } else if let Some(idx) = s.rfind('+') {
+            if idx > 10 {
+                (&s[..idx], Some(s[idx..].to_string()))
+            } else {
+                (s, None)
+            }
+        } else if let Some(idx) = s.rfind('-') {
+            if idx > 10 && s[idx..].contains(':') {
+                (&s[..idx], Some(s[idx..].to_string()))
+            } else {
+                (s, None)
+            }
+        } else {
+            (s, None)
+        }
+    }
+
+    fn parse_date(s: &str) -> Option<(i64, u32, u32)> {
+        let parts: Vec<&str> = s.split('-').collect();
+        if parts.len() != 3 {
+            return None;
+        }
+        let year: i64 = parts[0].parse().ok()?;
+        let month: u32 = parts[1].parse().ok()?;
+        let day: u32 = parts[2].parse().ok()?;
+        if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+            return None;
+        }
+        Some((year, month, day))
+    }
+
+    fn parse_time(s: &str) -> Option<(u32, u32, u32, u64)> {
+        let (time_str, frac_str) = s.split_once('.').unwrap_or((s, ""));
+        let parts: Vec<&str> = time_str.split(':').collect();
+        if parts.is_empty() || parts.len() > 3 {
+            return None;
+        }
+        let hour: u32 = parts.first().and_then(|p| p.parse().ok())?;
+        let minute: u32 = parts.get(1).and_then(|p| p.parse().ok()).unwrap_or(0);
+        let second: u32 = parts.get(2).and_then(|p| p.parse().ok()).unwrap_or(0);
+
+        if hour > 23 || minute > 59 || second > 59 {
+            return None;
+        }
+
+        let nanos = if frac_str.is_empty() {
+            0
+        } else {
+            let padded = format!("{:0<9}", &frac_str[..frac_str.len().min(9)]);
+            padded.parse::<u64>().unwrap_or(0)
+        };
+
+        Some((hour, minute, second, nanos))
+    }
+
+    fn ymd_hms_to_nanos(year: i64, month: u32, day: u32, hour: u32, minute: u32, second: u32, sub_nanos: u64) -> i64 {
+        let m = month as i64;
+        let d = day as i64;
+
+        let y = if m <= 2 { year - 1 } else { year };
+        let era = if y >= 0 { y } else { y - 399 } / 400;
+        let yoe = y - era * 400;
+        let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        let days_since_epoch = era * 146_097 + doe - 719_468;
+
+        let total_seconds = days_since_epoch * 86400 + (hour as i64) * 3600 + (minute as i64) * 60 + (second as i64);
+        total_seconds * Timedelta::NANOS_PER_SEC + sub_nanos as i64
     }
 
     /// Format timestamp using strftime directives.
@@ -6268,5 +6405,69 @@ mod tests {
         // Invalid ordinal returns NaT
         let nat = Timestamp::fromordinal(0);
         assert!(nat.is_nat());
+    }
+
+    #[test]
+    fn timestamp_parse_iso8601_date_only() {
+        let ts = Timestamp::parse("2024-01-15").unwrap();
+        assert_eq!(ts.year(), Some(2024));
+        assert_eq!(ts.month(), Some(1));
+        assert_eq!(ts.day(), Some(15));
+        assert_eq!(ts.hour(), Some(0));
+        assert_eq!(ts.minute(), Some(0));
+        assert_eq!(ts.second(), Some(0));
+    }
+
+    #[test]
+    fn timestamp_parse_iso8601_datetime() {
+        let ts = Timestamp::parse("2024-01-15T10:30:45").unwrap();
+        assert_eq!(ts.year(), Some(2024));
+        assert_eq!(ts.month(), Some(1));
+        assert_eq!(ts.day(), Some(15));
+        assert_eq!(ts.hour(), Some(10));
+        assert_eq!(ts.minute(), Some(30));
+        assert_eq!(ts.second(), Some(45));
+    }
+
+    #[test]
+    fn timestamp_parse_space_separator() {
+        let ts = Timestamp::parse("2024-01-15 10:30:45").unwrap();
+        assert_eq!(ts.year(), Some(2024));
+        assert_eq!(ts.hour(), Some(10));
+    }
+
+    #[test]
+    fn timestamp_parse_with_fractional_seconds() {
+        let ts = Timestamp::parse("2024-01-15T10:30:45.123456789").unwrap();
+        assert_eq!(ts.second(), Some(45));
+        assert_eq!(ts.microsecond(), Some(123456));
+        assert_eq!(ts.nanosecond(), Some(789));
+    }
+
+    #[test]
+    fn timestamp_parse_utc_timezone() {
+        let ts = Timestamp::parse("2024-01-15T10:30:45Z").unwrap();
+        assert_eq!(ts.tz, Some("UTC".to_string()));
+    }
+
+    #[test]
+    fn timestamp_parse_offset_timezone() {
+        let ts = Timestamp::parse("2024-01-15T10:30:45+05:30").unwrap();
+        assert_eq!(ts.tz, Some("+05:30".to_string()));
+    }
+
+    #[test]
+    fn timestamp_parse_nat() {
+        let ts = Timestamp::parse("NaT").unwrap();
+        assert!(ts.is_nat());
+        let ts2 = Timestamp::parse("nat").unwrap();
+        assert!(ts2.is_nat());
+    }
+
+    #[test]
+    fn timestamp_parse_invalid() {
+        assert!(Timestamp::parse("not a date").is_err());
+        assert!(Timestamp::parse("2024-13-01").is_err()); // invalid month
+        assert!(Timestamp::parse("2024-01-32").is_err()); // invalid day
     }
 }
