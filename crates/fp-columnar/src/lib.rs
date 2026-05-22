@@ -1304,6 +1304,12 @@ impl Column {
         self.to_vec()
     }
 
+    /// Flatten values to a one-dimensional vector, matching `pd.Series.ravel()`.
+    #[must_use]
+    pub fn ravel(&self) -> Vec<Scalar> {
+        self.to_numpy()
+    }
+
     /// Owned scalar materialization, matching `pd.Series.array`.
     #[must_use]
     pub fn array(&self) -> Vec<Scalar> {
@@ -8415,6 +8421,7 @@ mod tests {
             assert_eq!(col.to_list(), col.to_vec());
             assert_eq!(col.tolist(), col.to_vec());
             assert_eq!(col.to_numpy(), col.to_vec());
+            assert_eq!(col.ravel(), col.to_numpy());
             assert_eq!(col.array(), col.to_vec());
             Ok(())
         }
