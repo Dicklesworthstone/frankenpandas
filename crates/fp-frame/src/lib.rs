@@ -17360,6 +17360,42 @@ impl ListAccessor<'_> {
         Series::new(self.series.name(), index, Column::from_values(out)?)
     }
 
+    /// Median of elements within each list.
+    pub fn median(&self) -> Result<Series, FrameError> {
+        let values = self.list_values()?;
+        let out: Vec<Scalar> = values
+            .into_iter()
+            .map(|opt_list| {
+                opt_list
+                    .map(|list| {
+                        let mut nums: Vec<f64> = list
+                            .iter()
+                            .filter_map(|v| match v {
+                                Scalar::Int64(n) => Some(*n as f64),
+                                Scalar::Float64(f) if !f.is_nan() => Some(*f),
+                                _ => None,
+                            })
+                            .collect();
+                        if nums.is_empty() {
+                            return Scalar::Null(NullKind::NaN);
+                        }
+                        nums.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                        let mid = nums.len() / 2;
+                        let median = if nums.len() % 2 == 0 {
+                            (nums[mid - 1] + nums[mid]) / 2.0
+                        } else {
+                            nums[mid]
+                        };
+                        Scalar::Float64(median)
+                    })
+                    .unwrap_or(Scalar::Null(NullKind::NaN))
+            })
+            .collect();
+        let index = Index::new(self.series.index().labels().to_vec())
+            .rename_index(self.series.index().name());
+        Series::new(self.series.name(), index, Column::from_values(out)?)
+    }
+
     /// Join list elements with a separator.
     pub fn join(&self, sep: &str) -> Result<Series, FrameError> {
         let values = self.list_values()?;
@@ -91077,5 +91113,21 @@ mod test_select_columns_perf_76e1fd {
             _ => panic!("expected Float64"),
         };
         assert!((v1 - 50.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn series_list_accessor_median() {
+        let s = Series::from_values(
+            "lists",
+            vec![IndexLabel::Int64(0), IndexLabel::Int64(1)],
+            vec![
+                Scalar::Utf8("[1, 3, 5, 7, 9]".into()),
+                Scalar::Utf8("[2, 4, 6, 8]".into()),
+            ],
+        )
+        .unwrap();
+        let result = s.list().median().unwrap();
+        assert_eq!(result.column().values()[0], Scalar::Float64(5.0));
+        assert_eq!(result.column().values()[1], Scalar::Float64(5.0));
     }
 }
