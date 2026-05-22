@@ -1156,8 +1156,23 @@ fn format_pandas_csv_float(v: f64) -> String {
     }
 }
 
-fn csv_escape(value: &str, sep: char) -> String {
-    if value.contains(sep) || value.contains('"') || value.contains('\n') || value.contains('\r') {
+fn csv_lineterminator_or_default(lineterminator: &str) -> &str {
+    if lineterminator.is_empty() {
+        "\n"
+    } else {
+        lineterminator
+    }
+}
+
+fn csv_escape_with_lineterminator(value: &str, sep: char, lineterminator: &str) -> String {
+    let lineterminator = csv_lineterminator_or_default(lineterminator);
+    let contains_lineterminator_char = lineterminator.chars().any(|ch| value.contains(ch));
+    if value.contains(sep)
+        || value.contains('"')
+        || value.contains('\n')
+        || value.contains('\r')
+        || contains_lineterminator_char
+    {
         let mut escaped = String::with_capacity(value.len() + 2);
         escaped.push('"');
         for ch in value.chars() {
@@ -8685,46 +8700,87 @@ impl Series {
 
     /// Matches `pd.Series.to_csv(na_rep=...)`.
     pub fn to_csv_with_na_rep(&self, sep: char, include_index: bool, na_rep: &str) -> String {
-        fn format_scalar(val: &Scalar, sep: char, na_rep: &str) -> String {
+        self.to_csv_with_options(sep, include_index, na_rep, "\n")
+    }
+
+    /// Matches `pd.Series.to_csv(na_rep=..., lineterminator=...)`.
+    pub fn to_csv_with_options(
+        &self,
+        sep: char,
+        include_index: bool,
+        na_rep: &str,
+        lineterminator: &str,
+    ) -> String {
+        fn format_scalar(val: &Scalar, sep: char, na_rep: &str, lineterminator: &str) -> String {
             if val.is_missing() {
-                return csv_escape(na_rep, sep);
+                return csv_escape_with_lineterminator(na_rep, sep, lineterminator);
             }
             match val {
-                Scalar::Null(_) => csv_escape(na_rep, sep),
+                Scalar::Null(_) => csv_escape_with_lineterminator(na_rep, sep, lineterminator),
                 Scalar::Bool(b) => if *b { "True" } else { "False" }.to_string(),
                 Scalar::Int64(v) => v.to_string(),
                 // Per br-frankenpandas-41edff: pandas-canonical `.0` suffix.
                 Scalar::Float64(v) => format_pandas_csv_float(*v),
-                Scalar::Utf8(s) => csv_escape(s, sep),
-                Scalar::Timedelta64(v) if *v == Timedelta::NAT => csv_escape(na_rep, sep),
+                Scalar::Utf8(s) => csv_escape_with_lineterminator(s, sep, lineterminator),
+                Scalar::Timedelta64(v) if *v == Timedelta::NAT => {
+                    csv_escape_with_lineterminator(na_rep, sep, lineterminator)
+                }
                 Scalar::Timedelta64(v) => Timedelta::format(*v),
-                Scalar::Datetime64(v) if *v == Timedelta::NAT => csv_escape(na_rep, sep),
+                Scalar::Datetime64(v) if *v == Timedelta::NAT => {
+                    csv_escape_with_lineterminator(na_rep, sep, lineterminator)
+                }
                 Scalar::Datetime64(v) => format_datetime_ns(*v),
-                Scalar::Period(v) if *v == i64::MIN => csv_escape(na_rep, sep),
+                Scalar::Period(v) if *v == i64::MIN => {
+                    csv_escape_with_lineterminator(na_rep, sep, lineterminator)
+                }
                 Scalar::Period(v) => format!("Period[{v}]"),
                 Scalar::Interval(interval) => format!("{interval}"),
             }
         }
 
+        let lineterminator = csv_lineterminator_or_default(lineterminator);
         let mut out = String::new();
         // Header
         if include_index {
-            out.push_str(&format!("{sep}{}\n", csv_escape(&self.name, sep)));
+            out.push(sep);
+            out.push_str(&csv_escape_with_lineterminator(
+                &self.name,
+                sep,
+                lineterminator,
+            ));
+            out.push_str(lineterminator);
         } else {
-            out.push_str(&format!("{}\n", csv_escape(&self.name, sep)));
+            out.push_str(&csv_escape_with_lineterminator(
+                &self.name,
+                sep,
+                lineterminator,
+            ));
+            out.push_str(lineterminator);
         }
         // Data
         for (label, val) in self.index.labels().iter().zip(self.column.values()) {
             if include_index {
                 let idx = match label {
                     IndexLabel::Int64(v) => v.to_string(),
-                    IndexLabel::Utf8(s) => csv_escape(s, sep),
-                    IndexLabel::Timedelta64(ns) => csv_escape(&Timedelta::format(*ns), sep),
-                    IndexLabel::Datetime64(ns) => csv_escape(&format_datetime_ns(*ns), sep),
+                    IndexLabel::Utf8(s) => csv_escape_with_lineterminator(s, sep, lineterminator),
+                    IndexLabel::Timedelta64(ns) => csv_escape_with_lineterminator(
+                        &Timedelta::format(*ns),
+                        sep,
+                        lineterminator,
+                    ),
+                    IndexLabel::Datetime64(ns) => csv_escape_with_lineterminator(
+                        &format_datetime_ns(*ns),
+                        sep,
+                        lineterminator,
+                    ),
                 };
-                out.push_str(&format!("{idx}{sep}{}\n", format_scalar(val, sep, na_rep)));
+                out.push_str(&idx);
+                out.push(sep);
+                out.push_str(&format_scalar(val, sep, na_rep, lineterminator));
+                out.push_str(lineterminator);
             } else {
-                out.push_str(&format!("{}\n", format_scalar(val, sep, na_rep)));
+                out.push_str(&format_scalar(val, sep, na_rep, lineterminator));
+                out.push_str(lineterminator);
             }
         }
         out
@@ -32538,32 +32594,57 @@ impl DataFrame {
     ///
     /// Matches `df.to_csv()` returning a string representation.
     pub fn to_csv(&self, sep: char, include_index: bool) -> String {
+        self.to_csv_with_lineterminator(sep, include_index, "\n")
+    }
+
+    /// Matches `df.to_csv(lineterminator=...)` returning a string representation.
+    pub fn to_csv_with_lineterminator(
+        &self,
+        sep: char,
+        include_index: bool,
+        lineterminator: &str,
+    ) -> String {
+        let lineterminator = csv_lineterminator_or_default(lineterminator);
         let mut out = String::new();
 
         // Header
         if include_index {
-            out.push_str("index");
+            out.push_str(&csv_escape_with_lineterminator(
+                "index",
+                sep,
+                lineterminator,
+            ));
             out.push(sep);
         }
         for (i, name) in self.column_order.iter().enumerate() {
             if i > 0 {
                 out.push(sep);
             }
-            out.push_str(&csv_escape(name, sep));
+            out.push_str(&csv_escape_with_lineterminator(name, sep, lineterminator));
         }
-        out.push('\n');
+        out.push_str(lineterminator);
 
         // Rows
         for (row_idx, label) in self.index.labels().iter().enumerate() {
             if include_index {
                 match label {
                     IndexLabel::Int64(v) => out.push_str(&v.to_string()),
-                    IndexLabel::Utf8(s) => out.push_str(&csv_escape(s, sep)),
+                    IndexLabel::Utf8(s) => {
+                        out.push_str(&csv_escape_with_lineterminator(s, sep, lineterminator))
+                    }
                     IndexLabel::Timedelta64(ns) => {
-                        out.push_str(&csv_escape(&Timedelta::format(*ns), sep))
+                        out.push_str(&csv_escape_with_lineterminator(
+                            &Timedelta::format(*ns),
+                            sep,
+                            lineterminator,
+                        ))
                     }
                     IndexLabel::Datetime64(ns) => {
-                        out.push_str(&csv_escape(&format_datetime_ns(*ns), sep))
+                        out.push_str(&csv_escape_with_lineterminator(
+                            &format_datetime_ns(*ns),
+                            sep,
+                            lineterminator,
+                        ))
                     }
                 }
                 out.push(sep);
@@ -32580,7 +32661,9 @@ impl DataFrame {
                     // Per br-frankenpandas-41edff: whole-number Float64 needs
                     // pandas-canonical `.0` suffix.
                     Scalar::Float64(v) => out.push_str(&format_pandas_csv_float(*v)),
-                    Scalar::Utf8(s) => out.push_str(&csv_escape(s, sep)),
+                    Scalar::Utf8(s) => {
+                        out.push_str(&csv_escape_with_lineterminator(s, sep, lineterminator))
+                    }
                     Scalar::Timedelta64(v) if *v == Timedelta::NAT => {}
                     Scalar::Timedelta64(v) => out.push_str(&Timedelta::format(*v)),
                     Scalar::Datetime64(v) if *v == Timedelta::NAT => {}
@@ -32590,7 +32673,7 @@ impl DataFrame {
                     Scalar::Interval(interval) => out.push_str(&format!("{interval}")),
                 }
             }
-            out.push('\n');
+            out.push_str(lineterminator);
         }
 
         out
@@ -32608,6 +32691,18 @@ impl DataFrame {
         na_rep: &str,
         columns: Option<&[&str]>,
     ) -> Result<String, FrameError> {
+        self.to_csv_options_with_lineterminator(sep, include_index, na_rep, columns, "\n")
+    }
+
+    /// Matches `df.to_csv(sep, index, na_rep, columns, lineterminator)`.
+    pub fn to_csv_options_with_lineterminator(
+        &self,
+        sep: char,
+        include_index: bool,
+        na_rep: &str,
+        columns: Option<&[&str]>,
+        lineterminator: &str,
+    ) -> Result<String, FrameError> {
         let col_order: Vec<&str> = match columns {
             Some(cols) => {
                 for &c in cols {
@@ -32622,33 +32717,52 @@ impl DataFrame {
             None => self.column_order.iter().map(|s| s.as_str()).collect(),
         };
 
+        let lineterminator = csv_lineterminator_or_default(lineterminator);
         let mut out = String::new();
-        let na_rep_escaped = csv_escape(na_rep, sep);
+        let na_rep_escaped = csv_escape_with_lineterminator(na_rep, sep, lineterminator);
 
         // Header
         if include_index {
-            out.push_str("index");
+            out.push_str(&csv_escape_with_lineterminator(
+                "index",
+                sep,
+                lineterminator,
+            ));
             out.push(sep);
         }
         for (i, name) in col_order.iter().enumerate() {
             if i > 0 {
                 out.push(sep);
             }
-            out.push_str(&csv_escape(name, sep));
+            out.push_str(&csv_escape_with_lineterminator(
+                name,
+                sep,
+                lineterminator,
+            ));
         }
-        out.push('\n');
+        out.push_str(lineterminator);
 
         // Rows
         for (row_idx, label) in self.index.labels().iter().enumerate() {
             if include_index {
                 match label {
                     IndexLabel::Int64(v) => out.push_str(&v.to_string()),
-                    IndexLabel::Utf8(s) => out.push_str(&csv_escape(s, sep)),
+                    IndexLabel::Utf8(s) => {
+                        out.push_str(&csv_escape_with_lineterminator(s, sep, lineterminator))
+                    }
                     IndexLabel::Timedelta64(ns) => {
-                        out.push_str(&csv_escape(&Timedelta::format(*ns), sep))
+                        out.push_str(&csv_escape_with_lineterminator(
+                            &Timedelta::format(*ns),
+                            sep,
+                            lineterminator,
+                        ))
                     }
                     IndexLabel::Datetime64(ns) => {
-                        out.push_str(&csv_escape(&format_datetime_ns(*ns), sep))
+                        out.push_str(&csv_escape_with_lineterminator(
+                            &format_datetime_ns(*ns),
+                            sep,
+                            lineterminator,
+                        ))
                     }
                 }
                 out.push(sep);
@@ -32665,7 +32779,9 @@ impl DataFrame {
                     // Per br-frankenpandas-41edff: whole-number Float64 needs
                     // pandas-canonical `.0` suffix.
                     Scalar::Float64(v) => out.push_str(&format_pandas_csv_float(*v)),
-                    Scalar::Utf8(s) => out.push_str(&csv_escape(s, sep)),
+                    Scalar::Utf8(s) => {
+                        out.push_str(&csv_escape_with_lineterminator(s, sep, lineterminator))
+                    }
                     Scalar::Timedelta64(v) if *v == Timedelta::NAT => out.push_str(&na_rep_escaped),
                     Scalar::Timedelta64(v) => out.push_str(&Timedelta::format(*v)),
                     Scalar::Datetime64(v) if *v == Timedelta::NAT => out.push_str(&na_rep_escaped),
@@ -32675,7 +32791,7 @@ impl DataFrame {
                     Scalar::Interval(interval) => out.push_str(&format!("{interval}")),
                 }
             }
-            out.push('\n');
+            out.push_str(lineterminator);
         }
 
         Ok(out)
@@ -61969,6 +62085,33 @@ mod tests {
     }
 
     #[test]
+    fn dataframe_to_csv_with_lineterminator() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1)]),
+                ("b", vec![Scalar::Int64(2)]),
+            ],
+        )
+        .unwrap();
+
+        let csv = df.to_csv_with_lineterminator(',', false, "|");
+        assert_eq!(csv, "a,b|1,2|");
+    }
+
+    #[test]
+    fn dataframe_to_csv_lineterminator_quotes_matching_chars() {
+        let df = DataFrame::from_dict(
+            &["x"],
+            vec![("x", vec![Scalar::Utf8("fooE".to_owned())])],
+        )
+        .unwrap();
+
+        let csv = df.to_csv_with_lineterminator(',', false, "END");
+        assert_eq!(csv, "xEND\"fooE\"END");
+    }
+
+    #[test]
     fn dataframe_to_csv_with_index() {
         let df = DataFrame::from_dict(&["a"], vec![("a", vec![Scalar::Int64(10)])]).unwrap();
 
@@ -70265,6 +70408,32 @@ mod tests {
     }
 
     #[test]
+    fn series_to_csv_with_lineterminator() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Float64(1.0), Scalar::Null(NullKind::NaN)],
+        )
+        .unwrap();
+
+        let csv = s.to_csv_with_options(',', false, "NA", "|");
+        assert_eq!(csv, "x|1.0|NA|");
+    }
+
+    #[test]
+    fn series_to_csv_lineterminator_quotes_matching_chars() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into()],
+            vec![Scalar::Utf8("fooE".to_owned())],
+        )
+        .unwrap();
+
+        let csv = s.to_csv_with_options(',', false, "", "END");
+        assert_eq!(csv, "xEND\"fooE\"END");
+    }
+
+    #[test]
     fn series_to_json_split() {
         let s = Series::from_values(
             "x",
@@ -75151,6 +75320,20 @@ mod tests {
 
         let csv = df.to_csv_options(',', false, "NA,VAL", None).unwrap();
         assert!(csv.contains("\"NA,VAL\",1"));
+    }
+
+    #[test]
+    fn dataframe_to_csv_options_with_lineterminator_quotes_na_rep() {
+        let df = DataFrame::from_dict(
+            &["x"],
+            vec![("x", vec![Scalar::Null(NullKind::NaN)])],
+        )
+        .unwrap();
+
+        let csv = df
+            .to_csv_options_with_lineterminator(',', false, "NA", None, "END")
+            .unwrap();
+        assert_eq!(csv, "xEND\"NA\"END");
     }
 
     #[test]
