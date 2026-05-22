@@ -16879,6 +16879,20 @@ impl SparseAccessor<'_> {
             .collect()
     }
 
+    /// Return the indices of non-fill values.
+    ///
+    /// Returns position indices (0-based) where values differ from fill_value.
+    #[must_use]
+    pub fn sp_index(&self) -> Vec<usize> {
+        self.series
+            .values()
+            .iter()
+            .enumerate()
+            .filter(|(_, value)| !value.semantic_eq(&self.dtype.fill_value))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
     /// Return non-fill density as `npoints / len`.
     ///
     /// Matches `pd.Series.sparse.density`.
@@ -56588,6 +56602,8 @@ mod tests {
         assert_eq!(sp_vals.len(), 2);
         assert_eq!(sp_vals[0], Scalar::Int64(5));
         assert_eq!(sp_vals[1], Scalar::Int64(7));
+        let sp_idx = sparse.sp_index();
+        assert_eq!(sp_idx, vec![1, 3]);
     }
 
     #[test]
