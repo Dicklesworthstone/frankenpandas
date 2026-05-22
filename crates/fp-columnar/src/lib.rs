@@ -2248,6 +2248,24 @@ impl Column {
         Self::new(self.dtype, out)
     }
 
+    /// Tile (repeat) the entire column n times.
+    ///
+    /// Matches `np.tile()`. Unlike repeat which duplicates each element,
+    /// tile duplicates the entire array.
+    pub fn tile(&self, reps: usize) -> Result<Self, ColumnError> {
+        if reps == 0 {
+            return Self::new(self.dtype, Vec::new());
+        }
+        if reps == 1 {
+            return Ok(self.clone());
+        }
+        let mut out = Vec::with_capacity(self.values.len() * reps);
+        for _ in 0..reps {
+            out.extend_from_slice(&self.values);
+        }
+        Self::new(self.dtype, out)
+    }
+
     /// Reverse the row order of the column.
     ///
     /// Matches `pd.Series[::-1]` / `iloc[::-1]`. Dtype is preserved.
@@ -2255,6 +2273,32 @@ impl Column {
         let mut values = self.values.clone();
         values.reverse();
         Self::new(self.dtype, values)
+    }
+
+    /// Filter values based on a boolean condition column.
+    ///
+    /// Matches `np.compress()`. Returns only values where condition is True.
+    pub fn compress(&self, condition: &Self) -> Result<Self, ColumnError> {
+        if self.len() != condition.len() {
+            return Err(ColumnError::LengthMismatch {
+                left: self.len(),
+                right: condition.len(),
+            });
+        }
+        let mut out = Vec::new();
+        for (v, c) in self.values.iter().zip(&condition.values) {
+            match c {
+                Scalar::Bool(true) => out.push(v.clone()),
+                Scalar::Bool(false) => {}
+                _ => {
+                    return Err(ColumnError::Type(TypeError::NonNumericValue {
+                        value: format!("{c:?}"),
+                        dtype: condition.dtype,
+                    }));
+                }
+            }
+        }
+        Self::new(self.dtype, out)
     }
 
     /// Cumulative sum, null-propagating per fp-types::nancumsum.
