@@ -1479,6 +1479,24 @@ impl Timestamp {
         self.weekofyear()
     }
 
+    /// Return the timestamp value in the specified unit.
+    ///
+    /// Matches `pd.Timestamp.value` when unit is nanoseconds.
+    /// Supported units: "ns", "us", "ms", "s".
+    #[must_use]
+    pub fn to_unit(&self, unit: &str) -> Option<i64> {
+        if self.is_nat() {
+            return None;
+        }
+        match unit {
+            "ns" | "nanosecond" | "nanoseconds" => Some(self.nanos),
+            "us" | "microsecond" | "microseconds" => Some(self.nanos / 1_000),
+            "ms" | "millisecond" | "milliseconds" => Some(self.nanos / 1_000_000),
+            "s" | "second" | "seconds" => Some(self.nanos / 1_000_000_000),
+            _ => None,
+        }
+    }
+
     /// Whether the year is a leap year.
     ///
     /// Matches `pd.Timestamp.is_leap_year`. Returns None for NaT.
@@ -5284,5 +5302,17 @@ mod tests {
 
         assert_eq!(Timestamp::nat().weekofyear(), None);
         assert_eq!(Timestamp::nat().week(), None);
+    }
+
+    #[test]
+    fn timestamp_to_unit() {
+        let ts = Timestamp::from_nanos(1_000_000_000);
+        assert_eq!(ts.to_unit("ns"), Some(1_000_000_000));
+        assert_eq!(ts.to_unit("us"), Some(1_000_000));
+        assert_eq!(ts.to_unit("ms"), Some(1_000));
+        assert_eq!(ts.to_unit("s"), Some(1));
+        assert_eq!(ts.to_unit("invalid"), None);
+
+        assert_eq!(Timestamp::nat().to_unit("ns"), None);
     }
 }
