@@ -5629,6 +5629,11 @@ impl Series {
         Self::new(self.name.clone(), self.index.clone(), self.column.abs()?)
     }
 
+    /// Alias for `abs`. Matches `np.absolute`.
+    pub fn absolute(&self) -> Result<Self, FrameError> {
+        self.abs()
+    }
+
     /// Round each element to `decimals` decimal places.
     ///
     /// Matches `pd.Series.round(decimals)`. NaN values pass through.
@@ -6047,6 +6052,55 @@ impl Series {
             self.index.clone(),
             self.column.copysign(other.column())?,
         )
+    }
+
+    /// Element-wise bitwise AND.
+    ///
+    /// Matches `np.bitwise_and(s1, s2)`.
+    pub fn bitwise_and(&self, other: &Self) -> Result<Self, FrameError> {
+        Self::new(
+            self.name.clone(),
+            self.index.clone(),
+            self.column.bitwise_and(other.column())?,
+        )
+    }
+
+    /// Element-wise bitwise OR.
+    ///
+    /// Matches `np.bitwise_or(s1, s2)`.
+    pub fn bitwise_or(&self, other: &Self) -> Result<Self, FrameError> {
+        Self::new(
+            self.name.clone(),
+            self.index.clone(),
+            self.column.bitwise_or(other.column())?,
+        )
+    }
+
+    /// Element-wise bitwise XOR.
+    ///
+    /// Matches `np.bitwise_xor(s1, s2)`.
+    pub fn bitwise_xor(&self, other: &Self) -> Result<Self, FrameError> {
+        Self::new(
+            self.name.clone(),
+            self.index.clone(),
+            self.column.bitwise_xor(other.column())?,
+        )
+    }
+
+    /// Element-wise bitwise NOT.
+    ///
+    /// Matches `np.bitwise_not(s)` / `np.invert(s)`.
+    pub fn bitwise_not(&self) -> Result<Self, FrameError> {
+        Self::new(
+            self.name.clone(),
+            self.index.clone(),
+            self.column.bitwise_not()?,
+        )
+    }
+
+    /// Alias for `bitwise_not`. Matches `np.invert`.
+    pub fn invert(&self) -> Result<Self, FrameError> {
+        self.bitwise_not()
     }
 
     // --- Descriptive Statistics ---
@@ -91920,5 +91974,103 @@ mod test_select_columns_perf_76e1fd {
         assert!((vals[0] + 3.0).abs() < 1e-10);
         assert!((vals[1] - 2.0).abs() < 1e-10);
         assert!((vals[2] + 5.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn series_absolute_alias() {
+        let s = Series::from_pairs(
+            "x",
+            vec![
+                (0_i64.into(), Scalar::Float64(-3.0)),
+                (1_i64.into(), Scalar::Float64(4.0)),
+            ],
+        )
+        .unwrap();
+        assert_eq!(s.abs().unwrap().values(), s.absolute().unwrap().values());
+    }
+
+    #[test]
+    fn series_bitwise_and() {
+        let s1 = Series::from_pairs(
+            "a",
+            vec![
+                (0_i64.into(), Scalar::Int64(0b1100)),
+                (1_i64.into(), Scalar::Int64(0b1010)),
+            ],
+        )
+        .unwrap();
+        let s2 = Series::from_pairs(
+            "b",
+            vec![
+                (0_i64.into(), Scalar::Int64(0b1010)),
+                (1_i64.into(), Scalar::Int64(0b1010)),
+            ],
+        )
+        .unwrap();
+        let result = s1.bitwise_and(&s2).unwrap();
+        assert_eq!(result.values()[0], Scalar::Int64(0b1000));
+        assert_eq!(result.values()[1], Scalar::Int64(0b1010));
+    }
+
+    #[test]
+    fn series_bitwise_or() {
+        let s1 = Series::from_pairs(
+            "a",
+            vec![
+                (0_i64.into(), Scalar::Int64(0b1100)),
+                (1_i64.into(), Scalar::Int64(0b1010)),
+            ],
+        )
+        .unwrap();
+        let s2 = Series::from_pairs(
+            "b",
+            vec![
+                (0_i64.into(), Scalar::Int64(0b1010)),
+                (1_i64.into(), Scalar::Int64(0b0101)),
+            ],
+        )
+        .unwrap();
+        let result = s1.bitwise_or(&s2).unwrap();
+        assert_eq!(result.values()[0], Scalar::Int64(0b1110));
+        assert_eq!(result.values()[1], Scalar::Int64(0b1111));
+    }
+
+    #[test]
+    fn series_bitwise_xor() {
+        let s1 = Series::from_pairs(
+            "a",
+            vec![
+                (0_i64.into(), Scalar::Int64(0b1100)),
+                (1_i64.into(), Scalar::Int64(0b1010)),
+            ],
+        )
+        .unwrap();
+        let s2 = Series::from_pairs(
+            "b",
+            vec![
+                (0_i64.into(), Scalar::Int64(0b1010)),
+                (1_i64.into(), Scalar::Int64(0b1010)),
+            ],
+        )
+        .unwrap();
+        let result = s1.bitwise_xor(&s2).unwrap();
+        assert_eq!(result.values()[0], Scalar::Int64(0b0110));
+        assert_eq!(result.values()[1], Scalar::Int64(0b0000));
+    }
+
+    #[test]
+    fn series_bitwise_not() {
+        let s = Series::from_pairs("a", vec![(0_i64.into(), Scalar::Int64(0))]).unwrap();
+        let result = s.bitwise_not().unwrap();
+        assert_eq!(result.values()[0], Scalar::Int64(-1));
+    }
+
+    #[test]
+    fn series_invert_alias() {
+        let s = Series::from_pairs("a", vec![(0_i64.into(), Scalar::Int64(0))]).unwrap();
+        assert_eq!(
+            s.bitwise_not().unwrap().values(),
+            s.invert().unwrap().values()
+        );
     }
 }
