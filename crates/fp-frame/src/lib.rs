@@ -9322,6 +9322,35 @@ impl Series {
         Ok(result)
     }
 
+    /// Localize the row index to a timezone or strip timezone metadata.
+    ///
+    /// Matches `pd.Series.tz_localize(tz)` for the default row-index axis.
+    /// Series values are preserved unchanged.
+    pub fn tz_localize(&self, tz: Option<&str>) -> Result<Self, FrameError> {
+        self.tz_localize_with_options(tz, TzLocalizeOptions::default())
+    }
+
+    /// Localize the row index with explicit DST ambiguity/nonexistence policy.
+    pub fn tz_localize_with_options(
+        &self,
+        tz: Option<&str>,
+        options: TzLocalizeOptions,
+    ) -> Result<Self, FrameError> {
+        let labels = tz_localize_index_labels(self.index.labels(), tz, &options)?;
+        let index = Index::new(labels).rename_index(self.index.name());
+        Self::new(self.name.clone(), index, self.column.clone())
+    }
+
+    /// Convert a timezone-aware row index to another timezone.
+    ///
+    /// Matches `pd.Series.tz_convert(tz)` for the default row-index axis.
+    /// Series values are preserved unchanged.
+    pub fn tz_convert(&self, tz: Option<&str>) -> Result<Self, FrameError> {
+        let labels = tz_convert_index_labels(self.index.labels(), tz)?;
+        let index = Index::new(labels).rename_index(self.index.name());
+        Self::new(self.name.clone(), index, self.column.clone())
+    }
+
     /// Convert a datetime-like row index to period-style labels.
     ///
     /// Matches `pd.Series.to_period(freq)` for the supported row-index
@@ -21681,6 +21710,123 @@ fn localize_series_values(
                 ambiguous_policies[idx],
                 &options.nonexistent,
             ),
+        })
+        .collect()
+}
+
+fn index_label_to_tz_localize_scalar(label: &IndexLabel) -> Result<Scalar, FrameError> {
+    match label {
+        IndexLabel::Utf8(value) if value.trim() == "NaT" => Ok(Scalar::Null(NullKind::NaT)),
+        IndexLabel::Utf8(value) => Ok(Scalar::Utf8(value.clone())),
+        IndexLabel::Datetime64(nanos) if *nanos == i64::MIN => Ok(Scalar::Null(NullKind::NaT)),
+        IndexLabel::Datetime64(nanos) => {
+            Ok(Scalar::Utf8(format_naive_datetime(datetime64_nanos_to_naive(
+                *nanos,
+            )?)))
+        }
+        other => Err(FrameError::CompatibilityRejected(format!(
+            "tz_localize: index must be a DatetimeIndex, got {other:?}"
+        ))),
+    }
+}
+
+fn tz_scalar_to_index_label(value: Scalar) -> Result<IndexLabel, FrameError> {
+    match value {
+        Scalar::Utf8(value) => Ok(IndexLabel::Utf8(value)),
+        Scalar::Null(_) => Ok(IndexLabel::Utf8("NaT".to_owned())),
+        other => Err(FrameError::CompatibilityRejected(format!(
+            "timezone index operation produced non-datetime label {other:?}"
+        ))),
+    }
+}
+
+fn strip_tz_from_index_label(label: &IndexLabel) -> Result<IndexLabel, FrameError> {
+    match label {
+        IndexLabel::Utf8(value) if value.trim() == "NaT" => Ok(IndexLabel::Utf8("NaT".to_owned())),
+        IndexLabel::Utf8(value) if has_tz_suffix(value) => {
+            parse_tz_aware_datetime(value)?;
+            Ok(IndexLabel::Utf8(strip_tz_suffix(value).to_owned()))
+        }
+        IndexLabel::Utf8(value) => {
+            parse_naive_datetime_value(value)?;
+            Ok(IndexLabel::Utf8(value.clone()))
+        }
+        IndexLabel::Datetime64(_) => Ok(label.clone()),
+        other => Err(FrameError::CompatibilityRejected(format!(
+            "tz_localize: index must be a DatetimeIndex, got {other:?}"
+        ))),
+    }
+}
+
+fn tz_localize_index_labels(
+    labels: &[IndexLabel],
+    tz: Option<&str>,
+    options: &TzLocalizeOptions,
+) -> Result<Vec<IndexLabel>, FrameError> {
+    match tz {
+        Some(tz) => {
+            let tz_spec = parse_tz_spec(tz)?;
+            let values = labels
+                .iter()
+                .map(index_label_to_tz_localize_scalar)
+                .collect::<Result<Vec<_>, FrameError>>()?;
+            localize_series_values(&values, &tz_spec, options)?
+                .into_iter()
+                .map(tz_scalar_to_index_label)
+                .collect()
+        }
+        None => labels.iter().map(strip_tz_from_index_label).collect(),
+    }
+}
+
+fn convert_tz_aware_datetime_string(
+    value: &str,
+    target_tz: Option<&TimeZoneSpec>,
+) -> Result<Scalar, FrameError> {
+    if !has_tz_suffix(value) {
+        return Err(FrameError::CompatibilityRejected(
+            "Cannot convert tz-naive timestamps, use tz_localize to localize".to_owned(),
+        ));
+    }
+    let parsed = parse_tz_aware_datetime(value)?;
+    let utc = parsed.fixed.with_timezone(&Utc);
+    match target_tz {
+        Some(TimeZoneSpec::Fixed(offset)) => Ok(Scalar::Utf8(format_aware_datetime(
+            utc.with_timezone(offset),
+            None,
+        ))),
+        Some(TimeZoneSpec::Named { zone, name }) => {
+            let localized = utc.with_timezone(zone);
+            Ok(Scalar::Utf8(format_aware_datetime(
+                localized.with_timezone(&localized.offset().fix()),
+                Some(name),
+            )))
+        }
+        None => Ok(Scalar::Utf8(format_naive_datetime(utc.naive_utc()))),
+    }
+}
+
+fn tz_convert_index_labels(
+    labels: &[IndexLabel],
+    tz: Option<&str>,
+) -> Result<Vec<IndexLabel>, FrameError> {
+    let target_tz = tz.map(parse_tz_spec).transpose()?;
+    labels
+        .iter()
+        .map(|label| match label {
+            IndexLabel::Utf8(value) if value.trim() == "NaT" => {
+                Ok(IndexLabel::Utf8("NaT".to_owned()))
+            }
+            IndexLabel::Utf8(value) => {
+                convert_tz_aware_datetime_string(value, target_tz.as_ref())
+                    .and_then(tz_scalar_to_index_label)
+            }
+            IndexLabel::Datetime64(_) => Err(FrameError::CompatibilityRejected(
+                "Cannot convert tz-naive timestamps, use tz_localize to localize".to_owned(),
+            )),
+            other => Err(FrameError::CompatibilityRejected(format!(
+                "tz_convert: index must be a timezone-aware DatetimeIndex, got {other:?}"
+            ))),
         })
         .collect()
 }
@@ -84563,6 +84709,92 @@ mod tests {
             small_left.rpow(&small_right).unwrap().values(),
             small_right.pow(&small_left).unwrap().values()
         );
+    }
+
+    // ── Series.tz_localize / tz_convert on row index ─────────────────
+
+    #[test]
+    fn series_tz_localize_operates_on_index_and_preserves_values() {
+        let s = Series::from_values(
+            "sales",
+            vec![
+                "2024-01-01 00:00:00".into(),
+                "2024-01-01 01:00:00".into(),
+            ],
+            vec![Scalar::Int64(10), Scalar::Int64(20)],
+        )
+        .unwrap()
+        .rename_axis("ts")
+        .unwrap();
+
+        let out = s.tz_localize(Some("UTC")).unwrap();
+        assert_eq!(
+            out.index().labels(),
+            &[
+                IndexLabel::Utf8("2024-01-01 00:00:00+00:00".into()),
+                IndexLabel::Utf8("2024-01-01 01:00:00+00:00".into()),
+            ]
+        );
+        assert_eq!(out.index().name(), Some("ts"));
+        assert_eq!(out.values(), &[Scalar::Int64(10), Scalar::Int64(20)]);
+    }
+
+    #[test]
+    fn series_tz_convert_operates_on_index_and_can_drop_timezone() {
+        let s = Series::from_values(
+            "sales",
+            vec![
+                "2024-01-01 00:00:00+00:00".into(),
+                "2024-01-01 01:00:00+00:00".into(),
+            ],
+            vec![Scalar::Int64(10), Scalar::Int64(20)],
+        )
+        .unwrap()
+        .rename_axis("ts")
+        .unwrap();
+
+        let converted = s.tz_convert(Some("-05:00")).unwrap();
+        assert_eq!(
+            converted.index().labels(),
+            &[
+                IndexLabel::Utf8("2023-12-31 19:00:00-05:00".into()),
+                IndexLabel::Utf8("2023-12-31 20:00:00-05:00".into()),
+            ]
+        );
+        assert_eq!(converted.values(), &[Scalar::Int64(10), Scalar::Int64(20)]);
+
+        let naive = s.tz_convert(None).unwrap();
+        assert_eq!(
+            naive.index().labels(),
+            &[
+                IndexLabel::Utf8("2024-01-01 00:00:00".into()),
+                IndexLabel::Utf8("2024-01-01 01:00:00".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn series_timezone_index_methods_reject_wrong_awareness() {
+        let naive = Series::from_values(
+            "sales",
+            vec!["2024-01-01 00:00:00".into()],
+            vec![Scalar::Int64(10)],
+        )
+        .unwrap();
+        let err = naive.tz_convert(Some("UTC")).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Cannot convert tz-naive timestamps")
+        );
+
+        let aware = Series::from_values(
+            "sales",
+            vec!["2024-01-01 00:00:00+00:00".into()],
+            vec![Scalar::Int64(10)],
+        )
+        .unwrap();
+        let err = aware.tz_localize(Some("UTC")).unwrap_err();
+        assert!(err.to_string().contains("Already tz-aware"));
     }
 
     // ── DataFrame.tz_localize / tz_convert (br-frankenpandas-6iac0) ─
