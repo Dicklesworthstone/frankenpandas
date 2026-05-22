@@ -1247,6 +1247,24 @@ impl Timestamp {
             None => Self::nat(),
         }
     }
+
+    /// Pandas-named alias for [`floor_to_unit`](Self::floor_to_unit).
+    #[must_use]
+    pub fn floor(&self, freq: &str) -> Self {
+        self.floor_to_unit(freq)
+    }
+
+    /// Pandas-named alias for [`ceil_to_unit`](Self::ceil_to_unit).
+    #[must_use]
+    pub fn ceil(&self, freq: &str) -> Self {
+        self.ceil_to_unit(freq)
+    }
+
+    /// Pandas-named alias for [`round_to_unit`](Self::round_to_unit).
+    #[must_use]
+    pub fn round(&self, freq: &str) -> Self {
+        self.round_to_unit(freq)
+    }
 }
 
 impl std::fmt::Display for Timestamp {
@@ -4538,6 +4556,19 @@ mod tests {
         assert_eq!(ts.round_to_unit("min").nanos, expected);
         assert_eq!(ts.round_to_unit("T").nanos, expected); // pandas pre-2.2 alias
         assert_eq!(ts.round_to_unit("minute").nanos, expected);
+    }
+
+    #[test]
+    fn timestamp_floor_ceil_round_aliases_match_unit_methods_li897() {
+        let ts = Timestamp::from_nanos(
+            Timedelta::NANOS_PER_HOUR * 12
+                + Timedelta::NANOS_PER_MIN * 34
+                + Timedelta::NANOS_PER_SEC * 31,
+        );
+
+        assert_eq!(ts.floor("H"), ts.floor_to_unit("H"));
+        assert_eq!(ts.ceil("D"), ts.ceil_to_unit("D"));
+        assert_eq!(ts.round("min"), ts.round_to_unit("min"));
     }
 
     #[test]
