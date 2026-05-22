@@ -11977,5 +11977,117 @@ mod tests {
             assert!(python_floor_div_f64(f64::NEG_INFINITY, -2.0).is_nan());
             assert!(python_floor_div_f64(f64::INFINITY, f64::INFINITY).is_nan());
         }
+
+        #[test]
+        fn histogram_counts_values_in_bins() {
+            let col = Column::from_values(vec![
+                Scalar::Float64(0.5),
+                Scalar::Float64(1.5),
+                Scalar::Float64(2.5),
+                Scalar::Float64(1.2),
+                Scalar::Float64(2.8),
+            ])
+            .unwrap();
+            let edges = vec![0.0, 1.0, 2.0, 3.0];
+            let counts = col.histogram(&edges).unwrap();
+            assert_eq!(counts.values(), &[
+                Scalar::Int64(1),  // [0, 1): 0.5
+                Scalar::Int64(2),  // [1, 2): 1.5, 1.2
+                Scalar::Int64(2),  // [2, 3]: 2.5, 2.8
+            ]);
+        }
+
+        #[test]
+        fn histogram_auto_creates_bins() {
+            let col = Column::from_values(vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(4.0),
+            ])
+            .unwrap();
+            let (counts, edges) = col.histogram_auto(3).unwrap();
+            assert_eq!(counts.len(), 3);
+            assert_eq!(edges.len(), 4);
+            assert!((edges[0] - 1.0).abs() < 1e-10);
+            assert!((edges[3] - 4.0).abs() < 1e-10);
+        }
+
+        #[test]
+        fn histogram_auto_constant_values_extends_range() {
+            let col = Column::from_values(vec![
+                Scalar::Float64(5.0),
+                Scalar::Float64(5.0),
+                Scalar::Float64(5.0),
+            ])
+            .unwrap();
+            let (counts, edges) = col.histogram_auto(2).unwrap();
+            assert_eq!(counts.len(), 2);
+            assert!(edges[0] < 5.0);
+            assert!(edges[2] > 5.0);
+        }
+
+        #[test]
+        fn hanning_window_shape() {
+            let win = Column::hanning(5).unwrap();
+            assert_eq!(win.len(), 5);
+            // Endpoints should be 0
+            assert!((win.values()[0].to_f64().unwrap()).abs() < 1e-10);
+            assert!((win.values()[4].to_f64().unwrap()).abs() < 1e-10);
+            // Center should be 1
+            assert!((win.values()[2].to_f64().unwrap() - 1.0).abs() < 1e-10);
+        }
+
+        #[test]
+        fn hamming_window_shape() {
+            let win = Column::hamming(5).unwrap();
+            assert_eq!(win.len(), 5);
+            // Hamming endpoints are ~0.08, not 0
+            let v0 = win.values()[0].to_f64().unwrap();
+            assert!(v0 > 0.07 && v0 < 0.09);
+        }
+
+        #[test]
+        fn bartlett_window_triangular() {
+            let win = Column::bartlett(5).unwrap();
+            assert_eq!(win.len(), 5);
+            // Endpoints should be 0
+            assert!((win.values()[0].to_f64().unwrap()).abs() < 1e-10);
+            assert!((win.values()[4].to_f64().unwrap()).abs() < 1e-10);
+            // Center should be 1
+            assert!((win.values()[2].to_f64().unwrap() - 1.0).abs() < 1e-10);
+        }
+
+        #[test]
+        fn convolve_full_mode() {
+            let a = Column::from_values(vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+            ])
+            .unwrap();
+            let v = Column::from_values(vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(1.0),
+            ])
+            .unwrap();
+            let result = a.convolve(&v, "full").unwrap();
+            // Full convolution: [1*1, 1*1+2*1, 2*1+3*1, 3*1] = [1, 3, 5, 3]
+            assert_eq!(result.len(), 4);
+            assert!((result.values()[0].to_f64().unwrap() - 1.0).abs() < 1e-10);
+            assert!((result.values()[1].to_f64().unwrap() - 3.0).abs() < 1e-10);
+            assert!((result.values()[2].to_f64().unwrap() - 5.0).abs() < 1e-10);
+            assert!((result.values()[3].to_f64().unwrap() - 3.0).abs() < 1e-10);
+        }
+
+        #[test]
+        fn geomspace_creates_geometric_progression() {
+            let col = Column::geomspace(1.0, 1000.0, 4).unwrap();
+            assert_eq!(col.len(), 4);
+            assert!((col.values()[0].to_f64().unwrap() - 1.0).abs() < 1e-10);
+            assert!((col.values()[1].to_f64().unwrap() - 10.0).abs() < 1e-10);
+            assert!((col.values()[2].to_f64().unwrap() - 100.0).abs() < 1e-10);
+            assert!((col.values()[3].to_f64().unwrap() - 1000.0).abs() < 1e-10);
+        }
     }
 }
