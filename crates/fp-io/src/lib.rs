@@ -1096,7 +1096,7 @@ fn write_html_table_string(
     }
     for name in frame.column_names() {
         out.push_str("      <th>");
-        out.push_str(&html_text(&name, options.escape));
+        out.push_str(&html_text(name, options.escape));
         out.push_str("</th>\n");
     }
     out.push_str("    </tr>\n  </thead>\n  <tbody>\n");
@@ -1109,7 +1109,7 @@ fn write_html_table_string(
             out.push_str("</th>\n");
         }
         for name in frame.column_names() {
-            let value = frame.column(&name).and_then(|column| column.value(row_idx));
+            let value = frame.column(name).and_then(|column| column.value(row_idx));
             out.push_str("      <td>");
             match value {
                 Some(scalar) => out.push_str(&html_scalar_string(scalar, options)),

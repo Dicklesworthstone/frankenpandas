@@ -100,7 +100,7 @@ use fp_index::{
 use fp_runtime::{
     DecisionAction, EvidenceLedger, RuntimePolicy, SemanticIndexIdentity, SemanticWitnessRecord,
 };
-use fp_types::{DType, Interval, NullKind, PeriodFreq, Scalar, SparseDType, Timedelta, common_dtype};
+use fp_types::{DType, NullKind, PeriodFreq, Scalar, SparseDType, Timedelta, common_dtype};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
