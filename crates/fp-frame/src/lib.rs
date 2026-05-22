@@ -62782,7 +62782,8 @@ mod tests {
         let df = DataFrame::from_dict(&["a"], vec![("a", vec![Scalar::Int64(10)])]).unwrap();
 
         let csv = df.to_csv(',', true);
-        assert!(csv.starts_with("index,a\n"));
+        // When index has no name, header is empty (pandas behavior)
+        assert!(csv.starts_with(",a\n"));
         assert!(csv.contains("0,10\n"));
     }
 
@@ -62795,7 +62796,8 @@ mod tests {
         .unwrap();
 
         let csv = df.to_csv(',', true);
-        assert!(csv.starts_with("index,\"a,b\"\n"));
+        // When index has no name, header is empty (pandas behavior)
+        assert!(csv.starts_with(",\"a,b\"\n"));
         assert!(csv.contains("\"id,1\",\"x,y\"\n"));
     }
 
