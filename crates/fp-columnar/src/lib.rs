@@ -2397,6 +2397,29 @@ impl Column {
         Self::new(self.dtype, out)
     }
 
+    /// Replace elements at specified indices with given values.
+    ///
+    /// Matches np.put(). Returns a new column with values replaced at indices.
+    pub fn put(&self, indices: &[usize], values: &[Scalar]) -> Result<Self, ColumnError> {
+        if indices.len() != values.len() {
+            return Err(ColumnError::LengthMismatch {
+                left: indices.len(),
+                right: values.len(),
+            });
+        }
+        let mut out = self.values.clone();
+        for (&i, v) in indices.iter().zip(values) {
+            if i >= out.len() {
+                return Err(ColumnError::LengthMismatch {
+                    left: out.len(),
+                    right: i,
+                });
+            }
+            out[i] = v.clone();
+        }
+        Self::new(self.dtype, out)
+    }
+
     /// Contiguous slice by positional range `start..start+len`.
     ///
     /// Out-of-range requests are clamped to the available tail so a
