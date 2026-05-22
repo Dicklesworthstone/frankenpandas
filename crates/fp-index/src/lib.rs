@@ -2405,6 +2405,15 @@ fn period_qyear(period: Period) -> Result<i32, IndexError> {
         .map_err(period_date_error)
 }
 
+fn period_display_nanos(period: Period) -> Result<i64, IndexError> {
+    let date = datetime_nanos_to_date(period_end_nanos(period)?).map_err(period_date_error)?;
+    let start_nanos = period_start_nanos(period)?;
+    let time_nanos = datetime_from_nanos(start_nanos)
+        .map(|dt| time_to_nanos(dt.time()))
+        .ok_or_else(|| period_timestamp_error(format!("invalid start timestamp {start_nanos}")))?;
+    date_and_time_to_nanos(date, time_nanos).map_err(period_date_error)
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct PeriodFields<'a> {
     pub year: &'a [i32],
@@ -6416,6 +6425,24 @@ impl PeriodIndex {
             .iter()
             .copied()
             .map(period_qyear)
+            .collect::<Result<Vec<_>, _>>()
+    }
+
+    /// Format each period with pandas `PeriodIndex.strftime` semantics.
+    ///
+    /// Pandas formats periods at their display timestamp: the period's
+    /// ending date combined with the start-boundary clock time.
+    pub fn strftime(&self, format: &str) -> Result<Vec<Option<String>>, IndexError> {
+        self.values
+            .iter()
+            .copied()
+            .map(|period| {
+                let nanos = period_display_nanos(period)?;
+                let dt = datetime_from_nanos(nanos).ok_or_else(|| {
+                    period_timestamp_error(format!("invalid display timestamp {nanos}"))
+                })?;
+                Ok(Some(dt.format(format).to_string()))
+            })
             .collect::<Result<Vec<_>, _>>()
     }
 
@@ -18725,6 +18752,37 @@ mod tests {
         assert_eq!(periods.hour()?, start.hour());
         assert_eq!(periods.minute()?, start.minute());
         assert_eq!(periods.second()?, start.second());
+
+        Ok(())
+    }
+
+    #[test]
+    fn period_index_strftime_uses_pandas_display_timestamp_114mz() -> Result<(), super::IndexError>
+    {
+        use fp_types::{Period, PeriodFreq};
+
+        let periods = super::PeriodIndex::new(vec![
+            Period::new(50, PeriodFreq::Annual),
+            Period::new(216, PeriodFreq::Quarterly),
+            Period::new(649, PeriodFreq::Monthly),
+            Period::new(19_782, PeriodFreq::Daily),
+            Period::new(474_780, PeriodFreq::Hourly),
+            Period::new(28_486_834, PeriodFreq::Minutely),
+            Period::new(1_709_210_096, PeriodFreq::Secondly),
+        ]);
+
+        assert_eq!(
+            periods.strftime("%Y-%m-%d %H:%M:%S")?,
+            vec![
+                Some("2020-12-31 00:00:00".to_owned()),
+                Some("2024-03-31 00:00:00".to_owned()),
+                Some("2024-02-29 00:00:00".to_owned()),
+                Some("2024-02-29 00:00:00".to_owned()),
+                Some("2024-02-29 12:00:00".to_owned()),
+                Some("2024-02-29 12:34:00".to_owned()),
+                Some("2024-02-29 12:34:56".to_owned()),
+            ]
+        );
 
         Ok(())
     }
