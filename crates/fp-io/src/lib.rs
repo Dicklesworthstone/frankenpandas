@@ -2786,25 +2786,25 @@ fn parse_csv_datetime_column(series: &Series) -> Result<Option<Series>, IoError>
 }
 
 fn pandas_csv_numeric_column_requires_float(values: &[Scalar]) -> bool {
-    let mut saw_numeric = false;
-    let mut saw_missing = false;
+    // DISC-011: Nullable extension Int64 dtype parity.
+    // Previously: Int64 columns with nulls promoted to Float64 for CSV output.
+    // Now: Int64 columns preserve integer encoding; only promote when the
+    // column actually contains Float64 values (mixed Int64/Float64 → Float64).
+    let mut saw_int = false;
     let mut saw_float = false;
 
     for value in values {
         match value {
-            Scalar::Int64(_) => saw_numeric = true,
-            Scalar::Float64(_) => {
-                saw_numeric = true;
-                saw_float = true;
-            }
-            Scalar::Null(_) => saw_missing = true,
+            Scalar::Int64(_) => saw_int = true,
+            Scalar::Float64(_) => saw_float = true,
+            Scalar::Null(_) => {}
             Scalar::Bool(_) | Scalar::Utf8(_) | Scalar::Timedelta64(_) | Scalar::Datetime64(_) | Scalar::Period(_) | Scalar::Interval(_) => {
                 return false;
             }
         }
     }
 
-    saw_numeric && (saw_missing || saw_float)
+    saw_int && saw_float
 }
 
 fn apply_pandas_csv_numeric_promotions(columns: &mut [Vec<Scalar>]) {
@@ -3583,22 +3583,12 @@ fn scalar_to_json(scalar: &Scalar) -> serde_json::Value {
     }
 }
 
-fn column_promotes_int_json_values_to_float(values: &[Scalar]) -> bool {
-    let mut saw_int = false;
-    let mut saw_missing = false;
-
-    for value in values {
-        match value {
-            Scalar::Int64(_) => saw_int = true,
-            Scalar::Null(_) => saw_missing = true,
-            Scalar::Float64(_) => {}
-            Scalar::Bool(_) | Scalar::Utf8(_) | Scalar::Timedelta64(_) | Scalar::Datetime64(_) | Scalar::Period(_) | Scalar::Interval(_) => {
-                return false;
-            }
-        }
-    }
-
-    saw_int && saw_missing
+fn column_promotes_int_json_values_to_float(_values: &[Scalar]) -> bool {
+    // DISC-011: Nullable extension Int64 dtype parity.
+    // Pandas (since v0.24) preserves Int64 via a separate validity mask when
+    // null values are present. We now match: Int64 values serialize as integers,
+    // Null values serialize as null, no Float64 promotion.
+    false
 }
 
 fn scalar_to_json_with_column_promotion(
@@ -12452,6 +12442,8 @@ mod tests {
 
     #[test]
     fn csv_on_bad_lines_skip_preserves_short_rows_as_missing() {
+        // DISC-011: Int64 columns with missing values stay Int64 (extension dtype parity).
+        // Missing values use NullKind::Null (pd.NA semantics) not NullKind::NaN.
         let input = "a,b\n1,2\n3\n6,7\n";
         let opts = CsvReadOptions {
             on_bad_lines: CsvOnBadLines::Skip,
@@ -12463,7 +12455,7 @@ mod tests {
         assert_eq!(frame.column("a").unwrap().values()[1], Scalar::Int64(3));
         assert_eq!(
             frame.column("b").unwrap().values()[1],
-            Scalar::Null(NullKind::NaN)
+            Scalar::Null(NullKind::Null)
         );
     }
 
@@ -12751,7 +12743,8 @@ mod tests {
     }
 
     #[test]
-    fn json_records_write_promotes_nullable_int_column_to_float() {
+    fn json_records_write_preserves_nullable_int_column() {
+        // DISC-011: Nullable extension Int64 dtype parity - Int64 preserved, not promoted to Float64.
         let frame = DataFrame::from_dict_with_index(
             vec![("a", vec![Scalar::Int64(1), Scalar::Null(NullKind::Null)])],
             vec!["row".into(), "row".into()],
@@ -12759,7 +12752,7 @@ mod tests {
         .unwrap();
         let json = write_json_string(&frame, JsonOrient::Records).expect("write");
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed, serde_json::json!([{"a": 1.0}, {"a": null}]));
+        assert_eq!(parsed, serde_json::json!([{"a": 1}, {"a": null}]));
     }
 
     #[test]
@@ -12788,7 +12781,8 @@ mod tests {
     }
 
     #[test]
-    fn json_non_records_nullable_int_writes_promote_to_float() {
+    fn json_non_records_nullable_int_writes_preserve_int() {
+        // DISC-011: Nullable extension Int64 dtype parity - Int64 preserved, not promoted to Float64.
         let frame = DataFrame::from_dict(
             &["a"],
             vec![("a", vec![Scalar::Int64(1), Scalar::Null(NullKind::Null)])],
@@ -12799,26 +12793,26 @@ mod tests {
             serde_json::from_str(&write_json_string(&frame, JsonOrient::Columns).unwrap()).unwrap();
         assert_eq!(
             columns_json,
-            serde_json::json!({"a": {"0": 1.0, "1": null}})
+            serde_json::json!({"a": {"0": 1, "1": null}})
         );
 
         let index_json: serde_json::Value =
             serde_json::from_str(&write_json_string(&frame, JsonOrient::Index).unwrap()).unwrap();
         assert_eq!(
             index_json,
-            serde_json::json!({"0": {"a": 1.0}, "1": {"a": null}})
+            serde_json::json!({"0": {"a": 1}, "1": {"a": null}})
         );
 
         let split_json: serde_json::Value =
             serde_json::from_str(&write_json_string(&frame, JsonOrient::Split).unwrap()).unwrap();
         assert_eq!(
             split_json,
-            serde_json::json!({"columns": ["a"], "index": [0, 1], "data": [[1.0], [null]]})
+            serde_json::json!({"columns": ["a"], "index": [0, 1], "data": [[1], [null]]})
         );
 
         let values_json: serde_json::Value =
             serde_json::from_str(&write_json_string(&frame, JsonOrient::Values).unwrap()).unwrap();
-        assert_eq!(values_json, serde_json::json!([[1.0], [null]]));
+        assert_eq!(values_json, serde_json::json!([[1], [null]]));
     }
 
     #[test]
@@ -12863,6 +12857,7 @@ mod tests {
 
     #[test]
     fn file_csv_with_options_path() {
+        // DISC-011: Nullable extension Int64 dtype parity - Int64 preserved, not promoted to Float64.
         let input = "id\tval\na\tNA\nb\t2\n";
         let dir = std::env::temp_dir();
         let path = dir.join("fp_io_test_options.csv");
@@ -12884,7 +12879,7 @@ mod tests {
         assert!(frame.column("val").unwrap().values()[0].is_missing());
         assert_eq!(
             frame.column("val").unwrap().values()[1],
-            Scalar::Float64(2.0)
+            Scalar::Int64(2)
         );
 
         std::fs::remove_file(&path).ok();
@@ -12916,6 +12911,7 @@ mod tests {
 
     #[test]
     fn read_table_with_options_overrides_default_delimiter_4pwr9() {
+        // DISC-011: Nullable extension Int64 dtype parity - Int64 preserved, not promoted to Float64.
         let input = "x\ty\n1\tNA\n2\t3\n";
         let opts = CsvReadOptions {
             na_values: vec!["NA".into()],
@@ -12923,7 +12919,7 @@ mod tests {
         };
         let frame = super::read_table_with_options(input, &opts).expect("parse tsv with na");
         assert!(frame.column("y").unwrap().values()[0].is_missing());
-        assert_eq!(frame.column("y").unwrap().values()[1], Scalar::Float64(3.0));
+        assert_eq!(frame.column("y").unwrap().values()[1], Scalar::Int64(3));
     }
 
     #[test]
@@ -12976,6 +12972,7 @@ mod tests {
 
     #[test]
     fn read_fwf_str_threads_na_handling_23n8u() {
+        // DISC-011: Nullable extension Int64 dtype parity - Int64 preserved, not promoted to Float64.
         let input = "id   val\nA    NA \nB    7  \n";
         let opts = super::FwfReadOptions {
             colspecs: Some(vec![(0, 5), (5, 9)]),
@@ -12985,9 +12982,7 @@ mod tests {
         let frame = super::read_fwf_str(input, &opts).expect("parse fwf na");
         let col = frame.column("val").unwrap().values();
         assert!(col[0].is_missing());
-        // NaN promotes the numeric column to Float64 to mirror pandas' nullable
-        // semantics on int columns containing missing markers.
-        assert_eq!(col[1], Scalar::Float64(7.0));
+        assert_eq!(col[1], Scalar::Int64(7));
     }
 
     #[test]
@@ -14975,7 +14970,7 @@ mod tests {
             match dtype {
                 DType::Int64 | DType::Bool | DType::Timedelta64 | DType::Datetime64 => "BIGINT",
                 DType::Float64 => "DOUBLE PRECISION",
-                DType::Utf8 | DType::Categorical | DType::Null | DType::Sparse => "TEXT",
+                DType::Utf8 | DType::Categorical | DType::Null | DType::Sparse | DType::Period | DType::Interval => "TEXT",
             }
         }
 
@@ -17881,12 +17876,13 @@ mod tests {
     }
 
     #[test]
-    fn csv_missing_numeric_column_promotes_ints_to_float() {
+    fn csv_missing_numeric_column_preserves_int() {
+        // DISC-011: Nullable extension Int64 dtype parity - Int64 preserved, not promoted to Float64.
         let input = "a,b,c\n,NA,NaN\n1,,x\n";
         let frame = read_csv_with_options(input, &CsvReadOptions::default()).expect("parse");
         assert_eq!(
             frame.column("a").unwrap().values(),
-            &[Scalar::Null(NullKind::NaN), Scalar::Float64(1.0)]
+            &[Scalar::Null(NullKind::Null), Scalar::Int64(1)]
         );
         assert!(frame.column("b").unwrap().values()[0].is_missing());
         assert!(frame.column("b").unwrap().values()[1].is_missing());
@@ -18122,7 +18118,8 @@ mod tests {
     }
 
     #[test]
-    fn jsonl_records_write_promotes_nullable_int_column_to_float() {
+    fn jsonl_records_write_preserves_nullable_int_column() {
+        // DISC-011: Nullable extension Int64 dtype parity - Int64 preserved, not promoted to Float64.
         let frame = DataFrame::from_dict(
             &["a"],
             vec![("a", vec![Scalar::Int64(1), Scalar::Null(NullKind::Null)])],
@@ -18138,7 +18135,7 @@ mod tests {
         assert_eq!(
             rows,
             vec![
-                serde_json::json!({"a": 1.0}),
+                serde_json::json!({"a": 1}),
                 serde_json::json!({"a": null})
             ]
         );

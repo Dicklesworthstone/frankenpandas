@@ -226,6 +226,9 @@ fn dtype_to_pandas_jsonl_name(dtype: DType) -> &'static str {
         DType::Float64 => "float64",
         DType::Int64 => "int64",
         DType::Utf8 | DType::Categorical | DType::Sparse | DType::Timedelta64 => "object",
+        DType::Datetime64 => "datetime64[ns]",
+        DType::Period => "period",
+        DType::Interval => "interval",
         DType::Null => "float64",
     }
 }
@@ -246,6 +249,9 @@ fn scalar_to_jsonl_cell(value: &Scalar) -> Value {
         Scalar::Timedelta64(value) => {
             serde_json::json!({"kind": "utf8", "value": value.to_string()})
         }
+        Scalar::Datetime64(ns) => serde_json::json!({"kind": "datetime64", "value": ns}),
+        Scalar::Period(ordinal) => serde_json::json!({"kind": "period", "value": ordinal}),
+        Scalar::Interval(iv) => serde_json::json!({"kind": "interval", "value": iv.to_string()}),
     }
 }
 
