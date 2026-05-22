@@ -10230,8 +10230,8 @@ impl DataFrameIoExt for DataFrame {
 ///
 /// Import this trait to call `series.to_pickle(path)`,
 /// `series.to_pickle_bytes()`, `series.to_hdf(path)`,
-/// `series.to_excel(path)`, or `series.to_sql(conn, table, if_exists)`
-/// directly on Series values.
+/// `series.to_excel(path)`, `series.to_sql(conn, table, if_exists)`, or
+/// `series.to_clipboard()` directly on Series values.
 pub trait SeriesIoExt {
     /// Write this Series to a Pickle file.
     ///
@@ -10322,6 +10322,9 @@ pub trait SeriesIoExt {
         table_name: &str,
         options: &SqlWriteOptions,
     ) -> Result<(), IoError>;
+
+    /// Reject-closed clipboard writer, matching `pd.Series.to_clipboard()` shape.
+    fn to_clipboard(&self) -> Result<(), IoError>;
 }
 
 impl SeriesIoExt for Series {
@@ -10424,6 +10427,14 @@ impl SeriesIoExt for Series {
         options: &SqlWriteOptions,
     ) -> Result<(), IoError> {
         write_sql_with_options(&self.to_frame(None)?, conn, table_name, options)
+    }
+
+    fn to_clipboard(&self) -> Result<(), IoError> {
+        let _ = self;
+        Err(deferred_writer_error(
+            "to_clipboard",
+            "OS clipboard access requires GUI bindings outside FrankenPandas's headless charter",
+        ))
     }
 }
 
@@ -13438,6 +13449,24 @@ mod tests {
             .to_gbq("dataset.table", None)
             .expect_err("must reject BigQuery writer without project");
         assert!(matches!(no_project_err, super::IoError::Deferred(_)));
+    }
+
+    #[test]
+    fn series_clipboard_writer_rejects_with_deferred_marker() {
+        use super::SeriesIoExt;
+
+        let source = Series::from_values(
+            "sales",
+            vec!["r1".into(), "r2".into()],
+            vec![Scalar::Int64(10), Scalar::Int64(12)],
+        )
+        .expect("source series");
+        let err = source
+            .to_clipboard()
+            .expect_err("must reject series clipboard writer");
+        assert!(
+            matches!(&err, super::IoError::Deferred(message) if message.contains("to_clipboard") && message.contains("headless"))
+        );
     }
 
     #[test]
