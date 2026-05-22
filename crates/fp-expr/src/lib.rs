@@ -908,7 +908,7 @@ fn evaluate_delta_comparison(
 //   - Membership operators: in, not in (with scalar list literals)
 //   - Logical operators: and, or, not
 //   - Unary function calls: abs(expr)
-//   - No-argument null predicate methods: .isna(), .notna(), .isnull(), .notnull()
+//   - Series method calls: .isin([...]), .isna(), .notna(), .isnull(), .notnull()
 //   - Arithmetic operators: +, -, *, /, //, %, **
 //   - Parenthesized sub-expressions
 
@@ -924,7 +924,7 @@ fn evaluate_delta_comparison(
 ///   mul_expr   → unary_expr ( ("*" | "/" | "//" | "%") unary_expr )*
 ///   unary_expr → ("+" | "-") unary_expr | pow_expr
 ///   pow_expr   → atom ( "**" unary_expr )?
-///   atom       → primary ( "." NULL_METHOD "(" ")" )*
+///   atom       → primary ( "." METHOD_CALL )*
 ///   primary    → NUMBER | STRING | BOOL | IDENT | LOCAL | "abs" "(" expr ")" | "(" expr ")"
 pub fn parse_expr(input: &str) -> Result<Expr, ExprError> {
     let tokens = tokenize(input)?;
@@ -1641,25 +1641,41 @@ fn parse_postfix(mut expr: Expr, tokens: &[Token], pos: &mut usize) -> Result<Ex
                 "expected '(' after method name {method}"
             )));
         }
-        if tokens.get(*pos + 3) != Some(&Token::RParen) {
-            return Err(ExprError::ParseError(format!(
-                "method {method} does not accept arguments in expressions"
-            )));
-        }
-        let negated = match method.as_str() {
-            "isna" | "isnull" => false,
-            "notna" | "notnull" => true,
+
+        match method.as_str() {
+            "isna" | "isnull" | "notna" | "notnull" => {
+                if tokens.get(*pos + 3) != Some(&Token::RParen) {
+                    return Err(ExprError::ParseError(format!(
+                        "method {method} does not accept arguments in expressions"
+                    )));
+                }
+                expr = Expr::IsNull {
+                    expr: Box::new(expr),
+                    negated: matches!(method.as_str(), "notna" | "notnull"),
+                };
+                *pos += 4;
+            }
+            "isin" => {
+                let mut arg_pos = *pos + 3;
+                let values = parse_list_literal(tokens, &mut arg_pos)?;
+                if tokens.get(arg_pos) != Some(&Token::RParen) {
+                    return Err(ExprError::ParseError(
+                        "expected ')' after isin list literal".into(),
+                    ));
+                }
+                expr = Expr::IsIn {
+                    left: Box::new(expr),
+                    values,
+                    negated: false,
+                };
+                *pos = arg_pos + 1;
+            }
             _ => {
                 return Err(ExprError::ParseError(format!(
                     "unsupported expression method: {method}"
                 )));
             }
         };
-        expr = Expr::IsNull {
-            expr: Box::new(expr),
-            negated,
-        };
-        *pos += 4;
     }
     Ok(expr)
 }
@@ -3089,6 +3105,28 @@ mod tests {
     }
 
     #[test]
+    fn parse_isin_method_call_list_literal() -> Result<(), ExprError> {
+        let expr = super::parse_expr("a.isin([1, 3,])")?;
+        let Expr::IsIn {
+            left,
+            values,
+            negated,
+        } = expr
+        else {
+            return Err(ExprError::ParseError("expected IsIn expression".into()));
+        };
+        assert_eq!(
+            left.as_ref(),
+            &Expr::Series {
+                name: SeriesRef("a".into())
+            }
+        );
+        assert!(!negated);
+        assert_eq!(values, vec![Scalar::Int64(1), Scalar::Int64(3)]);
+        Ok(())
+    }
+
+    #[test]
     fn parse_backtick_identifier() {
         let expr = super::parse_expr("`gross margin` + normal").unwrap();
         assert!(matches!(&expr, Expr::Add { .. }));
@@ -3637,6 +3675,36 @@ mod tests {
         assert_eq!(
             notnull.values(),
             &[Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn eval_and_query_str_accept_isin_method_call() -> Result<(), ExprError> {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "a",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![Scalar::Int64(1), Scalar::Int64(4), Scalar::Int64(9)],
+            )
+            .map_err(ExprError::from)?,
+        ])
+        .map_err(ExprError::from)?;
+
+        let mask = super::eval_str("a.isin([1, 9])", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            mask.values(),
+            &[Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)]
+        );
+
+        let filtered = super::query_str("a.isin([1, 9])", &frame, &policy, &mut ledger)?;
+        assert_eq!(filtered.index().labels(), &[0_i64.into(), 2_i64.into()]);
+        assert_eq!(
+            filtered.columns()["a"].values(),
+            &[Scalar::Int64(1), Scalar::Int64(9)]
         );
         Ok(())
     }
