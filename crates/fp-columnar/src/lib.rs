@@ -4821,6 +4821,72 @@ impl Column {
         Self::new(DType::Float64, out)
     }
 
+    /// Compute element-wise inverse hyperbolic sine.
+    pub fn asinh(&self) -> Result<Self, ColumnError> {
+        let mut out = Vec::with_capacity(self.values.len());
+        for v in &self.values {
+            if v.is_missing() {
+                out.push(Scalar::Float64(f64::NAN));
+                continue;
+            }
+            match v {
+                Scalar::Int64(x) => out.push(Scalar::Float64((*x as f64).asinh())),
+                Scalar::Float64(x) => out.push(Scalar::Float64(x.asinh())),
+                _ => {
+                    return Err(ColumnError::Type(TypeError::NonNumericValue {
+                        value: format!("{v:?}"),
+                        dtype: self.dtype,
+                    }));
+                }
+            }
+        }
+        Self::new(DType::Float64, out)
+    }
+
+    /// Compute element-wise inverse hyperbolic cosine.
+    pub fn acosh(&self) -> Result<Self, ColumnError> {
+        let mut out = Vec::with_capacity(self.values.len());
+        for v in &self.values {
+            if v.is_missing() {
+                out.push(Scalar::Float64(f64::NAN));
+                continue;
+            }
+            match v {
+                Scalar::Int64(x) => out.push(Scalar::Float64((*x as f64).acosh())),
+                Scalar::Float64(x) => out.push(Scalar::Float64(x.acosh())),
+                _ => {
+                    return Err(ColumnError::Type(TypeError::NonNumericValue {
+                        value: format!("{v:?}"),
+                        dtype: self.dtype,
+                    }));
+                }
+            }
+        }
+        Self::new(DType::Float64, out)
+    }
+
+    /// Compute element-wise inverse hyperbolic tangent.
+    pub fn atanh(&self) -> Result<Self, ColumnError> {
+        let mut out = Vec::with_capacity(self.values.len());
+        for v in &self.values {
+            if v.is_missing() {
+                out.push(Scalar::Float64(f64::NAN));
+                continue;
+            }
+            match v {
+                Scalar::Int64(x) => out.push(Scalar::Float64((*x as f64).atanh())),
+                Scalar::Float64(x) => out.push(Scalar::Float64(x.atanh())),
+                _ => {
+                    return Err(ColumnError::Type(TypeError::NonNumericValue {
+                        value: format!("{v:?}"),
+                        dtype: self.dtype,
+                    }));
+                }
+            }
+        }
+        Self::new(DType::Float64, out)
+    }
+
     /// Compute element-wise floor.
     pub fn floor(&self) -> Result<Self, ColumnError> {
         let mut out = Vec::with_capacity(self.values.len());
