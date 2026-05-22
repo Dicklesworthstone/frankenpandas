@@ -2638,11 +2638,17 @@ impl Column {
 
     /// Remove duplicated values, keeping the first occurrence.
     ///
-    /// Matches `pd.Series.drop_duplicates(keep='first')`. Built atop
-    /// `duplicated()` for consistent null handling (a single null
-    /// position is kept; subsequent nulls are dropped).
+    /// Matches `pd.Series.drop_duplicates(keep='first')`.
     pub fn drop_duplicates(&self) -> Result<Self, ColumnError> {
-        let dup = self.duplicated()?;
+        self.drop_duplicates_keep("first")
+    }
+
+    /// Remove duplicated values with explicit pandas `keep=` semantics.
+    ///
+    /// Supported policies are `"first"`, `"last"`, and `"false"` /
+    /// `"none"` for pandas `keep=False`.
+    pub fn drop_duplicates_keep(&self, keep: &str) -> Result<Self, ColumnError> {
+        let dup = self.duplicated_keep(keep)?;
         let mut out = Vec::with_capacity(self.values.len());
         for (v, keep_flag) in self.values.iter().zip(dup.values.iter()) {
             if matches!(keep_flag, Scalar::Bool(false)) {
@@ -3565,7 +3571,21 @@ impl Column {
     /// of each value is flagged true. Missing values are treated as a
     /// single bucket (pandas equates NaN for this purpose).
     pub fn duplicated(&self) -> Result<Self, ColumnError> {
+        self.duplicated_keep("first")
+    }
+
+    /// Per-row boolean flag for duplicated values with explicit keep policy.
+    ///
+    /// Matches `pd.Series.duplicated(keep=...)`. Supported policies
+    /// are `"first"`, `"last"`, and `"false"` / `"none"` for pandas
+    /// `keep=False`.
+    pub fn duplicated_keep(&self, keep: &str) -> Result<Self, ColumnError> {
         use std::collections::HashSet;
+        enum Keep {
+            First,
+            Last,
+            None,
+        }
         #[derive(Hash, PartialEq, Eq)]
         enum Key<'a> {
             Null,
@@ -3601,12 +3621,48 @@ impl Column {
             }
         }
 
-        let mut seen: HashSet<Key<'_>> = HashSet::new();
-        let out: Vec<Scalar> = self
-            .values
-            .iter()
-            .map(|v| Scalar::Bool(!seen.insert(key_of(v))))
-            .collect();
+        let policy = match keep {
+            "first" => Keep::First,
+            "last" => Keep::Last,
+            "false" | "False" | "none" => Keep::None,
+            other => {
+                return Err(ColumnError::Type(TypeError::NonNumericValue {
+                    value: other.to_string(),
+                    dtype: self.dtype,
+                }));
+            }
+        };
+
+        let mut flags = vec![false; self.values.len()];
+        match policy {
+            Keep::First => {
+                let mut seen: HashSet<Key<'_>> = HashSet::new();
+                for (idx, value) in self.values.iter().enumerate() {
+                    flags[idx] = !seen.insert(key_of(value));
+                }
+            }
+            Keep::Last => {
+                let mut seen: HashSet<Key<'_>> = HashSet::new();
+                for (idx, value) in self.values.iter().enumerate().rev() {
+                    flags[idx] = !seen.insert(key_of(value));
+                }
+            }
+            Keep::None => {
+                let mut seen_once: HashSet<Key<'_>> = HashSet::new();
+                let mut seen_multiple: HashSet<Key<'_>> = HashSet::new();
+                for value in &self.values {
+                    let key = key_of(value);
+                    if !seen_once.insert(key_of(value)) {
+                        seen_multiple.insert(key);
+                    }
+                }
+                for (idx, value) in self.values.iter().enumerate() {
+                    flags[idx] = seen_multiple.contains(&key_of(value));
+                }
+            }
+        }
+
+        let out: Vec<Scalar> = flags.into_iter().map(Scalar::Bool).collect();
         Self::new(DType::Bool, out)
     }
 
@@ -6496,6 +6552,51 @@ mod tests {
         }
 
         #[test]
+        fn duplicated_keep_variants_match_pandas() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(1),
+                Scalar::Int64(1),
+                Scalar::Int64(3),
+                Scalar::Int64(2),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::NaN),
+            ])
+            .expect("col");
+
+            let last = col.duplicated_keep("last").expect("duplicated last");
+            assert_eq!(
+                last.values(),
+                &[
+                    Scalar::Bool(true),
+                    Scalar::Bool(true),
+                    Scalar::Bool(true),
+                    Scalar::Bool(false),
+                    Scalar::Bool(false),
+                    Scalar::Bool(false),
+                    Scalar::Bool(true),
+                    Scalar::Bool(false),
+                ]
+            );
+
+            let none = col.duplicated_keep("false").expect("duplicated none");
+            assert_eq!(
+                none.values(),
+                &[
+                    Scalar::Bool(true),
+                    Scalar::Bool(true),
+                    Scalar::Bool(true),
+                    Scalar::Bool(true),
+                    Scalar::Bool(false),
+                    Scalar::Bool(true),
+                    Scalar::Bool(true),
+                    Scalar::Bool(true),
+                ]
+            );
+        }
+
+        #[test]
         fn between_inclusive_both() {
             let col = Column::from_values(vec![
                 Scalar::Float64(0.5),
@@ -6990,6 +7091,31 @@ mod tests {
             assert_eq!(d.len(), 2);
             assert!(d.values()[0].is_missing());
             assert_eq!(d.values()[1], Scalar::Int64(1));
+        }
+
+        #[test]
+        fn drop_duplicates_keep_variants_match_pandas() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(1),
+                Scalar::Int64(1),
+                Scalar::Int64(3),
+                Scalar::Int64(2),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::NaN),
+            ])
+            .expect("col");
+
+            let last = col.drop_duplicates_keep("last").expect("drop last");
+            assert_eq!(last.len(), 4);
+            assert_eq!(last.values()[0], Scalar::Int64(1));
+            assert_eq!(last.values()[1], Scalar::Int64(3));
+            assert_eq!(last.values()[2], Scalar::Int64(2));
+            assert!(last.values()[3].is_missing());
+
+            let none = col.drop_duplicates_keep("false").expect("drop none");
+            assert_eq!(none.values(), &[Scalar::Int64(3)]);
         }
 
         #[test]
