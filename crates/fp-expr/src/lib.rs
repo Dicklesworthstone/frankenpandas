@@ -184,6 +184,11 @@ pub enum Expr {
         expr: Box<Expr>,
         value: Scalar,
     },
+    Replace {
+        expr: Box<Expr>,
+        to_replace: Scalar,
+        value: Scalar,
+    },
     Where {
         expr: Box<Expr>,
         cond: Box<Expr>,
@@ -413,6 +418,16 @@ pub fn evaluate(
         Expr::FillNa { expr, value } => {
             let input = evaluate(expr, context, policy, ledger)?;
             input.fillna(value).map_err(ExprError::from)
+        }
+        Expr::Replace {
+            expr,
+            to_replace,
+            value,
+        } => {
+            let input = evaluate(expr, context, policy, ledger)?;
+            input
+                .replace(&[(to_replace.clone(), value.clone())])
+                .map_err(ExprError::from)
         }
         Expr::Where {
             expr,
@@ -850,6 +865,7 @@ impl MaterializedView {
             }
             Expr::IsNull { expr, .. } => Self::extract_series(expr, series_set),
             Expr::FillNa { expr, .. } => Self::extract_series(expr, series_set),
+            Expr::Replace { expr, .. } => Self::extract_series(expr, series_set),
             Expr::Where {
                 expr, cond, other, ..
             } => {
@@ -987,6 +1003,16 @@ fn evaluate_delta(
             let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
             input.fillna(value).map_err(ExprError::from)
         }
+        Expr::Replace {
+            expr,
+            to_replace,
+            value,
+        } => {
+            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
+            input
+                .replace(&[(to_replace.clone(), value.clone())])
+                .map_err(ExprError::from)
+        }
         Expr::Where {
             expr,
             cond,
@@ -1112,8 +1138,8 @@ fn evaluate_delta_comparison(
 //     .div(other), .truediv(other), .floordiv(other), .mod(other),
 //     .pow(other), reflected arithmetic variants, .eq(other), .ne(other),
 //     .gt(other), .ge(other), .lt(other), .le(other), .clip(lower, upper),
-//     .round(decimals), .where(cond, other), .mask(cond, other), .isna(),
-//     .notna(), .isnull(), .notnull()
+//     .round(decimals), .replace(to_replace, value), .where(cond, other),
+//     .mask(cond, other), .isna(), .notna(), .isnull(), .notnull()
 //   - Arithmetic operators: +, -, *, /, //, %, **
 //   - Parenthesized sub-expressions
 
@@ -1978,6 +2004,48 @@ fn parse_postfix(mut expr: Expr, tokens: &[Token], pos: &mut usize) -> Result<Ex
                 }
                 expr = Expr::FillNa {
                     expr: Box::new(expr),
+                    value,
+                };
+                *pos = arg_pos + 1;
+            }
+            "replace" => {
+                let mut arg_pos = *pos + 3;
+                if let Some(Token::Ident(keyword)) = tokens.get(arg_pos)
+                    && tokens.get(arg_pos + 1) == Some(&Token::Assign)
+                {
+                    if keyword != "to_replace" {
+                        return Err(ExprError::ParseError(format!(
+                            "unexpected replace() first keyword argument: {keyword}"
+                        )));
+                    }
+                    arg_pos += 2;
+                }
+                let to_replace = parse_scalar_literal(tokens, &mut arg_pos)?;
+                if tokens.get(arg_pos) != Some(&Token::Comma) {
+                    return Err(ExprError::ParseError(
+                        "expected ',' between replace() arguments".into(),
+                    ));
+                }
+                arg_pos += 1;
+                if let Some(Token::Ident(keyword)) = tokens.get(arg_pos)
+                    && tokens.get(arg_pos + 1) == Some(&Token::Assign)
+                {
+                    if keyword != "value" {
+                        return Err(ExprError::ParseError(format!(
+                            "unexpected replace() keyword argument: {keyword}"
+                        )));
+                    }
+                    arg_pos += 2;
+                }
+                let value = parse_scalar_literal(tokens, &mut arg_pos)?;
+                if tokens.get(arg_pos) != Some(&Token::RParen) {
+                    return Err(ExprError::ParseError(
+                        "expected ')' after replace() arguments".into(),
+                    ));
+                }
+                expr = Expr::Replace {
+                    expr: Box::new(expr),
+                    to_replace,
                     value,
                 };
                 *pos = arg_pos + 1;
@@ -4452,6 +4520,57 @@ mod tests {
             keyword_filtered.index().labels(),
             &[1_i64.into(), 2_i64.into()]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn eval_and_query_str_accept_replace_method_call() -> Result<(), ExprError> {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "a",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(1)],
+            )
+            .map_err(ExprError::from)?,
+            fp_frame::Series::from_values(
+                "label",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![
+                    Scalar::Utf8("old".to_owned()),
+                    Scalar::Utf8("keep".to_owned()),
+                    Scalar::Utf8("old".to_owned()),
+                ],
+            )
+            .map_err(ExprError::from)?,
+        ])
+        .map_err(ExprError::from)?;
+
+        let replaced = super::eval_str("a.replace(1, 9)", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            replaced.values(),
+            &[Scalar::Int64(9), Scalar::Int64(2), Scalar::Int64(9)]
+        );
+
+        let keyword = super::eval_str(
+            "label.replace(to_replace=\"old\", value=\"new\")",
+            &frame,
+            &policy,
+            &mut ledger,
+        )?;
+        assert_eq!(
+            keyword.values(),
+            &[
+                Scalar::Utf8("new".to_owned()),
+                Scalar::Utf8("keep".to_owned()),
+                Scalar::Utf8("new".to_owned()),
+            ]
+        );
+
+        let filtered = super::query_str("a.replace(1, 9) == 9", &frame, &policy, &mut ledger)?;
+        assert_eq!(filtered.index().labels(), &[0_i64.into(), 2_i64.into()]);
         Ok(())
     }
 
