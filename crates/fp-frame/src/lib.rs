@@ -498,6 +498,7 @@ fn pivot_table_agg_value(aggfunc: &str, vals: &[f64]) -> Result<f64, FrameError>
             }
         }
         "count" => vals.len() as f64,
+        "size" => vals.len() as f64,
         "min" => vals.iter().copied().fold(f64::INFINITY, f64::min),
         "max" => vals.iter().copied().fold(f64::NEG_INFINITY, f64::max),
         "first" => vals.first().copied().unwrap_or(f64::NAN),
@@ -539,6 +540,10 @@ fn pivot_table_agg_value(aggfunc: &str, vals: &[f64]) -> Result<f64, FrameError>
             )));
         }
     })
+}
+
+fn pivot_table_counts_rows(aggfunc: &str) -> bool {
+    aggfunc == "size"
 }
 
 /// Per br-frankenpandas-a56003: pandas Series.quantile interpolation modes.
@@ -1032,7 +1037,9 @@ fn null_kind_rank(kind: NullKind) -> u8 {
 }
 
 fn scalar_key_cmp(a: &ScalarKey<'_>, b: &ScalarKey<'_>) -> Ordering {
-    use ScalarKey::{Bool, Datetime64, FloatBits, Int64, Interval, Null, Period, Timedelta64, Utf8};
+    use ScalarKey::{
+        Bool, Datetime64, FloatBits, Int64, Interval, Null, Period, Timedelta64, Utf8,
+    };
     match (a, b) {
         (Null(a_kind), Null(b_kind)) => null_kind_rank(*a_kind).cmp(&null_kind_rank(*b_kind)),
         (Null(_), _) => Ordering::Greater,
@@ -1046,12 +1053,10 @@ fn scalar_key_cmp(a: &ScalarKey<'_>, b: &ScalarKey<'_>) -> Ordering {
         (Timedelta64(a_val), Timedelta64(b_val)) => a_val.cmp(b_val),
         (Datetime64(a_val), Datetime64(b_val)) => a_val.cmp(b_val),
         (Period(a_val), Period(b_val)) => a_val.cmp(b_val),
-        (Interval(al, ar, ac), Interval(bl, br, bc)) => {
-            f64::from_bits(*al)
-                .total_cmp(&f64::from_bits(*bl))
-                .then_with(|| f64::from_bits(*ar).total_cmp(&f64::from_bits(*br)))
-                .then_with(|| ac.cmp(bc))
-        }
+        (Interval(al, ar, ac), Interval(bl, br, bc)) => f64::from_bits(*al)
+            .total_cmp(&f64::from_bits(*bl))
+            .then_with(|| f64::from_bits(*ar).total_cmp(&f64::from_bits(*br)))
+            .then_with(|| ac.cmp(bc)),
         (Bool(a_val), Int64(b_val)) => {
             let ord = i64::from(*a_val).cmp(b_val);
             if ord == Ordering::Equal {
@@ -27960,7 +27965,7 @@ impl DataFrame {
     /// `values`: column containing values to aggregate
     /// `index_col`: column to use as the new row index
     /// `columns_col`: column whose unique values become new columns
-    /// `aggfunc`: aggregation function ("mean", "sum", "count", "min", "max", "first")
+    /// `aggfunc`: aggregation function ("mean", "sum", "count", "size", "min", "max", "first")
     pub fn pivot_table(
         &self,
         values: &str,
@@ -28060,7 +28065,9 @@ impl DataFrame {
             }) else {
                 continue;
             };
-            if let Ok(v) = val_col.values()[i].to_f64() {
+            if pivot_table_counts_rows(aggfunc) {
+                groups.entry((ik, ck)).or_default().push(0.0);
+            } else if let Ok(v) = val_col.values()[i].to_f64() {
                 groups.entry((ik, ck)).or_default().push(v);
             }
         }
@@ -28236,6 +28243,7 @@ impl DataFrame {
         values: &str,
         index_col: &str,
         columns_col: &str,
+        aggfunc: &str,
         row_label: Option<&IndexLabel>,
         column_name: Option<&str>,
     ) -> Vec<f64> {
@@ -28265,7 +28273,9 @@ impl DataFrame {
                 continue;
             }
 
-            if let Ok(value) = val_col.values()[row_idx].to_f64() {
+            if pivot_table_counts_rows(aggfunc) {
+                out.push(0.0);
+            } else if let Ok(value) = val_col.values()[row_idx].to_f64() {
                 out.push(value);
             }
         }
@@ -28296,6 +28306,7 @@ impl DataFrame {
                 values,
                 index_col,
                 columns_col,
+                aggfunc,
                 Some(row_label),
                 None,
             );
@@ -28315,6 +28326,7 @@ impl DataFrame {
                 values,
                 index_col,
                 columns_col,
+                aggfunc,
                 None,
                 Some(name),
             );
@@ -28326,8 +28338,14 @@ impl DataFrame {
             new_cols.insert(name.clone(), Column::new(DType::Float64, col_vals)?);
         }
 
-        let overall_vals =
-            self.pivot_table_margin_source_values(values, index_col, columns_col, None, None);
+        let overall_vals = self.pivot_table_margin_source_values(
+            values,
+            index_col,
+            columns_col,
+            aggfunc,
+            None,
+            None,
+        );
         all_col_vals.push(if overall_vals.is_empty() {
             Scalar::Null(NullKind::NaN)
         } else {
@@ -50800,6 +50818,53 @@ mod tests {
         // r1, c1 → mean(10, 20) = 15.0; r1, c2 → 30.0
         assert_eq!(pivoted.columns["c1"].values()[0], Scalar::Float64(15.0));
         assert_eq!(pivoted.columns["c2"].values()[0], Scalar::Float64(30.0));
+    }
+
+    #[test]
+    fn dataframe_pivot_table_size_counts_rows_including_null_values() {
+        let df = DataFrame::from_series(vec![
+            Series::from_values(
+                "row",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("b".into()),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "col",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Utf8("x".into()),
+                    Scalar::Utf8("x".into()),
+                    Scalar::Utf8("y".into()),
+                    Scalar::Utf8("x".into()),
+                ],
+            )
+            .unwrap(),
+            Series::from_values(
+                "val",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Null(NullKind::NaN),
+                    Scalar::Float64(3.0),
+                    Scalar::Float64(4.0),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let pivoted = df.pivot_table("val", "row", "col", "size").unwrap();
+
+        assert_eq!(pivoted.columns["x"].values()[0], Scalar::Float64(2.0));
+        assert_eq!(pivoted.columns["y"].values()[0], Scalar::Float64(1.0));
+        assert_eq!(pivoted.columns["x"].values()[1], Scalar::Float64(1.0));
+        assert!(pivoted.columns["y"].values()[1].is_missing());
     }
 
     #[test]
