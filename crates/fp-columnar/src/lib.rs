@@ -6729,7 +6729,7 @@ impl Column {
                 Scalar::Int64(x) => {
                     let f = (*x as f64).abs();
                     if f == 0.0 {
-                        out.push(Scalar::Float64(f64::MIN_POSITIVE));
+                        out.push(Scalar::Float64(f64::from_bits(1)));
                     } else {
                         let bits = f.to_bits();
                         let next = f64::from_bits(bits + 1);
@@ -6742,7 +6742,7 @@ impl Column {
                     } else {
                         let f = x.abs();
                         if f == 0.0 {
-                            out.push(Scalar::Float64(f64::MIN_POSITIVE));
+                            out.push(Scalar::Float64(f64::from_bits(1)));
                         } else {
                             let bits = f.to_bits();
                             let next = f64::from_bits(bits + 1);
@@ -12717,8 +12717,8 @@ mod tests {
             // Spacing is symmetric for negative numbers
             let s_neg1 = result.values()[1].to_f64().unwrap();
             assert!((s1 - s_neg1).abs() < 1e-20);
-            // Spacing at 0 is MIN_POSITIVE
-            assert_eq!(result.values()[2].to_f64().unwrap(), f64::MIN_POSITIVE);
+            // Spacing at 0 is smallest denormal (not MIN_POSITIVE which is normalized)
+            assert_eq!(result.values()[2].to_f64().unwrap(), f64::from_bits(1));
         }
 
         #[test]
