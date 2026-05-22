@@ -4390,6 +4390,68 @@ impl Column {
         Ok(Some(sorter))
     }
 
+    /// Return bin indices for values given sorted bin edges.
+    ///
+    /// Matches np.digitize(). Returns indices such that bins[i-1] <= x < bins[i].
+    pub fn digitize(&self, bins: &Self, right: bool) -> Result<Self, ColumnError> {
+        let mut out = Vec::with_capacity(self.values.len());
+        for v in &self.values {
+            if v.is_missing() {
+                out.push(Scalar::Int64(0));
+                continue;
+            }
+            let vf = v.to_f64().map_err(ColumnError::Type)?;
+            let side = if right { "right" } else { "left" };
+            let pos = bins.searchsorted(&Scalar::Float64(vf), side)?;
+            out.push(Scalar::Int64(pos as i64));
+        }
+        Self::new(DType::Int64, out)
+    }
+
+    /// Count occurrences of each non-negative integer value.
+    ///
+    /// Matches np.bincount(). Returns array where output[i] = count of i in input.
+    /// Requires non-negative Int64 values.
+    pub fn bincount(&self, minlength: usize) -> Result<Self, ColumnError> {
+        let mut max_val = 0i64;
+        for v in &self.values {
+            if v.is_missing() {
+                continue;
+            }
+            match v {
+                Scalar::Int64(x) if *x >= 0 => {
+                    if *x > max_val {
+                        max_val = *x;
+                    }
+                }
+                Scalar::Int64(x) => {
+                    return Err(ColumnError::Type(TypeError::NonNumericValue {
+                        value: format!("negative value {x}"),
+                        dtype: self.dtype,
+                    }));
+                }
+                _ => {
+                    return Err(ColumnError::Type(TypeError::NonNumericValue {
+                        value: format!("{v:?}"),
+                        dtype: self.dtype,
+                    }));
+                }
+            }
+        }
+        let len = (max_val as usize + 1).max(minlength);
+        let mut counts = vec![0i64; len];
+        for v in &self.values {
+            if v.is_missing() {
+                continue;
+            }
+            if let Scalar::Int64(x) = v {
+                counts[*x as usize] += 1;
+            }
+        }
+        let out: Vec<Scalar> = counts.into_iter().map(Scalar::Int64).collect();
+        Self::new(DType::Int64, out)
+    }
+
     /// Cast the column to a target dtype.
     ///
     /// Matches `pd.Series.astype(dtype)`. Each value is routed through
