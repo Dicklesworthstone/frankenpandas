@@ -3195,6 +3195,26 @@ impl Column {
         self.memory_usage(false)
     }
 
+    /// Return the size in bytes of a single element.
+    ///
+    /// Matches `pd.Series.dtype.itemsize`. Returns 8 for Int64/Float64/Datetime64/Timedelta64,
+    /// 1 for Bool, and an estimate for variable-length types.
+    #[must_use]
+    pub fn itemsize(&self) -> usize {
+        match self.dtype() {
+            DType::Bool => 1,
+            DType::Int64 | DType::Float64 | DType::Datetime64 | DType::Timedelta64 | DType::Period => 8,
+            DType::Utf8 => {
+                if self.values.is_empty() {
+                    0
+                } else {
+                    self.memory_usage(true) / self.values.len()
+                }
+            }
+            DType::Null | DType::Categorical | DType::Interval | DType::Sparse => 8,
+        }
+    }
+
     /// Element-wise equality into a Bool column.
     ///
     /// Matches `pd.Series.eq(other)`. Both inputs must have the same
