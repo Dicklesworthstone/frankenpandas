@@ -5673,6 +5673,62 @@ impl Series {
         )
     }
 
+    /// Element-wise square root.
+    ///
+    /// Matches `np.sqrt(series)`. NaN values pass through.
+    pub fn sqrt(&self) -> Result<Self, FrameError> {
+        Self::new(self.name.clone(), self.index.clone(), self.column.sqrt()?)
+    }
+
+    /// Element-wise exponential (e^x).
+    ///
+    /// Matches `np.exp(series)`. NaN values pass through.
+    pub fn exp(&self) -> Result<Self, FrameError> {
+        Self::new(self.name.clone(), self.index.clone(), self.column.exp()?)
+    }
+
+    /// Element-wise natural logarithm.
+    ///
+    /// Matches `np.log(series)`. NaN values pass through.
+    pub fn log(&self) -> Result<Self, FrameError> {
+        Self::new(self.name.clone(), self.index.clone(), self.column.log()?)
+    }
+
+    /// Element-wise base-10 logarithm.
+    ///
+    /// Matches `np.log10(series)`. NaN values pass through.
+    pub fn log10(&self) -> Result<Self, FrameError> {
+        Self::new(self.name.clone(), self.index.clone(), self.column.log10()?)
+    }
+
+    /// Element-wise base-2 logarithm.
+    ///
+    /// Matches `np.log2(series)`. NaN values pass through.
+    pub fn log2(&self) -> Result<Self, FrameError> {
+        Self::new(self.name.clone(), self.index.clone(), self.column.log2()?)
+    }
+
+    /// Element-wise sine.
+    ///
+    /// Matches `np.sin(series)`. NaN values pass through.
+    pub fn sin(&self) -> Result<Self, FrameError> {
+        Self::new(self.name.clone(), self.index.clone(), self.column.sin()?)
+    }
+
+    /// Element-wise cosine.
+    ///
+    /// Matches `np.cos(series)`. NaN values pass through.
+    pub fn cos(&self) -> Result<Self, FrameError> {
+        Self::new(self.name.clone(), self.index.clone(), self.column.cos()?)
+    }
+
+    /// Element-wise tangent.
+    ///
+    /// Matches `np.tan(series)`. NaN values pass through.
+    pub fn tan(&self) -> Result<Self, FrameError> {
+        Self::new(self.name.clone(), self.index.clone(), self.column.tan()?)
+    }
+
     // --- Descriptive Statistics ---
 
     #[must_use]
@@ -34988,6 +35044,62 @@ impl DataFrame {
     /// Matches `np.trunc(df)`. NaN values pass through.
     pub fn trunc(&self) -> Result<Self, FrameError> {
         self.apply_per_column(|s| s.trunc())
+    }
+
+    /// Element-wise square root.
+    ///
+    /// Matches `np.sqrt(df)`. NaN values pass through.
+    pub fn sqrt(&self) -> Result<Self, FrameError> {
+        self.apply_per_column(|s| s.sqrt())
+    }
+
+    /// Element-wise exponential (e^x).
+    ///
+    /// Matches `np.exp(df)`. NaN values pass through.
+    pub fn exp(&self) -> Result<Self, FrameError> {
+        self.apply_per_column(|s| s.exp())
+    }
+
+    /// Element-wise natural logarithm.
+    ///
+    /// Matches `np.log(df)`. NaN values pass through.
+    pub fn log(&self) -> Result<Self, FrameError> {
+        self.apply_per_column(|s| s.log())
+    }
+
+    /// Element-wise base-10 logarithm.
+    ///
+    /// Matches `np.log10(df)`. NaN values pass through.
+    pub fn log10(&self) -> Result<Self, FrameError> {
+        self.apply_per_column(|s| s.log10())
+    }
+
+    /// Element-wise base-2 logarithm.
+    ///
+    /// Matches `np.log2(df)`. NaN values pass through.
+    pub fn log2(&self) -> Result<Self, FrameError> {
+        self.apply_per_column(|s| s.log2())
+    }
+
+    /// Element-wise sine.
+    ///
+    /// Matches `np.sin(df)`. NaN values pass through.
+    pub fn sin(&self) -> Result<Self, FrameError> {
+        self.apply_per_column(|s| s.sin())
+    }
+
+    /// Element-wise cosine.
+    ///
+    /// Matches `np.cos(df)`. NaN values pass through.
+    pub fn cos(&self) -> Result<Self, FrameError> {
+        self.apply_per_column(|s| s.cos())
+    }
+
+    /// Element-wise tangent.
+    ///
+    /// Matches `np.tan(df)`. NaN values pass through.
+    pub fn tan(&self) -> Result<Self, FrameError> {
+        self.apply_per_column(|s| s.tan())
     }
 
     /// Add a scalar to all numeric columns.
