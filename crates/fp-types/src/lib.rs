@@ -1083,6 +1083,22 @@ impl Timestamp {
         self.value()
     }
 
+    /// POSIX timestamp in seconds, matching `pd.Timestamp.timestamp()`.
+    ///
+    /// Pandas exposes this through Python's datetime surface, so sub-microsecond
+    /// nanoseconds are rounded to six decimal places. `NaT` raises in pandas;
+    /// fp-types surfaces the same condition as a missing-value error.
+    pub fn timestamp(&self) -> Result<f64, TypeError> {
+        if self.is_nat() {
+            return Err(TypeError::ValueIsMissing {
+                kind: NullKind::NaT,
+            });
+        }
+        let seconds = self.nanos as f64 / 1_000_000_000.0;
+        let rounded = format!("{seconds:.6}").parse().unwrap_or(seconds);
+        Ok(rounded)
+    }
+
     /// Add a Timedelta. NaT in either operand → NaT; saturates on overflow.
     /// TZ is preserved from `self`.
     #[must_use]
@@ -1353,6 +1369,62 @@ impl Timestamp {
             .replace("%M", &format!("{minute:02}"))
             .replace("%S", &format!("{second:02}"))
             .replace("%f", &format!("{micros:06}"))
+    }
+
+    /// Return the day of the week as a string (e.g., "Monday").
+    ///
+    /// Matches `pd.Timestamp.day_name()`. NaT returns "NaT".
+    #[must_use]
+    pub fn day_name(&self) -> String {
+        const NAMES: [&str; 7] = [
+            "Thursday",
+            "Friday",
+            "Saturday",
+            "Sunday",
+            "Monday",
+            "Tuesday",
+            "Wednesday",
+        ];
+        if self.is_nat() {
+            return "NaT".to_string();
+        }
+        let days_since_epoch = self.nanos / Timedelta::NANOS_PER_DAY;
+        let dow = ((days_since_epoch % 7) + 7) % 7;
+        NAMES[dow as usize].to_string()
+    }
+
+    /// Return the month name as a string (e.g., "January").
+    ///
+    /// Matches `pd.Timestamp.month_name()`. NaT returns "NaT".
+    #[must_use]
+    pub fn month_name(&self) -> String {
+        const NAMES: [&str; 12] = [
+            "January",
+            "February",
+            "March",
+            "April",
+            "May",
+            "June",
+            "July",
+            "August",
+            "September",
+            "October",
+            "November",
+            "December",
+        ];
+        if self.is_nat() {
+            return "NaT".to_string();
+        }
+        let total_secs = self.nanos / Timedelta::NANOS_PER_SEC;
+        let days_since_epoch = total_secs / 86400;
+        let mut days = days_since_epoch + 719_468;
+        let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
+        let doe = days - era * 146_097;
+        let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let m = if mp < 10 { mp + 3 } else { mp - 9 };
+        NAMES[(m - 1) as usize].to_string()
     }
 }
 
@@ -4474,6 +4546,32 @@ mod tests {
     }
 
     #[test]
+    fn timestamp_timestamp_accessor_matches_pandas_microsecond_rounding_py0h3() {
+        assert_eq!(Timestamp::from_nanos(0).timestamp().unwrap(), 0.0);
+        assert_eq!(
+            Timestamp::from_nanos(1_500_000_000).timestamp().unwrap(),
+            1.5
+        );
+        assert_eq!(Timestamp::from_nanos(500).timestamp().unwrap(), 0.0);
+        assert_eq!(Timestamp::from_nanos(501).timestamp().unwrap(), 0.000001);
+        assert_eq!(Timestamp::from_nanos(2_500).timestamp().unwrap(), 0.000003);
+
+        let negative_zero = Timestamp::from_nanos(-500).timestamp().unwrap();
+        assert_eq!(negative_zero, -0.0);
+        assert!(negative_zero.is_sign_negative());
+        assert_eq!(
+            Timestamp::from_nanos(-2_500).timestamp().unwrap(),
+            -0.000003
+        );
+        assert_eq!(
+            Timestamp::nat().timestamp(),
+            Err(TypeError::ValueIsMissing {
+                kind: NullKind::NaT,
+            })
+        );
+    }
+
+    #[test]
     fn timestamp_roundtrips_through_serde_json() {
         let naive = Timestamp::from_nanos(1_700_000_000_000_000_000);
         let json = serde_json::to_string(&naive).expect("serialize");
@@ -4746,7 +4844,9 @@ mod tests {
         assert_eq!(ts_utc.isoformat(), "1970-01-01T00:00:00+00:00");
 
         let ts_tz = Timestamp::from_nanos_tz(
-            Timedelta::NANOS_PER_DAY + Timedelta::NANOS_PER_HOUR * 14 + Timedelta::NANOS_PER_MIN * 30,
+            Timedelta::NANOS_PER_DAY
+                + Timedelta::NANOS_PER_HOUR * 14
+                + Timedelta::NANOS_PER_MIN * 30,
             "America/New_York",
         );
         assert!(ts_tz.isoformat().contains("1970-01-02T14:30:00"));
@@ -4758,11 +4858,27 @@ mod tests {
     #[test]
     fn timestamp_strftime_basic() {
         let ts = Timestamp::from_nanos(
-            Timedelta::NANOS_PER_DAY * 365 + Timedelta::NANOS_PER_HOUR * 9 + Timedelta::NANOS_PER_MIN * 15,
+            Timedelta::NANOS_PER_DAY * 365
+                + Timedelta::NANOS_PER_HOUR * 9
+                + Timedelta::NANOS_PER_MIN * 15,
         );
         assert_eq!(ts.strftime("%Y-%m-%d"), "1971-01-01");
         assert_eq!(ts.strftime("%H:%M:%S"), "09:15:00");
         assert_eq!(ts.strftime("%Y/%m/%d %H:%M"), "1971/01/01 09:15");
         assert_eq!(Timestamp::nat().strftime("%Y-%m-%d"), "NaT");
+    }
+
+    #[test]
+    fn timestamp_day_name_and_month_name() {
+        let ts = Timestamp::from_nanos(0);
+        assert_eq!(ts.day_name(), "Thursday");
+        assert_eq!(ts.month_name(), "January");
+
+        let ts2 = Timestamp::from_nanos(Timedelta::NANOS_PER_DAY * 365);
+        assert_eq!(ts2.day_name(), "Friday");
+        assert_eq!(ts2.month_name(), "January");
+
+        assert_eq!(Timestamp::nat().day_name(), "NaT");
+        assert_eq!(Timestamp::nat().month_name(), "NaT");
     }
 }
