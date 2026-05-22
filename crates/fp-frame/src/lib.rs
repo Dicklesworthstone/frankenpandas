@@ -18543,6 +18543,42 @@ impl StringAccessor<'_> {
         )
     }
 
+    fn find_or_error(&self, sub: &str, reverse: bool) -> Result<Series, FrameError> {
+        let vals = self.series.column().values();
+        let mut out = Vec::with_capacity(vals.len());
+        for value in vals {
+            match value {
+                Scalar::Utf8(s) => {
+                    let byte_pos =
+                        if reverse { s.rfind(sub) } else { s.find(sub) }.ok_or_else(|| {
+                            FrameError::CompatibilityRejected("substring not found".to_owned())
+                        })?;
+                    out.push(Scalar::Int64(s[..byte_pos].chars().count() as i64));
+                }
+                _ if value.is_missing() => out.push(Scalar::Null(NullKind::NaN)),
+                _ => out.push(value.clone()),
+            }
+        }
+        let index = Index::new(self.series.index().labels().to_vec())
+            .rename_index(self.series.index().name());
+        let column = Column::from_values(out)?;
+        Series::new(self.series.name(), index, column)
+    }
+
+    /// Find the first occurrence of a substring; error if any non-null string misses it.
+    ///
+    /// Matches `pd.Series.str.index(sub)`.
+    pub fn index(&self, sub: &str) -> Result<Series, FrameError> {
+        self.find_or_error(sub, false)
+    }
+
+    /// Find the last occurrence of a substring; error if any non-null string misses it.
+    ///
+    /// Matches `pd.Series.str.rindex(sub)`.
+    pub fn rindex(&self, sub: &str) -> Result<Series, FrameError> {
+        self.find_or_error(sub, true)
+    }
+
     /// Find the first occurrence of a substring; error if not found.
     ///
     /// Matches `pd.Series.str.index(sub)`. Like `find()` but raises
@@ -61723,6 +61759,43 @@ mod tests {
 
         let result = s.str().rfind("abc").unwrap();
         assert_eq!(result.values()[0], Scalar::Int64(3));
+    }
+
+    #[test]
+    fn str_index_and_rindex_pandas_named_methods() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![
+                Scalar::Utf8("ababa".to_owned()),
+                Scalar::Null(NullKind::NaN),
+            ],
+        )
+        .unwrap();
+
+        let index = s.str().index("ba").unwrap();
+        assert_eq!(index.values()[0], Scalar::Int64(1));
+        assert!(index.values()[1].is_missing());
+
+        let rindex = s.str().rindex("ba").unwrap();
+        assert_eq!(rindex.values()[0], Scalar::Int64(3));
+        assert!(rindex.values()[1].is_missing());
+    }
+
+    #[test]
+    fn str_index_and_rindex_error_on_missing_substring() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into()],
+            vec![Scalar::Utf8("abc".to_owned())],
+        )
+        .unwrap();
+
+        let index_err = s.str().index("z").unwrap_err();
+        assert!(index_err.to_string().contains("substring not found"));
+
+        let rindex_err = s.str().rindex("z").unwrap_err();
+        assert!(rindex_err.to_string().contains("substring not found"));
     }
 
     #[test]
