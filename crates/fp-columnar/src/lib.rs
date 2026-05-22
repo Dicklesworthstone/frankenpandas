@@ -3399,6 +3399,17 @@ impl Column {
         Self::new(inferred, out)
     }
 
+    /// Alias for [`replace_values`](Self::replace_values), matching
+    /// `pd.Series.replace(to_replace, value)` for equal-length scalar
+    /// list replacements.
+    pub fn replace(
+        &self,
+        to_replace: &[Scalar],
+        replacement: &[Scalar],
+    ) -> Result<Self, ColumnError> {
+        self.replace_values(to_replace, replacement)
+    }
+
     /// Positions where the value is truthy and non-missing.
     ///
     /// Matches `np.nonzero` / `pd.Series.to_numpy().nonzero()` style
@@ -9077,6 +9088,10 @@ mod tests {
             let out = col
                 .replace_values(&to_replace, &replacement)
                 .expect("replace");
+            let alias = col
+                .replace(&to_replace, &replacement)
+                .expect("replace alias");
+            assert_eq!(alias, out);
             assert_eq!(out.values()[0], Scalar::Int64(1));
             assert_eq!(out.values()[1], Scalar::Int64(20));
             assert_eq!(out.values()[2], Scalar::Int64(30));
