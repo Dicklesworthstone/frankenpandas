@@ -1265,6 +1265,12 @@ impl Timestamp {
     pub fn round(&self, freq: &str) -> Self {
         self.round_to_unit(freq)
     }
+
+    /// Normalize to midnight/day boundary, matching `pd.Timestamp.normalize()`.
+    #[must_use]
+    pub fn normalize(&self) -> Self {
+        self.floor_to_unit("D")
+    }
 }
 
 impl std::fmt::Display for Timestamp {
@@ -4569,6 +4575,21 @@ mod tests {
         assert_eq!(ts.floor("H"), ts.floor_to_unit("H"));
         assert_eq!(ts.ceil("D"), ts.ceil_to_unit("D"));
         assert_eq!(ts.round("min"), ts.round_to_unit("min"));
+    }
+
+    #[test]
+    fn timestamp_normalize_floors_to_day_and_preserves_tz_455op() {
+        let ts = Timestamp::from_nanos_tz(
+            Timedelta::NANOS_PER_DAY * 3
+                + Timedelta::NANOS_PER_HOUR * 12
+                + Timedelta::NANOS_PER_MIN * 34,
+            "US/Eastern",
+        );
+        let normalized = ts.normalize();
+
+        assert_eq!(normalized.nanos, Timedelta::NANOS_PER_DAY * 3);
+        assert_eq!(normalized.tz.as_deref(), Some("US/Eastern"));
+        assert!(Timestamp::nat().normalize().is_nat());
     }
 
     #[test]
