@@ -12,6 +12,7 @@
   "merge_on": "id",
   "merge_indicator": true,
   "merge_indicator_name": "origin",
+  "merge_suffixes": ["_left", "_right"],
   "frame": {
     "index": [
       { "kind": "int64", "value": 0 },
