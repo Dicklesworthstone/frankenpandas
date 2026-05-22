@@ -140,6 +140,10 @@ pub enum Expr {
     Abs {
         expr: Box<Expr>,
     },
+    IsNull {
+        expr: Box<Expr>,
+        negated: bool,
+    },
     Compare {
         left: Box<Expr>,
         right: Box<Expr>,
@@ -336,6 +340,14 @@ pub fn evaluate(
         Expr::Abs { expr } => {
             let input = evaluate(expr, context, policy, ledger)?;
             input.abs().map_err(ExprError::from)
+        }
+        Expr::IsNull { expr, negated } => {
+            let input = evaluate(expr, context, policy, ledger)?;
+            if *negated {
+                input.notna().map_err(ExprError::from)
+            } else {
+                input.isna().map_err(ExprError::from)
+            }
         }
         Expr::Compare { left, right, op } => {
             evaluate_comparison(left, right, *op, context, policy, ledger)
@@ -713,6 +725,7 @@ impl MaterializedView {
             }
             Expr::IsIn { left, .. } => Self::extract_series(left, series_set),
             Expr::Not { expr } | Expr::Abs { expr } => Self::extract_series(expr, series_set),
+            Expr::IsNull { expr, .. } => Self::extract_series(expr, series_set),
             Expr::Literal { .. } => {}
         }
     }
@@ -823,6 +836,14 @@ fn evaluate_delta(
             let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
             input.abs().map_err(ExprError::from)
         }
+        Expr::IsNull { expr, negated } => {
+            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
+            if *negated {
+                input.notna().map_err(ExprError::from)
+            } else {
+                input.isna().map_err(ExprError::from)
+            }
+        }
         Expr::Compare { left, right, op } => {
             evaluate_delta_comparison(left, right, *op, delta_ctx, delta, policy, ledger)
         }
@@ -887,6 +908,7 @@ fn evaluate_delta_comparison(
 //   - Membership operators: in, not in (with scalar list literals)
 //   - Logical operators: and, or, not
 //   - Unary function calls: abs(expr)
+//   - No-argument null predicate methods: .isna(), .notna(), .isnull(), .notnull()
 //   - Arithmetic operators: +, -, *, /, //, %, **
 //   - Parenthesized sub-expressions
 
@@ -902,7 +924,8 @@ fn evaluate_delta_comparison(
 ///   mul_expr   → unary_expr ( ("*" | "/" | "//" | "%") unary_expr )*
 ///   unary_expr → ("+" | "-") unary_expr | pow_expr
 ///   pow_expr   → atom ( "**" unary_expr )?
-///   atom       → NUMBER | STRING | BOOL | IDENT | LOCAL | "abs" "(" expr ")" | "(" expr ")"
+///   atom       → primary ( "." NULL_METHOD "(" ")" )*
+///   primary    → NUMBER | STRING | BOOL | IDENT | LOCAL | "abs" "(" expr ")" | "(" expr ")"
 pub fn parse_expr(input: &str) -> Result<Expr, ExprError> {
     let tokens = tokenize(input)?;
     let mut pos = 0;
@@ -945,6 +968,7 @@ enum Token {
     LBracket,
     RBracket,
     Comma,
+    Dot,
     // Logical (keywords)
     And,
     Or,
@@ -1059,9 +1083,8 @@ fn tokenize(input: &str) -> Result<Vec<Token>, ExprError> {
                 })?));
             }
             '.' => {
-                return Err(ExprError::ParseError(format!(
-                    "unexpected character: '{c}'"
-                )));
+                tokens.push(Token::Dot);
+                i += 1;
             }
             '*' => {
                 if i + 1 < chars.len() && chars[i + 1] == '*' {
@@ -1534,7 +1557,7 @@ fn parse_atom(tokens: &[Token], pos: &mut usize) -> Result<Expr, ExprError> {
     if *pos >= tokens.len() {
         return Err(ExprError::ParseError("unexpected end of expression".into()));
     }
-    match &tokens[*pos] {
+    let expr = match &tokens[*pos] {
         Token::Int(n) => {
             let val = *n;
             *pos += 1;
@@ -1602,7 +1625,43 @@ fn parse_atom(tokens: &[Token], pos: &mut usize) -> Result<Expr, ExprError> {
         other => Err(ExprError::ParseError(format!(
             "unexpected token: {other:?}"
         ))),
+    }?;
+    parse_postfix(expr, tokens, pos)
+}
+
+fn parse_postfix(mut expr: Expr, tokens: &[Token], pos: &mut usize) -> Result<Expr, ExprError> {
+    while *pos < tokens.len() && tokens[*pos] == Token::Dot {
+        let Some(Token::Ident(method)) = tokens.get(*pos + 1) else {
+            return Err(ExprError::ParseError(
+                "expected method name after '.'".into(),
+            ));
+        };
+        if tokens.get(*pos + 2) != Some(&Token::LParen) {
+            return Err(ExprError::ParseError(format!(
+                "expected '(' after method name {method}"
+            )));
+        }
+        if tokens.get(*pos + 3) != Some(&Token::RParen) {
+            return Err(ExprError::ParseError(format!(
+                "method {method} does not accept arguments in expressions"
+            )));
+        }
+        let negated = match method.as_str() {
+            "isna" | "isnull" => false,
+            "notna" | "notnull" => true,
+            _ => {
+                return Err(ExprError::ParseError(format!(
+                    "unsupported expression method: {method}"
+                )));
+            }
+        };
+        expr = Expr::IsNull {
+            expr: Box::new(expr),
+            negated,
+        };
+        *pos += 4;
     }
+    Ok(expr)
 }
 
 #[cfg(test)]
@@ -3004,6 +3063,32 @@ mod tests {
     }
 
     #[test]
+    fn parse_null_predicate_method_calls() -> Result<(), ExprError> {
+        let expr = super::parse_expr("a.isna()")?;
+        let Expr::IsNull {
+            expr: inner,
+            negated,
+        } = expr
+        else {
+            return Err(ExprError::ParseError("expected IsNull expression".into()));
+        };
+        assert!(!negated);
+        assert_eq!(
+            inner.as_ref(),
+            &Expr::Series {
+                name: SeriesRef("a".into())
+            }
+        );
+
+        let expr = super::parse_expr("a.notnull()")?;
+        let Expr::IsNull { negated, .. } = expr else {
+            return Err(ExprError::ParseError("expected IsNull expression".into()));
+        };
+        assert!(negated);
+        Ok(())
+    }
+
+    #[test]
     fn parse_backtick_identifier() {
         let expr = super::parse_expr("`gross margin` + normal").unwrap();
         assert!(matches!(&expr, Expr::Add { .. }));
@@ -3511,6 +3596,49 @@ mod tests {
             filtered.columns()["a"].values(),
             &[Scalar::Int64(-2), Scalar::Int64(2)]
         );
+    }
+
+    #[test]
+    fn eval_and_query_str_accept_null_predicate_methods() -> Result<(), ExprError> {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "a",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![
+                    Scalar::Int64(1),
+                    Scalar::Null(fp_types::NullKind::Null),
+                    Scalar::Int64(3),
+                ],
+            )
+            .map_err(ExprError::from)?,
+        ])
+        .map_err(ExprError::from)?;
+
+        let isna = super::eval_str("a.isna()", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            isna.values(),
+            &[Scalar::Bool(false), Scalar::Bool(true), Scalar::Bool(false)]
+        );
+
+        let isnull = super::query_str("a.isnull()", &frame, &policy, &mut ledger)?;
+        assert_eq!(isnull.index().labels(), &[1_i64.into()]);
+        assert_eq!(
+            isnull.columns()["a"].values(),
+            &[Scalar::Null(fp_types::NullKind::Null)]
+        );
+
+        let notna = super::query_str("a.notna()", &frame, &policy, &mut ledger)?;
+        assert_eq!(notna.index().labels(), &[0_i64.into(), 2_i64.into()]);
+
+        let notnull = super::eval_str("a.notnull()", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            notnull.values(),
+            &[Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)]
+        );
+        Ok(())
     }
 
     #[test]
