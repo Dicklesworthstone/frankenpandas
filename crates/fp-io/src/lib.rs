@@ -10228,8 +10228,9 @@ impl DataFrameIoExt for DataFrame {
 
 /// Extension trait that adds IO convenience methods to `Series`.
 ///
-/// Import this trait to call `series.to_pickle(path)` /
-/// `series.to_pickle_bytes()` directly on Series values.
+/// Import this trait to call `series.to_pickle(path)`,
+/// `series.to_pickle_bytes()`, or `series.to_excel(path)` directly on
+/// Series values.
 pub trait SeriesIoExt {
     /// Write this Series to a Pickle file.
     ///
@@ -10256,6 +10257,33 @@ pub trait SeriesIoExt {
     fn to_pickle_bytes_with_options(
         &self,
         options: &PickleWriteOptions,
+    ) -> Result<Vec<u8>, IoError>;
+
+    /// Write this Series to an Excel file.
+    ///
+    /// Matches `pd.Series.to_excel(path)` for the supported xlsx writer
+    /// surface.
+    fn to_excel(&self, path: &Path) -> Result<(), IoError>;
+
+    /// Write this Series to an Excel file.
+    ///
+    /// Explicit file-suffixed form of [`SeriesIoExt::to_excel`].
+    fn to_excel_file(&self, path: &Path) -> Result<(), IoError>;
+
+    /// Write this Series to an Excel file with explicit options.
+    fn to_excel_with_options(
+        &self,
+        path: &Path,
+        options: &ExcelWriteOptions,
+    ) -> Result<(), IoError>;
+
+    /// Serialize this Series to xlsx bytes.
+    fn to_excel_bytes(&self) -> Result<Vec<u8>, IoError>;
+
+    /// Serialize this Series to xlsx bytes with explicit options.
+    fn to_excel_bytes_with_options(
+        &self,
+        options: &ExcelWriteOptions,
     ) -> Result<Vec<u8>, IoError>;
 }
 
@@ -10286,6 +10314,33 @@ impl SeriesIoExt for Series {
     ) -> Result<Vec<u8>, IoError> {
         write_pickle_bytes_with_options(&self.to_frame(None)?, options)
     }
+
+    fn to_excel(&self, path: &Path) -> Result<(), IoError> {
+        write_excel(&self.to_frame(None)?, path)
+    }
+
+    fn to_excel_file(&self, path: &Path) -> Result<(), IoError> {
+        self.to_excel(path)
+    }
+
+    fn to_excel_with_options(
+        &self,
+        path: &Path,
+        options: &ExcelWriteOptions,
+    ) -> Result<(), IoError> {
+        write_excel_with_options(&self.to_frame(None)?, path, options)
+    }
+
+    fn to_excel_bytes(&self) -> Result<Vec<u8>, IoError> {
+        write_excel_bytes(&self.to_frame(None)?)
+    }
+
+    fn to_excel_bytes_with_options(
+        &self,
+        options: &ExcelWriteOptions,
+    ) -> Result<Vec<u8>, IoError> {
+        write_excel_bytes_with_options(&self.to_frame(None)?, options)
+    }
 }
 
 #[cfg(test)]
@@ -10302,17 +10357,17 @@ mod tests {
     use fp_types::{DType, NullKind, Scalar};
 
     use super::{
-        CsvWriteOptions, ExcelReadOptions, HdfReadOptions, HdfWriteOptions, HtmlReadOptions,
-        HtmlWriteOptions, IoError, JsonOrient, LatexWriteOptions, MarkdownWriteOptions,
-        PickleProtocol, PickleWriteOptions, StataWriteOptions, XmlReadOptions, XmlWriteOptions,
-        read_csv_str, read_csv_with_index_cols, read_excel_bytes, read_feather_bytes, read_hdf,
-        read_hdf_key, read_hdf_with_options, read_html, read_html_str, read_html_str_with_options,
-        read_json_str, read_orc, read_orc_bytes, read_parquet_bytes, read_pickle,
-        read_pickle_bytes, read_stata, read_stata_bytes, read_xml, read_xml_str,
-        read_xml_str_with_options, write_csv_string, write_csv_string_with_options, write_hdf,
-        write_hdf_key, write_hdf_with_options, write_html, write_html_string,
-        write_html_string_with_options, write_json_string, write_jsonl_string, write_latex,
-        write_latex_string, write_latex_string_with_options, write_latex_with_options,
+        CsvWriteOptions, ExcelReadOptions, ExcelWriteOptions, HdfReadOptions, HdfWriteOptions,
+        HtmlReadOptions, HtmlWriteOptions, IoError, JsonOrient, LatexWriteOptions,
+        MarkdownWriteOptions, PickleProtocol, PickleWriteOptions, StataWriteOptions,
+        XmlReadOptions, XmlWriteOptions, read_csv_str, read_csv_with_index_cols, read_excel_bytes,
+        read_feather_bytes, read_hdf, read_hdf_key, read_hdf_with_options, read_html,
+        read_html_str, read_html_str_with_options, read_json_str, read_orc, read_orc_bytes,
+        read_parquet_bytes, read_pickle, read_pickle_bytes, read_stata, read_stata_bytes, read_xml,
+        read_xml_str, read_xml_str_with_options, write_csv_string, write_csv_string_with_options,
+        write_excel_bytes, write_hdf, write_hdf_key, write_hdf_with_options, write_html,
+        write_html_string, write_html_string_with_options, write_json_string, write_jsonl_string,
+        write_latex, write_latex_string, write_latex_string_with_options, write_latex_with_options,
         write_markdown, write_markdown_string, write_markdown_string_with_options,
         write_markdown_with_options, write_orc, write_orc_bytes, write_pickle, write_pickle_bytes,
         write_stata, write_stata_bytes, write_stata_bytes_with_options, write_xml,
@@ -10972,6 +11027,54 @@ mod tests {
             .to_pickle_bytes_with_options(&options)
             .expect("series pickle protocol v2")
             .is_empty());
+    }
+
+    #[test]
+    fn series_excel_extension_aliases_roundtrip_to_single_column_frame() {
+        use super::SeriesIoExt;
+
+        let source = Series::from_values(
+            "sales",
+            vec!["r1".into(), "r2".into()],
+            vec![Scalar::Int64(10), Scalar::Int64(12)],
+        )
+        .expect("source series");
+
+        let bytes = source.to_excel_bytes().expect("series excel bytes");
+        let roundtrip =
+            read_excel_bytes(&bytes, &ExcelReadOptions::default()).expect("read series excel");
+        let names = roundtrip
+            .column_names()
+            .into_iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["column_0", "sales"]);
+        assert_eq!(
+            roundtrip.column("column_0").expect("index column").values(),
+            &[Scalar::Utf8("r1".into()), Scalar::Utf8("r2".into())]
+        );
+        assert_eq!(
+            roundtrip.column("sales").expect("sales column").values(),
+            source.values()
+        );
+
+        let frame = source.to_frame(None).expect("series frame");
+        assert_eq!(
+            source.to_excel_bytes().expect("trait excel bytes"),
+            write_excel_bytes(&frame).expect("frame excel bytes")
+        );
+
+        let options = ExcelWriteOptions {
+            index: false,
+            ..ExcelWriteOptions::default()
+        };
+        let no_index_bytes = source
+            .to_excel_bytes_with_options(&options)
+            .expect("series excel index false");
+        let no_index = read_excel_bytes(&no_index_bytes, &ExcelReadOptions::default())
+            .expect("read no-index series excel");
+        assert_eq!(no_index.column_names(), vec!["sales"]);
+        assert_eq!(no_index.index().len(), source.index().len());
     }
 
     #[test]
