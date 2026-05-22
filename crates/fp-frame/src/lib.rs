@@ -5952,6 +5952,21 @@ impl Series {
         self.reverse()
     }
 
+    /// Roll elements along the axis by shift positions.
+    ///
+    /// Matches `np.roll(series, shift)`. Elements shifted off
+    /// one end wrap around to the other.
+    pub fn roll(&self, shift: i64) -> Result<Self, FrameError> {
+        Self::new(self.name.clone(), self.index.clone(), self.column.roll(shift)?)
+    }
+
+    /// Tile (repeat) the series a given number of times.
+    ///
+    /// Matches `np.tile(series, reps)`.
+    pub fn tile(&self, reps: usize) -> Result<Self, FrameError> {
+        Self::new(self.name.clone(), self.index.clone(), self.column.tile(reps)?)
+    }
+
     // --- Descriptive Statistics ---
 
     #[must_use]
@@ -35546,6 +35561,21 @@ impl DataFrame {
     /// Alias for reverse(). Matches `np.flip(df, axis=0)`.
     pub fn flip(&self) -> Result<Self, FrameError> {
         self.reverse()
+    }
+
+    /// Roll elements along axis 0 by shift positions.
+    ///
+    /// Matches `np.roll(df, shift, axis=0)`. Elements shifted off
+    /// one end wrap around to the other.
+    pub fn roll(&self, shift: i64) -> Result<Self, FrameError> {
+        self.apply_per_column(|s| s.roll(shift))
+    }
+
+    /// Tile (repeat) each column a given number of times.
+    ///
+    /// Matches `np.tile(df, (reps, 1))`.
+    pub fn tile(&self, reps: usize) -> Result<Self, FrameError> {
+        self.apply_per_column(|s| s.tile(reps))
     }
 
     /// Add a scalar to all numeric columns.
