@@ -6290,6 +6290,101 @@ impl Column {
         Self::new(DType::Float64, out)
     }
 
+    /// Multiply by 2 raised to an integer power.
+    ///
+    /// Matches np.ldexp(x, exp). Computes x * 2^exp for each element.
+    pub fn ldexp(&self, exp: i32) -> Result<Self, ColumnError> {
+        let multiplier = 2.0_f64.powi(exp);
+        let mut out = Vec::with_capacity(self.values.len());
+        for v in &self.values {
+            if v.is_missing() {
+                out.push(Scalar::Float64(f64::NAN));
+                continue;
+            }
+            match v {
+                Scalar::Int64(x) => out.push(Scalar::Float64(*x as f64 * multiplier)),
+                Scalar::Float64(x) => out.push(Scalar::Float64(x * multiplier)),
+                _ => {
+                    return Err(ColumnError::Type(TypeError::NonNumericValue {
+                        value: format!("{v:?}"),
+                        dtype: self.dtype,
+                    }));
+                }
+            }
+        }
+        Self::new(DType::Float64, out)
+    }
+
+    /// Split into integer and fractional parts.
+    ///
+    /// Matches np.modf(x). Returns (fractional_part, integer_part) as two columns.
+    /// The fractional part has the same sign as the input.
+    pub fn modf(&self) -> Result<(Self, Self), ColumnError> {
+        let mut frac = Vec::with_capacity(self.values.len());
+        let mut int = Vec::with_capacity(self.values.len());
+        for v in &self.values {
+            if v.is_missing() {
+                frac.push(Scalar::Float64(f64::NAN));
+                int.push(Scalar::Float64(f64::NAN));
+                continue;
+            }
+            match v {
+                Scalar::Int64(x) => {
+                    frac.push(Scalar::Float64(0.0));
+                    int.push(Scalar::Float64(*x as f64));
+                }
+                Scalar::Float64(x) => {
+                    let i = x.trunc();
+                    let f = x - i;
+                    frac.push(Scalar::Float64(f));
+                    int.push(Scalar::Float64(i));
+                }
+                _ => {
+                    return Err(ColumnError::Type(TypeError::NonNumericValue {
+                        value: format!("{v:?}"),
+                        dtype: self.dtype,
+                    }));
+                }
+            }
+        }
+        Ok((Self::new(DType::Float64, frac)?, Self::new(DType::Float64, int)?))
+    }
+
+    /// Compute spacing between this value and the next representable float.
+    ///
+    /// Matches np.spacing(x). Returns the distance to the next larger float.
+    pub fn spacing(&self) -> Result<Self, ColumnError> {
+        let mut out = Vec::with_capacity(self.values.len());
+        for v in &self.values {
+            if v.is_missing() {
+                out.push(Scalar::Float64(f64::NAN));
+                continue;
+            }
+            match v {
+                Scalar::Int64(x) => {
+                    let f = *x as f64;
+                    let next = f64::from_bits(f.to_bits().wrapping_add(1));
+                    out.push(Scalar::Float64((next - f).abs()));
+                }
+                Scalar::Float64(x) => {
+                    if x.is_nan() || x.is_infinite() {
+                        out.push(Scalar::Float64(f64::NAN));
+                    } else {
+                        let next = f64::from_bits(x.to_bits().wrapping_add(1));
+                        out.push(Scalar::Float64((next - x).abs()));
+                    }
+                }
+                _ => {
+                    return Err(ColumnError::Type(TypeError::NonNumericValue {
+                        value: format!("{v:?}"),
+                        dtype: self.dtype,
+                    }));
+                }
+            }
+        }
+        Self::new(DType::Float64, out)
+    }
+
     /// Convert angles from degrees to radians.
     pub fn radians(&self) -> Result<Self, ColumnError> {
         let mut out = Vec::with_capacity(self.values.len());
