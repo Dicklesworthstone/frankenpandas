@@ -1805,6 +1805,34 @@ impl Timestamp {
         Self { nanos, tz: None }
     }
 
+    /// Return the Julian Date (astronomical day number).
+    ///
+    /// Matches `pd.Timestamp.to_julian_date()`. Returns NaN for NaT.
+    /// The Julian Date is the continuous count of days since the beginning
+    /// of the Julian Period (January 1, 4713 BC in the proleptic Julian calendar).
+    #[must_use]
+    pub fn to_julian_date(&self) -> f64 {
+        if self.is_nat() {
+            return f64::NAN;
+        }
+        // Gregorian ordinal 1 (Jan 1, year 1) corresponds to Julian Day 1721425.5
+        // (at noon, since JD starts at noon)
+        // For a timestamp at midnight, we subtract 0.5
+        let ordinal = match self.toordinal() {
+            Some(o) => o,
+            None => return f64::NAN,
+        };
+        // Fractional day from time components
+        let h = self.hour().unwrap_or(0) as f64;
+        let m = self.minute().unwrap_or(0) as f64;
+        let s = self.second().unwrap_or(0) as f64;
+        let us = self.microsecond().unwrap_or(0) as f64;
+        let ns = self.nanosecond().unwrap_or(0) as f64;
+        let frac_day = (h + m / 60.0 + s / 3600.0 + us / 3_600_000_000.0 + ns / 3_600_000_000_000.0) / 24.0;
+        // Julian day at midnight of ordinal 1 is 1721424.5
+        1721424.5 + ordinal as f64 + frac_day
+    }
+
     /// Return the quarter (1-4) of the year.
     ///
     /// Matches `pd.Timestamp.quarter`. Returns None for NaT.
