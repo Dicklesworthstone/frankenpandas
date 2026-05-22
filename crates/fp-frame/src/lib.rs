@@ -19563,6 +19563,83 @@ impl DatetimeAccessor<'_> {
         self.weekofyear()
     }
 
+    /// Returns a DataFrame with ISO calendar columns: year, week, day.
+    ///
+    /// Matches `pd.Series.dt.isocalendar()`.
+    pub fn isocalendar(&self) -> Result<DataFrame, FrameError> {
+        self.validate_datetime_dtype()?;
+        let n = self.series.column().values().len();
+        let mut years = Vec::with_capacity(n);
+        let mut weeks = Vec::with_capacity(n);
+        let mut days = Vec::with_capacity(n);
+
+        for v in self.series.column().values() {
+            match v {
+                Scalar::Utf8(s) => {
+                    if let Some((y, m, d)) = Self::parse_ymd_from_datetime(s) {
+                        // Compute ISO week
+                        let is_leap = (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0);
+                        let days_in_month: [i64; 12] = [
+                            31,
+                            if is_leap { 29 } else { 28 },
+                            31,
+                            30,
+                            31,
+                            30,
+                            31,
+                            31,
+                            30,
+                            31,
+                            30,
+                            31,
+                        ];
+                        let doy: i64 = days_in_month[..(m - 1) as usize].iter().sum::<i64>() + d;
+
+                        // Day of week (Monday=1, Sunday=7 for ISO)
+                        let t: [i64; 12] = [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4];
+                        let y_adj = if m < 3 { y - 1 } else { y };
+                        let dow_sun0 = (y_adj + y_adj / 4 - y_adj / 100 + y_adj / 400
+                            + t[(m - 1) as usize]
+                            + d)
+                            % 7;
+                        let iso_dow = if dow_sun0 == 0 { 7 } else { dow_sun0 };
+
+                        let week = (doy - iso_dow + 10) / 7;
+                        let (iso_year, iso_week) = if week < 1 {
+                            (y - 1, 52_i64)
+                        } else if week > 52 {
+                            (y + 1, 1_i64)
+                        } else {
+                            (y, week)
+                        };
+
+                        years.push(Scalar::Int64(iso_year));
+                        weeks.push(Scalar::Int64(iso_week));
+                        days.push(Scalar::Int64(iso_dow));
+                    } else {
+                        years.push(Scalar::Null(NullKind::NaN));
+                        weeks.push(Scalar::Null(NullKind::NaN));
+                        days.push(Scalar::Null(NullKind::NaN));
+                    }
+                }
+                _ => {
+                    years.push(Scalar::Null(NullKind::NaN));
+                    weeks.push(Scalar::Null(NullKind::NaN));
+                    days.push(Scalar::Null(NullKind::NaN));
+                }
+            }
+        }
+
+        let idx = self.series.index().labels().to_vec();
+        let year_series =
+            Series::from_values("year", idx.clone(), years).map_err(FrameError::from)?;
+        let week_series =
+            Series::from_values("week", idx.clone(), weeks).map_err(FrameError::from)?;
+        let day_series = Series::from_values("day", idx, days).map_err(FrameError::from)?;
+
+        DataFrame::from_series(vec![year_series, week_series, day_series])
+    }
+
     /// Check if date is the first day of the month.
     ///
     /// Matches `pd.Series.dt.is_month_start`.
@@ -76750,6 +76827,28 @@ mod tests {
             result.column().values()[2],
             Scalar::Utf8("08:00:00.123456".to_string())
         );
+    }
+
+    #[test]
+    fn test_dt_isocalendar() {
+        let s = Series::from_values(
+            "ts",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![
+                Scalar::Utf8("2023-01-02".to_string()),
+                Scalar::Utf8("2023-12-31".to_string()),
+            ],
+        )
+        .unwrap();
+        let result = s.dt().isocalendar().unwrap();
+        assert_eq!(result.columns().len(), 3);
+        assert_eq!(result.column_names(), &["year", "week", "day"]);
+        let year_col = result.get_column("year");
+        let week_col = result.get_column("week");
+        let day_col = result.get_column("day");
+        assert_eq!(year_col.column().values()[0], Scalar::Int64(2023));
+        assert_eq!(week_col.column().values()[0], Scalar::Int64(1));
+        assert_eq!(day_col.column().values()[0], Scalar::Int64(1));
     }
 
     #[test]
