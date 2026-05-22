@@ -6177,6 +6177,69 @@ impl Column {
         Self::new(self.dtype, out)
     }
 
+    /// Set difference: values in self that are not in other.
+    ///
+    /// Matches np.setdiff1d().
+    pub fn setdiff1d(&self, other: &Self) -> Result<Self, ColumnError> {
+        let other_unique = other.unique()?;
+        let mut out = Vec::new();
+        for v in &self.values {
+            if v.is_missing() {
+                continue;
+            }
+            let in_other = other_unique.values().iter().any(|o| v.semantic_eq(o));
+            if !in_other && !out.iter().any(|o: &Scalar| v.semantic_eq(o)) {
+                out.push(v.clone());
+            }
+        }
+        Self::new(self.dtype, out)
+    }
+
+    /// Set intersection: values common to both columns.
+    ///
+    /// Matches np.intersect1d().
+    pub fn intersect1d(&self, other: &Self) -> Result<Self, ColumnError> {
+        let self_unique = self.unique()?;
+        let other_unique = other.unique()?;
+        let mut out = Vec::new();
+        for v in self_unique.values() {
+            if v.is_missing() {
+                continue;
+            }
+            if other_unique.values().iter().any(|o| v.semantic_eq(o)) {
+                out.push(v.clone());
+            }
+        }
+        Self::new(self.dtype, out)
+    }
+
+    /// Set union: unique values from both columns.
+    ///
+    /// Matches np.union1d().
+    pub fn union1d(&self, other: &Self) -> Result<Self, ColumnError> {
+        let mut combined = self.values.clone();
+        combined.extend(other.values().iter().cloned());
+        let temp = Self::new(self.dtype, combined)?;
+        temp.unique()
+    }
+
+    /// Test whether each element is contained in other.
+    ///
+    /// Matches np.in1d(). Returns Bool column.
+    pub fn in1d(&self, other: &Self) -> Result<Self, ColumnError> {
+        let other_unique = other.unique()?;
+        let mut out = Vec::with_capacity(self.values.len());
+        for v in &self.values {
+            if v.is_missing() {
+                out.push(Scalar::Bool(false));
+                continue;
+            }
+            let found = other_unique.values().iter().any(|o| v.semantic_eq(o));
+            out.push(Scalar::Bool(found));
+        }
+        Self::new(DType::Bool, out)
+    }
+
     /// Count occurrences of each distinct value.
     ///
     /// Matches `pd.Series.value_counts()` default behavior at the
