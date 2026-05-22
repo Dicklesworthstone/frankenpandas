@@ -7142,6 +7142,37 @@ impl Column {
         temp.unique()
     }
 
+    /// Set symmetric difference: unique values in either but not both.
+    ///
+    /// Matches np.setxor1d(). Returns unique values that are in exactly
+    /// one of the input arrays.
+    pub fn setxor1d(&self, other: &Self) -> Result<Self, ColumnError> {
+        let a_unique = self.unique()?;
+        let b_unique = other.unique()?;
+        let mut out = Vec::new();
+        // Values in a but not in b
+        for v in a_unique.values() {
+            if v.is_missing() {
+                continue;
+            }
+            let in_b = b_unique.values().iter().any(|o| v.semantic_eq(o));
+            if !in_b {
+                out.push(v.clone());
+            }
+        }
+        // Values in b but not in a
+        for v in b_unique.values() {
+            if v.is_missing() {
+                continue;
+            }
+            let in_a = a_unique.values().iter().any(|o| v.semantic_eq(o));
+            if !in_a {
+                out.push(v.clone());
+            }
+        }
+        Self::new(self.dtype, out)
+    }
+
     /// Test whether each element is contained in other.
     ///
     /// Matches np.in1d(). Returns Bool column.
