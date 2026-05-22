@@ -17133,6 +17133,68 @@ impl ListAccessor<'_> {
         Series::new(self.series.name(), index, Column::from_values(out)?)
     }
 
+    /// Minimum of elements within each list.
+    pub fn min(&self) -> Result<Series, FrameError> {
+        let values = self.list_values()?;
+        let out: Vec<Scalar> = values
+            .into_iter()
+            .map(|opt_list| {
+                opt_list
+                    .map(|list| {
+                        let mut min_val: Option<f64> = None;
+                        for val in list {
+                            let v = match val {
+                                Scalar::Int64(n) => Some(n as f64),
+                                Scalar::Float64(f) if !f.is_nan() => Some(f),
+                                _ => None,
+                            };
+                            if let Some(v) = v {
+                                min_val = Some(min_val.map_or(v, |m| m.min(v)));
+                            }
+                        }
+                        min_val
+                            .map(Scalar::Float64)
+                            .unwrap_or(Scalar::Null(NullKind::NaN))
+                    })
+                    .unwrap_or(Scalar::Null(NullKind::NaN))
+            })
+            .collect();
+        let index = Index::new(self.series.index().labels().to_vec())
+            .rename_index(self.series.index().name());
+        Series::new(self.series.name(), index, Column::from_values(out)?)
+    }
+
+    /// Maximum of elements within each list.
+    pub fn max(&self) -> Result<Series, FrameError> {
+        let values = self.list_values()?;
+        let out: Vec<Scalar> = values
+            .into_iter()
+            .map(|opt_list| {
+                opt_list
+                    .map(|list| {
+                        let mut max_val: Option<f64> = None;
+                        for val in list {
+                            let v = match val {
+                                Scalar::Int64(n) => Some(n as f64),
+                                Scalar::Float64(f) if !f.is_nan() => Some(f),
+                                _ => None,
+                            };
+                            if let Some(v) = v {
+                                max_val = Some(max_val.map_or(v, |m| m.max(v)));
+                            }
+                        }
+                        max_val
+                            .map(Scalar::Float64)
+                            .unwrap_or(Scalar::Null(NullKind::NaN))
+                    })
+                    .unwrap_or(Scalar::Null(NullKind::NaN))
+            })
+            .collect();
+        let index = Index::new(self.series.index().labels().to_vec())
+            .rename_index(self.series.index().name());
+        Series::new(self.series.name(), index, Column::from_values(out)?)
+    }
+
     fn parsed_lists(&self) -> Result<(), FrameError> {
         self.list_values().map(|_| ())
     }
@@ -66099,6 +66161,25 @@ mod tests {
         let result = s.list().mean().unwrap();
         assert_eq!(result.column().values()[0], Scalar::Float64(2.0));
         assert_eq!(result.column().values()[1], Scalar::Float64(5.0));
+    }
+
+    #[test]
+    fn series_list_accessor_min_max() {
+        let s = Series::from_values(
+            "lists",
+            vec![IndexLabel::Int64(0), IndexLabel::Int64(1)],
+            vec![
+                Scalar::Utf8("[1, 5, 3]".into()),
+                Scalar::Utf8("[4, 2, 8]".into()),
+            ],
+        )
+        .unwrap();
+        let min_result = s.list().min().unwrap();
+        assert_eq!(min_result.column().values()[0], Scalar::Float64(1.0));
+        assert_eq!(min_result.column().values()[1], Scalar::Float64(2.0));
+        let max_result = s.list().max().unwrap();
+        assert_eq!(max_result.column().values()[0], Scalar::Float64(5.0));
+        assert_eq!(max_result.column().values()[1], Scalar::Float64(8.0));
     }
 
     #[test]
