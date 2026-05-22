@@ -6553,6 +6553,22 @@ impl Series {
         )
     }
 
+    /// Differences between consecutive elements.
+    ///
+    /// Matches `np.ediff1d(s, to_begin, to_end)`. Prepends `to_begin` and appends `to_end`.
+    pub fn ediff1d(&self, to_begin: Option<Scalar>, to_end: Option<Scalar>) -> Result<Self, FrameError> {
+        let col = self.column.ediff1d(to_begin, to_end)?;
+        let idx = Index::from_range(0, col.len() as i64, 1);
+        Self::new(self.name.clone(), idx, col)
+    }
+
+    /// Covariance with degrees of freedom adjustment.
+    ///
+    /// Matches `np.cov` / `pd.DataFrame.cov(ddof)`. Returns scalar covariance value.
+    pub fn cov_ddof(&self, other: &Self, ddof: usize) -> Scalar {
+        self.column.cov_ddof(other.column(), ddof)
+    }
+
     // --- Descriptive Statistics ---
 
     #[must_use]
@@ -93060,5 +93076,46 @@ mod test_select_columns_perf_76e1fd {
         assert_eq!(result.values()[0], Scalar::Float64(1.0));
         assert_eq!(result.values()[1], Scalar::Float64(20.0));
         assert_eq!(result.values()[2], Scalar::Float64(3.0));
+    }
+
+    #[test]
+    fn series_ediff1d() {
+        let s = Series::from_pairs(
+            "x",
+            vec![
+                (0_i64.into(), Scalar::Float64(1.0)),
+                (1_i64.into(), Scalar::Float64(3.0)),
+                (2_i64.into(), Scalar::Float64(6.0)),
+            ],
+        )
+        .unwrap();
+        let result = s.ediff1d(None, None).unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result.values()[0], Scalar::Float64(2.0));
+        assert_eq!(result.values()[1], Scalar::Float64(3.0));
+    }
+
+    #[test]
+    fn series_cov_ddof() {
+        let s1 = Series::from_pairs(
+            "a",
+            vec![
+                (0_i64.into(), Scalar::Float64(1.0)),
+                (1_i64.into(), Scalar::Float64(2.0)),
+                (2_i64.into(), Scalar::Float64(3.0)),
+            ],
+        )
+        .unwrap();
+        let s2 = Series::from_pairs(
+            "b",
+            vec![
+                (0_i64.into(), Scalar::Float64(4.0)),
+                (1_i64.into(), Scalar::Float64(5.0)),
+                (2_i64.into(), Scalar::Float64(6.0)),
+            ],
+        )
+        .unwrap();
+        let cov = s1.cov_ddof(&s2, 1);
+        assert!((cov.to_f64().unwrap() - 1.0).abs() < 1e-10);
     }
 }
