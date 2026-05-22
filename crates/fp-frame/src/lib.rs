@@ -6011,6 +6011,44 @@ impl Series {
         )
     }
 
+    /// Element-wise hypotenuse: sqrt(x**2 + y**2).
+    ///
+    /// Matches `np.hypot(s1, s2)`.
+    pub fn hypot(&self, other: &Self) -> Result<Self, FrameError> {
+        Self::new(
+            self.name.clone(),
+            self.index.clone(),
+            self.column.hypot(other.column())?,
+        )
+    }
+
+    /// Element-wise arc tangent of y/x (choosing quadrant correctly).
+    ///
+    /// Matches `np.arctan2(y, x)`.
+    pub fn atan2(&self, other: &Self) -> Result<Self, FrameError> {
+        Self::new(
+            self.name.clone(),
+            self.index.clone(),
+            self.column.atan2(other.column())?,
+        )
+    }
+
+    /// Alias for `atan2`. Matches `np.arctan2`.
+    pub fn arctan2(&self, other: &Self) -> Result<Self, FrameError> {
+        self.atan2(other)
+    }
+
+    /// Element-wise copy sign from `other` to `self`.
+    ///
+    /// Matches `np.copysign(s1, s2)`.
+    pub fn copysign(&self, other: &Self) -> Result<Self, FrameError> {
+        Self::new(
+            self.name.clone(),
+            self.index.clone(),
+            self.column.copysign(other.column())?,
+        )
+    }
+
     // --- Descriptive Statistics ---
 
     #[must_use]
@@ -91791,5 +91829,96 @@ mod test_select_columns_perf_76e1fd {
         let max_val = cat.max().unwrap();
         assert_eq!(min_val, Scalar::Utf8("b".into()));
         assert_eq!(max_val, Scalar::Utf8("a".into()));
+    }
+
+    #[test]
+    fn series_hypot() {
+        let s1 = Series::from_pairs(
+            "x",
+            vec![
+                (0_i64.into(), Scalar::Float64(3.0)),
+                (1_i64.into(), Scalar::Float64(0.0)),
+                (2_i64.into(), Scalar::Float64(5.0)),
+            ],
+        )
+        .unwrap();
+        let s2 = Series::from_pairs(
+            "y",
+            vec![
+                (0_i64.into(), Scalar::Float64(4.0)),
+                (1_i64.into(), Scalar::Float64(0.0)),
+                (2_i64.into(), Scalar::Float64(12.0)),
+            ],
+        )
+        .unwrap();
+        let result = s1.hypot(&s2).unwrap();
+        let vals: Vec<f64> = result.values().iter().map(|s| s.to_f64().unwrap()).collect();
+        assert!((vals[0] - 5.0).abs() < 1e-10);
+        assert!((vals[1] - 0.0).abs() < 1e-10);
+        assert!((vals[2] - 13.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn series_atan2() {
+        let y = Series::from_pairs(
+            "y",
+            vec![
+                (0_i64.into(), Scalar::Float64(1.0)),
+                (1_i64.into(), Scalar::Float64(0.0)),
+                (2_i64.into(), Scalar::Float64(-1.0)),
+            ],
+        )
+        .unwrap();
+        let x = Series::from_pairs(
+            "x",
+            vec![
+                (0_i64.into(), Scalar::Float64(1.0)),
+                (1_i64.into(), Scalar::Float64(1.0)),
+                (2_i64.into(), Scalar::Float64(1.0)),
+            ],
+        )
+        .unwrap();
+        let result = y.atan2(&x).unwrap();
+        let vals: Vec<f64> = result.values().iter().map(|s| s.to_f64().unwrap()).collect();
+        let pi = std::f64::consts::PI;
+        assert!((vals[0] - pi / 4.0).abs() < 1e-10);
+        assert!((vals[1] - 0.0).abs() < 1e-10);
+        assert!((vals[2] + pi / 4.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn series_arctan2_alias() {
+        let y = Series::from_pairs("y", vec![(0_i64.into(), Scalar::Float64(1.0))]).unwrap();
+        let x = Series::from_pairs("x", vec![(0_i64.into(), Scalar::Float64(1.0))]).unwrap();
+        let a = y.atan2(&x).unwrap();
+        let b = y.arctan2(&x).unwrap();
+        assert_eq!(a.values(), b.values());
+    }
+
+    #[test]
+    fn series_copysign() {
+        let mag = Series::from_pairs(
+            "mag",
+            vec![
+                (0_i64.into(), Scalar::Float64(3.0)),
+                (1_i64.into(), Scalar::Float64(-2.0)),
+                (2_i64.into(), Scalar::Float64(5.0)),
+            ],
+        )
+        .unwrap();
+        let sign = Series::from_pairs(
+            "sign",
+            vec![
+                (0_i64.into(), Scalar::Float64(-1.0)),
+                (1_i64.into(), Scalar::Float64(1.0)),
+                (2_i64.into(), Scalar::Float64(-1.0)),
+            ],
+        )
+        .unwrap();
+        let result = mag.copysign(&sign).unwrap();
+        let vals: Vec<f64> = result.values().iter().map(|s| s.to_f64().unwrap()).collect();
+        assert!((vals[0] + 3.0).abs() < 1e-10);
+        assert!((vals[1] - 2.0).abs() < 1e-10);
+        assert!((vals[2] + 5.0).abs() < 1e-10);
     }
 }
