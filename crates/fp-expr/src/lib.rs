@@ -1002,8 +1002,8 @@ fn evaluate_delta_comparison(
 //   - Logical operators: and, or, not
 //   - Unary function calls: abs(expr)
 //   - Series method calls: .isin([...]), .between(left, right, inclusive=...),
-//     .clip(lower, upper), .round(decimals), .isna(), .notna(), .isnull(),
-//     .notnull()
+//     .abs(), .clip(lower, upper), .round(decimals), .isna(), .notna(),
+//     .isnull(), .notnull()
 //   - Arithmetic operators: +, -, *, /, //, %, **
 //   - Parenthesized sub-expressions
 
@@ -1794,6 +1794,17 @@ fn parse_postfix(mut expr: Expr, tokens: &[Token], pos: &mut usize) -> Result<Ex
         }
 
         match method.as_str() {
+            "abs" => {
+                if tokens.get(*pos + 3) != Some(&Token::RParen) {
+                    return Err(ExprError::ParseError(
+                        "method abs does not accept arguments in expressions".into(),
+                    ));
+                }
+                expr = Expr::Abs {
+                    expr: Box::new(expr),
+                };
+                *pos += 4;
+            }
             "isna" | "isnull" | "notna" | "notnull" => {
                 if tokens.get(*pos + 3) != Some(&Token::RParen) {
                     return Err(ExprError::ParseError(format!(
@@ -3327,6 +3338,21 @@ mod tests {
     }
 
     #[test]
+    fn parse_abs_method_call() -> Result<(), ExprError> {
+        let expr = super::parse_expr("a.abs()")?;
+        let Expr::Abs { expr: inner } = expr else {
+            return Err(ExprError::ParseError("expected Abs expression".into()));
+        };
+        assert_eq!(
+            inner.as_ref(),
+            &Expr::Series {
+                name: SeriesRef("a".into())
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
     fn parse_null_predicate_method_calls() -> Result<(), ExprError> {
         let expr = super::parse_expr("a.isna()")?;
         let Expr::IsNull {
@@ -3976,6 +4002,36 @@ mod tests {
             filtered.columns()["a"].values(),
             &[Scalar::Int64(-2), Scalar::Int64(2)]
         );
+    }
+
+    #[test]
+    fn eval_and_query_str_accept_abs_method_call() -> Result<(), ExprError> {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "a",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![Scalar::Int64(-2), Scalar::Int64(-1), Scalar::Int64(3)],
+            )
+            .map_err(ExprError::from)?,
+        ])
+        .map_err(ExprError::from)?;
+
+        let evaluated = super::eval_str("a.abs()", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            evaluated.values(),
+            &[Scalar::Int64(2), Scalar::Int64(1), Scalar::Int64(3)]
+        );
+
+        let filtered = super::query_str("a.abs() >= 2", &frame, &policy, &mut ledger)?;
+        assert_eq!(filtered.index().labels(), &[0_i64.into(), 2_i64.into()]);
+        assert_eq!(
+            filtered.columns()["a"].values(),
+            &[Scalar::Int64(-2), Scalar::Int64(3)]
+        );
+        Ok(())
     }
 
     #[test]
