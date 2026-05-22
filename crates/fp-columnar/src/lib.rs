@@ -3612,6 +3612,18 @@ impl Column {
         self.argmax()
     }
 
+    /// Alias for argmin, matching np.nanargmin.
+    #[must_use]
+    pub fn nanargmin(&self) -> Option<usize> {
+        self.argmin()
+    }
+
+    /// Alias for argmax, matching np.nanargmax.
+    #[must_use]
+    pub fn nanargmax(&self) -> Option<usize> {
+        self.argmax()
+    }
+
     /// Whether non-missing values are non-decreasing.
     ///
     /// Matches `pd.Series.is_monotonic_increasing`. An empty column or
@@ -3808,6 +3820,26 @@ impl Column {
     #[must_use]
     pub fn quantile(&self, q: f64) -> Scalar {
         nanquantile(&self.values, q)
+    }
+
+    /// Percentile of non-missing values.
+    ///
+    /// Matches np.percentile(). Takes percentile p in [0, 100].
+    #[must_use]
+    pub fn percentile(&self, p: f64) -> Scalar {
+        self.quantile(p / 100.0)
+    }
+
+    /// Alias for quantile, matching np.nanquantile.
+    #[must_use]
+    pub fn nanquantile(&self, q: f64) -> Scalar {
+        self.quantile(q)
+    }
+
+    /// Alias for percentile, matching np.nanpercentile.
+    #[must_use]
+    pub fn nanpercentile(&self, p: f64) -> Scalar {
+        self.percentile(p)
     }
 
     /// Most frequent non-missing values, ascending-sorted.
