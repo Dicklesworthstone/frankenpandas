@@ -6637,6 +6637,25 @@ impl Series {
         Self::new(self.name.clone(), self.index.clone(), col)
     }
 
+    /// Split Series into n equal-ish parts.
+    ///
+    /// Matches `np.array_split()`. Returns Vec of Series.
+    pub fn array_split(&self, n: usize) -> Result<Vec<Self>, FrameError> {
+        let columns = self.column.array_split(n)?;
+        let len = self.len();
+        let base_size = len / n;
+        let remainder = len % n;
+        let mut result = Vec::with_capacity(n);
+        let mut start = 0;
+        for (i, col) in columns.into_iter().enumerate() {
+            let size = base_size + if i < remainder { 1 } else { 0 };
+            let idx = self.index.slice(start, size);
+            result.push(Self::new(self.name.clone(), idx, col)?);
+            start += size;
+        }
+        Ok(result)
+    }
+
     // --- Descriptive Statistics ---
 
     #[must_use]
@@ -93287,5 +93306,25 @@ mod test_select_columns_perf_76e1fd {
         let p = s.partition(1).unwrap();
         assert_eq!(p.len(), 3);
         assert!((p.values()[1].to_f64().unwrap() - 2.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn series_array_split() {
+        let s = Series::from_pairs(
+            "x",
+            vec![
+                (0_i64.into(), Scalar::Float64(1.0)),
+                (1_i64.into(), Scalar::Float64(2.0)),
+                (2_i64.into(), Scalar::Float64(3.0)),
+                (3_i64.into(), Scalar::Float64(4.0)),
+                (4_i64.into(), Scalar::Float64(5.0)),
+            ],
+        )
+        .unwrap();
+        let parts = s.array_split(3).unwrap();
+        assert_eq!(parts.len(), 3);
+        assert_eq!(parts[0].len(), 2);
+        assert_eq!(parts[1].len(), 2);
+        assert_eq!(parts[2].len(), 1);
     }
 }
