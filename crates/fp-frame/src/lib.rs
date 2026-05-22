@@ -17088,6 +17088,45 @@ impl ListAccessor<'_> {
         Series::new(self.series.name(), index, Column::from_values(out)?)
     }
 
+    /// Mean of elements within each list.
+    ///
+    /// Returns a Series with the mean of each list. Missing lists return NaN.
+    pub fn mean(&self) -> Result<Series, FrameError> {
+        let values = self.list_values()?;
+        let out: Vec<Scalar> = values
+            .into_iter()
+            .map(|opt_list| {
+                opt_list
+                    .map(|list| {
+                        let mut total = 0.0_f64;
+                        let mut count = 0_usize;
+                        for val in list {
+                            match val {
+                                Scalar::Int64(n) => {
+                                    total += n as f64;
+                                    count += 1;
+                                }
+                                Scalar::Float64(f) if !f.is_nan() => {
+                                    total += f;
+                                    count += 1;
+                                }
+                                _ => {}
+                            }
+                        }
+                        if count > 0 {
+                            Scalar::Float64(total / count as f64)
+                        } else {
+                            Scalar::Null(NullKind::NaN)
+                        }
+                    })
+                    .unwrap_or(Scalar::Null(NullKind::NaN))
+            })
+            .collect();
+        let index = Index::new(self.series.index().labels().to_vec())
+            .rename_index(self.series.index().name());
+        Series::new(self.series.name(), index, Column::from_values(out)?)
+    }
+
     fn parsed_lists(&self) -> Result<(), FrameError> {
         self.list_values().map(|_| ())
     }
@@ -65858,6 +65897,22 @@ mod tests {
         let result = s.list().sum().unwrap();
         assert_eq!(result.column().values()[0], Scalar::Float64(6.0));
         assert_eq!(result.column().values()[1], Scalar::Float64(10.0));
+    }
+
+    #[test]
+    fn series_list_accessor_mean() {
+        let s = Series::from_values(
+            "lists",
+            vec![IndexLabel::Int64(0), IndexLabel::Int64(1)],
+            vec![
+                Scalar::Utf8("[1, 2, 3]".into()),
+                Scalar::Utf8("[4, 6]".into()),
+            ],
+        )
+        .unwrap();
+        let result = s.list().mean().unwrap();
+        assert_eq!(result.column().values()[0], Scalar::Float64(2.0));
+        assert_eq!(result.column().values()[1], Scalar::Float64(5.0));
     }
 
     #[test]
