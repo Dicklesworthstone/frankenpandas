@@ -17535,6 +17535,28 @@ impl ListAccessor<'_> {
         Series::new(self.series.name(), index, Column::from_values(out)?)
     }
 
+    /// Count unique elements within each list.
+    pub fn nunique(&self) -> Result<Series, FrameError> {
+        let values = self.list_values()?;
+        let out: Vec<Scalar> = values
+            .into_iter()
+            .map(|opt_list| {
+                opt_list
+                    .map(|list| {
+                        let mut seen = std::collections::HashSet::new();
+                        for v in list {
+                            seen.insert(format!("{:?}", v));
+                        }
+                        Scalar::Int64(seen.len() as i64)
+                    })
+                    .unwrap_or(Scalar::Null(NullKind::NaN))
+            })
+            .collect();
+        let index = Index::new(self.series.index().labels().to_vec())
+            .rename_index(self.series.index().name());
+        Series::new(self.series.name(), index, Column::from_values(out)?)
+    }
+
     /// Join list elements with a separator.
     pub fn join(&self, sep: &str) -> Result<Series, FrameError> {
         let values = self.list_values()?;
@@ -91354,5 +91376,21 @@ mod test_select_columns_perf_76e1fd {
         let any_result = s.list().any().unwrap();
         assert_eq!(any_result.column().values()[0], Scalar::Bool(true));
         assert_eq!(any_result.column().values()[1], Scalar::Bool(true));
+    }
+
+    #[test]
+    fn series_list_accessor_nunique() {
+        let s = Series::from_values(
+            "lists",
+            vec![IndexLabel::Int64(0), IndexLabel::Int64(1)],
+            vec![
+                Scalar::Utf8("[1, 2, 2, 3, 1]".into()),
+                Scalar::Utf8("[1, 1, 1]".into()),
+            ],
+        )
+        .unwrap();
+        let result = s.list().nunique().unwrap();
+        assert_eq!(result.column().values()[0], Scalar::Int64(3));
+        assert_eq!(result.column().values()[1], Scalar::Int64(1));
     }
 }
