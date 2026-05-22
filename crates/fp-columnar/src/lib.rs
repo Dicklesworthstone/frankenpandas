@@ -964,6 +964,12 @@ fn interval_key(interval: &Interval) -> (u64, u64, IntervalClosed) {
 pub enum ColumnError {
     #[error("column length mismatch: left={left}, right={right}")]
     LengthMismatch { left: usize, right: usize },
+    #[error("{operation} requires exactly {expected} element(s), got {actual}")]
+    InvalidLength {
+        operation: &'static str,
+        expected: usize,
+        actual: usize,
+    },
     #[error("invalid sorter permutation for column of length {len}: {reason}")]
     InvalidSorter { len: usize, reason: String },
     #[error("mask must be Bool dtype; found {dtype:?}")]
@@ -1233,6 +1239,21 @@ impl Column {
     #[must_use]
     pub fn value(&self, idx: usize) -> Option<&Scalar> {
         self.values.get(idx)
+    }
+
+    /// Extract scalar value from a single-element column.
+    ///
+    /// Matches `pd.Series.item()` at the column storage layer. Returns an
+    /// error unless the column has exactly one element.
+    pub fn item(&self) -> Result<Scalar, ColumnError> {
+        match self.values.as_slice() {
+            [value] => Ok(value.clone()),
+            values => Err(ColumnError::InvalidLength {
+                operation: "item()",
+                expected: 1,
+                actual: values.len(),
+            }),
+        }
     }
 
     #[must_use]
@@ -5866,6 +5887,32 @@ mod tests {
             let copied = col.copy();
             assert_eq!(copied, col);
             assert_ne!(copied.values().as_ptr(), col.values().as_ptr());
+        }
+
+        #[test]
+        fn item_extracts_single_value_and_rejects_other_lengths() {
+            let single = Column::from_values(vec![Scalar::Int64(5)]).expect("col");
+            assert_eq!(single.item(), Ok(Scalar::Int64(5)));
+
+            let empty = Column::from_values(Vec::<Scalar>::new()).expect("col");
+            assert_eq!(
+                empty.item(),
+                Err(crate::ColumnError::InvalidLength {
+                    operation: "item()",
+                    expected: 1,
+                    actual: 0,
+                })
+            );
+
+            let multi = Column::from_values(vec![Scalar::Int64(5), Scalar::Int64(6)]).expect("col");
+            assert_eq!(
+                multi.item(),
+                Err(crate::ColumnError::InvalidLength {
+                    operation: "item()",
+                    expected: 1,
+                    actual: 2,
+                })
+            );
         }
 
         #[test]
