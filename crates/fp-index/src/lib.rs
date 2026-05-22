@@ -6306,6 +6306,96 @@ impl PeriodIndex {
         }
     }
 
+    /// Calendar year for each period's ending date, matching
+    /// `pd.PeriodIndex.year`.
+    pub fn year(&self) -> Result<Vec<Option<i32>>, IndexError> {
+        Ok(self.end_time()?.year())
+    }
+
+    /// Calendar month for each period's ending date, matching
+    /// `pd.PeriodIndex.month`.
+    pub fn month(&self) -> Result<Vec<Option<u32>>, IndexError> {
+        Ok(self.end_time()?.month())
+    }
+
+    /// Calendar day for each period's ending date, matching
+    /// `pd.PeriodIndex.day`.
+    pub fn day(&self) -> Result<Vec<Option<u32>>, IndexError> {
+        Ok(self.end_time()?.day())
+    }
+
+    /// Hour component at each period's start boundary, matching
+    /// `pd.PeriodIndex.hour`.
+    pub fn hour(&self) -> Result<Vec<Option<u32>>, IndexError> {
+        Ok(self.start_time()?.hour())
+    }
+
+    /// Minute component at each period's start boundary, matching
+    /// `pd.PeriodIndex.minute`.
+    pub fn minute(&self) -> Result<Vec<Option<u32>>, IndexError> {
+        Ok(self.start_time()?.minute())
+    }
+
+    /// Second component at each period's start boundary, matching
+    /// `pd.PeriodIndex.second`.
+    pub fn second(&self) -> Result<Vec<Option<u32>>, IndexError> {
+        Ok(self.start_time()?.second())
+    }
+
+    /// Day of year for each period's ending date, matching
+    /// `pd.PeriodIndex.dayofyear`.
+    pub fn dayofyear(&self) -> Result<Vec<Option<u32>>, IndexError> {
+        Ok(self.end_time()?.dayofyear())
+    }
+
+    /// Alias for [`dayofyear`](Self::dayofyear), matching
+    /// `pd.PeriodIndex.day_of_year`.
+    pub fn day_of_year(&self) -> Result<Vec<Option<u32>>, IndexError> {
+        self.dayofyear()
+    }
+
+    /// Weekday number of each period's ending date (Monday=0), matching
+    /// `pd.PeriodIndex.dayofweek`.
+    pub fn dayofweek(&self) -> Result<Vec<Option<u32>>, IndexError> {
+        Ok(self.end_time()?.dayofweek())
+    }
+
+    /// Alias for [`dayofweek`](Self::dayofweek), matching
+    /// `pd.PeriodIndex.day_of_week`.
+    pub fn day_of_week(&self) -> Result<Vec<Option<u32>>, IndexError> {
+        self.dayofweek()
+    }
+
+    /// Alias for [`dayofweek`](Self::dayofweek), matching
+    /// `pd.PeriodIndex.weekday`.
+    pub fn weekday(&self) -> Result<Vec<Option<u32>>, IndexError> {
+        self.dayofweek()
+    }
+
+    /// Calendar quarter for each period's ending date, matching
+    /// `pd.PeriodIndex.quarter`.
+    pub fn quarter(&self) -> Result<Vec<Option<u32>>, IndexError> {
+        Ok(self.end_time()?.quarter())
+    }
+
+    /// Leap-year flag for each period's ending date, matching
+    /// `pd.PeriodIndex.is_leap_year`.
+    pub fn is_leap_year(&self) -> Result<Vec<Option<bool>>, IndexError> {
+        Ok(self.end_time()?.is_leap_year())
+    }
+
+    /// Days in month for each period's ending date, matching
+    /// `pd.PeriodIndex.days_in_month`.
+    pub fn days_in_month(&self) -> Result<Vec<Option<u32>>, IndexError> {
+        Ok(self.end_time()?.days_in_month())
+    }
+
+    /// Alias for [`days_in_month`](Self::days_in_month), matching
+    /// `pd.PeriodIndex.daysinmonth`.
+    pub fn daysinmonth(&self) -> Result<Vec<Option<u32>>, IndexError> {
+        self.days_in_month()
+    }
+
     /// Fiscal year for each period's ending boundary.
     ///
     /// For the currently supported unanchored frequencies this is the
@@ -18585,6 +18675,43 @@ mod tests {
             ]
         );
         assert_eq!(mixed_freq.qyear()?, vec![1970, 1970, 1970]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn period_index_calendar_components_match_pandas_boundaries_rhwx9()
+    -> Result<(), super::IndexError> {
+        use fp_types::{Period, PeriodFreq};
+
+        let periods = super::PeriodIndex::new(vec![
+            Period::new(50, PeriodFreq::Annual),
+            Period::new(216, PeriodFreq::Quarterly),
+            Period::new(649, PeriodFreq::Monthly),
+            Period::new(19_782, PeriodFreq::Daily),
+            Period::new(474_780, PeriodFreq::Hourly),
+            Period::new(28_486_834, PeriodFreq::Minutely),
+            Period::new(1_709_210_096, PeriodFreq::Secondly),
+        ]);
+        let start = periods.start_time()?;
+        let end = periods.end_time()?;
+
+        assert_eq!(periods.year()?, end.year());
+        assert_eq!(periods.month()?, end.month());
+        assert_eq!(periods.day()?, end.day());
+        assert_eq!(periods.dayofyear()?, end.dayofyear());
+        assert_eq!(periods.day_of_year()?, periods.dayofyear()?);
+        assert_eq!(periods.dayofweek()?, end.dayofweek());
+        assert_eq!(periods.day_of_week()?, periods.dayofweek()?);
+        assert_eq!(periods.weekday()?, periods.dayofweek()?);
+        assert_eq!(periods.quarter()?, end.quarter());
+        assert_eq!(periods.is_leap_year()?, end.is_leap_year());
+        assert_eq!(periods.days_in_month()?, end.days_in_month());
+        assert_eq!(periods.daysinmonth()?, periods.days_in_month()?);
+
+        assert_eq!(periods.hour()?, start.hour());
+        assert_eq!(periods.minute()?, start.minute());
+        assert_eq!(periods.second()?, start.second());
 
         Ok(())
     }
