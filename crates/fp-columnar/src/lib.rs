@@ -2565,6 +2565,32 @@ impl Column {
         self.slice(start, len)
     }
 
+    /// Split column into n equal-ish parts.
+    ///
+    /// Matches np.array_split(). Returns Vec of Columns.
+    pub fn array_split(&self, n: usize) -> Result<Vec<Self>, ColumnError> {
+        if n == 0 {
+            return Ok(Vec::new());
+        }
+        let len = self.values.len();
+        let base_size = len / n;
+        let remainder = len % n;
+        let mut result = Vec::with_capacity(n);
+        let mut start = 0;
+        for i in 0..n {
+            let size = base_size + if i < remainder { 1 } else { 0 };
+            let part = self.slice(start, size)?;
+            result.push(part);
+            start += size;
+        }
+        Ok(result)
+    }
+
+    /// Alias for array_split.
+    pub fn split(&self, n: usize) -> Result<Vec<Self>, ColumnError> {
+        self.array_split(n)
+    }
+
     /// Concatenate `other` onto `self`, preserving dtype.
     ///
     /// Returns `ColumnError::DTypeMismatch` when `other.dtype()` differs
