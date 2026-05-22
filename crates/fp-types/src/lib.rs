@@ -2376,11 +2376,11 @@ pub enum PeriodFreq {
     Daily,
     /// `B` — business-day periods.
     Business,
-    /// `H` — hourly periods.
+    /// `h` / `H` — hourly periods.
     Hourly,
-    /// `T` / `min` — minutely periods.
+    /// `min` / `T` — minutely periods.
     Minutely,
-    /// `S` — secondly periods.
+    /// `s` / `S` — secondly periods.
     Secondly,
 }
 
@@ -2412,9 +2412,9 @@ impl PeriodFreq {
             Self::Weekly => "W",
             Self::Daily => "D",
             Self::Business => "B",
-            Self::Hourly => "H",
-            Self::Minutely => "T",
-            Self::Secondly => "S",
+            Self::Hourly => "h",
+            Self::Minutely => "min",
+            Self::Secondly => "s",
         }
     }
 }
@@ -3819,6 +3819,17 @@ mod tests {
         ] {
             assert_eq!(PeriodFreq::parse(freq.alias()), Some(freq));
         }
+    }
+
+    #[test]
+    fn period_freq_intraday_aliases_are_pandas_canonical_8kfdo() {
+        assert_eq!(PeriodFreq::Hourly.alias(), "h");
+        assert_eq!(PeriodFreq::Minutely.alias(), "min");
+        assert_eq!(PeriodFreq::Secondly.alias(), "s");
+
+        assert_eq!(PeriodFreq::parse("H"), Some(PeriodFreq::Hourly));
+        assert_eq!(PeriodFreq::parse("T"), Some(PeriodFreq::Minutely));
+        assert_eq!(PeriodFreq::parse("S"), Some(PeriodFreq::Secondly));
     }
 
     #[test]
