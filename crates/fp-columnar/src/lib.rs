@@ -6543,6 +6543,137 @@ impl Column {
         self.trunc()
     }
 
+    /// Trim leading and/or trailing zeros from a 1-D array.
+    ///
+    /// Matches np.trim_zeros(). The `trim` parameter specifies:
+    /// - "f" or "fb": trim from front (leading zeros)
+    /// - "b" or "fb": trim from back (trailing zeros)
+    /// - "fb" (default): trim both
+    pub fn trim_zeros(&self, trim: &str) -> Result<Self, ColumnError> {
+        let values = &self.values;
+        if values.is_empty() {
+            return Self::new(self.dtype, vec![]);
+        }
+
+        let is_zero = |s: &Scalar| -> bool {
+            match s {
+                Scalar::Int64(x) => *x == 0,
+                Scalar::Float64(x) => *x == 0.0,
+                Scalar::Bool(b) => !*b,
+                _ => false,
+            }
+        };
+
+        let mut start = 0;
+        let mut end = values.len();
+
+        if trim.contains('f') {
+            while start < end && is_zero(&values[start]) {
+                start += 1;
+            }
+        }
+
+        if trim.contains('b') {
+            while end > start && is_zero(&values[end - 1]) {
+                end -= 1;
+            }
+        }
+
+        Self::new(self.dtype, values[start..end].to_vec())
+    }
+
+    /// Round to the given number of decimals.
+    ///
+    /// Matches np.around(a, decimals). For negative decimals, rounds to
+    /// the left of the decimal point (e.g., decimals=-1 rounds to tens).
+    pub fn around(&self, decimals: i32) -> Result<Self, ColumnError> {
+        let factor = 10.0_f64.powi(decimals);
+        let mut out = Vec::with_capacity(self.values.len());
+        for v in &self.values {
+            if v.is_missing() {
+                out.push(Scalar::Float64(f64::NAN));
+                continue;
+            }
+            match v {
+                Scalar::Int64(x) => {
+                    if decimals >= 0 {
+                        out.push(Scalar::Int64(*x));
+                    } else {
+                        let rounded = ((*x as f64) * factor).round() / factor;
+                        out.push(Scalar::Int64(rounded as i64));
+                    }
+                }
+                Scalar::Float64(x) => {
+                    let rounded = (*x * factor).round() / factor;
+                    out.push(Scalar::Float64(rounded));
+                }
+                _ => {
+                    return Err(ColumnError::Type(TypeError::NonNumericValue {
+                        value: format!("{v:?}"),
+                        dtype: self.dtype,
+                    }));
+                }
+            }
+        }
+        if decimals >= 0 && self.dtype == DType::Int64 {
+            Self::new(DType::Int64, out)
+        } else {
+            Self::new(DType::Float64, out)
+        }
+    }
+
+    /// Unwrap by changing deltas between values to their 2*pi complements.
+    ///
+    /// Matches np.unwrap(). Unwraps radian phase values by adding multiples
+    /// of 2*pi when the absolute difference from the previous value exceeds
+    /// the discontinuity threshold (default: pi).
+    pub fn unwrap(&self, discont: Option<f64>) -> Result<Self, ColumnError> {
+        let threshold = discont.unwrap_or(std::f64::consts::PI);
+        let two_pi = 2.0 * std::f64::consts::PI;
+
+        let mut out = Vec::with_capacity(self.values.len());
+        let mut offset = 0.0;
+
+        for (i, v) in self.values.iter().enumerate() {
+            if v.is_missing() {
+                out.push(Scalar::Float64(f64::NAN));
+                continue;
+            }
+            let x = match v {
+                Scalar::Int64(x) => *x as f64,
+                Scalar::Float64(x) => *x,
+                _ => {
+                    return Err(ColumnError::Type(TypeError::NonNumericValue {
+                        value: format!("{v:?}"),
+                        dtype: self.dtype,
+                    }));
+                }
+            };
+
+            if i == 0 {
+                out.push(Scalar::Float64(x));
+            } else {
+                let prev = match &out[out.len() - 1] {
+                    Scalar::Float64(p) if !p.is_nan() => *p,
+                    _ => {
+                        out.push(Scalar::Float64(x + offset));
+                        continue;
+                    }
+                };
+
+                let diff = x + offset - prev;
+                if diff > threshold {
+                    offset -= two_pi * ((diff + std::f64::consts::PI) / two_pi).floor();
+                } else if diff < -threshold {
+                    offset += two_pi * ((-diff + std::f64::consts::PI) / two_pi).floor();
+                }
+                out.push(Scalar::Float64(x + offset));
+            }
+        }
+
+        Self::new(DType::Float64, out)
+    }
+
     /// Compute exp(x) - 1 with improved precision for small x.
     pub fn expm1(&self) -> Result<Self, ColumnError> {
         let mut out = Vec::with_capacity(self.values.len());
@@ -13179,6 +13310,82 @@ mod tests {
             assert_eq!(r3.values()[0].to_i64().unwrap(), 1);
             let r4 = col.roll(5).unwrap();
             assert_eq!(r4.values()[0].to_i64().unwrap(), 1);
+        }
+
+        #[test]
+        fn trim_zeros_removes_leading_trailing() {
+            let col = Column::from_values(vec![
+                Scalar::Int64(0),
+                Scalar::Int64(0),
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(0),
+            ])
+            .unwrap();
+            // Trim both
+            let r1 = col.trim_zeros("fb").unwrap();
+            assert_eq!(r1.len(), 2);
+            assert_eq!(r1.values()[0].to_i64().unwrap(), 1);
+            assert_eq!(r1.values()[1].to_i64().unwrap(), 2);
+            // Trim front only
+            let r2 = col.trim_zeros("f").unwrap();
+            assert_eq!(r2.len(), 3);
+            assert_eq!(r2.values()[0].to_i64().unwrap(), 1);
+            // Trim back only
+            let r3 = col.trim_zeros("b").unwrap();
+            assert_eq!(r3.len(), 4);
+            assert_eq!(r3.values()[3].to_i64().unwrap(), 2);
+        }
+
+        #[test]
+        fn around_rounds_to_decimals() {
+            let col = Column::from_values(vec![
+                Scalar::Float64(1.234),
+                Scalar::Float64(5.678),
+                Scalar::Float64(3.5),
+            ])
+            .unwrap();
+            // Round to 2 decimals
+            let r1 = col.around(2).unwrap();
+            assert!((r1.values()[0].to_f64().unwrap() - 1.23).abs() < 1e-10);
+            assert!((r1.values()[1].to_f64().unwrap() - 5.68).abs() < 1e-10);
+            assert!((r1.values()[2].to_f64().unwrap() - 3.5).abs() < 1e-10);
+            // Round to 0 decimals
+            let r2 = col.around(0).unwrap();
+            assert!((r2.values()[0].to_f64().unwrap() - 1.0).abs() < 1e-10);
+            assert!((r2.values()[1].to_f64().unwrap() - 6.0).abs() < 1e-10);
+            // Round to -1 (tens) - uses round-half-away-from-zero
+            let col2 = Column::from_values(vec![
+                Scalar::Float64(15.0),
+                Scalar::Float64(24.0),
+                Scalar::Float64(35.0),
+            ])
+            .unwrap();
+            let r3 = col2.around(-1).unwrap();
+            assert!((r3.values()[0].to_f64().unwrap() - 20.0).abs() < 1e-10);
+            assert!((r3.values()[1].to_f64().unwrap() - 20.0).abs() < 1e-10);
+            assert!((r3.values()[2].to_f64().unwrap() - 40.0).abs() < 1e-10);
+        }
+
+        #[test]
+        fn unwrap_removes_phase_discontinuities() {
+            use std::f64::consts::PI;
+            let col = Column::from_values(vec![
+                Scalar::Float64(0.0),
+                Scalar::Float64(PI * 0.9),
+                Scalar::Float64(-PI * 0.9), // jump > PI
+                Scalar::Float64(0.0),
+            ])
+            .unwrap();
+            let result = col.unwrap(None).unwrap();
+            // After unwrap, the sequence should be continuous
+            assert!((result.values()[0].to_f64().unwrap() - 0.0).abs() < 1e-10);
+            // Second value unchanged
+            assert!((result.values()[1].to_f64().unwrap() - PI * 0.9).abs() < 1e-10);
+            // Third value should be unwrapped (added 2*PI)
+            let v2 = result.values()[2].to_f64().unwrap();
+            let v1 = result.values()[1].to_f64().unwrap();
+            assert!((v2 - v1).abs() < PI); // difference should now be < PI
         }
     }
 }
