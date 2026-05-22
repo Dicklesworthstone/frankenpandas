@@ -2506,6 +2506,117 @@ impl Column {
         nansem(&self.values, ddof)
     }
 
+    /// Sample covariance between this column and another.
+    ///
+    /// Matches `pd.Series.cov(other)`. Uses ddof=1 by default.
+    /// Returns NaN if fewer than 2 valid pairs.
+    #[must_use]
+    pub fn cov(&self, other: &Self) -> Scalar {
+        self.cov_ddof(other, 1)
+    }
+
+    /// Sample covariance with custom ddof.
+    #[must_use]
+    pub fn cov_ddof(&self, other: &Self, ddof: usize) -> Scalar {
+        let n = self.values.len().min(other.values.len());
+        if n == 0 {
+            return Scalar::Null(NullKind::NaN);
+        }
+        let mut sum_x = 0.0;
+        let mut sum_y = 0.0;
+        let mut count = 0usize;
+        for i in 0..n {
+            let x = match self.values[i].to_f64() {
+                Ok(v) if v.is_finite() => v,
+                _ => continue,
+            };
+            let y = match other.values[i].to_f64() {
+                Ok(v) if v.is_finite() => v,
+                _ => continue,
+            };
+            sum_x += x;
+            sum_y += y;
+            count += 1;
+        }
+        if count <= ddof {
+            return Scalar::Null(NullKind::NaN);
+        }
+        let mean_x = sum_x / count as f64;
+        let mean_y = sum_y / count as f64;
+        let mut cov_sum = 0.0;
+        for i in 0..n {
+            let x = match self.values[i].to_f64() {
+                Ok(v) if v.is_finite() => v,
+                _ => continue,
+            };
+            let y = match other.values[i].to_f64() {
+                Ok(v) if v.is_finite() => v,
+                _ => continue,
+            };
+            cov_sum += (x - mean_x) * (y - mean_y);
+        }
+        Scalar::Float64(cov_sum / (count - ddof) as f64)
+    }
+
+    /// Pearson correlation coefficient between this column and another.
+    ///
+    /// Matches `pd.Series.corr(other)`. Returns NaN if fewer than 2 valid pairs.
+    #[must_use]
+    pub fn corr(&self, other: &Self) -> Scalar {
+        let n = self.values.len().min(other.values.len());
+        if n == 0 {
+            return Scalar::Null(NullKind::NaN);
+        }
+        let mut sum_x = 0.0;
+        let mut sum_y = 0.0;
+        let mut sum_xx = 0.0;
+        let mut sum_yy = 0.0;
+        let mut sum_xy = 0.0;
+        let mut count = 0usize;
+        for i in 0..n {
+            let x = match self.values[i].to_f64() {
+                Ok(v) if v.is_finite() => v,
+                _ => continue,
+            };
+            let y = match other.values[i].to_f64() {
+                Ok(v) if v.is_finite() => v,
+                _ => continue,
+            };
+            sum_x += x;
+            sum_y += y;
+            sum_xx += x * x;
+            sum_yy += y * y;
+            sum_xy += x * y;
+            count += 1;
+        }
+        if count < 2 {
+            return Scalar::Null(NullKind::NaN);
+        }
+        let n_f = count as f64;
+        let numerator = n_f * sum_xy - sum_x * sum_y;
+        let denom_x = (n_f * sum_xx - sum_x * sum_x).sqrt();
+        let denom_y = (n_f * sum_yy - sum_y * sum_y).sqrt();
+        if denom_x == 0.0 || denom_y == 0.0 {
+            return Scalar::Null(NullKind::NaN);
+        }
+        Scalar::Float64(numerator / (denom_x * denom_y))
+    }
+
+    /// Autocorrelation at a given lag.
+    ///
+    /// Matches `pd.Series.autocorr(lag)`. Returns NaN if fewer than 2 valid pairs.
+    #[must_use]
+    pub fn autocorr(&self, lag: usize) -> Scalar {
+        if lag >= self.values.len() {
+            return Scalar::Null(NullKind::NaN);
+        }
+        let shifted = match self.shift(lag as i64, Scalar::Null(NullKind::NaN)) {
+            Ok(s) => s,
+            Err(_) => return Scalar::Null(NullKind::NaN),
+        };
+        self.corr(&shifted)
+    }
+
     /// Sample skewness (bias-corrected, Fisher-Pearson).
     ///
     /// Matches `pd.Series.skew()`. Requires at least 3 non-missing
