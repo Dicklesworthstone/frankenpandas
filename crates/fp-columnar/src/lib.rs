@@ -1285,6 +1285,12 @@ impl Column {
         self.values.iter().any(Scalar::is_missing)
     }
 
+    /// Whether any value is missing, matching `pd.Series.hasnans`.
+    #[must_use]
+    pub fn hasnans(&self) -> bool {
+        self.has_any_missing()
+    }
+
     /// Whether every value in the column is missing.
     ///
     /// Matches `pd.Series.isna().all()`. Empty columns return true
@@ -2857,6 +2863,12 @@ impl Column {
         // One bit per element, rounded up to whole bytes.
         let validity_bytes = self.values.len().div_ceil(8);
         base + deep_extra + validity_bytes
+    }
+
+    /// Approximate value-buffer footprint, matching `pd.Series.nbytes`.
+    #[must_use]
+    pub fn nbytes(&self) -> usize {
+        self.memory_usage(false)
     }
 
     /// Element-wise equality into a Bool column.
@@ -5675,11 +5687,15 @@ mod tests {
             let populated =
                 Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2)]).expect("col");
             assert!(!populated.has_any_missing());
+            assert_eq!(populated.hasnans(), populated.has_any_missing());
+            assert_eq!(populated.nbytes(), populated.memory_usage(false));
 
             let with_null =
                 Column::from_values(vec![Scalar::Int64(1), Scalar::Null(NullKind::NaN)])
                     .expect("col");
             assert!(with_null.has_any_missing());
+            assert_eq!(with_null.hasnans(), with_null.has_any_missing());
+            assert_eq!(with_null.nbytes(), with_null.memory_usage(false));
         }
 
         #[test]
