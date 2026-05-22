@@ -5868,6 +5868,45 @@ impl Column {
                 .zip(&other.values)
                 .all(|(left, right)| left.semantic_eq(right))
     }
+
+    /// Element-wise comparison for approximate equality.
+    ///
+    /// Matches np.isclose(). Returns True where |a - b| <= atol + rtol * |b|.
+    pub fn isclose(&self, other: &Self, rtol: f64, atol: f64) -> Result<Self, ColumnError> {
+        if self.len() != other.len() {
+            return Err(ColumnError::LengthMismatch {
+                left: self.len(),
+                right: other.len(),
+            });
+        }
+        let mut out = Vec::with_capacity(self.values.len());
+        for (a, b) in self.values.iter().zip(&other.values) {
+            if a.is_missing() || b.is_missing() {
+                out.push(Scalar::Bool(false));
+                continue;
+            }
+            let af = a.to_f64().map_err(ColumnError::Type)?;
+            let bf = b.to_f64().map_err(ColumnError::Type)?;
+            let close = (af - bf).abs() <= atol + rtol * bf.abs();
+            out.push(Scalar::Bool(close));
+        }
+        Self::new(DType::Bool, out)
+    }
+
+    /// Check if all elements are approximately equal.
+    ///
+    /// Matches np.allclose(). Returns True if all pairs satisfy isclose.
+    pub fn allclose(&self, other: &Self, rtol: f64, atol: f64) -> Result<bool, ColumnError> {
+        let close = self.isclose(other, rtol, atol)?;
+        for v in close.values() {
+            match v {
+                Scalar::Bool(true) => continue,
+                Scalar::Bool(false) => return Ok(false),
+                _ => return Ok(false),
+            }
+        }
+        Ok(true)
+    }
 }
 
 // ---------------------------------------------------------------------------
