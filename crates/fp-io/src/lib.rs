@@ -10230,8 +10230,9 @@ impl DataFrameIoExt for DataFrame {
 ///
 /// Import this trait to call `series.to_pickle(path)`,
 /// `series.to_pickle_bytes()`, `series.to_hdf(path)`,
-/// `series.to_excel(path)`, `series.to_sql(conn, table, if_exists)`, or
-/// `series.to_clipboard()` directly on Series values.
+/// `series.to_csv_string()`, `series.to_hdf(path)`, `series.to_excel(path)`,
+/// `series.to_sql(conn, table, if_exists)`, or `series.to_clipboard()`
+/// directly on Series values.
 pub trait SeriesIoExt {
     /// Write this Series to a Pickle file.
     ///
@@ -10259,6 +10260,28 @@ pub trait SeriesIoExt {
         &self,
         options: &PickleWriteOptions,
     ) -> Result<Vec<u8>, IoError>;
+
+    /// Write this Series to a CSV file.
+    ///
+    /// Matches `pd.Series.to_csv(path)` for the supported CSV writer surface,
+    /// including pandas' default index materialization.
+    fn to_csv_file(&self, path: &Path) -> Result<(), IoError>;
+
+    /// Write this Series to a CSV file with explicit write options.
+    fn to_csv_file_with_options(
+        &self,
+        path: &Path,
+        options: &CsvWriteOptions,
+    ) -> Result<(), IoError>;
+
+    /// Serialize this Series to a CSV string.
+    ///
+    /// Matches `pd.Series.to_csv()` with no path for the supported writer
+    /// surface.
+    fn to_csv_string(&self) -> Result<String, IoError>;
+
+    /// Serialize this Series to a CSV string with explicit write options.
+    fn to_csv_string_with_options(&self, options: &CsvWriteOptions) -> Result<String, IoError>;
 
     /// Write this Series to an HDF5 file at the default key.
     ///
@@ -10353,6 +10376,36 @@ impl SeriesIoExt for Series {
         options: &PickleWriteOptions,
     ) -> Result<Vec<u8>, IoError> {
         write_pickle_bytes_with_options(&self.to_frame(None)?, options)
+    }
+
+    fn to_csv_file(&self, path: &Path) -> Result<(), IoError> {
+        self.to_csv_file_with_options(
+            path,
+            &CsvWriteOptions {
+                include_index: true,
+                ..CsvWriteOptions::default()
+            },
+        )
+    }
+
+    fn to_csv_file_with_options(
+        &self,
+        path: &Path,
+        options: &CsvWriteOptions,
+    ) -> Result<(), IoError> {
+        std::fs::write(path, self.to_csv_string_with_options(options)?)?;
+        Ok(())
+    }
+
+    fn to_csv_string(&self) -> Result<String, IoError> {
+        self.to_csv_string_with_options(&CsvWriteOptions {
+            include_index: true,
+            ..CsvWriteOptions::default()
+        })
+    }
+
+    fn to_csv_string_with_options(&self, options: &CsvWriteOptions) -> Result<String, IoError> {
+        write_csv_string_with_options(&self.to_frame(None)?, options)
     }
 
     fn to_hdf(&self, path: &Path) -> Result<(), IoError> {
@@ -11122,6 +11175,40 @@ mod tests {
             .to_pickle_bytes_with_options(&options)
             .expect("series pickle protocol v2")
             .is_empty());
+    }
+
+    #[test]
+    fn series_csv_extension_aliases_preserve_default_index() {
+        use super::SeriesIoExt;
+
+        let source = Series::from_values(
+            "sales",
+            vec!["r1".into(), "r2".into()],
+            vec![Scalar::Int64(10), Scalar::Int64(12)],
+        )
+        .expect("source series");
+
+        let csv = source.to_csv_string().expect("series csv string");
+        assert_eq!(csv, ",sales\nr1,10\nr2,12\n");
+
+        let no_index = source
+            .to_csv_string_with_options(&CsvWriteOptions {
+                include_index: false,
+                ..CsvWriteOptions::default()
+            })
+            .expect("series csv without index");
+        assert_eq!(no_index, "sales\n10\n12\n");
+
+        let path = std::env::temp_dir().join(format!(
+            "fp_io_series_csv_{}_{}.csv",
+            std::process::id(),
+            line!()
+        ));
+        source.to_csv_file(&path).expect("series csv file");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read series csv file"),
+            csv
+        );
     }
 
     #[test]
