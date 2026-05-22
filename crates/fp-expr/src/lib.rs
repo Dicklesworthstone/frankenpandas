@@ -184,6 +184,9 @@ pub enum Expr {
         expr: Box<Expr>,
         value: Scalar,
     },
+    DropNa {
+        expr: Box<Expr>,
+    },
     Replace {
         expr: Box<Expr>,
         to_replace: Scalar,
@@ -457,6 +460,10 @@ pub fn evaluate(
         Expr::FillNa { expr, value } => {
             let input = evaluate(expr, context, policy, ledger)?;
             input.fillna(value).map_err(ExprError::from)
+        }
+        Expr::DropNa { expr } => {
+            let input = evaluate(expr, context, policy, ledger)?;
+            input.dropna().map_err(ExprError::from)
         }
         Expr::Replace {
             expr,
@@ -955,6 +962,7 @@ impl MaterializedView {
             }
             Expr::IsNull { expr, .. } => Self::extract_series(expr, series_set),
             Expr::FillNa { expr, .. } => Self::extract_series(expr, series_set),
+            Expr::DropNa { expr } => Self::extract_series(expr, series_set),
             Expr::Replace { expr, .. } => Self::extract_series(expr, series_set),
             Expr::Astype { expr, .. } => Self::extract_series(expr, series_set),
             Expr::Where {
@@ -1100,6 +1108,10 @@ fn evaluate_delta(
         Expr::FillNa { expr, value } => {
             let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
             input.fillna(value).map_err(ExprError::from)
+        }
+        Expr::DropNa { expr } => {
+            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
+            input.dropna().map_err(ExprError::from)
         }
         Expr::Replace {
             expr,
@@ -1284,10 +1296,10 @@ fn evaluate_delta_comparison(
 //     .pow(other), reflected arithmetic variants, .eq(other), .ne(other),
 //     .gt(other), .ge(other), .lt(other), .le(other), .clip(lower, upper),
 //     .shift(periods), .diff(periods), .cumsum(), .cumprod(), .cummin(),
-//     .cummax(), .pct_change(periods), .round(decimals), .replace(to_replace, value), .astype(dtype),
-//     .combine_first(other), .rank(method=..., ascending=..., na_option=...),
-//     .where(cond, other), .mask(cond, other), .isna(), .notna(), .isnull(),
-//     .notnull()
+//     .cummax(), .pct_change(periods), .round(decimals), .dropna(),
+//     .replace(to_replace, value), .astype(dtype), .combine_first(other),
+//     .rank(method=..., ascending=..., na_option=...), .where(cond, other),
+//     .mask(cond, other), .isna(), .notna(), .isnull(), .notnull()
 //   - Arithmetic operators: +, -, *, /, //, %, **
 //   - Parenthesized sub-expressions
 
@@ -2254,6 +2266,17 @@ fn parse_postfix(mut expr: Expr, tokens: &[Token], pos: &mut usize) -> Result<Ex
                     value,
                 };
                 *pos = arg_pos + 1;
+            }
+            "dropna" => {
+                if tokens.get(*pos + 3) != Some(&Token::RParen) {
+                    return Err(ExprError::ParseError(
+                        "method dropna does not accept arguments in expressions".into(),
+                    ));
+                }
+                expr = Expr::DropNa {
+                    expr: Box::new(expr),
+                };
+                *pos += 4;
             }
             "replace" => {
                 let mut arg_pos = *pos + 3;
@@ -5297,6 +5320,69 @@ mod tests {
             keyword_filtered.index().labels(),
             &[1_i64.into(), 2_i64.into()]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn eval_and_query_str_accept_dropna_method_call() -> Result<(), ExprError> {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "a",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Int64(1),
+                    Scalar::Null(fp_types::NullKind::Null),
+                    Scalar::Int64(3),
+                    Scalar::Int64(4),
+                ],
+            )
+            .map_err(ExprError::from)?,
+            fp_frame::Series::from_values(
+                "b",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+                vec![
+                    Scalar::Int64(10),
+                    Scalar::Int64(20),
+                    Scalar::Int64(30),
+                    Scalar::Int64(10),
+                ],
+            )
+            .map_err(ExprError::from)?,
+        ])
+        .map_err(ExprError::from)?;
+
+        let dropped = super::eval_str("a.dropna()", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            dropped.index().labels(),
+            &[0_i64.into(), 2_i64.into(), 3_i64.into()]
+        );
+        assert_eq!(
+            dropped.values(),
+            &[Scalar::Int64(1), Scalar::Int64(3), Scalar::Int64(4)]
+        );
+
+        let predicate = super::eval_str("a.dropna().gt(2)", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            predicate.index().labels(),
+            &[0_i64.into(), 2_i64.into(), 3_i64.into()]
+        );
+        assert_eq!(
+            predicate.values(),
+            &[Scalar::Bool(false), Scalar::Bool(true), Scalar::Bool(true)]
+        );
+
+        let filtered = super::query_str(
+            "a.dropna().gt(2) and b.gt(20)",
+            &frame,
+            &policy,
+            &mut ledger,
+        )?;
+        assert_eq!(filtered.index().labels(), &[2_i64.into()]);
+
+        assert!(super::parse_expr("a.dropna(0)").is_err());
         Ok(())
     }
 
