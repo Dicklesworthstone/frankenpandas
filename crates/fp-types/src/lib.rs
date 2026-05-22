@@ -1312,6 +1312,48 @@ impl Timestamp {
             None => base,
         }
     }
+
+    /// Format timestamp using strftime directives.
+    ///
+    /// Matches `pd.Timestamp.strftime(format)`. Supports: %Y (year), %m (month),
+    /// %d (day), %H (hour), %M (minute), %S (second), %f (microsecond).
+    /// NaT returns "NaT".
+    #[must_use]
+    pub fn strftime(&self, format: &str) -> String {
+        if self.is_nat() {
+            return "NaT".to_string();
+        }
+        let total_secs = self.nanos / Timedelta::NANOS_PER_SEC;
+        let sub_nanos = (self.nanos % Timedelta::NANOS_PER_SEC).unsigned_abs();
+
+        let days_since_epoch = total_secs / 86400;
+        let secs_of_day = (total_secs % 86400 + 86400) % 86400;
+
+        let mut days = days_since_epoch + 719_468;
+        let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
+        let doe = days - era * 146_097;
+        let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+        let y = yoe + era * 400;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let d = doy - (153 * mp + 2) / 5 + 1;
+        let m = if mp < 10 { mp + 3 } else { mp - 9 };
+        let year = if m <= 2 { y + 1 } else { y };
+
+        let hour = secs_of_day / 3600;
+        let minute = (secs_of_day % 3600) / 60;
+        let second = secs_of_day % 60;
+        let micros = sub_nanos / 1000;
+
+        format
+            .replace("%Y", &format!("{year:04}"))
+            .replace("%m", &format!("{m:02}"))
+            .replace("%d", &format!("{d:02}"))
+            .replace("%H", &format!("{hour:02}"))
+            .replace("%M", &format!("{minute:02}"))
+            .replace("%S", &format!("{second:02}"))
+            .replace("%f", &format!("{micros:06}"))
+    }
 }
 
 impl std::fmt::Display for Timestamp {
@@ -4711,5 +4753,16 @@ mod tests {
         assert!(ts_tz.isoformat().contains("[America/New_York]"));
 
         assert_eq!(Timestamp::nat().isoformat(), "NaT");
+    }
+
+    #[test]
+    fn timestamp_strftime_basic() {
+        let ts = Timestamp::from_nanos(
+            Timedelta::NANOS_PER_DAY * 365 + Timedelta::NANOS_PER_HOUR * 9 + Timedelta::NANOS_PER_MIN * 15,
+        );
+        assert_eq!(ts.strftime("%Y-%m-%d"), "1971-01-01");
+        assert_eq!(ts.strftime("%H:%M:%S"), "09:15:00");
+        assert_eq!(ts.strftime("%Y/%m/%d %H:%M"), "1971/01/01 09:15");
+        assert_eq!(Timestamp::nat().strftime("%Y-%m-%d"), "NaT");
     }
 }
