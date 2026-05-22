@@ -1245,6 +1245,47 @@ fn csv_escape_with_csv_options(
     }
 }
 
+fn csv_escape_quote_none_with_escapechar(
+    value: &str,
+    sep: char,
+    escapechar: Option<char>,
+    lineterminator: &str,
+) -> Result<String, FrameError> {
+    let lineterminator = csv_lineterminator_or_default(lineterminator);
+    let needs_escape = value.chars().any(|ch| {
+        ch == sep
+            || ch == '\n'
+            || ch == '\r'
+            || lineterminator.contains(ch)
+            || Some(ch) == escapechar
+    });
+
+    if !needs_escape {
+        return Ok(value.to_owned());
+    }
+
+    let escape = escapechar.ok_or_else(|| {
+        FrameError::CompatibilityRejected(
+            "quoting=QUOTE_NONE requires escapechar when a field contains special CSV characters"
+                .to_owned(),
+        )
+    })?;
+
+    let mut escaped = String::with_capacity(value.len() + 1);
+    for ch in value.chars() {
+        if ch == sep
+            || ch == '\n'
+            || ch == '\r'
+            || lineterminator.contains(ch)
+            || ch == escape
+        {
+            escaped.push(escape);
+        }
+        escaped.push(ch);
+    }
+    Ok(escaped)
+}
+
 fn format_pandas_csv_float_with_csv_options(
     v: f64,
     sep: char,
@@ -1267,6 +1308,86 @@ fn format_pandas_csv_float_with_csv_options(
         escapechar,
         lineterminator,
     )
+}
+
+fn format_pandas_csv_float_quote_none(
+    v: f64,
+    sep: char,
+    lineterminator: &str,
+    decimal: &str,
+    escapechar: Option<char>,
+) -> Result<String, FrameError> {
+    let decimal = csv_decimal_or_default(decimal);
+    let mut rendered = format_pandas_csv_float(v);
+    if decimal != "." && rendered.contains('.') {
+        rendered = rendered.replace('.', decimal);
+    }
+    csv_escape_quote_none_with_escapechar(&rendered, sep, escapechar, lineterminator)
+}
+
+fn csv_scalar_quote_none(
+    val: &Scalar,
+    sep: char,
+    na_rep: &str,
+    lineterminator: &str,
+    decimal: &str,
+    escapechar: Option<char>,
+) -> Result<String, FrameError> {
+    if val.is_missing() {
+        return csv_escape_quote_none_with_escapechar(na_rep, sep, escapechar, lineterminator);
+    }
+
+    match val {
+        Scalar::Null(_) => csv_escape_quote_none_with_escapechar(na_rep, sep, escapechar, lineterminator),
+        Scalar::Bool(b) => Ok(if *b { "True" } else { "False" }.to_string()),
+        Scalar::Int64(v) => Ok(v.to_string()),
+        Scalar::Float64(v) => {
+            format_pandas_csv_float_quote_none(*v, sep, lineterminator, decimal, escapechar)
+        }
+        Scalar::Utf8(s) => csv_escape_quote_none_with_escapechar(s, sep, escapechar, lineterminator),
+        Scalar::Timedelta64(v) if *v == Timedelta::NAT => {
+            csv_escape_quote_none_with_escapechar(na_rep, sep, escapechar, lineterminator)
+        }
+        Scalar::Timedelta64(v) => csv_escape_quote_none_with_escapechar(
+            &Timedelta::format(*v),
+            sep,
+            escapechar,
+            lineterminator,
+        ),
+        Scalar::Datetime64(v) if *v == Timedelta::NAT => {
+            csv_escape_quote_none_with_escapechar(na_rep, sep, escapechar, lineterminator)
+        }
+        Scalar::Datetime64(v) => csv_escape_quote_none_with_escapechar(
+            &format_datetime_ns(*v),
+            sep,
+            escapechar,
+            lineterminator,
+        ),
+        Scalar::Period(v) if *v == i64::MIN => {
+            csv_escape_quote_none_with_escapechar(na_rep, sep, escapechar, lineterminator)
+        }
+        Scalar::Period(v) => {
+            csv_escape_quote_none_with_escapechar(&format!("Period[{v}]"), sep, escapechar, lineterminator)
+        }
+        Scalar::Interval(interval) => {
+            csv_escape_quote_none_with_escapechar(&format!("{interval}"), sep, escapechar, lineterminator)
+        }
+    }
+}
+
+fn csv_index_label_quote_none(
+    label: &IndexLabel,
+    sep: char,
+    escapechar: Option<char>,
+    lineterminator: &str,
+) -> Result<String, FrameError> {
+    let rendered = match label {
+        IndexLabel::Int64(v) => v.to_string(),
+        IndexLabel::Utf8(s) => s.clone(),
+        IndexLabel::Timedelta64(ns) => Timedelta::format(*ns),
+        IndexLabel::Datetime64(ns) => format_datetime_ns(*ns),
+    };
+    csv_escape_quote_none_with_escapechar(&rendered, sep, escapechar, lineterminator)
 }
 
 fn scalar_to_json_value(value: &Scalar) -> Value {
@@ -9196,6 +9317,83 @@ impl Series {
             doublequote,
             escapechar,
         )
+    }
+
+    /// Matches `pd.Series.to_csv(quoting=csv.QUOTE_NONE, escapechar=...)`.
+    pub fn to_csv_with_quote_none_escapechar(
+        &self,
+        sep: char,
+        include_index: bool,
+        escapechar: Option<char>,
+    ) -> Result<String, FrameError> {
+        self.to_csv_with_format_options_index_label_decimal_quote_none_escapechar(
+            sep,
+            include_index,
+            true,
+            "",
+            "\n",
+            None,
+            ".",
+            escapechar,
+        )
+    }
+
+    /// Matches `pd.Series.to_csv(header=..., na_rep=..., lineterminator=..., index_label=..., decimal=..., quoting=csv.QUOTE_NONE, escapechar=...)`.
+    pub fn to_csv_with_format_options_index_label_decimal_quote_none_escapechar(
+        &self,
+        sep: char,
+        include_index: bool,
+        include_header: bool,
+        na_rep: &str,
+        lineterminator: &str,
+        index_label: Option<&str>,
+        decimal: &str,
+        escapechar: Option<char>,
+    ) -> Result<String, FrameError> {
+        let lineterminator = csv_lineterminator_or_default(lineterminator);
+        let mut out = String::new();
+
+        if include_header {
+            if include_index {
+                out.push_str(&csv_escape_quote_none_with_escapechar(
+                    index_label.unwrap_or_else(|| self.index.name().unwrap_or("")),
+                    sep,
+                    escapechar,
+                    lineterminator,
+                )?);
+                out.push(sep);
+            }
+            out.push_str(&csv_escape_quote_none_with_escapechar(
+                &self.name,
+                sep,
+                escapechar,
+                lineterminator,
+            )?);
+            out.push_str(lineterminator);
+        }
+
+        for (label, val) in self.index.labels().iter().zip(self.column.values()) {
+            if include_index {
+                out.push_str(&csv_index_label_quote_none(
+                    label,
+                    sep,
+                    escapechar,
+                    lineterminator,
+                )?);
+                out.push(sep);
+            }
+            out.push_str(&csv_scalar_quote_none(
+                val,
+                sep,
+                na_rep,
+                lineterminator,
+                decimal,
+                escapechar,
+            )?);
+            out.push_str(lineterminator);
+        }
+
+        Ok(out)
     }
 
     /// Matches `pd.Series.to_csv(header=..., na_rep=..., lineterminator=..., index_label=..., decimal=..., quotechar=..., doublequote=..., escapechar=...)`.
@@ -21010,6 +21208,50 @@ impl DatetimeAccessor<'_> {
     /// Alias for `dayofweek()`. Matches `pd.Series.dt.day_of_week`.
     pub fn day_of_week(&self) -> Result<Series, FrameError> {
         self.dayofweek()
+    }
+
+    /// Return True for weekdays (Monday=0 through Friday=4).
+    ///
+    /// Analogous to checking if `dt.dayofweek < 5`.
+    pub fn is_weekday(&self) -> Result<Series, FrameError> {
+        self.extract_component(
+            |s| {
+                if let Some((y, m, d)) = Self::parse_ymd_from_datetime(s) {
+                    let t: [i64; 12] = [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4];
+                    let y_adj = if m < 3 { y - 1 } else { y };
+                    let dow =
+                        (y_adj + y_adj / 4 - y_adj / 100 + y_adj / 400 + t[(m - 1) as usize] + d)
+                            % 7;
+                    let pandas_dow = (dow + 6) % 7;
+                    Scalar::Bool(pandas_dow < 5)
+                } else {
+                    Scalar::Null(NullKind::Null)
+                }
+            },
+            self.series.name(),
+        )
+    }
+
+    /// Return True for weekends (Saturday=5, Sunday=6).
+    ///
+    /// Analogous to checking if `dt.dayofweek >= 5`.
+    pub fn is_weekend(&self) -> Result<Series, FrameError> {
+        self.extract_component(
+            |s| {
+                if let Some((y, m, d)) = Self::parse_ymd_from_datetime(s) {
+                    let t: [i64; 12] = [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4];
+                    let y_adj = if m < 3 { y - 1 } else { y };
+                    let dow =
+                        (y_adj + y_adj / 4 - y_adj / 100 + y_adj / 400 + t[(m - 1) as usize] + d)
+                            % 7;
+                    let pandas_dow = (dow + 6) % 7;
+                    Scalar::Bool(pandas_dow >= 5)
+                } else {
+                    Scalar::Null(NullKind::Null)
+                }
+            },
+            self.series.name(),
+        )
     }
 
     /// Extract date part as string (YYYY-MM-DD).
@@ -33275,6 +33517,91 @@ impl DataFrame {
         )
     }
 
+    /// Matches `df.to_csv(quoting=csv.QUOTE_NONE, escapechar=...)` returning a string representation.
+    pub fn to_csv_with_quote_none_escapechar(
+        &self,
+        sep: char,
+        include_index: bool,
+        escapechar: Option<char>,
+    ) -> Result<String, FrameError> {
+        self.to_csv_with_index_label_lineterminator_decimal_quote_none_escapechar(
+            sep,
+            include_index,
+            true,
+            None,
+            "\n",
+            ".",
+            escapechar,
+        )
+    }
+
+    /// Matches `df.to_csv(header=..., index_label=..., lineterminator=..., decimal=..., quoting=csv.QUOTE_NONE, escapechar=...)`.
+    pub fn to_csv_with_index_label_lineterminator_decimal_quote_none_escapechar(
+        &self,
+        sep: char,
+        include_index: bool,
+        include_header: bool,
+        index_label: Option<&str>,
+        lineterminator: &str,
+        decimal: &str,
+        escapechar: Option<char>,
+    ) -> Result<String, FrameError> {
+        let lineterminator = csv_lineterminator_or_default(lineterminator);
+        let mut out = String::new();
+
+        if include_header {
+            if include_index {
+                out.push_str(&csv_escape_quote_none_with_escapechar(
+                    index_label.unwrap_or_else(|| self.index.name().unwrap_or("")),
+                    sep,
+                    escapechar,
+                    lineterminator,
+                )?);
+                out.push(sep);
+            }
+            for (i, name) in self.column_order.iter().enumerate() {
+                if i > 0 {
+                    out.push(sep);
+                }
+                out.push_str(&csv_escape_quote_none_with_escapechar(
+                    name,
+                    sep,
+                    escapechar,
+                    lineterminator,
+                )?);
+            }
+            out.push_str(lineterminator);
+        }
+
+        for (row_idx, label) in self.index.labels().iter().enumerate() {
+            if include_index {
+                out.push_str(&csv_index_label_quote_none(
+                    label,
+                    sep,
+                    escapechar,
+                    lineterminator,
+                )?);
+                out.push(sep);
+            }
+            for (col_idx, name) in self.column_order.iter().enumerate() {
+                if col_idx > 0 {
+                    out.push(sep);
+                }
+                out.push_str(&csv_scalar_quote_none(
+                    &self.columns[name].values()[row_idx],
+                    sep,
+                    "",
+                    lineterminator,
+                    decimal,
+                    escapechar,
+                )?);
+            }
+            out.push_str(lineterminator);
+        }
+
+        Ok(out)
+    }
+
     /// Matches `df.to_csv(header=..., lineterminator=...)` returning a string representation.
     pub fn to_csv_with_header_and_lineterminator(
         &self,
@@ -33602,6 +33929,84 @@ impl DataFrame {
             doublequote,
             escapechar,
         )
+    }
+
+    /// Matches `df.to_csv(quoting=csv.QUOTE_NONE, escapechar=...)` for the options path.
+    pub fn to_csv_options_with_quote_none_escapechar(
+        &self,
+        sep: char,
+        include_index: bool,
+        na_rep: &str,
+        columns: Option<&[&str]>,
+        escapechar: Option<char>,
+    ) -> Result<String, FrameError> {
+        let col_order: Vec<&str> = match columns {
+            Some(cols) => {
+                for &c in cols {
+                    if !self.columns.contains_key(c) {
+                        return Err(FrameError::CompatibilityRejected(format!(
+                            "column '{c}' not found"
+                        )));
+                    }
+                }
+                cols.to_vec()
+            }
+            None => self.column_order.iter().map(|s| s.as_str()).collect(),
+        };
+
+        let lineterminator = "\n";
+        let mut out = String::new();
+        let na_rep_escaped =
+            csv_escape_quote_none_with_escapechar(na_rep, sep, escapechar, lineterminator)?;
+
+        if include_index {
+            out.push(sep);
+        }
+        for (i, name) in col_order.iter().enumerate() {
+            if i > 0 {
+                out.push(sep);
+            }
+            out.push_str(&csv_escape_quote_none_with_escapechar(
+                name,
+                sep,
+                escapechar,
+                lineterminator,
+            )?);
+        }
+        out.push_str(lineterminator);
+
+        for (row_idx, label) in self.index.labels().iter().enumerate() {
+            if include_index {
+                out.push_str(&csv_index_label_quote_none(
+                    label,
+                    sep,
+                    escapechar,
+                    lineterminator,
+                )?);
+                out.push(sep);
+            }
+            for (col_idx, name) in col_order.iter().enumerate() {
+                if col_idx > 0 {
+                    out.push(sep);
+                }
+                let val = &self.columns[*name].values()[row_idx];
+                if val.is_missing() {
+                    out.push_str(&na_rep_escaped);
+                } else {
+                    out.push_str(&csv_scalar_quote_none(
+                        val,
+                        sep,
+                        na_rep,
+                        lineterminator,
+                        ".",
+                        escapechar,
+                    )?);
+                }
+            }
+            out.push_str(lineterminator);
+        }
+
+        Ok(out)
     }
 
     /// Matches `df.to_csv(sep, index, na_rep, columns, lineterminator)`.
@@ -63275,6 +63680,41 @@ mod tests {
     }
 
     #[test]
+    fn dataframe_to_csv_with_quote_none_escapechar() {
+        let df = DataFrame::from_dict(
+            &["x"],
+            vec![(
+                "x",
+                vec![
+                    Scalar::Utf8("a,b".to_owned()),
+                    Scalar::Utf8("a\"b".to_owned()),
+                    Scalar::Utf8("a,\"b".to_owned()),
+                    Scalar::Utf8("a\nb".to_owned()),
+                    Scalar::Utf8("a\\b".to_owned()),
+                ],
+            )],
+        )
+        .unwrap();
+
+        let csv = df
+            .to_csv_with_quote_none_escapechar(',', false, Some('\\'))
+            .unwrap();
+        assert_eq!(csv, "x\na\\,b\na\"b\na\\,\"b\na\\\nb\na\\\\b\n");
+    }
+
+    #[test]
+    fn dataframe_to_csv_with_quote_none_without_escapechar_errors() {
+        let df = DataFrame::from_dict(
+            &["x"],
+            vec![("x", vec![Scalar::Utf8("a,b".to_owned())])],
+        )
+        .unwrap();
+
+        let result = df.to_csv_with_quote_none_escapechar(',', false, None);
+        assert!(matches!(result, Err(FrameError::CompatibilityRejected(_))));
+    }
+
+    #[test]
     fn dataframe_to_csv_with_header_false() {
         let df = DataFrame::from_dict(
             &["a", "b"],
@@ -71805,6 +72245,40 @@ mod tests {
     }
 
     #[test]
+    fn series_to_csv_with_quote_none_escapechar() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                Scalar::Utf8("a,b".to_owned()),
+                Scalar::Utf8("a\"b".to_owned()),
+                Scalar::Utf8("a,\"b".to_owned()),
+                Scalar::Utf8("a\nb".to_owned()),
+                Scalar::Utf8("a\\b".to_owned()),
+            ],
+        )
+        .unwrap();
+
+        let csv = s
+            .to_csv_with_quote_none_escapechar(',', false, Some('\\'))
+            .unwrap();
+        assert_eq!(csv, "x\na\\,b\na\"b\na\\,\"b\na\\\nb\na\\\\b\n");
+    }
+
+    #[test]
+    fn series_to_csv_with_quote_none_without_escapechar_errors() {
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into()],
+            vec![Scalar::Utf8("a,b".to_owned())],
+        )
+        .unwrap();
+
+        let result = s.to_csv_with_quote_none_escapechar(',', false, None);
+        assert!(matches!(result, Err(FrameError::CompatibilityRejected(_))));
+    }
+
+    #[test]
     fn series_to_csv_with_header_false() {
         let s = Series::from_values(
             "x",
@@ -76878,6 +77352,26 @@ mod tests {
             .to_csv_options_with_doublequote_escapechar(',', false, "", None, false, Some('\\'))
             .unwrap();
         assert_eq!(csv, "x\n\"a,b\"\na\\\"b\n");
+    }
+
+    #[test]
+    fn dataframe_to_csv_options_with_quote_none_escapechar() {
+        let df = DataFrame::from_dict(
+            &["x"],
+            vec![(
+                "x",
+                vec![
+                    Scalar::Utf8("a,b".to_owned()),
+                    Scalar::Utf8("a\\b".to_owned()),
+                ],
+            )],
+        )
+        .unwrap();
+
+        let csv = df
+            .to_csv_options_with_quote_none_escapechar(',', false, "", None, Some('\\'))
+            .unwrap();
+        assert_eq!(csv, "x\na\\,b\na\\\\b\n");
     }
 
     #[test]
@@ -85576,6 +86070,42 @@ mod tests {
         assert_eq!(days_col.values()[0], Scalar::Int64(1));
         let hours_col = df.get("hours").unwrap().unwrap();
         assert_eq!(hours_col.values()[0], Scalar::Int64(2));
+    }
+
+    #[test]
+    fn dt_accessor_is_weekday() {
+        let s = Series::from_values(
+            "dates",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("2026-05-18".to_string()), // Monday
+                Scalar::Utf8("2026-05-23".to_string()), // Saturday
+                Scalar::Utf8("2026-05-20".to_string()), // Wednesday
+            ],
+        )
+        .unwrap();
+        let result = s.dt().is_weekday().unwrap();
+        assert_eq!(result.values()[0], Scalar::Bool(true));  // Monday is weekday
+        assert_eq!(result.values()[1], Scalar::Bool(false)); // Saturday is not
+        assert_eq!(result.values()[2], Scalar::Bool(true));  // Wednesday is weekday
+    }
+
+    #[test]
+    fn dt_accessor_is_weekend() {
+        let s = Series::from_values(
+            "dates",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("2026-05-18".to_string()), // Monday
+                Scalar::Utf8("2026-05-23".to_string()), // Saturday
+                Scalar::Utf8("2026-05-24".to_string()), // Sunday
+            ],
+        )
+        .unwrap();
+        let result = s.dt().is_weekend().unwrap();
+        assert_eq!(result.values()[0], Scalar::Bool(false)); // Monday is not weekend
+        assert_eq!(result.values()[1], Scalar::Bool(true));  // Saturday is weekend
+        assert_eq!(result.values()[2], Scalar::Bool(true));  // Sunday is weekend
     }
 
     #[test]
