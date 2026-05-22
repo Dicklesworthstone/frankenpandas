@@ -150,6 +150,58 @@ impl DType {
     pub const fn is_interval(&self) -> bool {
         matches!(self, Self::Interval)
     }
+
+    /// Return the dtype name as a string.
+    ///
+    /// Matches numpy dtype.name property.
+    #[must_use]
+    pub const fn name(&self) -> &'static str {
+        match self {
+            Self::Bool => "bool",
+            Self::Int64 => "int64",
+            Self::Float64 => "float64",
+            Self::Utf8 => "object",
+            Self::Datetime64 => "datetime64[ns]",
+            Self::Timedelta64 => "timedelta64[ns]",
+            Self::Categorical => "category",
+            Self::Period => "period",
+            Self::Interval => "interval",
+            Self::Sparse => "Sparse",
+            Self::Null => "object",
+        }
+    }
+
+    /// Return the dtype kind character.
+    ///
+    /// Matches numpy dtype.kind property.
+    #[must_use]
+    pub const fn kind(&self) -> char {
+        match self {
+            Self::Bool => 'b',
+            Self::Int64 => 'i',
+            Self::Float64 => 'f',
+            Self::Utf8 => 'O',
+            Self::Datetime64 => 'M',
+            Self::Timedelta64 => 'm',
+            Self::Categorical => 'O',
+            Self::Period => 'O',
+            Self::Interval => 'O',
+            Self::Sparse => 'O',
+            Self::Null => 'O',
+        }
+    }
+
+    /// Return the dtype itemsize in bytes.
+    ///
+    /// Matches numpy dtype.itemsize property.
+    #[must_use]
+    pub const fn itemsize(&self) -> usize {
+        match self {
+            Self::Bool => 1,
+            Self::Int64 | Self::Float64 | Self::Datetime64 | Self::Timedelta64 | Self::Period => 8,
+            Self::Utf8 | Self::Categorical | Self::Interval | Self::Sparse | Self::Null => 8,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
