@@ -6524,6 +6524,35 @@ impl Series {
         Self::new(self.name.clone(), idx, col)
     }
 
+    /// Bin count for non-negative integer values.
+    ///
+    /// Matches `np.bincount(s, minlength)`. Returns counts for each integer bin.
+    pub fn bincount(&self, minlength: usize) -> Result<Self, FrameError> {
+        let col = self.column.bincount(minlength)?;
+        let idx = Index::from_range(0, col.len() as i64, 1);
+        Self::new(self.name.clone(), idx, col)
+    }
+
+    /// Indices of non-zero elements.
+    ///
+    /// Matches `np.flatnonzero(s)`. Returns indices where values are non-zero.
+    pub fn flatnonzero(&self) -> Result<Self, FrameError> {
+        let col = self.column.flatnonzero()?;
+        let idx = Index::from_range(0, col.len() as i64, 1);
+        Self::new(self.name.clone(), idx, col)
+    }
+
+    /// Fill null values using values from another series.
+    ///
+    /// Matches `pd.Series.fillna(other)` when other is a Series.
+    pub fn fillna_with_series(&self, other: &Self) -> Result<Self, FrameError> {
+        Self::new(
+            self.name.clone(),
+            self.index.clone(),
+            self.column.fillna_with_column(other.column())?,
+        )
+    }
+
     // --- Descriptive Statistics ---
 
     #[must_use]
@@ -92967,5 +92996,69 @@ mod test_select_columns_perf_76e1fd {
         assert_eq!(result.len(), 2);
         assert_eq!(result.values()[0], Scalar::Float64(1.0));
         assert_eq!(result.values()[1], Scalar::Float64(3.0));
+    }
+
+    #[test]
+    fn series_bincount() {
+        let s = Series::from_pairs(
+            "x",
+            vec![
+                (0_i64.into(), Scalar::Int64(0)),
+                (1_i64.into(), Scalar::Int64(1)),
+                (2_i64.into(), Scalar::Int64(1)),
+                (3_i64.into(), Scalar::Int64(3)),
+            ],
+        )
+        .unwrap();
+        let result = s.bincount(4).unwrap();
+        assert_eq!(result.len(), 4);
+        assert_eq!(result.values()[0], Scalar::Int64(1)); // one 0
+        assert_eq!(result.values()[1], Scalar::Int64(2)); // two 1s
+        assert_eq!(result.values()[2], Scalar::Int64(0)); // zero 2s
+        assert_eq!(result.values()[3], Scalar::Int64(1)); // one 3
+    }
+
+    #[test]
+    fn series_flatnonzero() {
+        let s = Series::from_pairs(
+            "x",
+            vec![
+                (0_i64.into(), Scalar::Float64(0.0)),
+                (1_i64.into(), Scalar::Float64(1.0)),
+                (2_i64.into(), Scalar::Float64(0.0)),
+                (3_i64.into(), Scalar::Float64(2.0)),
+            ],
+        )
+        .unwrap();
+        let result = s.flatnonzero().unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result.values()[0], Scalar::Int64(1));
+        assert_eq!(result.values()[1], Scalar::Int64(3));
+    }
+
+    #[test]
+    fn series_fillna_with_series() {
+        let s1 = Series::from_pairs(
+            "a",
+            vec![
+                (0_i64.into(), Scalar::Float64(1.0)),
+                (1_i64.into(), Scalar::Float64(f64::NAN)),
+                (2_i64.into(), Scalar::Float64(3.0)),
+            ],
+        )
+        .unwrap();
+        let s2 = Series::from_pairs(
+            "b",
+            vec![
+                (0_i64.into(), Scalar::Float64(10.0)),
+                (1_i64.into(), Scalar::Float64(20.0)),
+                (2_i64.into(), Scalar::Float64(30.0)),
+            ],
+        )
+        .unwrap();
+        let result = s1.fillna_with_series(&s2).unwrap();
+        assert_eq!(result.values()[0], Scalar::Float64(1.0));
+        assert_eq!(result.values()[1], Scalar::Float64(20.0));
+        assert_eq!(result.values()[2], Scalar::Float64(3.0));
     }
 }
