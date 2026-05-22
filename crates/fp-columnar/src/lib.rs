@@ -1342,7 +1342,8 @@ impl Column {
         }
         let values: Vec<Scalar> = (0..m)
             .map(|n| {
-                let val = 0.5 - 0.5 * (2.0 * std::f64::consts::PI * n as f64 / (m - 1) as f64).cos();
+                let val =
+                    0.5 - 0.5 * (2.0 * std::f64::consts::PI * n as f64 / (m - 1) as f64).cos();
                 Scalar::Float64(val)
             })
             .collect();
@@ -1361,7 +1362,8 @@ impl Column {
         }
         let values: Vec<Scalar> = (0..m)
             .map(|n| {
-                let val = 0.54 - 0.46 * (2.0 * std::f64::consts::PI * n as f64 / (m - 1) as f64).cos();
+                let val =
+                    0.54 - 0.46 * (2.0 * std::f64::consts::PI * n as f64 / (m - 1) as f64).cos();
                 Scalar::Float64(val)
             })
             .collect();
@@ -1381,8 +1383,7 @@ impl Column {
         let values: Vec<Scalar> = (0..m)
             .map(|n| {
                 let x = n as f64 / (m - 1) as f64;
-                let val = 0.42
-                    - 0.5 * (2.0 * std::f64::consts::PI * x).cos()
+                let val = 0.42 - 0.5 * (2.0 * std::f64::consts::PI * x).cos()
                     + 0.08 * (4.0 * std::f64::consts::PI * x).cos();
                 Scalar::Float64(val)
             })
@@ -2135,7 +2136,13 @@ impl Column {
             }
             match v {
                 Scalar::Int64(x) => {
-                    let s = if *x > 0 { 1 } else if *x < 0 { -1 } else { 0 };
+                    let s = if *x > 0 {
+                        1
+                    } else if *x < 0 {
+                        -1
+                    } else {
+                        0
+                    };
                     out.push(Scalar::Int64(s));
                 }
                 Scalar::Float64(x) => {
@@ -2204,7 +2211,13 @@ impl Column {
             }
             match v {
                 Scalar::Int64(x) => {
-                    let val = if *x < 0 { 0.0 } else if *x > 0 { 1.0 } else { h0 };
+                    let val = if *x < 0 {
+                        0.0
+                    } else if *x > 0 {
+                        1.0
+                    } else {
+                        h0
+                    };
                     out.push(Scalar::Float64(val));
                 }
                 Scalar::Float64(x) => {
@@ -2300,11 +2313,7 @@ impl Column {
             match (a, b) {
                 (Scalar::Int64(x), Scalar::Int64(y)) => {
                     let g = compute_gcd(*x, *y);
-                    let result = if g == 0 {
-                        0
-                    } else {
-                        (x.abs() / g) * y.abs()
-                    };
+                    let result = if g == 0 { 0 } else { (x.abs() / g) * y.abs() };
                     out.push(Scalar::Int64(result));
                 }
                 _ => {
@@ -4576,7 +4585,11 @@ impl Column {
     pub fn itemsize(&self) -> usize {
         match self.dtype() {
             DType::Bool => 1,
-            DType::Int64 | DType::Float64 | DType::Datetime64 | DType::Timedelta64 | DType::Period => 8,
+            DType::Int64
+            | DType::Float64
+            | DType::Datetime64
+            | DType::Timedelta64
+            | DType::Period => 8,
             DType::Utf8 => {
                 if self.values.is_empty() {
                     0
@@ -4951,7 +4964,11 @@ impl Column {
     ///
     /// Matches np.flatnonzero(). Returns Int64 column of indices.
     pub fn flatnonzero(&self) -> Result<Self, ColumnError> {
-        let indices: Vec<Scalar> = self.nonzero().into_iter().map(|i| Scalar::Int64(i as i64)).collect();
+        let indices: Vec<Scalar> = self
+            .nonzero()
+            .into_iter()
+            .map(|i| Scalar::Int64(i as i64))
+            .collect();
         Self::new(DType::Int64, indices)
     }
 
@@ -5319,11 +5336,11 @@ impl Column {
             if v.is_missing() {
                 continue;
             }
-            if let Ok(x) = v.to_f64() {
-                if x.is_finite() {
-                    min_val = min_val.min(x);
-                    max_val = max_val.max(x);
-                }
+            if let Ok(x) = v.to_f64()
+                && x.is_finite()
+            {
+                min_val = min_val.min(x);
+                max_val = max_val.max(x);
             }
         }
 
@@ -5344,9 +5361,7 @@ impl Column {
         };
         let adj_range = adj_max - adj_min;
         let step = adj_range / n_bins as f64;
-        let bin_edges: Vec<f64> = (0..=n_bins)
-            .map(|i| adj_min + step * i as f64)
-            .collect();
+        let bin_edges: Vec<f64> = (0..=n_bins).map(|i| adj_min + step * i as f64).collect();
 
         let counts = self.histogram(&bin_edges)?;
         Ok((counts, bin_edges))
@@ -6846,7 +6861,10 @@ impl Column {
                 }
             }
         }
-        Ok((Self::new(DType::Float64, frac)?, Self::new(DType::Float64, int)?))
+        Ok((
+            Self::new(DType::Float64, frac)?,
+            Self::new(DType::Float64, int)?,
+        ))
     }
 
     /// Decompose float into mantissa and exponent.
@@ -6923,7 +6941,10 @@ impl Column {
                 }
             }
         }
-        Ok((Self::new(DType::Float64, mantissa)?, Self::new(DType::Int64, exponent)?))
+        Ok((
+            Self::new(DType::Float64, mantissa)?,
+            Self::new(DType::Int64, exponent)?,
+        ))
     }
 
     /// Return the next representable floating-point value after x toward y.
@@ -6943,8 +6964,8 @@ impl Column {
                 out.push(Scalar::Float64(f64::NAN));
                 continue;
             }
-            let x = v1.to_f64().map_err(|e| ColumnError::Type(e))?;
-            let y = v2.to_f64().map_err(|e| ColumnError::Type(e))?;
+            let x = v1.to_f64().map_err(ColumnError::Type)?;
+            let y = v2.to_f64().map_err(ColumnError::Type)?;
             let result = if x.is_nan() || y.is_nan() {
                 f64::NAN
             } else if x == y {
@@ -7091,8 +7112,8 @@ impl Column {
                 out.push(Scalar::Float64(f64::NAN));
                 continue;
             }
-            let x = v1.to_f64().map_err(|e| ColumnError::Type(e))?;
-            let y = v2.to_f64().map_err(|e| ColumnError::Type(e))?;
+            let x = v1.to_f64().map_err(ColumnError::Type)?;
+            let y = v2.to_f64().map_err(ColumnError::Type)?;
             let result = if x.is_nan() || y.is_nan() {
                 f64::NAN
             } else if x == f64::NEG_INFINITY {
@@ -7128,8 +7149,8 @@ impl Column {
                 out.push(Scalar::Float64(f64::NAN));
                 continue;
             }
-            let x = v1.to_f64().map_err(|e| ColumnError::Type(e))?;
-            let y = v2.to_f64().map_err(|e| ColumnError::Type(e))?;
+            let x = v1.to_f64().map_err(ColumnError::Type)?;
+            let y = v2.to_f64().map_err(ColumnError::Type)?;
             let result = if x.is_nan() || y.is_nan() {
                 f64::NAN
             } else if x == f64::NEG_INFINITY {
@@ -10240,14 +10261,8 @@ mod tests {
             let d = col.diff(1).expect("diff");
             assert_eq!(d.dtype(), DType::Timedelta64);
             assert!(d.values()[0].is_missing()); // first row → NaT
-            match &d.values()[1] {
-                Scalar::Timedelta64(ns) => assert_eq!(*ns, 2 * one_hour),
-                other => panic!("expected Timedelta64(2h), got {:?}", other),
-            }
-            match &d.values()[2] {
-                Scalar::Timedelta64(ns) => assert_eq!(*ns, -one_hour),
-                other => panic!("expected Timedelta64(-1h), got {:?}", other),
-            }
+            assert_eq!(d.values()[1], Scalar::Timedelta64(2 * one_hour));
+            assert_eq!(d.values()[2], Scalar::Timedelta64(-one_hour));
         }
 
         #[test]
@@ -13003,11 +13018,14 @@ mod tests {
             .unwrap();
             let edges = vec![0.0, 1.0, 2.0, 3.0];
             let counts = col.histogram(&edges).unwrap();
-            assert_eq!(counts.values(), &[
-                Scalar::Int64(1),  // [0, 1): 0.5
-                Scalar::Int64(2),  // [1, 2): 1.5, 1.2
-                Scalar::Int64(2),  // [2, 3]: 2.5, 2.8
-            ]);
+            assert_eq!(
+                counts.values(),
+                &[
+                    Scalar::Int64(1), // [0, 1): 0.5
+                    Scalar::Int64(2), // [1, 2): 1.5, 1.2
+                    Scalar::Int64(2), // [2, 3]: 2.5, 2.8
+                ]
+            );
         }
 
         #[test]
@@ -13079,11 +13097,7 @@ mod tests {
                 Scalar::Float64(3.0),
             ])
             .unwrap();
-            let v = Column::from_values(vec![
-                Scalar::Float64(1.0),
-                Scalar::Float64(1.0),
-            ])
-            .unwrap();
+            let v = Column::from_values(vec![Scalar::Float64(1.0), Scalar::Float64(1.0)]).unwrap();
             let result = a.convolve(&v, "full").unwrap();
             // Full convolution: [1*1, 1*1+2*1, 2*1+3*1, 3*1] = [1, 3, 5, 3]
             assert_eq!(result.len(), 4);
@@ -13317,16 +13331,8 @@ mod tests {
 
         #[test]
         fn logaddexp2_computes_stable_log2_sum() {
-            let x = Column::from_values(vec![
-                Scalar::Float64(0.0),
-                Scalar::Float64(1.0),
-            ])
-            .unwrap();
-            let y = Column::from_values(vec![
-                Scalar::Float64(0.0),
-                Scalar::Float64(1.0),
-            ])
-            .unwrap();
+            let x = Column::from_values(vec![Scalar::Float64(0.0), Scalar::Float64(1.0)]).unwrap();
+            let y = Column::from_values(vec![Scalar::Float64(0.0), Scalar::Float64(1.0)]).unwrap();
             let result = x.logaddexp2(&y).unwrap();
             // log2(2^0 + 2^0) = log2(2) = 1
             assert!((result.values()[0].to_f64().unwrap() - 1.0).abs() < 1e-10);
