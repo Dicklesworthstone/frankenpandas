@@ -2211,6 +2211,64 @@ impl Timestamp {
         self.floor_to_unit("D")
     }
 
+    /// Replace timestamp components with new values.
+    ///
+    /// Matches pd.Timestamp.replace(). None values keep the existing component.
+    #[must_use]
+    pub fn replace(
+        &self,
+        year: Option<i64>,
+        month: Option<i64>,
+        day: Option<i64>,
+        hour: Option<i64>,
+        minute: Option<i64>,
+        second: Option<i64>,
+        microsecond: Option<i64>,
+        nanosecond: Option<i64>,
+    ) -> Self {
+        if self.is_nat() {
+            return self.clone();
+        }
+        let cur_year = self.year().unwrap_or(1970);
+        let cur_month = self.month().unwrap_or(1);
+        let cur_day = self.day().unwrap_or(1);
+        let cur_hour = self.hour().unwrap_or(0);
+        let cur_minute = self.minute().unwrap_or(0);
+        let cur_second = self.second().unwrap_or(0);
+        let cur_micro = self.microsecond().unwrap_or(0);
+        let cur_nano = self.nanosecond().unwrap_or(0);
+
+        let y = year.unwrap_or(cur_year);
+        let mo = month.unwrap_or(cur_month);
+        let d = day.unwrap_or(cur_day);
+        let h = hour.unwrap_or(cur_hour);
+        let mi = minute.unwrap_or(cur_minute);
+        let s = second.unwrap_or(cur_second);
+        let us = microsecond.unwrap_or(cur_micro);
+        let ns = nanosecond.unwrap_or(cur_nano);
+
+        let days_from_epoch = Self::days_from_ymd(y, mo, d);
+        let secs = h * 3600 + mi * 60 + s;
+        let total_nanos = days_from_epoch * Timedelta::NANOS_PER_DAY
+            + secs * Timedelta::NANOS_PER_SEC
+            + us * Timedelta::NANOS_PER_MICRO
+            + ns;
+
+        Self {
+            nanos: total_nanos,
+            tz: self.tz.clone(),
+        }
+    }
+
+    fn days_from_ymd(year: i64, month: i64, day: i64) -> i64 {
+        let y = if month <= 2 { year - 1 } else { year };
+        let era = if y >= 0 { y } else { y - 399 } / 400;
+        let yoe = y - era * 400;
+        let doy = (153 * (if month > 2 { month - 3 } else { month + 9 }) + 2) / 5 + day - 1;
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        era * 146097 + doe - 719468
+    }
+
     /// Return an ISO 8601 string representation of the timestamp.
     ///
     /// Matches `pd.Timestamp.isoformat()`. NaT returns "NaT".
