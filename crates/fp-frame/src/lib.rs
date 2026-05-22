@@ -19589,11 +19589,9 @@ impl DatetimeAccessor<'_> {
         }
 
         let idx = self.series.index().labels().to_vec();
-        let year_series =
-            Series::from_values("year", idx.clone(), years).map_err(FrameError::from)?;
-        let week_series =
-            Series::from_values("week", idx.clone(), weeks).map_err(FrameError::from)?;
-        let day_series = Series::from_values("day", idx, days).map_err(FrameError::from)?;
+        let year_series = Series::from_values("year", idx.clone(), years)?;
+        let week_series = Series::from_values("week", idx.clone(), weeks)?;
+        let day_series = Series::from_values("day", idx, days)?;
 
         DataFrame::from_series(vec![year_series, week_series, day_series])
     }
