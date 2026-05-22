@@ -2385,6 +2385,70 @@ impl Column {
         Self::new(self.dtype, out)
     }
 
+    /// Element-wise left bit shift.
+    ///
+    /// Matches np.left_shift(x, y). Shifts bits of x left by y positions.
+    pub fn left_shift(&self, other: &Self) -> Result<Self, ColumnError> {
+        if self.len() != other.len() {
+            return Err(ColumnError::LengthMismatch {
+                left: self.len(),
+                right: other.len(),
+            });
+        }
+        let mut out = Vec::with_capacity(self.values.len());
+        for (a, b) in self.values.iter().zip(&other.values) {
+            if a.is_missing() || b.is_missing() {
+                out.push(Scalar::Null(NullKind::Null));
+                continue;
+            }
+            match (a, b) {
+                (Scalar::Int64(x), Scalar::Int64(y)) => {
+                    let shift = (*y).clamp(0, 63) as u32;
+                    out.push(Scalar::Int64(x.wrapping_shl(shift)));
+                }
+                _ => {
+                    return Err(ColumnError::Type(TypeError::NonNumericValue {
+                        value: format!("{a:?}"),
+                        dtype: self.dtype,
+                    }));
+                }
+            }
+        }
+        Self::new(DType::Int64, out)
+    }
+
+    /// Element-wise right bit shift.
+    ///
+    /// Matches np.right_shift(x, y). Shifts bits of x right by y positions.
+    pub fn right_shift(&self, other: &Self) -> Result<Self, ColumnError> {
+        if self.len() != other.len() {
+            return Err(ColumnError::LengthMismatch {
+                left: self.len(),
+                right: other.len(),
+            });
+        }
+        let mut out = Vec::with_capacity(self.values.len());
+        for (a, b) in self.values.iter().zip(&other.values) {
+            if a.is_missing() || b.is_missing() {
+                out.push(Scalar::Null(NullKind::Null));
+                continue;
+            }
+            match (a, b) {
+                (Scalar::Int64(x), Scalar::Int64(y)) => {
+                    let shift = (*y).clamp(0, 63) as u32;
+                    out.push(Scalar::Int64(x.wrapping_shr(shift)));
+                }
+                _ => {
+                    return Err(ColumnError::Type(TypeError::NonNumericValue {
+                        value: format!("{a:?}"),
+                        dtype: self.dtype,
+                    }));
+                }
+            }
+        }
+        Self::new(DType::Int64, out)
+    }
+
     /// Element-wise bitwise NOT (invert).
     pub fn bitwise_not(&self) -> Result<Self, ColumnError> {
         let mut out = Vec::with_capacity(self.values.len());
