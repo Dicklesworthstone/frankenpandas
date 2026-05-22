@@ -72,12 +72,12 @@
         { "kind": "int64", "value": 200 },
         { "kind": "null", "value": "null" }
       ],
-      "shared_left": [
+      "shared_x": [
         { "kind": "int64", "value": 1 },
         { "kind": "int64", "value": 2 },
         { "kind": "int64", "value": 3 }
       ],
-      "shared_right": [
+      "shared_y": [
         { "kind": "null", "value": "null" },
         { "kind": "int64", "value": 9 },
         { "kind": "null", "value": "null" }

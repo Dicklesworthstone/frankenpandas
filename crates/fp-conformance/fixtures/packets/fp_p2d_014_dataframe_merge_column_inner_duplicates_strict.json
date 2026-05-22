@@ -80,13 +80,13 @@
         { "kind": "int64", "value": 1000 },
         { "kind": "int64", "value": 2000 }
       ],
-      "shared_left": [
+      "shared_x": [
         { "kind": "int64", "value": 100 },
         { "kind": "int64", "value": 100 },
         { "kind": "int64", "value": 200 },
         { "kind": "int64", "value": 200 }
       ],
-      "shared_right": [
+      "shared_y": [
         { "kind": "int64", "value": 7 },
         { "kind": "int64", "value": 8 },
         { "kind": "int64", "value": 7 },
