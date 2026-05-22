@@ -1066,6 +1066,27 @@ impl Timedelta {
         }
     }
 
+    /// Convert to specified time unit.
+    ///
+    /// Matches pd.Timedelta.as_unit(). Supported units: ns, us, ms, s, m, h, D.
+    #[must_use]
+    pub fn as_unit(nanos: i64, unit: &str) -> f64 {
+        if nanos == Self::NAT {
+            return f64::NAN;
+        }
+        let nanos_f = nanos as f64;
+        match unit {
+            "ns" | "nanoseconds" => nanos_f,
+            "us" | "microseconds" => nanos_f / Self::NANOS_PER_MICRO as f64,
+            "ms" | "milliseconds" => nanos_f / Self::NANOS_PER_MILLI as f64,
+            "s" | "seconds" => nanos_f / Self::NANOS_PER_SEC as f64,
+            "m" | "minutes" => nanos_f / Self::NANOS_PER_MIN as f64,
+            "h" | "hours" => nanos_f / Self::NANOS_PER_HOUR as f64,
+            "D" | "days" => nanos_f / Self::NANOS_PER_DAY as f64,
+            _ => f64::NAN,
+        }
+    }
+
     /// Return the days component. Matches `pd.Timedelta.days`.
     #[must_use]
     pub fn days(nanos: i64) -> i64 {
