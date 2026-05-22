@@ -1237,6 +1237,14 @@ impl Column {
         self.clone()
     }
 
+    /// Return an immutable view-shaped clone of this column.
+    ///
+    /// Matches `pd.Series.view()` at the column storage layer.
+    #[must_use]
+    pub fn view(&self) -> Self {
+        self.clone()
+    }
+
     #[must_use]
     pub fn values(&self) -> &[Scalar] {
         &self.values
@@ -6222,8 +6230,11 @@ mod tests {
         fn copy_returns_independent_clone() {
             let col = Column::from_values(vec![Scalar::Int64(5), Scalar::Int64(6)]).expect("col");
             let copied = col.copy();
+            let viewed = col.view();
             assert_eq!(copied, col);
+            assert_eq!(viewed, col);
             assert_ne!(copied.values().as_ptr(), col.values().as_ptr());
+            assert_ne!(viewed.values().as_ptr(), col.values().as_ptr());
         }
 
         #[test]
