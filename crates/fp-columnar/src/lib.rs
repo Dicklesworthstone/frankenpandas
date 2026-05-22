@@ -1190,6 +1190,60 @@ impl Column {
         Self::new(dtype, values)
     }
 
+    /// Create a column filled with zeros.
+    ///
+    /// Matches np.zeros().
+    pub fn zeros(n: usize, dtype: DType) -> Result<Self, ColumnError> {
+        let zero = match dtype {
+            DType::Int64 => Scalar::Int64(0),
+            DType::Float64 => Scalar::Float64(0.0),
+            DType::Bool => Scalar::Bool(false),
+            _ => Scalar::Int64(0),
+        };
+        Self::new(dtype, vec![zero; n])
+    }
+
+    /// Create a column filled with ones.
+    ///
+    /// Matches np.ones().
+    pub fn ones(n: usize, dtype: DType) -> Result<Self, ColumnError> {
+        let one = match dtype {
+            DType::Int64 => Scalar::Int64(1),
+            DType::Float64 => Scalar::Float64(1.0),
+            DType::Bool => Scalar::Bool(true),
+            _ => Scalar::Int64(1),
+        };
+        Self::new(dtype, vec![one; n])
+    }
+
+    /// Create a column filled with a given value.
+    ///
+    /// Matches np.full().
+    pub fn full(n: usize, fill_value: Scalar) -> Result<Self, ColumnError> {
+        let dtype = fill_value.dtype();
+        Self::new(dtype, vec![fill_value; n])
+    }
+
+    /// Create a zeros column with same shape and dtype as self.
+    pub fn zeros_like(&self) -> Result<Self, ColumnError> {
+        Self::zeros(self.len(), self.dtype)
+    }
+
+    /// Create a ones column with same shape and dtype as self.
+    pub fn ones_like(&self) -> Result<Self, ColumnError> {
+        Self::ones(self.len(), self.dtype)
+    }
+
+    /// Create a column filled with fill_value with same shape as self.
+    pub fn full_like(&self, fill_value: Scalar) -> Result<Self, ColumnError> {
+        Self::new(self.dtype, vec![fill_value; self.len()])
+    }
+
+    /// Create an empty column with same dtype as self.
+    pub fn empty_like(&self) -> Result<Self, ColumnError> {
+        Self::new(self.dtype, Vec::new())
+    }
+
     #[must_use]
     pub fn dtype(&self) -> DType {
         self.dtype
