@@ -2213,6 +2213,94 @@ impl Column {
         Self::new(DType::Float64, out)
     }
 
+    /// Element-wise greatest common divisor.
+    ///
+    /// Matches np.gcd(x, y). Works on integer values.
+    pub fn gcd(&self, other: &Self) -> Result<Self, ColumnError> {
+        if self.len() != other.len() {
+            return Err(ColumnError::LengthMismatch {
+                left: self.len(),
+                right: other.len(),
+            });
+        }
+        fn compute_gcd(mut a: i64, mut b: i64) -> i64 {
+            a = a.abs();
+            b = b.abs();
+            while b != 0 {
+                let t = b;
+                b = a % b;
+                a = t;
+            }
+            a
+        }
+        let mut out = Vec::with_capacity(self.values.len());
+        for (a, b) in self.values.iter().zip(&other.values) {
+            if a.is_missing() || b.is_missing() {
+                out.push(Scalar::Null(NullKind::Null));
+                continue;
+            }
+            match (a, b) {
+                (Scalar::Int64(x), Scalar::Int64(y)) => {
+                    out.push(Scalar::Int64(compute_gcd(*x, *y)));
+                }
+                _ => {
+                    return Err(ColumnError::Type(TypeError::NonNumericValue {
+                        value: format!("{a:?}"),
+                        dtype: self.dtype,
+                    }));
+                }
+            }
+        }
+        Self::new(DType::Int64, out)
+    }
+
+    /// Element-wise least common multiple.
+    ///
+    /// Matches np.lcm(x, y). Works on integer values.
+    pub fn lcm(&self, other: &Self) -> Result<Self, ColumnError> {
+        if self.len() != other.len() {
+            return Err(ColumnError::LengthMismatch {
+                left: self.len(),
+                right: other.len(),
+            });
+        }
+        fn compute_gcd(mut a: i64, mut b: i64) -> i64 {
+            a = a.abs();
+            b = b.abs();
+            while b != 0 {
+                let t = b;
+                b = a % b;
+                a = t;
+            }
+            a
+        }
+        let mut out = Vec::with_capacity(self.values.len());
+        for (a, b) in self.values.iter().zip(&other.values) {
+            if a.is_missing() || b.is_missing() {
+                out.push(Scalar::Null(NullKind::Null));
+                continue;
+            }
+            match (a, b) {
+                (Scalar::Int64(x), Scalar::Int64(y)) => {
+                    let g = compute_gcd(*x, *y);
+                    let result = if g == 0 {
+                        0
+                    } else {
+                        (x.abs() / g) * y.abs()
+                    };
+                    out.push(Scalar::Int64(result));
+                }
+                _ => {
+                    return Err(ColumnError::Type(TypeError::NonNumericValue {
+                        value: format!("{a:?}"),
+                        dtype: self.dtype,
+                    }));
+                }
+            }
+        }
+        Self::new(DType::Int64, out)
+    }
+
     /// Element-wise bitwise AND.
     pub fn bitwise_and(&self, other: &Self) -> Result<Self, ColumnError> {
         if self.len() != other.len() {
