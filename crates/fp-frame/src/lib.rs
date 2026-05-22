@@ -19353,6 +19353,42 @@ impl DatetimeAccessor<'_> {
         )
     }
 
+    /// Extract time with timezone info preserved (HH:MM:SS+TZ).
+    ///
+    /// Matches `pd.Series.dt.timetz` which returns time objects with tzinfo.
+    /// For naive datetimes, returns time without timezone suffix.
+    pub fn timetz(&self) -> Result<Series, FrameError> {
+        self.extract_component(
+            |s| {
+                let s = s.trim();
+                // Find time part start (after T or space)
+                let time_start = if let Some(i) = s.find('T') {
+                    i + 1
+                } else if let Some(i) = s.find(' ') {
+                    i + 1
+                } else {
+                    return Scalar::Null(NullKind::NaN);
+                };
+                let time_with_tz = &s[time_start..];
+                if time_with_tz.is_empty() {
+                    return Scalar::Null(NullKind::NaN);
+                }
+                // Validate time portion
+                let time_part = time_with_tz
+                    .split('+')
+                    .next()
+                    .and_then(|t| t.split('-').next())
+                    .and_then(|t| t.split('Z').next())
+                    .unwrap_or(time_with_tz);
+                if Self::parse_time(time_part).is_some() {
+                    return Scalar::Utf8(time_with_tz.to_string());
+                }
+                Scalar::Null(NullKind::NaN)
+            },
+            self.series.name(),
+        )
+    }
+
     /// Internal: parse a datetime string and extract a specific component.
     ///
     /// Components: 0=year, 1=month, 2=day, 3=hour, 4=minute, 5=second
@@ -76725,6 +76761,33 @@ mod tests {
             Scalar::Utf8("-08:00".to_string())
         );
         assert_eq!(result.column().values()[3], Scalar::Null(NullKind::Null));
+    }
+
+    #[test]
+    fn test_dt_timetz() {
+        let s = Series::from_values(
+            "ts",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("2023-01-15T14:35:22Z".to_string()),
+                Scalar::Utf8("2023-06-30 23:59:59+05:30".to_string()),
+                Scalar::Utf8("2023-12-01 08:00:00".to_string()),
+            ],
+        )
+        .unwrap();
+        let result = s.dt().timetz().unwrap();
+        assert_eq!(
+            result.column().values()[0],
+            Scalar::Utf8("14:35:22Z".to_string())
+        );
+        assert_eq!(
+            result.column().values()[1],
+            Scalar::Utf8("23:59:59+05:30".to_string())
+        );
+        assert_eq!(
+            result.column().values()[2],
+            Scalar::Utf8("08:00:00".to_string())
+        );
     }
 
     #[test]
