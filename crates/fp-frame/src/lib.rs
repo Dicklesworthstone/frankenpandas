@@ -6656,6 +6656,79 @@ impl Series {
         Ok(result)
     }
 
+    /// Logical AND between two Series.
+    ///
+    /// Matches `np.logical_and()`.
+    pub fn logical_and(&self, other: &Self) -> Result<Self, FrameError> {
+        Self::new(
+            self.name.clone(),
+            self.index.clone(),
+            self.column.logical_and(other.column())?,
+        )
+    }
+
+    /// Logical OR between two Series.
+    ///
+    /// Matches `np.logical_or()`.
+    pub fn logical_or(&self, other: &Self) -> Result<Self, FrameError> {
+        Self::new(
+            self.name.clone(),
+            self.index.clone(),
+            self.column.logical_or(other.column())?,
+        )
+    }
+
+    /// Logical XOR between two Series.
+    ///
+    /// Matches `np.logical_xor()`.
+    pub fn logical_xor(&self, other: &Self) -> Result<Self, FrameError> {
+        Self::new(
+            self.name.clone(),
+            self.index.clone(),
+            self.column.logical_xor(other.column())?,
+        )
+    }
+
+    /// Logical NOT (element-wise negation to boolean).
+    ///
+    /// Matches `np.logical_not()`.
+    pub fn logical_not(&self) -> Result<Self, FrameError> {
+        Self::new(
+            self.name.clone(),
+            self.index.clone(),
+            self.column.logical_not()?,
+        )
+    }
+
+    /// Left bit shift.
+    ///
+    /// Matches `np.left_shift()`.
+    pub fn left_shift(&self, other: &Self) -> Result<Self, FrameError> {
+        Self::new(
+            self.name.clone(),
+            self.index.clone(),
+            self.column.left_shift(other.column())?,
+        )
+    }
+
+    /// Split into integer and fractional parts.
+    ///
+    /// Matches `np.modf(x)`. Returns `(fractional_part, integer_part)` as two Series.
+    pub fn modf(&self) -> Result<(Self, Self), FrameError> {
+        let (frac_col, int_col) = self.column.modf()?;
+        let frac = Self::new(
+            format!("{}_frac", self.name),
+            self.index.clone(),
+            frac_col,
+        )?;
+        let int = Self::new(
+            format!("{}_int", self.name),
+            self.index.clone(),
+            int_col,
+        )?;
+        Ok((frac, int))
+    }
+
     // --- Descriptive Statistics ---
 
     #[must_use]
@@ -93326,5 +93399,89 @@ mod test_select_columns_perf_76e1fd {
         assert_eq!(parts[0].len(), 2);
         assert_eq!(parts[1].len(), 2);
         assert_eq!(parts[2].len(), 1);
+    }
+
+    #[test]
+    fn series_logical_and() {
+        let a = Series::from_pairs(
+            "a",
+            vec![
+                (0_i64.into(), Scalar::Bool(true)),
+                (1_i64.into(), Scalar::Bool(true)),
+                (2_i64.into(), Scalar::Bool(false)),
+            ],
+        )
+        .unwrap();
+        let b = Series::from_pairs(
+            "b",
+            vec![
+                (0_i64.into(), Scalar::Bool(true)),
+                (1_i64.into(), Scalar::Bool(false)),
+                (2_i64.into(), Scalar::Bool(false)),
+            ],
+        )
+        .unwrap();
+        let result = a.logical_and(&b).unwrap();
+        assert_eq!(result.values()[0], Scalar::Bool(true));
+        assert_eq!(result.values()[1], Scalar::Bool(false));
+        assert_eq!(result.values()[2], Scalar::Bool(false));
+    }
+
+    #[test]
+    fn series_logical_or() {
+        let a = Series::from_pairs(
+            "a",
+            vec![
+                (0_i64.into(), Scalar::Bool(true)),
+                (1_i64.into(), Scalar::Bool(false)),
+                (2_i64.into(), Scalar::Bool(false)),
+            ],
+        )
+        .unwrap();
+        let b = Series::from_pairs(
+            "b",
+            vec![
+                (0_i64.into(), Scalar::Bool(false)),
+                (1_i64.into(), Scalar::Bool(true)),
+                (2_i64.into(), Scalar::Bool(false)),
+            ],
+        )
+        .unwrap();
+        let result = a.logical_or(&b).unwrap();
+        assert_eq!(result.values()[0], Scalar::Bool(true));
+        assert_eq!(result.values()[1], Scalar::Bool(true));
+        assert_eq!(result.values()[2], Scalar::Bool(false));
+    }
+
+    #[test]
+    fn series_logical_not() {
+        let s = Series::from_pairs(
+            "x",
+            vec![
+                (0_i64.into(), Scalar::Bool(true)),
+                (1_i64.into(), Scalar::Bool(false)),
+            ],
+        )
+        .unwrap();
+        let result = s.logical_not().unwrap();
+        assert_eq!(result.values()[0], Scalar::Bool(false));
+        assert_eq!(result.values()[1], Scalar::Bool(true));
+    }
+
+    #[test]
+    fn series_modf() {
+        let s = Series::from_pairs(
+            "x",
+            vec![
+                (0_i64.into(), Scalar::Float64(3.5)),
+                (1_i64.into(), Scalar::Float64(-2.7)),
+            ],
+        )
+        .unwrap();
+        let (frac, int) = s.modf().unwrap();
+        assert_eq!(frac.name(), "x_frac");
+        assert_eq!(int.name(), "x_int");
+        assert!((frac.values()[0].to_f64().unwrap() - 0.5).abs() < 1e-10);
+        assert!((int.values()[0].to_f64().unwrap() - 3.0).abs() < 1e-10);
     }
 }
