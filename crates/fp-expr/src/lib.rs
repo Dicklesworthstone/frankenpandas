@@ -82,7 +82,7 @@ use fp_columnar::ComparisonOp;
 use fp_frame::{self, FrameError, Series};
 use fp_index::{Index, IndexLabel};
 use fp_runtime::{EvidenceLedger, RuntimePolicy};
-use fp_types::Scalar;
+use fp_types::{DType, Scalar};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -188,6 +188,10 @@ pub enum Expr {
         expr: Box<Expr>,
         to_replace: Scalar,
         value: Scalar,
+    },
+    Astype {
+        expr: Box<Expr>,
+        dtype: DType,
     },
     Where {
         expr: Box<Expr>,
@@ -428,6 +432,10 @@ pub fn evaluate(
             input
                 .replace(&[(to_replace.clone(), value.clone())])
                 .map_err(ExprError::from)
+        }
+        Expr::Astype { expr, dtype } => {
+            let input = evaluate(expr, context, policy, ledger)?;
+            input.astype(*dtype).map_err(ExprError::from)
         }
         Expr::Where {
             expr,
@@ -866,6 +874,7 @@ impl MaterializedView {
             Expr::IsNull { expr, .. } => Self::extract_series(expr, series_set),
             Expr::FillNa { expr, .. } => Self::extract_series(expr, series_set),
             Expr::Replace { expr, .. } => Self::extract_series(expr, series_set),
+            Expr::Astype { expr, .. } => Self::extract_series(expr, series_set),
             Expr::Where {
                 expr, cond, other, ..
             } => {
@@ -1013,6 +1022,10 @@ fn evaluate_delta(
                 .replace(&[(to_replace.clone(), value.clone())])
                 .map_err(ExprError::from)
         }
+        Expr::Astype { expr, dtype } => {
+            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
+            input.astype(*dtype).map_err(ExprError::from)
+        }
         Expr::Where {
             expr,
             cond,
@@ -1138,8 +1151,9 @@ fn evaluate_delta_comparison(
 //     .div(other), .truediv(other), .floordiv(other), .mod(other),
 //     .pow(other), reflected arithmetic variants, .eq(other), .ne(other),
 //     .gt(other), .ge(other), .lt(other), .le(other), .clip(lower, upper),
-//     .round(decimals), .replace(to_replace, value), .where(cond, other),
-//     .mask(cond, other), .isna(), .notna(), .isnull(), .notnull()
+//     .round(decimals), .replace(to_replace, value), .astype(dtype),
+//     .where(cond, other), .mask(cond, other), .isna(), .notna(),
+//     .isnull(), .notnull()
 //   - Arithmetic operators: +, -, *, /, //, %, **
 //   - Parenthesized sub-expressions
 
@@ -1735,6 +1749,35 @@ fn parse_i32_literal(tokens: &[Token], pos: &mut usize, context: &str) -> Result
         .map_err(|_| ExprError::ParseError(format!("{context} is outside the i32 range: {value}")))
 }
 
+fn parse_dtype_alias(value: &str) -> Result<DType, ExprError> {
+    match value.to_ascii_lowercase().as_str() {
+        "null" | "none" => Ok(DType::Null),
+        "bool" | "boolean" | "?" => Ok(DType::Bool),
+        "int" | "integer" | "int64" | "i8" => Ok(DType::Int64),
+        "float" | "floating" | "float64" | "f8" => Ok(DType::Float64),
+        "object" | "string" | "str" | "utf8" | "o" => Ok(DType::Utf8),
+        "category" | "categorical" => Ok(DType::Categorical),
+        "timedelta" | "timedelta64" | "timedelta64[ns]" | "m8" | "m8[ns]" => Ok(DType::Timedelta64),
+        "datetime" | "datetime64" | "datetime64[ns]" => Ok(DType::Datetime64),
+        "period" => Ok(DType::Period),
+        "interval" => Ok(DType::Interval),
+        "sparse" => Ok(DType::Sparse),
+        other => Err(ExprError::ParseError(format!(
+            "astype() dtype is not supported in expressions: {other:?}"
+        ))),
+    }
+}
+
+fn parse_dtype_literal(tokens: &[Token], pos: &mut usize) -> Result<DType, ExprError> {
+    let dtype = parse_scalar_literal(tokens, pos)?;
+    let Scalar::Utf8(value) = dtype else {
+        return Err(ExprError::ParseError(format!(
+            "astype() dtype must be a string literal, got {dtype:?}"
+        )));
+    };
+    parse_dtype_alias(&value)
+}
+
 fn parse_add(tokens: &[Token], pos: &mut usize) -> Result<Expr, ExprError> {
     let mut left = parse_mul(tokens, pos)?;
     while *pos < tokens.len() {
@@ -2050,6 +2093,30 @@ fn parse_postfix(mut expr: Expr, tokens: &[Token], pos: &mut usize) -> Result<Ex
                 };
                 *pos = arg_pos + 1;
             }
+            "astype" => {
+                let mut arg_pos = *pos + 3;
+                if let Some(Token::Ident(keyword)) = tokens.get(arg_pos)
+                    && tokens.get(arg_pos + 1) == Some(&Token::Assign)
+                {
+                    if keyword != "dtype" {
+                        return Err(ExprError::ParseError(format!(
+                            "unexpected astype() keyword argument: {keyword}"
+                        )));
+                    }
+                    arg_pos += 2;
+                }
+                let dtype = parse_dtype_literal(tokens, &mut arg_pos)?;
+                if tokens.get(arg_pos) != Some(&Token::RParen) {
+                    return Err(ExprError::ParseError(
+                        "expected ')' after astype() dtype".into(),
+                    ));
+                }
+                expr = Expr::Astype {
+                    expr: Box::new(expr),
+                    dtype,
+                };
+                *pos = arg_pos + 1;
+            }
             "add" | "radd" | "sub" | "subtract" | "rsub" | "mul" | "multiply" | "rmul" | "div"
             | "divide" | "truediv" | "rdiv" | "rtruediv" | "floordiv" | "rfloordiv" | "mod"
             | "rmod" | "pow" | "rpow" => {
@@ -2279,7 +2346,7 @@ mod tests {
     use fp_columnar::ComparisonOp;
     use fp_frame::{FrameError, Series};
     use fp_runtime::{EvidenceLedger, RuntimePolicy};
-    use fp_types::Scalar;
+    use fp_types::{DType, Scalar};
 
     use super::{
         BetweenInclusive, Delta, EvalContext, Expr, ExprError, MaterializedView, SeriesRef,
@@ -4570,6 +4637,48 @@ mod tests {
         );
 
         let filtered = super::query_str("a.replace(1, 9) == 9", &frame, &policy, &mut ledger)?;
+        assert_eq!(filtered.index().labels(), &[0_i64.into(), 2_i64.into()]);
+        Ok(())
+    }
+
+    #[test]
+    fn eval_and_query_str_accept_astype_method_call() -> Result<(), ExprError> {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "a",
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                vec![Scalar::Int64(1), Scalar::Int64(0), Scalar::Int64(1)],
+            )
+            .map_err(ExprError::from)?,
+        ])
+        .map_err(ExprError::from)?;
+
+        let as_float = super::eval_str("a.astype(\"float64\")", &frame, &policy, &mut ledger)?;
+        assert_eq!(as_float.dtype(), DType::Float64);
+        assert_eq!(
+            as_float.values(),
+            &[
+                Scalar::Float64(1.0),
+                Scalar::Float64(0.0),
+                Scalar::Float64(1.0),
+            ]
+        );
+
+        let as_string = super::eval_str("a.astype(dtype=\"str\")", &frame, &policy, &mut ledger)?;
+        assert_eq!(as_string.dtype(), DType::Utf8);
+        assert_eq!(
+            as_string.values(),
+            &[
+                Scalar::Utf8("1".to_owned()),
+                Scalar::Utf8("0".to_owned()),
+                Scalar::Utf8("1".to_owned()),
+            ]
+        );
+
+        let filtered = super::query_str("a.astype(\"bool\")", &frame, &policy, &mut ledger)?;
         assert_eq!(filtered.index().labels(), &[0_i64.into(), 2_i64.into()]);
         Ok(())
     }
