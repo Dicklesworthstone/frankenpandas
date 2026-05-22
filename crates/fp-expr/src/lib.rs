@@ -80,7 +80,7 @@ use std::collections::BTreeMap;
 
 use fp_columnar::ComparisonOp;
 use fp_frame::{self, FrameError, Series};
-use fp_index::{Index, IndexLabel};
+use fp_index::{DuplicateKeep, Index, IndexLabel};
 use fp_runtime::{EvidenceLedger, RuntimePolicy};
 use fp_types::{DType, Scalar};
 use serde::{Deserialize, Serialize};
@@ -96,6 +96,41 @@ pub enum BetweenInclusive {
     Left,
     Right,
     Neither,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExprDuplicateKeep {
+    First,
+    Last,
+    None,
+}
+
+impl ExprDuplicateKeep {
+    fn parse(value: Scalar, context: &str) -> Result<Self, ExprError> {
+        match value {
+            Scalar::Utf8(value) => match value.as_str() {
+                "first" => Ok(Self::First),
+                "last" => Ok(Self::Last),
+                other => Err(ExprError::ParseError(format!(
+                    "{context} keep must be 'first', 'last', or False, got {other:?}"
+                ))),
+            },
+            Scalar::Bool(false) | Scalar::Int64(0) => Ok(Self::None),
+            Scalar::Float64(0.0) => Ok(Self::None),
+            other => Err(ExprError::ParseError(format!(
+                "{context} keep must be 'first', 'last', or False, got {other:?}"
+            ))),
+        }
+    }
+
+    fn as_frame_keep(self) -> DuplicateKeep {
+        match self {
+            Self::First => DuplicateKeep::First,
+            Self::Last => DuplicateKeep::Last,
+            Self::None => DuplicateKeep::None,
+        }
+    }
 }
 
 impl BetweenInclusive {
@@ -203,6 +238,14 @@ pub enum Expr {
     Mode {
         expr: Box<Expr>,
         dropna: bool,
+    },
+    Duplicated {
+        expr: Box<Expr>,
+        keep: ExprDuplicateKeep,
+    },
+    DropDuplicates {
+        expr: Box<Expr>,
+        keep: ExprDuplicateKeep,
     },
     HeadTail {
         expr: Box<Expr>,
@@ -518,6 +561,18 @@ pub fn evaluate(
         Expr::Mode { expr, dropna } => {
             let input = evaluate(expr, context, policy, ledger)?;
             input.mode_with_dropna(*dropna).map_err(ExprError::from)
+        }
+        Expr::Duplicated { expr, keep } => {
+            let input = evaluate(expr, context, policy, ledger)?;
+            input
+                .duplicated_keep(keep.as_frame_keep())
+                .map_err(ExprError::from)
+        }
+        Expr::DropDuplicates { expr, keep } => {
+            let input = evaluate(expr, context, policy, ledger)?;
+            input
+                .drop_duplicates_keep(keep.as_frame_keep())
+                .map_err(ExprError::from)
         }
         Expr::HeadTail { expr, n, tail } => {
             let input = evaluate(expr, context, policy, ledger)?;
@@ -1065,6 +1120,8 @@ impl MaterializedView {
             Expr::SortIndex { expr, .. } => Self::extract_series(expr, series_set),
             Expr::ArgSort { expr } => Self::extract_series(expr, series_set),
             Expr::Mode { expr, .. } => Self::extract_series(expr, series_set),
+            Expr::Duplicated { expr, .. } => Self::extract_series(expr, series_set),
+            Expr::DropDuplicates { expr, .. } => Self::extract_series(expr, series_set),
             Expr::HeadTail { expr, .. } => Self::extract_series(expr, series_set),
             Expr::TopN { expr, .. } => Self::extract_series(expr, series_set),
             Expr::Replace { expr, .. } => Self::extract_series(expr, series_set),
@@ -1242,6 +1299,18 @@ fn evaluate_delta(
         Expr::Mode { expr, dropna } => {
             let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
             input.mode_with_dropna(*dropna).map_err(ExprError::from)
+        }
+        Expr::Duplicated { expr, keep } => {
+            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
+            input
+                .duplicated_keep(keep.as_frame_keep())
+                .map_err(ExprError::from)
+        }
+        Expr::DropDuplicates { expr, keep } => {
+            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
+            input
+                .drop_duplicates_keep(keep.as_frame_keep())
+                .map_err(ExprError::from)
         }
         Expr::HeadTail { expr, n, tail } => {
             let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
@@ -1449,7 +1518,8 @@ fn evaluate_delta_comparison(
 //     .shift(periods), .diff(periods), .cumsum(), .cumprod(), .cummin(),
 //     .cummax(), .pct_change(periods), .round(decimals), .dropna(),
 //     .sort_values(ascending=..., na_position=...), .sort_index(ascending=...),
-//     .argsort(axis, kind, order, stable), .mode(dropna), .head(n), .tail(n),
+//     .argsort(axis, kind, order, stable), .mode(dropna),
+//     .duplicated(keep), .drop_duplicates(keep), .head(n), .tail(n),
 //     .replace(to_replace, value), .nlargest(n, keep), .nsmallest(n, keep),
 //     .astype(dtype), .combine_first(other), .rank(method=..., ascending=...,
 //     na_option=...), .where(cond, other), .mask(cond, other), .isna(),
@@ -2162,6 +2232,15 @@ fn parse_bool_literal_argument(
         )));
     };
     Ok(value)
+}
+
+fn parse_duplicate_keep_argument(
+    tokens: &[Token],
+    pos: &mut usize,
+    context: &str,
+) -> Result<ExprDuplicateKeep, ExprError> {
+    let value = parse_scalar_literal(tokens, pos)?;
+    ExprDuplicateKeep::parse(value, context)
 }
 
 fn parse_axis_zero_argument(
@@ -2988,6 +3067,104 @@ fn parse_postfix(mut expr: Expr, tokens: &[Token], pos: &mut usize) -> Result<Ex
                 expr = Expr::Mode {
                     expr: Box::new(expr),
                     dropna,
+                };
+                *pos = arg_pos + 1;
+            }
+            "duplicated" | "drop_duplicates" => {
+                let mut arg_pos = *pos + 3;
+                let mut keep = ExprDuplicateKeep::First;
+                let mut keep_seen = false;
+                let mut positional_count = 0_usize;
+                let mut keyword_seen = false;
+
+                while tokens.get(arg_pos) != Some(&Token::RParen) {
+                    if arg_pos >= tokens.len() {
+                        return Err(ExprError::ParseError(format!(
+                            "unterminated {method}() arguments"
+                        )));
+                    }
+
+                    if let Some(Token::Ident(keyword)) = tokens.get(arg_pos)
+                        && tokens.get(arg_pos + 1) == Some(&Token::Assign)
+                    {
+                        keyword_seen = true;
+                        let keyword = keyword.clone();
+                        arg_pos += 2;
+                        match keyword.as_str() {
+                            "keep" => {
+                                if keep_seen {
+                                    return Err(ExprError::ParseError(format!(
+                                        "{method}() keep argument was provided more than once"
+                                    )));
+                                }
+                                keep = parse_duplicate_keep_argument(tokens, &mut arg_pos, method)?;
+                                keep_seen = true;
+                            }
+                            other => {
+                                return Err(ExprError::ParseError(format!(
+                                    "unexpected {method}() keyword argument: {other}"
+                                )));
+                            }
+                        }
+                    } else {
+                        if method == "drop_duplicates" {
+                            return Err(ExprError::ParseError(
+                                "drop_duplicates() arguments are keyword-only in expressions"
+                                    .into(),
+                            ));
+                        }
+                        if keyword_seen {
+                            return Err(ExprError::ParseError(format!(
+                                "{method}() positional arguments cannot follow keyword arguments"
+                            )));
+                        }
+                        match positional_count {
+                            0 => {
+                                if keep_seen {
+                                    return Err(ExprError::ParseError(format!(
+                                        "{method}() keep argument was provided more than once"
+                                    )));
+                                }
+                                keep = parse_duplicate_keep_argument(tokens, &mut arg_pos, method)?;
+                                keep_seen = true;
+                            }
+                            _ => {
+                                return Err(ExprError::ParseError(format!(
+                                    "{method}() accepts at most one keep argument"
+                                )));
+                            }
+                        }
+                        positional_count += 1;
+                    }
+
+                    match tokens.get(arg_pos) {
+                        Some(Token::Comma) => {
+                            arg_pos += 1;
+                            if tokens.get(arg_pos) == Some(&Token::RParen) {
+                                return Err(ExprError::ParseError(format!(
+                                    "{method}() arguments cannot end with ','"
+                                )));
+                            }
+                        }
+                        Some(Token::RParen) => {}
+                        other => {
+                            return Err(ExprError::ParseError(format!(
+                                "expected ',' or ')' in {method}() arguments, got {other:?}"
+                            )));
+                        }
+                    }
+                }
+
+                expr = if method == "duplicated" {
+                    Expr::Duplicated {
+                        expr: Box::new(expr),
+                        keep,
+                    }
+                } else {
+                    Expr::DropDuplicates {
+                        expr: Box::new(expr),
+                        keep,
+                    }
                 };
                 *pos = arg_pos + 1;
             }
@@ -6744,6 +6921,138 @@ mod tests {
         assert!(super::parse_expr("a.head(1, 2)").is_err());
         assert!(super::parse_expr("a.tail(n=1, 2)").is_err());
         assert!(super::parse_expr("a.head(skipna=True)").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn eval_and_query_str_accept_deduplicate_method_calls() -> Result<(), ExprError> {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+
+        let labels = vec![
+            10_i64.into(),
+            7_i64.into(),
+            12_i64.into(),
+            11_i64.into(),
+            8_i64.into(),
+        ];
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "a",
+                labels.clone(),
+                vec![
+                    Scalar::Int64(3),
+                    Scalar::Null(fp_types::NullKind::NaN),
+                    Scalar::Int64(1),
+                    Scalar::Int64(3),
+                    Scalar::Null(fp_types::NullKind::NaN),
+                ],
+            )
+            .map_err(ExprError::from)?,
+            fp_frame::Series::from_values(
+                "b",
+                labels,
+                vec![
+                    Scalar::Int64(30),
+                    Scalar::Int64(40),
+                    Scalar::Int64(10),
+                    Scalar::Int64(20),
+                    Scalar::Int64(50),
+                ],
+            )
+            .map_err(ExprError::from)?,
+        ])
+        .map_err(ExprError::from)?;
+
+        let duplicated = super::eval_str("a.duplicated()", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            duplicated.values(),
+            &[
+                Scalar::Bool(false),
+                Scalar::Bool(false),
+                Scalar::Bool(false),
+                Scalar::Bool(true),
+                Scalar::Bool(true),
+            ]
+        );
+
+        let duplicated_last =
+            super::eval_str("a.duplicated(keep='last')", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            duplicated_last.values(),
+            &[
+                Scalar::Bool(true),
+                Scalar::Bool(true),
+                Scalar::Bool(false),
+                Scalar::Bool(false),
+                Scalar::Bool(false),
+            ]
+        );
+
+        let duplicated_none =
+            super::eval_str("a.duplicated(keep=False)", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            duplicated_none.values(),
+            &[
+                Scalar::Bool(true),
+                Scalar::Bool(true),
+                Scalar::Bool(false),
+                Scalar::Bool(true),
+                Scalar::Bool(true),
+            ]
+        );
+
+        let dropped = super::eval_str("a.drop_duplicates()", &frame, &policy, &mut ledger)?;
+        assert_eq!(
+            dropped.index().labels(),
+            &[10_i64.into(), 7_i64.into(), 12_i64.into()]
+        );
+        assert_eq!(
+            dropped.values(),
+            &[
+                Scalar::Int64(3),
+                Scalar::Null(fp_types::NullKind::NaN),
+                Scalar::Int64(1),
+            ]
+        );
+
+        let dropped_last = super::eval_str(
+            "a.drop_duplicates(keep='last')",
+            &frame,
+            &policy,
+            &mut ledger,
+        )?;
+        assert_eq!(
+            dropped_last.index().labels(),
+            &[12_i64.into(), 11_i64.into(), 8_i64.into()]
+        );
+        assert_eq!(
+            dropped_last.values(),
+            &[
+                Scalar::Int64(1),
+                Scalar::Int64(3),
+                Scalar::Null(fp_types::NullKind::NaN),
+            ]
+        );
+
+        let dropped_none =
+            super::eval_str("a.drop_duplicates(keep=0)", &frame, &policy, &mut ledger)?;
+        assert_eq!(dropped_none.index().labels(), &[12_i64.into()]);
+        assert_eq!(dropped_none.values(), &[Scalar::Int64(1)]);
+
+        let filtered = super::query_str(
+            "not a.duplicated(keep=False) and b.lt(40)",
+            &frame,
+            &policy,
+            &mut ledger,
+        )?;
+        assert_eq!(filtered.index().labels(), &[12_i64.into()]);
+
+        assert!(super::parse_expr("a.duplicated(keep=True)").is_err());
+        assert!(super::parse_expr("a.duplicated(keep='middle')").is_err());
+        assert!(super::parse_expr("a.drop_duplicates('last')").is_err());
+        assert!(super::parse_expr("a.drop_duplicates('first', 'last')").is_err());
+        assert!(super::parse_expr("a.duplicated(skipna=True)").is_err());
         Ok(())
     }
 
