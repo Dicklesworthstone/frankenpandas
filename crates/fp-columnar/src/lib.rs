@@ -2643,6 +2643,22 @@ impl Column {
         Self::new(self.dtype, out)
     }
 
+    /// Resize column to new size, padding or truncating as needed.
+    ///
+    /// Matches np.resize(). If new size is larger, values cycle from beginning.
+    pub fn resize(&self, new_size: usize) -> Result<Self, ColumnError> {
+        if new_size == 0 || self.values.is_empty() {
+            return Self::new(self.dtype, Vec::new());
+        }
+        let mut out = Vec::with_capacity(new_size);
+        let mut i = 0;
+        while out.len() < new_size {
+            out.push(self.values[i % self.values.len()].clone());
+            i += 1;
+        }
+        Self::new(self.dtype, out)
+    }
+
     /// Repeat each value `repeats` times contiguously.
     ///
     /// Matches `pd.Series.repeat(n)`. `repeats=0` yields an empty
