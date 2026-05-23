@@ -1,0 +1,6 @@
+         vals
+0          10
+1          20
+2          30
+
+[3 rows x 1 columns]

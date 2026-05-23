@@ -87891,6 +87891,95 @@ mod tests {
         assert_text_golden("dataframe_dropna_basic.txt", &output);
     }
 
+    #[test]
+    fn series_replace_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+                Scalar::Int64(2),
+            ],
+        )
+        .unwrap();
+        let replaced = s.replace(&[(Scalar::Int64(2), Scalar::Int64(99))]).unwrap();
+        let output = format!("{replaced}");
+        assert_text_golden("series_replace_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_to_frame_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+        )
+        .unwrap();
+        let df = s.to_frame(None).unwrap();
+        let output = format!("{df}");
+        assert_text_golden("series_to_frame_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_where_cond_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+                Scalar::Int64(4),
+            ],
+        )
+        .unwrap();
+        let cond = Series::from_values(
+            "cond",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Bool(true),
+                Scalar::Bool(false),
+                Scalar::Bool(true),
+                Scalar::Bool(false),
+            ],
+        )
+        .unwrap();
+        let result = s.where_cond(&cond, Some(&Scalar::Int64(0))).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_where_cond_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_mask_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+                Scalar::Int64(4),
+            ],
+        )
+        .unwrap();
+        let mask_cond = Series::from_values(
+            "mask",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Bool(false),
+                Scalar::Bool(true),
+                Scalar::Bool(false),
+                Scalar::Bool(true),
+            ],
+        )
+        .unwrap();
+        let result = s.mask(&mask_cond, Some(&Scalar::Int64(99))).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_mask_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))
