@@ -94770,6 +94770,82 @@ mod tests {
         assert_text_golden("series_cat_to_values_basic.txt", &output);
     }
 
+
+    #[test]
+    fn series_sparse_density_golden_basic() {
+        let s = Series::from_sparse_dense(
+            "values",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![Scalar::Float64(0.0), Scalar::Float64(1.0), Scalar::Float64(0.0), Scalar::Float64(2.0), Scalar::Float64(0.0)],
+            DType::Float64,
+            Scalar::Float64(0.0),
+        ).unwrap();
+        let sparse = s.sparse().unwrap();
+        let density = sparse.density();
+        let output = format!("{density}");
+        assert_text_golden("series_sparse_density_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_sparse_sp_values_golden_basic() {
+        let s = Series::from_sparse_dense(
+            "values",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![Scalar::Float64(0.0), Scalar::Float64(1.0), Scalar::Float64(0.0), Scalar::Float64(2.0), Scalar::Float64(0.0)],
+            DType::Float64,
+            Scalar::Float64(0.0),
+        ).unwrap();
+        let sparse = s.sparse().unwrap();
+        let sp_values = sparse.sp_values();
+        let output = format!("{sp_values:?}");
+        assert_text_golden("series_sparse_sp_values_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_sparse_sp_index_golden_basic() {
+        let s = Series::from_sparse_dense(
+            "values",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![Scalar::Float64(0.0), Scalar::Float64(1.0), Scalar::Float64(0.0), Scalar::Float64(2.0), Scalar::Float64(0.0)],
+            DType::Float64,
+            Scalar::Float64(0.0),
+        ).unwrap();
+        let sparse = s.sparse().unwrap();
+        let sp_index = sparse.sp_index();
+        let output = format!("{sp_index:?}");
+        assert_text_golden("series_sparse_sp_index_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_sparse_to_dense_golden_basic() {
+        let s = Series::from_sparse_dense(
+            "values",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Float64(0.0), Scalar::Float64(5.0), Scalar::Float64(0.0)],
+            DType::Float64,
+            Scalar::Float64(0.0),
+        ).unwrap();
+        let sparse = s.sparse().unwrap();
+        let dense = sparse.to_dense();
+        let output = format!("{dense}");
+        assert_text_golden("series_sparse_to_dense_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_sparse_fill_value_golden_basic() {
+        let s = Series::from_sparse_dense(
+            "values",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(-1), Scalar::Int64(10), Scalar::Int64(-1)],
+            DType::Int64,
+            Scalar::Int64(-1),
+        ).unwrap();
+        let sparse = s.sparse().unwrap();
+        let fill_value = sparse.fill_value();
+        let output = format!("{fill_value:?}");
+        assert_text_golden("series_sparse_fill_value_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

@@ -1,0 +1,4 @@
+0    0
+1    5
+2    0
+Name: values, Length: 3, dtype: Float64
