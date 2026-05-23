@@ -1,0 +1,4 @@
+0    0
+1    30
+2    59
+Name: dates, Length: 3, dtype: Int64
