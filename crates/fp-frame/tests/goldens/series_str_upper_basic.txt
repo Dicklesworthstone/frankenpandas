@@ -1,0 +1,4 @@
+0    HELLO
+1    WORLD
+2    TEST
+Name: vals, Length: 3, dtype: Utf8

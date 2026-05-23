@@ -87706,6 +87706,74 @@ mod tests {
         assert_text_golden("series_isin_basic.txt", &output);
     }
 
+    #[test]
+    fn series_str_lower_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("HELLO".into()),
+                Scalar::Utf8("World".into()),
+                Scalar::Utf8("TEST".into()),
+            ],
+        )
+        .unwrap();
+        let lower = s.str().lower().unwrap();
+        let output = format!("{lower}");
+        assert_text_golden("series_str_lower_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_str_upper_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("hello".into()),
+                Scalar::Utf8("World".into()),
+                Scalar::Utf8("test".into()),
+            ],
+        )
+        .unwrap();
+        let upper = s.str().upper().unwrap();
+        let output = format!("{upper}");
+        assert_text_golden("series_str_upper_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_str_strip_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("  hello  ".into()),
+                Scalar::Utf8("\tworld\n".into()),
+                Scalar::Utf8("  test".into()),
+            ],
+        )
+        .unwrap();
+        let stripped = s.str().strip().unwrap();
+        let output = format!("{stripped}");
+        assert_text_golden("series_str_strip_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_str_len_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("hello".into()),
+                Scalar::Utf8("world".into()),
+                Scalar::Utf8("".into()),
+            ],
+        )
+        .unwrap();
+        let lens = s.str().len().unwrap();
+        let output = format!("{lens}");
+        assert_text_golden("series_str_len_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))
