@@ -88843,6 +88843,54 @@ mod tests {
         assert_text_golden("dataframe_duplicated_basic.txt", &output);
     }
 
+    #[test]
+    fn groupby_prod_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["key", "val"],
+            vec![
+                ("key", vec![Scalar::Utf8("a".into()), Scalar::Utf8("a".into()), Scalar::Utf8("b".into()), Scalar::Utf8("b".into())]),
+                ("val", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3), Scalar::Int64(4)]),
+            ],
+        )
+        .unwrap();
+        let grouped = df.groupby(&["key"]).unwrap().prod().unwrap();
+        let output = format!("{grouped}");
+        assert_text_golden("groupby_prod_basic.txt", &output);
+    }
+
+    #[test]
+    fn groupby_nunique_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["key", "val"],
+            vec![
+                ("key", vec![Scalar::Utf8("a".into()), Scalar::Utf8("a".into()), Scalar::Utf8("b".into()), Scalar::Utf8("b".into())]),
+                ("val", vec![Scalar::Int64(1), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]),
+            ],
+        )
+        .unwrap();
+        let grouped = df.groupby(&["key"]).unwrap().nunique().unwrap();
+        let output = format!("{grouped}");
+        assert_text_golden("groupby_nunique_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_searchsorted_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                Scalar::Int64(10),
+                Scalar::Int64(20),
+                Scalar::Int64(30),
+                Scalar::Int64(40),
+                Scalar::Int64(50),
+            ],
+        ).unwrap();
+        let idx = s.searchsorted(&Scalar::Int64(25), "left").unwrap();
+        let output = format!("{idx}");
+        assert_text_golden("series_searchsorted_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

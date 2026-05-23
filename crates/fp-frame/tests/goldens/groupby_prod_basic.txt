@@ -1,0 +1,5 @@
+         val
+a          2
+b         12
+
+[2 rows x 1 columns]
