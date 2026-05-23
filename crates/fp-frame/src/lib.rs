@@ -91435,6 +91435,78 @@ mod tests {
         assert_text_golden("dataframe_positive_basic.txt", &output);
     }
 
+    #[test]
+    fn series_cbrt_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Float64(1.0), Scalar::Float64(8.0), Scalar::Float64(-27.0)],
+        ).unwrap();
+        let result = s.cbrt().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_cbrt_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_signbit_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Float64(-5.0), Scalar::Float64(0.0), Scalar::Float64(5.0)],
+        ).unwrap();
+        let result = s.signbit().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_signbit_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_square_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(-4.0)],
+        ).unwrap();
+        let result = s.square().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_square_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_rint_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Float64(1.4), Scalar::Float64(2.5), Scalar::Float64(3.6)],
+        ).unwrap();
+        let result = s.rint().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_rint_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_trunc_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Float64(1.7), Scalar::Float64(-2.3), Scalar::Float64(3.9)],
+        ).unwrap();
+        let result = s.trunc().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_trunc_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_positive_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Float64(1.0), Scalar::Float64(-2.0), Scalar::Float64(3.0)],
+        ).unwrap();
+        let result = s.positive().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_positive_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))
