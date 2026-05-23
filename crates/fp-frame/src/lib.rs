@@ -87559,7 +87559,7 @@ mod tests {
             ],
         )
         .unwrap();
-        let dd = df.drop_duplicates().unwrap();
+        let dd = df.drop_duplicates(None, DuplicateKeep::First, false).unwrap();
         let output = format!("{dd}");
         assert_text_golden("dataframe_drop_duplicates_basic.txt", &output);
     }
