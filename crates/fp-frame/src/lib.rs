@@ -14425,7 +14425,7 @@ impl DataFrameExpanding<'_> {
 
     /// Apply a custom function over the expanding window for each numeric column.
     ///
-    /// Matches `df.expanding().apply(func)`.
+    /// Matches `df.expanding(Some(1)).apply(func)`.
     pub fn apply<F>(&self, func: F) -> Result<DataFrame, FrameError>
     where
         F: Fn(&[f64]) -> f64 + Copy,
@@ -14435,7 +14435,7 @@ impl DataFrameExpanding<'_> {
 
     /// Aggregate each numeric column with multiple expanding functions.
     ///
-    /// Matches `df.expanding().agg(['sum', 'mean'])`. Output columns are
+    /// Matches `df.expanding(Some(1)).agg(['sum', 'mean'])`. Output columns are
     /// named `{column}_{function}`.
     pub fn agg(&self, funcs: &[&str]) -> Result<DataFrame, FrameError> {
         let mut result_cols = BTreeMap::new();
@@ -91625,6 +91625,76 @@ mod tests {
         let result = df.rolling(3, None).first().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_rolling_first_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_expanding_mean_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0), Scalar::Float64(5.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(15.0), Scalar::Float64(25.0), Scalar::Float64(30.0)]),
+            ],
+        ).unwrap();
+        let result = df.expanding(Some(1)).mean().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_expanding_mean_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_expanding_min_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0), Scalar::Float64(5.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(15.0), Scalar::Float64(25.0), Scalar::Float64(30.0)]),
+            ],
+        ).unwrap();
+        let result = df.expanding(Some(1)).min().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_expanding_min_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_expanding_max_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0), Scalar::Float64(5.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(15.0), Scalar::Float64(25.0), Scalar::Float64(30.0)]),
+            ],
+        ).unwrap();
+        let result = df.expanding(Some(1)).max().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_expanding_max_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_expanding_std_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0), Scalar::Float64(5.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(15.0), Scalar::Float64(25.0), Scalar::Float64(30.0)]),
+            ],
+        ).unwrap();
+        let result = df.expanding(Some(1)).std().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_expanding_std_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_expanding_var_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0), Scalar::Float64(5.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(15.0), Scalar::Float64(25.0), Scalar::Float64(30.0)]),
+            ],
+        ).unwrap();
+        let result = df.expanding(Some(1)).var().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_expanding_var_basic.txt", &output);
     }
 
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
