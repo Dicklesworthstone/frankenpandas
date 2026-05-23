@@ -93217,6 +93217,83 @@ mod tests {
         assert_text_golden("dataframe_dropna_columns_basic.txt", &output);
     }
 
+    #[test]
+    fn dataframe_swapaxes_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0)]),
+            ],
+        ).unwrap();
+        let result = df.swapaxes().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_swapaxes_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_iat_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
+            ],
+        ).unwrap();
+        let result = df.iat(1, 1).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_iat_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_to_records_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0)]),
+            ],
+        ).unwrap();
+        let result = df.to_records();
+        let output = format!("{result:?}");
+        assert_text_golden("dataframe_to_records_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_itertuples_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0)]),
+            ],
+        ).unwrap();
+        let result = df.itertuples();
+        let output = format!("{result:?}");
+        assert_text_golden("dataframe_itertuples_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_dot_golden_basic() {
+        let df1 = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
+                ("b", vec![Scalar::Float64(3.0), Scalar::Float64(4.0)]),
+            ],
+        ).unwrap();
+        let df2 = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(5.0), Scalar::Float64(6.0)]),
+                ("b", vec![Scalar::Float64(7.0), Scalar::Float64(8.0)]),
+            ],
+        ).unwrap();
+        let result = df1.dot(&df2).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_dot_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

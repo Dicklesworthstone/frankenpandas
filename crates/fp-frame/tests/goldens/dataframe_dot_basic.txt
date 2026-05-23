@@ -1,0 +1,5 @@
+          a   b
+0        23  31
+1        34  46
+
+[2 rows x 2 columns]
