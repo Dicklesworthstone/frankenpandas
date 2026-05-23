@@ -92672,6 +92672,38 @@ mod tests {
         assert_text_golden("dataframe_reindex_basic.txt", &output);
     }
 
+    #[test]
+    fn dataframe_applymap_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
+                ("b", vec![Scalar::Float64(4.0), Scalar::Float64(5.0), Scalar::Float64(6.0)]),
+            ],
+        ).unwrap();
+        let result = df.applymap(|s| match s {
+            Scalar::Float64(f) => Scalar::Float64(f * 2.0),
+            other => other.clone(),
+        }).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_applymap_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_drop_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b", "c"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0)]),
+                ("c", vec![Scalar::Float64(100.0), Scalar::Float64(200.0)]),
+            ],
+        ).unwrap();
+        let result = df.drop(&["b"], 1).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_drop_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))
