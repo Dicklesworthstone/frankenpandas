@@ -91393,6 +91393,48 @@ mod tests {
         assert_text_golden("dataframe_reciprocal_basic.txt", &output);
     }
 
+    #[test]
+    fn dataframe_trunc_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.7), Scalar::Float64(2.3), Scalar::Float64(-3.9)]),
+                ("b", vec![Scalar::Float64(-4.1), Scalar::Float64(5.9), Scalar::Float64(-6.5)]),
+            ],
+        ).unwrap();
+        let result = df.trunc().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_trunc_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_negative_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(-2.0), Scalar::Float64(3.0)]),
+                ("b", vec![Scalar::Float64(-4.0), Scalar::Float64(5.0), Scalar::Float64(-6.0)]),
+            ],
+        ).unwrap();
+        let result = df.negative().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_negative_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_positive_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(-2.0), Scalar::Float64(3.0)]),
+                ("b", vec![Scalar::Float64(-4.0), Scalar::Float64(5.0), Scalar::Float64(-6.0)]),
+            ],
+        ).unwrap();
+        let result = df.positive().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_positive_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))
