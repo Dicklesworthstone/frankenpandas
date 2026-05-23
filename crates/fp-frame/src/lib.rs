@@ -89901,6 +89901,79 @@ mod tests {
         assert_text_golden("dataframe_shape_basic.txt", &output);
     }
 
+    #[test]
+    fn series_any_golden_basic() {
+        let s = Series::from_values(
+            "flags",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Bool(false), Scalar::Bool(true), Scalar::Bool(false)],
+        ).unwrap();
+        let result = s.any().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_any_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_all_golden_basic() {
+        let s = Series::from_values(
+            "flags",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Bool(true), Scalar::Bool(true), Scalar::Bool(true)],
+        ).unwrap();
+        let result = s.all().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_all_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_is_unique_golden_basic() {
+        let s1 = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+        ).unwrap();
+        let s2 = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Int64(1), Scalar::Int64(3)],
+        ).unwrap();
+        let output = format!("unique: {}, has_dups: {}", s1.is_unique(), s2.is_unique());
+        assert_text_golden("series_is_unique_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_is_monotonic_golden_basic() {
+        let s_inc = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+        ).unwrap();
+        let s_dec = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(3), Scalar::Int64(2), Scalar::Int64(1)],
+        ).unwrap();
+        let output = format!("inc_monotonic: {}, dec_monotonic: {}",
+            s_inc.is_monotonic_increasing(), s_dec.is_monotonic_decreasing());
+        assert_text_golden("series_is_monotonic_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_hasnans_golden_basic() {
+        let s_no_nan = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)],
+        ).unwrap();
+        let s_has_nan = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Float64(1.0), Scalar::Null(NullKind::NaN), Scalar::Float64(3.0)],
+        ).unwrap();
+        let output = format!("no_nan: {}, has_nan: {}", s_no_nan.hasnans(), s_has_nan.hasnans());
+        assert_text_golden("series_hasnans_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))
