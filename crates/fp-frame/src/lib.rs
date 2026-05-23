@@ -92105,6 +92105,153 @@ mod tests {
         assert_text_golden("dataframe_pow_basic.txt", &output);
     }
 
+    #[test]
+    fn dataframe_mod_df_golden_basic() {
+        let df1 = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(10.0), Scalar::Float64(15.0), Scalar::Float64(20.0)]),
+                ("b", vec![Scalar::Float64(25.0), Scalar::Float64(30.0), Scalar::Float64(35.0)]),
+            ],
+        ).unwrap();
+        let df2 = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(3.0), Scalar::Float64(4.0), Scalar::Float64(7.0)]),
+                ("b", vec![Scalar::Float64(6.0), Scalar::Float64(8.0), Scalar::Float64(9.0)]),
+            ],
+        ).unwrap();
+        let result = df1.mod_df(&df2).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_mod_df_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_eq_df_golden_basic() {
+        let df1 = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
+            ],
+        ).unwrap();
+        let df2 = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(5.0), Scalar::Float64(3.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(25.0), Scalar::Float64(35.0)]),
+            ],
+        ).unwrap();
+        let result = df1.eq_df(&df2).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_eq_df_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_ne_df_golden_basic() {
+        let df1 = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
+            ],
+        ).unwrap();
+        let df2 = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(5.0), Scalar::Float64(3.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(25.0), Scalar::Float64(35.0)]),
+            ],
+        ).unwrap();
+        let result = df1.ne_df(&df2).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_ne_df_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_gt_df_golden_basic() {
+        let df1 = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(5.0), Scalar::Float64(3.0)]),
+                ("b", vec![Scalar::Float64(15.0), Scalar::Float64(20.0), Scalar::Float64(25.0)]),
+            ],
+        ).unwrap();
+        let df2 = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(3.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
+            ],
+        ).unwrap();
+        let result = df1.gt_df(&df2).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_gt_df_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_ge_df_golden_basic() {
+        let df1 = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(5.0), Scalar::Float64(3.0)]),
+                ("b", vec![Scalar::Float64(15.0), Scalar::Float64(20.0), Scalar::Float64(25.0)]),
+            ],
+        ).unwrap();
+        let df2 = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(3.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
+            ],
+        ).unwrap();
+        let result = df1.ge_df(&df2).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_ge_df_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_lt_df_golden_basic() {
+        let df1 = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(5.0), Scalar::Float64(3.0)]),
+                ("b", vec![Scalar::Float64(15.0), Scalar::Float64(20.0), Scalar::Float64(25.0)]),
+            ],
+        ).unwrap();
+        let df2 = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(3.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
+            ],
+        ).unwrap();
+        let result = df1.lt_df(&df2).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_lt_df_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_le_df_golden_basic() {
+        let df1 = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(5.0), Scalar::Float64(3.0)]),
+                ("b", vec![Scalar::Float64(15.0), Scalar::Float64(20.0), Scalar::Float64(25.0)]),
+            ],
+        ).unwrap();
+        let df2 = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(3.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
+            ],
+        ).unwrap();
+        let result = df1.le_df(&df2).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_le_df_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))
