@@ -89974,6 +89974,68 @@ mod tests {
         assert_text_golden("series_hasnans_basic.txt", &output);
     }
 
+    #[test]
+    fn series_invert_golden_basic() {
+        let s = Series::from_values(
+            "flags",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)],
+        ).unwrap();
+        let result = s.invert().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_invert_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_clip_lower_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![Scalar::Float64(1.0), Scalar::Float64(5.0), Scalar::Float64(3.0), Scalar::Float64(8.0)],
+        ).unwrap();
+        let result = s.clip_lower(4.0).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_clip_lower_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_clip_upper_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![Scalar::Float64(1.0), Scalar::Float64(5.0), Scalar::Float64(3.0), Scalar::Float64(8.0)],
+        ).unwrap();
+        let result = s.clip_upper(4.0).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_clip_upper_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_clip_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(5.0), Scalar::Float64(3.0), Scalar::Float64(8.0)]),
+                ("b", vec![Scalar::Float64(2.0), Scalar::Float64(6.0), Scalar::Float64(4.0), Scalar::Float64(9.0)]),
+            ],
+        ).unwrap();
+        let result = df.clip(Some(3.0), Some(7.0)).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_clip_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_to_dict_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![IndexLabel::Utf8("a".into()), IndexLabel::Utf8("b".into()), IndexLabel::Utf8("c".into())],
+            vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+        ).unwrap();
+        let result = s.to_dict();
+        let output = format!("{result:?}");
+        assert_text_golden("series_to_dict_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

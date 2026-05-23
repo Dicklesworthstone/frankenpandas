@@ -1,0 +1,4 @@
+0    false
+1    true
+2    false
+Name: flags, Length: 3, dtype: Bool
