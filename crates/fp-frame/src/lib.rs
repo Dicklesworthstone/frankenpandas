@@ -87195,6 +87195,24 @@ mod tests {
         assert_text_golden("series_pct_change_basic.txt", &output);
     }
 
+    #[test]
+    fn series_shift_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Int64(10),
+                Scalar::Int64(20),
+                Scalar::Int64(30),
+                Scalar::Int64(40),
+            ],
+        )
+        .unwrap();
+        let shifted = s.shift(1).unwrap();
+        let output = format!("{shifted}");
+        assert_text_golden("series_shift_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))
