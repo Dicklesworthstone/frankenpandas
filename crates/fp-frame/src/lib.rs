@@ -88070,6 +88070,75 @@ mod tests {
         assert_text_golden("series_nunique_basic.txt", &output);
     }
 
+    #[test]
+    fn series_agg_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(4.0),
+            ],
+        )
+        .unwrap();
+        let result = s.agg(&["sum", "mean", "min", "max"]).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_agg_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_idxmax_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Int64(10),
+                Scalar::Int64(40),
+                Scalar::Int64(20),
+                Scalar::Int64(30),
+            ],
+        )
+        .unwrap();
+        let result = s.idxmax().unwrap();
+        let output = format!("{result:?}");
+        assert_text_golden("series_idxmax_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_idxmin_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Int64(30),
+                Scalar::Int64(10),
+                Scalar::Int64(40),
+                Scalar::Int64(20),
+            ],
+        )
+        .unwrap();
+        let result = s.idxmin().unwrap();
+        let output = format!("{result:?}");
+        assert_text_golden("series_idxmin_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_transpose_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]),
+                ("b", vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)]),
+            ],
+        )
+        .unwrap();
+        let transposed = df.transpose().unwrap();
+        let output = format!("{transposed}");
+        assert_text_golden("dataframe_transpose_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))
