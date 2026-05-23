@@ -94466,6 +94466,31 @@ mod tests {
         assert_text_golden("qcut_basic.txt", &output);
     }
 
+    #[test]
+    fn dataframe_get_dummies_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["cat"],
+            vec![
+                ("cat", vec![Scalar::Utf8("a".to_owned()), Scalar::Utf8("b".to_owned()), Scalar::Utf8("a".to_owned())]),
+            ],
+        ).unwrap();
+        let result = df.get_dummies(&["cat"]).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_get_dummies_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_str_get_dummies_golden_basic() {
+        let s = Series::from_values(
+            "cat",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Utf8("a|b".to_owned()), Scalar::Utf8("b|c".to_owned()), Scalar::Utf8("a".to_owned())],
+        ).unwrap();
+        let result = s.str().get_dummies("|").unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_str_get_dummies_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))
