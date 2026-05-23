@@ -91979,6 +91979,132 @@ mod tests {
         assert_text_golden("series_dt_time_basic.txt", &output);
     }
 
+    #[test]
+    fn dataframe_add_golden_basic() {
+        let df1 = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
+            ],
+        ).unwrap();
+        let df2 = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(0.5), Scalar::Float64(1.5), Scalar::Float64(2.5)]),
+                ("b", vec![Scalar::Float64(5.0), Scalar::Float64(10.0), Scalar::Float64(15.0)]),
+            ],
+        ).unwrap();
+        let result = df1.add(&df2).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_add_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_sub_golden_basic() {
+        let df1 = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(5.0), Scalar::Float64(10.0), Scalar::Float64(15.0)]),
+                ("b", vec![Scalar::Float64(50.0), Scalar::Float64(100.0), Scalar::Float64(150.0)]),
+            ],
+        ).unwrap();
+        let df2 = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
+            ],
+        ).unwrap();
+        let result = df1.sub(&df2).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_sub_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_mul_golden_basic() {
+        let df1 = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0)]),
+                ("b", vec![Scalar::Float64(5.0), Scalar::Float64(6.0), Scalar::Float64(7.0)]),
+            ],
+        ).unwrap();
+        let df2 = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(10.0), Scalar::Float64(10.0), Scalar::Float64(10.0)]),
+                ("b", vec![Scalar::Float64(2.0), Scalar::Float64(2.0), Scalar::Float64(2.0)]),
+            ],
+        ).unwrap();
+        let result = df1.mul(&df2).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_mul_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_div_golden_basic() {
+        let df1 = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
+                ("b", vec![Scalar::Float64(100.0), Scalar::Float64(200.0), Scalar::Float64(300.0)]),
+            ],
+        ).unwrap();
+        let df2 = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(2.0), Scalar::Float64(4.0), Scalar::Float64(5.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
+            ],
+        ).unwrap();
+        let result = df1.div(&df2).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_div_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_floordiv_golden_basic() {
+        let df1 = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(10.0), Scalar::Float64(23.0), Scalar::Float64(35.0)]),
+                ("b", vec![Scalar::Float64(100.0), Scalar::Float64(250.0), Scalar::Float64(370.0)]),
+            ],
+        ).unwrap();
+        let df2 = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(3.0), Scalar::Float64(5.0), Scalar::Float64(10.0)]),
+                ("b", vec![Scalar::Float64(30.0), Scalar::Float64(100.0), Scalar::Float64(100.0)]),
+            ],
+        ).unwrap();
+        let result = df1.floordiv(&df2).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_floordiv_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_pow_golden_basic() {
+        let df1 = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(2.0), Scalar::Float64(5.0)]),
+            ],
+        ).unwrap();
+        let df2 = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(3.0), Scalar::Float64(2.0), Scalar::Float64(2.0)]),
+                ("b", vec![Scalar::Float64(2.0), Scalar::Float64(10.0), Scalar::Float64(3.0)]),
+            ],
+        ).unwrap();
+        let result = df1.pow(&df2).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_pow_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))
