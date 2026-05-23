@@ -88212,6 +88212,80 @@ mod tests {
         assert_text_golden("series_quantile_basic.txt", &output);
     }
 
+    #[test]
+    fn series_skew_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(4.0),
+                Scalar::Float64(10.0),
+            ],
+        )
+        .unwrap();
+        let result = s.skew().unwrap();
+        let output = format!("{result:?}");
+        assert_text_golden("series_skew_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_kurtosis_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(4.0),
+                Scalar::Float64(10.0),
+            ],
+        )
+        .unwrap();
+        let result = s.kurtosis().unwrap();
+        let output = format!("{result:?}");
+        assert_text_golden("series_kurtosis_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_sem_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(4.0),
+            ],
+        )
+        .unwrap();
+        let result = s.sem().unwrap();
+        let output = format!("{result:?}");
+        assert_text_golden("series_sem_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_prod_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+                Scalar::Int64(4),
+            ],
+        )
+        .unwrap();
+        let result = s.prod().unwrap();
+        let output = format!("{result:?}");
+        assert_text_golden("series_prod_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))
