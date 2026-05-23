@@ -1,0 +1,9 @@
+count    4
+mean    2.5
+std    1.2909944487358056
+min    1
+25%    1.75
+50%    2.5
+75%    3.25
+max    4
+Name: vals, Length: 8, dtype: Float64
