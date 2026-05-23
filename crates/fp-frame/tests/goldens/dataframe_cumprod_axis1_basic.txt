@@ -1,0 +1,5 @@
+         a  b   c
+0        1  2   6
+1        2  6  24
+
+[2 rows x 3 columns]

@@ -93649,6 +93649,139 @@ mod tests {
         assert_text_golden("series_bartlett_basic.txt", &output);
     }
 
+    #[test]
+    fn dataframe_sum_axis1_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b", "c"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0)]),
+                ("c", vec![Scalar::Float64(100.0), Scalar::Float64(200.0)]),
+            ],
+        ).unwrap();
+        let result = df.sum_axis1().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_sum_axis1_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_mean_axis1_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b", "c"],
+            vec![
+                ("a", vec![Scalar::Float64(3.0), Scalar::Float64(6.0)]),
+                ("b", vec![Scalar::Float64(6.0), Scalar::Float64(12.0)]),
+                ("c", vec![Scalar::Float64(9.0), Scalar::Float64(18.0)]),
+            ],
+        ).unwrap();
+        let result = df.mean_axis1().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_mean_axis1_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_min_axis1_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b", "c"],
+            vec![
+                ("a", vec![Scalar::Float64(3.0), Scalar::Float64(1.0)]),
+                ("b", vec![Scalar::Float64(1.0), Scalar::Float64(5.0)]),
+                ("c", vec![Scalar::Float64(2.0), Scalar::Float64(3.0)]),
+            ],
+        ).unwrap();
+        let result = df.min_axis1().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_min_axis1_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_max_axis1_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b", "c"],
+            vec![
+                ("a", vec![Scalar::Float64(3.0), Scalar::Float64(1.0)]),
+                ("b", vec![Scalar::Float64(1.0), Scalar::Float64(5.0)]),
+                ("c", vec![Scalar::Float64(2.0), Scalar::Float64(3.0)]),
+            ],
+        ).unwrap();
+        let result = df.max_axis1().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_max_axis1_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_count_axis1_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b", "c"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Null(NullKind::Null)]),
+                ("b", vec![Scalar::Float64(2.0), Scalar::Float64(3.0)]),
+                ("c", vec![Scalar::Null(NullKind::Null), Scalar::Float64(4.0)]),
+            ],
+        ).unwrap();
+        let result = df.count_axis1().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_count_axis1_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_all_axis1_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Bool(true), Scalar::Bool(true), Scalar::Bool(false)]),
+                ("b", vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(false)]),
+            ],
+        ).unwrap();
+        let result = df.all_axis1().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_all_axis1_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_any_axis1_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(false)]),
+                ("b", vec![Scalar::Bool(false), Scalar::Bool(false), Scalar::Bool(false)]),
+            ],
+        ).unwrap();
+        let result = df.any_axis1().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_any_axis1_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_cumsum_axis1_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b", "c"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0)]),
+                ("c", vec![Scalar::Float64(100.0), Scalar::Float64(200.0)]),
+            ],
+        ).unwrap();
+        let result = df.cumsum_axis1().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_cumsum_axis1_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_cumprod_axis1_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b", "c"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
+                ("b", vec![Scalar::Float64(2.0), Scalar::Float64(3.0)]),
+                ("c", vec![Scalar::Float64(3.0), Scalar::Float64(4.0)]),
+            ],
+        ).unwrap();
+        let result = df.cumprod_axis1().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_cumprod_axis1_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))
