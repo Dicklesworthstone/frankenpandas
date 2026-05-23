@@ -1,0 +1,7 @@
+original: 0    1
+1    2
+2    3
+Name: vals, Length: 3, dtype: Int64, copy: 0    1
+1    2
+2    3
+Name: vals, Length: 3, dtype: Int64

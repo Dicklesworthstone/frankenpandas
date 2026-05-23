@@ -90549,6 +90549,79 @@ mod tests {
         assert_text_golden("dataframe_from_dict_basic.txt", &output);
     }
 
+    #[test]
+    fn series_copy_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+        ).unwrap();
+        let copied = s.copy();
+        let output = format!("original: {s}, copy: {copied}");
+        assert_text_golden("series_copy_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_to_csv_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![IndexLabel::Utf8("a".into()), IndexLabel::Utf8("b".into())],
+            vec![Scalar::Int64(10), Scalar::Int64(20)],
+        ).unwrap();
+        let csv = s.to_csv(',', true);
+        assert_text_golden("series_to_csv_basic.txt", &csv);
+    }
+
+    #[test]
+    fn series_to_json_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![IndexLabel::Utf8("a".into()), IndexLabel::Utf8("b".into())],
+            vec![Scalar::Int64(10), Scalar::Int64(20)],
+        ).unwrap();
+        let json = s.to_json("index").unwrap();
+        assert_text_golden("series_to_json_basic.txt", &json);
+    }
+
+    #[test]
+    fn series_convert_dtypes_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)],
+        ).unwrap();
+        let result = s.convert_dtypes().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_convert_dtypes_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_copy_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                ("b", vec![Scalar::Int64(3), Scalar::Int64(4)]),
+            ],
+        ).unwrap();
+        let copied = df.copy();
+        let output = format!("{copied}");
+        assert_text_golden("dataframe_copy_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_to_csv_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["name", "value"],
+            vec![
+                ("name", vec![Scalar::Utf8("a".into()), Scalar::Utf8("b".into())]),
+                ("value", vec![Scalar::Int64(10), Scalar::Int64(20)]),
+            ],
+        ).unwrap();
+        let csv = df.to_csv(',', true);
+        assert_text_golden("dataframe_to_csv_basic.txt", &csv);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))
