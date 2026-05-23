@@ -90670,6 +90670,78 @@ mod tests {
         assert_text_golden("series_iloc_slice_basic.txt", &output);
     }
 
+    #[test]
+    fn series_sin_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Float64(0.0), Scalar::Float64(std::f64::consts::PI / 2.0), Scalar::Float64(std::f64::consts::PI)],
+        ).unwrap();
+        let result = s.sin().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_sin_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_cos_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Float64(0.0), Scalar::Float64(std::f64::consts::PI / 2.0), Scalar::Float64(std::f64::consts::PI)],
+        ).unwrap();
+        let result = s.cos().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_cos_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_tan_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Float64(0.0), Scalar::Float64(std::f64::consts::PI / 4.0), Scalar::Float64(std::f64::consts::PI / 6.0)],
+        ).unwrap();
+        let result = s.tan().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_tan_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_arcsin_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Float64(0.0), Scalar::Float64(0.5), Scalar::Float64(1.0)],
+        ).unwrap();
+        let result = s.arcsin().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_arcsin_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_arccos_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Float64(0.0), Scalar::Float64(0.5), Scalar::Float64(1.0)],
+        ).unwrap();
+        let result = s.arccos().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_arccos_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_arctan_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Float64(0.0), Scalar::Float64(1.0), Scalar::Float64(-1.0)],
+        ).unwrap();
+        let result = s.arctan().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_arctan_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))
