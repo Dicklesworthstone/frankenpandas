@@ -87031,6 +87031,46 @@ mod tests {
         assert_text_golden("series_expanding_sum_basic.txt", &output);
     }
 
+    #[test]
+    fn dataframe_pivot_table_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["region", "product", "sales"],
+            vec![
+                (
+                    "region",
+                    vec![
+                        Scalar::Utf8("east".into()),
+                        Scalar::Utf8("east".into()),
+                        Scalar::Utf8("west".into()),
+                        Scalar::Utf8("west".into()),
+                    ],
+                ),
+                (
+                    "product",
+                    vec![
+                        Scalar::Utf8("A".into()),
+                        Scalar::Utf8("B".into()),
+                        Scalar::Utf8("A".into()),
+                        Scalar::Utf8("B".into()),
+                    ],
+                ),
+                (
+                    "sales",
+                    vec![
+                        Scalar::Float64(100.0),
+                        Scalar::Float64(150.0),
+                        Scalar::Float64(200.0),
+                        Scalar::Float64(250.0),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let pivot = df.pivot_table("sales", "region", "product", "sum").unwrap();
+        let output = format!("{pivot}");
+        assert_text_golden("dataframe_pivot_table_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

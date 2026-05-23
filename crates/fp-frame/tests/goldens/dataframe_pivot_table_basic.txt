@@ -1,0 +1,5 @@
+           A    B
+east     100  150
+west     200  250
+
+[2 rows x 2 columns]
