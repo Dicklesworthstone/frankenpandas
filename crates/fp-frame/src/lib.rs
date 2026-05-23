@@ -87774,6 +87774,66 @@ mod tests {
         assert_text_golden("series_str_len_basic.txt", &output);
     }
 
+    #[test]
+    fn dataframe_rename_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]),
+                ("b", vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)]),
+            ],
+        )
+        .unwrap();
+        let renamed = df.rename(&[("a", "x"), ("b", "y")]).unwrap();
+        let output = format!("{renamed}");
+        assert_text_golden("dataframe_rename_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_assign_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]),
+            ],
+        )
+        .unwrap();
+        let new_col = Column::from_values(vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)]).unwrap();
+        let assigned = df.assign(vec![("b", new_col)]).unwrap();
+        let output = format!("{assigned}");
+        assert_text_golden("dataframe_assign_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_sort_values_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(3), Scalar::Int64(1), Scalar::Int64(2)]),
+                ("b", vec![Scalar::Int64(30), Scalar::Int64(10), Scalar::Int64(20)]),
+            ],
+        )
+        .unwrap();
+        let sorted = df.sort_values("a", true).unwrap();
+        let output = format!("{sorted}");
+        assert_text_golden("dataframe_sort_values_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_fillna_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Null(NullKind::NaN), Scalar::Int64(3)]),
+                ("b", vec![Scalar::Null(NullKind::NaN), Scalar::Int64(20), Scalar::Int64(30)]),
+            ],
+        )
+        .unwrap();
+        let filled = df.fillna(&Scalar::Int64(0)).unwrap();
+        let output = format!("{filled}");
+        assert_text_golden("dataframe_fillna_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))
