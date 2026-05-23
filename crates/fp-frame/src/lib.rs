@@ -89185,6 +89185,90 @@ mod tests {
         assert_text_golden("series_mean_basic.txt", &output);
     }
 
+    #[test]
+    fn dataframe_sum_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]),
+                ("b", vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)]),
+            ],
+        ).unwrap();
+        let result = df.sum().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_sum_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_mean_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
+            ],
+        ).unwrap();
+        let result = df.mean().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_mean_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_min_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(3), Scalar::Int64(1), Scalar::Int64(2)]),
+                ("b", vec![Scalar::Int64(30), Scalar::Int64(10), Scalar::Int64(20)]),
+            ],
+        ).unwrap();
+        let result = df.min().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_min_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_max_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(3), Scalar::Int64(1), Scalar::Int64(2)]),
+                ("b", vec![Scalar::Int64(30), Scalar::Int64(10), Scalar::Int64(20)]),
+            ],
+        ).unwrap();
+        let result = df.max().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_max_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_std_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0), Scalar::Float64(40.0)]),
+            ],
+        ).unwrap();
+        let result = df.std().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_std_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_var_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0), Scalar::Float64(40.0)]),
+            ],
+        ).unwrap();
+        let result = df.var().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_var_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))
