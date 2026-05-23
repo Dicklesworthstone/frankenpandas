@@ -91543,6 +91543,90 @@ mod tests {
         assert_text_golden("series_arctanh_basic.txt", &output);
     }
 
+    #[test]
+    fn dataframe_rolling_min_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0), Scalar::Float64(5.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(15.0), Scalar::Float64(25.0), Scalar::Float64(30.0)]),
+            ],
+        ).unwrap();
+        let result = df.rolling(3, None).min().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_rolling_min_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_rolling_max_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0), Scalar::Float64(5.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(15.0), Scalar::Float64(25.0), Scalar::Float64(30.0)]),
+            ],
+        ).unwrap();
+        let result = df.rolling(3, None).max().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_rolling_max_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_rolling_var_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0), Scalar::Float64(5.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(15.0), Scalar::Float64(25.0), Scalar::Float64(30.0)]),
+            ],
+        ).unwrap();
+        let result = df.rolling(3, None).var().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_rolling_var_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_rolling_median_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0), Scalar::Float64(5.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(15.0), Scalar::Float64(25.0), Scalar::Float64(30.0)]),
+            ],
+        ).unwrap();
+        let result = df.rolling(3, None).median().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_rolling_median_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_rolling_count_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0), Scalar::Float64(5.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(15.0), Scalar::Float64(25.0), Scalar::Float64(30.0)]),
+            ],
+        ).unwrap();
+        let result = df.rolling(3, None).count().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_rolling_count_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_rolling_first_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0), Scalar::Float64(5.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(15.0), Scalar::Float64(25.0), Scalar::Float64(30.0)]),
+            ],
+        ).unwrap();
+        let result = df.rolling(3, None).first().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_rolling_first_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

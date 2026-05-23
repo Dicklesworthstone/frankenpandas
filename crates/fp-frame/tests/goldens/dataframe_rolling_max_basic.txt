@@ -1,0 +1,8 @@
+           a    b
+0        NaN  NaN
+1        NaN  NaN
+2          3   20
+3          4   25
+4          5   30
+
+[5 rows x 2 columns]
