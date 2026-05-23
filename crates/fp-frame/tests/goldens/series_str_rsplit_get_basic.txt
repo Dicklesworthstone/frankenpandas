@@ -1,0 +1,4 @@
+0    c
+1    y
+2    single
+Name: vals, Length: 3, dtype: Utf8

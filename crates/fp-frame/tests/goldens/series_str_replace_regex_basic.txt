@@ -1,0 +1,4 @@
+0    helloX
+1    worldX
+2    testX
+Name: vals, Length: 3, dtype: Utf8

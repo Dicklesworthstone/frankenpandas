@@ -1,0 +1,4 @@
+0    123
+1    456
+2    NaN
+Name: vals, Length: 3, dtype: Utf8

@@ -92388,6 +92388,66 @@ mod tests {
         assert_text_golden("dataframe_pipe_basic.txt", &output);
     }
 
+    #[test]
+    fn series_str_strip_chars_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Utf8("xxhellox".into()), Scalar::Utf8("xworld".into()), Scalar::Utf8("texx".into())],
+        ).unwrap();
+        let result = s.str().strip_chars("x").unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_str_strip_chars_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_str_contains_regex_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Utf8("hello123".into()), Scalar::Utf8("world".into()), Scalar::Utf8("test456".into())],
+        ).unwrap();
+        let result = s.str().contains_regex(r"\d+").unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_str_contains_regex_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_str_replace_regex_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Utf8("hello123".into()), Scalar::Utf8("world456".into()), Scalar::Utf8("test789".into())],
+        ).unwrap();
+        let result = s.str().replace_regex(r"\d+", "X").unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_str_replace_regex_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_str_rsplit_get_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Utf8("a-b-c".into()), Scalar::Utf8("x-y".into()), Scalar::Utf8("single".into())],
+        ).unwrap();
+        let result = s.str().rsplit_get("-", 0).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_str_rsplit_get_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_str_extract_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Utf8("hello123".into()), Scalar::Utf8("world456".into()), Scalar::Utf8("test".into())],
+        ).unwrap();
+        let result = s.str().extract(r"(\d+)").unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_str_extract_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))
