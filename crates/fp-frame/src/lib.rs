@@ -92504,6 +92504,34 @@ mod tests {
         assert_text_golden("dataframe_rolling_last_basic.txt", &output);
     }
 
+    #[test]
+    fn dataframe_expanding_skew_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(5.0), Scalar::Float64(3.0), Scalar::Float64(4.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(30.0), Scalar::Float64(20.0), Scalar::Float64(40.0), Scalar::Float64(50.0)]),
+            ],
+        ).unwrap();
+        let result = df.expanding(Some(3)).skew().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_expanding_skew_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_expanding_kurt_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(5.0), Scalar::Float64(3.0), Scalar::Float64(4.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(30.0), Scalar::Float64(20.0), Scalar::Float64(40.0), Scalar::Float64(50.0)]),
+            ],
+        ).unwrap();
+        let result = df.expanding(Some(4)).kurt().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_expanding_kurt_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))
