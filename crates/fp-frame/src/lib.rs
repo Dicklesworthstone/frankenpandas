@@ -95445,6 +95445,40 @@ mod tests {
         let output = format!("{result:?}");
         assert_text_golden("dataframe_lookup_basic.txt", &output);
     }
+
+    #[test]
+    fn series_droplevel_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![
+                IndexLabel::Utf8("a".to_string()),
+                IndexLabel::Utf8("b".to_string()),
+                IndexLabel::Utf8("c".to_string()),
+            ],
+            vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+        ).unwrap();
+        let result = s.droplevel().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_droplevel_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_droplevel_golden_basic() {
+        let df = DataFrame::from_dict_with_index(
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]),
+                ("b", vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)]),
+            ],
+            vec![
+                IndexLabel::Utf8("x".to_string()),
+                IndexLabel::Utf8("y".to_string()),
+                IndexLabel::Utf8("z".to_string()),
+            ],
+        ).unwrap();
+        let result = df.droplevel().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_droplevel_basic.txt", &output);
+    }
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))
