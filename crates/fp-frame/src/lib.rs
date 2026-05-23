@@ -87177,6 +87177,24 @@ mod tests {
         assert_text_golden("series_diff_basic.txt", &output);
     }
 
+    #[test]
+    fn series_pct_change_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Float64(100.0),
+                Scalar::Float64(110.0),
+                Scalar::Float64(105.0),
+                Scalar::Float64(120.0),
+            ],
+        )
+        .unwrap();
+        let pct = s.pct_change(1).unwrap();
+        let output = format!("{pct}");
+        assert_text_golden("series_pct_change_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))
