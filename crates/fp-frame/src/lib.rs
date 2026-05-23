@@ -94237,6 +94237,66 @@ mod tests {
         assert_text_golden("resample_median_basic.txt", &output);
     }
 
+    #[test]
+    fn concat_series_golden_axis0() {
+        use super::concat_series;
+        let s1 = Series::from_values(
+            "a",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Float64(1.0), Scalar::Float64(2.0)],
+        ).unwrap();
+        let s2 = Series::from_values(
+            "a",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Float64(3.0), Scalar::Float64(4.0)],
+        ).unwrap();
+        let result = concat_series(&[&s1, &s2]).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("concat_series_axis0.txt", &output);
+    }
+
+    #[test]
+    fn concat_dataframes_golden_axis0() {
+        use super::concat_dataframes;
+        let df1 = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0)]),
+            ],
+        ).unwrap();
+        let df2 = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(3.0), Scalar::Float64(4.0)]),
+                ("b", vec![Scalar::Float64(30.0), Scalar::Float64(40.0)]),
+            ],
+        ).unwrap();
+        let result = concat_dataframes(&[&df1, &df2]).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("concat_dataframes_axis0.txt", &output);
+    }
+
+    #[test]
+    fn concat_dataframes_golden_axis1() {
+        use super::concat_dataframes_with_axis;
+        let df1 = DataFrame::from_dict(
+            &["a"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
+            ],
+        ).unwrap();
+        let df2 = DataFrame::from_dict(
+            &["b"],
+            vec![
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0)]),
+            ],
+        ).unwrap();
+        let result = concat_dataframes_with_axis(&[&df1, &df2], 1).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("concat_dataframes_axis1.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))
