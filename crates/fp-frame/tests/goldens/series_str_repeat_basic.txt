@@ -1,0 +1,4 @@
+0    ababab
+1    xxx
+2    123123123
+Name: chars, Length: 3, dtype: Utf8

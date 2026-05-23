@@ -1,0 +1,4 @@
+0    b
+1    y
+2    two
+Name: paths, Length: 3, dtype: Utf8

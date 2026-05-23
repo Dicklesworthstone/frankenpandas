@@ -1,0 +1,4 @@
+0    Hello world
+1    Rust
+2    Pandas
+Name: words, Length: 3, dtype: Utf8

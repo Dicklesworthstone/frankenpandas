@@ -1,0 +1,4 @@
+0    Hello World
+1    Rust Is Fast
+2    Pandas Library
+Name: phrases, Length: 3, dtype: Utf8

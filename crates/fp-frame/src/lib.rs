@@ -90036,6 +90036,118 @@ mod tests {
         assert_text_golden("series_to_dict_basic.txt", &output);
     }
 
+    #[test]
+    fn series_str_capitalize_golden_basic() {
+        let s = Series::from_values(
+            "words",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("hello WORLD".into()),
+                Scalar::Utf8("RUST".into()),
+                Scalar::Utf8("pandas".into()),
+            ],
+        ).unwrap();
+        let result = s.str().capitalize().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_str_capitalize_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_str_title_golden_basic() {
+        let s = Series::from_values(
+            "phrases",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("hello world".into()),
+                Scalar::Utf8("RUST IS FAST".into()),
+                Scalar::Utf8("pandas library".into()),
+            ],
+        ).unwrap();
+        let result = s.str().title().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_str_title_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_str_repeat_golden_basic() {
+        let s = Series::from_values(
+            "chars",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("ab".into()),
+                Scalar::Utf8("x".into()),
+                Scalar::Utf8("123".into()),
+            ],
+        ).unwrap();
+        let result = s.str().repeat(3).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_str_repeat_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_str_pad_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("bb".into()),
+                Scalar::Utf8("ccc".into()),
+            ],
+        ).unwrap();
+        let result = s.str().pad(5, "left", '*').unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_str_pad_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_str_lstrip_golden_basic() {
+        let s = Series::from_values(
+            "text",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("  hello".into()),
+                Scalar::Utf8("  world  ".into()),
+                Scalar::Utf8("test".into()),
+            ],
+        ).unwrap();
+        let result = s.str().lstrip().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_str_lstrip_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_str_rstrip_golden_basic() {
+        let s = Series::from_values(
+            "text",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("hello  ".into()),
+                Scalar::Utf8("  world  ".into()),
+                Scalar::Utf8("test".into()),
+            ],
+        ).unwrap();
+        let result = s.str().rstrip().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_str_rstrip_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_str_split_get_golden_basic() {
+        let s = Series::from_values(
+            "paths",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("a/b/c".into()),
+                Scalar::Utf8("x/y".into()),
+                Scalar::Utf8("one/two/three/four".into()),
+            ],
+        ).unwrap();
+        let result = s.str().split_get("/", 1).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_str_split_get_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))
