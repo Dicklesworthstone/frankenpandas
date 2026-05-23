@@ -94637,6 +94637,139 @@ mod tests {
         assert_text_golden("groupby_agg_list_basic.txt", &output);
     }
 
+
+    #[test]
+    fn series_cat_categories_golden_basic() {
+        let s = Series::from_categorical(
+            "color",
+            vec![
+                Scalar::Utf8("red".to_owned()),
+                Scalar::Utf8("blue".to_owned()),
+                Scalar::Utf8("red".to_owned()),
+                Scalar::Utf8("green".to_owned()),
+            ],
+            false,
+        ).unwrap();
+        let cat = s.cat().unwrap();
+        let categories = cat.categories();
+        let output = format!("{categories:?}");
+        assert_text_golden("series_cat_categories_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_cat_codes_golden_basic() {
+        let s = Series::from_categorical(
+            "color",
+            vec![
+                Scalar::Utf8("red".to_owned()),
+                Scalar::Utf8("blue".to_owned()),
+                Scalar::Utf8("red".to_owned()),
+                Scalar::Utf8("green".to_owned()),
+            ],
+            false,
+        ).unwrap();
+        let cat = s.cat().unwrap();
+        let codes = cat.codes().unwrap();
+        let output = format!("{codes}");
+        assert_text_golden("series_cat_codes_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_cat_ordered_golden_basic() {
+        let s = Series::from_categorical(
+            "size",
+            vec![
+                Scalar::Utf8("small".to_owned()),
+                Scalar::Utf8("medium".to_owned()),
+                Scalar::Utf8("large".to_owned()),
+            ],
+            true,
+        ).unwrap();
+        let cat = s.cat().unwrap();
+        let ordered = cat.ordered();
+        let output = format!("{ordered}");
+        assert_text_golden("series_cat_ordered_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_cat_rename_golden_basic() {
+        let s = Series::from_categorical(
+            "color",
+            vec![
+                Scalar::Utf8("r".to_owned()),
+                Scalar::Utf8("g".to_owned()),
+                Scalar::Utf8("b".to_owned()),
+            ],
+            false,
+        ).unwrap();
+        let cat = s.cat().unwrap();
+        let renamed = cat.rename_categories(vec![
+            Scalar::Utf8("red".to_owned()),
+            Scalar::Utf8("green".to_owned()),
+            Scalar::Utf8("blue".to_owned()),
+        ]).unwrap();
+        let output = format!("{renamed}");
+        assert_text_golden("series_cat_rename_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_cat_add_categories_golden_basic() {
+        let s = Series::from_categorical(
+            "color",
+            vec![
+                Scalar::Utf8("red".to_owned()),
+                Scalar::Utf8("blue".to_owned()),
+            ],
+            false,
+        ).unwrap();
+        let cat = s.cat().unwrap();
+        let extended = cat.add_categories(vec![
+            Scalar::Utf8("green".to_owned()),
+            Scalar::Utf8("yellow".to_owned()),
+        ]).unwrap();
+        let ext_cat = extended.cat().unwrap();
+        let categories = ext_cat.categories();
+        let output = format!("{categories:?}");
+        assert_text_golden("series_cat_add_categories_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_cat_remove_unused_golden_basic() {
+        let s = Series::from_categorical_codes(
+            "color",
+            vec![0, 0, 0],
+            vec![
+                Scalar::Utf8("red".to_owned()),
+                Scalar::Utf8("blue".to_owned()),
+                Scalar::Utf8("green".to_owned()),
+            ],
+            false,
+        ).unwrap();
+        let cat = s.cat().unwrap();
+        let cleaned = cat.remove_unused_categories().unwrap();
+        let clean_cat = cleaned.cat().unwrap();
+        let categories = clean_cat.categories();
+        let output = format!("{categories:?}");
+        assert_text_golden("series_cat_remove_unused_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_cat_to_values_golden_basic() {
+        let s = Series::from_categorical(
+            "color",
+            vec![
+                Scalar::Utf8("red".to_owned()),
+                Scalar::Utf8("blue".to_owned()),
+                Scalar::Utf8("red".to_owned()),
+            ],
+            false,
+        ).unwrap();
+        let cat = s.cat().unwrap();
+        let values = cat.to_values().unwrap();
+        let output = format!("{values}");
+        assert_text_golden("series_cat_to_values_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

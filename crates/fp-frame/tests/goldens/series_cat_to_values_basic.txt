@@ -1,0 +1,4 @@
+0    red
+1    blue
+2    red
+Name: color, Length: 3, dtype: Utf8
