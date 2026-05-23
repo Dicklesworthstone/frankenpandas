@@ -92746,6 +92746,47 @@ mod tests {
         assert_text_golden("dataframe_loc_row_basic.txt", &output);
     }
 
+    #[test]
+    fn dataframe_update_golden_basic() {
+        let df1 = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
+            ],
+        ).unwrap();
+        let df2 = DataFrame::from_dict(
+            &["a"],
+            vec![
+                ("a", vec![Scalar::Float64(100.0), Scalar::Float64(200.0)]),
+            ],
+        ).unwrap();
+        let result = df1.update(&df2).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_update_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_compare_golden_basic() {
+        let df1 = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
+            ],
+        ).unwrap();
+        let df2 = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(5.0), Scalar::Float64(3.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(25.0), Scalar::Float64(35.0)]),
+            ],
+        ).unwrap();
+        let result = df1.compare(&df2).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_compare_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

@@ -1,0 +1,5 @@
+         a_self  a_other  b_self  b_other
+1             2        5      20       25
+2           NaN      NaN      30       35
+
+[2 rows x 4 columns]
