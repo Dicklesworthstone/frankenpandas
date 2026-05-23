@@ -90622,6 +90622,54 @@ mod tests {
         assert_text_golden("dataframe_to_csv_basic.txt", &csv);
     }
 
+    #[test]
+    fn series_loc_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![IndexLabel::Utf8("a".into()), IndexLabel::Utf8("b".into()), IndexLabel::Utf8("c".into())],
+            vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+        ).unwrap();
+        let result = s.loc(&[IndexLabel::Utf8("a".into()), IndexLabel::Utf8("c".into())]).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_loc_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_iloc_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![IndexLabel::Utf8("a".into()), IndexLabel::Utf8("b".into()), IndexLabel::Utf8("c".into())],
+            vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+        ).unwrap();
+        let result = s.iloc(&[0, 2]).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_iloc_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_loc_slice_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![IndexLabel::Utf8("a".into()), IndexLabel::Utf8("b".into()), IndexLabel::Utf8("c".into()), IndexLabel::Utf8("d".into())],
+            vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30), Scalar::Int64(40)],
+        ).unwrap();
+        let result = s.loc_slice(Some(&IndexLabel::Utf8("b".into())), Some(&IndexLabel::Utf8("d".into()))).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_loc_slice_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_iloc_slice_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30), Scalar::Int64(40), Scalar::Int64(50)],
+        ).unwrap();
+        let result = s.iloc_slice(Some(1), Some(4)).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_iloc_slice_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))
