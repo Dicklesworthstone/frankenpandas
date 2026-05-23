@@ -87123,6 +87123,24 @@ mod tests {
         assert_text_golden("series_ewm_mean_basic.txt", &output);
     }
 
+    #[test]
+    fn series_rank_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Float64(3.0),
+                Scalar::Float64(1.0),
+                Scalar::Float64(4.0),
+                Scalar::Float64(1.0),
+            ],
+        )
+        .unwrap();
+        let ranked = s.rank("average", true, "keep").unwrap();
+        let output = format!("{ranked}");
+        assert_text_golden("series_rank_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))
