@@ -87071,6 +87071,21 @@ mod tests {
         assert_text_golden("dataframe_pivot_table_basic.txt", &output);
     }
 
+    #[test]
+    fn dataframe_stack_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                ("b", vec![Scalar::Int64(3), Scalar::Int64(4)]),
+            ],
+        )
+        .unwrap();
+        let stacked = df.stack().unwrap();
+        let output = format!("{stacked}");
+        assert_text_golden("dataframe_stack_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))
