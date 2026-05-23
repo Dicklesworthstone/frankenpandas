@@ -95743,6 +95743,84 @@ mod tests {
         let output = format!("{result}");
         assert_text_golden("dataframe_mod_scalar_basic.txt", &output);
     }
+
+    #[test]
+    fn series_floor_divide_golden_basic() {
+        let s1 = Series::from_values(
+            "a",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Float64(10.0), Scalar::Float64(17.0), Scalar::Float64(25.0)],
+        ).unwrap();
+        let s2 = Series::from_values(
+            "b",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Float64(3.0), Scalar::Float64(5.0), Scalar::Float64(7.0)],
+        ).unwrap();
+        let result = s1.floor_divide(&s2).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_floor_divide_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_true_divide_golden_basic() {
+        let s1 = Series::from_values(
+            "a",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(10), Scalar::Int64(17), Scalar::Int64(25)],
+        ).unwrap();
+        let s2 = Series::from_values(
+            "b",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(3), Scalar::Int64(5), Scalar::Int64(7)],
+        ).unwrap();
+        let result = s1.true_divide(&s2).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_true_divide_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_where_series_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+        ).unwrap();
+        let cond = Series::from_values(
+            "cond",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)],
+        ).unwrap();
+        let other = Series::from_values(
+            "other",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(100), Scalar::Int64(200), Scalar::Int64(300)],
+        ).unwrap();
+        let result = s.where_series(&cond, &other).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_where_series_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_mask_series_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+        ).unwrap();
+        let cond = Series::from_values(
+            "cond",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)],
+        ).unwrap();
+        let other = Series::from_values(
+            "other",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(100), Scalar::Int64(200), Scalar::Int64(300)],
+        ).unwrap();
+        let result = s.mask_series(&cond, &other).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_mask_series_basic.txt", &output);
+    }
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))
