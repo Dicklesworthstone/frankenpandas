@@ -1,0 +1,6 @@
+             a      b
+0         true  false
+1        false   true
+2         true   true
+
+[3 rows x 2 columns]
