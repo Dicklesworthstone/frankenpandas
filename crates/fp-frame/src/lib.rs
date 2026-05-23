@@ -93437,6 +93437,107 @@ mod tests {
         assert_text_golden("dataframe_product_basic.txt", &output);
     }
 
+    #[test]
+    fn dataframe_at_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
+            ],
+        ).unwrap();
+        let result = df.at(&1_i64.into(), "b").unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_at_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_take_rows_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0), Scalar::Float64(40.0)]),
+            ],
+        ).unwrap();
+        let result = df.take_rows(&[0, 2, 3]).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_take_rows_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_axes_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0)]),
+            ],
+        ).unwrap();
+        let result = df.axes();
+        let output = format!("{result:?}");
+        assert_text_golden("dataframe_axes_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_memory_usage_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0)]),
+            ],
+        ).unwrap();
+        let result = df.memory_usage().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_memory_usage_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_reindex_columns_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b", "c"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0)]),
+                ("c", vec![Scalar::Float64(100.0), Scalar::Float64(200.0)]),
+            ],
+        ).unwrap();
+        let result = df.reindex_columns(&["c", "a"]).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_reindex_columns_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_idxmin_axis1_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b", "c"],
+            vec![
+                ("a", vec![Scalar::Float64(3.0), Scalar::Float64(1.0)]),
+                ("b", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
+                ("c", vec![Scalar::Float64(2.0), Scalar::Float64(3.0)]),
+            ],
+        ).unwrap();
+        let result = df.idxmin_axis1().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_idxmin_axis1_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_idxmax_axis1_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b", "c"],
+            vec![
+                ("a", vec![Scalar::Float64(3.0), Scalar::Float64(1.0)]),
+                ("b", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
+                ("c", vec![Scalar::Float64(2.0), Scalar::Float64(3.0)]),
+            ],
+        ).unwrap();
+        let result = df.idxmax_axis1().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_idxmax_axis1_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

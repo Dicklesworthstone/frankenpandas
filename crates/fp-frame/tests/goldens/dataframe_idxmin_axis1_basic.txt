@@ -1,0 +1,3 @@
+0    b
+1    a
+Name: idxmin, Length: 2, dtype: Utf8
