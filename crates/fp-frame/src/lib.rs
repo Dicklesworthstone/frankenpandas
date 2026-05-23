@@ -93782,6 +93782,81 @@ mod tests {
         assert_text_golden("dataframe_cumprod_axis1_basic.txt", &output);
     }
 
+    #[test]
+    fn dataframe_cummax_axis1_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b", "c"],
+            vec![
+                ("a", vec![Scalar::Float64(3.0), Scalar::Float64(1.0)]),
+                ("b", vec![Scalar::Float64(1.0), Scalar::Float64(5.0)]),
+                ("c", vec![Scalar::Float64(2.0), Scalar::Float64(3.0)]),
+            ],
+        ).unwrap();
+        let result = df.cummax_axis1().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_cummax_axis1_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_cummin_axis1_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b", "c"],
+            vec![
+                ("a", vec![Scalar::Float64(3.0), Scalar::Float64(5.0)]),
+                ("b", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
+                ("c", vec![Scalar::Float64(2.0), Scalar::Float64(1.0)]),
+            ],
+        ).unwrap();
+        let result = df.cummin_axis1().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_cummin_axis1_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_diff_axis1_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b", "c"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(10.0)]),
+                ("b", vec![Scalar::Float64(3.0), Scalar::Float64(30.0)]),
+                ("c", vec![Scalar::Float64(6.0), Scalar::Float64(60.0)]),
+            ],
+        ).unwrap();
+        let result = df.diff_axis1(1).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_diff_axis1_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_shift_axis1_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b", "c"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
+                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0)]),
+                ("c", vec![Scalar::Float64(100.0), Scalar::Float64(200.0)]),
+            ],
+        ).unwrap();
+        let result = df.shift_axis1(1).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_shift_axis1_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_pct_change_axis1_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b", "c"],
+            vec![
+                ("a", vec![Scalar::Float64(10.0), Scalar::Float64(20.0)]),
+                ("b", vec![Scalar::Float64(20.0), Scalar::Float64(40.0)]),
+                ("c", vec![Scalar::Float64(40.0), Scalar::Float64(80.0)]),
+            ],
+        ).unwrap();
+        let result = df.pct_change_axis1(1).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_pct_change_axis1_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))
