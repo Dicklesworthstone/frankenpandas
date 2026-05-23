@@ -87394,6 +87394,101 @@ mod tests {
         assert_text_golden("series_sort_values_basic.txt", &output);
     }
 
+    #[test]
+    fn series_nlargest_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                Scalar::Int64(30),
+                Scalar::Int64(10),
+                Scalar::Int64(50),
+                Scalar::Int64(20),
+                Scalar::Int64(40),
+            ],
+        )
+        .unwrap();
+        let top3 = s.nlargest(3).unwrap();
+        let output = format!("{top3}");
+        assert_text_golden("series_nlargest_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_nsmallest_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                Scalar::Int64(30),
+                Scalar::Int64(10),
+                Scalar::Int64(50),
+                Scalar::Int64(20),
+                Scalar::Int64(40),
+            ],
+        )
+        .unwrap();
+        let bot3 = s.nsmallest(3).unwrap();
+        let output = format!("{bot3}");
+        assert_text_golden("series_nsmallest_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_head_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                Scalar::Int64(10),
+                Scalar::Int64(20),
+                Scalar::Int64(30),
+                Scalar::Int64(40),
+                Scalar::Int64(50),
+            ],
+        )
+        .unwrap();
+        let h = s.head(3).unwrap();
+        let output = format!("{h}");
+        assert_text_golden("series_head_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_tail_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                Scalar::Int64(10),
+                Scalar::Int64(20),
+                Scalar::Int64(30),
+                Scalar::Int64(40),
+                Scalar::Int64(50),
+            ],
+        )
+        .unwrap();
+        let t = s.tail(3).unwrap();
+        let output = format!("{t}");
+        assert_text_golden("series_tail_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_drop_duplicates_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(1),
+                Scalar::Int64(3),
+                Scalar::Int64(2),
+            ],
+        )
+        .unwrap();
+        let dd = s.drop_duplicates().unwrap();
+        let output = format!("{dd}");
+        assert_text_golden("series_drop_duplicates_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))
