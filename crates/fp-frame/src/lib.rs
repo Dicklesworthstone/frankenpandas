@@ -91196,6 +91196,105 @@ mod tests {
         assert_text_golden("dataframe_arctan_basic.txt", &output);
     }
 
+    #[test]
+    fn dataframe_arcsinh_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(0.0), Scalar::Float64(1.0), Scalar::Float64(-1.0)]),
+                ("b", vec![Scalar::Float64(0.5), Scalar::Float64(-0.5), Scalar::Float64(2.0)]),
+            ],
+        ).unwrap();
+        let result = df.arcsinh().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_arcsinh_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_arccosh_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
+                ("b", vec![Scalar::Float64(1.5), Scalar::Float64(2.5), Scalar::Float64(4.0)]),
+            ],
+        ).unwrap();
+        let result = df.arccosh().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_arccosh_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_arctanh_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(0.0), Scalar::Float64(0.5), Scalar::Float64(-0.5)]),
+                ("b", vec![Scalar::Float64(0.25), Scalar::Float64(-0.25), Scalar::Float64(0.75)]),
+            ],
+        ).unwrap();
+        let result = df.arctanh().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_arctanh_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_expm1_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(0.0), Scalar::Float64(1.0), Scalar::Float64(-1.0)]),
+                ("b", vec![Scalar::Float64(0.5), Scalar::Float64(-0.5), Scalar::Float64(2.0)]),
+            ],
+        ).unwrap();
+        let result = df.expm1().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_expm1_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_log1p_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(0.0), Scalar::Float64(1.0), Scalar::Float64(2.0)]),
+                ("b", vec![Scalar::Float64(0.5), Scalar::Float64(1.5), Scalar::Float64(3.0)]),
+            ],
+        ).unwrap();
+        let result = df.log1p().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_log1p_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_degrees_golden_basic() {
+        use std::f64::consts::PI;
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(0.0), Scalar::Float64(PI / 2.0), Scalar::Float64(PI)]),
+                ("b", vec![Scalar::Float64(PI / 4.0), Scalar::Float64(PI / 3.0), Scalar::Float64(2.0 * PI)]),
+            ],
+        ).unwrap();
+        let result = df.degrees().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_degrees_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_radians_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(0.0), Scalar::Float64(90.0), Scalar::Float64(180.0)]),
+                ("b", vec![Scalar::Float64(45.0), Scalar::Float64(60.0), Scalar::Float64(360.0)]),
+            ],
+        ).unwrap();
+        let result = df.radians().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_radians_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))
