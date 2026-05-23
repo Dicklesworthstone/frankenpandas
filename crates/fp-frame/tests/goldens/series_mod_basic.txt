@@ -1,0 +1,4 @@
+0    1
+1    2
+2    4
+Name: x%y, Length: 3, dtype: Int64

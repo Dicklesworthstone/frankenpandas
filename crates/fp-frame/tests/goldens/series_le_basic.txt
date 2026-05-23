@@ -1,0 +1,4 @@
+0    true
+1    false
+2    true
+Name: x<=y, Length: 3, dtype: Bool

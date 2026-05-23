@@ -89714,6 +89714,74 @@ mod tests {
         assert_text_golden("series_gt_basic.txt", &output);
     }
 
+    #[test]
+    fn series_le_golden_basic() {
+        let s1 = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Int64(5), Scalar::Int64(3)],
+        ).unwrap();
+        let s2 = Series::from_values(
+            "y",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(2), Scalar::Int64(3), Scalar::Int64(3)],
+        ).unwrap();
+        let result = s1.le(&s2).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_le_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_ge_golden_basic() {
+        let s1 = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Int64(5), Scalar::Int64(3)],
+        ).unwrap();
+        let s2 = Series::from_values(
+            "y",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(2), Scalar::Int64(3), Scalar::Int64(3)],
+        ).unwrap();
+        let result = s1.ge(&s2).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_ge_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_mod_golden_basic() {
+        let s1 = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(10), Scalar::Int64(17), Scalar::Int64(25)],
+        ).unwrap();
+        let s2 = Series::from_values(
+            "y",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(3), Scalar::Int64(5), Scalar::Int64(7)],
+        ).unwrap();
+        let result = s1.modulo(&s2).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_mod_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_floordiv_golden_basic() {
+        let s1 = Series::from_values(
+            "x",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(10), Scalar::Int64(17), Scalar::Int64(25)],
+        ).unwrap();
+        let s2 = Series::from_values(
+            "y",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(3), Scalar::Int64(5), Scalar::Int64(7)],
+        ).unwrap();
+        let result = s1.floordiv(&s2).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_floordiv_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))
