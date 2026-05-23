@@ -86866,6 +86866,24 @@ mod tests {
         assert_text_golden("dataframe_describe_multicolumn.txt", &output);
     }
 
+    #[test]
+    fn series_value_counts_golden_basic() {
+        let s = Series::from_values(
+            "letters",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Utf8("a".to_string()),
+                Scalar::Utf8("b".to_string()),
+                Scalar::Utf8("a".to_string()),
+                Scalar::Utf8("a".to_string()),
+            ],
+        )
+        .unwrap();
+        let vc = s.value_counts().unwrap();
+        let output = format!("{vc}");
+        assert_text_golden("series_value_counts_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))
