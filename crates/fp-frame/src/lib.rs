@@ -94491,6 +94491,51 @@ mod tests {
         assert_text_golden("series_str_get_dummies_basic.txt", &output);
     }
 
+    #[test]
+    fn series_dt_microsecond_golden_basic() {
+        let s = Series::from_values(
+            "ts",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![
+                Scalar::Utf8("2024-01-15T10:30:00.123456".into()),
+                Scalar::Utf8("2024-01-15T10:30:00.789012".into()),
+            ],
+        ).unwrap();
+        let result = s.dt().microsecond().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_dt_microsecond_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_dt_nanosecond_golden_basic() {
+        let s = Series::from_values(
+            "ts",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![
+                Scalar::Utf8("2024-01-15T10:30:00.123456789".into()),
+                Scalar::Utf8("2024-01-15T10:30:00.987654321".into()),
+            ],
+        ).unwrap();
+        let result = s.dt().nanosecond().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_dt_nanosecond_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_dt_dayofweek_golden_basic() {
+        let s = Series::from_values(
+            "ts",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![
+                Scalar::Utf8("2024-01-15T10:30:00".into()),
+                Scalar::Utf8("2024-01-16T10:30:00".into()),
+            ],
+        ).unwrap();
+        let result = s.dt().dayofweek().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_dt_dayofweek_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))
