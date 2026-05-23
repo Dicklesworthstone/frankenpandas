@@ -88558,6 +88558,68 @@ mod tests {
         assert_text_golden("series_str_endswith_basic.txt", &output);
     }
 
+    #[test]
+    fn series_explode_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("a,b,c".into()),
+                Scalar::Utf8("d,e".into()),
+                Scalar::Utf8("f".into()),
+            ],
+        ).unwrap();
+        let exploded = s.explode(",").unwrap();
+        let output = format!("{exploded}");
+        assert_text_golden("series_explode_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_explode_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["key", "vals"],
+            vec![
+                ("key", vec![Scalar::Utf8("x".into()), Scalar::Utf8("y".into())]),
+                ("vals", vec![Scalar::Utf8("a,b".into()), Scalar::Utf8("c,d,e".into())]),
+            ],
+        )
+        .unwrap();
+        let exploded = df.explode("vals", ",").unwrap();
+        let output = format!("{exploded}");
+        assert_text_golden("dataframe_explode_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_xs_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]),
+                ("b", vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)]),
+            ],
+        )
+        .unwrap();
+        let row = df.xs(&IndexLabel::Int64(1)).unwrap();
+        let output = format!("{row}");
+        assert_text_golden("dataframe_xs_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_repeat_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+            ],
+        ).unwrap();
+        let repeated = s.repeat(2).unwrap();
+        let output = format!("{repeated}");
+        assert_text_golden("series_repeat_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))
