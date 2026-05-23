@@ -91507,6 +91507,42 @@ mod tests {
         assert_text_golden("series_positive_basic.txt", &output);
     }
 
+    #[test]
+    fn series_arcsinh_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Float64(0.0), Scalar::Float64(1.0), Scalar::Float64(-1.0)],
+        ).unwrap();
+        let result = s.arcsinh().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_arcsinh_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_arccosh_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)],
+        ).unwrap();
+        let result = s.arccosh().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_arccosh_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_arctanh_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Float64(0.0), Scalar::Float64(0.5), Scalar::Float64(-0.5)],
+        ).unwrap();
+        let result = s.arctanh().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_arctanh_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))
