@@ -90337,6 +90337,90 @@ mod tests {
         assert_text_golden("series_swaplevel_basic.txt", &output);
     }
 
+    #[test]
+    fn series_sqrt_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![Scalar::Float64(1.0), Scalar::Float64(4.0), Scalar::Float64(9.0), Scalar::Float64(16.0)],
+        ).unwrap();
+        let result = s.sqrt().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_sqrt_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_exp_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Float64(0.0), Scalar::Float64(1.0), Scalar::Float64(2.0)],
+        ).unwrap();
+        let result = s.exp().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_exp_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_log_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Float64(1.0), Scalar::Float64(std::f64::consts::E), Scalar::Float64(10.0)],
+        ).unwrap();
+        let result = s.log().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_log_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_floor_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![Scalar::Float64(1.5), Scalar::Float64(2.7), Scalar::Float64(-1.5), Scalar::Float64(-2.7)],
+        ).unwrap();
+        let result = s.floor().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_floor_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_ceil_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![Scalar::Float64(1.5), Scalar::Float64(2.7), Scalar::Float64(-1.5), Scalar::Float64(-2.7)],
+        ).unwrap();
+        let result = s.ceil().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_ceil_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_log10_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Float64(1.0), Scalar::Float64(10.0), Scalar::Float64(100.0)],
+        ).unwrap();
+        let result = s.log10().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_log10_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_log2_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(8.0)],
+        ).unwrap();
+        let result = s.log2().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_log2_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

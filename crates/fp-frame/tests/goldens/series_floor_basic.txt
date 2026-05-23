@@ -1,0 +1,5 @@
+0    1
+1    2
+2    -2
+3    -3
+Name: vals, Length: 4, dtype: Float64
