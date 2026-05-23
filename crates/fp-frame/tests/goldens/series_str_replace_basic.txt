@@ -1,0 +1,4 @@
+0    hi world
+1    hi there
+2    hi hi
+Name: vals, Length: 3, dtype: Utf8

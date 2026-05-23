@@ -88493,6 +88493,71 @@ mod tests {
         assert_text_golden("series_sample_basic.txt", &output);
     }
 
+    #[test]
+    fn series_str_contains_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Utf8("hello world".into()),
+                Scalar::Utf8("goodbye".into()),
+                Scalar::Utf8("hello there".into()),
+                Scalar::Utf8("test".into()),
+            ],
+        ).unwrap();
+        let result = s.str().contains("hello").unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_str_contains_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_str_replace_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("hello world".into()),
+                Scalar::Utf8("hello there".into()),
+                Scalar::Utf8("hello hello".into()),
+            ],
+        ).unwrap();
+        let result = s.str().replace("hello", "hi").unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_str_replace_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_str_startswith_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("hello world".into()),
+                Scalar::Utf8("goodbye".into()),
+                Scalar::Utf8("help me".into()),
+            ],
+        ).unwrap();
+        let result = s.str().startswith("hel").unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_str_startswith_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_str_endswith_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("hello world".into()),
+                Scalar::Utf8("new world".into()),
+                Scalar::Utf8("goodbye".into()),
+            ],
+        ).unwrap();
+        let result = s.str().endswith("world").unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_str_endswith_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))
