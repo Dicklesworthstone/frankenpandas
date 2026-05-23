@@ -1,0 +1,6 @@
+0    1
+1    2.7
+2    4.89
+3    7.423
+4    10.1961
+Name: vals, Length: 5, dtype: Float64
