@@ -91803,6 +91803,86 @@ mod tests {
         assert_text_golden("dataframe_where_cond_basic.txt", &output);
     }
 
+    #[test]
+    fn series_dt_year_golden_basic() {
+        let s = Series::from_values(
+            "dates",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("2024-01-15T10:30:00".into()),
+                Scalar::Utf8("2023-06-20T14:45:30".into()),
+                Scalar::Utf8("2025-12-31T23:59:59".into()),
+            ],
+        ).unwrap();
+        let result = s.dt().year().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_dt_year_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_dt_month_golden_basic() {
+        let s = Series::from_values(
+            "dates",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("2024-01-15T10:30:00".into()),
+                Scalar::Utf8("2023-06-20T14:45:30".into()),
+                Scalar::Utf8("2025-12-31T23:59:59".into()),
+            ],
+        ).unwrap();
+        let result = s.dt().month().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_dt_month_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_dt_day_golden_basic() {
+        let s = Series::from_values(
+            "dates",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("2024-01-15T10:30:00".into()),
+                Scalar::Utf8("2023-06-20T14:45:30".into()),
+                Scalar::Utf8("2025-12-31T23:59:59".into()),
+            ],
+        ).unwrap();
+        let result = s.dt().day().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_dt_day_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_dt_hour_golden_basic() {
+        let s = Series::from_values(
+            "dates",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("2024-01-15T10:30:00".into()),
+                Scalar::Utf8("2023-06-20T14:45:30".into()),
+                Scalar::Utf8("2025-12-31T23:59:59".into()),
+            ],
+        ).unwrap();
+        let result = s.dt().hour().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_dt_hour_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_dt_weekday_golden_basic() {
+        let s = Series::from_values(
+            "dates",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("2024-01-15T10:30:00".into()),
+                Scalar::Utf8("2023-06-20T14:45:30".into()),
+                Scalar::Utf8("2025-12-31T23:59:59".into()),
+            ],
+        ).unwrap();
+        let result = s.dt().weekday().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_dt_weekday_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

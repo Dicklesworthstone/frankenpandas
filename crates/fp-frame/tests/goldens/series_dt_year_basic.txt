@@ -1,0 +1,4 @@
+0    2024
+1    2023
+2    2025
+Name: dates, Length: 3, dtype: Int64
