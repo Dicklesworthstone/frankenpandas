@@ -89782,6 +89782,74 @@ mod tests {
         assert_text_golden("series_floordiv_basic.txt", &output);
     }
 
+    #[test]
+    fn series_reindex_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![IndexLabel::Utf8("a".into()), IndexLabel::Utf8("b".into()), IndexLabel::Utf8("c".into())],
+            vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+        ).unwrap();
+        let new_labels = vec![IndexLabel::Utf8("c".into()), IndexLabel::Utf8("b".into()), IndexLabel::Utf8("a".into()), IndexLabel::Utf8("d".into())];
+        let result = s.reindex(new_labels).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_reindex_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_append_golden_basic() {
+        let s1 = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(10), Scalar::Int64(20)],
+        ).unwrap();
+        let s2 = Series::from_values(
+            "vals",
+            vec![2_i64.into(), 3_i64.into()],
+            vec![Scalar::Int64(30), Scalar::Int64(40)],
+        ).unwrap();
+        let result = s1.append(&s2).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_append_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_align_golden_basic() {
+        let s1 = Series::from_values(
+            "x",
+            vec![IndexLabel::Utf8("a".into()), IndexLabel::Utf8("b".into()), IndexLabel::Utf8("c".into())],
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+        ).unwrap();
+        let s2 = Series::from_values(
+            "y",
+            vec![IndexLabel::Utf8("b".into()), IndexLabel::Utf8("c".into()), IndexLabel::Utf8("d".into())],
+            vec![Scalar::Int64(20), Scalar::Int64(30), Scalar::Int64(40)],
+        ).unwrap();
+        let (aligned1, aligned2) = s1.align(&s2, AlignMode::Outer).unwrap();
+        let output = format!("aligned1:\n{aligned1}\naligned2:\n{aligned2}");
+        assert_text_golden("series_align_basic.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_append_golden_basic() {
+        let df1 = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                ("b", vec![Scalar::Int64(10), Scalar::Int64(20)]),
+            ],
+        ).unwrap();
+        let df2 = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(3), Scalar::Int64(4)]),
+                ("b", vec![Scalar::Int64(30), Scalar::Int64(40)]),
+            ],
+        ).unwrap();
+        let result = df1.append(&df2).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_append_basic.txt", &output);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))

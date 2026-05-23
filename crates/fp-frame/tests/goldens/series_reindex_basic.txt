@@ -1,0 +1,5 @@
+c    30
+b    20
+a    10
+d    None
+Name: vals, Length: 4, dtype: Int64

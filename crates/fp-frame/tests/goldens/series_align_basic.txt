@@ -1,0 +1,12 @@
+aligned1:
+a    1
+b    2
+c    3
+d    None
+Name: x, Length: 4, dtype: Int64
+aligned2:
+a    None
+b    20
+c    30
+d    40
+Name: y, Length: 4, dtype: Int64
