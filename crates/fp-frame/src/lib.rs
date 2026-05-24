@@ -106337,6 +106337,225 @@ mod tests {
         assert_text_golden("rolling_std_basic.txt", &output);
     }
 
+    // ── Expanding Window Edge Cases ──
+
+    #[test]
+    fn expanding_mean_golden_basic() {
+        let s = Series::from_pairs(
+            "vals",
+            vec![
+                (0_i64.into(), Scalar::Float64(1.0)),
+                (1_i64.into(), Scalar::Float64(2.0)),
+                (2_i64.into(), Scalar::Float64(3.0)),
+                (3_i64.into(), Scalar::Float64(4.0)),
+            ],
+        )
+        .unwrap();
+        let result = s.expanding(Some(1)).mean().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("expanding_mean_basic.txt", &output);
+    }
+
+    #[test]
+    fn expanding_min_golden_basic() {
+        let s = Series::from_pairs(
+            "vals",
+            vec![
+                (0_i64.into(), Scalar::Float64(3.0)),
+                (1_i64.into(), Scalar::Float64(1.0)),
+                (2_i64.into(), Scalar::Float64(4.0)),
+                (3_i64.into(), Scalar::Float64(2.0)),
+            ],
+        )
+        .unwrap();
+        let result = s.expanding(Some(1)).min().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("expanding_min_basic.txt", &output);
+    }
+
+    #[test]
+    fn expanding_max_golden_basic() {
+        let s = Series::from_pairs(
+            "vals",
+            vec![
+                (0_i64.into(), Scalar::Float64(3.0)),
+                (1_i64.into(), Scalar::Float64(1.0)),
+                (2_i64.into(), Scalar::Float64(4.0)),
+                (3_i64.into(), Scalar::Float64(2.0)),
+            ],
+        )
+        .unwrap();
+        let result = s.expanding(Some(1)).max().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("expanding_max_basic.txt", &output);
+    }
+
+    #[test]
+    fn expanding_std_golden_basic() {
+        let s = Series::from_pairs(
+            "vals",
+            vec![
+                (0_i64.into(), Scalar::Float64(1.0)),
+                (1_i64.into(), Scalar::Float64(2.0)),
+                (2_i64.into(), Scalar::Float64(3.0)),
+                (3_i64.into(), Scalar::Float64(4.0)),
+            ],
+        )
+        .unwrap();
+        let result = s.expanding(Some(1)).std().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("expanding_std_basic.txt", &output);
+    }
+
+    // ── GroupBy with Nulls ──
+
+    #[test]
+    fn groupby_with_nulls_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["key", "val"],
+            vec![
+                ("key", vec![
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("b".into()),
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("b".into()),
+                    Scalar::Utf8("a".into()),
+                ]),
+                ("val", vec![
+                    Scalar::Int64(1),
+                    Scalar::Int64(2),
+                    Scalar::Int64(3),
+                    Scalar::Null(NullKind::Null),
+                    Scalar::Int64(5),
+                ]),
+            ],
+        )
+        .unwrap();
+        let result = df.groupby(&["key"]).unwrap().sum().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("groupby_with_nulls_basic.txt", &output);
+    }
+
+    // ── DataFrame Transpose ──
+
+    #[test]
+    fn transpose_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                ("b", vec![Scalar::Int64(3), Scalar::Int64(4)]),
+            ],
+        )
+        .unwrap();
+        let result = df.transpose().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("transpose_basic.txt", &output);
+    }
+
+    // ── DataFrame Select dtypes ──
+
+    #[test]
+    fn select_dtypes_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["int_col", "float_col", "str_col"],
+            vec![
+                ("int_col", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                ("float_col", vec![Scalar::Float64(1.5), Scalar::Float64(2.5)]),
+                ("str_col", vec![Scalar::Utf8("a".into()), Scalar::Utf8("b".into())]),
+            ],
+        )
+        .unwrap();
+        let result = df.select_dtypes(&[DType::Int64], &[]).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("select_dtypes_basic.txt", &output);
+    }
+
+    // ── DataFrame Drop Duplicates ──
+
+    #[test]
+    fn drop_duplicates_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![
+                    Scalar::Int64(1),
+                    Scalar::Int64(1),
+                    Scalar::Int64(2),
+                    Scalar::Int64(2),
+                ]),
+                ("b", vec![
+                    Scalar::Utf8("x".into()),
+                    Scalar::Utf8("x".into()),
+                    Scalar::Utf8("y".into()),
+                    Scalar::Utf8("z".into()),
+                ]),
+            ],
+        )
+        .unwrap();
+        let result = df.drop_duplicates(None, DuplicateKeep::First, false).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("drop_duplicates_basic.txt", &output);
+    }
+
+    // ── Series Value Counts ──
+
+    #[test]
+    fn value_counts_golden_basic() {
+        let s = Series::from_pairs(
+            "vals",
+            vec![
+                (0_i64.into(), Scalar::Utf8("a".into())),
+                (1_i64.into(), Scalar::Utf8("b".into())),
+                (2_i64.into(), Scalar::Utf8("a".into())),
+                (3_i64.into(), Scalar::Utf8("a".into())),
+                (4_i64.into(), Scalar::Utf8("b".into())),
+            ],
+        )
+        .unwrap();
+        let result = s.value_counts().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("value_counts_basic.txt", &output);
+    }
+
+    // ── Series Unique ──
+
+    #[test]
+    fn unique_golden_basic() {
+        let s = Series::from_pairs(
+            "vals",
+            vec![
+                (0_i64.into(), Scalar::Int64(1)),
+                (1_i64.into(), Scalar::Int64(2)),
+                (2_i64.into(), Scalar::Int64(1)),
+                (3_i64.into(), Scalar::Int64(3)),
+                (4_i64.into(), Scalar::Int64(2)),
+            ],
+        )
+        .unwrap();
+        let result = s.unique();
+        let output = format!("{result:?}");
+        assert_text_golden("unique_basic.txt", &output);
+    }
+
+    // ── Series Nunique ──
+
+    #[test]
+    fn nunique_golden_basic() {
+        let s = Series::from_pairs(
+            "vals",
+            vec![
+                (0_i64.into(), Scalar::Int64(1)),
+                (1_i64.into(), Scalar::Int64(2)),
+                (2_i64.into(), Scalar::Int64(1)),
+                (3_i64.into(), Scalar::Int64(3)),
+            ],
+        )
+        .unwrap();
+        let result = s.nunique();
+        assert_eq!(result, 3);
+    }
+
 }
 
 #[cfg(test)]
