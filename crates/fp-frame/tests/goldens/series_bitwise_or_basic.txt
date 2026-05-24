@@ -1,0 +1,4 @@
+0    14
+1    14
+2    15
+Name: a, Length: 3, dtype: Int64

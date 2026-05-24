@@ -96068,6 +96068,132 @@ mod tests {
         let output = format!("{result}");
         assert_text_golden("series_nextafter_basic.txt", &output);
     }
+
+    #[test]
+    fn series_logical_and_golden_basic() {
+        let s1 = Series::from_values(
+            "a",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![Scalar::Bool(true), Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(false)],
+        ).unwrap();
+        let s2 = Series::from_values(
+            "b",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true), Scalar::Bool(false)],
+        ).unwrap();
+        let result = s1.logical_and(&s2).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_logical_and_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_logical_or_golden_basic() {
+        let s1 = Series::from_values(
+            "a",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![Scalar::Bool(true), Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(false)],
+        ).unwrap();
+        let s2 = Series::from_values(
+            "b",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true), Scalar::Bool(false)],
+        ).unwrap();
+        let result = s1.logical_or(&s2).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_logical_or_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_logical_xor_golden_basic() {
+        let s1 = Series::from_values(
+            "a",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![Scalar::Bool(true), Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(false)],
+        ).unwrap();
+        let s2 = Series::from_values(
+            "b",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true), Scalar::Bool(false)],
+        ).unwrap();
+        let result = s1.logical_xor(&s2).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_logical_xor_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_logical_not_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)],
+        ).unwrap();
+        let result = s.logical_not().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_logical_not_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_bitwise_and_golden_basic() {
+        let s1 = Series::from_values(
+            "a",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(0b1010), Scalar::Int64(0b1100), Scalar::Int64(0b1111)],
+        ).unwrap();
+        let s2 = Series::from_values(
+            "b",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(0b1100), Scalar::Int64(0b1010), Scalar::Int64(0b0101)],
+        ).unwrap();
+        let result = s1.bitwise_and(&s2).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_bitwise_and_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_bitwise_or_golden_basic() {
+        let s1 = Series::from_values(
+            "a",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(0b1010), Scalar::Int64(0b1100), Scalar::Int64(0b1111)],
+        ).unwrap();
+        let s2 = Series::from_values(
+            "b",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(0b1100), Scalar::Int64(0b1010), Scalar::Int64(0b0101)],
+        ).unwrap();
+        let result = s1.bitwise_or(&s2).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_bitwise_or_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_bitwise_xor_golden_basic() {
+        let s1 = Series::from_values(
+            "a",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(0b1010), Scalar::Int64(0b1100), Scalar::Int64(0b1111)],
+        ).unwrap();
+        let s2 = Series::from_values(
+            "b",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(0b1100), Scalar::Int64(0b1010), Scalar::Int64(0b0101)],
+        ).unwrap();
+        let result = s1.bitwise_xor(&s2).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_bitwise_xor_basic.txt", &output);
+    }
+
+    #[test]
+    fn series_bitwise_not_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(0), Scalar::Int64(1), Scalar::Int64(-1)],
+        ).unwrap();
+        let result = s.bitwise_not().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_bitwise_not_basic.txt", &output);
+    }
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))
