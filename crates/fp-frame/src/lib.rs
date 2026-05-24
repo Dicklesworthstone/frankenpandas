@@ -1182,6 +1182,19 @@ fn csv_escape(value: &str, sep: char) -> String {
     }
 }
 
+fn csv_quote_always(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len() + 2);
+    escaped.push('"');
+    for ch in value.chars() {
+        if ch == '"' {
+            escaped.push('"');
+        }
+        escaped.push(ch);
+    }
+    escaped.push('"');
+    escaped
+}
+
 fn scalar_to_json_value(value: &Scalar) -> Value {
     match value {
         Scalar::Null(_) => Value::Null,
@@ -2305,7 +2318,12 @@ impl Series {
     /// Create a Series with evenly spaced values within a given interval.
     ///
     /// Matches `np.arange(start, stop, step)`.
-    pub fn arange(name: impl Into<String>, start: f64, stop: f64, step: f64) -> Result<Self, FrameError> {
+    pub fn arange(
+        name: impl Into<String>,
+        start: f64,
+        stop: f64,
+        step: f64,
+    ) -> Result<Self, FrameError> {
         let col = Column::arange(start, stop, step)?;
         let idx = Index::from_range(0, col.len() as i64, 1);
         Self::new(name, idx, col)
@@ -2314,7 +2332,12 @@ impl Series {
     /// Create a Series with evenly spaced values over [start, stop].
     ///
     /// Matches `np.linspace(start, stop, num)`.
-    pub fn linspace(name: impl Into<String>, start: f64, stop: f64, num: usize) -> Result<Self, FrameError> {
+    pub fn linspace(
+        name: impl Into<String>,
+        start: f64,
+        stop: f64,
+        num: usize,
+    ) -> Result<Self, FrameError> {
         let col = Column::linspace(start, stop, num)?;
         let idx = Index::from_range(0, col.len() as i64, 1);
         Self::new(name, idx, col)
@@ -2323,7 +2346,12 @@ impl Series {
     /// Create a Series with evenly spaced values on a log scale.
     ///
     /// Matches `np.logspace(start, stop, num)`.
-    pub fn logspace(name: impl Into<String>, start: f64, stop: f64, num: usize) -> Result<Self, FrameError> {
+    pub fn logspace(
+        name: impl Into<String>,
+        start: f64,
+        stop: f64,
+        num: usize,
+    ) -> Result<Self, FrameError> {
         let col = Column::logspace(start, stop, num)?;
         let idx = Index::from_range(0, col.len() as i64, 1);
         Self::new(name, idx, col)
@@ -2332,7 +2360,12 @@ impl Series {
     /// Create a Series with values evenly spaced on a log scale (geometric progression).
     ///
     /// Matches `np.geomspace(start, stop, num)`.
-    pub fn geomspace(name: impl Into<String>, start: f64, stop: f64, num: usize) -> Result<Self, FrameError> {
+    pub fn geomspace(
+        name: impl Into<String>,
+        start: f64,
+        stop: f64,
+        num: usize,
+    ) -> Result<Self, FrameError> {
         let col = Column::geomspace(start, stop, num)?;
         let idx = Index::from_range(0, col.len() as i64, 1);
         Self::new(name, idx, col)
@@ -2350,7 +2383,11 @@ impl Series {
     /// Create a Series filled with zeros of specified dtype.
     ///
     /// Matches `np.zeros(n, dtype=dtype)`.
-    pub fn zeros_dtype(name: impl Into<String>, n: usize, dtype: DType) -> Result<Self, FrameError> {
+    pub fn zeros_dtype(
+        name: impl Into<String>,
+        n: usize,
+        dtype: DType,
+    ) -> Result<Self, FrameError> {
         let col = Column::zeros(n, dtype)?;
         let idx = Index::from_range(0, n as i64, 1);
         Self::new(name, idx, col)
@@ -6675,7 +6712,11 @@ impl Series {
     /// Differences between consecutive elements.
     ///
     /// Matches `np.ediff1d(s, to_begin, to_end)`. Prepends `to_begin` and appends `to_end`.
-    pub fn ediff1d(&self, to_begin: Option<Scalar>, to_end: Option<Scalar>) -> Result<Self, FrameError> {
+    pub fn ediff1d(
+        &self,
+        to_begin: Option<Scalar>,
+        to_end: Option<Scalar>,
+    ) -> Result<Self, FrameError> {
         let col = self.column.ediff1d(to_begin, to_end)?;
         let idx = Index::from_range(0, col.len() as i64, 1);
         Self::new(self.name.clone(), idx, col)
@@ -6873,16 +6914,8 @@ impl Series {
     /// Matches `np.modf(x)`. Returns `(fractional_part, integer_part)` as two Series.
     pub fn modf(&self) -> Result<(Self, Self), FrameError> {
         let (frac_col, int_col) = self.column.modf()?;
-        let frac = Self::new(
-            format!("{}_frac", self.name),
-            self.index.clone(),
-            frac_col,
-        )?;
-        let int = Self::new(
-            format!("{}_int", self.name),
-            self.index.clone(),
-            int_col,
-        )?;
+        let frac = Self::new(format!("{}_frac", self.name), self.index.clone(), frac_col)?;
+        let int = Self::new(format!("{}_int", self.name), self.index.clone(), int_col)?;
         Ok((frac, int))
     }
 
@@ -7741,11 +7774,7 @@ impl Series {
     ///
     /// Matches `np.sinc(x)`. Returns `sin(pi*x) / (pi*x)`, with `sinc(0) = 1`.
     pub fn sinc(&self) -> Result<Self, FrameError> {
-        Self::new(
-            self.name.clone(),
-            self.index.clone(),
-            self.column.sinc()?,
-        )
+        Self::new(self.name.clone(), self.index.clone(), self.column.sinc()?)
     }
 
     /// Trapezoidal numerical integration.
@@ -10189,6 +10218,93 @@ impl Series {
                 out.push_str(&format!("{idx}{sep}{}\n", format_scalar(val, sep)));
             } else {
                 out.push_str(&format!("{}\n", format_scalar(val, sep)));
+            }
+        }
+        out
+    }
+
+    /// Serialize the Series to a CSV string with quoting control.
+    ///
+    /// Matches `pd.Series.to_csv(..., quoting=csv.QUOTE_*)`.
+    pub fn to_csv_with_quoting(
+        &self,
+        sep: char,
+        include_index: bool,
+        na_rep: &str,
+        quoting: CsvQuoting,
+    ) -> String {
+        let quote_str = |s: &str, is_numeric: bool| -> String {
+            match quoting {
+                CsvQuoting::Minimal => csv_escape(s, sep),
+                CsvQuoting::All => csv_quote_always(s),
+                CsvQuoting::NonNumeric if is_numeric => s.to_owned(),
+                CsvQuoting::NonNumeric => csv_quote_always(s),
+                CsvQuoting::None => s.to_owned(),
+            }
+        };
+
+        fn format_scalar_with_quoting(
+            val: &Scalar,
+            na_rep: &str,
+            quote_str: impl Fn(&str, bool) -> String,
+        ) -> String {
+            match val {
+                Scalar::Null(_) => quote_str(na_rep, false),
+                Scalar::Bool(b) => {
+                    let s = if *b { "True" } else { "False" };
+                    quote_str(s, false)
+                }
+                Scalar::Int64(v) => {
+                    let s = v.to_string();
+                    quote_str(&s, true)
+                }
+                Scalar::Float64(v) => {
+                    let s = format_pandas_csv_float(*v);
+                    quote_str(&s, true)
+                }
+                Scalar::Utf8(s) => quote_str(s, false),
+                Scalar::Timedelta64(v) if *v == Timedelta::NAT => quote_str(na_rep, false),
+                Scalar::Timedelta64(v) => quote_str(&Timedelta::format(*v), false),
+                Scalar::Datetime64(v) if *v == Timedelta::NAT => quote_str(na_rep, false),
+                Scalar::Datetime64(v) => quote_str(&format_datetime_ns(*v), false),
+                Scalar::Period(v) if *v == i64::MIN => quote_str(na_rep, false),
+                Scalar::Period(v) => quote_str(&format!("Period[{v}]"), false),
+                Scalar::Interval(interval) => quote_str(&format!("{interval}"), false),
+            }
+        }
+
+        let mut out = String::new();
+        // Header
+        if include_index {
+            if quoting == CsvQuoting::All {
+                out.push_str(&format!("\"\"{sep}{}\n", quote_str(&self.name, false)));
+            } else {
+                out.push_str(&format!("{sep}{}\n", quote_str(&self.name, false)));
+            }
+        } else {
+            out.push_str(&format!("{}\n", quote_str(&self.name, false)));
+        }
+        // Data
+        for (label, val) in self.index.labels().iter().zip(self.column.values()) {
+            if include_index {
+                let idx = match label {
+                    IndexLabel::Int64(v) => {
+                        let s = v.to_string();
+                        quote_str(&s, true)
+                    }
+                    IndexLabel::Utf8(s) => quote_str(s, false),
+                    IndexLabel::Timedelta64(ns) => quote_str(&Timedelta::format(*ns), false),
+                    IndexLabel::Datetime64(ns) => quote_str(&format_datetime_ns(*ns), false),
+                };
+                out.push_str(&format!(
+                    "{idx}{sep}{}\n",
+                    format_scalar_with_quoting(val, na_rep, quote_str)
+                ));
+            } else {
+                out.push_str(&format!(
+                    "{}\n",
+                    format_scalar_with_quoting(val, na_rep, quote_str)
+                ));
             }
         }
         out
@@ -25200,6 +25316,15 @@ pub enum DropNaHow {
     All,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CsvQuoting {
+    #[default]
+    Minimal,
+    All,
+    NonNumeric,
+    None,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum DataFrameColumnInput {
     Values(Vec<Scalar>),
@@ -33222,6 +33347,127 @@ impl DataFrame {
                     Scalar::Period(v) if *v == i64::MIN => out.push_str(&na_rep_escaped),
                     Scalar::Period(v) => out.push_str(&format!("Period[{v}]")),
                     Scalar::Interval(interval) => out.push_str(&format!("{interval}")),
+                }
+            }
+            out.push('\n');
+        }
+
+        Ok(out)
+    }
+
+    /// Export DataFrame to CSV string with quoting control.
+    ///
+    /// Matches `df.to_csv(..., quoting=csv.QUOTE_*)`.
+    /// - `CsvQuoting::Minimal`: Quote only when necessary (default pandas behavior)
+    /// - `CsvQuoting::All`: Quote all fields including headers, index, and values
+    /// - `CsvQuoting::NonNumeric`: Quote all non-numeric fields
+    /// - `CsvQuoting::None`: Never quote fields
+    pub fn to_csv_with_quoting(
+        &self,
+        sep: char,
+        include_index: bool,
+        na_rep: &str,
+        columns: Option<&[&str]>,
+        quoting: CsvQuoting,
+    ) -> Result<String, FrameError> {
+        let col_order: Vec<&str> = match columns {
+            Some(cols) => {
+                for &c in cols {
+                    if !self.columns.contains_key(c) {
+                        return Err(FrameError::CompatibilityRejected(format!(
+                            "column '{c}' not found"
+                        )));
+                    }
+                }
+                cols.to_vec()
+            }
+            None => self.column_order.iter().map(|s| s.as_str()).collect(),
+        };
+
+        let quote_str = |s: &str, is_numeric: bool| -> String {
+            match quoting {
+                CsvQuoting::Minimal => csv_escape(s, sep),
+                CsvQuoting::All => csv_quote_always(s),
+                CsvQuoting::NonNumeric if is_numeric => s.to_owned(),
+                CsvQuoting::NonNumeric => csv_quote_always(s),
+                CsvQuoting::None => s.to_owned(),
+            }
+        };
+
+        let mut out = String::new();
+
+        // Header
+        if include_index {
+            if let Some(idx_name) = self.index.name() {
+                out.push_str(&quote_str(idx_name, false));
+            } else if quoting == CsvQuoting::All {
+                out.push_str("\"\"");
+            }
+            out.push(sep);
+        }
+        for (i, name) in col_order.iter().enumerate() {
+            if i > 0 {
+                out.push(sep);
+            }
+            out.push_str(&quote_str(name, false));
+        }
+        out.push('\n');
+
+        // Rows
+        for (row_idx, label) in self.index.labels().iter().enumerate() {
+            if include_index {
+                match label {
+                    IndexLabel::Int64(v) => {
+                        let s = v.to_string();
+                        out.push_str(&quote_str(&s, true));
+                    }
+                    IndexLabel::Utf8(s) => out.push_str(&quote_str(s, false)),
+                    IndexLabel::Timedelta64(ns) => {
+                        out.push_str(&quote_str(&Timedelta::format(*ns), false))
+                    }
+                    IndexLabel::Datetime64(ns) => {
+                        out.push_str(&quote_str(&format_datetime_ns(*ns), false))
+                    }
+                }
+                out.push(sep);
+            }
+            for (col_idx, name) in col_order.iter().enumerate() {
+                if col_idx > 0 {
+                    out.push(sep);
+                }
+                let val = &self.columns[*name].values()[row_idx];
+                match val {
+                    Scalar::Null(_) => out.push_str(&quote_str(na_rep, false)),
+                    Scalar::Bool(b) => {
+                        let s = if *b { "True" } else { "False" };
+                        out.push_str(&quote_str(s, false));
+                    }
+                    Scalar::Int64(v) => {
+                        let s = v.to_string();
+                        out.push_str(&quote_str(&s, true));
+                    }
+                    Scalar::Float64(v) => {
+                        let s = format_pandas_csv_float(*v);
+                        out.push_str(&quote_str(&s, true));
+                    }
+                    Scalar::Utf8(s) => out.push_str(&quote_str(s, false)),
+                    Scalar::Timedelta64(v) if *v == Timedelta::NAT => {
+                        out.push_str(&quote_str(na_rep, false))
+                    }
+                    Scalar::Timedelta64(v) => {
+                        out.push_str(&quote_str(&Timedelta::format(*v), false))
+                    }
+                    Scalar::Datetime64(v) if *v == Timedelta::NAT => {
+                        out.push_str(&quote_str(na_rep, false))
+                    }
+                    Scalar::Datetime64(v) => {
+                        out.push_str(&quote_str(&format_datetime_ns(*v), false))
+                    }
+                    Scalar::Period(v) if *v == i64::MIN => out.push_str(&quote_str(na_rep, false)),
+                    Scalar::Period(v) => out.push_str(&quote_str(&format!("Period[{v}]"), false)),
+                    Scalar::Interval(interval) => {
+                        out.push_str(&quote_str(&format!("{interval}"), false))
+                    }
                 }
             }
             out.push('\n');
@@ -43324,10 +43570,11 @@ mod tests {
     use serde_json::Value;
 
     use super::{
-        DataFrame, DataFrameColumnInput, DataFrameCsvReadOptions, DataFrameDictAxisLabels,
-        DropNaHow, DuplicateKeep, FrameError, IndexLabel, Series, TzAmbiguousPolicy,
-        TzLocalizeOptions, TzNonexistentPolicy, cut, datetime64_label_from_naive, index_to_frame,
-        index_to_series, parse_datetime64_nanos, parse_naive_datetime_value, qcut, to_numeric,
+        CsvQuoting, DataFrame, DataFrameColumnInput, DataFrameCsvReadOptions,
+        DataFrameDictAxisLabels, DropNaHow, DuplicateKeep, FrameError, IndexLabel, Series,
+        TzAmbiguousPolicy, TzLocalizeOptions, TzNonexistentPolicy, cut, datetime64_label_from_naive,
+        index_to_frame, index_to_series, parse_datetime64_nanos, parse_naive_datetime_value, qcut,
+        to_numeric,
     };
 
     fn assert_text_golden(golden_name: &str, actual: &str) {
@@ -70504,7 +70751,11 @@ mod tests {
         // Column 'a' has no padding needed (2 modes, max_modes=2), keeps Int64
         assert_eq!(col_a.dtype(), DType::Int64);
         // Column 'b' needs NaN padding (1 mode < max_modes=2), becomes Float64
-        assert_eq!(col_b.dtype(), DType::Float64, "b is Float64 for pandas parity");
+        assert_eq!(
+            col_b.dtype(),
+            DType::Float64,
+            "b is Float64 for pandas parity"
+        );
         assert_eq!(col_a.values()[0], Scalar::Int64(1));
         assert_eq!(col_a.values()[1], Scalar::Int64(2));
         assert_eq!(col_b.values()[0], Scalar::Float64(3.0));
@@ -86934,7 +87185,10 @@ mod tests {
         let result = df
             .groupby(&["region"])
             .unwrap()
-            .agg_named(&[("revenue_sum", "revenue", "sum"), ("qty_mean", "qty", "mean")])
+            .agg_named(&[
+                ("revenue_sum", "revenue", "sum"),
+                ("qty_mean", "qty", "mean"),
+            ])
             .unwrap();
         let output = format!("{result}");
         assert_text_golden("groupby_agg_multicolumn.txt", &output);
@@ -87017,7 +87271,13 @@ mod tests {
     fn series_rolling_mean_golden_basic() {
         let s = Series::from_values(
             "vals",
-            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+            ],
             vec![
                 Scalar::Float64(1.0),
                 Scalar::Float64(2.0),
@@ -87321,7 +87581,13 @@ mod tests {
     fn series_clip_golden_basic() {
         let s = Series::from_values(
             "vals",
-            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+            ],
             vec![
                 Scalar::Float64(1.0),
                 Scalar::Float64(5.0),
@@ -87376,7 +87642,13 @@ mod tests {
     fn series_unique_golden_basic() {
         let s = Series::from_values(
             "vals",
-            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+            ],
             vec![
                 Scalar::Int64(1),
                 Scalar::Int64(2),
@@ -87417,7 +87689,13 @@ mod tests {
     fn series_nlargest_golden_basic() {
         let s = Series::from_values(
             "vals",
-            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+            ],
             vec![
                 Scalar::Int64(30),
                 Scalar::Int64(10),
@@ -87436,7 +87714,13 @@ mod tests {
     fn series_nsmallest_golden_basic() {
         let s = Series::from_values(
             "vals",
-            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+            ],
             vec![
                 Scalar::Int64(30),
                 Scalar::Int64(10),
@@ -87455,7 +87739,13 @@ mod tests {
     fn series_head_golden_basic() {
         let s = Series::from_values(
             "vals",
-            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+            ],
             vec![
                 Scalar::Int64(10),
                 Scalar::Int64(20),
@@ -87474,7 +87764,13 @@ mod tests {
     fn series_tail_golden_basic() {
         let s = Series::from_values(
             "vals",
-            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+            ],
             vec![
                 Scalar::Int64(10),
                 Scalar::Int64(20),
@@ -87493,7 +87789,13 @@ mod tests {
     fn series_drop_duplicates_golden_basic() {
         let s = Series::from_values(
             "vals",
-            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+            ],
             vec![
                 Scalar::Int64(1),
                 Scalar::Int64(2),
@@ -87513,8 +87815,26 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3), Scalar::Int64(4), Scalar::Int64(5)]),
-                ("b", vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30), Scalar::Int64(40), Scalar::Int64(50)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                        Scalar::Int64(3),
+                        Scalar::Int64(4),
+                        Scalar::Int64(5),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Int64(10),
+                        Scalar::Int64(20),
+                        Scalar::Int64(30),
+                        Scalar::Int64(40),
+                        Scalar::Int64(50),
+                    ],
+                ),
             ],
         )
         .unwrap();
@@ -87528,8 +87848,26 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3), Scalar::Int64(4), Scalar::Int64(5)]),
-                ("b", vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30), Scalar::Int64(40), Scalar::Int64(50)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                        Scalar::Int64(3),
+                        Scalar::Int64(4),
+                        Scalar::Int64(5),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Int64(10),
+                        Scalar::Int64(20),
+                        Scalar::Int64(30),
+                        Scalar::Int64(40),
+                        Scalar::Int64(50),
+                    ],
+                ),
             ],
         )
         .unwrap();
@@ -87543,8 +87881,26 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Int64(30), Scalar::Int64(10), Scalar::Int64(50), Scalar::Int64(20), Scalar::Int64(40)]),
-                ("b", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3), Scalar::Int64(4), Scalar::Int64(5)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Int64(30),
+                        Scalar::Int64(10),
+                        Scalar::Int64(50),
+                        Scalar::Int64(20),
+                        Scalar::Int64(40),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                        Scalar::Int64(3),
+                        Scalar::Int64(4),
+                        Scalar::Int64(5),
+                    ],
+                ),
             ],
         )
         .unwrap();
@@ -87558,8 +87914,26 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Int64(30), Scalar::Int64(10), Scalar::Int64(50), Scalar::Int64(20), Scalar::Int64(40)]),
-                ("b", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3), Scalar::Int64(4), Scalar::Int64(5)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Int64(30),
+                        Scalar::Int64(10),
+                        Scalar::Int64(50),
+                        Scalar::Int64(20),
+                        Scalar::Int64(40),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                        Scalar::Int64(3),
+                        Scalar::Int64(4),
+                        Scalar::Int64(5),
+                    ],
+                ),
             ],
         )
         .unwrap();
@@ -87573,12 +87947,32 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(1), Scalar::Int64(3), Scalar::Int64(2)]),
-                ("b", vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(10), Scalar::Int64(30), Scalar::Int64(20)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                        Scalar::Int64(1),
+                        Scalar::Int64(3),
+                        Scalar::Int64(2),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Int64(10),
+                        Scalar::Int64(20),
+                        Scalar::Int64(10),
+                        Scalar::Int64(30),
+                        Scalar::Int64(20),
+                    ],
+                ),
             ],
         )
         .unwrap();
-        let dd = df.drop_duplicates(None, DuplicateKeep::First, false).unwrap();
+        let dd = df
+            .drop_duplicates(None, DuplicateKeep::First, false)
+            .unwrap();
         let output = format!("{dd}");
         assert_text_golden("dataframe_drop_duplicates_basic.txt", &output);
     }
@@ -87588,8 +87982,24 @@ mod tests {
         let df = DataFrame::from_dict(
             &["key", "val"],
             vec![
-                ("key", vec![Scalar::Utf8("a".into()), Scalar::Utf8("b".into()), Scalar::Utf8("a".into()), Scalar::Utf8("b".into())]),
-                ("val", vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30), Scalar::Int64(40)]),
+                (
+                    "key",
+                    vec![
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("b".into()),
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("b".into()),
+                    ],
+                ),
+                (
+                    "val",
+                    vec![
+                        Scalar::Int64(10),
+                        Scalar::Int64(20),
+                        Scalar::Int64(30),
+                        Scalar::Int64(40),
+                    ],
+                ),
             ],
         )
         .unwrap();
@@ -87603,8 +88013,24 @@ mod tests {
         let df = DataFrame::from_dict(
             &["key", "val"],
             vec![
-                ("key", vec![Scalar::Utf8("a".into()), Scalar::Utf8("b".into()), Scalar::Utf8("a".into()), Scalar::Utf8("b".into())]),
-                ("val", vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30), Scalar::Int64(40)]),
+                (
+                    "key",
+                    vec![
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("b".into()),
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("b".into()),
+                    ],
+                ),
+                (
+                    "val",
+                    vec![
+                        Scalar::Int64(10),
+                        Scalar::Int64(20),
+                        Scalar::Int64(30),
+                        Scalar::Int64(40),
+                    ],
+                ),
             ],
         )
         .unwrap();
@@ -87618,8 +88044,24 @@ mod tests {
         let df = DataFrame::from_dict(
             &["key", "val"],
             vec![
-                ("key", vec![Scalar::Utf8("a".into()), Scalar::Utf8("b".into()), Scalar::Utf8("a".into()), Scalar::Utf8("b".into())]),
-                ("val", vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30), Scalar::Int64(40)]),
+                (
+                    "key",
+                    vec![
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("b".into()),
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("b".into()),
+                    ],
+                ),
+                (
+                    "val",
+                    vec![
+                        Scalar::Int64(10),
+                        Scalar::Int64(20),
+                        Scalar::Int64(30),
+                        Scalar::Int64(40),
+                    ],
+                ),
             ],
         )
         .unwrap();
@@ -87633,8 +88075,24 @@ mod tests {
         let df = DataFrame::from_dict(
             &["key", "val"],
             vec![
-                ("key", vec![Scalar::Utf8("a".into()), Scalar::Utf8("b".into()), Scalar::Utf8("a".into()), Scalar::Utf8("b".into())]),
-                ("val", vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30), Scalar::Int64(40)]),
+                (
+                    "key",
+                    vec![
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("b".into()),
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("b".into()),
+                    ],
+                ),
+                (
+                    "val",
+                    vec![
+                        Scalar::Int64(10),
+                        Scalar::Int64(20),
+                        Scalar::Int64(30),
+                        Scalar::Int64(40),
+                    ],
+                ),
             ],
         )
         .unwrap();
@@ -87648,8 +88106,24 @@ mod tests {
         let df = DataFrame::from_dict(
             &["key", "val"],
             vec![
-                ("key", vec![Scalar::Utf8("a".into()), Scalar::Utf8("b".into()), Scalar::Utf8("a".into()), Scalar::Utf8("b".into())]),
-                ("val", vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30), Scalar::Int64(40)]),
+                (
+                    "key",
+                    vec![
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("b".into()),
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("b".into()),
+                    ],
+                ),
+                (
+                    "val",
+                    vec![
+                        Scalar::Int64(10),
+                        Scalar::Int64(20),
+                        Scalar::Int64(30),
+                        Scalar::Int64(40),
+                    ],
+                ),
             ],
         )
         .unwrap();
@@ -87663,8 +88137,26 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0), Scalar::Float64(5.0)]),
-                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0), Scalar::Float64(40.0), Scalar::Float64(50.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(4.0),
+                        Scalar::Float64(5.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(30.0),
+                        Scalar::Float64(40.0),
+                        Scalar::Float64(50.0),
+                    ],
+                ),
             ],
         )
         .unwrap();
@@ -87678,8 +88170,24 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0)]),
-                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0), Scalar::Float64(40.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(4.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(30.0),
+                        Scalar::Float64(40.0),
+                    ],
+                ),
             ],
         )
         .unwrap();
@@ -87692,7 +88200,13 @@ mod tests {
     fn series_between_golden_basic() {
         let s = Series::from_values(
             "vals",
-            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+            ],
             vec![
                 Scalar::Int64(1),
                 Scalar::Int64(5),
@@ -87702,7 +88216,9 @@ mod tests {
             ],
         )
         .unwrap();
-        let between = s.between(&Scalar::Int64(5), &Scalar::Int64(15), "both").unwrap();
+        let between = s
+            .between(&Scalar::Int64(5), &Scalar::Int64(15), "both")
+            .unwrap();
         let output = format!("{between}");
         assert_text_golden("series_between_basic.txt", &output);
     }
@@ -87798,8 +88314,14 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]),
-                ("b", vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)]),
+                (
+                    "a",
+                    vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                ),
+                (
+                    "b",
+                    vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+                ),
             ],
         )
         .unwrap();
@@ -87812,12 +88334,18 @@ mod tests {
     fn dataframe_assign_golden_basic() {
         let df = DataFrame::from_dict(
             &["a"],
-            vec![
-                ("a", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]),
-            ],
+            vec![(
+                "a",
+                vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            )],
         )
         .unwrap();
-        let new_col = Column::from_values(vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)]).unwrap();
+        let new_col = Column::from_values(vec![
+            Scalar::Int64(10),
+            Scalar::Int64(20),
+            Scalar::Int64(30),
+        ])
+        .unwrap();
         let assigned = df.assign(vec![("b", new_col)]).unwrap();
         let output = format!("{assigned}");
         assert_text_golden("dataframe_assign_basic.txt", &output);
@@ -87828,8 +88356,14 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Int64(3), Scalar::Int64(1), Scalar::Int64(2)]),
-                ("b", vec![Scalar::Int64(30), Scalar::Int64(10), Scalar::Int64(20)]),
+                (
+                    "a",
+                    vec![Scalar::Int64(3), Scalar::Int64(1), Scalar::Int64(2)],
+                ),
+                (
+                    "b",
+                    vec![Scalar::Int64(30), Scalar::Int64(10), Scalar::Int64(20)],
+                ),
             ],
         )
         .unwrap();
@@ -87843,8 +88377,22 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Int64(1), Scalar::Null(NullKind::NaN), Scalar::Int64(3)]),
-                ("b", vec![Scalar::Null(NullKind::NaN), Scalar::Int64(20), Scalar::Int64(30)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Int64(1),
+                        Scalar::Null(NullKind::NaN),
+                        Scalar::Int64(3),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Null(NullKind::NaN),
+                        Scalar::Int64(20),
+                        Scalar::Int64(30),
+                    ],
+                ),
             ],
         )
         .unwrap();
@@ -87900,8 +88448,22 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Int64(1), Scalar::Null(NullKind::NaN), Scalar::Int64(3)]),
-                ("b", vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Null(NullKind::NaN)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Int64(1),
+                        Scalar::Null(NullKind::NaN),
+                        Scalar::Int64(3),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Int64(10),
+                        Scalar::Int64(20),
+                        Scalar::Null(NullKind::NaN),
+                    ],
+                ),
             ],
         )
         .unwrap();
@@ -88057,7 +88619,13 @@ mod tests {
     fn series_nunique_golden_basic() {
         let s = Series::from_values(
             "vals",
-            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+            ],
             vec![
                 Scalar::Int64(1),
                 Scalar::Int64(2),
@@ -88131,8 +88699,14 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]),
-                ("b", vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)]),
+                (
+                    "a",
+                    vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                ),
+                (
+                    "b",
+                    vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+                ),
             ],
         )
         .unwrap();
@@ -88181,7 +88755,13 @@ mod tests {
     fn series_median_golden_basic() {
         let s = Series::from_values(
             "vals",
-            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+            ],
             vec![
                 Scalar::Float64(5.0),
                 Scalar::Float64(1.0),
@@ -88218,7 +88798,13 @@ mod tests {
     fn series_skew_golden_basic() {
         let s = Series::from_values(
             "vals",
-            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+            ],
             vec![
                 Scalar::Float64(1.0),
                 Scalar::Float64(2.0),
@@ -88237,7 +88823,13 @@ mod tests {
     fn series_kurtosis_golden_basic() {
         let s = Series::from_values(
             "vals",
-            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+            ],
             vec![
                 Scalar::Float64(1.0),
                 Scalar::Float64(2.0),
@@ -88293,8 +88885,24 @@ mod tests {
         let df = DataFrame::from_dict(
             &["key", "val"],
             vec![
-                ("key", vec![Scalar::Utf8("a".into()), Scalar::Utf8("a".into()), Scalar::Utf8("b".into()), Scalar::Utf8("b".into())]),
-                ("val", vec![Scalar::Float64(1.0), Scalar::Float64(3.0), Scalar::Float64(10.0), Scalar::Float64(20.0)]),
+                (
+                    "key",
+                    vec![
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("b".into()),
+                        Scalar::Utf8("b".into()),
+                    ],
+                ),
+                (
+                    "val",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                    ],
+                ),
             ],
         )
         .unwrap();
@@ -88308,8 +88916,24 @@ mod tests {
         let df = DataFrame::from_dict(
             &["key", "val"],
             vec![
-                ("key", vec![Scalar::Utf8("a".into()), Scalar::Utf8("a".into()), Scalar::Utf8("b".into()), Scalar::Utf8("b".into())]),
-                ("val", vec![Scalar::Float64(1.0), Scalar::Float64(3.0), Scalar::Float64(10.0), Scalar::Float64(20.0)]),
+                (
+                    "key",
+                    vec![
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("b".into()),
+                        Scalar::Utf8("b".into()),
+                    ],
+                ),
+                (
+                    "val",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                    ],
+                ),
             ],
         )
         .unwrap();
@@ -88323,8 +88947,26 @@ mod tests {
         let df = DataFrame::from_dict(
             &["key", "val"],
             vec![
-                ("key", vec![Scalar::Utf8("a".into()), Scalar::Utf8("a".into()), Scalar::Utf8("a".into()), Scalar::Utf8("b".into()), Scalar::Utf8("b".into())]),
-                ("val", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(10.0), Scalar::Float64(20.0)]),
+                (
+                    "key",
+                    vec![
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("b".into()),
+                        Scalar::Utf8("b".into()),
+                    ],
+                ),
+                (
+                    "val",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                    ],
+                ),
             ],
         )
         .unwrap();
@@ -88338,8 +88980,24 @@ mod tests {
         let df = DataFrame::from_dict(
             &["key", "val"],
             vec![
-                ("key", vec![Scalar::Utf8("a".into()), Scalar::Utf8("b".into()), Scalar::Utf8("a".into()), Scalar::Utf8("b".into())]),
-                ("val", vec![Scalar::Int64(1), Scalar::Int64(10), Scalar::Int64(2), Scalar::Int64(20)]),
+                (
+                    "key",
+                    vec![
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("b".into()),
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("b".into()),
+                    ],
+                ),
+                (
+                    "val",
+                    vec![
+                        Scalar::Int64(1),
+                        Scalar::Int64(10),
+                        Scalar::Int64(2),
+                        Scalar::Int64(20),
+                    ],
+                ),
             ],
         )
         .unwrap();
@@ -88353,8 +89011,24 @@ mod tests {
         let df = DataFrame::from_dict(
             &["key", "val"],
             vec![
-                ("key", vec![Scalar::Utf8("a".into()), Scalar::Utf8("b".into()), Scalar::Utf8("a".into()), Scalar::Utf8("b".into())]),
-                ("val", vec![Scalar::Int64(1), Scalar::Int64(10), Scalar::Int64(2), Scalar::Int64(20)]),
+                (
+                    "key",
+                    vec![
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("b".into()),
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("b".into()),
+                    ],
+                ),
+                (
+                    "val",
+                    vec![
+                        Scalar::Int64(1),
+                        Scalar::Int64(10),
+                        Scalar::Int64(2),
+                        Scalar::Int64(20),
+                    ],
+                ),
             ],
         )
         .unwrap();
@@ -88367,7 +89041,13 @@ mod tests {
     fn series_mode_golden_basic() {
         let s = Series::from_values(
             "vals",
-            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+            ],
             vec![
                 Scalar::Int64(1),
                 Scalar::Int64(2),
@@ -88375,7 +89055,8 @@ mod tests {
                 Scalar::Int64(3),
                 Scalar::Int64(2),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let modes = s.mode().unwrap();
         let output = format!("{modes}");
         assert_text_golden("series_mode_basic.txt", &output);
@@ -88392,7 +89073,8 @@ mod tests {
                 Scalar::Int64(40),
                 Scalar::Int64(20),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let sorted_indices = s.argsort(true).unwrap();
         let output = format!("{sorted_indices}");
         assert_text_golden("series_argsort_basic.txt", &output);
@@ -88409,7 +89091,8 @@ mod tests {
                 Scalar::Int64(40),
                 Scalar::Int64(20),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let idx = s.argmax().unwrap();
         let output = format!("{idx}");
         assert_text_golden("series_argmax_basic.txt", &output);
@@ -88426,7 +89109,8 @@ mod tests {
                 Scalar::Int64(40),
                 Scalar::Int64(20),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let idx = s.argmin().unwrap();
         let output = format!("{idx}");
         assert_text_golden("series_argmin_basic.txt", &output);
@@ -88436,7 +89120,13 @@ mod tests {
     fn series_factorize_golden_basic() {
         let s = Series::from_values(
             "vals",
-            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+            ],
             vec![
                 Scalar::Utf8("a".into()),
                 Scalar::Utf8("b".into()),
@@ -88444,7 +89134,8 @@ mod tests {
                 Scalar::Utf8("c".into()),
                 Scalar::Utf8("b".into()),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let (codes, uniques) = s.factorize().unwrap();
         let output = format!("codes:\n{codes}\nuniques:\n{uniques}");
         assert_text_golden("series_factorize_basic.txt", &output);
@@ -88461,7 +89152,8 @@ mod tests {
                 Scalar::Utf8("b".into()),
                 Scalar::Utf8("b".into()),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let columns = Series::from_values(
             "columns",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
@@ -88471,7 +89163,8 @@ mod tests {
                 Scalar::Utf8("x".into()),
                 Scalar::Utf8("y".into()),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let ct = DataFrame::crosstab(&index, &columns).unwrap();
         let output = format!("{ct}");
         assert_text_golden("dataframe_crosstab_basic.txt", &output);
@@ -88481,7 +89174,13 @@ mod tests {
     fn series_sample_golden_basic() {
         let s = Series::from_values(
             "vals",
-            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+            ],
             vec![
                 Scalar::Int64(10),
                 Scalar::Int64(20),
@@ -88489,7 +89188,8 @@ mod tests {
                 Scalar::Int64(40),
                 Scalar::Int64(50),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let sampled = s.sample(Some(3), None, false, Some(42)).unwrap();
         let output = format!("{sampled}");
         assert_text_golden("series_sample_basic.txt", &output);
@@ -88506,7 +89206,8 @@ mod tests {
                 Scalar::Utf8("hello there".into()),
                 Scalar::Utf8("test".into()),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.str().contains("hello").unwrap();
         let output = format!("{result}");
         assert_text_golden("series_str_contains_basic.txt", &output);
@@ -88522,7 +89223,8 @@ mod tests {
                 Scalar::Utf8("hello there".into()),
                 Scalar::Utf8("hello hello".into()),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.str().replace("hello", "hi").unwrap();
         let output = format!("{result}");
         assert_text_golden("series_str_replace_basic.txt", &output);
@@ -88538,7 +89240,8 @@ mod tests {
                 Scalar::Utf8("goodbye".into()),
                 Scalar::Utf8("help me".into()),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.str().startswith("hel").unwrap();
         let output = format!("{result}");
         assert_text_golden("series_str_startswith_basic.txt", &output);
@@ -88554,7 +89257,8 @@ mod tests {
                 Scalar::Utf8("new world".into()),
                 Scalar::Utf8("goodbye".into()),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.str().endswith("world").unwrap();
         let output = format!("{result}");
         assert_text_golden("series_str_endswith_basic.txt", &output);
@@ -88570,7 +89274,8 @@ mod tests {
                 Scalar::Utf8("d,e".into()),
                 Scalar::Utf8("f".into()),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let exploded = s.explode(",").unwrap();
         let output = format!("{exploded}");
         assert_text_golden("series_explode_basic.txt", &output);
@@ -88581,8 +89286,14 @@ mod tests {
         let df = DataFrame::from_dict(
             &["key", "vals"],
             vec![
-                ("key", vec![Scalar::Utf8("x".into()), Scalar::Utf8("y".into())]),
-                ("vals", vec![Scalar::Utf8("a,b".into()), Scalar::Utf8("c,d,e".into())]),
+                (
+                    "key",
+                    vec![Scalar::Utf8("x".into()), Scalar::Utf8("y".into())],
+                ),
+                (
+                    "vals",
+                    vec![Scalar::Utf8("a,b".into()), Scalar::Utf8("c,d,e".into())],
+                ),
             ],
         )
         .unwrap();
@@ -88596,8 +89307,14 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]),
-                ("b", vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)]),
+                (
+                    "a",
+                    vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                ),
+                (
+                    "b",
+                    vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+                ),
             ],
         )
         .unwrap();
@@ -88611,12 +89328,9 @@ mod tests {
         let s = Series::from_values(
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![
-                Scalar::Int64(1),
-                Scalar::Int64(2),
-                Scalar::Int64(3),
-            ],
-        ).unwrap();
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+        )
+        .unwrap();
         let repeated = s.repeat(2).unwrap();
         let output = format!("{repeated}");
         assert_text_golden("series_repeat_basic.txt", &output);
@@ -88632,7 +89346,8 @@ mod tests {
                 Scalar::Null(NullKind::Null),
                 Scalar::Float64(3.0),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let s2 = Series::from_values(
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
@@ -88641,7 +89356,8 @@ mod tests {
                 Scalar::Float64(20.0),
                 Scalar::Float64(30.0),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let combined = s1.combine_first(&s2).unwrap();
         let output = format!("{combined}");
         assert_text_golden("series_combine_first_basic.txt", &output);
@@ -88657,7 +89373,8 @@ mod tests {
                 Scalar::Float64(2.0),
                 Scalar::Float64(3.0),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let s2 = Series::from_values(
             "b",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
@@ -88666,7 +89383,8 @@ mod tests {
                 Scalar::Float64(5.0),
                 Scalar::Float64(6.0),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let dot_product = s1.dot(&s2).unwrap();
         let output = format!("{dot_product}");
         assert_text_golden("series_dot_basic.txt", &output);
@@ -88691,7 +89409,13 @@ mod tests {
     fn series_rolling_sum_golden_basic() {
         let s = Series::from_values(
             "vals",
-            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+            ],
             vec![
                 Scalar::Float64(1.0),
                 Scalar::Float64(2.0),
@@ -88699,7 +89423,8 @@ mod tests {
                 Scalar::Float64(4.0),
                 Scalar::Float64(5.0),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let rolled = s.rolling(3, None).sum().unwrap();
         let output = format!("{rolled}");
         assert_text_golden("series_rolling_sum_basic.txt", &output);
@@ -88709,7 +89434,13 @@ mod tests {
     fn series_rolling_min_golden_basic() {
         let s = Series::from_values(
             "vals",
-            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+            ],
             vec![
                 Scalar::Float64(3.0),
                 Scalar::Float64(1.0),
@@ -88717,7 +89448,8 @@ mod tests {
                 Scalar::Float64(1.0),
                 Scalar::Float64(5.0),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let rolled = s.rolling(3, None).min().unwrap();
         let output = format!("{rolled}");
         assert_text_golden("series_rolling_min_basic.txt", &output);
@@ -88727,7 +89459,13 @@ mod tests {
     fn series_rolling_max_golden_basic() {
         let s = Series::from_values(
             "vals",
-            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+            ],
             vec![
                 Scalar::Float64(3.0),
                 Scalar::Float64(1.0),
@@ -88735,7 +89473,8 @@ mod tests {
                 Scalar::Float64(1.0),
                 Scalar::Float64(5.0),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let rolled = s.rolling(3, None).max().unwrap();
         let output = format!("{rolled}");
         assert_text_golden("series_rolling_max_basic.txt", &output);
@@ -88746,8 +89485,26 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3), Scalar::Int64(4), Scalar::Int64(5)]),
-                ("b", vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30), Scalar::Int64(40), Scalar::Int64(50)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                        Scalar::Int64(3),
+                        Scalar::Int64(4),
+                        Scalar::Int64(5),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Int64(10),
+                        Scalar::Int64(20),
+                        Scalar::Int64(30),
+                        Scalar::Int64(40),
+                        Scalar::Int64(50),
+                    ],
+                ),
             ],
         )
         .unwrap();
@@ -88760,7 +89517,13 @@ mod tests {
     fn series_autocorr_golden_basic() {
         let s = Series::from_values(
             "vals",
-            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+            ],
             vec![
                 Scalar::Float64(1.0),
                 Scalar::Float64(2.0),
@@ -88768,7 +89531,8 @@ mod tests {
                 Scalar::Float64(2.0),
                 Scalar::Float64(1.0),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let ac = s.autocorr(1).unwrap();
         let output = format!("{ac}");
         assert_text_golden("series_autocorr_basic.txt", &output);
@@ -88778,7 +89542,13 @@ mod tests {
     fn series_duplicated_golden_basic() {
         let s = Series::from_values(
             "vals",
-            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+            ],
             vec![
                 Scalar::Int64(1),
                 Scalar::Int64(2),
@@ -88786,7 +89556,8 @@ mod tests {
                 Scalar::Int64(3),
                 Scalar::Int64(2),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let dups = s.duplicated().unwrap();
         let output = format!("{dups}");
         assert_text_golden("series_duplicated_basic.txt", &output);
@@ -88796,7 +89567,13 @@ mod tests {
     fn series_rolling_std_golden_basic() {
         let s = Series::from_values(
             "vals",
-            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+            ],
             vec![
                 Scalar::Float64(1.0),
                 Scalar::Float64(2.0),
@@ -88804,7 +89581,8 @@ mod tests {
                 Scalar::Float64(4.0),
                 Scalar::Float64(5.0),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let rolled = s.rolling(3, None).std().unwrap();
         let output = format!("{rolled}");
         assert_text_golden("series_rolling_std_basic.txt", &output);
@@ -88814,7 +89592,13 @@ mod tests {
     fn series_ewm_std_golden_basic() {
         let s = Series::from_values(
             "vals",
-            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+            ],
             vec![
                 Scalar::Float64(1.0),
                 Scalar::Float64(2.0),
@@ -88822,7 +89606,8 @@ mod tests {
                 Scalar::Float64(4.0),
                 Scalar::Float64(5.0),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let ewm_std = s.ewm(Some(3.0), None).std().unwrap();
         let output = format!("{ewm_std}");
         assert_text_golden("series_ewm_std_basic.txt", &output);
@@ -88833,8 +89618,24 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(1), Scalar::Int64(2)]),
-                ("b", vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(10), Scalar::Int64(30)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Int64(10),
+                        Scalar::Int64(20),
+                        Scalar::Int64(10),
+                        Scalar::Int64(30),
+                    ],
+                ),
             ],
         )
         .unwrap();
@@ -88848,8 +89649,24 @@ mod tests {
         let df = DataFrame::from_dict(
             &["key", "val"],
             vec![
-                ("key", vec![Scalar::Utf8("a".into()), Scalar::Utf8("a".into()), Scalar::Utf8("b".into()), Scalar::Utf8("b".into())]),
-                ("val", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3), Scalar::Int64(4)]),
+                (
+                    "key",
+                    vec![
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("b".into()),
+                        Scalar::Utf8("b".into()),
+                    ],
+                ),
+                (
+                    "val",
+                    vec![
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                        Scalar::Int64(3),
+                        Scalar::Int64(4),
+                    ],
+                ),
             ],
         )
         .unwrap();
@@ -88863,8 +89680,24 @@ mod tests {
         let df = DataFrame::from_dict(
             &["key", "val"],
             vec![
-                ("key", vec![Scalar::Utf8("a".into()), Scalar::Utf8("a".into()), Scalar::Utf8("b".into()), Scalar::Utf8("b".into())]),
-                ("val", vec![Scalar::Int64(1), Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]),
+                (
+                    "key",
+                    vec![
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("b".into()),
+                        Scalar::Utf8("b".into()),
+                    ],
+                ),
+                (
+                    "val",
+                    vec![
+                        Scalar::Int64(1),
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                        Scalar::Int64(3),
+                    ],
+                ),
             ],
         )
         .unwrap();
@@ -88877,7 +89710,13 @@ mod tests {
     fn series_searchsorted_golden_basic() {
         let s = Series::from_values(
             "vals",
-            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+            ],
             vec![
                 Scalar::Int64(10),
                 Scalar::Int64(20),
@@ -88885,7 +89724,8 @@ mod tests {
                 Scalar::Int64(40),
                 Scalar::Int64(50),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let idx = s.searchsorted(&Scalar::Int64(25), "left").unwrap();
         let output = format!("{idx}");
         assert_text_golden("series_searchsorted_basic.txt", &output);
@@ -88902,7 +89742,8 @@ mod tests {
                 Scalar::Float64(3.0),
                 Scalar::Float64(4.0),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let s2 = Series::from_values(
             "y",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
@@ -88912,7 +89753,8 @@ mod tests {
                 Scalar::Float64(6.0),
                 Scalar::Float64(8.0),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let corr = s1.corr(&s2).unwrap();
         let output = format!("{corr:.4}");
         assert_text_golden("series_corr_basic.txt", &output);
@@ -88929,7 +89771,8 @@ mod tests {
                 Scalar::Float64(3.0),
                 Scalar::Float64(4.0),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let s2 = Series::from_values(
             "y",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
@@ -88939,7 +89782,8 @@ mod tests {
                 Scalar::Float64(30.0),
                 Scalar::Float64(40.0),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let cov = s1.cov(&s2).unwrap();
         let output = format!("{cov:.4}");
         assert_text_golden("series_cov_basic.txt", &output);
@@ -88950,12 +89794,9 @@ mod tests {
         let s = Series::from_values(
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![
-                Scalar::Int64(1),
-                Scalar::Int64(2),
-                Scalar::Int64(3),
-            ],
-        ).unwrap();
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+        )
+        .unwrap();
         let mapping = vec![
             (Scalar::Int64(1), Scalar::Utf8("one".into())),
             (Scalar::Int64(2), Scalar::Utf8("two".into())),
@@ -88971,21 +89812,15 @@ mod tests {
         let s1 = Series::from_values(
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![
-                Scalar::Int64(1),
-                Scalar::Int64(2),
-                Scalar::Int64(3),
-            ],
-        ).unwrap();
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+        )
+        .unwrap();
         let s2 = Series::from_values(
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![
-                Scalar::Int64(1),
-                Scalar::Int64(5),
-                Scalar::Int64(3),
-            ],
-        ).unwrap();
+            vec![Scalar::Int64(1), Scalar::Int64(5), Scalar::Int64(3)],
+        )
+        .unwrap();
         let cmp = s1.compare(&s2).unwrap();
         let output = format!("{cmp}");
         assert_text_golden("series_compare_basic.txt", &output);
@@ -88997,8 +89832,22 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
-                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(30.0),
+                    ],
+                ),
             ],
         )
         .unwrap();
@@ -89021,7 +89870,8 @@ mod tests {
                 Scalar::Int64(30),
                 Scalar::Int64(40),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let mask = Series::from_values(
             "mask",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
@@ -89031,7 +89881,8 @@ mod tests {
                 Scalar::Bool(true),
                 Scalar::Bool(false),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let filtered = s.filter(&mask).unwrap();
         let output = format!("{filtered}");
         assert_text_golden("series_filter_basic.txt", &output);
@@ -89043,12 +89894,14 @@ mod tests {
             "x",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
-        ).unwrap();
+        )
+        .unwrap();
         let s2 = Series::from_values(
             "y",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s1.add(&s2).unwrap();
         let output = format!("{result}");
         assert_text_golden("series_add_basic.txt", &output);
@@ -89060,12 +89913,14 @@ mod tests {
             "x",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
-        ).unwrap();
+        )
+        .unwrap();
         let s2 = Series::from_values(
             "y",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s1.sub(&s2).unwrap();
         let output = format!("{result}");
         assert_text_golden("series_sub_basic.txt", &output);
@@ -89077,12 +89932,14 @@ mod tests {
             "x",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(2), Scalar::Int64(3), Scalar::Int64(4)],
-        ).unwrap();
+        )
+        .unwrap();
         let s2 = Series::from_values(
             "y",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(5), Scalar::Int64(6), Scalar::Int64(7)],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s1.mul(&s2).unwrap();
         let output = format!("{result}");
         assert_text_golden("series_mul_basic.txt", &output);
@@ -89093,13 +89950,23 @@ mod tests {
         let s1 = Series::from_values(
             "x",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(10.0),
+                Scalar::Float64(20.0),
+                Scalar::Float64(30.0),
+            ],
+        )
+        .unwrap();
         let s2 = Series::from_values(
             "y",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(2.0), Scalar::Float64(4.0), Scalar::Float64(5.0)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(2.0),
+                Scalar::Float64(4.0),
+                Scalar::Float64(5.0),
+            ],
+        )
+        .unwrap();
         let result = s1.div(&s2).unwrap();
         let output = format!("{result}");
         assert_text_golden("series_div_basic.txt", &output);
@@ -89109,9 +89976,14 @@ mod tests {
     fn series_reset_index_golden_basic() {
         let s = Series::from_values(
             "vals",
-            vec![IndexLabel::Utf8("a".into()), IndexLabel::Utf8("b".into()), IndexLabel::Utf8("c".into())],
+            vec![
+                IndexLabel::Utf8("a".into()),
+                IndexLabel::Utf8("b".into()),
+                IndexLabel::Utf8("c".into()),
+            ],
             vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.reset_index(false).unwrap();
         let output = match result {
             super::SeriesResetIndexResult::DataFrame(df) => format!("{df}"),
@@ -89125,13 +89997,23 @@ mod tests {
         let s1 = Series::from_values(
             "base",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(4.0),
+            ],
+        )
+        .unwrap();
         let s2 = Series::from_values(
             "exp",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(2.0), Scalar::Float64(2.0), Scalar::Float64(3.0)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(2.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+            ],
+        )
+        .unwrap();
         let result = s1.pow(&s2).unwrap();
         let output = format!("{result}");
         assert_text_golden("series_pow_basic.txt", &output);
@@ -89142,8 +90024,14 @@ mod tests {
         let s = Series::from_values(
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
-            vec![Scalar::Int64(30), Scalar::Int64(10), Scalar::Int64(40), Scalar::Int64(20)],
-        ).unwrap();
+            vec![
+                Scalar::Int64(30),
+                Scalar::Int64(10),
+                Scalar::Int64(40),
+                Scalar::Int64(20),
+            ],
+        )
+        .unwrap();
         let result = s.min().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_min_basic.txt", &output);
@@ -89154,8 +90042,14 @@ mod tests {
         let s = Series::from_values(
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
-            vec![Scalar::Int64(30), Scalar::Int64(10), Scalar::Int64(40), Scalar::Int64(20)],
-        ).unwrap();
+            vec![
+                Scalar::Int64(30),
+                Scalar::Int64(10),
+                Scalar::Int64(40),
+                Scalar::Int64(20),
+            ],
+        )
+        .unwrap();
         let result = s.max().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_max_basic.txt", &output);
@@ -89166,8 +90060,14 @@ mod tests {
         let s = Series::from_values(
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
-            vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30), Scalar::Int64(40)],
-        ).unwrap();
+            vec![
+                Scalar::Int64(10),
+                Scalar::Int64(20),
+                Scalar::Int64(30),
+                Scalar::Int64(40),
+            ],
+        )
+        .unwrap();
         let result = s.sum().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_sum_basic.txt", &output);
@@ -89178,8 +90078,14 @@ mod tests {
         let s = Series::from_values(
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
-            vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0), Scalar::Float64(40.0)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(10.0),
+                Scalar::Float64(20.0),
+                Scalar::Float64(30.0),
+                Scalar::Float64(40.0),
+            ],
+        )
+        .unwrap();
         let result = s.mean().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_mean_basic.txt", &output);
@@ -89190,10 +90096,17 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]),
-                ("b", vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)]),
+                (
+                    "a",
+                    vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                ),
+                (
+                    "b",
+                    vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.sum().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_sum_basic.txt", &output);
@@ -89204,10 +90117,25 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
-                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(30.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.mean().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_mean_basic.txt", &output);
@@ -89218,10 +90146,17 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Int64(3), Scalar::Int64(1), Scalar::Int64(2)]),
-                ("b", vec![Scalar::Int64(30), Scalar::Int64(10), Scalar::Int64(20)]),
+                (
+                    "a",
+                    vec![Scalar::Int64(3), Scalar::Int64(1), Scalar::Int64(2)],
+                ),
+                (
+                    "b",
+                    vec![Scalar::Int64(30), Scalar::Int64(10), Scalar::Int64(20)],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.min().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_min_basic.txt", &output);
@@ -89232,10 +90167,17 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Int64(3), Scalar::Int64(1), Scalar::Int64(2)]),
-                ("b", vec![Scalar::Int64(30), Scalar::Int64(10), Scalar::Int64(20)]),
+                (
+                    "a",
+                    vec![Scalar::Int64(3), Scalar::Int64(1), Scalar::Int64(2)],
+                ),
+                (
+                    "b",
+                    vec![Scalar::Int64(30), Scalar::Int64(10), Scalar::Int64(20)],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.max().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_max_basic.txt", &output);
@@ -89246,10 +90188,27 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0)]),
-                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0), Scalar::Float64(40.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(4.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(30.0),
+                        Scalar::Float64(40.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.std().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_std_basic.txt", &output);
@@ -89260,10 +90219,27 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0)]),
-                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0), Scalar::Float64(40.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(4.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(30.0),
+                        Scalar::Float64(40.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.var().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_var_basic.txt", &output);
@@ -89274,10 +90250,27 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Null(NullKind::Null), Scalar::Int64(4)]),
-                ("b", vec![Scalar::Int64(10), Scalar::Null(NullKind::Null), Scalar::Int64(30), Scalar::Int64(40)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                        Scalar::Null(NullKind::Null),
+                        Scalar::Int64(4),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Int64(10),
+                        Scalar::Null(NullKind::Null),
+                        Scalar::Int64(30),
+                        Scalar::Int64(40),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.count().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_count_basic.txt", &output);
@@ -89288,10 +90281,29 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0), Scalar::Float64(5.0)]),
-                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0), Scalar::Float64(40.0), Scalar::Float64(50.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(4.0),
+                        Scalar::Float64(5.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(30.0),
+                        Scalar::Float64(40.0),
+                        Scalar::Float64(50.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.median().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_median_basic.txt", &output);
@@ -89302,10 +90314,17 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]),
-                ("b", vec![Scalar::Int64(2), Scalar::Int64(3), Scalar::Int64(4)]),
+                (
+                    "a",
+                    vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                ),
+                (
+                    "b",
+                    vec![Scalar::Int64(2), Scalar::Int64(3), Scalar::Int64(4)],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.prod().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_prod_basic.txt", &output);
@@ -89316,10 +90335,17 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Int64(3), Scalar::Int64(1), Scalar::Int64(2)]),
-                ("b", vec![Scalar::Int64(20), Scalar::Int64(30), Scalar::Int64(10)]),
+                (
+                    "a",
+                    vec![Scalar::Int64(3), Scalar::Int64(1), Scalar::Int64(2)],
+                ),
+                (
+                    "b",
+                    vec![Scalar::Int64(20), Scalar::Int64(30), Scalar::Int64(10)],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.idxmin().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_idxmin_basic.txt", &output);
@@ -89330,10 +90356,17 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Int64(3), Scalar::Int64(1), Scalar::Int64(2)]),
-                ("b", vec![Scalar::Int64(20), Scalar::Int64(30), Scalar::Int64(10)]),
+                (
+                    "a",
+                    vec![Scalar::Int64(3), Scalar::Int64(1), Scalar::Int64(2)],
+                ),
+                (
+                    "b",
+                    vec![Scalar::Int64(20), Scalar::Int64(30), Scalar::Int64(10)],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.idxmax().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_idxmax_basic.txt", &output);
@@ -89344,10 +90377,17 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]),
-                ("b", vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)]),
+                (
+                    "a",
+                    vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                ),
+                (
+                    "b",
+                    vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.cumsum().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_cumsum_basic.txt", &output);
@@ -89358,10 +90398,17 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]),
-                ("b", vec![Scalar::Int64(2), Scalar::Int64(3), Scalar::Int64(4)]),
+                (
+                    "a",
+                    vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                ),
+                (
+                    "b",
+                    vec![Scalar::Int64(2), Scalar::Int64(3), Scalar::Int64(4)],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.cumprod().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_cumprod_basic.txt", &output);
@@ -89372,10 +90419,17 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Int64(1), Scalar::Int64(3), Scalar::Int64(2)]),
-                ("b", vec![Scalar::Int64(30), Scalar::Int64(10), Scalar::Int64(20)]),
+                (
+                    "a",
+                    vec![Scalar::Int64(1), Scalar::Int64(3), Scalar::Int64(2)],
+                ),
+                (
+                    "b",
+                    vec![Scalar::Int64(30), Scalar::Int64(10), Scalar::Int64(20)],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.cummax().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_cummax_basic.txt", &output);
@@ -89386,10 +90440,17 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Int64(3), Scalar::Int64(1), Scalar::Int64(2)]),
-                ("b", vec![Scalar::Int64(10), Scalar::Int64(30), Scalar::Int64(20)]),
+                (
+                    "a",
+                    vec![Scalar::Int64(3), Scalar::Int64(1), Scalar::Int64(2)],
+                ),
+                (
+                    "b",
+                    vec![Scalar::Int64(10), Scalar::Int64(30), Scalar::Int64(20)],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.cummin().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_cummin_basic.txt", &output);
@@ -89400,10 +90461,27 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Int64(1), Scalar::Int64(3), Scalar::Int64(6), Scalar::Int64(10)]),
-                ("b", vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(25), Scalar::Int64(35)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Int64(1),
+                        Scalar::Int64(3),
+                        Scalar::Int64(6),
+                        Scalar::Int64(10),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Int64(10),
+                        Scalar::Int64(20),
+                        Scalar::Int64(25),
+                        Scalar::Int64(35),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.diff(1).unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_diff_basic.txt", &output);
@@ -89414,10 +90492,25 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(100.0), Scalar::Float64(110.0), Scalar::Float64(121.0)]),
-                ("b", vec![Scalar::Float64(50.0), Scalar::Float64(55.0), Scalar::Float64(60.5)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(100.0),
+                        Scalar::Float64(110.0),
+                        Scalar::Float64(121.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(50.0),
+                        Scalar::Float64(55.0),
+                        Scalar::Float64(60.5),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.pct_change(1).unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_pct_change_basic.txt", &output);
@@ -89433,7 +90526,8 @@ mod tests {
                 Scalar::Utf8("world".into()),
                 Scalar::Utf8("pandas".into()),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.str().slice(0, Some(3)).unwrap();
         let output = format!("{result}");
         assert_text_golden("series_str_slice_basic.txt", &output);
@@ -89449,7 +90543,8 @@ mod tests {
                 Scalar::Utf8("42".into()),
                 Scalar::Utf8("123".into()),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.str().zfill(5).unwrap();
         let output = format!("{result}");
         assert_text_golden("series_str_zfill_basic.txt", &output);
@@ -89465,7 +90560,8 @@ mod tests {
                 Scalar::Utf8("aaa".into()),
                 Scalar::Utf8("xyz".into()),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.str().count("a").unwrap();
         let output = format!("{result}");
         assert_text_golden("series_str_count_basic.txt", &output);
@@ -89481,7 +90577,8 @@ mod tests {
                 Scalar::Utf8("world peace".into()),
                 Scalar::Utf8("nothing".into()),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.str().find("world").unwrap();
         let output = format!("{result}");
         assert_text_golden("series_str_find_basic.txt", &output);
@@ -89498,7 +90595,8 @@ mod tests {
                 Scalar::Float64(3.0),
                 Scalar::Float64(4.0),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.expanding(None).mean().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_expanding_mean_basic.txt", &output);
@@ -89515,7 +90613,8 @@ mod tests {
                 Scalar::Float64(3.0),
                 Scalar::Float64(4.0),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.expanding(None).std().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_expanding_std_basic.txt", &output);
@@ -89532,7 +90631,8 @@ mod tests {
                 Scalar::Int64(8),
                 Scalar::Int64(2),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.expanding(None).min().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_expanding_min_basic.txt", &output);
@@ -89549,7 +90649,8 @@ mod tests {
                 Scalar::Int64(8),
                 Scalar::Int64(2),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.expanding(None).max().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_expanding_max_basic.txt", &output);
@@ -89559,7 +90660,13 @@ mod tests {
     fn series_rolling_var_golden_basic() {
         let s = Series::from_values(
             "vals",
-            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+            ],
             vec![
                 Scalar::Float64(1.0),
                 Scalar::Float64(2.0),
@@ -89567,7 +90674,8 @@ mod tests {
                 Scalar::Float64(5.0),
                 Scalar::Float64(8.0),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.rolling(3, None).var().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_rolling_var_basic.txt", &output);
@@ -89577,7 +90685,13 @@ mod tests {
     fn series_rolling_median_golden_basic() {
         let s = Series::from_values(
             "vals",
-            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+            ],
             vec![
                 Scalar::Float64(1.0),
                 Scalar::Float64(5.0),
@@ -89585,7 +90699,8 @@ mod tests {
                 Scalar::Float64(2.0),
                 Scalar::Float64(4.0),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.rolling(3, None).median().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_rolling_median_basic.txt", &output);
@@ -89596,10 +90711,27 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3), Scalar::Int64(4)]),
-                ("b", vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30), Scalar::Int64(40)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                        Scalar::Int64(3),
+                        Scalar::Int64(4),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Int64(10),
+                        Scalar::Int64(20),
+                        Scalar::Int64(30),
+                        Scalar::Int64(40),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.rolling(2, None).sum().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_rolling_sum_basic.txt", &output);
@@ -89610,10 +90742,27 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0)]),
-                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0), Scalar::Float64(40.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(4.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(30.0),
+                        Scalar::Float64(40.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.rolling(2, None).std().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_rolling_std_basic.txt", &output);
@@ -89624,8 +90773,14 @@ mod tests {
         let s = Series::from_values(
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
-            vec![Scalar::Int64(10), Scalar::Null(NullKind::Null), Scalar::Int64(30), Scalar::Int64(40)],
-        ).unwrap();
+            vec![
+                Scalar::Int64(10),
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(30),
+                Scalar::Int64(40),
+            ],
+        )
+        .unwrap();
         let result = s.count();
         let output = format!("{result}");
         assert_text_golden("series_count_basic.txt", &output);
@@ -89636,10 +90791,27 @@ mod tests {
         let df = DataFrame::from_dict(
             &["key", "val"],
             vec![
-                ("key", vec![Scalar::Utf8("a".into()), Scalar::Utf8("a".into()), Scalar::Utf8("b".into()), Scalar::Utf8("b".into())]),
-                ("val", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(10), Scalar::Int64(20)]),
+                (
+                    "key",
+                    vec![
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("b".into()),
+                        Scalar::Utf8("b".into()),
+                    ],
+                ),
+                (
+                    "val",
+                    vec![
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                        Scalar::Int64(10),
+                        Scalar::Int64(20),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let first = df.groupby(&["key"]).unwrap().first().unwrap();
         let last = df.groupby(&["key"]).unwrap().last().unwrap();
         let output = format!("first:\n{first}\nlast:\n{last}");
@@ -89652,12 +90824,14 @@ mod tests {
             "x",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
-        ).unwrap();
+        )
+        .unwrap();
         let s2 = Series::from_values(
             "y",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(1), Scalar::Int64(5), Scalar::Int64(3)],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s1.eq(&s2).unwrap();
         let output = format!("{result}");
         assert_text_golden("series_eq_basic.txt", &output);
@@ -89669,12 +90843,14 @@ mod tests {
             "x",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
-        ).unwrap();
+        )
+        .unwrap();
         let s2 = Series::from_values(
             "y",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(1), Scalar::Int64(5), Scalar::Int64(3)],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s1.ne(&s2).unwrap();
         let output = format!("{result}");
         assert_text_golden("series_ne_basic.txt", &output);
@@ -89686,12 +90862,14 @@ mod tests {
             "x",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(1), Scalar::Int64(5), Scalar::Int64(3)],
-        ).unwrap();
+        )
+        .unwrap();
         let s2 = Series::from_values(
             "y",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(2), Scalar::Int64(3), Scalar::Int64(3)],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s1.lt(&s2).unwrap();
         let output = format!("{result}");
         assert_text_golden("series_lt_basic.txt", &output);
@@ -89703,12 +90881,14 @@ mod tests {
             "x",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(1), Scalar::Int64(5), Scalar::Int64(3)],
-        ).unwrap();
+        )
+        .unwrap();
         let s2 = Series::from_values(
             "y",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(2), Scalar::Int64(3), Scalar::Int64(3)],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s1.gt(&s2).unwrap();
         let output = format!("{result}");
         assert_text_golden("series_gt_basic.txt", &output);
@@ -89720,12 +90900,14 @@ mod tests {
             "x",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(1), Scalar::Int64(5), Scalar::Int64(3)],
-        ).unwrap();
+        )
+        .unwrap();
         let s2 = Series::from_values(
             "y",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(2), Scalar::Int64(3), Scalar::Int64(3)],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s1.le(&s2).unwrap();
         let output = format!("{result}");
         assert_text_golden("series_le_basic.txt", &output);
@@ -89737,12 +90919,14 @@ mod tests {
             "x",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(1), Scalar::Int64(5), Scalar::Int64(3)],
-        ).unwrap();
+        )
+        .unwrap();
         let s2 = Series::from_values(
             "y",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(2), Scalar::Int64(3), Scalar::Int64(3)],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s1.ge(&s2).unwrap();
         let output = format!("{result}");
         assert_text_golden("series_ge_basic.txt", &output);
@@ -89754,12 +90938,14 @@ mod tests {
             "x",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(10), Scalar::Int64(17), Scalar::Int64(25)],
-        ).unwrap();
+        )
+        .unwrap();
         let s2 = Series::from_values(
             "y",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(3), Scalar::Int64(5), Scalar::Int64(7)],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s1.modulo(&s2).unwrap();
         let output = format!("{result}");
         assert_text_golden("series_mod_basic.txt", &output);
@@ -89771,12 +90957,14 @@ mod tests {
             "x",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(10), Scalar::Int64(17), Scalar::Int64(25)],
-        ).unwrap();
+        )
+        .unwrap();
         let s2 = Series::from_values(
             "y",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(3), Scalar::Int64(5), Scalar::Int64(7)],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s1.floordiv(&s2).unwrap();
         let output = format!("{result}");
         assert_text_golden("series_floordiv_basic.txt", &output);
@@ -89786,10 +90974,20 @@ mod tests {
     fn series_reindex_golden_basic() {
         let s = Series::from_values(
             "vals",
-            vec![IndexLabel::Utf8("a".into()), IndexLabel::Utf8("b".into()), IndexLabel::Utf8("c".into())],
+            vec![
+                IndexLabel::Utf8("a".into()),
+                IndexLabel::Utf8("b".into()),
+                IndexLabel::Utf8("c".into()),
+            ],
             vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
-        ).unwrap();
-        let new_labels = vec![IndexLabel::Utf8("c".into()), IndexLabel::Utf8("b".into()), IndexLabel::Utf8("a".into()), IndexLabel::Utf8("d".into())];
+        )
+        .unwrap();
+        let new_labels = vec![
+            IndexLabel::Utf8("c".into()),
+            IndexLabel::Utf8("b".into()),
+            IndexLabel::Utf8("a".into()),
+            IndexLabel::Utf8("d".into()),
+        ];
         let result = s.reindex(new_labels).unwrap();
         let output = format!("{result}");
         assert_text_golden("series_reindex_basic.txt", &output);
@@ -89801,12 +90999,14 @@ mod tests {
             "vals",
             vec![0_i64.into(), 1_i64.into()],
             vec![Scalar::Int64(10), Scalar::Int64(20)],
-        ).unwrap();
+        )
+        .unwrap();
         let s2 = Series::from_values(
             "vals",
             vec![2_i64.into(), 3_i64.into()],
             vec![Scalar::Int64(30), Scalar::Int64(40)],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s1.append(&s2).unwrap();
         let output = format!("{result}");
         assert_text_golden("series_append_basic.txt", &output);
@@ -89816,14 +91016,24 @@ mod tests {
     fn series_align_golden_basic() {
         let s1 = Series::from_values(
             "x",
-            vec![IndexLabel::Utf8("a".into()), IndexLabel::Utf8("b".into()), IndexLabel::Utf8("c".into())],
+            vec![
+                IndexLabel::Utf8("a".into()),
+                IndexLabel::Utf8("b".into()),
+                IndexLabel::Utf8("c".into()),
+            ],
             vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
-        ).unwrap();
+        )
+        .unwrap();
         let s2 = Series::from_values(
             "y",
-            vec![IndexLabel::Utf8("b".into()), IndexLabel::Utf8("c".into()), IndexLabel::Utf8("d".into())],
+            vec![
+                IndexLabel::Utf8("b".into()),
+                IndexLabel::Utf8("c".into()),
+                IndexLabel::Utf8("d".into()),
+            ],
             vec![Scalar::Int64(20), Scalar::Int64(30), Scalar::Int64(40)],
-        ).unwrap();
+        )
+        .unwrap();
         let (aligned1, aligned2) = s1.align(&s2, AlignMode::Outer).unwrap();
         let output = format!("aligned1:\n{aligned1}\naligned2:\n{aligned2}");
         assert_text_golden("series_align_basic.txt", &output);
@@ -89837,14 +91047,16 @@ mod tests {
                 ("a", vec![Scalar::Int64(1), Scalar::Int64(2)]),
                 ("b", vec![Scalar::Int64(10), Scalar::Int64(20)]),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let df2 = DataFrame::from_dict(
             &["a", "b"],
             vec![
                 ("a", vec![Scalar::Int64(3), Scalar::Int64(4)]),
                 ("b", vec![Scalar::Int64(30), Scalar::Int64(40)]),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df1.append(&df2).unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_append_basic.txt", &output);
@@ -89856,7 +91068,8 @@ mod tests {
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.astype(DType::Float64).unwrap();
         let output = format!("{result}");
         assert_text_golden("series_astype_float_basic.txt", &output);
@@ -89868,7 +91081,8 @@ mod tests {
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(123), Scalar::Int64(456), Scalar::Int64(789)],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.astype(DType::Utf8).unwrap();
         let output = format!("{result}");
         assert_text_golden("series_astype_string_basic.txt", &output);
@@ -89880,7 +91094,8 @@ mod tests {
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.to_list();
         let output = format!("{result:?}");
         assert_text_golden("series_tolist_basic.txt", &output);
@@ -89891,11 +91106,36 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b", "c"],
             vec![
-                ("a", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3), Scalar::Int64(4)]),
-                ("b", vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30), Scalar::Int64(40)]),
-                ("c", vec![Scalar::Int64(100), Scalar::Int64(200), Scalar::Int64(300), Scalar::Int64(400)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                        Scalar::Int64(3),
+                        Scalar::Int64(4),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Int64(10),
+                        Scalar::Int64(20),
+                        Scalar::Int64(30),
+                        Scalar::Int64(40),
+                    ],
+                ),
+                (
+                    "c",
+                    vec![
+                        Scalar::Int64(100),
+                        Scalar::Int64(200),
+                        Scalar::Int64(300),
+                        Scalar::Int64(400),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let (rows, cols) = df.shape();
         let output = format!("({rows}, {cols})");
         assert_text_golden("dataframe_shape_basic.txt", &output);
@@ -89907,7 +91147,8 @@ mod tests {
             "flags",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Bool(false), Scalar::Bool(true), Scalar::Bool(false)],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.any().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_any_basic.txt", &output);
@@ -89919,7 +91160,8 @@ mod tests {
             "flags",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Bool(true), Scalar::Bool(true), Scalar::Bool(true)],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.all().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_all_basic.txt", &output);
@@ -89931,12 +91173,14 @@ mod tests {
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
-        ).unwrap();
+        )
+        .unwrap();
         let s2 = Series::from_values(
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(1), Scalar::Int64(1), Scalar::Int64(3)],
-        ).unwrap();
+        )
+        .unwrap();
         let output = format!("unique: {}, has_dups: {}", s1.is_unique(), s2.is_unique());
         assert_text_golden("series_is_unique_basic.txt", &output);
     }
@@ -89947,14 +91191,19 @@ mod tests {
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
-        ).unwrap();
+        )
+        .unwrap();
         let s_dec = Series::from_values(
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(3), Scalar::Int64(2), Scalar::Int64(1)],
-        ).unwrap();
-        let output = format!("inc_monotonic: {}, dec_monotonic: {}",
-            s_inc.is_monotonic_increasing(), s_dec.is_monotonic_decreasing());
+        )
+        .unwrap();
+        let output = format!(
+            "inc_monotonic: {}, dec_monotonic: {}",
+            s_inc.is_monotonic_increasing(),
+            s_dec.is_monotonic_decreasing()
+        );
         assert_text_golden("series_is_monotonic_basic.txt", &output);
     }
 
@@ -89963,14 +91212,28 @@ mod tests {
         let s_no_nan = Series::from_values(
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+            ],
+        )
+        .unwrap();
         let s_has_nan = Series::from_values(
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(1.0), Scalar::Null(NullKind::NaN), Scalar::Float64(3.0)],
-        ).unwrap();
-        let output = format!("no_nan: {}, has_nan: {}", s_no_nan.hasnans(), s_has_nan.hasnans());
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(3.0),
+            ],
+        )
+        .unwrap();
+        let output = format!(
+            "no_nan: {}, has_nan: {}",
+            s_no_nan.hasnans(),
+            s_has_nan.hasnans()
+        );
         assert_text_golden("series_hasnans_basic.txt", &output);
     }
 
@@ -89980,7 +91243,8 @@ mod tests {
             "flags",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.invert().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_invert_basic.txt", &output);
@@ -89991,8 +91255,14 @@ mod tests {
         let s = Series::from_values(
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
-            vec![Scalar::Float64(1.0), Scalar::Float64(5.0), Scalar::Float64(3.0), Scalar::Float64(8.0)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(5.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(8.0),
+            ],
+        )
+        .unwrap();
         let result = s.clip_lower(4.0).unwrap();
         let output = format!("{result}");
         assert_text_golden("series_clip_lower_basic.txt", &output);
@@ -90003,8 +91273,14 @@ mod tests {
         let s = Series::from_values(
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
-            vec![Scalar::Float64(1.0), Scalar::Float64(5.0), Scalar::Float64(3.0), Scalar::Float64(8.0)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(5.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(8.0),
+            ],
+        )
+        .unwrap();
         let result = s.clip_upper(4.0).unwrap();
         let output = format!("{result}");
         assert_text_golden("series_clip_upper_basic.txt", &output);
@@ -90015,10 +91291,27 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(5.0), Scalar::Float64(3.0), Scalar::Float64(8.0)]),
-                ("b", vec![Scalar::Float64(2.0), Scalar::Float64(6.0), Scalar::Float64(4.0), Scalar::Float64(9.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(5.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(8.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(6.0),
+                        Scalar::Float64(4.0),
+                        Scalar::Float64(9.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.clip(Some(3.0), Some(7.0)).unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_clip_basic.txt", &output);
@@ -90028,9 +91321,14 @@ mod tests {
     fn series_to_dict_golden_basic() {
         let s = Series::from_values(
             "vals",
-            vec![IndexLabel::Utf8("a".into()), IndexLabel::Utf8("b".into()), IndexLabel::Utf8("c".into())],
+            vec![
+                IndexLabel::Utf8("a".into()),
+                IndexLabel::Utf8("b".into()),
+                IndexLabel::Utf8("c".into()),
+            ],
             vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.to_dict();
         let output = format!("{result:?}");
         assert_text_golden("series_to_dict_basic.txt", &output);
@@ -90046,7 +91344,8 @@ mod tests {
                 Scalar::Utf8("RUST".into()),
                 Scalar::Utf8("pandas".into()),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.str().capitalize().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_str_capitalize_basic.txt", &output);
@@ -90062,7 +91361,8 @@ mod tests {
                 Scalar::Utf8("RUST IS FAST".into()),
                 Scalar::Utf8("pandas library".into()),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.str().title().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_str_title_basic.txt", &output);
@@ -90078,7 +91378,8 @@ mod tests {
                 Scalar::Utf8("x".into()),
                 Scalar::Utf8("123".into()),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.str().repeat(3).unwrap();
         let output = format!("{result}");
         assert_text_golden("series_str_repeat_basic.txt", &output);
@@ -90094,7 +91395,8 @@ mod tests {
                 Scalar::Utf8("bb".into()),
                 Scalar::Utf8("ccc".into()),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.str().pad(5, "left", '*').unwrap();
         let output = format!("{result}");
         assert_text_golden("series_str_pad_basic.txt", &output);
@@ -90110,7 +91412,8 @@ mod tests {
                 Scalar::Utf8("  world  ".into()),
                 Scalar::Utf8("test".into()),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.str().lstrip().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_str_lstrip_basic.txt", &output);
@@ -90126,7 +91429,8 @@ mod tests {
                 Scalar::Utf8("  world  ".into()),
                 Scalar::Utf8("test".into()),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.str().rstrip().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_str_rstrip_basic.txt", &output);
@@ -90142,7 +91446,8 @@ mod tests {
                 Scalar::Utf8("x/y".into()),
                 Scalar::Utf8("one/two/three/four".into()),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.str().split_get("/", 1).unwrap();
         let output = format!("{result}");
         assert_text_golden("series_str_split_get_basic.txt", &output);
@@ -90150,19 +91455,21 @@ mod tests {
 
     #[test]
     fn series_squeeze_golden_basic() {
-        let s_single = Series::from_values(
-            "single",
-            vec![0_i64.into()],
-            vec![Scalar::Int64(42)],
-        ).unwrap();
+        let s_single =
+            Series::from_values("single", vec![0_i64.into()], vec![Scalar::Int64(42)]).unwrap();
         let s_multi = Series::from_values(
             "multi",
             vec![0_i64.into(), 1_i64.into()],
             vec![Scalar::Int64(1), Scalar::Int64(2)],
-        ).unwrap();
+        )
+        .unwrap();
         let single_result = s_single.squeeze();
         let multi_result = s_multi.squeeze();
-        let output = format!("single: {:?}, multi_is_series: {}", single_result, multi_result.is_err());
+        let output = format!(
+            "single: {:?}, multi_is_series: {}",
+            single_result,
+            multi_result.is_err()
+        );
         assert_text_golden("series_squeeze_basic.txt", &output);
     }
 
@@ -90172,7 +91479,8 @@ mod tests {
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.to_list();
         let output = format!("{result:?}");
         assert_text_golden("series_to_list_basic.txt", &output);
@@ -90183,8 +91491,13 @@ mod tests {
         let s = Series::from_values(
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(1.5), Scalar::Float64(2.5), Scalar::Float64(3.5)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(1.5),
+                Scalar::Float64(2.5),
+                Scalar::Float64(3.5),
+            ],
+        )
+        .unwrap();
         let result = s.to_numpy();
         let output = format!("{result:?}");
         assert_text_golden("series_to_numpy_basic.txt", &output);
@@ -90196,7 +91509,8 @@ mod tests {
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
-        ).unwrap();
+        )
+        .unwrap();
         let mem = s.memory_usage();
         let output = format!("memory_usage > 0: {}", mem > 0);
         assert_text_golden("series_memory_usage_basic.txt", &output);
@@ -90208,7 +91522,8 @@ mod tests {
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
-        ).unwrap();
+        )
+        .unwrap();
         let nb = s.nbytes();
         let output = format!("nbytes > 0: {}", nb > 0);
         assert_text_golden("series_nbytes_basic.txt", &output);
@@ -90224,8 +91539,14 @@ mod tests {
                 IndexLabel::Utf8("B, x".into()),
                 IndexLabel::Utf8("B, y".into()),
             ],
-            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3), Scalar::Int64(4)],
-        ).unwrap();
+            vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+                Scalar::Int64(4),
+            ],
+        )
+        .unwrap();
         let result = s.unstack().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_unstack_basic.txt", &output);
@@ -90240,9 +91561,16 @@ mod tests {
             IndexLabel::Utf8("B|y".into()),
         ]);
         let mut cols = BTreeMap::new();
-        cols.insert("value".to_string(), Column::from_values(vec![
-            Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3), Scalar::Int64(4)
-        ]).unwrap());
+        cols.insert(
+            "value".to_string(),
+            Column::from_values(vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+                Scalar::Int64(4),
+            ])
+            .unwrap(),
+        );
         let df = DataFrame::new_with_column_order(index, cols, vec!["value".to_string()]).unwrap();
         let result = df.unstack().unwrap();
         let output = format!("{result}");
@@ -90253,7 +91581,13 @@ mod tests {
     fn series_ffill_golden_basic() {
         let s = Series::from_values(
             "vals",
-            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+            ],
             vec![
                 Scalar::Float64(1.0),
                 Scalar::Null(NullKind::NaN),
@@ -90261,7 +91595,8 @@ mod tests {
                 Scalar::Null(NullKind::NaN),
                 Scalar::Null(NullKind::NaN),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.ffill(None).unwrap();
         let output = format!("{result}");
         assert_text_golden("series_ffill_basic.txt", &output);
@@ -90271,7 +91606,13 @@ mod tests {
     fn series_bfill_golden_basic() {
         let s = Series::from_values(
             "vals",
-            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+            ],
             vec![
                 Scalar::Null(NullKind::NaN),
                 Scalar::Null(NullKind::NaN),
@@ -90279,7 +91620,8 @@ mod tests {
                 Scalar::Null(NullKind::NaN),
                 Scalar::Float64(5.0),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.bfill(None).unwrap();
         let output = format!("{result}");
         assert_text_golden("series_bfill_basic.txt", &output);
@@ -90289,7 +91631,13 @@ mod tests {
     fn series_interpolate_golden_basic() {
         let s = Series::from_values(
             "vals",
-            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+            ],
             vec![
                 Scalar::Float64(1.0),
                 Scalar::Null(NullKind::NaN),
@@ -90297,7 +91645,8 @@ mod tests {
                 Scalar::Null(NullKind::NaN),
                 Scalar::Float64(5.0),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.interpolate().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_interpolate_basic.txt", &output);
@@ -90308,13 +91657,23 @@ mod tests {
         let s1 = Series::from_values(
             "a",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+            ],
+        )
+        .unwrap();
         let s2 = Series::from_values(
             "b",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(1.00001), Scalar::Float64(2.00001), Scalar::Float64(3.00001)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(1.00001),
+                Scalar::Float64(2.00001),
+                Scalar::Float64(3.00001),
+            ],
+        )
+        .unwrap();
         let close = s1.allclose(&s2, 1e-4, 1e-4).unwrap();
         let not_close = s1.allclose(&s2, 1e-8, 1e-8).unwrap();
         let output = format!("close: {close}, not_close: {not_close}");
@@ -90331,7 +91690,8 @@ mod tests {
                 IndexLabel::Utf8("B, x".into()),
             ],
             vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.swaplevel();
         let output = format!("{result}");
         assert_text_golden("series_swaplevel_basic.txt", &output);
@@ -90342,8 +91702,14 @@ mod tests {
         let s = Series::from_values(
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
-            vec![Scalar::Float64(1.0), Scalar::Float64(4.0), Scalar::Float64(9.0), Scalar::Float64(16.0)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(4.0),
+                Scalar::Float64(9.0),
+                Scalar::Float64(16.0),
+            ],
+        )
+        .unwrap();
         let result = s.sqrt().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_sqrt_basic.txt", &output);
@@ -90354,8 +91720,13 @@ mod tests {
         let s = Series::from_values(
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(0.0), Scalar::Float64(1.0), Scalar::Float64(2.0)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(0.0),
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+            ],
+        )
+        .unwrap();
         let result = s.exp().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_exp_basic.txt", &output);
@@ -90366,8 +91737,13 @@ mod tests {
         let s = Series::from_values(
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(1.0), Scalar::Float64(std::f64::consts::E), Scalar::Float64(10.0)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(std::f64::consts::E),
+                Scalar::Float64(10.0),
+            ],
+        )
+        .unwrap();
         let result = s.log().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_log_basic.txt", &output);
@@ -90378,8 +91754,14 @@ mod tests {
         let s = Series::from_values(
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
-            vec![Scalar::Float64(1.5), Scalar::Float64(2.7), Scalar::Float64(-1.5), Scalar::Float64(-2.7)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(1.5),
+                Scalar::Float64(2.7),
+                Scalar::Float64(-1.5),
+                Scalar::Float64(-2.7),
+            ],
+        )
+        .unwrap();
         let result = s.floor().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_floor_basic.txt", &output);
@@ -90390,8 +91772,14 @@ mod tests {
         let s = Series::from_values(
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
-            vec![Scalar::Float64(1.5), Scalar::Float64(2.7), Scalar::Float64(-1.5), Scalar::Float64(-2.7)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(1.5),
+                Scalar::Float64(2.7),
+                Scalar::Float64(-1.5),
+                Scalar::Float64(-2.7),
+            ],
+        )
+        .unwrap();
         let result = s.ceil().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_ceil_basic.txt", &output);
@@ -90402,8 +91790,13 @@ mod tests {
         let s = Series::from_values(
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(1.0), Scalar::Float64(10.0), Scalar::Float64(100.0)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(10.0),
+                Scalar::Float64(100.0),
+            ],
+        )
+        .unwrap();
         let result = s.log10().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_log10_basic.txt", &output);
@@ -90414,8 +91807,13 @@ mod tests {
         let s = Series::from_values(
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(8.0)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(8.0),
+            ],
+        )
+        .unwrap();
         let result = s.log2().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_log2_basic.txt", &output);
@@ -90425,7 +91823,13 @@ mod tests {
     fn series_percentile_golden_basic() {
         let s = Series::from_values(
             "vals",
-            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+            ],
             vec![
                 Scalar::Float64(10.0),
                 Scalar::Float64(20.0),
@@ -90433,7 +91837,8 @@ mod tests {
                 Scalar::Float64(40.0),
                 Scalar::Float64(50.0),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let p50 = s.percentile(50.0);
         let p25 = s.percentile(25.0);
         let output = format!("p50: {p50:?}, p25: {p25:?}");
@@ -90446,11 +91851,14 @@ mod tests {
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
-        ).unwrap();
-        let result = s.apply(|v| match v {
-            Scalar::Int64(n) => Scalar::Int64(n * 2),
-            other => other.clone(),
-        }).unwrap();
+        )
+        .unwrap();
+        let result = s
+            .apply(|v| match v {
+                Scalar::Int64(n) => Scalar::Int64(n * 2),
+                other => other.clone(),
+            })
+            .unwrap();
         let output = format!("{result}");
         assert_text_golden("series_apply_basic.txt", &output);
     }
@@ -90460,11 +91868,14 @@ mod tests {
         let s = Series::from_values(
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(4.0), Scalar::Float64(9.0), Scalar::Float64(16.0)],
-        ).unwrap();
-        let result = s.pipe(|series| {
-            series.sqrt()
-        }).unwrap();
+            vec![
+                Scalar::Float64(4.0),
+                Scalar::Float64(9.0),
+                Scalar::Float64(16.0),
+            ],
+        )
+        .unwrap();
+        let result = s.pipe(|series| series.sqrt()).unwrap();
         let output = format!("{result}");
         assert_text_golden("series_pipe_basic.txt", &output);
     }
@@ -90475,11 +91886,14 @@ mod tests {
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
-        ).unwrap();
-        let result = s.transform(|v| match v {
-            Scalar::Int64(n) => Scalar::Int64(n / 10),
-            other => other.clone(),
-        }).unwrap();
+        )
+        .unwrap();
+        let result = s
+            .transform(|v| match v {
+                Scalar::Int64(n) => Scalar::Int64(n / 10),
+                other => other.clone(),
+            })
+            .unwrap();
         let output = format!("{result}");
         assert_text_golden("series_transform_basic.txt", &output);
     }
@@ -90490,12 +91904,14 @@ mod tests {
             "a",
             vec![IndexLabel::Utf8("x".into()), IndexLabel::Utf8("y".into())],
             vec![Scalar::Int64(1), Scalar::Int64(2)],
-        ).unwrap();
+        )
+        .unwrap();
         let s2 = Series::from_values(
             "b",
             vec![IndexLabel::Utf8("y".into()), IndexLabel::Utf8("z".into())],
             vec![Scalar::Int64(10), Scalar::Int64(20)],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s1.reindex_like(&s2).unwrap();
         let output = format!("{result}");
         assert_text_golden("series_reindex_like_basic.txt", &output);
@@ -90541,10 +91957,21 @@ mod tests {
         let df = DataFrame::from_dict(
             &["name", "value"],
             vec![
-                ("name", vec![Scalar::Utf8("a".into()), Scalar::Utf8("b".into()), Scalar::Utf8("c".into())]),
-                ("value", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]),
+                (
+                    "name",
+                    vec![
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("b".into()),
+                        Scalar::Utf8("c".into()),
+                    ],
+                ),
+                (
+                    "value",
+                    vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let output = format!("{df}");
         assert_text_golden("dataframe_from_dict_basic.txt", &output);
     }
@@ -90555,7 +91982,8 @@ mod tests {
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
-        ).unwrap();
+        )
+        .unwrap();
         let copied = s.copy();
         let output = format!("original: {s}, copy: {copied}");
         assert_text_golden("series_copy_basic.txt", &output);
@@ -90567,7 +91995,8 @@ mod tests {
             "vals",
             vec![IndexLabel::Utf8("a".into()), IndexLabel::Utf8("b".into())],
             vec![Scalar::Int64(10), Scalar::Int64(20)],
-        ).unwrap();
+        )
+        .unwrap();
         let csv = s.to_csv(',', true);
         assert_text_golden("series_to_csv_basic.txt", &csv);
     }
@@ -90578,7 +92007,8 @@ mod tests {
             "vals",
             vec![IndexLabel::Utf8("a".into()), IndexLabel::Utf8("b".into())],
             vec![Scalar::Int64(10), Scalar::Int64(20)],
-        ).unwrap();
+        )
+        .unwrap();
         let json = s.to_json("index").unwrap();
         assert_text_golden("series_to_json_basic.txt", &json);
     }
@@ -90588,8 +92018,13 @@ mod tests {
         let s = Series::from_values(
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+            ],
+        )
+        .unwrap();
         let result = s.convert_dtypes().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_convert_dtypes_basic.txt", &output);
@@ -90603,7 +92038,8 @@ mod tests {
                 ("a", vec![Scalar::Int64(1), Scalar::Int64(2)]),
                 ("b", vec![Scalar::Int64(3), Scalar::Int64(4)]),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let copied = df.copy();
         let output = format!("{copied}");
         assert_text_golden("dataframe_copy_basic.txt", &output);
@@ -90614,10 +92050,14 @@ mod tests {
         let df = DataFrame::from_dict(
             &["name", "value"],
             vec![
-                ("name", vec![Scalar::Utf8("a".into()), Scalar::Utf8("b".into())]),
+                (
+                    "name",
+                    vec![Scalar::Utf8("a".into()), Scalar::Utf8("b".into())],
+                ),
                 ("value", vec![Scalar::Int64(10), Scalar::Int64(20)]),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let csv = df.to_csv(',', true);
         assert_text_golden("dataframe_to_csv_basic.txt", &csv);
     }
@@ -90626,10 +92066,17 @@ mod tests {
     fn series_loc_golden_basic() {
         let s = Series::from_values(
             "vals",
-            vec![IndexLabel::Utf8("a".into()), IndexLabel::Utf8("b".into()), IndexLabel::Utf8("c".into())],
+            vec![
+                IndexLabel::Utf8("a".into()),
+                IndexLabel::Utf8("b".into()),
+                IndexLabel::Utf8("c".into()),
+            ],
             vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
-        ).unwrap();
-        let result = s.loc(&[IndexLabel::Utf8("a".into()), IndexLabel::Utf8("c".into())]).unwrap();
+        )
+        .unwrap();
+        let result = s
+            .loc(&[IndexLabel::Utf8("a".into()), IndexLabel::Utf8("c".into())])
+            .unwrap();
         let output = format!("{result}");
         assert_text_golden("series_loc_basic.txt", &output);
     }
@@ -90638,9 +92085,14 @@ mod tests {
     fn series_iloc_golden_basic() {
         let s = Series::from_values(
             "vals",
-            vec![IndexLabel::Utf8("a".into()), IndexLabel::Utf8("b".into()), IndexLabel::Utf8("c".into())],
+            vec![
+                IndexLabel::Utf8("a".into()),
+                IndexLabel::Utf8("b".into()),
+                IndexLabel::Utf8("c".into()),
+            ],
             vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.iloc(&[0, 2]).unwrap();
         let output = format!("{result}");
         assert_text_golden("series_iloc_basic.txt", &output);
@@ -90650,10 +92102,26 @@ mod tests {
     fn series_loc_slice_golden_basic() {
         let s = Series::from_values(
             "vals",
-            vec![IndexLabel::Utf8("a".into()), IndexLabel::Utf8("b".into()), IndexLabel::Utf8("c".into()), IndexLabel::Utf8("d".into())],
-            vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30), Scalar::Int64(40)],
-        ).unwrap();
-        let result = s.loc_slice(Some(&IndexLabel::Utf8("b".into())), Some(&IndexLabel::Utf8("d".into()))).unwrap();
+            vec![
+                IndexLabel::Utf8("a".into()),
+                IndexLabel::Utf8("b".into()),
+                IndexLabel::Utf8("c".into()),
+                IndexLabel::Utf8("d".into()),
+            ],
+            vec![
+                Scalar::Int64(10),
+                Scalar::Int64(20),
+                Scalar::Int64(30),
+                Scalar::Int64(40),
+            ],
+        )
+        .unwrap();
+        let result = s
+            .loc_slice(
+                Some(&IndexLabel::Utf8("b".into())),
+                Some(&IndexLabel::Utf8("d".into())),
+            )
+            .unwrap();
         let output = format!("{result}");
         assert_text_golden("series_loc_slice_basic.txt", &output);
     }
@@ -90662,9 +92130,22 @@ mod tests {
     fn series_iloc_slice_golden_basic() {
         let s = Series::from_values(
             "vals",
-            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
-            vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30), Scalar::Int64(40), Scalar::Int64(50)],
-        ).unwrap();
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+            ],
+            vec![
+                Scalar::Int64(10),
+                Scalar::Int64(20),
+                Scalar::Int64(30),
+                Scalar::Int64(40),
+                Scalar::Int64(50),
+            ],
+        )
+        .unwrap();
         let result = s.iloc_slice(Some(1), Some(4)).unwrap();
         let output = format!("{result}");
         assert_text_golden("series_iloc_slice_basic.txt", &output);
@@ -90675,8 +92156,13 @@ mod tests {
         let s = Series::from_values(
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(0.0), Scalar::Float64(std::f64::consts::PI / 2.0), Scalar::Float64(std::f64::consts::PI)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(0.0),
+                Scalar::Float64(std::f64::consts::PI / 2.0),
+                Scalar::Float64(std::f64::consts::PI),
+            ],
+        )
+        .unwrap();
         let result = s.sin().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_sin_basic.txt", &output);
@@ -90687,8 +92173,13 @@ mod tests {
         let s = Series::from_values(
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(0.0), Scalar::Float64(std::f64::consts::PI / 2.0), Scalar::Float64(std::f64::consts::PI)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(0.0),
+                Scalar::Float64(std::f64::consts::PI / 2.0),
+                Scalar::Float64(std::f64::consts::PI),
+            ],
+        )
+        .unwrap();
         let result = s.cos().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_cos_basic.txt", &output);
@@ -90699,8 +92190,13 @@ mod tests {
         let s = Series::from_values(
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(0.0), Scalar::Float64(std::f64::consts::PI / 4.0), Scalar::Float64(std::f64::consts::PI / 6.0)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(0.0),
+                Scalar::Float64(std::f64::consts::PI / 4.0),
+                Scalar::Float64(std::f64::consts::PI / 6.0),
+            ],
+        )
+        .unwrap();
         let result = s.tan().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_tan_basic.txt", &output);
@@ -90711,8 +92207,13 @@ mod tests {
         let s = Series::from_values(
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(0.0), Scalar::Float64(0.5), Scalar::Float64(1.0)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(0.0),
+                Scalar::Float64(0.5),
+                Scalar::Float64(1.0),
+            ],
+        )
+        .unwrap();
         let result = s.arcsin().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_arcsin_basic.txt", &output);
@@ -90723,8 +92224,13 @@ mod tests {
         let s = Series::from_values(
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(0.0), Scalar::Float64(0.5), Scalar::Float64(1.0)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(0.0),
+                Scalar::Float64(0.5),
+                Scalar::Float64(1.0),
+            ],
+        )
+        .unwrap();
         let result = s.arccos().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_arccos_basic.txt", &output);
@@ -90735,8 +92241,13 @@ mod tests {
         let s = Series::from_values(
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(0.0), Scalar::Float64(1.0), Scalar::Float64(-1.0)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(0.0),
+                Scalar::Float64(1.0),
+                Scalar::Float64(-1.0),
+            ],
+        )
+        .unwrap();
         let result = s.arctan().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_arctan_basic.txt", &output);
@@ -90747,8 +92258,13 @@ mod tests {
         let s = Series::from_values(
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(0.0), Scalar::Float64(1.0), Scalar::Float64(-1.0)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(0.0),
+                Scalar::Float64(1.0),
+                Scalar::Float64(-1.0),
+            ],
+        )
+        .unwrap();
         let result = s.sinh().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_sinh_basic.txt", &output);
@@ -90759,8 +92275,13 @@ mod tests {
         let s = Series::from_values(
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(0.0), Scalar::Float64(1.0), Scalar::Float64(-1.0)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(0.0),
+                Scalar::Float64(1.0),
+                Scalar::Float64(-1.0),
+            ],
+        )
+        .unwrap();
         let result = s.cosh().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_cosh_basic.txt", &output);
@@ -90771,8 +92292,13 @@ mod tests {
         let s = Series::from_values(
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(0.0), Scalar::Float64(1.0), Scalar::Float64(-1.0)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(0.0),
+                Scalar::Float64(1.0),
+                Scalar::Float64(-1.0),
+            ],
+        )
+        .unwrap();
         let result = s.tanh().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_tanh_basic.txt", &output);
@@ -90783,8 +92309,14 @@ mod tests {
         let s = Series::from_values(
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
-            vec![Scalar::Float64(-5.0), Scalar::Float64(0.0), Scalar::Float64(3.0), Scalar::Float64(-1.0)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(-5.0),
+                Scalar::Float64(0.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(-1.0),
+            ],
+        )
+        .unwrap();
         let result = s.sign().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_sign_basic.txt", &output);
@@ -90795,8 +92327,13 @@ mod tests {
         let s = Series::from_values(
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(1.0), Scalar::Float64(-2.0), Scalar::Float64(3.0)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(-2.0),
+                Scalar::Float64(3.0),
+            ],
+        )
+        .unwrap();
         let result = s.negative().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_negative_basic.txt", &output);
@@ -90807,8 +92344,13 @@ mod tests {
         let s = Series::from_values(
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(2.0), Scalar::Float64(4.0), Scalar::Float64(5.0)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(2.0),
+                Scalar::Float64(4.0),
+                Scalar::Float64(5.0),
+            ],
+        )
+        .unwrap();
         let result = s.reciprocal().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_reciprocal_basic.txt", &output);
@@ -90819,8 +92361,13 @@ mod tests {
         let s = Series::from_values(
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(0.0), Scalar::Float64(1.0), Scalar::Float64(-1.0)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(0.0),
+                Scalar::Float64(1.0),
+                Scalar::Float64(-1.0),
+            ],
+        )
+        .unwrap();
         let result = s.asinh().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_asinh_basic.txt", &output);
@@ -90831,8 +92378,13 @@ mod tests {
         let s = Series::from_values(
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+            ],
+        )
+        .unwrap();
         let result = s.acosh().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_acosh_basic.txt", &output);
@@ -90843,8 +92395,13 @@ mod tests {
         let s = Series::from_values(
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(0.0), Scalar::Float64(0.5), Scalar::Float64(-0.5)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(0.0),
+                Scalar::Float64(0.5),
+                Scalar::Float64(-0.5),
+            ],
+        )
+        .unwrap();
         let result = s.atanh().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_atanh_basic.txt", &output);
@@ -90855,8 +92412,13 @@ mod tests {
         let s = Series::from_values(
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(0.0), Scalar::Float64(1.0), Scalar::Float64(-1.0)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(0.0),
+                Scalar::Float64(1.0),
+                Scalar::Float64(-1.0),
+            ],
+        )
+        .unwrap();
         let result = s.expm1().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_expm1_basic.txt", &output);
@@ -90867,8 +92429,13 @@ mod tests {
         let s = Series::from_values(
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(0.0), Scalar::Float64(1.0), Scalar::Float64(2.0)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(0.0),
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+            ],
+        )
+        .unwrap();
         let result = s.log1p().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_log1p_basic.txt", &output);
@@ -90880,8 +92447,13 @@ mod tests {
         let s = Series::from_values(
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(0.0), Scalar::Float64(PI / 2.0), Scalar::Float64(PI)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(0.0),
+                Scalar::Float64(PI / 2.0),
+                Scalar::Float64(PI),
+            ],
+        )
+        .unwrap();
         let result = s.degrees().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_degrees_basic.txt", &output);
@@ -90892,8 +92464,13 @@ mod tests {
         let s = Series::from_values(
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(0.0), Scalar::Float64(90.0), Scalar::Float64(180.0)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(0.0),
+                Scalar::Float64(90.0),
+                Scalar::Float64(180.0),
+            ],
+        )
+        .unwrap();
         let result = s.radians().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_radians_basic.txt", &output);
@@ -90904,10 +92481,29 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0), Scalar::Float64(5.0)]),
-                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0), Scalar::Float64(40.0), Scalar::Float64(50.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(4.0),
+                        Scalar::Float64(5.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(30.0),
+                        Scalar::Float64(40.0),
+                        Scalar::Float64(50.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.skew().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_skew_basic.txt", &output);
@@ -90918,10 +92514,29 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0), Scalar::Float64(5.0)]),
-                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0), Scalar::Float64(40.0), Scalar::Float64(50.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(4.0),
+                        Scalar::Float64(5.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(30.0),
+                        Scalar::Float64(40.0),
+                        Scalar::Float64(50.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.kurt().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_kurt_basic.txt", &output);
@@ -90932,10 +92547,29 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0), Scalar::Float64(5.0)]),
-                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0), Scalar::Float64(40.0), Scalar::Float64(50.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(4.0),
+                        Scalar::Float64(5.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(30.0),
+                        Scalar::Float64(40.0),
+                        Scalar::Float64(50.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.sem().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_sem_basic.txt", &output);
@@ -90946,10 +92580,25 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(-1.0), Scalar::Float64(2.0), Scalar::Float64(-3.0)]),
-                ("b", vec![Scalar::Float64(4.0), Scalar::Float64(-5.0), Scalar::Float64(6.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(-1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(-3.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(4.0),
+                        Scalar::Float64(-5.0),
+                        Scalar::Float64(6.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.abs().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_abs_basic.txt", &output);
@@ -90960,10 +92609,25 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.234), Scalar::Float64(2.567), Scalar::Float64(3.891)]),
-                ("b", vec![Scalar::Float64(4.123), Scalar::Float64(5.456), Scalar::Float64(6.789)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.234),
+                        Scalar::Float64(2.567),
+                        Scalar::Float64(3.891),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(4.123),
+                        Scalar::Float64(5.456),
+                        Scalar::Float64(6.789),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.round(2).unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_round_basic.txt", &output);
@@ -90974,10 +92638,25 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.9), Scalar::Float64(2.1), Scalar::Float64(3.5)]),
-                ("b", vec![Scalar::Float64(4.7), Scalar::Float64(5.2), Scalar::Float64(6.8)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.9),
+                        Scalar::Float64(2.1),
+                        Scalar::Float64(3.5),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(4.7),
+                        Scalar::Float64(5.2),
+                        Scalar::Float64(6.8),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.floor().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_floor_basic.txt", &output);
@@ -90988,10 +92667,25 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.1), Scalar::Float64(2.9), Scalar::Float64(3.5)]),
-                ("b", vec![Scalar::Float64(4.2), Scalar::Float64(5.8), Scalar::Float64(6.3)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.1),
+                        Scalar::Float64(2.9),
+                        Scalar::Float64(3.5),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(4.2),
+                        Scalar::Float64(5.8),
+                        Scalar::Float64(6.3),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.ceil().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_ceil_basic.txt", &output);
@@ -91002,10 +92696,25 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(0.0), Scalar::Float64(1.0), Scalar::Float64(2.0)]),
-                ("b", vec![Scalar::Float64(-1.0), Scalar::Float64(0.5), Scalar::Float64(1.5)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(0.0),
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(-1.0),
+                        Scalar::Float64(0.5),
+                        Scalar::Float64(1.5),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.exp().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_exp_basic.txt", &output);
@@ -91016,10 +92725,25 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
-                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(30.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.log().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_log_basic.txt", &output);
@@ -91031,10 +92755,25 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(0.0), Scalar::Float64(PI / 2.0), Scalar::Float64(PI)]),
-                ("b", vec![Scalar::Float64(PI / 4.0), Scalar::Float64(PI / 3.0), Scalar::Float64(PI / 6.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(0.0),
+                        Scalar::Float64(PI / 2.0),
+                        Scalar::Float64(PI),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(PI / 4.0),
+                        Scalar::Float64(PI / 3.0),
+                        Scalar::Float64(PI / 6.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.sin().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_sin_basic.txt", &output);
@@ -91046,10 +92785,25 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(0.0), Scalar::Float64(PI / 2.0), Scalar::Float64(PI)]),
-                ("b", vec![Scalar::Float64(PI / 4.0), Scalar::Float64(PI / 3.0), Scalar::Float64(PI / 6.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(0.0),
+                        Scalar::Float64(PI / 2.0),
+                        Scalar::Float64(PI),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(PI / 4.0),
+                        Scalar::Float64(PI / 3.0),
+                        Scalar::Float64(PI / 6.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.cos().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_cos_basic.txt", &output);
@@ -91061,10 +92815,25 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(0.0), Scalar::Float64(PI / 4.0), Scalar::Float64(PI / 6.0)]),
-                ("b", vec![Scalar::Float64(PI / 3.0), Scalar::Float64(PI / 8.0), Scalar::Float64(PI / 12.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(0.0),
+                        Scalar::Float64(PI / 4.0),
+                        Scalar::Float64(PI / 6.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(PI / 3.0),
+                        Scalar::Float64(PI / 8.0),
+                        Scalar::Float64(PI / 12.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.tan().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_tan_basic.txt", &output);
@@ -91075,10 +92844,25 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(4.0), Scalar::Float64(9.0)]),
-                ("b", vec![Scalar::Float64(16.0), Scalar::Float64(25.0), Scalar::Float64(36.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(4.0),
+                        Scalar::Float64(9.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(16.0),
+                        Scalar::Float64(25.0),
+                        Scalar::Float64(36.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.sqrt().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_sqrt_basic.txt", &output);
@@ -91089,10 +92873,25 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(4.0)]),
-                ("b", vec![Scalar::Float64(8.0), Scalar::Float64(16.0), Scalar::Float64(32.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(4.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(8.0),
+                        Scalar::Float64(16.0),
+                        Scalar::Float64(32.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.log2().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_log2_basic.txt", &output);
@@ -91103,10 +92902,25 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(10.0), Scalar::Float64(100.0)]),
-                ("b", vec![Scalar::Float64(1000.0), Scalar::Float64(10000.0), Scalar::Float64(100000.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(100.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(1000.0),
+                        Scalar::Float64(10000.0),
+                        Scalar::Float64(100000.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.log10().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_log10_basic.txt", &output);
@@ -91117,10 +92931,25 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(0.0), Scalar::Float64(1.0), Scalar::Float64(-1.0)]),
-                ("b", vec![Scalar::Float64(0.5), Scalar::Float64(-0.5), Scalar::Float64(2.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(0.0),
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(-1.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(0.5),
+                        Scalar::Float64(-0.5),
+                        Scalar::Float64(2.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.sinh().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_sinh_basic.txt", &output);
@@ -91131,10 +92960,25 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(0.0), Scalar::Float64(1.0), Scalar::Float64(-1.0)]),
-                ("b", vec![Scalar::Float64(0.5), Scalar::Float64(-0.5), Scalar::Float64(2.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(0.0),
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(-1.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(0.5),
+                        Scalar::Float64(-0.5),
+                        Scalar::Float64(2.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.cosh().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_cosh_basic.txt", &output);
@@ -91145,10 +92989,25 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(0.0), Scalar::Float64(1.0), Scalar::Float64(-1.0)]),
-                ("b", vec![Scalar::Float64(0.5), Scalar::Float64(-0.5), Scalar::Float64(2.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(0.0),
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(-1.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(0.5),
+                        Scalar::Float64(-0.5),
+                        Scalar::Float64(2.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.tanh().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_tanh_basic.txt", &output);
@@ -91159,10 +93018,25 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(0.0), Scalar::Float64(0.5), Scalar::Float64(1.0)]),
-                ("b", vec![Scalar::Float64(-0.5), Scalar::Float64(-1.0), Scalar::Float64(0.25)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(0.0),
+                        Scalar::Float64(0.5),
+                        Scalar::Float64(1.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(-0.5),
+                        Scalar::Float64(-1.0),
+                        Scalar::Float64(0.25),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.arcsin().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_arcsin_basic.txt", &output);
@@ -91173,10 +93047,25 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(0.0), Scalar::Float64(0.5), Scalar::Float64(1.0)]),
-                ("b", vec![Scalar::Float64(-0.5), Scalar::Float64(-1.0), Scalar::Float64(0.25)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(0.0),
+                        Scalar::Float64(0.5),
+                        Scalar::Float64(1.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(-0.5),
+                        Scalar::Float64(-1.0),
+                        Scalar::Float64(0.25),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.arccos().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_arccos_basic.txt", &output);
@@ -91187,10 +93076,25 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(0.0), Scalar::Float64(1.0), Scalar::Float64(-1.0)]),
-                ("b", vec![Scalar::Float64(0.5), Scalar::Float64(-0.5), Scalar::Float64(2.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(0.0),
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(-1.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(0.5),
+                        Scalar::Float64(-0.5),
+                        Scalar::Float64(2.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.arctan().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_arctan_basic.txt", &output);
@@ -91201,10 +93105,25 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(0.0), Scalar::Float64(1.0), Scalar::Float64(-1.0)]),
-                ("b", vec![Scalar::Float64(0.5), Scalar::Float64(-0.5), Scalar::Float64(2.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(0.0),
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(-1.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(0.5),
+                        Scalar::Float64(-0.5),
+                        Scalar::Float64(2.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.arcsinh().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_arcsinh_basic.txt", &output);
@@ -91215,10 +93134,25 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
-                ("b", vec![Scalar::Float64(1.5), Scalar::Float64(2.5), Scalar::Float64(4.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(1.5),
+                        Scalar::Float64(2.5),
+                        Scalar::Float64(4.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.arccosh().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_arccosh_basic.txt", &output);
@@ -91229,10 +93163,25 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(0.0), Scalar::Float64(0.5), Scalar::Float64(-0.5)]),
-                ("b", vec![Scalar::Float64(0.25), Scalar::Float64(-0.25), Scalar::Float64(0.75)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(0.0),
+                        Scalar::Float64(0.5),
+                        Scalar::Float64(-0.5),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(0.25),
+                        Scalar::Float64(-0.25),
+                        Scalar::Float64(0.75),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.arctanh().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_arctanh_basic.txt", &output);
@@ -91243,10 +93192,25 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(0.0), Scalar::Float64(1.0), Scalar::Float64(-1.0)]),
-                ("b", vec![Scalar::Float64(0.5), Scalar::Float64(-0.5), Scalar::Float64(2.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(0.0),
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(-1.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(0.5),
+                        Scalar::Float64(-0.5),
+                        Scalar::Float64(2.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.expm1().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_expm1_basic.txt", &output);
@@ -91257,10 +93221,25 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(0.0), Scalar::Float64(1.0), Scalar::Float64(2.0)]),
-                ("b", vec![Scalar::Float64(0.5), Scalar::Float64(1.5), Scalar::Float64(3.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(0.0),
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(0.5),
+                        Scalar::Float64(1.5),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.log1p().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_log1p_basic.txt", &output);
@@ -91272,10 +93251,25 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(0.0), Scalar::Float64(PI / 2.0), Scalar::Float64(PI)]),
-                ("b", vec![Scalar::Float64(PI / 4.0), Scalar::Float64(PI / 3.0), Scalar::Float64(2.0 * PI)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(0.0),
+                        Scalar::Float64(PI / 2.0),
+                        Scalar::Float64(PI),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(PI / 4.0),
+                        Scalar::Float64(PI / 3.0),
+                        Scalar::Float64(2.0 * PI),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.degrees().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_degrees_basic.txt", &output);
@@ -91286,10 +93280,25 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(0.0), Scalar::Float64(90.0), Scalar::Float64(180.0)]),
-                ("b", vec![Scalar::Float64(45.0), Scalar::Float64(60.0), Scalar::Float64(360.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(0.0),
+                        Scalar::Float64(90.0),
+                        Scalar::Float64(180.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(45.0),
+                        Scalar::Float64(60.0),
+                        Scalar::Float64(360.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.radians().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_radians_basic.txt", &output);
@@ -91300,10 +93309,25 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(8.0), Scalar::Float64(27.0)]),
-                ("b", vec![Scalar::Float64(64.0), Scalar::Float64(125.0), Scalar::Float64(-8.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(8.0),
+                        Scalar::Float64(27.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(64.0),
+                        Scalar::Float64(125.0),
+                        Scalar::Float64(-8.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.cbrt().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_cbrt_basic.txt", &output);
@@ -91314,10 +93338,25 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(-5.0), Scalar::Float64(0.0), Scalar::Float64(5.0)]),
-                ("b", vec![Scalar::Float64(3.0), Scalar::Float64(-3.0), Scalar::Float64(0.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(-5.0),
+                        Scalar::Float64(0.0),
+                        Scalar::Float64(5.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(-3.0),
+                        Scalar::Float64(0.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.sign().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_sign_basic.txt", &output);
@@ -91328,10 +93367,25 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(-5.0), Scalar::Float64(0.0), Scalar::Float64(5.0)]),
-                ("b", vec![Scalar::Float64(3.0), Scalar::Float64(-3.0), Scalar::Float64(-0.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(-5.0),
+                        Scalar::Float64(0.0),
+                        Scalar::Float64(5.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(-3.0),
+                        Scalar::Float64(-0.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.signbit().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_signbit_basic.txt", &output);
@@ -91342,10 +93396,25 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
-                ("b", vec![Scalar::Float64(-2.0), Scalar::Float64(4.0), Scalar::Float64(-5.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(-2.0),
+                        Scalar::Float64(4.0),
+                        Scalar::Float64(-5.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.square().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_square_basic.txt", &output);
@@ -91356,10 +93425,25 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.4), Scalar::Float64(2.5), Scalar::Float64(3.6)]),
-                ("b", vec![Scalar::Float64(-1.5), Scalar::Float64(4.5), Scalar::Float64(-5.5)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.4),
+                        Scalar::Float64(2.5),
+                        Scalar::Float64(3.6),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(-1.5),
+                        Scalar::Float64(4.5),
+                        Scalar::Float64(-5.5),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.rint().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_rint_basic.txt", &output);
@@ -91370,10 +93454,25 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(-2.0), Scalar::Float64(3.0)]),
-                ("b", vec![Scalar::Float64(-4.0), Scalar::Float64(5.0), Scalar::Float64(-6.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(-2.0),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(-4.0),
+                        Scalar::Float64(5.0),
+                        Scalar::Float64(-6.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.neg().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_neg_basic.txt", &output);
@@ -91384,10 +93483,25 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(4.0)]),
-                ("b", vec![Scalar::Float64(5.0), Scalar::Float64(10.0), Scalar::Float64(0.5)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(4.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(5.0),
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(0.5),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.reciprocal().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_reciprocal_basic.txt", &output);
@@ -91398,10 +93512,25 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.7), Scalar::Float64(2.3), Scalar::Float64(-3.9)]),
-                ("b", vec![Scalar::Float64(-4.1), Scalar::Float64(5.9), Scalar::Float64(-6.5)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.7),
+                        Scalar::Float64(2.3),
+                        Scalar::Float64(-3.9),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(-4.1),
+                        Scalar::Float64(5.9),
+                        Scalar::Float64(-6.5),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.trunc().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_trunc_basic.txt", &output);
@@ -91412,10 +93541,25 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(-2.0), Scalar::Float64(3.0)]),
-                ("b", vec![Scalar::Float64(-4.0), Scalar::Float64(5.0), Scalar::Float64(-6.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(-2.0),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(-4.0),
+                        Scalar::Float64(5.0),
+                        Scalar::Float64(-6.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.negative().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_negative_basic.txt", &output);
@@ -91426,10 +93570,25 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(-2.0), Scalar::Float64(3.0)]),
-                ("b", vec![Scalar::Float64(-4.0), Scalar::Float64(5.0), Scalar::Float64(-6.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(-2.0),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(-4.0),
+                        Scalar::Float64(5.0),
+                        Scalar::Float64(-6.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.positive().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_positive_basic.txt", &output);
@@ -91440,8 +93599,13 @@ mod tests {
         let s = Series::from_values(
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(1.0), Scalar::Float64(8.0), Scalar::Float64(-27.0)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(8.0),
+                Scalar::Float64(-27.0),
+            ],
+        )
+        .unwrap();
         let result = s.cbrt().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_cbrt_basic.txt", &output);
@@ -91452,8 +93616,13 @@ mod tests {
         let s = Series::from_values(
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(-5.0), Scalar::Float64(0.0), Scalar::Float64(5.0)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(-5.0),
+                Scalar::Float64(0.0),
+                Scalar::Float64(5.0),
+            ],
+        )
+        .unwrap();
         let result = s.signbit().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_signbit_basic.txt", &output);
@@ -91464,8 +93633,13 @@ mod tests {
         let s = Series::from_values(
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(-4.0)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(-4.0),
+            ],
+        )
+        .unwrap();
         let result = s.square().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_square_basic.txt", &output);
@@ -91476,8 +93650,13 @@ mod tests {
         let s = Series::from_values(
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(1.4), Scalar::Float64(2.5), Scalar::Float64(3.6)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(1.4),
+                Scalar::Float64(2.5),
+                Scalar::Float64(3.6),
+            ],
+        )
+        .unwrap();
         let result = s.rint().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_rint_basic.txt", &output);
@@ -91488,8 +93667,13 @@ mod tests {
         let s = Series::from_values(
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(1.7), Scalar::Float64(-2.3), Scalar::Float64(3.9)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(1.7),
+                Scalar::Float64(-2.3),
+                Scalar::Float64(3.9),
+            ],
+        )
+        .unwrap();
         let result = s.trunc().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_trunc_basic.txt", &output);
@@ -91500,8 +93684,13 @@ mod tests {
         let s = Series::from_values(
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(1.0), Scalar::Float64(-2.0), Scalar::Float64(3.0)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(-2.0),
+                Scalar::Float64(3.0),
+            ],
+        )
+        .unwrap();
         let result = s.positive().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_positive_basic.txt", &output);
@@ -91512,8 +93701,13 @@ mod tests {
         let s = Series::from_values(
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(0.0), Scalar::Float64(1.0), Scalar::Float64(-1.0)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(0.0),
+                Scalar::Float64(1.0),
+                Scalar::Float64(-1.0),
+            ],
+        )
+        .unwrap();
         let result = s.arcsinh().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_arcsinh_basic.txt", &output);
@@ -91524,8 +93718,13 @@ mod tests {
         let s = Series::from_values(
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+            ],
+        )
+        .unwrap();
         let result = s.arccosh().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_arccosh_basic.txt", &output);
@@ -91536,8 +93735,13 @@ mod tests {
         let s = Series::from_values(
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(0.0), Scalar::Float64(0.5), Scalar::Float64(-0.5)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(0.0),
+                Scalar::Float64(0.5),
+                Scalar::Float64(-0.5),
+            ],
+        )
+        .unwrap();
         let result = s.arctanh().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_arctanh_basic.txt", &output);
@@ -91548,10 +93752,29 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0), Scalar::Float64(5.0)]),
-                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(15.0), Scalar::Float64(25.0), Scalar::Float64(30.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(4.0),
+                        Scalar::Float64(5.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(15.0),
+                        Scalar::Float64(25.0),
+                        Scalar::Float64(30.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.rolling(3, None).min().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_rolling_min_basic.txt", &output);
@@ -91562,10 +93785,29 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0), Scalar::Float64(5.0)]),
-                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(15.0), Scalar::Float64(25.0), Scalar::Float64(30.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(4.0),
+                        Scalar::Float64(5.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(15.0),
+                        Scalar::Float64(25.0),
+                        Scalar::Float64(30.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.rolling(3, None).max().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_rolling_max_basic.txt", &output);
@@ -91576,10 +93818,29 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0), Scalar::Float64(5.0)]),
-                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(15.0), Scalar::Float64(25.0), Scalar::Float64(30.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(4.0),
+                        Scalar::Float64(5.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(15.0),
+                        Scalar::Float64(25.0),
+                        Scalar::Float64(30.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.rolling(3, None).var().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_rolling_var_basic.txt", &output);
@@ -91590,10 +93851,29 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0), Scalar::Float64(5.0)]),
-                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(15.0), Scalar::Float64(25.0), Scalar::Float64(30.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(4.0),
+                        Scalar::Float64(5.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(15.0),
+                        Scalar::Float64(25.0),
+                        Scalar::Float64(30.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.rolling(3, None).median().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_rolling_median_basic.txt", &output);
@@ -91604,10 +93884,29 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0), Scalar::Float64(5.0)]),
-                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(15.0), Scalar::Float64(25.0), Scalar::Float64(30.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(4.0),
+                        Scalar::Float64(5.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(15.0),
+                        Scalar::Float64(25.0),
+                        Scalar::Float64(30.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.rolling(3, None).count().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_rolling_count_basic.txt", &output);
@@ -91618,10 +93917,29 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0), Scalar::Float64(5.0)]),
-                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(15.0), Scalar::Float64(25.0), Scalar::Float64(30.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(4.0),
+                        Scalar::Float64(5.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(15.0),
+                        Scalar::Float64(25.0),
+                        Scalar::Float64(30.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.rolling(3, None).first().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_rolling_first_basic.txt", &output);
@@ -91632,10 +93950,29 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0), Scalar::Float64(5.0)]),
-                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(15.0), Scalar::Float64(25.0), Scalar::Float64(30.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(4.0),
+                        Scalar::Float64(5.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(15.0),
+                        Scalar::Float64(25.0),
+                        Scalar::Float64(30.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.expanding(Some(1)).mean().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_expanding_mean_basic.txt", &output);
@@ -91646,10 +93983,29 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0), Scalar::Float64(5.0)]),
-                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(15.0), Scalar::Float64(25.0), Scalar::Float64(30.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(4.0),
+                        Scalar::Float64(5.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(15.0),
+                        Scalar::Float64(25.0),
+                        Scalar::Float64(30.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.expanding(Some(1)).min().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_expanding_min_basic.txt", &output);
@@ -91660,10 +94016,29 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0), Scalar::Float64(5.0)]),
-                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(15.0), Scalar::Float64(25.0), Scalar::Float64(30.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(4.0),
+                        Scalar::Float64(5.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(15.0),
+                        Scalar::Float64(25.0),
+                        Scalar::Float64(30.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.expanding(Some(1)).max().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_expanding_max_basic.txt", &output);
@@ -91674,10 +94049,29 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0), Scalar::Float64(5.0)]),
-                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(15.0), Scalar::Float64(25.0), Scalar::Float64(30.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(4.0),
+                        Scalar::Float64(5.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(15.0),
+                        Scalar::Float64(25.0),
+                        Scalar::Float64(30.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.expanding(Some(1)).std().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_expanding_std_basic.txt", &output);
@@ -91688,10 +94082,29 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0), Scalar::Float64(5.0)]),
-                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(15.0), Scalar::Float64(25.0), Scalar::Float64(30.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(4.0),
+                        Scalar::Float64(5.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(15.0),
+                        Scalar::Float64(25.0),
+                        Scalar::Float64(30.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.expanding(Some(1)).var().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_expanding_var_basic.txt", &output);
@@ -91702,10 +94115,29 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0), Scalar::Float64(5.0)]),
-                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(15.0), Scalar::Float64(25.0), Scalar::Float64(30.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(4.0),
+                        Scalar::Float64(5.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(15.0),
+                        Scalar::Float64(25.0),
+                        Scalar::Float64(30.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.ewm(None, Some(0.3)).mean().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_ewm_mean_basic.txt", &output);
@@ -91716,10 +94148,29 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0), Scalar::Float64(5.0)]),
-                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(15.0), Scalar::Float64(25.0), Scalar::Float64(30.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(4.0),
+                        Scalar::Float64(5.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(15.0),
+                        Scalar::Float64(25.0),
+                        Scalar::Float64(30.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.ewm(None, Some(0.3)).std().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_ewm_std_basic.txt", &output);
@@ -91730,10 +94181,29 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0), Scalar::Float64(5.0)]),
-                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(15.0), Scalar::Float64(25.0), Scalar::Float64(30.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(4.0),
+                        Scalar::Float64(5.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(15.0),
+                        Scalar::Float64(25.0),
+                        Scalar::Float64(30.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.ewm(None, Some(0.3)).var().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_ewm_var_basic.txt", &output);
@@ -91743,9 +94213,22 @@ mod tests {
     fn series_ewm_var_golden_basic() {
         let s = Series::from_values(
             "vals",
-            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
-            vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0), Scalar::Float64(5.0)],
-        ).unwrap();
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+            ],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(4.0),
+                Scalar::Float64(5.0),
+            ],
+        )
+        .unwrap();
         let result = s.ewm(None, Some(0.3)).var().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_ewm_var_basic.txt", &output);
@@ -91755,9 +94238,22 @@ mod tests {
     fn series_ewm_sum_golden_basic() {
         let s = Series::from_values(
             "vals",
-            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
-            vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0), Scalar::Float64(5.0)],
-        ).unwrap();
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+            ],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(4.0),
+                Scalar::Float64(5.0),
+            ],
+        )
+        .unwrap();
         let result = s.ewm(None, Some(0.3)).sum().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_ewm_sum_basic.txt", &output);
@@ -91768,16 +94264,31 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(4.0), Scalar::Float64(9.0)]),
-                ("b", vec![Scalar::Float64(16.0), Scalar::Float64(25.0), Scalar::Float64(36.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(4.0),
+                        Scalar::Float64(9.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(16.0),
+                        Scalar::Float64(25.0),
+                        Scalar::Float64(36.0),
+                    ],
+                ),
             ],
-        ).unwrap();
-        let result = df.transform(|s| {
-            match s {
+        )
+        .unwrap();
+        let result = df
+            .transform(|s| match s {
                 Scalar::Float64(f) => Scalar::Float64(f.sqrt()),
                 other => other.clone(),
-            }
-        }).unwrap();
+            })
+            .unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_transform_basic.txt", &output);
     }
@@ -91787,17 +94298,39 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
-                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(30.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let cond = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)]),
-                ("b", vec![Scalar::Bool(false), Scalar::Bool(true), Scalar::Bool(false)]),
+                (
+                    "a",
+                    vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)],
+                ),
+                (
+                    "b",
+                    vec![Scalar::Bool(false), Scalar::Bool(true), Scalar::Bool(false)],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.where_cond(&cond, None).unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_where_cond_basic.txt", &output);
@@ -91813,7 +94346,8 @@ mod tests {
                 Scalar::Utf8("2023-06-20T14:45:30".into()),
                 Scalar::Utf8("2025-12-31T23:59:59".into()),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.dt().year().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_dt_year_basic.txt", &output);
@@ -91829,7 +94363,8 @@ mod tests {
                 Scalar::Utf8("2023-06-20T14:45:30".into()),
                 Scalar::Utf8("2025-12-31T23:59:59".into()),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.dt().month().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_dt_month_basic.txt", &output);
@@ -91845,7 +94380,8 @@ mod tests {
                 Scalar::Utf8("2023-06-20T14:45:30".into()),
                 Scalar::Utf8("2025-12-31T23:59:59".into()),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.dt().day().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_dt_day_basic.txt", &output);
@@ -91861,7 +94397,8 @@ mod tests {
                 Scalar::Utf8("2023-06-20T14:45:30".into()),
                 Scalar::Utf8("2025-12-31T23:59:59".into()),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.dt().hour().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_dt_hour_basic.txt", &output);
@@ -91877,7 +94414,8 @@ mod tests {
                 Scalar::Utf8("2023-06-20T14:45:30".into()),
                 Scalar::Utf8("2025-12-31T23:59:59".into()),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.dt().weekday().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_dt_weekday_basic.txt", &output);
@@ -91893,7 +94431,8 @@ mod tests {
                 Scalar::Utf8("2023-06-20T14:45:30".into()),
                 Scalar::Utf8("2025-12-31T23:59:59".into()),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.dt().minute().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_dt_minute_basic.txt", &output);
@@ -91909,7 +94448,8 @@ mod tests {
                 Scalar::Utf8("2023-06-20T14:45:30".into()),
                 Scalar::Utf8("2025-12-31T23:59:59".into()),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.dt().second().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_dt_second_basic.txt", &output);
@@ -91925,7 +94465,8 @@ mod tests {
                 Scalar::Utf8("2023-06-20T14:45:30".into()),
                 Scalar::Utf8("2025-12-31T23:59:59".into()),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.dt().quarter().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_dt_quarter_basic.txt", &output);
@@ -91941,7 +94482,8 @@ mod tests {
                 Scalar::Utf8("2023-06-20T14:45:30".into()),
                 Scalar::Utf8("2025-12-31T23:59:59".into()),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.dt().dayofyear().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_dt_dayofyear_basic.txt", &output);
@@ -91957,7 +94499,8 @@ mod tests {
                 Scalar::Utf8("2023-06-20T14:45:30".into()),
                 Scalar::Utf8("2025-12-31T23:59:59".into()),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.dt().date().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_dt_date_basic.txt", &output);
@@ -91973,7 +94516,8 @@ mod tests {
                 Scalar::Utf8("2023-06-20T14:45:30".into()),
                 Scalar::Utf8("2025-12-31T23:59:59".into()),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.dt().time().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_dt_time_basic.txt", &output);
@@ -91984,17 +94528,47 @@ mod tests {
         let df1 = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
-                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(30.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let df2 = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(0.5), Scalar::Float64(1.5), Scalar::Float64(2.5)]),
-                ("b", vec![Scalar::Float64(5.0), Scalar::Float64(10.0), Scalar::Float64(15.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(0.5),
+                        Scalar::Float64(1.5),
+                        Scalar::Float64(2.5),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(5.0),
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(15.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df1.add(&df2).unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_add_basic.txt", &output);
@@ -92005,17 +94579,47 @@ mod tests {
         let df1 = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(5.0), Scalar::Float64(10.0), Scalar::Float64(15.0)]),
-                ("b", vec![Scalar::Float64(50.0), Scalar::Float64(100.0), Scalar::Float64(150.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(5.0),
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(15.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(50.0),
+                        Scalar::Float64(100.0),
+                        Scalar::Float64(150.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let df2 = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
-                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(30.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df1.sub(&df2).unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_sub_basic.txt", &output);
@@ -92026,17 +94630,47 @@ mod tests {
         let df1 = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0)]),
-                ("b", vec![Scalar::Float64(5.0), Scalar::Float64(6.0), Scalar::Float64(7.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(4.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(5.0),
+                        Scalar::Float64(6.0),
+                        Scalar::Float64(7.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let df2 = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(10.0), Scalar::Float64(10.0), Scalar::Float64(10.0)]),
-                ("b", vec![Scalar::Float64(2.0), Scalar::Float64(2.0), Scalar::Float64(2.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(10.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(2.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df1.mul(&df2).unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_mul_basic.txt", &output);
@@ -92047,17 +94681,47 @@ mod tests {
         let df1 = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
-                ("b", vec![Scalar::Float64(100.0), Scalar::Float64(200.0), Scalar::Float64(300.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(30.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(100.0),
+                        Scalar::Float64(200.0),
+                        Scalar::Float64(300.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let df2 = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(2.0), Scalar::Float64(4.0), Scalar::Float64(5.0)]),
-                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(4.0),
+                        Scalar::Float64(5.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(30.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df1.div(&df2).unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_div_basic.txt", &output);
@@ -92068,17 +94732,47 @@ mod tests {
         let df1 = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(10.0), Scalar::Float64(23.0), Scalar::Float64(35.0)]),
-                ("b", vec![Scalar::Float64(100.0), Scalar::Float64(250.0), Scalar::Float64(370.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(23.0),
+                        Scalar::Float64(35.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(100.0),
+                        Scalar::Float64(250.0),
+                        Scalar::Float64(370.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let df2 = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(3.0), Scalar::Float64(5.0), Scalar::Float64(10.0)]),
-                ("b", vec![Scalar::Float64(30.0), Scalar::Float64(100.0), Scalar::Float64(100.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(5.0),
+                        Scalar::Float64(10.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(30.0),
+                        Scalar::Float64(100.0),
+                        Scalar::Float64(100.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df1.floordiv(&df2).unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_floordiv_basic.txt", &output);
@@ -92089,17 +94783,47 @@ mod tests {
         let df1 = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0)]),
-                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(2.0), Scalar::Float64(5.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(4.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(5.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let df2 = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(3.0), Scalar::Float64(2.0), Scalar::Float64(2.0)]),
-                ("b", vec![Scalar::Float64(2.0), Scalar::Float64(10.0), Scalar::Float64(3.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(2.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df1.pow(&df2).unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_pow_basic.txt", &output);
@@ -92110,17 +94834,47 @@ mod tests {
         let df1 = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(10.0), Scalar::Float64(15.0), Scalar::Float64(20.0)]),
-                ("b", vec![Scalar::Float64(25.0), Scalar::Float64(30.0), Scalar::Float64(35.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(15.0),
+                        Scalar::Float64(20.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(25.0),
+                        Scalar::Float64(30.0),
+                        Scalar::Float64(35.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let df2 = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(3.0), Scalar::Float64(4.0), Scalar::Float64(7.0)]),
-                ("b", vec![Scalar::Float64(6.0), Scalar::Float64(8.0), Scalar::Float64(9.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(4.0),
+                        Scalar::Float64(7.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(6.0),
+                        Scalar::Float64(8.0),
+                        Scalar::Float64(9.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df1.mod_df(&df2).unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_mod_df_basic.txt", &output);
@@ -92131,17 +94885,47 @@ mod tests {
         let df1 = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
-                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(30.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let df2 = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(5.0), Scalar::Float64(3.0)]),
-                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(25.0), Scalar::Float64(35.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(5.0),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(25.0),
+                        Scalar::Float64(35.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df1.eq_df(&df2).unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_eq_df_basic.txt", &output);
@@ -92152,17 +94936,47 @@ mod tests {
         let df1 = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
-                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(30.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let df2 = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(5.0), Scalar::Float64(3.0)]),
-                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(25.0), Scalar::Float64(35.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(5.0),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(25.0),
+                        Scalar::Float64(35.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df1.ne_df(&df2).unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_ne_df_basic.txt", &output);
@@ -92173,17 +94987,47 @@ mod tests {
         let df1 = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(5.0), Scalar::Float64(3.0)]),
-                ("b", vec![Scalar::Float64(15.0), Scalar::Float64(20.0), Scalar::Float64(25.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(5.0),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(15.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(25.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let df2 = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(3.0)]),
-                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(30.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df1.gt_df(&df2).unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_gt_df_basic.txt", &output);
@@ -92194,17 +95038,47 @@ mod tests {
         let df1 = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(5.0), Scalar::Float64(3.0)]),
-                ("b", vec![Scalar::Float64(15.0), Scalar::Float64(20.0), Scalar::Float64(25.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(5.0),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(15.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(25.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let df2 = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(3.0)]),
-                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(30.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df1.ge_df(&df2).unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_ge_df_basic.txt", &output);
@@ -92215,17 +95089,47 @@ mod tests {
         let df1 = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(5.0), Scalar::Float64(3.0)]),
-                ("b", vec![Scalar::Float64(15.0), Scalar::Float64(20.0), Scalar::Float64(25.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(5.0),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(15.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(25.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let df2 = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(3.0)]),
-                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(30.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df1.lt_df(&df2).unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_lt_df_basic.txt", &output);
@@ -92236,17 +95140,47 @@ mod tests {
         let df1 = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(5.0), Scalar::Float64(3.0)]),
-                ("b", vec![Scalar::Float64(15.0), Scalar::Float64(20.0), Scalar::Float64(25.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(5.0),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(15.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(25.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let df2 = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(3.0)]),
-                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(30.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df1.le_df(&df2).unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_le_df_basic.txt", &output);
@@ -92257,10 +95191,25 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Null(NullKind::Null), Scalar::Float64(3.0)]),
-                ("b", vec![Scalar::Null(NullKind::Null), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Null(NullKind::Null),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Null(NullKind::Null),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(30.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.isna().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_isna_basic.txt", &output);
@@ -92271,10 +95220,25 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Null(NullKind::Null), Scalar::Float64(3.0)]),
-                ("b", vec![Scalar::Null(NullKind::Null), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Null(NullKind::Null),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Null(NullKind::Null),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(30.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.isnull().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_isnull_basic.txt", &output);
@@ -92285,10 +95249,25 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Null(NullKind::Null), Scalar::Float64(3.0)]),
-                ("b", vec![Scalar::Null(NullKind::Null), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Null(NullKind::Null),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Null(NullKind::Null),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(30.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.notna().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_notna_basic.txt", &output);
@@ -92299,10 +95278,25 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Null(NullKind::Null), Scalar::Float64(3.0)]),
-                ("b", vec![Scalar::Null(NullKind::Null), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Null(NullKind::Null),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Null(NullKind::Null),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(30.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.notnull().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_notnull_basic.txt", &output);
@@ -92313,14 +95307,31 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
-                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(30.0),
+                    ],
+                ),
             ],
-        ).unwrap();
-        let result = df.replace(&[
-            (Scalar::Float64(1.0), Scalar::Float64(100.0)),
-            (Scalar::Float64(20.0), Scalar::Float64(200.0)),
-        ]).unwrap();
+        )
+        .unwrap();
+        let result = df
+            .replace(&[
+                (Scalar::Float64(1.0), Scalar::Float64(100.0)),
+                (Scalar::Float64(20.0), Scalar::Float64(200.0)),
+            ])
+            .unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_replace_basic.txt", &output);
     }
@@ -92330,10 +95341,25 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(3.0), Scalar::Float64(1.0), Scalar::Float64(2.0)]),
-                ("b", vec![Scalar::Float64(20.0), Scalar::Float64(30.0), Scalar::Float64(10.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(30.0),
+                        Scalar::Float64(10.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.rank("average", true, "keep").unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_rank_basic.txt", &output);
@@ -92344,10 +95370,25 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
-                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(30.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.astype(DType::Int64).unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_astype_basic.txt", &output);
@@ -92358,17 +95399,39 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
-                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(30.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let cond = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)]),
-                ("b", vec![Scalar::Bool(false), Scalar::Bool(true), Scalar::Bool(false)]),
+                (
+                    "a",
+                    vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)],
+                ),
+                (
+                    "b",
+                    vec![Scalar::Bool(false), Scalar::Bool(true), Scalar::Bool(false)],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.mask(&cond, Some(&Scalar::Float64(-1.0))).unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_mask_basic.txt", &output);
@@ -92379,10 +95442,25 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
-                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(30.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.pipe(|d| d.head(2)).unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_pipe_basic.txt", &output);
@@ -92393,8 +95471,13 @@ mod tests {
         let s = Series::from_values(
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Utf8("xxhellox".into()), Scalar::Utf8("xworld".into()), Scalar::Utf8("texx".into())],
-        ).unwrap();
+            vec![
+                Scalar::Utf8("xxhellox".into()),
+                Scalar::Utf8("xworld".into()),
+                Scalar::Utf8("texx".into()),
+            ],
+        )
+        .unwrap();
         let result = s.str().strip_chars("x").unwrap();
         let output = format!("{result}");
         assert_text_golden("series_str_strip_chars_basic.txt", &output);
@@ -92405,8 +95488,13 @@ mod tests {
         let s = Series::from_values(
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Utf8("hello123".into()), Scalar::Utf8("world".into()), Scalar::Utf8("test456".into())],
-        ).unwrap();
+            vec![
+                Scalar::Utf8("hello123".into()),
+                Scalar::Utf8("world".into()),
+                Scalar::Utf8("test456".into()),
+            ],
+        )
+        .unwrap();
         let result = s.str().contains_regex(r"\d+").unwrap();
         let output = format!("{result}");
         assert_text_golden("series_str_contains_regex_basic.txt", &output);
@@ -92417,8 +95505,13 @@ mod tests {
         let s = Series::from_values(
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Utf8("hello123".into()), Scalar::Utf8("world456".into()), Scalar::Utf8("test789".into())],
-        ).unwrap();
+            vec![
+                Scalar::Utf8("hello123".into()),
+                Scalar::Utf8("world456".into()),
+                Scalar::Utf8("test789".into()),
+            ],
+        )
+        .unwrap();
         let result = s.str().replace_regex(r"\d+", "X").unwrap();
         let output = format!("{result}");
         assert_text_golden("series_str_replace_regex_basic.txt", &output);
@@ -92429,8 +95522,13 @@ mod tests {
         let s = Series::from_values(
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Utf8("a-b-c".into()), Scalar::Utf8("x-y".into()), Scalar::Utf8("single".into())],
-        ).unwrap();
+            vec![
+                Scalar::Utf8("a-b-c".into()),
+                Scalar::Utf8("x-y".into()),
+                Scalar::Utf8("single".into()),
+            ],
+        )
+        .unwrap();
         let result = s.str().rsplit_get("-", 0).unwrap();
         let output = format!("{result}");
         assert_text_golden("series_str_rsplit_get_basic.txt", &output);
@@ -92441,8 +95539,13 @@ mod tests {
         let s = Series::from_values(
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Utf8("hello123".into()), Scalar::Utf8("world456".into()), Scalar::Utf8("test".into())],
-        ).unwrap();
+            vec![
+                Scalar::Utf8("hello123".into()),
+                Scalar::Utf8("world456".into()),
+                Scalar::Utf8("test".into()),
+            ],
+        )
+        .unwrap();
         let result = s.str().extract(r"(\d+)").unwrap();
         let output = format!("{result}");
         assert_text_golden("series_str_extract_basic.txt", &output);
@@ -92453,10 +95556,29 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(5.0), Scalar::Float64(3.0), Scalar::Float64(4.0)]),
-                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(30.0), Scalar::Float64(20.0), Scalar::Float64(40.0), Scalar::Float64(50.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(5.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(4.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(30.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(40.0),
+                        Scalar::Float64(50.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.rolling(3, None).skew().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_rolling_skew_basic.txt", &output);
@@ -92467,10 +95589,29 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(5.0), Scalar::Float64(3.0), Scalar::Float64(4.0)]),
-                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(30.0), Scalar::Float64(20.0), Scalar::Float64(40.0), Scalar::Float64(50.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(5.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(4.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(30.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(40.0),
+                        Scalar::Float64(50.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.rolling(4, None).kurt().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_rolling_kurt_basic.txt", &output);
@@ -92481,10 +95622,27 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0)]),
-                ("b", vec![Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(2.0), Scalar::Float64(2.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(4.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(2.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.rolling(2, None).prod().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_rolling_prod_basic.txt", &output);
@@ -92495,10 +95653,27 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0)]),
-                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0), Scalar::Float64(40.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(4.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(30.0),
+                        Scalar::Float64(40.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.rolling(2, None).last().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_rolling_last_basic.txt", &output);
@@ -92509,10 +95684,29 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(5.0), Scalar::Float64(3.0), Scalar::Float64(4.0)]),
-                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(30.0), Scalar::Float64(20.0), Scalar::Float64(40.0), Scalar::Float64(50.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(5.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(4.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(30.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(40.0),
+                        Scalar::Float64(50.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.expanding(Some(3)).skew().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_expanding_skew_basic.txt", &output);
@@ -92523,10 +95717,29 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(5.0), Scalar::Float64(3.0), Scalar::Float64(4.0)]),
-                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(30.0), Scalar::Float64(20.0), Scalar::Float64(40.0), Scalar::Float64(50.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(5.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(4.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(30.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(40.0),
+                        Scalar::Float64(50.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.expanding(Some(4)).kurt().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_expanding_kurt_basic.txt", &output);
@@ -92537,10 +95750,27 @@ mod tests {
         let df = DataFrame::from_dict(
             &["grp", "val"],
             vec![
-                ("grp", vec![Scalar::Utf8("a".into()), Scalar::Utf8("a".into()), Scalar::Utf8("b".into()), Scalar::Utf8("b".into())]),
-                ("val", vec![Scalar::Float64(3.0), Scalar::Float64(1.0), Scalar::Float64(4.0), Scalar::Float64(2.0)]),
+                (
+                    "grp",
+                    vec![
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("b".into()),
+                        Scalar::Utf8("b".into()),
+                    ],
+                ),
+                (
+                    "val",
+                    vec![
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(4.0),
+                        Scalar::Float64(2.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.groupby(&["grp"]).unwrap().idxmin().unwrap();
         let output = format!("{result}");
         assert_text_golden("groupby_idxmin_basic.txt", &output);
@@ -92551,10 +95781,27 @@ mod tests {
         let df = DataFrame::from_dict(
             &["grp", "val"],
             vec![
-                ("grp", vec![Scalar::Utf8("a".into()), Scalar::Utf8("a".into()), Scalar::Utf8("b".into()), Scalar::Utf8("b".into())]),
-                ("val", vec![Scalar::Float64(3.0), Scalar::Float64(1.0), Scalar::Float64(4.0), Scalar::Float64(2.0)]),
+                (
+                    "grp",
+                    vec![
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("b".into()),
+                        Scalar::Utf8("b".into()),
+                    ],
+                ),
+                (
+                    "val",
+                    vec![
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(4.0),
+                        Scalar::Float64(2.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.groupby(&["grp"]).unwrap().idxmax().unwrap();
         let output = format!("{result}");
         assert_text_golden("groupby_idxmax_basic.txt", &output);
@@ -92565,10 +95812,27 @@ mod tests {
         let df = DataFrame::from_dict(
             &["grp", "val"],
             vec![
-                ("grp", vec![Scalar::Utf8("a".into()), Scalar::Utf8("a".into()), Scalar::Utf8("b".into()), Scalar::Utf8("b".into())]),
-                ("val", vec![Scalar::Float64(1.0), Scalar::Float64(5.0), Scalar::Float64(10.0), Scalar::Float64(20.0)]),
+                (
+                    "grp",
+                    vec![
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("b".into()),
+                        Scalar::Utf8("b".into()),
+                    ],
+                ),
+                (
+                    "val",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(5.0),
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.groupby(&["grp"]).unwrap().quantile(0.5).unwrap();
         let output = format!("{result}");
         assert_text_golden("groupby_quantile_basic.txt", &output);
@@ -92579,10 +95843,27 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0)]),
-                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0), Scalar::Float64(40.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(4.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(30.0),
+                        Scalar::Float64(40.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.quantile(0.5).unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_quantile_basic.txt", &output);
@@ -92595,9 +95876,13 @@ mod tests {
             vec![
                 ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
                 ("b", vec![Scalar::Int64(10), Scalar::Int64(20)]),
-                ("c", vec![Scalar::Utf8("x".into()), Scalar::Utf8("y".into())]),
+                (
+                    "c",
+                    vec![Scalar::Utf8("x".into()), Scalar::Utf8("y".into())],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.select_dtypes(&[DType::Float64], &[]).unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_select_dtypes_basic.txt", &output);
@@ -92608,10 +95893,25 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(1.0)]),
-                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(10.0), Scalar::Float64(20.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(1.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.mode().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_mode_basic.txt", &output);
@@ -92622,10 +95922,25 @@ mod tests {
         let df = DataFrame::from_dict(
             &["key", "val"],
             vec![
-                ("key", vec![Scalar::Utf8("a".into()), Scalar::Utf8("b".into()), Scalar::Utf8("c".into())]),
-                ("val", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
+                (
+                    "key",
+                    vec![
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("b".into()),
+                        Scalar::Utf8("c".into()),
+                    ],
+                ),
+                (
+                    "val",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.set_index("key", true).unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_set_index_basic.txt", &output);
@@ -92635,10 +95950,16 @@ mod tests {
     fn dataframe_reset_index_golden_basic() {
         let df = DataFrame::from_dict(
             &["val"],
-            vec![
-                ("val", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
-            ],
-        ).unwrap();
+            vec![(
+                "val",
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(2.0),
+                    Scalar::Float64(3.0),
+                ],
+            )],
+        )
+        .unwrap();
         let result = df.reset_index(false).unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_reset_index_basic.txt", &output);
@@ -92649,10 +95970,21 @@ mod tests {
         let mut df = DataFrame::from_dict(
             &["key", "val"],
             vec![
-                ("key", vec![Scalar::Int64(3), Scalar::Int64(1), Scalar::Int64(2)]),
-                ("val", vec![Scalar::Float64(30.0), Scalar::Float64(10.0), Scalar::Float64(20.0)]),
+                (
+                    "key",
+                    vec![Scalar::Int64(3), Scalar::Int64(1), Scalar::Int64(2)],
+                ),
+                (
+                    "val",
+                    vec![
+                        Scalar::Float64(30.0),
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         df = df.set_index("key", true).unwrap();
         let result = df.sort_index(true).unwrap();
         let output = format!("{result}");
@@ -92663,11 +95995,19 @@ mod tests {
     fn dataframe_reindex_golden_basic() {
         let df = DataFrame::from_dict(
             &["val"],
-            vec![
-                ("val", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
-            ],
-        ).unwrap();
-        let result = df.reindex(vec![2_i64.into(), 0_i64.into(), 1_i64.into()]).unwrap();
+            vec![(
+                "val",
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(2.0),
+                    Scalar::Float64(3.0),
+                ],
+            )],
+        )
+        .unwrap();
+        let result = df
+            .reindex(vec![2_i64.into(), 0_i64.into(), 1_i64.into()])
+            .unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_reindex_basic.txt", &output);
     }
@@ -92677,14 +96017,31 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
-                ("b", vec![Scalar::Float64(4.0), Scalar::Float64(5.0), Scalar::Float64(6.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(4.0),
+                        Scalar::Float64(5.0),
+                        Scalar::Float64(6.0),
+                    ],
+                ),
             ],
-        ).unwrap();
-        let result = df.applymap(|s| match s {
-            Scalar::Float64(f) => Scalar::Float64(f * 2.0),
-            other => other.clone(),
-        }).unwrap();
+        )
+        .unwrap();
+        let result = df
+            .applymap(|s| match s {
+                Scalar::Float64(f) => Scalar::Float64(f * 2.0),
+                other => other.clone(),
+            })
+            .unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_applymap_basic.txt", &output);
     }
@@ -92698,7 +96055,8 @@ mod tests {
                 ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0)]),
                 ("c", vec![Scalar::Float64(100.0), Scalar::Float64(200.0)]),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.drop(&["b"], 1).unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_drop_basic.txt", &output);
@@ -92709,10 +96067,25 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
-                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(30.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.loc(&[0_i64.into(), 2_i64.into()]).unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_loc_basic.txt", &output);
@@ -92723,10 +96096,25 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
-                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(30.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.iloc(&[0, 2]).unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_iloc_basic.txt", &output);
@@ -92737,10 +96125,25 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
-                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(30.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.loc_row(&1_i64.into()).unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_loc_row_basic.txt", &output);
@@ -92751,16 +96154,30 @@ mod tests {
         let df1 = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
-                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(30.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let df2 = DataFrame::from_dict(
             &["a"],
-            vec![
-                ("a", vec![Scalar::Float64(100.0), Scalar::Float64(200.0)]),
-            ],
-        ).unwrap();
+            vec![("a", vec![Scalar::Float64(100.0), Scalar::Float64(200.0)])],
+        )
+        .unwrap();
         let result = df1.update(&df2).unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_update_basic.txt", &output);
@@ -92771,17 +96188,47 @@ mod tests {
         let df1 = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
-                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(30.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let df2 = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(5.0), Scalar::Float64(3.0)]),
-                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(25.0), Scalar::Float64(35.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(5.0),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(25.0),
+                        Scalar::Float64(35.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df1.compare(&df2).unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_compare_basic.txt", &output);
@@ -92792,10 +96239,21 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Bool(false), Scalar::Bool(true), Scalar::Bool(false)]),
-                ("b", vec![Scalar::Bool(false), Scalar::Bool(false), Scalar::Bool(false)]),
+                (
+                    "a",
+                    vec![Scalar::Bool(false), Scalar::Bool(true), Scalar::Bool(false)],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Bool(false),
+                        Scalar::Bool(false),
+                        Scalar::Bool(false),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.any().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_any_basic.txt", &output);
@@ -92806,10 +96264,17 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Bool(true), Scalar::Bool(true), Scalar::Bool(true)]),
-                ("b", vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)]),
+                (
+                    "a",
+                    vec![Scalar::Bool(true), Scalar::Bool(true), Scalar::Bool(true)],
+                ),
+                (
+                    "b",
+                    vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.all().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_all_basic.txt", &output);
@@ -92823,14 +96288,16 @@ mod tests {
                 ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
                 ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0)]),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let df2 = DataFrame::from_dict(
             &["a", "b"],
             vec![
                 ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
                 ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0)]),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df1.equals(&df2);
         let output = format!("{result}");
         assert_text_golden("dataframe_equals_basic.txt", &output);
@@ -92844,7 +96311,8 @@ mod tests {
                 ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
                 ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0)]),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.ndim();
         let output = format!("{result}");
         assert_text_golden("dataframe_ndim_basic.txt", &output);
@@ -92855,10 +96323,25 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
-                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(30.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.size();
         let output = format!("{result}");
         assert_text_golden("dataframe_size_basic.txt", &output);
@@ -92868,10 +96351,16 @@ mod tests {
     fn dataframe_squeeze_golden_basic() {
         let df = DataFrame::from_dict(
             &["a"],
-            vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
-            ],
-        ).unwrap();
+            vec![(
+                "a",
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(2.0),
+                    Scalar::Float64(3.0),
+                ],
+            )],
+        )
+        .unwrap();
         let result = df.squeeze(1).unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_squeeze_basic.txt", &output);
@@ -92882,10 +96371,25 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(1.0)]),
-                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(10.0), Scalar::Float64(20.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(1.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.nunique().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_nunique_basic.txt", &output);
@@ -92896,10 +96400,25 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
-                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(30.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.shift(1).unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_shift_basic.txt", &output);
@@ -92910,10 +96429,27 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0)]),
-                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0), Scalar::Float64(40.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(4.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(30.0),
+                        Scalar::Float64(40.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.take(&[0, 2, 3], 0).unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_take_basic.txt", &output);
@@ -92924,15 +96460,31 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
-                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(30.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let mask = Series::from_values(
             "mask",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.filter_rows(&mask).unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_filter_rows_basic.txt", &output);
@@ -92942,10 +96494,16 @@ mod tests {
     fn dataframe_first_valid_index_golden_basic() {
         let df = DataFrame::from_dict(
             &["a"],
-            vec![
-                ("a", vec![Scalar::Null(NullKind::Null), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
-            ],
-        ).unwrap();
+            vec![(
+                "a",
+                vec![
+                    Scalar::Null(NullKind::Null),
+                    Scalar::Float64(2.0),
+                    Scalar::Float64(3.0),
+                ],
+            )],
+        )
+        .unwrap();
         let result = df.first_valid_index();
         let output = format!("{result:?}");
         assert_text_golden("dataframe_first_valid_index_basic.txt", &output);
@@ -92955,10 +96513,16 @@ mod tests {
     fn dataframe_last_valid_index_golden_basic() {
         let df = DataFrame::from_dict(
             &["a"],
-            vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Null(NullKind::Null)]),
-            ],
-        ).unwrap();
+            vec![(
+                "a",
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(2.0),
+                    Scalar::Null(NullKind::Null),
+                ],
+            )],
+        )
+        .unwrap();
         let result = df.last_valid_index();
         let output = format!("{result:?}");
         assert_text_golden("dataframe_last_valid_index_basic.txt", &output);
@@ -92972,7 +96536,8 @@ mod tests {
                 ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
                 ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0)]),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.add_prefix("col_").unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_add_prefix_basic.txt", &output);
@@ -92986,7 +96551,8 @@ mod tests {
                 ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
                 ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0)]),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.add_suffix("_val").unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_add_suffix_basic.txt", &output);
@@ -92996,10 +96562,17 @@ mod tests {
     fn dataframe_ffill_golden_basic() {
         let df = DataFrame::from_dict(
             &["a"],
-            vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Null(NullKind::Null), Scalar::Float64(3.0), Scalar::Null(NullKind::Null)]),
-            ],
-        ).unwrap();
+            vec![(
+                "a",
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Null(NullKind::Null),
+                    Scalar::Float64(3.0),
+                    Scalar::Null(NullKind::Null),
+                ],
+            )],
+        )
+        .unwrap();
         let result = df.ffill(None).unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_ffill_basic.txt", &output);
@@ -93009,10 +96582,17 @@ mod tests {
     fn dataframe_bfill_golden_basic() {
         let df = DataFrame::from_dict(
             &["a"],
-            vec![
-                ("a", vec![Scalar::Null(NullKind::Null), Scalar::Float64(2.0), Scalar::Null(NullKind::Null), Scalar::Float64(4.0)]),
-            ],
-        ).unwrap();
+            vec![(
+                "a",
+                vec![
+                    Scalar::Null(NullKind::Null),
+                    Scalar::Float64(2.0),
+                    Scalar::Null(NullKind::Null),
+                    Scalar::Float64(4.0),
+                ],
+            )],
+        )
+        .unwrap();
         let result = df.bfill(None).unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_bfill_basic.txt", &output);
@@ -93022,16 +96602,28 @@ mod tests {
     fn dataframe_combine_first_golden_basic() {
         let df1 = DataFrame::from_dict(
             &["a"],
-            vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Null(NullKind::Null), Scalar::Float64(3.0)]),
-            ],
-        ).unwrap();
+            vec![(
+                "a",
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Null(NullKind::Null),
+                    Scalar::Float64(3.0),
+                ],
+            )],
+        )
+        .unwrap();
         let df2 = DataFrame::from_dict(
             &["a"],
-            vec![
-                ("a", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
-            ],
-        ).unwrap();
+            vec![(
+                "a",
+                vec![
+                    Scalar::Float64(10.0),
+                    Scalar::Float64(20.0),
+                    Scalar::Float64(30.0),
+                ],
+            )],
+        )
+        .unwrap();
         let result = df1.combine_first(&df2).unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_combine_first_basic.txt", &output);
@@ -93041,10 +96633,17 @@ mod tests {
     fn dataframe_interpolate_golden_basic() {
         let df = DataFrame::from_dict(
             &["a"],
-            vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Null(NullKind::Null), Scalar::Null(NullKind::Null), Scalar::Float64(4.0)]),
-            ],
-        ).unwrap();
+            vec![(
+                "a",
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Null(NullKind::Null),
+                    Scalar::Null(NullKind::Null),
+                    Scalar::Float64(4.0),
+                ],
+            )],
+        )
+        .unwrap();
         let result = df.interpolate().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_interpolate_basic.txt", &output);
@@ -93055,10 +96654,27 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0)]),
-                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0), Scalar::Float64(40.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(4.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(30.0),
+                        Scalar::Float64(40.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.iloc_slice(Some(1), Some(3)).unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_iloc_slice_basic.txt", &output);
@@ -93068,10 +96684,17 @@ mod tests {
     fn dataframe_value_counts_golden_basic() {
         let df = DataFrame::from_dict(
             &["a"],
-            vec![
-                ("a", vec![Scalar::Utf8("x".into()), Scalar::Utf8("y".into()), Scalar::Utf8("x".into()), Scalar::Utf8("x".into())]),
-            ],
-        ).unwrap();
+            vec![(
+                "a",
+                vec![
+                    Scalar::Utf8("x".into()),
+                    Scalar::Utf8("y".into()),
+                    Scalar::Utf8("x".into()),
+                    Scalar::Utf8("x".into()),
+                ],
+            )],
+        )
+        .unwrap();
         let result = df.value_counts().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_value_counts_basic.txt", &output);
@@ -93082,10 +96705,25 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
-                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(30.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.loc_bool(&[true, false, true]).unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_loc_bool_basic.txt", &output);
@@ -93096,10 +96734,25 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
-                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(30.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.iloc_bool(&[false, true, true]).unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_iloc_bool_basic.txt", &output);
@@ -93109,10 +96762,17 @@ mod tests {
     fn dataframe_pad_golden_basic() {
         let df = DataFrame::from_dict(
             &["a"],
-            vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Null(NullKind::Null), Scalar::Float64(3.0), Scalar::Null(NullKind::Null)]),
-            ],
-        ).unwrap();
+            vec![(
+                "a",
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Null(NullKind::Null),
+                    Scalar::Float64(3.0),
+                    Scalar::Null(NullKind::Null),
+                ],
+            )],
+        )
+        .unwrap();
         let result = df.pad(None).unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_pad_basic.txt", &output);
@@ -93122,10 +96782,17 @@ mod tests {
     fn dataframe_backfill_golden_basic() {
         let df = DataFrame::from_dict(
             &["a"],
-            vec![
-                ("a", vec![Scalar::Null(NullKind::Null), Scalar::Float64(2.0), Scalar::Null(NullKind::Null), Scalar::Float64(4.0)]),
-            ],
-        ).unwrap();
+            vec![(
+                "a",
+                vec![
+                    Scalar::Null(NullKind::Null),
+                    Scalar::Float64(2.0),
+                    Scalar::Null(NullKind::Null),
+                    Scalar::Float64(4.0),
+                ],
+            )],
+        )
+        .unwrap();
         let result = df.backfill(None).unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_backfill_basic.txt", &output);
@@ -93137,12 +96804,14 @@ mod tests {
             "a",
             vec![0_i64.into(), 1_i64.into()],
             vec![Scalar::Float64(1.0), Scalar::Float64(2.0)],
-        ).unwrap();
+        )
+        .unwrap();
         let s2 = Series::from_values(
             "b",
             vec![0_i64.into(), 1_i64.into()],
             vec![Scalar::Float64(10.0), Scalar::Float64(20.0)],
-        ).unwrap();
+        )
+        .unwrap();
         let result = DataFrame::from_series(vec![s1, s2]).unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_from_series_basic.txt", &output);
@@ -93152,10 +96821,9 @@ mod tests {
     fn dataframe_empty_golden_basic() {
         let df = DataFrame::from_dict(
             &["a"],
-            vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
-            ],
-        ).unwrap();
+            vec![("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)])],
+        )
+        .unwrap();
         let result = df.empty();
         let output = format!("{result}");
         assert_text_golden("dataframe_empty_basic.txt", &output);
@@ -93169,7 +96837,8 @@ mod tests {
                 ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
                 ("b", vec![Scalar::Int64(10), Scalar::Int64(20)]),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.dtypes().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_dtypes_basic.txt", &output);
@@ -93180,10 +96849,25 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Null(NullKind::Null), Scalar::Float64(3.0)]),
-                ("b", vec![Scalar::Null(NullKind::Null), Scalar::Null(NullKind::Null), Scalar::Float64(30.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Null(NullKind::Null),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Null(NullKind::Null),
+                        Scalar::Null(NullKind::Null),
+                        Scalar::Float64(30.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.count_na().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_count_na_basic.txt", &output);
@@ -93194,10 +96878,25 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
-                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(30.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.iloc_row(1).unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_iloc_row_basic.txt", &output);
@@ -93209,9 +96908,13 @@ mod tests {
             &["a", "b"],
             vec![
                 ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
-                ("b", vec![Scalar::Null(NullKind::Null), Scalar::Null(NullKind::Null)]),
+                (
+                    "b",
+                    vec![Scalar::Null(NullKind::Null), Scalar::Null(NullKind::Null)],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.dropna_columns().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_dropna_columns_basic.txt", &output);
@@ -93225,7 +96928,8 @@ mod tests {
                 ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
                 ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0)]),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.swapaxes().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_swapaxes_basic.txt", &output);
@@ -93236,10 +96940,25 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
-                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(30.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.iat(1, 1).unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_iat_basic.txt", &output);
@@ -93253,7 +96972,8 @@ mod tests {
                 ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
                 ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0)]),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.to_records();
         let output = format!("{result:?}");
         assert_text_golden("dataframe_to_records_basic.txt", &output);
@@ -93267,7 +96987,8 @@ mod tests {
                 ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
                 ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0)]),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.itertuples();
         let output = format!("{result:?}");
         assert_text_golden("dataframe_itertuples_basic.txt", &output);
@@ -93281,14 +97002,16 @@ mod tests {
                 ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
                 ("b", vec![Scalar::Float64(3.0), Scalar::Float64(4.0)]),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let df2 = DataFrame::from_dict(
             &["a", "b"],
             vec![
                 ("a", vec![Scalar::Float64(5.0), Scalar::Float64(6.0)]),
                 ("b", vec![Scalar::Float64(7.0), Scalar::Float64(8.0)]),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df1.dot(&df2).unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_dot_basic.txt", &output);
@@ -93303,7 +97026,8 @@ mod tests {
                 ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0)]),
                 ("c", vec![Scalar::Float64(100.0), Scalar::Float64(200.0)]),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.select_columns(&["a", "c"]).unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_select_columns_basic.txt", &output);
@@ -93318,7 +97042,8 @@ mod tests {
                 ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0)]),
                 ("c", vec![Scalar::Float64(100.0), Scalar::Float64(200.0)]),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.drop_column("b").unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_drop_column_basic.txt", &output);
@@ -93333,7 +97058,8 @@ mod tests {
                 ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0)]),
                 ("c", vec![Scalar::Float64(100.0), Scalar::Float64(200.0)]),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.drop_columns(&["a", "c"]).unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_drop_columns_basic.txt", &output);
@@ -93347,7 +97073,8 @@ mod tests {
                 ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
                 ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0)]),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.rename_columns(&[("a", "x"), ("b", "y")]).unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_rename_columns_basic.txt", &output);
@@ -93361,7 +97088,8 @@ mod tests {
                 ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
                 ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0)]),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.values();
         let output = format!("{result:?}");
         assert_text_golden("dataframe_values_basic.txt", &output);
@@ -93376,7 +97104,8 @@ mod tests {
                 ("b", vec![Scalar::Float64(2.0)]),
                 ("c", vec![Scalar::Float64(3.0)]),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.num_columns();
         let output = format!("{result}");
         assert_text_golden("dataframe_num_columns_basic.txt", &output);
@@ -93391,7 +97120,8 @@ mod tests {
                 ("y", vec![Scalar::Float64(2.0)]),
                 ("z", vec![Scalar::Float64(3.0)]),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.column_names();
         let output = format!("{result:?}");
         assert_text_golden("dataframe_column_names_basic.txt", &output);
@@ -93401,10 +97131,17 @@ mod tests {
     fn dataframe_len_golden_basic() {
         let df = DataFrame::from_dict(
             &["a"],
-            vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0)]),
-            ],
-        ).unwrap();
+            vec![(
+                "a",
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(2.0),
+                    Scalar::Float64(3.0),
+                    Scalar::Float64(4.0),
+                ],
+            )],
+        )
+        .unwrap();
         let result = df.len();
         let output = format!("{result}");
         assert_text_golden("dataframe_len_basic.txt", &output);
@@ -93412,12 +97149,7 @@ mod tests {
 
     #[test]
     fn dataframe_is_empty_golden_basic() {
-        let df = DataFrame::from_dict(
-            &["a"],
-            vec![
-                ("a", vec![Scalar::Float64(1.0)]),
-            ],
-        ).unwrap();
+        let df = DataFrame::from_dict(&["a"], vec![("a", vec![Scalar::Float64(1.0)])]).unwrap();
         let result = df.is_empty();
         let output = format!("{result}");
         assert_text_golden("dataframe_is_empty_basic.txt", &output);
@@ -93431,7 +97163,8 @@ mod tests {
                 ("a", vec![Scalar::Float64(2.0), Scalar::Float64(3.0)]),
                 ("b", vec![Scalar::Float64(4.0), Scalar::Float64(5.0)]),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.product().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_product_basic.txt", &output);
@@ -93442,10 +97175,25 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
-                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(30.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.at(&1_i64.into(), "b").unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_at_basic.txt", &output);
@@ -93456,10 +97204,27 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0)]),
-                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0), Scalar::Float64(40.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(4.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(30.0),
+                        Scalar::Float64(40.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.take_rows(&[0, 2, 3]).unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_take_rows_basic.txt", &output);
@@ -93473,7 +97238,8 @@ mod tests {
                 ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
                 ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0)]),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.axes();
         let output = format!("{result:?}");
         assert_text_golden("dataframe_axes_basic.txt", &output);
@@ -93487,7 +97253,8 @@ mod tests {
                 ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
                 ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0)]),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.memory_usage().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_memory_usage_basic.txt", &output);
@@ -93502,7 +97269,8 @@ mod tests {
                 ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0)]),
                 ("c", vec![Scalar::Float64(100.0), Scalar::Float64(200.0)]),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.reindex_columns(&["c", "a"]).unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_reindex_columns_basic.txt", &output);
@@ -93517,7 +97285,8 @@ mod tests {
                 ("b", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
                 ("c", vec![Scalar::Float64(2.0), Scalar::Float64(3.0)]),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.idxmin_axis1().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_idxmin_axis1_basic.txt", &output);
@@ -93532,7 +97301,8 @@ mod tests {
                 ("b", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
                 ("c", vec![Scalar::Float64(2.0), Scalar::Float64(3.0)]),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.idxmax_axis1().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_idxmax_axis1_basic.txt", &output);
@@ -93542,10 +97312,17 @@ mod tests {
     fn dataframe_fillna_method_golden_basic() {
         let df = DataFrame::from_dict(
             &["a"],
-            vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Null(NullKind::Null), Scalar::Float64(3.0), Scalar::Null(NullKind::Null)]),
-            ],
-        ).unwrap();
+            vec![(
+                "a",
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Null(NullKind::Null),
+                    Scalar::Float64(3.0),
+                    Scalar::Null(NullKind::Null),
+                ],
+            )],
+        )
+        .unwrap();
         let result = df.fillna_method("ffill").unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_fillna_method_basic.txt", &output);
@@ -93559,7 +97336,8 @@ mod tests {
                 ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
                 ("b", vec![Scalar::Int64(10), Scalar::Int64(20)]),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.info();
         let output = format!("{result}");
         assert_text_golden("dataframe_info_basic.txt", &output);
@@ -93573,7 +97351,8 @@ mod tests {
                 ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
                 ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0)]),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.to_numpy();
         let output = format!("{result:?}");
         assert_text_golden("dataframe_to_numpy_basic.txt", &output);
@@ -93587,7 +97366,8 @@ mod tests {
                 ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
                 ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0)]),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.to_string();
         let output = format!("{result}");
         assert_text_golden("dataframe_to_string_basic.txt", &output);
@@ -93601,7 +97381,8 @@ mod tests {
                 ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
                 ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0)]),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.to_series_dict();
         let output = format!("{result:?}");
         assert_text_golden("dataframe_to_series_dict_basic.txt", &output);
@@ -93658,7 +97439,8 @@ mod tests {
                 ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0)]),
                 ("c", vec![Scalar::Float64(100.0), Scalar::Float64(200.0)]),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.sum_axis1().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_sum_axis1_basic.txt", &output);
@@ -93673,7 +97455,8 @@ mod tests {
                 ("b", vec![Scalar::Float64(6.0), Scalar::Float64(12.0)]),
                 ("c", vec![Scalar::Float64(9.0), Scalar::Float64(18.0)]),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.mean_axis1().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_mean_axis1_basic.txt", &output);
@@ -93688,7 +97471,8 @@ mod tests {
                 ("b", vec![Scalar::Float64(1.0), Scalar::Float64(5.0)]),
                 ("c", vec![Scalar::Float64(2.0), Scalar::Float64(3.0)]),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.min_axis1().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_min_axis1_basic.txt", &output);
@@ -93703,7 +97487,8 @@ mod tests {
                 ("b", vec![Scalar::Float64(1.0), Scalar::Float64(5.0)]),
                 ("c", vec![Scalar::Float64(2.0), Scalar::Float64(3.0)]),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.max_axis1().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_max_axis1_basic.txt", &output);
@@ -93714,11 +97499,18 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b", "c"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Null(NullKind::Null)]),
+                (
+                    "a",
+                    vec![Scalar::Float64(1.0), Scalar::Null(NullKind::Null)],
+                ),
                 ("b", vec![Scalar::Float64(2.0), Scalar::Float64(3.0)]),
-                ("c", vec![Scalar::Null(NullKind::Null), Scalar::Float64(4.0)]),
+                (
+                    "c",
+                    vec![Scalar::Null(NullKind::Null), Scalar::Float64(4.0)],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.count_axis1().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_count_axis1_basic.txt", &output);
@@ -93729,10 +97521,17 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Bool(true), Scalar::Bool(true), Scalar::Bool(false)]),
-                ("b", vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(false)]),
+                (
+                    "a",
+                    vec![Scalar::Bool(true), Scalar::Bool(true), Scalar::Bool(false)],
+                ),
+                (
+                    "b",
+                    vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(false)],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.all_axis1().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_all_axis1_basic.txt", &output);
@@ -93743,10 +97542,21 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(false)]),
-                ("b", vec![Scalar::Bool(false), Scalar::Bool(false), Scalar::Bool(false)]),
+                (
+                    "a",
+                    vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(false)],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Bool(false),
+                        Scalar::Bool(false),
+                        Scalar::Bool(false),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.any_axis1().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_any_axis1_basic.txt", &output);
@@ -93761,7 +97571,8 @@ mod tests {
                 ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0)]),
                 ("c", vec![Scalar::Float64(100.0), Scalar::Float64(200.0)]),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.cumsum_axis1().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_cumsum_axis1_basic.txt", &output);
@@ -93776,7 +97587,8 @@ mod tests {
                 ("b", vec![Scalar::Float64(2.0), Scalar::Float64(3.0)]),
                 ("c", vec![Scalar::Float64(3.0), Scalar::Float64(4.0)]),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.cumprod_axis1().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_cumprod_axis1_basic.txt", &output);
@@ -93791,7 +97603,8 @@ mod tests {
                 ("b", vec![Scalar::Float64(1.0), Scalar::Float64(5.0)]),
                 ("c", vec![Scalar::Float64(2.0), Scalar::Float64(3.0)]),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.cummax_axis1().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_cummax_axis1_basic.txt", &output);
@@ -93806,7 +97619,8 @@ mod tests {
                 ("b", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
                 ("c", vec![Scalar::Float64(2.0), Scalar::Float64(1.0)]),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.cummin_axis1().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_cummin_axis1_basic.txt", &output);
@@ -93821,7 +97635,8 @@ mod tests {
                 ("b", vec![Scalar::Float64(3.0), Scalar::Float64(30.0)]),
                 ("c", vec![Scalar::Float64(6.0), Scalar::Float64(60.0)]),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.diff_axis1(1).unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_diff_axis1_basic.txt", &output);
@@ -93836,7 +97651,8 @@ mod tests {
                 ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0)]),
                 ("c", vec![Scalar::Float64(100.0), Scalar::Float64(200.0)]),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.shift_axis1(1).unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_shift_axis1_basic.txt", &output);
@@ -93851,7 +97667,8 @@ mod tests {
                 ("b", vec![Scalar::Float64(20.0), Scalar::Float64(40.0)]),
                 ("c", vec![Scalar::Float64(40.0), Scalar::Float64(80.0)]),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.pct_change_axis1(1).unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_pct_change_axis1_basic.txt", &output);
@@ -93862,10 +97679,27 @@ mod tests {
         let df = DataFrame::from_dict(
             &["key", "val"],
             vec![
-                ("key", vec![Scalar::Utf8("a".to_owned()), Scalar::Utf8("a".to_owned()), Scalar::Utf8("b".to_owned()), Scalar::Utf8("b".to_owned())]),
-                ("val", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(10.0), Scalar::Float64(20.0)]),
+                (
+                    "key",
+                    vec![
+                        Scalar::Utf8("a".to_owned()),
+                        Scalar::Utf8("a".to_owned()),
+                        Scalar::Utf8("b".to_owned()),
+                        Scalar::Utf8("b".to_owned()),
+                    ],
+                ),
+                (
+                    "val",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let gb = df.groupby(&["key"]).unwrap();
         let result = gb.transform("sum").unwrap();
         let output = format!("{result}");
@@ -93877,10 +97711,27 @@ mod tests {
         let df = DataFrame::from_dict(
             &["key", "val"],
             vec![
-                ("key", vec![Scalar::Utf8("a".to_owned()), Scalar::Utf8("a".to_owned()), Scalar::Utf8("b".to_owned()), Scalar::Utf8("b".to_owned())]),
-                ("val", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(10.0), Scalar::Float64(20.0)]),
+                (
+                    "key",
+                    vec![
+                        Scalar::Utf8("a".to_owned()),
+                        Scalar::Utf8("a".to_owned()),
+                        Scalar::Utf8("b".to_owned()),
+                        Scalar::Utf8("b".to_owned()),
+                    ],
+                ),
+                (
+                    "val",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let gb = df.groupby(&["key"]).unwrap();
         let result = gb.cumsum().unwrap();
         let output = format!("{result}");
@@ -93892,10 +97743,27 @@ mod tests {
         let df = DataFrame::from_dict(
             &["key", "val"],
             vec![
-                ("key", vec![Scalar::Utf8("a".to_owned()), Scalar::Utf8("a".to_owned()), Scalar::Utf8("b".to_owned()), Scalar::Utf8("b".to_owned())]),
-                ("val", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0)]),
+                (
+                    "key",
+                    vec![
+                        Scalar::Utf8("a".to_owned()),
+                        Scalar::Utf8("a".to_owned()),
+                        Scalar::Utf8("b".to_owned()),
+                        Scalar::Utf8("b".to_owned()),
+                    ],
+                ),
+                (
+                    "val",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(4.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let gb = df.groupby(&["key"]).unwrap();
         let result = gb.cumprod().unwrap();
         let output = format!("{result}");
@@ -93907,10 +97775,27 @@ mod tests {
         let df = DataFrame::from_dict(
             &["key", "val"],
             vec![
-                ("key", vec![Scalar::Utf8("a".to_owned()), Scalar::Utf8("a".to_owned()), Scalar::Utf8("b".to_owned()), Scalar::Utf8("b".to_owned())]),
-                ("val", vec![Scalar::Float64(3.0), Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(4.0)]),
+                (
+                    "key",
+                    vec![
+                        Scalar::Utf8("a".to_owned()),
+                        Scalar::Utf8("a".to_owned()),
+                        Scalar::Utf8("b".to_owned()),
+                        Scalar::Utf8("b".to_owned()),
+                    ],
+                ),
+                (
+                    "val",
+                    vec![
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(4.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let gb = df.groupby(&["key"]).unwrap();
         let result = gb.cummax().unwrap();
         let output = format!("{result}");
@@ -93922,10 +97807,27 @@ mod tests {
         let df = DataFrame::from_dict(
             &["key", "val"],
             vec![
-                ("key", vec![Scalar::Utf8("a".to_owned()), Scalar::Utf8("a".to_owned()), Scalar::Utf8("b".to_owned()), Scalar::Utf8("b".to_owned())]),
-                ("val", vec![Scalar::Float64(3.0), Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(4.0)]),
+                (
+                    "key",
+                    vec![
+                        Scalar::Utf8("a".to_owned()),
+                        Scalar::Utf8("a".to_owned()),
+                        Scalar::Utf8("b".to_owned()),
+                        Scalar::Utf8("b".to_owned()),
+                    ],
+                ),
+                (
+                    "val",
+                    vec![
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(4.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let gb = df.groupby(&["key"]).unwrap();
         let result = gb.cummin().unwrap();
         let output = format!("{result}");
@@ -93937,10 +97839,27 @@ mod tests {
         let df = DataFrame::from_dict(
             &["key", "val"],
             vec![
-                ("key", vec![Scalar::Utf8("a".to_owned()), Scalar::Utf8("a".to_owned()), Scalar::Utf8("b".to_owned()), Scalar::Utf8("b".to_owned())]),
-                ("val", vec![Scalar::Float64(3.0), Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(4.0)]),
+                (
+                    "key",
+                    vec![
+                        Scalar::Utf8("a".to_owned()),
+                        Scalar::Utf8("a".to_owned()),
+                        Scalar::Utf8("b".to_owned()),
+                        Scalar::Utf8("b".to_owned()),
+                    ],
+                ),
+                (
+                    "val",
+                    vec![
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(4.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let gb = df.groupby(&["key"]).unwrap();
         let result = gb.rank("average", true, "keep").unwrap();
         let output = format!("{result}");
@@ -93952,10 +97871,27 @@ mod tests {
         let df = DataFrame::from_dict(
             &["key", "val"],
             vec![
-                ("key", vec![Scalar::Utf8("a".to_owned()), Scalar::Utf8("a".to_owned()), Scalar::Utf8("b".to_owned()), Scalar::Utf8("b".to_owned())]),
-                ("val", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(10.0), Scalar::Float64(20.0)]),
+                (
+                    "key",
+                    vec![
+                        Scalar::Utf8("a".to_owned()),
+                        Scalar::Utf8("a".to_owned()),
+                        Scalar::Utf8("b".to_owned()),
+                        Scalar::Utf8("b".to_owned()),
+                    ],
+                ),
+                (
+                    "val",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let gb = df.groupby(&["key"]).unwrap();
         let result = gb.shift(1).unwrap();
         let output = format!("{result}");
@@ -93967,10 +97903,27 @@ mod tests {
         let df = DataFrame::from_dict(
             &["key", "val"],
             vec![
-                ("key", vec![Scalar::Utf8("a".to_owned()), Scalar::Utf8("a".to_owned()), Scalar::Utf8("b".to_owned()), Scalar::Utf8("b".to_owned())]),
-                ("val", vec![Scalar::Float64(1.0), Scalar::Float64(3.0), Scalar::Float64(10.0), Scalar::Float64(15.0)]),
+                (
+                    "key",
+                    vec![
+                        Scalar::Utf8("a".to_owned()),
+                        Scalar::Utf8("a".to_owned()),
+                        Scalar::Utf8("b".to_owned()),
+                        Scalar::Utf8("b".to_owned()),
+                    ],
+                ),
+                (
+                    "val",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(15.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let gb = df.groupby(&["key"]).unwrap();
         let result = gb.diff(1).unwrap();
         let output = format!("{result}");
@@ -93982,10 +97935,27 @@ mod tests {
         let df = DataFrame::from_dict(
             &["key", "val"],
             vec![
-                ("key", vec![Scalar::Utf8("a".to_owned()), Scalar::Utf8("a".to_owned()), Scalar::Utf8("a".to_owned()), Scalar::Utf8("b".to_owned())]),
-                ("val", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(10.0)]),
+                (
+                    "key",
+                    vec![
+                        Scalar::Utf8("a".to_owned()),
+                        Scalar::Utf8("a".to_owned()),
+                        Scalar::Utf8("a".to_owned()),
+                        Scalar::Utf8("b".to_owned()),
+                    ],
+                ),
+                (
+                    "val",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(10.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let gb = df.groupby(&["key"]).unwrap();
         let result = gb.nth(1).unwrap();
         let output = format!("{result}");
@@ -93997,10 +97967,27 @@ mod tests {
         let df = DataFrame::from_dict(
             &["key", "val"],
             vec![
-                ("key", vec![Scalar::Utf8("a".to_owned()), Scalar::Utf8("a".to_owned()), Scalar::Utf8("a".to_owned()), Scalar::Utf8("b".to_owned())]),
-                ("val", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(10.0)]),
+                (
+                    "key",
+                    vec![
+                        Scalar::Utf8("a".to_owned()),
+                        Scalar::Utf8("a".to_owned()),
+                        Scalar::Utf8("a".to_owned()),
+                        Scalar::Utf8("b".to_owned()),
+                    ],
+                ),
+                (
+                    "val",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(10.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let gb = df.groupby(&["key"]).unwrap();
         let result = gb.head(2).unwrap();
         let output = format!("{result}");
@@ -94012,10 +97999,27 @@ mod tests {
         let df = DataFrame::from_dict(
             &["key", "val"],
             vec![
-                ("key", vec![Scalar::Utf8("a".to_owned()), Scalar::Utf8("a".to_owned()), Scalar::Utf8("a".to_owned()), Scalar::Utf8("b".to_owned())]),
-                ("val", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(10.0)]),
+                (
+                    "key",
+                    vec![
+                        Scalar::Utf8("a".to_owned()),
+                        Scalar::Utf8("a".to_owned()),
+                        Scalar::Utf8("a".to_owned()),
+                        Scalar::Utf8("b".to_owned()),
+                    ],
+                ),
+                (
+                    "val",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(10.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let gb = df.groupby(&["key"]).unwrap();
         let result = gb.tail(1).unwrap();
         let output = format!("{result}");
@@ -94027,10 +98031,27 @@ mod tests {
         let df = DataFrame::from_dict(
             &["key", "val"],
             vec![
-                ("key", vec![Scalar::Utf8("a".to_owned()), Scalar::Utf8("a".to_owned()), Scalar::Utf8("b".to_owned()), Scalar::Utf8("b".to_owned())]),
-                ("val", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(100.0), Scalar::Float64(150.0)]),
+                (
+                    "key",
+                    vec![
+                        Scalar::Utf8("a".to_owned()),
+                        Scalar::Utf8("a".to_owned()),
+                        Scalar::Utf8("b".to_owned()),
+                        Scalar::Utf8("b".to_owned()),
+                    ],
+                ),
+                (
+                    "val",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(100.0),
+                        Scalar::Float64(150.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let gb = df.groupby(&["key"]).unwrap();
         let result = gb.pct_change(1).unwrap();
         let output = format!("{result}");
@@ -94051,7 +98072,8 @@ mod tests {
                 Scalar::Float64(200.0),
                 Scalar::Float64(150.0),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.resample("M").sum().unwrap();
         let output = format!("{result}");
         assert_text_golden("resample_sum_basic.txt", &output);
@@ -94071,7 +98093,8 @@ mod tests {
                 Scalar::Float64(30.0),
                 Scalar::Float64(50.0),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.resample("M").mean().unwrap();
         let output = format!("{result}");
         assert_text_golden("resample_mean_basic.txt", &output);
@@ -94091,7 +98114,8 @@ mod tests {
                 Scalar::Float64(2.0),
                 Scalar::Float64(3.0),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.resample("M").count().unwrap();
         let output = format!("{result}");
         assert_text_golden("resample_count_basic.txt", &output);
@@ -94111,7 +98135,8 @@ mod tests {
                 Scalar::Float64(50.0),
                 Scalar::Float64(75.0),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.resample("M").min().unwrap();
         let output = format!("{result}");
         assert_text_golden("resample_min_basic.txt", &output);
@@ -94131,7 +98156,8 @@ mod tests {
                 Scalar::Float64(50.0),
                 Scalar::Float64(75.0),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.resample("M").max().unwrap();
         let output = format!("{result}");
         assert_text_golden("resample_max_basic.txt", &output);
@@ -94151,7 +98177,8 @@ mod tests {
                 Scalar::Float64(200.0),
                 Scalar::Float64(300.0),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.resample("M").first().unwrap();
         let output = format!("{result}");
         assert_text_golden("resample_first_basic.txt", &output);
@@ -94171,7 +98198,8 @@ mod tests {
                 Scalar::Float64(200.0),
                 Scalar::Float64(300.0),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.resample("M").last().unwrap();
         let output = format!("{result}");
         assert_text_golden("resample_last_basic.txt", &output);
@@ -94191,7 +98219,8 @@ mod tests {
                 Scalar::Float64(20.0),
                 Scalar::Float64(30.0),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.resample("M").std().unwrap();
         let output = format!("{result}");
         assert_text_golden("resample_std_basic.txt", &output);
@@ -94211,7 +98240,8 @@ mod tests {
                 Scalar::Float64(20.0),
                 Scalar::Float64(30.0),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.resample("M").var().unwrap();
         let output = format!("{result}");
         assert_text_golden("resample_var_basic.txt", &output);
@@ -94231,7 +98261,8 @@ mod tests {
                 Scalar::Float64(20.0),
                 Scalar::Float64(30.0),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.resample("M").median().unwrap();
         let output = format!("{result}");
         assert_text_golden("resample_median_basic.txt", &output);
@@ -94244,12 +98275,14 @@ mod tests {
             "a",
             vec![0_i64.into(), 1_i64.into()],
             vec![Scalar::Float64(1.0), Scalar::Float64(2.0)],
-        ).unwrap();
+        )
+        .unwrap();
         let s2 = Series::from_values(
             "a",
             vec![0_i64.into(), 1_i64.into()],
             vec![Scalar::Float64(3.0), Scalar::Float64(4.0)],
-        ).unwrap();
+        )
+        .unwrap();
         let result = concat_series(&[&s1, &s2]).unwrap();
         let output = format!("{result}");
         assert_text_golden("concat_series_axis0.txt", &output);
@@ -94264,14 +98297,16 @@ mod tests {
                 ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
                 ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0)]),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let df2 = DataFrame::from_dict(
             &["a", "b"],
             vec![
                 ("a", vec![Scalar::Float64(3.0), Scalar::Float64(4.0)]),
                 ("b", vec![Scalar::Float64(30.0), Scalar::Float64(40.0)]),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = concat_dataframes(&[&df1, &df2]).unwrap();
         let output = format!("{result}");
         assert_text_golden("concat_dataframes_axis0.txt", &output);
@@ -94282,16 +98317,14 @@ mod tests {
         use super::concat_dataframes_with_axis;
         let df1 = DataFrame::from_dict(
             &["a"],
-            vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
-            ],
-        ).unwrap();
+            vec![("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)])],
+        )
+        .unwrap();
         let df2 = DataFrame::from_dict(
             &["b"],
-            vec![
-                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0)]),
-            ],
-        ).unwrap();
+            vec![("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0)])],
+        )
+        .unwrap();
         let result = concat_dataframes_with_axis(&[&df1, &df2], 1).unwrap();
         let output = format!("{result}");
         assert_text_golden("concat_dataframes_axis1.txt", &output);
@@ -94300,15 +98333,21 @@ mod tests {
     #[test]
     fn dataframe_resample_sum_golden_basic() {
         let df = DataFrame::from_dict_with_index(
-            vec![
-                ("val", vec![Scalar::Float64(100.0), Scalar::Float64(200.0), Scalar::Float64(150.0)]),
-            ],
+            vec![(
+                "val",
+                vec![
+                    Scalar::Float64(100.0),
+                    Scalar::Float64(200.0),
+                    Scalar::Float64(150.0),
+                ],
+            )],
             vec![
                 "2024-01-15".into(),
                 "2024-01-20".into(),
                 "2024-02-10".into(),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.resample("M").sum().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_resample_sum_basic.txt", &output);
@@ -94317,15 +98356,21 @@ mod tests {
     #[test]
     fn dataframe_resample_mean_golden_basic() {
         let df = DataFrame::from_dict_with_index(
-            vec![
-                ("val", vec![Scalar::Float64(10.0), Scalar::Float64(30.0), Scalar::Float64(50.0)]),
-            ],
+            vec![(
+                "val",
+                vec![
+                    Scalar::Float64(10.0),
+                    Scalar::Float64(30.0),
+                    Scalar::Float64(50.0),
+                ],
+            )],
             vec![
                 "2024-01-10".into(),
                 "2024-01-20".into(),
                 "2024-02-15".into(),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.resample("M").mean().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_resample_mean_basic.txt", &output);
@@ -94334,15 +98379,21 @@ mod tests {
     #[test]
     fn dataframe_resample_count_golden_basic() {
         let df = DataFrame::from_dict_with_index(
-            vec![
-                ("val", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
-            ],
+            vec![(
+                "val",
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(2.0),
+                    Scalar::Float64(3.0),
+                ],
+            )],
             vec![
                 "2024-01-10".into(),
                 "2024-01-20".into(),
                 "2024-02-15".into(),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.resample("M").count().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_resample_count_basic.txt", &output);
@@ -94351,15 +98402,21 @@ mod tests {
     #[test]
     fn dataframe_resample_min_golden_basic() {
         let df = DataFrame::from_dict_with_index(
-            vec![
-                ("val", vec![Scalar::Float64(100.0), Scalar::Float64(50.0), Scalar::Float64(75.0)]),
-            ],
+            vec![(
+                "val",
+                vec![
+                    Scalar::Float64(100.0),
+                    Scalar::Float64(50.0),
+                    Scalar::Float64(75.0),
+                ],
+            )],
             vec![
                 "2024-01-10".into(),
                 "2024-01-20".into(),
                 "2024-02-15".into(),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.resample("M").min().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_resample_min_basic.txt", &output);
@@ -94368,15 +98425,21 @@ mod tests {
     #[test]
     fn dataframe_resample_max_golden_basic() {
         let df = DataFrame::from_dict_with_index(
-            vec![
-                ("val", vec![Scalar::Float64(100.0), Scalar::Float64(50.0), Scalar::Float64(75.0)]),
-            ],
+            vec![(
+                "val",
+                vec![
+                    Scalar::Float64(100.0),
+                    Scalar::Float64(50.0),
+                    Scalar::Float64(75.0),
+                ],
+            )],
             vec![
                 "2024-01-10".into(),
                 "2024-01-20".into(),
                 "2024-02-15".into(),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.resample("M").max().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_resample_max_basic.txt", &output);
@@ -94388,12 +98451,14 @@ mod tests {
             "a",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Bool(true), Scalar::Bool(true), Scalar::Bool(false)],
-        ).unwrap();
+        )
+        .unwrap();
         let s2 = Series::from_values(
             "b",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(false)],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s1.and(&s2).unwrap();
         let output = format!("{result}");
         assert_text_golden("series_and_basic.txt", &output);
@@ -94405,12 +98470,14 @@ mod tests {
             "a",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(false)],
-        ).unwrap();
+        )
+        .unwrap();
         let s2 = Series::from_values(
             "b",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Bool(false), Scalar::Bool(true), Scalar::Bool(false)],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s1.or(&s2).unwrap();
         let output = format!("{result}");
         assert_text_golden("series_or_basic.txt", &output);
@@ -94422,7 +98489,8 @@ mod tests {
             "a",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.not().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_not_basic.txt", &output);
@@ -94433,7 +98501,13 @@ mod tests {
         use super::cut;
         let s = Series::from_values(
             "val",
-            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+            ],
             vec![
                 Scalar::Float64(0.0),
                 Scalar::Float64(25.0),
@@ -94441,7 +98515,8 @@ mod tests {
                 Scalar::Float64(75.0),
                 Scalar::Float64(100.0),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = cut(&s, 4).unwrap();
         let output = format!("{result}");
         assert_text_golden("cut_basic.txt", &output);
@@ -94452,7 +98527,13 @@ mod tests {
         use super::qcut;
         let s = Series::from_values(
             "val",
-            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+            ],
             vec![
                 Scalar::Float64(0.0),
                 Scalar::Float64(25.0),
@@ -94460,7 +98541,8 @@ mod tests {
                 Scalar::Float64(75.0),
                 Scalar::Float64(100.0),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = qcut(&s, 4).unwrap();
         let output = format!("{result}");
         assert_text_golden("qcut_basic.txt", &output);
@@ -94470,10 +98552,16 @@ mod tests {
     fn dataframe_get_dummies_golden_basic() {
         let df = DataFrame::from_dict(
             &["cat"],
-            vec![
-                ("cat", vec![Scalar::Utf8("a".to_owned()), Scalar::Utf8("b".to_owned()), Scalar::Utf8("a".to_owned())]),
-            ],
-        ).unwrap();
+            vec![(
+                "cat",
+                vec![
+                    Scalar::Utf8("a".to_owned()),
+                    Scalar::Utf8("b".to_owned()),
+                    Scalar::Utf8("a".to_owned()),
+                ],
+            )],
+        )
+        .unwrap();
         let result = df.get_dummies(&["cat"]).unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_get_dummies_basic.txt", &output);
@@ -94484,8 +98572,13 @@ mod tests {
         let s = Series::from_values(
             "cat",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Utf8("a|b".to_owned()), Scalar::Utf8("b|c".to_owned()), Scalar::Utf8("a".to_owned())],
-        ).unwrap();
+            vec![
+                Scalar::Utf8("a|b".to_owned()),
+                Scalar::Utf8("b|c".to_owned()),
+                Scalar::Utf8("a".to_owned()),
+            ],
+        )
+        .unwrap();
         let result = s.str().get_dummies("|").unwrap();
         let output = format!("{result}");
         assert_text_golden("series_str_get_dummies_basic.txt", &output);
@@ -94500,7 +98593,8 @@ mod tests {
                 Scalar::Utf8("2024-01-15T10:30:00.123456".into()),
                 Scalar::Utf8("2024-01-15T10:30:00.789012".into()),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.dt().microsecond().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_dt_microsecond_basic.txt", &output);
@@ -94515,7 +98609,8 @@ mod tests {
                 Scalar::Utf8("2024-01-15T10:30:00.123456789".into()),
                 Scalar::Utf8("2024-01-15T10:30:00.987654321".into()),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.dt().nanosecond().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_dt_nanosecond_basic.txt", &output);
@@ -94530,7 +98625,8 @@ mod tests {
                 Scalar::Utf8("2024-01-15T10:30:00".into()),
                 Scalar::Utf8("2024-01-16T10:30:00".into()),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.dt().dayofweek().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_dt_dayofweek_basic.txt", &output);
@@ -94546,7 +98642,8 @@ mod tests {
                 Scalar::Utf8("x,y".to_owned()),
                 Scalar::Utf8("p,q,r,s".to_owned()),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.str().split_df(",").unwrap();
         let output = format!("{result}");
         assert_text_golden("series_str_split_df_basic.txt", &output);
@@ -94561,7 +98658,8 @@ mod tests {
                 Scalar::Utf8("xxhello".to_owned()),
                 Scalar::Utf8("xxxworld".to_owned()),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.str().lstrip_chars("x").unwrap();
         let output = format!("{result}");
         assert_text_golden("series_str_lstrip_chars_basic.txt", &output);
@@ -94576,7 +98674,8 @@ mod tests {
                 Scalar::Utf8("helloxx".to_owned()),
                 Scalar::Utf8("worldxxx".to_owned()),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.str().rstrip_chars("x").unwrap();
         let output = format!("{result}");
         assert_text_golden("series_str_rstrip_chars_basic.txt", &output);
@@ -94590,7 +98689,8 @@ mod tests {
                 ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
                 ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0)]),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.to_dict("list").unwrap();
         let output = format!("{result:?}");
         assert_text_golden("dataframe_to_dict_basic.txt", &output);
@@ -94604,7 +98704,8 @@ mod tests {
                 ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
                 ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0)]),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let items = df.items().unwrap();
         let output = format!("{items:?}");
         assert_text_golden("dataframe_items_basic.txt", &output);
@@ -94615,8 +98716,13 @@ mod tests {
         let s = Series::from_values(
             "val",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+            ],
+        )
+        .unwrap();
         let result = s.agg(&["sum", "mean", "min", "max"]).unwrap();
         let output = format!("{result}");
         assert_text_golden("series_agg_multi_basic.txt", &output);
@@ -94627,16 +98733,30 @@ mod tests {
         let df = DataFrame::from_dict(
             &["key", "val"],
             vec![
-                ("key", vec![Scalar::Utf8("a".to_owned()), Scalar::Utf8("a".to_owned()), Scalar::Utf8("b".to_owned())]),
-                ("val", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(10.0)]),
+                (
+                    "key",
+                    vec![
+                        Scalar::Utf8("a".to_owned()),
+                        Scalar::Utf8("a".to_owned()),
+                        Scalar::Utf8("b".to_owned()),
+                    ],
+                ),
+                (
+                    "val",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(10.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let gb = df.groupby(&["key"]).unwrap();
         let result = gb.agg_list(&["sum", "mean"]).unwrap();
         let output = format!("{result}");
         assert_text_golden("groupby_agg_list_basic.txt", &output);
     }
-
 
     #[test]
     fn series_cat_categories_golden_basic() {
@@ -94649,7 +98769,8 @@ mod tests {
                 Scalar::Utf8("green".to_owned()),
             ],
             false,
-        ).unwrap();
+        )
+        .unwrap();
         let cat = s.cat().unwrap();
         let categories = cat.categories();
         let output = format!("{categories:?}");
@@ -94667,7 +98788,8 @@ mod tests {
                 Scalar::Utf8("green".to_owned()),
             ],
             false,
-        ).unwrap();
+        )
+        .unwrap();
         let cat = s.cat().unwrap();
         let codes = cat.codes().unwrap();
         let output = format!("{codes}");
@@ -94684,7 +98806,8 @@ mod tests {
                 Scalar::Utf8("large".to_owned()),
             ],
             true,
-        ).unwrap();
+        )
+        .unwrap();
         let cat = s.cat().unwrap();
         let ordered = cat.ordered();
         let output = format!("{ordered}");
@@ -94701,13 +98824,16 @@ mod tests {
                 Scalar::Utf8("b".to_owned()),
             ],
             false,
-        ).unwrap();
+        )
+        .unwrap();
         let cat = s.cat().unwrap();
-        let renamed = cat.rename_categories(vec![
-            Scalar::Utf8("red".to_owned()),
-            Scalar::Utf8("green".to_owned()),
-            Scalar::Utf8("blue".to_owned()),
-        ]).unwrap();
+        let renamed = cat
+            .rename_categories(vec![
+                Scalar::Utf8("red".to_owned()),
+                Scalar::Utf8("green".to_owned()),
+                Scalar::Utf8("blue".to_owned()),
+            ])
+            .unwrap();
         let output = format!("{renamed}");
         assert_text_golden("series_cat_rename_basic.txt", &output);
     }
@@ -94721,12 +98847,15 @@ mod tests {
                 Scalar::Utf8("blue".to_owned()),
             ],
             false,
-        ).unwrap();
+        )
+        .unwrap();
         let cat = s.cat().unwrap();
-        let extended = cat.add_categories(vec![
-            Scalar::Utf8("green".to_owned()),
-            Scalar::Utf8("yellow".to_owned()),
-        ]).unwrap();
+        let extended = cat
+            .add_categories(vec![
+                Scalar::Utf8("green".to_owned()),
+                Scalar::Utf8("yellow".to_owned()),
+            ])
+            .unwrap();
         let ext_cat = extended.cat().unwrap();
         let categories = ext_cat.categories();
         let output = format!("{categories:?}");
@@ -94744,7 +98873,8 @@ mod tests {
                 Scalar::Utf8("green".to_owned()),
             ],
             false,
-        ).unwrap();
+        )
+        .unwrap();
         let cat = s.cat().unwrap();
         let cleaned = cat.remove_unused_categories().unwrap();
         let clean_cat = cleaned.cat().unwrap();
@@ -94763,23 +98893,36 @@ mod tests {
                 Scalar::Utf8("red".to_owned()),
             ],
             false,
-        ).unwrap();
+        )
+        .unwrap();
         let cat = s.cat().unwrap();
         let values = cat.to_values().unwrap();
         let output = format!("{values}");
         assert_text_golden("series_cat_to_values_basic.txt", &output);
     }
 
-
     #[test]
     fn series_sparse_density_golden_basic() {
         let s = Series::from_sparse_dense(
             "values",
-            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
-            vec![Scalar::Float64(0.0), Scalar::Float64(1.0), Scalar::Float64(0.0), Scalar::Float64(2.0), Scalar::Float64(0.0)],
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+            ],
+            vec![
+                Scalar::Float64(0.0),
+                Scalar::Float64(1.0),
+                Scalar::Float64(0.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(0.0),
+            ],
             DType::Float64,
             Scalar::Float64(0.0),
-        ).unwrap();
+        )
+        .unwrap();
         let sparse = s.sparse().unwrap();
         let density = sparse.density();
         let output = format!("{density}");
@@ -94790,11 +98933,24 @@ mod tests {
     fn series_sparse_sp_values_golden_basic() {
         let s = Series::from_sparse_dense(
             "values",
-            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
-            vec![Scalar::Float64(0.0), Scalar::Float64(1.0), Scalar::Float64(0.0), Scalar::Float64(2.0), Scalar::Float64(0.0)],
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+            ],
+            vec![
+                Scalar::Float64(0.0),
+                Scalar::Float64(1.0),
+                Scalar::Float64(0.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(0.0),
+            ],
             DType::Float64,
             Scalar::Float64(0.0),
-        ).unwrap();
+        )
+        .unwrap();
         let sparse = s.sparse().unwrap();
         let sp_values = sparse.sp_values();
         let output = format!("{sp_values:?}");
@@ -94805,11 +98961,24 @@ mod tests {
     fn series_sparse_sp_index_golden_basic() {
         let s = Series::from_sparse_dense(
             "values",
-            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
-            vec![Scalar::Float64(0.0), Scalar::Float64(1.0), Scalar::Float64(0.0), Scalar::Float64(2.0), Scalar::Float64(0.0)],
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+            ],
+            vec![
+                Scalar::Float64(0.0),
+                Scalar::Float64(1.0),
+                Scalar::Float64(0.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(0.0),
+            ],
             DType::Float64,
             Scalar::Float64(0.0),
-        ).unwrap();
+        )
+        .unwrap();
         let sparse = s.sparse().unwrap();
         let sp_index = sparse.sp_index();
         let output = format!("{sp_index:?}");
@@ -94821,10 +98990,15 @@ mod tests {
         let s = Series::from_sparse_dense(
             "values",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(0.0), Scalar::Float64(5.0), Scalar::Float64(0.0)],
+            vec![
+                Scalar::Float64(0.0),
+                Scalar::Float64(5.0),
+                Scalar::Float64(0.0),
+            ],
             DType::Float64,
             Scalar::Float64(0.0),
-        ).unwrap();
+        )
+        .unwrap();
         let sparse = s.sparse().unwrap();
         let dense = sparse.to_dense();
         let output = format!("{dense}");
@@ -94839,13 +99013,13 @@ mod tests {
             vec![Scalar::Int64(-1), Scalar::Int64(10), Scalar::Int64(-1)],
             DType::Int64,
             Scalar::Int64(-1),
-        ).unwrap();
+        )
+        .unwrap();
         let sparse = s.sparse().unwrap();
         let fill_value = sparse.fill_value();
         let output = format!("{fill_value:?}");
         assert_text_golden("series_sparse_fill_value_basic.txt", &output);
     }
-
 
     #[test]
     fn series_dt_tz_golden_basic() {
@@ -94857,7 +99031,8 @@ mod tests {
                 Scalar::Utf8("2024-06-20T14:45:30Z".to_owned()),
                 Scalar::Utf8("2024-12-31T23:59:59-08:00".to_owned()),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let tz = s.dt().tz().unwrap();
         let output = format!("{tz}");
         assert_text_golden("series_dt_tz_basic.txt", &output);
@@ -94872,7 +99047,8 @@ mod tests {
                 Scalar::Utf8("2024-01-15T10:30:00+05:00".to_owned()),
                 Scalar::Utf8("2024-06-20T14:45:30Z".to_owned()),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let timetz = s.dt().timetz().unwrap();
         let output = format!("{timetz}");
         assert_text_golden("series_dt_timetz_basic.txt", &output);
@@ -94887,7 +99063,8 @@ mod tests {
                 Scalar::Utf8("2024-01-15T10:30:45".to_owned()),
                 Scalar::Utf8("2024-12-31T23:59:00".to_owned()),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let components = s.dt().components().unwrap();
         let output = format!("{components}");
         assert_text_golden("series_dt_components_basic.txt", &output);
@@ -94903,12 +99080,12 @@ mod tests {
                 Scalar::Null(NullKind::NaN),
                 Scalar::Utf8("2024-12-31T23:59:59".to_owned()),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let doy = s.dt().dayofyear().unwrap();
         let output = format!("{doy}");
         assert_text_golden("series_dt_dayofyear_with_null_basic.txt", &output);
     }
-
 
     #[test]
     fn dataframe_swaplevel_golden_basic() {
@@ -94917,8 +99094,12 @@ mod tests {
                 ("a", vec![Scalar::Int64(1), Scalar::Int64(2)]),
                 ("b", vec![Scalar::Int64(10), Scalar::Int64(20)]),
             ],
-            vec![IndexLabel::Utf8("(x, 1)".to_owned()), IndexLabel::Utf8("(y, 2)".to_owned())],
-        ).unwrap();
+            vec![
+                IndexLabel::Utf8("(x, 1)".to_owned()),
+                IndexLabel::Utf8("(y, 2)".to_owned()),
+            ],
+        )
+        .unwrap();
         let result = df.swaplevel();
         let output = format!("{result}");
         assert_text_golden("dataframe_swaplevel_basic.txt", &output);
@@ -94927,17 +99108,18 @@ mod tests {
     #[test]
     fn dataframe_align_golden_basic() {
         let df1 = DataFrame::from_dict_with_index(
-            vec![
-                ("a", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]),
-            ],
+            vec![(
+                "a",
+                vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            )],
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-        ).unwrap();
+        )
+        .unwrap();
         let df2 = DataFrame::from_dict_with_index(
-            vec![
-                ("a", vec![Scalar::Int64(10), Scalar::Int64(20)]),
-            ],
+            vec![("a", vec![Scalar::Int64(10), Scalar::Int64(20)])],
             vec![1_i64.into(), 3_i64.into()],
-        ).unwrap();
+        )
+        .unwrap();
         let (aligned1, aligned2) = df1.align(&df2, AlignMode::Outer).unwrap();
         let output = format!("aligned1:\n{aligned1}\naligned2:\n{aligned2}");
         assert_text_golden("dataframe_align_basic.txt", &output);
@@ -94948,17 +99130,31 @@ mod tests {
         let df1 = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]),
-                ("b", vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)]),
+                (
+                    "a",
+                    vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                ),
+                (
+                    "b",
+                    vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let df2 = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Int64(1), Scalar::Int64(5), Scalar::Int64(3)]),
-                ("b", vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(40)]),
+                (
+                    "a",
+                    vec![Scalar::Int64(1), Scalar::Int64(5), Scalar::Int64(3)],
+                ),
+                (
+                    "b",
+                    vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(40)],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df1.ne(&df2).unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_ne_basic.txt", &output);
@@ -94969,32 +99165,55 @@ mod tests {
         let df1 = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]),
-                ("b", vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)]),
+                (
+                    "a",
+                    vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                ),
+                (
+                    "b",
+                    vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let df2 = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Int64(1), Scalar::Int64(5), Scalar::Int64(3)]),
-                ("b", vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(40)]),
+                (
+                    "a",
+                    vec![Scalar::Int64(1), Scalar::Int64(5), Scalar::Int64(3)],
+                ),
+                (
+                    "b",
+                    vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(40)],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df1.eq(&df2).unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_eq_basic.txt", &output);
     }
-
 
     #[test]
     fn dataframe_convert_dtypes_golden_basic() {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Utf8("1".to_owned()), Scalar::Utf8("2".to_owned())]),
-                ("b", vec![Scalar::Utf8("3.14".to_owned()), Scalar::Utf8("2.71".to_owned())]),
+                (
+                    "a",
+                    vec![Scalar::Utf8("1".to_owned()), Scalar::Utf8("2".to_owned())],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Utf8("3.14".to_owned()),
+                        Scalar::Utf8("2.71".to_owned()),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.convert_dtypes().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_convert_dtypes_basic.txt", &output);
@@ -95005,8 +99224,13 @@ mod tests {
         let s = Series::from_values(
             "val",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Utf8("10".to_owned()), Scalar::Utf8("20".to_owned()), Scalar::Utf8("30".to_owned())],
-        ).unwrap();
+            vec![
+                Scalar::Utf8("10".to_owned()),
+                Scalar::Utf8("20".to_owned()),
+                Scalar::Utf8("30".to_owned()),
+            ],
+        )
+        .unwrap();
         let result = s.infer_objects().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_infer_objects_basic.txt", &output);
@@ -95016,10 +99240,15 @@ mod tests {
     fn dataframe_infer_objects_golden_basic() {
         let df = DataFrame::from_dict(
             &["a"],
-            vec![
-                ("a", vec![Scalar::Utf8("100".to_owned()), Scalar::Utf8("200".to_owned())]),
-            ],
-        ).unwrap();
+            vec![(
+                "a",
+                vec![
+                    Scalar::Utf8("100".to_owned()),
+                    Scalar::Utf8("200".to_owned()),
+                ],
+            )],
+        )
+        .unwrap();
         let result = df.infer_objects().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_infer_objects_basic.txt", &output);
@@ -95030,10 +99259,17 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Int64(1), Scalar::Int64(5), Scalar::Int64(3)]),
-                ("b", vec![Scalar::Int64(10), Scalar::Int64(2), Scalar::Int64(8)]),
+                (
+                    "a",
+                    vec![Scalar::Int64(1), Scalar::Int64(5), Scalar::Int64(3)],
+                ),
+                (
+                    "b",
+                    vec![Scalar::Int64(10), Scalar::Int64(2), Scalar::Int64(8)],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.gt_scalar_df(&Scalar::Int64(3)).unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_gt_scalar_df_basic.txt", &output);
@@ -95044,15 +99280,21 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Int64(1), Scalar::Int64(5), Scalar::Int64(3)]),
-                ("b", vec![Scalar::Int64(10), Scalar::Int64(2), Scalar::Int64(8)]),
+                (
+                    "a",
+                    vec![Scalar::Int64(1), Scalar::Int64(5), Scalar::Int64(3)],
+                ),
+                (
+                    "b",
+                    vec![Scalar::Int64(10), Scalar::Int64(2), Scalar::Int64(8)],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.lt_scalar_df(&Scalar::Int64(5)).unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_lt_scalar_df_basic.txt", &output);
     }
-
 
     #[test]
     fn series_pop_golden_basic() {
@@ -95060,7 +99302,8 @@ mod tests {
             "val",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
-        ).unwrap();
+        )
+        .unwrap();
         let (popped, remaining) = s.pop(&1_i64.into()).unwrap();
         let output = format!("popped: {popped:?}\nremaining:\n{remaining}");
         assert_text_golden("series_pop_basic.txt", &output);
@@ -95075,7 +99318,8 @@ mod tests {
                 ("b", vec![Scalar::Int64(10), Scalar::Int64(20)]),
                 ("c", vec![Scalar::Int64(100), Scalar::Int64(200)]),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let (popped, remaining) = df.pop("b").unwrap();
         let output = format!("popped:\n{popped}\nremaining:\n{remaining}");
         assert_text_golden("dataframe_pop_basic.txt", &output);
@@ -95089,7 +99333,8 @@ mod tests {
                 ("a", vec![Scalar::Int64(1), Scalar::Int64(2)]),
                 ("c", vec![Scalar::Int64(100), Scalar::Int64(200)]),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let new_col = Column::from_values(vec![Scalar::Int64(10), Scalar::Int64(20)]).unwrap();
         let result = df.insert(1, "b", new_col).unwrap();
         let output = format!("{result}");
@@ -95102,26 +99347,29 @@ mod tests {
             "val",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
-        ).unwrap();
-        let other = Series::from_values(
-            "val",
-            vec![1_i64.into()],
-            vec![Scalar::Int64(99)],
-        ).unwrap();
+        )
+        .unwrap();
+        let other =
+            Series::from_values("val", vec![1_i64.into()], vec![Scalar::Int64(99)]).unwrap();
         let result = s.update(&other).unwrap();
         let output = format!("{result}");
         assert_text_golden("series_update_basic.txt", &output);
     }
 
-
     #[test]
     fn dataframe_keys_golden_basic() {
         let df = DataFrame::from_dict_with_index(
+            vec![(
+                "a",
+                vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            )],
             vec![
-                ("a", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]),
+                IndexLabel::Utf8("x".to_owned()),
+                IndexLabel::Utf8("y".to_owned()),
+                IndexLabel::Utf8("z".to_owned()),
             ],
-            vec![IndexLabel::Utf8("x".to_owned()), IndexLabel::Utf8("y".to_owned()), IndexLabel::Utf8("z".to_owned())],
-        ).unwrap();
+        )
+        .unwrap();
         let keys = df.keys();
         let output = format!("{keys:?}");
         assert_text_golden("dataframe_keys_basic.txt", &output);
@@ -95131,9 +99379,14 @@ mod tests {
     fn series_keys_golden_basic() {
         let s = Series::from_values(
             "val",
-            vec![IndexLabel::Utf8("a".to_owned()), IndexLabel::Utf8("b".to_owned()), IndexLabel::Utf8("c".to_owned())],
+            vec![
+                IndexLabel::Utf8("a".to_owned()),
+                IndexLabel::Utf8("b".to_owned()),
+                IndexLabel::Utf8("c".to_owned()),
+            ],
             vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
-        ).unwrap();
+        )
+        .unwrap();
         let keys = s.keys();
         let output = format!("{keys:?}");
         assert_text_golden("series_keys_basic.txt", &output);
@@ -95145,20 +99398,25 @@ mod tests {
             "val",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
-        ).unwrap();
+        )
+        .unwrap();
         let ndim = s.ndim();
         let output = format!("{ndim}");
         assert_text_golden("series_ndim_basic.txt", &output);
     }
 
-
     #[test]
     fn series_get_golden_basic() {
         let s = Series::from_values(
             "val",
-            vec![IndexLabel::Utf8("a".to_owned()), IndexLabel::Utf8("b".to_owned()), IndexLabel::Utf8("c".to_owned())],
+            vec![
+                IndexLabel::Utf8("a".to_owned()),
+                IndexLabel::Utf8("b".to_owned()),
+                IndexLabel::Utf8("c".to_owned()),
+            ],
             vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.get(&IndexLabel::Utf8("b".to_owned()));
         let output = format!("{result:?}");
         assert_text_golden("series_get_basic.txt", &output);
@@ -95173,7 +99431,8 @@ mod tests {
                 ("b", vec![Scalar::Int64(10), Scalar::Int64(20)]),
                 ("c", vec![Scalar::Int64(100), Scalar::Int64(200)]),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.get("b").unwrap();
         let output = format!("{result:?}");
         assert_text_golden("dataframe_get_basic.txt", &output);
@@ -95185,7 +99444,8 @@ mod tests {
             "val",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.iat(1).unwrap();
         let output = format!("{result:?}");
         assert_text_golden("series_iat_basic.txt", &output);
@@ -95193,24 +99453,25 @@ mod tests {
 
     #[test]
     fn series_item_golden_basic() {
-        let s = Series::from_values(
-            "val",
-            vec![0_i64.into()],
-            vec![Scalar::Int64(42)],
-        ).unwrap();
+        let s = Series::from_values("val", vec![0_i64.into()], vec![Scalar::Int64(42)]).unwrap();
         let result = s.item().unwrap();
         let output = format!("{result:?}");
         assert_text_golden("series_item_basic.txt", &output);
     }
-
 
     #[test]
     fn series_asof_golden_basic() {
         let s = Series::from_values(
             "val",
             vec![1_i64.into(), 2_i64.into(), 4_i64.into(), 5_i64.into()],
-            vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(40.0), Scalar::Float64(50.0)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(10.0),
+                Scalar::Float64(20.0),
+                Scalar::Float64(40.0),
+                Scalar::Float64(50.0),
+            ],
+        )
+        .unwrap();
         let result = s.asof(&3_i64.into());
         let output = format!("{result:?}");
         assert_text_golden("series_asof_basic.txt", &output);
@@ -95219,11 +99480,17 @@ mod tests {
     #[test]
     fn dataframe_asof_golden_basic() {
         let df = DataFrame::from_dict_with_index(
-            vec![
-                ("a", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(40.0)]),
-            ],
+            vec![(
+                "a",
+                vec![
+                    Scalar::Float64(10.0),
+                    Scalar::Float64(20.0),
+                    Scalar::Float64(40.0),
+                ],
+            )],
             vec![1_i64.into(), 2_i64.into(), 4_i64.into()],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.asof(&3_i64.into(), None).unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_asof_basic.txt", &output);
@@ -95235,12 +99502,12 @@ mod tests {
             "val",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
-        ).unwrap();
+        )
+        .unwrap();
         let arr = s.array();
         let output = format!("{arr:?}");
         assert_text_golden("series_array_basic.txt", &output);
     }
-
 
     #[test]
     fn series_set_axis_golden_basic() {
@@ -95248,12 +99515,15 @@ mod tests {
             "val",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
-        ).unwrap();
-        let result = s.set_axis(vec![
-            IndexLabel::Utf8("a".to_owned()),
-            IndexLabel::Utf8("b".to_owned()),
-            IndexLabel::Utf8("c".to_owned()),
-        ]).unwrap();
+        )
+        .unwrap();
+        let result = s
+            .set_axis(vec![
+                IndexLabel::Utf8("a".to_owned()),
+                IndexLabel::Utf8("b".to_owned()),
+                IndexLabel::Utf8("c".to_owned()),
+            ])
+            .unwrap();
         let output = format!("{result}");
         assert_text_golden("series_set_axis_basic.txt", &output);
     }
@@ -95264,7 +99534,8 @@ mod tests {
             "val",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.rename_axis("new_index").unwrap();
         let output = format!("{result}");
         assert_text_golden("series_rename_axis_basic.txt", &output);
@@ -95278,11 +99549,17 @@ mod tests {
                 ("a", vec![Scalar::Int64(1), Scalar::Int64(2)]),
                 ("b", vec![Scalar::Int64(10), Scalar::Int64(20)]),
             ],
-        ).unwrap();
-        let result = df.set_axis(vec![
-            IndexLabel::Utf8("x".to_owned()),
-            IndexLabel::Utf8("y".to_owned()),
-        ], 0).unwrap();
+        )
+        .unwrap();
+        let result = df
+            .set_axis(
+                vec![
+                    IndexLabel::Utf8("x".to_owned()),
+                    IndexLabel::Utf8("y".to_owned()),
+                ],
+                0,
+            )
+            .unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_set_axis_basic.txt", &output);
     }
@@ -95295,27 +99572,35 @@ mod tests {
                 ("a", vec![Scalar::Int64(1), Scalar::Int64(2)]),
                 ("b", vec![Scalar::Int64(10), Scalar::Int64(20)]),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.rename_axis("row_id").unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_rename_axis_basic.txt", &output);
     }
 
-
     #[test]
     fn dataframe_reindex_like_golden_basic() {
         let df1 = DataFrame::from_dict_with_index(
+            vec![("a", vec![Scalar::Int64(1), Scalar::Int64(2)])],
             vec![
-                ("a", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                IndexLabel::Utf8("x".to_owned()),
+                IndexLabel::Utf8("y".to_owned()),
             ],
-            vec![IndexLabel::Utf8("x".to_owned()), IndexLabel::Utf8("y".to_owned())],
-        ).unwrap();
+        )
+        .unwrap();
         let df2 = DataFrame::from_dict_with_index(
+            vec![(
+                "b",
+                vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+            )],
             vec![
-                ("b", vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)]),
+                IndexLabel::Utf8("y".to_owned()),
+                IndexLabel::Utf8("z".to_owned()),
+                IndexLabel::Utf8("x".to_owned()),
             ],
-            vec![IndexLabel::Utf8("y".to_owned()), IndexLabel::Utf8("z".to_owned()), IndexLabel::Utf8("x".to_owned())],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df1.reindex_like(&df2).unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_reindex_like_basic.txt", &output);
@@ -95325,10 +99610,25 @@ mod tests {
     fn series_truncate_golden_basic() {
         let s = Series::from_values(
             "val",
-            vec![1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into(), 5_i64.into()],
-            vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30), Scalar::Int64(40), Scalar::Int64(50)],
-        ).unwrap();
-        let result = s.truncate(Some(&2_i64.into()), Some(&4_i64.into())).unwrap();
+            vec![
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+                5_i64.into(),
+            ],
+            vec![
+                Scalar::Int64(10),
+                Scalar::Int64(20),
+                Scalar::Int64(30),
+                Scalar::Int64(40),
+                Scalar::Int64(50),
+            ],
+        )
+        .unwrap();
+        let result = s
+            .truncate(Some(&2_i64.into()), Some(&4_i64.into()))
+            .unwrap();
         let output = format!("{result}");
         assert_text_golden("series_truncate_basic.txt", &output);
     }
@@ -95336,16 +99636,24 @@ mod tests {
     #[test]
     fn dataframe_truncate_golden_basic() {
         let df = DataFrame::from_dict_with_index(
-            vec![
-                ("a", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3), Scalar::Int64(4)]),
-            ],
+            vec![(
+                "a",
+                vec![
+                    Scalar::Int64(1),
+                    Scalar::Int64(2),
+                    Scalar::Int64(3),
+                    Scalar::Int64(4),
+                ],
+            )],
             vec![1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
-        ).unwrap();
-        let result = df.truncate(Some(&2_i64.into()), Some(&3_i64.into())).unwrap();
+        )
+        .unwrap();
+        let result = df
+            .truncate(Some(&2_i64.into()), Some(&3_i64.into()))
+            .unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_truncate_basic.txt", &output);
     }
-
 
     #[test]
     fn series_divmod_golden_basic() {
@@ -95353,12 +99661,14 @@ mod tests {
             "dividend",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(17), Scalar::Int64(23), Scalar::Int64(30)],
-        ).unwrap();
+        )
+        .unwrap();
         let s2 = Series::from_values(
             "divisor",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(5), Scalar::Int64(7), Scalar::Int64(8)],
-        ).unwrap();
+        )
+        .unwrap();
         let (quot, rem) = s1.divmod(&s2).unwrap();
         let output = format!("quotient:\n{quot}\nremainder:\n{rem}");
         assert_text_golden("series_divmod_basic.txt", &output);
@@ -95370,12 +99680,14 @@ mod tests {
             "x",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(5), Scalar::Int64(7), Scalar::Int64(8)],
-        ).unwrap();
+        )
+        .unwrap();
         let s2 = Series::from_values(
             "y",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(17), Scalar::Int64(23), Scalar::Int64(30)],
-        ).unwrap();
+        )
+        .unwrap();
         let (quot, rem) = s1.rdivmod(&s2).unwrap();
         let output = format!("quotient:\n{quot}\nremainder:\n{rem}");
         assert_text_golden("series_rdivmod_basic.txt", &output);
@@ -95391,7 +99703,8 @@ mod tests {
                 IndexLabel::Utf8("(c, 3)".to_string()),
             ],
             vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.reorder_levels(&[1, 0]).unwrap();
         let output = format!("{result}");
         assert_text_golden("series_reorder_levels_basic.txt", &output);
@@ -95403,7 +99716,8 @@ mod tests {
             "fill",
             Scalar::Int64(42),
             vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
-        ).unwrap();
+        )
+        .unwrap();
         let output = format!("{s}");
         assert_text_golden("series_broadcast_basic.txt", &output);
     }
@@ -95414,7 +99728,8 @@ mod tests {
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.ravel();
         let output = format!("{result:?}");
         assert_text_golden("series_ravel_basic.txt", &output);
@@ -95426,7 +99741,8 @@ mod tests {
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.view();
         let output = format!("{result}");
         assert_text_golden("series_view_basic.txt", &output);
@@ -95437,11 +99753,23 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]),
-                ("b", vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)]),
+                (
+                    "a",
+                    vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                ),
+                (
+                    "b",
+                    vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+                ),
             ],
-        ).unwrap();
-        let result = df.lookup(&[0_i64.into(), 1_i64.into(), 2_i64.into()], &["a", "b", "a"]).unwrap();
+        )
+        .unwrap();
+        let result = df
+            .lookup(
+                &[0_i64.into(), 1_i64.into(), 2_i64.into()],
+                &["a", "b", "a"],
+            )
+            .unwrap();
         let output = format!("{result:?}");
         assert_text_golden("dataframe_lookup_basic.txt", &output);
     }
@@ -95456,7 +99784,8 @@ mod tests {
                 IndexLabel::Utf8("c".to_string()),
             ],
             vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.droplevel().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_droplevel_basic.txt", &output);
@@ -95466,15 +99795,22 @@ mod tests {
     fn dataframe_droplevel_golden_basic() {
         let df = DataFrame::from_dict_with_index(
             vec![
-                ("a", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]),
-                ("b", vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)]),
+                (
+                    "a",
+                    vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                ),
+                (
+                    "b",
+                    vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+                ),
             ],
             vec![
                 IndexLabel::Utf8("x".to_string()),
                 IndexLabel::Utf8("y".to_string()),
                 IndexLabel::Utf8("z".to_string()),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.droplevel().unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_droplevel_basic.txt", &output);
@@ -95485,13 +99821,25 @@ mod tests {
         let s1 = Series::from_values(
             "x",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
-            vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(4.0),
+            ],
+        )
+        .unwrap();
         let s2 = Series::from_values(
             "y",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
-            vec![Scalar::Float64(2.0), Scalar::Float64(4.0), Scalar::Float64(5.0), Scalar::Float64(8.0)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(2.0),
+                Scalar::Float64(4.0),
+                Scalar::Float64(5.0),
+                Scalar::Float64(8.0),
+            ],
+        )
+        .unwrap();
         let result = s1.cov_with(&s2).unwrap();
         let output = format!("{result}");
         assert_text_golden("series_cov_with_basic.txt", &output);
@@ -95502,8 +99850,13 @@ mod tests {
         let s = Series::from_values(
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(1.0), Scalar::Null(NullKind::NaN), Scalar::Float64(3.0)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(3.0),
+            ],
+        )
+        .unwrap();
         let with_skip = s.sum_skipna(true).unwrap();
         let without_skip = s.sum_skipna(false).unwrap();
         let output = format!("skipna=true: {with_skip}\nskipna=false: {without_skip}");
@@ -95515,17 +99868,47 @@ mod tests {
         let df1 = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
-                ("b", vec![Scalar::Float64(4.0), Scalar::Float64(5.0), Scalar::Float64(6.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(4.0),
+                        Scalar::Float64(5.0),
+                        Scalar::Float64(6.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let df2 = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
-                ("b", vec![Scalar::Float64(6.0), Scalar::Float64(5.0), Scalar::Float64(4.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(6.0),
+                        Scalar::Float64(5.0),
+                        Scalar::Float64(4.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df1.corrwith(&df2).unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_corrwith_basic.txt", &output);
@@ -95536,8 +99919,13 @@ mod tests {
         let s = Series::from_values(
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(1.0), Scalar::Null(NullKind::NaN), Scalar::Float64(5.0)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(5.0),
+            ],
+        )
+        .unwrap();
         let with_skip = s.mean_skipna(true).unwrap();
         let without_skip = s.mean_skipna(false).unwrap();
         let output = format!("skipna=true: {with_skip}\nskipna=false: {without_skip}");
@@ -95549,8 +99937,14 @@ mod tests {
         let s = Series::from_values(
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
-            vec![Scalar::Float64(1.0), Scalar::Null(NullKind::NaN), Scalar::Float64(5.0), Scalar::Float64(9.0)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(5.0),
+                Scalar::Float64(9.0),
+            ],
+        )
+        .unwrap();
         let with_skip = s.std_skipna(true).unwrap();
         let without_skip = s.std_skipna(false).unwrap();
         let output = format!("skipna=true: {with_skip}\nskipna=false: {without_skip}");
@@ -95562,8 +99956,14 @@ mod tests {
         let s = Series::from_values(
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
-            vec![Scalar::Float64(1.0), Scalar::Null(NullKind::NaN), Scalar::Float64(5.0), Scalar::Float64(9.0)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(5.0),
+                Scalar::Float64(9.0),
+            ],
+        )
+        .unwrap();
         let with_skip = s.var_skipna(true).unwrap();
         let without_skip = s.var_skipna(false).unwrap();
         let output = format!("skipna=true: {with_skip}\nskipna=false: {without_skip}");
@@ -95575,8 +99975,13 @@ mod tests {
         let s = Series::from_values(
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(2.0), Scalar::Null(NullKind::NaN), Scalar::Float64(5.0)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(2.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(5.0),
+            ],
+        )
+        .unwrap();
         let with_skip = s.min_skipna(true).unwrap();
         let without_skip = s.min_skipna(false).unwrap();
         let output = format!("skipna=true: {with_skip}\nskipna=false: {without_skip}");
@@ -95588,8 +99993,13 @@ mod tests {
         let s = Series::from_values(
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(2.0), Scalar::Null(NullKind::NaN), Scalar::Float64(5.0)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(2.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(5.0),
+            ],
+        )
+        .unwrap();
         let with_skip = s.max_skipna(true).unwrap();
         let without_skip = s.max_skipna(false).unwrap();
         let output = format!("skipna=true: {with_skip}\nskipna=false: {without_skip}");
@@ -95601,8 +100011,14 @@ mod tests {
         let s = Series::from_values(
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
-            vec![Scalar::Float64(1.0), Scalar::Null(NullKind::NaN), Scalar::Float64(5.0), Scalar::Float64(9.0)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(5.0),
+                Scalar::Float64(9.0),
+            ],
+        )
+        .unwrap();
         let with_skip = s.median_skipna(true).unwrap();
         let without_skip = s.median_skipna(false).unwrap();
         let output = format!("skipna=true: {with_skip}\nskipna=false: {without_skip}");
@@ -95614,8 +100030,13 @@ mod tests {
         let s = Series::from_values(
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(2.0), Scalar::Null(NullKind::NaN), Scalar::Float64(3.0)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(2.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(3.0),
+            ],
+        )
+        .unwrap();
         let with_skip = s.prod_skipna(true).unwrap();
         let without_skip = s.prod_skipna(false).unwrap();
         let output = format!("skipna=true: {with_skip}\nskipna=false: {without_skip}");
@@ -95627,15 +100048,38 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0)]),
-                ("b", vec![Scalar::Float64(4.0), Scalar::Float64(5.0), Scalar::Float64(6.0), Scalar::Float64(7.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(4.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(4.0),
+                        Scalar::Float64(5.0),
+                        Scalar::Float64(6.0),
+                        Scalar::Float64(7.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let other = Series::from_values(
             "c",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
-            vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(4.0),
+            ],
+        )
+        .unwrap();
         let result = df.rolling(3, None).corr_with(&other).unwrap();
         let output = format!("{result}");
         assert_text_golden("rolling_dataframe_corr_with_basic.txt", &output);
@@ -95646,15 +100090,38 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0)]),
-                ("b", vec![Scalar::Float64(4.0), Scalar::Float64(5.0), Scalar::Float64(6.0), Scalar::Float64(7.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(4.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(4.0),
+                        Scalar::Float64(5.0),
+                        Scalar::Float64(6.0),
+                        Scalar::Float64(7.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let other = Series::from_values(
             "c",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
-            vec![Scalar::Float64(2.0), Scalar::Float64(4.0), Scalar::Float64(6.0), Scalar::Float64(8.0)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(2.0),
+                Scalar::Float64(4.0),
+                Scalar::Float64(6.0),
+                Scalar::Float64(8.0),
+            ],
+        )
+        .unwrap();
         let result = df.rolling(3, None).cov_with(&other).unwrap();
         let output = format!("{result}");
         assert_text_golden("rolling_dataframe_cov_with_basic.txt", &output);
@@ -95665,10 +100132,25 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
-                ("b", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(30.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.add_scalar(5.0).unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_add_scalar_basic.txt", &output);
@@ -95679,10 +100161,25 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
-                ("b", vec![Scalar::Float64(100.0), Scalar::Float64(200.0), Scalar::Float64(300.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(30.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(100.0),
+                        Scalar::Float64(200.0),
+                        Scalar::Float64(300.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.sub_scalar(5.0).unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_sub_scalar_basic.txt", &output);
@@ -95693,10 +100190,25 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
-                ("b", vec![Scalar::Float64(4.0), Scalar::Float64(5.0), Scalar::Float64(6.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(4.0),
+                        Scalar::Float64(5.0),
+                        Scalar::Float64(6.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.mul_scalar(10.0).unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_mul_scalar_basic.txt", &output);
@@ -95707,10 +100219,25 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(10.0), Scalar::Float64(20.0), Scalar::Float64(30.0)]),
-                ("b", vec![Scalar::Float64(100.0), Scalar::Float64(200.0), Scalar::Float64(300.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(30.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(100.0),
+                        Scalar::Float64(200.0),
+                        Scalar::Float64(300.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.div_scalar(10.0).unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_div_scalar_basic.txt", &output);
@@ -95721,10 +100248,25 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0)]),
-                ("b", vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(3.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(4.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.pow_scalar(2.0).unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_pow_scalar_basic.txt", &output);
@@ -95735,10 +100277,25 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Float64(10.0), Scalar::Float64(17.0), Scalar::Float64(23.0)]),
-                ("b", vec![Scalar::Float64(7.0), Scalar::Float64(11.0), Scalar::Float64(19.0)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(17.0),
+                        Scalar::Float64(23.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(7.0),
+                        Scalar::Float64(11.0),
+                        Scalar::Float64(19.0),
+                    ],
+                ),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let result = df.mod_scalar(5.0).unwrap();
         let output = format!("{result}");
         assert_text_golden("dataframe_mod_scalar_basic.txt", &output);
@@ -95749,13 +100306,23 @@ mod tests {
         let s1 = Series::from_values(
             "a",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(10.0), Scalar::Float64(17.0), Scalar::Float64(25.0)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(10.0),
+                Scalar::Float64(17.0),
+                Scalar::Float64(25.0),
+            ],
+        )
+        .unwrap();
         let s2 = Series::from_values(
             "b",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(3.0), Scalar::Float64(5.0), Scalar::Float64(7.0)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(3.0),
+                Scalar::Float64(5.0),
+                Scalar::Float64(7.0),
+            ],
+        )
+        .unwrap();
         let result = s1.floor_divide(&s2).unwrap();
         let output = format!("{result}");
         assert_text_golden("series_floor_divide_basic.txt", &output);
@@ -95767,12 +100334,14 @@ mod tests {
             "a",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(10), Scalar::Int64(17), Scalar::Int64(25)],
-        ).unwrap();
+        )
+        .unwrap();
         let s2 = Series::from_values(
             "b",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(3), Scalar::Int64(5), Scalar::Int64(7)],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s1.true_divide(&s2).unwrap();
         let output = format!("{result}");
         assert_text_golden("series_true_divide_basic.txt", &output);
@@ -95784,17 +100353,20 @@ mod tests {
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
-        ).unwrap();
+        )
+        .unwrap();
         let cond = Series::from_values(
             "cond",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)],
-        ).unwrap();
+        )
+        .unwrap();
         let other = Series::from_values(
             "other",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(100), Scalar::Int64(200), Scalar::Int64(300)],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.where_series(&cond, &other).unwrap();
         let output = format!("{result}");
         assert_text_golden("series_where_series_basic.txt", &output);
@@ -95806,17 +100378,20 @@ mod tests {
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
-        ).unwrap();
+        )
+        .unwrap();
         let cond = Series::from_values(
             "cond",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)],
-        ).unwrap();
+        )
+        .unwrap();
         let other = Series::from_values(
             "other",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(100), Scalar::Int64(200), Scalar::Int64(300)],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.mask_series(&cond, &other).unwrap();
         let output = format!("{result}");
         assert_text_golden("series_mask_series_basic.txt", &output);
@@ -95827,13 +100402,23 @@ mod tests {
         let s1 = Series::from_values(
             "a",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(10.5), Scalar::Float64(-17.3), Scalar::Float64(25.7)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(10.5),
+                Scalar::Float64(-17.3),
+                Scalar::Float64(25.7),
+            ],
+        )
+        .unwrap();
         let s2 = Series::from_values(
             "b",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(3.0), Scalar::Float64(5.0), Scalar::Float64(7.0)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(3.0),
+                Scalar::Float64(5.0),
+                Scalar::Float64(7.0),
+            ],
+        )
+        .unwrap();
         let result = s1.fmod(&s2).unwrap();
         let output = format!("{result}");
         assert_text_golden("series_fmod_basic.txt", &output);
@@ -95844,13 +100429,23 @@ mod tests {
         let s1 = Series::from_values(
             "a",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(10.5), Scalar::Float64(-17.3), Scalar::Float64(25.7)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(10.5),
+                Scalar::Float64(-17.3),
+                Scalar::Float64(25.7),
+            ],
+        )
+        .unwrap();
         let s2 = Series::from_values(
             "b",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(3.0), Scalar::Float64(5.0), Scalar::Float64(7.0)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(3.0),
+                Scalar::Float64(5.0),
+                Scalar::Float64(7.0),
+            ],
+        )
+        .unwrap();
         let result = s1.remainder(&s2).unwrap();
         let output = format!("{result}");
         assert_text_golden("series_remainder_basic.txt", &output);
@@ -95861,13 +100456,23 @@ mod tests {
         let s1 = Series::from_values(
             "base",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(4.0)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(4.0),
+            ],
+        )
+        .unwrap();
         let s2 = Series::from_values(
             "exp",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(2.0), Scalar::Float64(3.0), Scalar::Float64(0.5)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(0.5),
+            ],
+        )
+        .unwrap();
         let result = s1.power(&s2).unwrap();
         let output = format!("{result}");
         assert_text_golden("series_power_basic.txt", &output);
@@ -95878,13 +100483,23 @@ mod tests {
         let s1 = Series::from_values(
             "a",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(1.0), Scalar::Float64(5.0), Scalar::Float64(3.0)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(5.0),
+                Scalar::Float64(3.0),
+            ],
+        )
+        .unwrap();
         let s2 = Series::from_values(
             "b",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(2.0), Scalar::Float64(4.0), Scalar::Float64(6.0)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(2.0),
+                Scalar::Float64(4.0),
+                Scalar::Float64(6.0),
+            ],
+        )
+        .unwrap();
         let result = s1.maximum(&s2).unwrap();
         let output = format!("{result}");
         assert_text_golden("series_maximum_basic.txt", &output);
@@ -95895,13 +100510,23 @@ mod tests {
         let s1 = Series::from_values(
             "a",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(1.0), Scalar::Float64(5.0), Scalar::Float64(3.0)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(5.0),
+                Scalar::Float64(3.0),
+            ],
+        )
+        .unwrap();
         let s2 = Series::from_values(
             "b",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(2.0), Scalar::Float64(4.0), Scalar::Float64(6.0)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(2.0),
+                Scalar::Float64(4.0),
+                Scalar::Float64(6.0),
+            ],
+        )
+        .unwrap();
         let result = s1.minimum(&s2).unwrap();
         let output = format!("{result}");
         assert_text_golden("series_minimum_basic.txt", &output);
@@ -95912,13 +100537,23 @@ mod tests {
         let s1 = Series::from_values(
             "a",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(3.0), Scalar::Float64(5.0), Scalar::Float64(8.0)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(3.0),
+                Scalar::Float64(5.0),
+                Scalar::Float64(8.0),
+            ],
+        )
+        .unwrap();
         let s2 = Series::from_values(
             "b",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(4.0), Scalar::Float64(12.0), Scalar::Float64(15.0)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(4.0),
+                Scalar::Float64(12.0),
+                Scalar::Float64(15.0),
+            ],
+        )
+        .unwrap();
         let result = s1.hypot(&s2).unwrap();
         let output = format!("{result}");
         assert_text_golden("series_hypot_basic.txt", &output);
@@ -95929,13 +100564,23 @@ mod tests {
         let s1 = Series::from_values(
             "y",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(1.0), Scalar::Float64(1.0), Scalar::Float64(-1.0)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(1.0),
+                Scalar::Float64(-1.0),
+            ],
+        )
+        .unwrap();
         let s2 = Series::from_values(
             "x",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(1.0), Scalar::Float64(-1.0), Scalar::Float64(1.0)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(-1.0),
+                Scalar::Float64(1.0),
+            ],
+        )
+        .unwrap();
         let result = s1.arctan2(&s2).unwrap();
         let output = format!("{result}");
         assert_text_golden("series_arctan2_basic.txt", &output);
@@ -95946,13 +100591,23 @@ mod tests {
         let s1 = Series::from_values(
             "mag",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(5.0), Scalar::Float64(-3.0), Scalar::Float64(7.0)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(5.0),
+                Scalar::Float64(-3.0),
+                Scalar::Float64(7.0),
+            ],
+        )
+        .unwrap();
         let s2 = Series::from_values(
             "sign",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(-1.0), Scalar::Float64(1.0), Scalar::Float64(-1.0)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(-1.0),
+                Scalar::Float64(1.0),
+                Scalar::Float64(-1.0),
+            ],
+        )
+        .unwrap();
         let result = s1.copysign(&s2).unwrap();
         let output = format!("{result}");
         assert_text_golden("series_copysign_basic.txt", &output);
@@ -95963,8 +100618,14 @@ mod tests {
         let s = Series::from_values(
             "x",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
-            vec![Scalar::Float64(-1.0), Scalar::Float64(0.0), Scalar::Float64(1.0), Scalar::Float64(2.0)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(-1.0),
+                Scalar::Float64(0.0),
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+            ],
+        )
+        .unwrap();
         let result = s.heaviside(0.5).unwrap();
         let output = format!("{result}");
         assert_text_golden("series_heaviside_basic.txt", &output);
@@ -95975,8 +100636,13 @@ mod tests {
         let s = Series::from_values(
             "mantissa",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(0.5)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(0.5),
+            ],
+        )
+        .unwrap();
         let result = s.ldexp(3).unwrap();
         let output = format!("{result}");
         assert_text_golden("series_ldexp_basic.txt", &output);
@@ -95987,13 +100653,23 @@ mod tests {
         let s1 = Series::from_values(
             "a",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(1.0), Scalar::Null(NullKind::NaN), Scalar::Float64(3.0)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(3.0),
+            ],
+        )
+        .unwrap();
         let s2 = Series::from_values(
             "b",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(2.0), Scalar::Float64(4.0), Scalar::Null(NullKind::NaN)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(2.0),
+                Scalar::Float64(4.0),
+                Scalar::Null(NullKind::NaN),
+            ],
+        )
+        .unwrap();
         let result = s1.fmax(&s2).unwrap();
         let output = format!("{result}");
         assert_text_golden("series_fmax_basic.txt", &output);
@@ -96004,13 +100680,23 @@ mod tests {
         let s1 = Series::from_values(
             "a",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(1.0), Scalar::Null(NullKind::NaN), Scalar::Float64(3.0)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(3.0),
+            ],
+        )
+        .unwrap();
         let s2 = Series::from_values(
             "b",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(2.0), Scalar::Float64(4.0), Scalar::Null(NullKind::NaN)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(2.0),
+                Scalar::Float64(4.0),
+                Scalar::Null(NullKind::NaN),
+            ],
+        )
+        .unwrap();
         let result = s1.fmin(&s2).unwrap();
         let output = format!("{result}");
         assert_text_golden("series_fmin_basic.txt", &output);
@@ -96021,8 +100707,13 @@ mod tests {
         let s = Series::from_values(
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(2.0), Scalar::Float64(8.0), Scalar::Float64(0.125)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(2.0),
+                Scalar::Float64(8.0),
+                Scalar::Float64(0.125),
+            ],
+        )
+        .unwrap();
         let (mant, exp) = s.frexp().unwrap();
         let output = format!("mantissa:\n{mant}\nexponent:\n{exp}");
         assert_text_golden("series_frexp_basic.txt", &output);
@@ -96033,8 +100724,13 @@ mod tests {
         let s = Series::from_values(
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(2.5), Scalar::Float64(-3.7), Scalar::Float64(4.0)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(2.5),
+                Scalar::Float64(-3.7),
+                Scalar::Float64(4.0),
+            ],
+        )
+        .unwrap();
         let (frac, int) = s.modf().unwrap();
         let output = format!("frac:\n{frac}\nint:\n{int}");
         assert_text_golden("series_modf_basic.txt", &output);
@@ -96045,8 +100741,13 @@ mod tests {
         let s = Series::from_values(
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(1.0), Scalar::Float64(1e10), Scalar::Float64(1e-10)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(1e10),
+                Scalar::Float64(1e-10),
+            ],
+        )
+        .unwrap();
         let result = s.spacing().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_spacing_basic.txt", &output);
@@ -96057,13 +100758,23 @@ mod tests {
         let s1 = Series::from_values(
             "x",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(1.0), Scalar::Float64(2.0), Scalar::Float64(0.0)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(0.0),
+            ],
+        )
+        .unwrap();
         let s2 = Series::from_values(
             "y",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Float64(2.0), Scalar::Float64(1.0), Scalar::Float64(-1.0)],
-        ).unwrap();
+            vec![
+                Scalar::Float64(2.0),
+                Scalar::Float64(1.0),
+                Scalar::Float64(-1.0),
+            ],
+        )
+        .unwrap();
         let result = s1.nextafter(&s2).unwrap();
         let output = format!("{result}");
         assert_text_golden("series_nextafter_basic.txt", &output);
@@ -96074,13 +100785,25 @@ mod tests {
         let s1 = Series::from_values(
             "a",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
-            vec![Scalar::Bool(true), Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(false)],
-        ).unwrap();
+            vec![
+                Scalar::Bool(true),
+                Scalar::Bool(true),
+                Scalar::Bool(false),
+                Scalar::Bool(false),
+            ],
+        )
+        .unwrap();
         let s2 = Series::from_values(
             "b",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
-            vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true), Scalar::Bool(false)],
-        ).unwrap();
+            vec![
+                Scalar::Bool(true),
+                Scalar::Bool(false),
+                Scalar::Bool(true),
+                Scalar::Bool(false),
+            ],
+        )
+        .unwrap();
         let result = s1.logical_and(&s2).unwrap();
         let output = format!("{result}");
         assert_text_golden("series_logical_and_basic.txt", &output);
@@ -96091,13 +100814,25 @@ mod tests {
         let s1 = Series::from_values(
             "a",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
-            vec![Scalar::Bool(true), Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(false)],
-        ).unwrap();
+            vec![
+                Scalar::Bool(true),
+                Scalar::Bool(true),
+                Scalar::Bool(false),
+                Scalar::Bool(false),
+            ],
+        )
+        .unwrap();
         let s2 = Series::from_values(
             "b",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
-            vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true), Scalar::Bool(false)],
-        ).unwrap();
+            vec![
+                Scalar::Bool(true),
+                Scalar::Bool(false),
+                Scalar::Bool(true),
+                Scalar::Bool(false),
+            ],
+        )
+        .unwrap();
         let result = s1.logical_or(&s2).unwrap();
         let output = format!("{result}");
         assert_text_golden("series_logical_or_basic.txt", &output);
@@ -96108,13 +100843,25 @@ mod tests {
         let s1 = Series::from_values(
             "a",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
-            vec![Scalar::Bool(true), Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(false)],
-        ).unwrap();
+            vec![
+                Scalar::Bool(true),
+                Scalar::Bool(true),
+                Scalar::Bool(false),
+                Scalar::Bool(false),
+            ],
+        )
+        .unwrap();
         let s2 = Series::from_values(
             "b",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
-            vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true), Scalar::Bool(false)],
-        ).unwrap();
+            vec![
+                Scalar::Bool(true),
+                Scalar::Bool(false),
+                Scalar::Bool(true),
+                Scalar::Bool(false),
+            ],
+        )
+        .unwrap();
         let result = s1.logical_xor(&s2).unwrap();
         let output = format!("{result}");
         assert_text_golden("series_logical_xor_basic.txt", &output);
@@ -96126,7 +100873,8 @@ mod tests {
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.logical_not().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_logical_not_basic.txt", &output);
@@ -96137,13 +100885,23 @@ mod tests {
         let s1 = Series::from_values(
             "a",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Int64(0b1010), Scalar::Int64(0b1100), Scalar::Int64(0b1111)],
-        ).unwrap();
+            vec![
+                Scalar::Int64(0b1010),
+                Scalar::Int64(0b1100),
+                Scalar::Int64(0b1111),
+            ],
+        )
+        .unwrap();
         let s2 = Series::from_values(
             "b",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Int64(0b1100), Scalar::Int64(0b1010), Scalar::Int64(0b0101)],
-        ).unwrap();
+            vec![
+                Scalar::Int64(0b1100),
+                Scalar::Int64(0b1010),
+                Scalar::Int64(0b0101),
+            ],
+        )
+        .unwrap();
         let result = s1.bitwise_and(&s2).unwrap();
         let output = format!("{result}");
         assert_text_golden("series_bitwise_and_basic.txt", &output);
@@ -96154,13 +100912,23 @@ mod tests {
         let s1 = Series::from_values(
             "a",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Int64(0b1010), Scalar::Int64(0b1100), Scalar::Int64(0b1111)],
-        ).unwrap();
+            vec![
+                Scalar::Int64(0b1010),
+                Scalar::Int64(0b1100),
+                Scalar::Int64(0b1111),
+            ],
+        )
+        .unwrap();
         let s2 = Series::from_values(
             "b",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Int64(0b1100), Scalar::Int64(0b1010), Scalar::Int64(0b0101)],
-        ).unwrap();
+            vec![
+                Scalar::Int64(0b1100),
+                Scalar::Int64(0b1010),
+                Scalar::Int64(0b0101),
+            ],
+        )
+        .unwrap();
         let result = s1.bitwise_or(&s2).unwrap();
         let output = format!("{result}");
         assert_text_golden("series_bitwise_or_basic.txt", &output);
@@ -96171,13 +100939,23 @@ mod tests {
         let s1 = Series::from_values(
             "a",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Int64(0b1010), Scalar::Int64(0b1100), Scalar::Int64(0b1111)],
-        ).unwrap();
+            vec![
+                Scalar::Int64(0b1010),
+                Scalar::Int64(0b1100),
+                Scalar::Int64(0b1111),
+            ],
+        )
+        .unwrap();
         let s2 = Series::from_values(
             "b",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
-            vec![Scalar::Int64(0b1100), Scalar::Int64(0b1010), Scalar::Int64(0b0101)],
-        ).unwrap();
+            vec![
+                Scalar::Int64(0b1100),
+                Scalar::Int64(0b1010),
+                Scalar::Int64(0b0101),
+            ],
+        )
+        .unwrap();
         let result = s1.bitwise_xor(&s2).unwrap();
         let output = format!("{result}");
         assert_text_golden("series_bitwise_xor_basic.txt", &output);
@@ -96189,11 +100967,77 @@ mod tests {
             "vals",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
             vec![Scalar::Int64(0), Scalar::Int64(1), Scalar::Int64(-1)],
-        ).unwrap();
+        )
+        .unwrap();
         let result = s.bitwise_not().unwrap();
         let output = format!("{result}");
         assert_text_golden("series_bitwise_not_basic.txt", &output);
     }
+
+    #[test]
+    fn series_to_csv_quote_all_golden_basic() {
+        let s = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("hello".to_string()),
+                Scalar::Int64(42),
+                Scalar::Float64(3.14),
+            ],
+        )
+        .unwrap();
+        let output = s.to_csv_with_quoting(',', true, "", CsvQuoting::All);
+        let normalized = output.trim_end_matches('\n');
+        assert_text_golden("series_to_csv_quote_all_basic.txt", normalized);
+    }
+
+    #[test]
+    fn dataframe_to_csv_quote_all_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["name", "age", "score"],
+            vec![
+                (
+                    "name",
+                    vec![
+                        Scalar::Utf8("Alice".to_string()),
+                        Scalar::Utf8("Bob".to_string()),
+                    ],
+                ),
+                ("age", vec![Scalar::Int64(30), Scalar::Int64(25)]),
+                ("score", vec![Scalar::Float64(95.5), Scalar::Float64(87.0)]),
+            ],
+        )
+        .unwrap();
+        let output = df
+            .to_csv_with_quoting(',', true, "", None, CsvQuoting::All)
+            .unwrap();
+        let normalized = output.trim_end_matches('\n');
+        assert_text_golden("dataframe_to_csv_quote_all_basic.txt", normalized);
+    }
+
+    #[test]
+    fn dataframe_to_csv_quote_nonnumeric_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["name", "age"],
+            vec![
+                (
+                    "name",
+                    vec![
+                        Scalar::Utf8("Alice".to_string()),
+                        Scalar::Utf8("Bob".to_string()),
+                    ],
+                ),
+                ("age", vec![Scalar::Int64(30), Scalar::Int64(25)]),
+            ],
+        )
+        .unwrap();
+        let output = df
+            .to_csv_with_quoting(',', true, "", None, CsvQuoting::NonNumeric)
+            .unwrap();
+        let normalized = output.trim_end_matches('\n');
+        assert_text_golden("dataframe_to_csv_quote_nonnumeric_basic.txt", normalized);
+    }
+
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
     //
     // Metamorphic relations: assertions of the form f(g(x)) == g(f(x))
@@ -103507,5 +108351,4 @@ mod test_select_columns_perf_76e1fd {
         assert_eq!(s.len(), 3);
         assert!((s.values()[1].to_f64().unwrap() - 42.0).abs() < 1e-10);
     }
-
 }
