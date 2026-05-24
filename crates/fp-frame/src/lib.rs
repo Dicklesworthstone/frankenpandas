@@ -10233,6 +10233,20 @@ impl Series {
         na_rep: &str,
         quoting: CsvQuoting,
     ) -> String {
+        self.to_csv_with_header(sep, include_index, na_rep, quoting, true)
+    }
+
+    /// Serialize the Series to a CSV string with quoting and header control.
+    ///
+    /// - `header`: if true, write series name as first row; if false, omit header
+    pub fn to_csv_with_header(
+        &self,
+        sep: char,
+        include_index: bool,
+        na_rep: &str,
+        quoting: CsvQuoting,
+        header: bool,
+    ) -> String {
         let quote_str = |s: &str, is_numeric: bool| -> String {
             match quoting {
                 CsvQuoting::Minimal => csv_escape(s, sep),
@@ -10274,15 +10288,17 @@ impl Series {
         }
 
         let mut out = String::new();
-        // Header
-        if include_index {
-            if quoting == CsvQuoting::All {
-                out.push_str(&format!("\"\"{sep}{}\n", quote_str(&self.name, false)));
+        // Header (only if header=true)
+        if header {
+            if include_index {
+                if quoting == CsvQuoting::All {
+                    out.push_str(&format!("\"\"{sep}{}\n", quote_str(&self.name, false)));
+                } else {
+                    out.push_str(&format!("{sep}{}\n", quote_str(&self.name, false)));
+                }
             } else {
-                out.push_str(&format!("{sep}{}\n", quote_str(&self.name, false)));
+                out.push_str(&format!("{}\n", quote_str(&self.name, false)));
             }
-        } else {
-            out.push_str(&format!("{}\n", quote_str(&self.name, false)));
         }
         // Data
         for (label, val) in self.index.labels().iter().zip(self.column.values()) {
@@ -33362,6 +33378,7 @@ impl DataFrame {
     /// - `CsvQuoting::All`: Quote all fields including headers, index, and values
     /// - `CsvQuoting::NonNumeric`: Quote all non-numeric fields
     /// - `CsvQuoting::None`: Never quote fields
+    /// - `header`: if true (default), write column names as first row
     pub fn to_csv_with_quoting(
         &self,
         sep: char,
@@ -33369,6 +33386,21 @@ impl DataFrame {
         na_rep: &str,
         columns: Option<&[&str]>,
         quoting: CsvQuoting,
+    ) -> Result<String, FrameError> {
+        self.to_csv_with_header(sep, include_index, na_rep, columns, quoting, true)
+    }
+
+    /// Export DataFrame to CSV string with full control over quoting and header.
+    ///
+    /// - `header`: if true, write column names as first row; if false, omit header
+    pub fn to_csv_with_header(
+        &self,
+        sep: char,
+        include_index: bool,
+        na_rep: &str,
+        columns: Option<&[&str]>,
+        quoting: CsvQuoting,
+        header: bool,
     ) -> Result<String, FrameError> {
         let col_order: Vec<&str> = match columns {
             Some(cols) => {
@@ -33396,22 +33428,24 @@ impl DataFrame {
 
         let mut out = String::new();
 
-        // Header
-        if include_index {
-            if let Some(idx_name) = self.index.name() {
-                out.push_str(&quote_str(idx_name, false));
-            } else if quoting == CsvQuoting::All {
-                out.push_str("\"\"");
-            }
-            out.push(sep);
-        }
-        for (i, name) in col_order.iter().enumerate() {
-            if i > 0 {
+        // Header (only if header=true)
+        if header {
+            if include_index {
+                if let Some(idx_name) = self.index.name() {
+                    out.push_str(&quote_str(idx_name, false));
+                } else if quoting == CsvQuoting::All {
+                    out.push_str("\"\"");
+                }
                 out.push(sep);
             }
-            out.push_str(&quote_str(name, false));
+            for (i, name) in col_order.iter().enumerate() {
+                if i > 0 {
+                    out.push(sep);
+                }
+                out.push_str(&quote_str(name, false));
+            }
+            out.push('\n');
         }
-        out.push('\n');
 
         // Rows
         for (row_idx, label) in self.index.labels().iter().enumerate() {
@@ -101036,6 +101070,42 @@ mod tests {
             .unwrap();
         let normalized = output.trim_end_matches('\n');
         assert_text_golden("dataframe_to_csv_quote_nonnumeric_basic.txt", normalized);
+    }
+
+    #[test]
+    fn series_to_csv_no_header_golden_basic() {
+        let s = Series::from_pairs(
+            "data",
+            vec![
+                (0_i64.into(), Scalar::Int64(1)),
+                (1_i64.into(), Scalar::Int64(2)),
+                (2_i64.into(), Scalar::Int64(3)),
+            ],
+        )
+        .unwrap();
+        let output = s.to_csv_with_header(',', false, "", CsvQuoting::Minimal, false);
+        let normalized = output.trim_end_matches('\n');
+        assert_text_golden("series_to_csv_no_header_basic.txt", normalized);
+    }
+
+    #[test]
+    fn dataframe_to_csv_no_header_golden_basic() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                (
+                    "b",
+                    vec![Scalar::Utf8("x".to_string()), Scalar::Utf8("y".to_string())],
+                ),
+            ],
+        )
+        .unwrap();
+        let output = df
+            .to_csv_with_header(',', false, "", None, CsvQuoting::Minimal, false)
+            .unwrap();
+        let normalized = output.trim_end_matches('\n');
+        assert_text_golden("dataframe_to_csv_no_header_basic.txt", normalized);
     }
 
     // ── Metamorphic property tests (skill: /testing-metamorphic) ─────
