@@ -1,0 +1,3 @@
+0        hi    
+1       abc    
+Name: text, Length: 2, dtype: Utf8

@@ -1,0 +1,4 @@
+0    3.5
+1    2
+2    1.5
+Name: val, Length: 3, dtype: Float64

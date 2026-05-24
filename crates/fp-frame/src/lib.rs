@@ -43572,9 +43572,9 @@ mod tests {
     use super::{
         CsvQuoting, DataFrame, DataFrameColumnInput, DataFrameCsvReadOptions,
         DataFrameDictAxisLabels, DropNaHow, DuplicateKeep, FrameError, IndexLabel, Series,
-        TzAmbiguousPolicy, TzLocalizeOptions, TzNonexistentPolicy, cut, datetime64_label_from_naive,
-        index_to_frame, index_to_series, parse_datetime64_nanos, parse_naive_datetime_value, qcut,
-        to_numeric,
+        TzAmbiguousPolicy, TzLocalizeOptions, TzNonexistentPolicy, cut,
+        datetime64_label_from_naive, index_to_frame, index_to_series, parse_datetime64_nanos,
+        parse_naive_datetime_value, qcut, to_numeric,
     };
 
     fn assert_text_golden(golden_name: &str, actual: &str) {
@@ -105591,6 +105591,90 @@ mod tests {
         .unwrap();
         assert_eq!(s.min().unwrap(), Scalar::Int64(2));
         assert_eq!(s.max().unwrap(), Scalar::Int64(8));
+    }
+
+    #[test]
+    fn golden_series_case_when() {
+        let s = Series::from_pairs(
+            "val",
+            vec![
+                (0_i64.into(), Scalar::Int64(1)),
+                (1_i64.into(), Scalar::Int64(2)),
+                (2_i64.into(), Scalar::Int64(3)),
+                (3_i64.into(), Scalar::Int64(4)),
+            ],
+        )
+        .unwrap();
+        let cond1 = Series::from_pairs(
+            "c1",
+            vec![
+                (0_i64.into(), Scalar::Bool(true)),
+                (1_i64.into(), Scalar::Bool(false)),
+                (2_i64.into(), Scalar::Bool(true)),
+                (3_i64.into(), Scalar::Bool(false)),
+            ],
+        )
+        .unwrap();
+        let val1 = Series::from_pairs(
+            "v1",
+            vec![
+                (0_i64.into(), Scalar::Int64(100)),
+                (1_i64.into(), Scalar::Int64(100)),
+                (2_i64.into(), Scalar::Int64(100)),
+                (3_i64.into(), Scalar::Int64(100)),
+            ],
+        )
+        .unwrap();
+        let result = s.case_when(&[(cond1, val1)]).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_case_when_basic.txt", &output);
+    }
+
+    #[test]
+    fn golden_series_absolute() {
+        let s = Series::from_pairs(
+            "val",
+            vec![
+                (0_i64.into(), Scalar::Float64(-3.5)),
+                (1_i64.into(), Scalar::Float64(2.0)),
+                (2_i64.into(), Scalar::Float64(-1.5)),
+            ],
+        )
+        .unwrap();
+        let result = s.absolute().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_absolute_basic.txt", &output);
+    }
+
+    #[test]
+    fn golden_series_str_casefold() {
+        let s = Series::from_pairs(
+            "text",
+            vec![
+                (0_i64.into(), Scalar::Utf8("HELLO".to_string())),
+                (1_i64.into(), Scalar::Utf8("World".to_string())),
+                (2_i64.into(), Scalar::Utf8("ẞ".to_string())),
+            ],
+        )
+        .unwrap();
+        let result = s.str().casefold().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_str_casefold_basic.txt", &output);
+    }
+
+    #[test]
+    fn golden_series_str_center() {
+        let s = Series::from_pairs(
+            "text",
+            vec![
+                (0_i64.into(), Scalar::Utf8("hi".to_string())),
+                (1_i64.into(), Scalar::Utf8("abc".to_string())),
+            ],
+        )
+        .unwrap();
+        let result = s.str().center(10, ' ').unwrap();
+        let output = format!("{result}");
+        assert_text_golden("series_str_center_basic.txt", &output);
     }
 }
 
