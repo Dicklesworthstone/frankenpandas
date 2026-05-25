@@ -926,11 +926,27 @@ pub fn cast_scalar_owned(value: Scalar, target: DType) -> Result<Scalar, TypeErr
                 }
                 Ok(Scalar::Int64(*v as i64))
             }
+            Scalar::Utf8(s) => {
+                // Try direct int parse first, then try float parse + truncate
+                // (pandas accepts "1.0" as valid int via float intermediate)
+                if let Ok(v) = s.parse::<i64>() {
+                    return Ok(Scalar::Int64(v));
+                }
+                if let Ok(f) = s.parse::<f64>() {
+                    if f.is_finite() && f.fract() == 0.0 && f >= i64::MIN as f64 && f < 9223372036854775808.0 {
+                        return Ok(Scalar::Int64(f as i64));
+                    }
+                }
+                Err(TypeError::InvalidCast { from, to: target })
+            }
             _ => Err(TypeError::InvalidCast { from, to: target }),
         },
         DType::Float64 => match &value {
             Scalar::Bool(v) => Ok(Scalar::Float64(if *v { 1.0 } else { 0.0 })),
             Scalar::Int64(v) => Ok(Scalar::Float64(*v as f64)),
+            Scalar::Utf8(s) => s.parse::<f64>().map(Scalar::Float64).map_err(|_| {
+                TypeError::InvalidCast { from, to: target }
+            }),
             _ => Err(TypeError::InvalidCast { from, to: target }),
         },
         DType::Utf8 => Ok(Scalar::Utf8(scalar_to_string_for_astype(value))),
