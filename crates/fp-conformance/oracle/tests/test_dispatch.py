@@ -316,3 +316,123 @@ def test_setup_pandas_strict_legacy_allows_system_fallback(oracle, tmp_path):
     finally:
         sys.path[:] = original_path
     assert hasattr(pd, "Series")
+
+
+def _datetime_series_payload(values):
+    return {
+        "index": [{"kind": "int64", "value": i} for i, _ in enumerate(values)],
+        "values": [{"kind": "utf8", "value": value} for value in values],
+    }
+
+
+@pytest.mark.parametrize(
+    ("operation", "expected_kind"),
+    [
+        ("series_dt_year", "int64"),
+        ("series_dt_month", "int64"),
+        ("series_dt_day", "int64"),
+        ("series_dt_hour", "int64"),
+        ("series_dt_minute", "int64"),
+        ("series_dt_second", "int64"),
+        ("series_dt_dayofweek", "int64"),
+        ("series_dt_dayofyear", "int64"),
+        ("series_dt_quarter", "int64"),
+        ("series_dt_is_month_start", "bool"),
+        ("series_dt_is_month_end", "bool"),
+        ("series_dt_is_year_start", "bool"),
+        ("series_dt_is_year_end", "bool"),
+        ("series_dt_is_leap_year", "bool"),
+    ],
+)
+def test_series_dt_accessors_dispatch(oracle, pd, operation, expected_kind):
+    payload = {
+        "operation": operation,
+        "left": _datetime_series_payload(["2024-01-15", "2024-06-30", "2024-12-31"]),
+    }
+    response = oracle.dispatch(pd, payload)
+    assert "expected_series" in response
+    values = response["expected_series"]["values"]
+    assert len(values) == 3
+    assert all(v["kind"] in (expected_kind, "null") for v in values)
+
+
+def test_series_dt_day_name_returns_strings(oracle, pd):
+    payload = {
+        "operation": "series_dt_day_name",
+        "left": _datetime_series_payload(["2024-01-01", "2024-01-02"]),
+    }
+    response = oracle.dispatch(pd, payload)
+    values = [v["value"] for v in response["expected_series"]["values"]]
+    assert values == ["Monday", "Tuesday"]
+
+
+def test_series_dt_month_name_returns_strings(oracle, pd):
+    payload = {
+        "operation": "series_dt_month_name",
+        "left": _datetime_series_payload(["2024-01-15", "2024-06-15"]),
+    }
+    response = oracle.dispatch(pd, payload)
+    values = [v["value"] for v in response["expected_series"]["values"]]
+    assert values == ["January", "June"]
+
+
+def test_series_concat_combines_series(oracle, pd):
+    payload = {
+        "operation": "series_concat",
+        "left": _series_payload([1, 2], [0, 1]),
+        "right": _series_payload([3, 4], [2, 3]),
+    }
+    response = oracle.dispatch(pd, payload)
+    assert "expected_series" in response
+    values = [v["value"] for v in response["expected_series"]["values"]]
+    assert len(values) == 4
+
+
+def test_series_to_timedelta_converts_to_timedelta(oracle, pd):
+    payload = {
+        "operation": "series_to_timedelta",
+        "left": _utf8_series_payload(["1 days", "2 hours"]),
+    }
+    response = oracle.dispatch(pd, payload)
+    assert "expected_series" in response
+
+
+@pytest.mark.parametrize(
+    ("operation", "expected"),
+    [
+        ("series_str_casefold", ["abc", "hello"]),
+        ("series_str_isdecimal", [False, True]),
+        ("series_str_istitle", [True, False]),
+    ],
+)
+def test_series_str_new_unary_dispatches(oracle, pd, operation, expected):
+    inputs = ["ABC", "hello"] if operation == "series_str_casefold" else (
+        ["abc", "123"] if operation == "series_str_isdecimal" else ["Hello World", "hello"]
+    )
+    payload = {
+        "operation": operation,
+        "left": _utf8_series_payload(inputs),
+    }
+    response = oracle.dispatch(pd, payload)
+    assert _expected_values(response) == expected
+
+
+def test_series_str_normalize_nfc(oracle, pd):
+    payload = {
+        "operation": "series_str_normalize",
+        "left": _utf8_series_payload(["café"]),
+        "str_normalize_form": "NFC",
+    }
+    response = oracle.dispatch(pd, payload)
+    assert "expected_series" in response
+
+
+def test_series_str_get_extracts_character(oracle, pd):
+    payload = {
+        "operation": "series_str_get",
+        "left": _utf8_series_payload(["abc", "xyz"]),
+        "str_get_index": 0,
+    }
+    response = oracle.dispatch(pd, payload)
+    values = _expected_values(response)
+    assert values == ["a", "x"]
