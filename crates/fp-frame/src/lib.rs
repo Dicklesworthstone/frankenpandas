@@ -27837,42 +27837,102 @@ impl DataFrame {
     /// Return a boolean Series indicating duplicated rows.
     ///
     /// Matches `df.duplicated(subset=..., keep=...)`.
+    ///
+    /// Uses hash-based O(n) deduplication instead of O(n²) pairwise comparison.
+    /// Per br-frankenpandas-cclly performance optimization.
     pub fn duplicated(
         &self,
         subset: Option<&[String]>,
         keep: DuplicateKeep,
     ) -> Result<Series, FrameError> {
+        use std::collections::HashMap;
+        use std::hash::{Hash, Hasher};
+
         let selected_columns = self.resolve_column_selector(subset)?;
         let row_count = self.len();
         let mut duplicated = vec![false; row_count];
 
+        // Build row keys for hashing - collect column values per row
+        // Use semantic hashing: all missing values (Null, NaN, NaT) hash to same value
+        let mut row_keys: Vec<Vec<u64>> = Vec::with_capacity(row_count);
+        for i in 0..row_count {
+            let mut key = Vec::with_capacity(selected_columns.len());
+            for col_name in &selected_columns {
+                let col = self.columns.get(col_name).expect("column must exist");
+                let value = &col.values()[i];
+                // Hash each scalar value - missing values hash identically
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                if value.is_missing() {
+                    // All missing values (Null, NaN, NaT, Float64(NaN)) hash identically
+                    0xDEADBEEF_u64.hash(&mut hasher);
+                } else {
+                    match value {
+                        Scalar::Null(_) => 0xDEADBEEF_u64.hash(&mut hasher),
+                        Scalar::Bool(b) => b.hash(&mut hasher),
+                        Scalar::Int64(v) => v.hash(&mut hasher),
+                        Scalar::Float64(f) => f.to_bits().hash(&mut hasher),
+                        Scalar::Utf8(s) => s.hash(&mut hasher),
+                        Scalar::Datetime64(ns) => ns.hash(&mut hasher),
+                        Scalar::Timedelta64(ns) => ns.hash(&mut hasher),
+                        Scalar::Period(ord) => ord.hash(&mut hasher),
+                        Scalar::Interval(iv) => {
+                            iv.left.to_bits().hash(&mut hasher);
+                            iv.right.to_bits().hash(&mut hasher);
+                        }
+                    }
+                }
+                key.push(hasher.finish());
+            }
+            row_keys.push(key);
+        }
+
         match keep {
             DuplicateKeep::First => {
-                for (i, is_duplicated) in duplicated.iter_mut().enumerate() {
-                    for j in 0..i {
-                        if self.rows_equal_on_subset(i, j, &selected_columns) {
-                            *is_duplicated = true;
-                            break;
+                // Track first occurrence of each row key
+                let mut seen: HashMap<&[u64], usize> = HashMap::with_capacity(row_count);
+                for i in 0..row_count {
+                    let key = row_keys[i].as_slice();
+                    if let Some(&first_idx) = seen.get(key) {
+                        // Verify actual equality (hash collision check)
+                        if self.rows_equal_on_subset(i, first_idx, &selected_columns) {
+                            duplicated[i] = true;
                         }
+                    } else {
+                        seen.insert(key, i);
                     }
                 }
             }
             DuplicateKeep::Last => {
-                for (i, is_duplicated) in duplicated.iter_mut().enumerate() {
-                    for j in (i + 1)..row_count {
-                        if self.rows_equal_on_subset(i, j, &selected_columns) {
-                            *is_duplicated = true;
-                            break;
+                // Track last occurrence by iterating backwards
+                let mut seen: HashMap<&[u64], usize> = HashMap::with_capacity(row_count);
+                for i in (0..row_count).rev() {
+                    let key = row_keys[i].as_slice();
+                    if let Some(&last_idx) = seen.get(key) {
+                        // Verify actual equality (hash collision check)
+                        if self.rows_equal_on_subset(i, last_idx, &selected_columns) {
+                            duplicated[i] = true;
                         }
+                    } else {
+                        seen.insert(key, i);
                     }
                 }
             }
             DuplicateKeep::None => {
-                for (i, is_duplicated) in duplicated.iter_mut().enumerate() {
-                    for j in 0..row_count {
-                        if i != j && self.rows_equal_on_subset(i, j, &selected_columns) {
-                            *is_duplicated = true;
-                            break;
+                // Count occurrences, mark all that appear more than once
+                let mut counts: HashMap<&[u64], Vec<usize>> = HashMap::with_capacity(row_count);
+                for i in 0..row_count {
+                    counts.entry(row_keys[i].as_slice()).or_default().push(i);
+                }
+                for indices in counts.values() {
+                    if indices.len() > 1 {
+                        // Verify actual equality for hash collisions
+                        for &i in indices {
+                            for &j in indices {
+                                if i != j && self.rows_equal_on_subset(i, j, &selected_columns) {
+                                    duplicated[i] = true;
+                                    break;
+                                }
+                            }
                         }
                     }
                 }
