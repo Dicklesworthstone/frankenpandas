@@ -40,7 +40,10 @@ find "$ARTIFACTS_DIR" -name "parity_gate_result.json" -exec cat {} \; 2>/dev/nul
             failed: [.[] | select(.pass == false)] | length,
             red_packets: [.[] | select(.pass == false) | .packet_id] | sort,
             green_packets: [.[] | select(.pass == true) | .packet_id] | sort,
-            details: (. | sort_by(.packet_id) | map({(.packet_id): {pass, reasons}})) | add
+            live_validated: [.[] | select(.validation_source == "live")] | length,
+            replay_only: [.[] | select(.validation_source == "replay" or .validation_source == null)] | length,
+            live_validated_pct: (([.[] | select(.validation_source == "live")] | length) / (length | if . == 0 then 1 else . end) * 100 | floor),
+            details: (. | sort_by(.packet_id) | map({(.packet_id): {pass, reasons, validation_source}})) | add
         }
     ' > "$CURRENT_RESULTS"
 

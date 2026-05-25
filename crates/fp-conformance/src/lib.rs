@@ -3034,6 +3034,8 @@ pub struct PacketGateResult {
     pub hardened_total: usize,
     pub hardened_failed: usize,
     pub reasons: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validation_source: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -4508,6 +4510,7 @@ pub fn evaluate_parity_gate(
         hardened_total,
         hardened_failed,
         reasons,
+        validation_source: None,
     })
 }
 
