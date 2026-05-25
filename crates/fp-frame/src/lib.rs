@@ -33446,6 +33446,7 @@ impl DataFrame {
     /// Export DataFrame to CSV string with full control over all options.
     ///
     /// - `escapechar`: when using CsvQuoting::None, escape special characters with this
+    #[allow(clippy::too_many_arguments)]
     pub fn to_csv_full(
         &self,
         sep: char,
@@ -105941,8 +105942,14 @@ mod tests {
         let original = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]),
-                ("b", vec![Scalar::Int64(4), Scalar::Int64(5), Scalar::Int64(6)]),
+                (
+                    "a",
+                    vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                ),
+                (
+                    "b",
+                    vec![Scalar::Int64(4), Scalar::Int64(5), Scalar::Int64(6)],
+                ),
             ],
         )
         .unwrap();
@@ -105994,7 +106001,13 @@ mod tests {
     fn rolling_sum_golden_basic() {
         let s = Series::from_values(
             "vals",
-            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+            ],
             vec![
                 Scalar::Float64(1.0),
                 Scalar::Float64(2.0),
@@ -106013,7 +106026,13 @@ mod tests {
     fn rolling_mean_golden_basic() {
         let s = Series::from_values(
             "vals",
-            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                3_i64.into(),
+                4_i64.into(),
+            ],
             vec![
                 Scalar::Float64(10.0),
                 Scalar::Float64(20.0),
@@ -106101,7 +106120,9 @@ mod tests {
             ],
         )
         .unwrap();
-        let result = df.melt(&["id"], &["a", "b"], Some("variable"), Some("value")).unwrap();
+        let result = df
+            .melt(&["id"], &["a", "b"], Some("variable"), Some("value"))
+            .unwrap();
         let output = format!("{result}");
         assert_text_golden("melt_basic.txt", &output);
     }
@@ -106242,8 +106263,22 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![Scalar::Int64(1), Scalar::Null(NullKind::Null), Scalar::Int64(3)]),
-                ("b", vec![Scalar::Utf8("x".into()), Scalar::Utf8("y".into()), Scalar::Null(NullKind::Null)]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Int64(1),
+                        Scalar::Null(NullKind::Null),
+                        Scalar::Int64(3),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Utf8("x".into()),
+                        Scalar::Utf8("y".into()),
+                        Scalar::Null(NullKind::Null),
+                    ],
+                ),
             ],
         )
         .unwrap();
@@ -106255,9 +106290,14 @@ mod tests {
     fn io_csv_with_nan_golden_basic() {
         let df = DataFrame::from_dict(
             &["a"],
-            vec![
-                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(f64::NAN), Scalar::Float64(3.0)]),
-            ],
+            vec![(
+                "a",
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(f64::NAN),
+                    Scalar::Float64(3.0),
+                ],
+            )],
         )
         .unwrap();
         let csv = df.to_csv(',', true);
@@ -106414,20 +106454,26 @@ mod tests {
         let df = DataFrame::from_dict(
             &["key", "val"],
             vec![
-                ("key", vec![
-                    Scalar::Utf8("a".into()),
-                    Scalar::Utf8("b".into()),
-                    Scalar::Utf8("a".into()),
-                    Scalar::Utf8("b".into()),
-                    Scalar::Utf8("a".into()),
-                ]),
-                ("val", vec![
-                    Scalar::Int64(1),
-                    Scalar::Int64(2),
-                    Scalar::Int64(3),
-                    Scalar::Null(NullKind::Null),
-                    Scalar::Int64(5),
-                ]),
+                (
+                    "key",
+                    vec![
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("b".into()),
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("b".into()),
+                        Scalar::Utf8("a".into()),
+                    ],
+                ),
+                (
+                    "val",
+                    vec![
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                        Scalar::Int64(3),
+                        Scalar::Null(NullKind::Null),
+                        Scalar::Int64(5),
+                    ],
+                ),
             ],
         )
         .unwrap();
@@ -106461,8 +106507,14 @@ mod tests {
             &["int_col", "float_col", "str_col"],
             vec![
                 ("int_col", vec![Scalar::Int64(1), Scalar::Int64(2)]),
-                ("float_col", vec![Scalar::Float64(1.5), Scalar::Float64(2.5)]),
-                ("str_col", vec![Scalar::Utf8("a".into()), Scalar::Utf8("b".into())]),
+                (
+                    "float_col",
+                    vec![Scalar::Float64(1.5), Scalar::Float64(2.5)],
+                ),
+                (
+                    "str_col",
+                    vec![Scalar::Utf8("a".into()), Scalar::Utf8("b".into())],
+                ),
             ],
         )
         .unwrap();
@@ -106478,22 +106530,30 @@ mod tests {
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
-                ("a", vec![
-                    Scalar::Int64(1),
-                    Scalar::Int64(1),
-                    Scalar::Int64(2),
-                    Scalar::Int64(2),
-                ]),
-                ("b", vec![
-                    Scalar::Utf8("x".into()),
-                    Scalar::Utf8("x".into()),
-                    Scalar::Utf8("y".into()),
-                    Scalar::Utf8("z".into()),
-                ]),
+                (
+                    "a",
+                    vec![
+                        Scalar::Int64(1),
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                        Scalar::Int64(2),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Utf8("x".into()),
+                        Scalar::Utf8("x".into()),
+                        Scalar::Utf8("y".into()),
+                        Scalar::Utf8("z".into()),
+                    ],
+                ),
             ],
         )
         .unwrap();
-        let result = df.drop_duplicates(None, DuplicateKeep::First, false).unwrap();
+        let result = df
+            .drop_duplicates(None, DuplicateKeep::First, false)
+            .unwrap();
         let output = format!("{result}");
         assert_text_golden("drop_duplicates_basic.txt", &output);
     }
@@ -106855,7 +106915,6 @@ mod tests {
         let output = format!("{result}");
         assert_text_golden("cummin_basic.txt", &output);
     }
-
 }
 
 #[cfg(test)]
