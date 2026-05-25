@@ -22267,28 +22267,43 @@ impl DatetimeAccessor<'_> {
         )
     }
 
-    /// Total seconds elapsed from midnight for each datetime.
+    /// Total seconds for each timedelta value.
     ///
-    /// Matches `pd.Series.dt.total_seconds()` (for time components).
+    /// Per br-frankenpandas-i9bah: pandas dt.total_seconds() is for timedelta
+    /// dtype, not datetime. Returns Float64 (fractional seconds supported).
     pub fn total_seconds(&self) -> Result<Series, FrameError> {
-        self.extract_component(
-            |s| {
-                let h = match Self::parse_datetime_component(s, 3) {
-                    Scalar::Int64(v) => v,
-                    _ => 0,
-                };
-                let mi = match Self::parse_datetime_component(s, 4) {
-                    Scalar::Int64(v) => v,
-                    _ => 0,
-                };
-                let sec = match Self::parse_datetime_component(s, 5) {
-                    Scalar::Int64(v) => v,
-                    _ => 0,
-                };
-                Scalar::Int64(h * 3600 + mi * 60 + sec)
-            },
-            self.series.name(),
-        )
+        let vals = self.series.column().values();
+        let mut out = Vec::with_capacity(vals.len());
+
+        for v in vals {
+            match v {
+                Scalar::Timedelta64(nanos) => {
+                    out.push(Scalar::Float64(fp_types::Timedelta::total_seconds(*nanos)));
+                }
+                Scalar::Utf8(s) => {
+                    // Try to parse as timedelta string (e.g., "1 days 02:30:00")
+                    match fp_types::Timedelta::parse(s) {
+                        Ok(nanos) => {
+                            out.push(Scalar::Float64(fp_types::Timedelta::total_seconds(nanos)));
+                        }
+                        Err(_) => {
+                            out.push(Scalar::Null(NullKind::NaN));
+                        }
+                    }
+                }
+                Scalar::Null(_) => {
+                    out.push(Scalar::Null(NullKind::NaN));
+                }
+                _ => {
+                    out.push(Scalar::Null(NullKind::NaN));
+                }
+            }
+        }
+
+        let index = Index::new(self.series.index().labels().to_vec())
+            .rename_index(self.series.index().name());
+        let column = Column::from_values(out)?;
+        Series::new(self.series.name(), index, column)
     }
 
     fn last_day_of_month(year: i32, month: u32) -> Option<u32> {
@@ -75478,19 +75493,20 @@ mod tests {
 
     #[test]
     fn dt_total_seconds() {
+        // Per br-frankenpandas-i9bah: pandas dt.total_seconds() is for
+        // timedelta dtype only, returns Float64.
         let s = Series::from_values(
             "d",
             vec![0_i64.into(), 1_i64.into()],
             vec![
-                Scalar::Utf8("2024-01-01T01:30:45".to_string()),
-                Scalar::Utf8("2024-01-01T00:00:00".to_string()),
+                Scalar::Timedelta64(fp_types::Timedelta::NANOS_PER_DAY), // 1 day
+                Scalar::Timedelta64(fp_types::Timedelta::NANOS_PER_HOUR * 2), // 2 hours
             ],
         )
         .unwrap();
         let result = s.dt().total_seconds().unwrap();
-        // 1*3600 + 30*60 + 45 = 5445
-        assert_eq!(result.values()[0], Scalar::Int64(5445));
-        assert_eq!(result.values()[1], Scalar::Int64(0));
+        assert_eq!(result.values()[0], Scalar::Float64(86400.0)); // 1 day = 86400 seconds
+        assert_eq!(result.values()[1], Scalar::Float64(7200.0)); // 2 hours = 7200 seconds
     }
 
     // ── DataFrameExpanding count/quantile ──

@@ -1108,6 +1108,15 @@ impl Timedelta {
                 break;
             }
 
+            // Per br-frankenpandas-i9bah: check if remaining is a time format
+            // (HH:MM:SS) which can appear after "N days " in pandas timedelta strings.
+            if remaining.contains(':') {
+                if let Some(time_nanos) = Self::try_parse_time_format(remaining) {
+                    total = total.checked_add(time_nanos).ok_or(TimedeltaError::Overflow)?;
+                    break;
+                }
+            }
+
             let num_end = remaining
                 .find(|c: char| !c.is_ascii_digit() && c != '.' && c != '-')
                 .unwrap_or(remaining.len());
