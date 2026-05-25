@@ -22,7 +22,7 @@ use fp_index::{Index, IndexLabel};
 use fp_types::Scalar;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
-use pyo3::IntoPy;
+use pyo3::IntoPyObjectExt;
 
 /// Convert a Python value to a FrankenPandas Scalar.
 fn py_to_scalar(_py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Scalar> {
@@ -47,17 +47,17 @@ fn py_to_scalar(_py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Scalar> {
 }
 
 /// Convert a FrankenPandas Scalar to a Python object.
-fn scalar_to_py(py: Python<'_>, scalar: &Scalar) -> PyObject {
+fn scalar_to_py(py: Python<'_>, scalar: &Scalar) -> PyResult<Py<PyAny>> {
     match scalar {
-        Scalar::Null(_) => py.None(),
-        Scalar::Bool(b) => b.into_py(py),
-        Scalar::Int64(i) => i.into_py(py),
-        Scalar::Float64(f) => f.into_py(py),
-        Scalar::Utf8(s) => s.into_py(py),
-        Scalar::Datetime64(ns) => ns.into_py(py),
-        Scalar::Timedelta64(ns) => ns.into_py(py),
-        Scalar::Period(ordinal) => ordinal.into_py(py),
-        Scalar::Interval(_) => py.None(),
+        Scalar::Null(_) => Ok(py.None()),
+        Scalar::Bool(b) => b.into_py_any(py),
+        Scalar::Int64(i) => i.into_py_any(py),
+        Scalar::Float64(f) => f.into_py_any(py),
+        Scalar::Utf8(s) => s.into_py_any(py),
+        Scalar::Datetime64(ns) => ns.into_py_any(py),
+        Scalar::Timedelta64(ns) => ns.into_py_any(py),
+        Scalar::Period(ordinal) => ordinal.into_py_any(py),
+        Scalar::Interval(_) => Ok(py.None()),
     }
 }
 
@@ -106,57 +106,57 @@ impl PySeries {
     }
 
     /// Return the sum of the Series.
-    fn sum(&self) -> PyResult<PyObject> {
-        Python::with_gil(|py| {
+    fn sum(&self) -> PyResult<Py<PyAny>> {
+        Python::attach(|py| {
             let result = self
                 .inner
                 .sum()
                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-            Ok(scalar_to_py(py, &result))
+            scalar_to_py(py, &result)
         })
     }
 
     /// Return the mean of the Series.
-    fn mean(&self) -> PyResult<PyObject> {
-        Python::with_gil(|py| {
+    fn mean(&self) -> PyResult<Py<PyAny>> {
+        Python::attach(|py| {
             let result = self
                 .inner
                 .mean()
                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-            Ok(scalar_to_py(py, &result))
+            scalar_to_py(py, &result)
         })
     }
 
     /// Return the minimum value.
-    fn min(&self) -> PyResult<PyObject> {
-        Python::with_gil(|py| {
+    fn min(&self) -> PyResult<Py<PyAny>> {
+        Python::attach(|py| {
             let result = self
                 .inner
                 .min()
                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-            Ok(scalar_to_py(py, &result))
+            scalar_to_py(py, &result)
         })
     }
 
     /// Return the maximum value.
-    fn max(&self) -> PyResult<PyObject> {
-        Python::with_gil(|py| {
+    fn max(&self) -> PyResult<Py<PyAny>> {
+        Python::attach(|py| {
             let result = self
                 .inner
                 .max()
                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-            Ok(scalar_to_py(py, &result))
+            scalar_to_py(py, &result)
         })
     }
 
     /// Return the standard deviation.
-    fn std(&self) -> PyResult<PyObject> {
-        Python::with_gil(|py| {
+    fn std(&self) -> PyResult<Py<PyAny>> {
+        Python::attach(|py| {
             let result = self
                 .inner
                 .std()
                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-            Ok(scalar_to_py(py, &result))
+            scalar_to_py(py, &result)
         })
     }
 
@@ -181,14 +181,14 @@ impl PySeries {
     }
 
     /// Return values as a Python list.
-    fn tolist(&self, py: Python<'_>) -> PyResult<PyObject> {
-        let values: Vec<PyObject> = self
+    fn tolist(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let values: Vec<Py<PyAny>> = self
             .inner
             .column()
             .values()
             .iter()
             .map(|s| scalar_to_py(py, s))
-            .collect();
+            .collect::<PyResult<Vec<Py<PyAny>>>>()?;
         Ok(PyList::new(py, values)?.into_any().unbind())
     }
 }
