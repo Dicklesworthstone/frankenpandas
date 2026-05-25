@@ -1,19 +1,19 @@
 # Parity Coverage Report
 
 > Rigorous audit of FrankenPandas vs upstream pandas API surface.
-> Generated: 2026-05-25
+> Generated: 2026-05-25 (Updated: 2026-05-25)
 
 ## Executive Summary
 
 | Metric | Value |
 |--------|-------|
-| **Effective Coverage** | **98.3%** (1,456 / 1,481 applicable APIs) |
-| Present (fully implemented) | 1,427 |
+| **Effective Coverage** | **98.5%** (1,459 / 1,481 applicable APIs) |
+| Present (fully implemented) | 1,430 |
 | Partial (documented limitations) | 29 |
-| Missing (tracked in beads) | 25 |
-| N/A (Python-specific) | 3 |
+| Missing (tracked in beads) | 22 |
+| N/A (Python-specific) | 0 |
 | Conformance Tests | 1,586 pass, 0 fail |
-| Documented Divergences | 15 (in DISCREPANCIES.md) |
+| Documented Divergences | 12 (in DISCREPANCIES.md) |
 
 ## Implementation Statistics
 
@@ -64,14 +64,14 @@
 | DISC-004 | ACCEPTED | CSV NA value handling (pandas 2.x behavior) |
 | DISC-005 | RESOLVED | Mixed string/numeric constructors |
 | DISC-006 | INVESTIGATING | Row MultiIndex partial parity |
-| DISC-007 | INVESTIGATING | SQL is SQLite-only |
-| DISC-008 | ACCEPTED | No Python bindings |
+| DISC-007 | RESOLVED | SQL now supports SQLite, PostgreSQL, MySQL |
+| DISC-008 | RESOLVED | PyO3 Python bindings (fp-python crate) |
 | DISC-009 | WILL-FIX | Sparse dtype before compressed storage |
 | DISC-010 | INVESTIGATING | GroupBy.apply explicit output-shape |
-| DISC-011 | WILL-FIX | No nullable Int64 extension dtype |
+| DISC-011 | RESOLVED | Nullable Int64/Bool extension dtypes implemented |
 | DISC-012 | ACCEPTED | Mixed naive/tz-aware CSV parse_dates |
 | DISC-013 | RESOLVED | Series alignment now sorts result |
-| DISC-014 | WILL-FIX | Duplicate-label arithmetic Int64 promotion |
+| DISC-014 | RESOLVED | Duplicate-label arithmetic preserves Int64Nullable |
 | DISC-015 | ACCEPTED | memory_usage exact bytes structural divergence |
 
 ## Out-of-Scope (Intentional)
@@ -89,13 +89,25 @@ These pandas features are NOT targeted for implementation:
 
 ## Tracked Gaps (Beads)
 
-Active beads for remaining gaps:
+**All implementation beads closed.** Remaining beads are convergence/certification tasks:
 
-| Bead | Priority | Description |
-|------|----------|-------------|
-| br-frankenpandas-0a80y | P1 | PyO3 Python bindings |
-| br-frankenpandas-q9r8y | P2 | PostgreSQL/MySQL backends |
-| br-frankenpandas-rg8ys.6.1 | P2 | Nullable Int64 extension dtype |
+| Bead | Priority | Description | Status |
+|------|----------|-------------|--------|
+| br-frankenpandas-rg8ys | P1 | Gauntlet Remediation EPIC | Open (verification) |
+| br-frankenpandas-rg8ys.10 | P2 | Convergence Campaign & Soak | Open (requires multi-round execution) |
+| br-frankenpandas-rg8ys.10.1 | P2 | Execute gauntlet rounds 2-N | Open (>=10 rounds, 2 clean) |
+| br-frankenpandas-rg8ys.10.2 | P2 | Soak campaigns (24h fuzz, Miri) | Open (long-running) |
+| br-frankenpandas-rg8ys.10.3 | P1 | Emit strict-conformant-release.v1 | Blocked on 10.1, 10.2 |
+
+### Recently Closed (This Session)
+
+| Bead | Description |
+|------|-------------|
+| br-frankenpandas-0a80y | PyO3 Python bindings (fp-python crate) |
+| br-frankenpandas-q9r8y | PostgreSQL/MySQL SqlConnection backends |
+| br-frankenpandas-rg8ys.6.* | Nullable Int64/Bool extension dtypes |
+| br-frankenpandas-rg8ys.7.* | Performance measurement infrastructure |
+| br-frankenpandas-rg8ys.8.* | Documentation & metric honesty |
 
 ## Verification Methodology
 
@@ -120,4 +132,11 @@ cargo test --package fp-conformance --lib differential_all_packets_green
 
 ## Changelog
 
+- 2026-05-25 (PM): All implementation EPICs closed. Coverage: 98.5%
+  - Added: PyO3 Python bindings (fp-python crate)
+  - Added: PostgreSQL/MySQL SqlConnection backends
+  - Added: Nullable Int64/Bool extension dtypes
+  - Added: Performance measurement infrastructure (criterion benchmarks, ratchet gates)
+  - Added: Resample calendar unit multipliers + sub-day frequencies
+  - Updated: DISC-007, DISC-008, DISC-011, DISC-014 to RESOLVED
 - 2026-05-25: Initial rigorous audit. Coverage: 98.3%
