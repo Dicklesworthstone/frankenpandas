@@ -106556,6 +106556,306 @@ mod tests {
         assert_eq!(result, 3);
     }
 
+    // ── Series fillna ──
+
+    #[test]
+    fn fillna_golden_basic() {
+        let s = Series::from_pairs(
+            "vals",
+            vec![
+                (0_i64.into(), Scalar::Float64(1.0)),
+                (1_i64.into(), Scalar::Null(NullKind::Null)),
+                (2_i64.into(), Scalar::Float64(3.0)),
+                (3_i64.into(), Scalar::Null(NullKind::Null)),
+            ],
+        )
+        .unwrap();
+        let result = s.fillna(&Scalar::Float64(0.0)).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("fillna_basic.txt", &output);
+    }
+
+    // ── Series dropna ──
+
+    #[test]
+    fn dropna_golden_basic() {
+        let s = Series::from_pairs(
+            "vals",
+            vec![
+                (0_i64.into(), Scalar::Float64(1.0)),
+                (1_i64.into(), Scalar::Null(NullKind::Null)),
+                (2_i64.into(), Scalar::Float64(3.0)),
+            ],
+        )
+        .unwrap();
+        let result = s.dropna().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dropna_basic.txt", &output);
+    }
+
+    // ── Series where ──
+
+    #[test]
+    fn where_golden_basic() {
+        let s = Series::from_pairs(
+            "vals",
+            vec![
+                (0_i64.into(), Scalar::Int64(1)),
+                (1_i64.into(), Scalar::Int64(2)),
+                (2_i64.into(), Scalar::Int64(3)),
+                (3_i64.into(), Scalar::Int64(4)),
+            ],
+        )
+        .unwrap();
+        let cond = Series::from_pairs(
+            "cond",
+            vec![
+                (0_i64.into(), Scalar::Bool(true)),
+                (1_i64.into(), Scalar::Bool(false)),
+                (2_i64.into(), Scalar::Bool(true)),
+                (3_i64.into(), Scalar::Bool(false)),
+            ],
+        )
+        .unwrap();
+        let result = s.r#where(&cond, None).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("where_basic.txt", &output);
+    }
+
+    // ── Series mask ──
+
+    #[test]
+    fn mask_golden_basic() {
+        let s = Series::from_pairs(
+            "vals",
+            vec![
+                (0_i64.into(), Scalar::Int64(1)),
+                (1_i64.into(), Scalar::Int64(2)),
+                (2_i64.into(), Scalar::Int64(3)),
+                (3_i64.into(), Scalar::Int64(4)),
+            ],
+        )
+        .unwrap();
+        let cond = Series::from_pairs(
+            "cond",
+            vec![
+                (0_i64.into(), Scalar::Bool(true)),
+                (1_i64.into(), Scalar::Bool(false)),
+                (2_i64.into(), Scalar::Bool(true)),
+                (3_i64.into(), Scalar::Bool(false)),
+            ],
+        )
+        .unwrap();
+        let result = s.mask(&cond, None).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("mask_basic.txt", &output);
+    }
+
+    // ── Series clip ──
+
+    #[test]
+    fn clip_golden_basic() {
+        let s = Series::from_pairs(
+            "vals",
+            vec![
+                (0_i64.into(), Scalar::Float64(-5.0)),
+                (1_i64.into(), Scalar::Float64(0.0)),
+                (2_i64.into(), Scalar::Float64(5.0)),
+                (3_i64.into(), Scalar::Float64(10.0)),
+            ],
+        )
+        .unwrap();
+        let result = s.clip(Some(0.0), Some(5.0)).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("clip_basic.txt", &output);
+    }
+
+    // ── Series round ──
+
+    #[test]
+    fn round_golden_basic() {
+        let s = Series::from_pairs(
+            "vals",
+            vec![
+                (0_i64.into(), Scalar::Float64(1.234)),
+                (1_i64.into(), Scalar::Float64(5.678)),
+                (2_i64.into(), Scalar::Float64(9.999)),
+            ],
+        )
+        .unwrap();
+        let result = s.round(2).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("round_basic.txt", &output);
+    }
+
+    // ── Series abs ──
+
+    #[test]
+    fn abs_golden_basic() {
+        let s = Series::from_pairs(
+            "vals",
+            vec![
+                (0_i64.into(), Scalar::Float64(-3.0)),
+                (1_i64.into(), Scalar::Float64(0.0)),
+                (2_i64.into(), Scalar::Float64(5.0)),
+            ],
+        )
+        .unwrap();
+        let result = s.abs().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("abs_basic.txt", &output);
+    }
+
+    // ── Series diff ──
+
+    #[test]
+    fn diff_golden_basic() {
+        let s = Series::from_pairs(
+            "vals",
+            vec![
+                (0_i64.into(), Scalar::Int64(1)),
+                (1_i64.into(), Scalar::Int64(3)),
+                (2_i64.into(), Scalar::Int64(6)),
+                (3_i64.into(), Scalar::Int64(10)),
+            ],
+        )
+        .unwrap();
+        let result = s.diff(1).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("diff_basic.txt", &output);
+    }
+
+    // ── Series pct_change ──
+
+    #[test]
+    fn pct_change_golden_basic() {
+        let s = Series::from_pairs(
+            "vals",
+            vec![
+                (0_i64.into(), Scalar::Float64(100.0)),
+                (1_i64.into(), Scalar::Float64(110.0)),
+                (2_i64.into(), Scalar::Float64(99.0)),
+            ],
+        )
+        .unwrap();
+        let result = s.pct_change(1).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("pct_change_basic.txt", &output);
+    }
+
+    // ── Series rank ──
+
+    #[test]
+    fn rank_golden_basic() {
+        let s = Series::from_pairs(
+            "vals",
+            vec![
+                (0_i64.into(), Scalar::Float64(3.0)),
+                (1_i64.into(), Scalar::Float64(1.0)),
+                (2_i64.into(), Scalar::Float64(2.0)),
+                (3_i64.into(), Scalar::Float64(3.0)),
+            ],
+        )
+        .unwrap();
+        let result = s.rank("average", true, "keep").unwrap();
+        let output = format!("{result}");
+        assert_text_golden("rank_basic.txt", &output);
+    }
+
+    // ── Series shift ──
+
+    #[test]
+    fn shift_golden_basic() {
+        let s = Series::from_pairs(
+            "vals",
+            vec![
+                (0_i64.into(), Scalar::Int64(1)),
+                (1_i64.into(), Scalar::Int64(2)),
+                (2_i64.into(), Scalar::Int64(3)),
+            ],
+        )
+        .unwrap();
+        let result = s.shift(1).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("shift_basic.txt", &output);
+    }
+
+    // ── Series cumsum ──
+
+    #[test]
+    fn cumsum_golden_basic() {
+        let s = Series::from_pairs(
+            "vals",
+            vec![
+                (0_i64.into(), Scalar::Int64(1)),
+                (1_i64.into(), Scalar::Int64(2)),
+                (2_i64.into(), Scalar::Int64(3)),
+                (3_i64.into(), Scalar::Int64(4)),
+            ],
+        )
+        .unwrap();
+        let result = s.cumsum().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("cumsum_basic.txt", &output);
+    }
+
+    // ── Series cumprod ──
+
+    #[test]
+    fn cumprod_golden_basic() {
+        let s = Series::from_pairs(
+            "vals",
+            vec![
+                (0_i64.into(), Scalar::Int64(1)),
+                (1_i64.into(), Scalar::Int64(2)),
+                (2_i64.into(), Scalar::Int64(3)),
+                (3_i64.into(), Scalar::Int64(4)),
+            ],
+        )
+        .unwrap();
+        let result = s.cumprod().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("cumprod_basic.txt", &output);
+    }
+
+    // ── Series cummax ──
+
+    #[test]
+    fn cummax_golden_basic() {
+        let s = Series::from_pairs(
+            "vals",
+            vec![
+                (0_i64.into(), Scalar::Float64(3.0)),
+                (1_i64.into(), Scalar::Float64(1.0)),
+                (2_i64.into(), Scalar::Float64(4.0)),
+                (3_i64.into(), Scalar::Float64(2.0)),
+            ],
+        )
+        .unwrap();
+        let result = s.cummax().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("cummax_basic.txt", &output);
+    }
+
+    // ── Series cummin ──
+
+    #[test]
+    fn cummin_golden_basic() {
+        let s = Series::from_pairs(
+            "vals",
+            vec![
+                (0_i64.into(), Scalar::Float64(3.0)),
+                (1_i64.into(), Scalar::Float64(1.0)),
+                (2_i64.into(), Scalar::Float64(4.0)),
+                (3_i64.into(), Scalar::Float64(2.0)),
+            ],
+        )
+        .unwrap();
+        let result = s.cummin().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("cummin_basic.txt", &output);
+    }
+
 }
 
 #[cfg(test)]

@@ -1,0 +1,4 @@
+0    NaN
+1    0.1
+2    -0.1
+Name: vals, Length: 3, dtype: Float64

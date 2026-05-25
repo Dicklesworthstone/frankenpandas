@@ -1,0 +1,5 @@
+0    1
+1    NaN
+2    3
+3    NaN
+Name: vals, Length: 4, dtype: Int64
