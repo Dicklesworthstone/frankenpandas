@@ -13484,4 +13484,70 @@ mod tests {
             assert!((v2 - v1).abs() < PI); // difference should now be < PI
         }
     }
+
+    // ── Nullable Int64/Bool column tests (br-frankenpandas-rg8ys.6.4) ────
+
+    #[test]
+    fn column_has_nulls_detects_missing_values() {
+        let col_with_null = Column::from_values(vec![
+            Scalar::Int64(1),
+            Scalar::Null(NullKind::Null),
+            Scalar::Int64(3),
+        ])
+        .unwrap();
+        assert!(col_with_null.has_nulls());
+
+        let col_no_null =
+            Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)])
+                .unwrap();
+        assert!(!col_no_null.has_nulls());
+    }
+
+    #[test]
+    fn column_promote_to_nullable_upgrades_dtype() {
+        let col = Column::new(
+            DType::Int64,
+            vec![
+                Scalar::Int64(1),
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(3),
+            ],
+        )
+        .unwrap();
+        assert_eq!(col.dtype(), DType::Int64);
+        assert!(col.has_nulls());
+
+        let promoted = col.promote_to_nullable();
+        assert_eq!(promoted.dtype(), DType::Int64Nullable);
+        assert_eq!(promoted.len(), 3);
+    }
+
+    #[test]
+    fn column_promote_to_nullable_noop_without_nulls() {
+        let col =
+            Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)])
+                .unwrap();
+        let promoted = col.promote_to_nullable();
+        // No nulls, so dtype stays Int64
+        assert_eq!(promoted.dtype(), DType::Int64);
+    }
+
+    #[test]
+    fn column_with_dtype_changes_metadata() {
+        let col = Column::new(DType::Int64, vec![Scalar::Int64(42)]).unwrap();
+        let changed = col.with_dtype(DType::Int64Nullable);
+        assert_eq!(changed.dtype(), DType::Int64Nullable);
+        assert_eq!(changed.values()[0], Scalar::Int64(42));
+    }
+
+    #[test]
+    fn nullable_int64_from_scalars_preserves_storage() {
+        use super::ColumnData;
+        let values = vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)];
+        let data = ColumnData::from_scalars(&values, DType::Int64Nullable);
+        match data {
+            ColumnData::Int64(arr) => assert_eq!(arr, vec![1, 2, 3]),
+            _ => panic!("expected Int64 storage"),
+        }
+    }
 }

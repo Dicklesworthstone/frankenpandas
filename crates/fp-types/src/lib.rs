@@ -4533,6 +4533,122 @@ mod tests {
         );
     }
 
+    // ── Nullable Int64/Bool dtype tests (br-frankenpandas-rg8ys.6.4) ────
+
+    #[test]
+    fn nullable_int64_promotion_matrix() {
+        // Int64 + Int64Nullable -> Int64Nullable (nullable absorbs)
+        assert_eq!(
+            common_dtype(DType::Int64, DType::Int64Nullable).unwrap(),
+            DType::Int64Nullable
+        );
+        assert_eq!(
+            common_dtype(DType::Int64Nullable, DType::Int64).unwrap(),
+            DType::Int64Nullable
+        );
+
+        // Int64Nullable + Float64 -> Float64 (float always wins)
+        assert_eq!(
+            common_dtype(DType::Int64Nullable, DType::Float64).unwrap(),
+            DType::Float64
+        );
+        assert_eq!(
+            common_dtype(DType::Float64, DType::Int64Nullable).unwrap(),
+            DType::Float64
+        );
+
+        // Int64Nullable + Int64Nullable -> Int64Nullable
+        assert_eq!(
+            common_dtype(DType::Int64Nullable, DType::Int64Nullable).unwrap(),
+            DType::Int64Nullable
+        );
+
+        // Bool + Int64Nullable -> Int64Nullable
+        assert_eq!(
+            common_dtype(DType::Bool, DType::Int64Nullable).unwrap(),
+            DType::Int64Nullable
+        );
+
+        // BoolNullable + Int64 -> Int64Nullable
+        assert_eq!(
+            common_dtype(DType::BoolNullable, DType::Int64).unwrap(),
+            DType::Int64Nullable
+        );
+    }
+
+    #[test]
+    fn nullable_bool_promotion_matrix() {
+        // Bool + BoolNullable -> BoolNullable
+        assert_eq!(
+            common_dtype(DType::Bool, DType::BoolNullable).unwrap(),
+            DType::BoolNullable
+        );
+        assert_eq!(
+            common_dtype(DType::BoolNullable, DType::Bool).unwrap(),
+            DType::BoolNullable
+        );
+
+        // BoolNullable + Float64 -> Float64
+        assert_eq!(
+            common_dtype(DType::BoolNullable, DType::Float64).unwrap(),
+            DType::Float64
+        );
+    }
+
+    #[test]
+    fn dtype_is_nullable_helper() {
+        assert!(DType::Int64Nullable.is_nullable());
+        assert!(DType::BoolNullable.is_nullable());
+        assert!(!DType::Int64.is_nullable());
+        assert!(!DType::Bool.is_nullable());
+        assert!(!DType::Float64.is_nullable());
+        assert!(!DType::Utf8.is_nullable());
+    }
+
+    #[test]
+    fn dtype_to_nullable_conversions() {
+        assert_eq!(DType::Int64.to_nullable(), DType::Int64Nullable);
+        assert_eq!(DType::Bool.to_nullable(), DType::BoolNullable);
+        assert_eq!(DType::Float64.to_nullable(), DType::Float64); // unchanged
+        assert_eq!(DType::Int64Nullable.to_nullable(), DType::Int64Nullable);
+    }
+
+    #[test]
+    fn dtype_to_non_nullable_conversions() {
+        assert_eq!(DType::Int64Nullable.to_non_nullable(), DType::Int64);
+        assert_eq!(DType::BoolNullable.to_non_nullable(), DType::Bool);
+        assert_eq!(DType::Int64.to_non_nullable(), DType::Int64); // unchanged
+        assert_eq!(DType::Float64.to_non_nullable(), DType::Float64);
+    }
+
+    #[test]
+    fn nullable_dtype_name_reports_pandas_style() {
+        assert_eq!(DType::Int64.name(), "int64");
+        assert_eq!(DType::Int64Nullable.name(), "Int64"); // capital I
+        assert_eq!(DType::Bool.name(), "bool");
+        assert_eq!(DType::BoolNullable.name(), "boolean");
+    }
+
+    #[test]
+    fn cast_scalar_int64_nullable_identity() {
+        let val = Scalar::Int64(42);
+        // Int64 -> Int64Nullable is identity (no actual conversion)
+        let result = cast_scalar(&val, DType::Int64Nullable).unwrap();
+        assert_eq!(result, Scalar::Int64(42));
+
+        // Int64Nullable -> Int64 is also identity
+        let result2 = cast_scalar(&val, DType::Int64).unwrap();
+        assert_eq!(result2, Scalar::Int64(42));
+    }
+
+    #[test]
+    fn nullable_dtype_is_extension() {
+        assert!(DType::Int64Nullable.is_extension());
+        assert!(DType::BoolNullable.is_extension());
+        assert!(!DType::Int64.is_extension());
+        assert!(!DType::Bool.is_extension());
+    }
+
     #[test]
     fn infer_dtype_preserves_string_numeric_mix_as_utf8_bucket() {
         let values = vec![Scalar::Utf8("x".into()), Scalar::Int64(7)];
