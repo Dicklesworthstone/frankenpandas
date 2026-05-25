@@ -106915,6 +106915,298 @@ mod tests {
         let output = format!("{result}");
         assert_text_golden("cummin_basic.txt", &output);
     }
+
+    // ── Series sort_values ──
+
+    #[test]
+    fn sort_values_golden_basic() {
+        let s = Series::from_pairs(
+            "vals",
+            vec![
+                (0_i64.into(), Scalar::Int64(3)),
+                (1_i64.into(), Scalar::Int64(1)),
+                (2_i64.into(), Scalar::Int64(4)),
+                (3_i64.into(), Scalar::Int64(2)),
+            ],
+        )
+        .unwrap();
+        let result = s.sort_values(true).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("sort_values_basic.txt", &output);
+    }
+
+    #[test]
+    fn sort_values_desc_golden_basic() {
+        let s = Series::from_pairs(
+            "vals",
+            vec![
+                (0_i64.into(), Scalar::Int64(3)),
+                (1_i64.into(), Scalar::Int64(1)),
+                (2_i64.into(), Scalar::Int64(4)),
+                (3_i64.into(), Scalar::Int64(2)),
+            ],
+        )
+        .unwrap();
+        let result = s.sort_values(false).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("sort_values_desc_basic.txt", &output);
+    }
+
+    // ── Series argsort ──
+
+    #[test]
+    fn argsort_golden_basic() {
+        let s = Series::from_pairs(
+            "vals",
+            vec![
+                (0_i64.into(), Scalar::Int64(3)),
+                (1_i64.into(), Scalar::Int64(1)),
+                (2_i64.into(), Scalar::Int64(4)),
+                (3_i64.into(), Scalar::Int64(2)),
+            ],
+        )
+        .unwrap();
+        let result = s.argsort(true).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("argsort_basic.txt", &output);
+    }
+
+    // ── Series nlargest / nsmallest ──
+
+    #[test]
+    fn nlargest_golden_basic() {
+        let s = Series::from_pairs(
+            "vals",
+            vec![
+                (0_i64.into(), Scalar::Int64(3)),
+                (1_i64.into(), Scalar::Int64(1)),
+                (2_i64.into(), Scalar::Int64(4)),
+                (3_i64.into(), Scalar::Int64(2)),
+                (4_i64.into(), Scalar::Int64(5)),
+            ],
+        )
+        .unwrap();
+        let result = s.nlargest(3).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("nlargest_basic.txt", &output);
+    }
+
+    #[test]
+    fn nsmallest_golden_basic() {
+        let s = Series::from_pairs(
+            "vals",
+            vec![
+                (0_i64.into(), Scalar::Int64(3)),
+                (1_i64.into(), Scalar::Int64(1)),
+                (2_i64.into(), Scalar::Int64(4)),
+                (3_i64.into(), Scalar::Int64(2)),
+                (4_i64.into(), Scalar::Int64(5)),
+            ],
+        )
+        .unwrap();
+        let result = s.nsmallest(3).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("nsmallest_basic.txt", &output);
+    }
+
+    // ── Series head / tail ──
+
+    #[test]
+    fn head_golden_basic() {
+        let s = Series::from_pairs(
+            "vals",
+            vec![
+                (0_i64.into(), Scalar::Int64(1)),
+                (1_i64.into(), Scalar::Int64(2)),
+                (2_i64.into(), Scalar::Int64(3)),
+                (3_i64.into(), Scalar::Int64(4)),
+                (4_i64.into(), Scalar::Int64(5)),
+            ],
+        )
+        .unwrap();
+        let result = s.head(3).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("head_basic.txt", &output);
+    }
+
+    #[test]
+    fn tail_golden_basic() {
+        let s = Series::from_pairs(
+            "vals",
+            vec![
+                (0_i64.into(), Scalar::Int64(1)),
+                (1_i64.into(), Scalar::Int64(2)),
+                (2_i64.into(), Scalar::Int64(3)),
+                (3_i64.into(), Scalar::Int64(4)),
+                (4_i64.into(), Scalar::Int64(5)),
+            ],
+        )
+        .unwrap();
+        let result = s.tail(3).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("tail_basic.txt", &output);
+    }
+
+    // ── Series between ──
+
+    #[test]
+    fn between_golden_basic() {
+        let s = Series::from_pairs(
+            "vals",
+            vec![
+                (0_i64.into(), Scalar::Int64(1)),
+                (1_i64.into(), Scalar::Int64(3)),
+                (2_i64.into(), Scalar::Int64(5)),
+                (3_i64.into(), Scalar::Int64(7)),
+            ],
+        )
+        .unwrap();
+        let result = s.between(&Scalar::Int64(2), &Scalar::Int64(6), "both").unwrap();
+        let output = format!("{result}");
+        assert_text_golden("between_basic.txt", &output);
+    }
+
+    // ── Series isin ──
+
+    #[test]
+    fn isin_golden_basic() {
+        let s = Series::from_pairs(
+            "vals",
+            vec![
+                (0_i64.into(), Scalar::Int64(1)),
+                (1_i64.into(), Scalar::Int64(2)),
+                (2_i64.into(), Scalar::Int64(3)),
+                (3_i64.into(), Scalar::Int64(4)),
+            ],
+        )
+        .unwrap();
+        let values = vec![Scalar::Int64(2), Scalar::Int64(4)];
+        let result = s.isin(&values).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("isin_basic.txt", &output);
+    }
+
+    // ── Series isna / notna ──
+
+    #[test]
+    fn isna_golden_basic() {
+        let s = Series::from_pairs(
+            "vals",
+            vec![
+                (0_i64.into(), Scalar::Float64(1.0)),
+                (1_i64.into(), Scalar::Null(NullKind::Null)),
+                (2_i64.into(), Scalar::Float64(3.0)),
+            ],
+        )
+        .unwrap();
+        let result = s.isna().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("isna_basic.txt", &output);
+    }
+
+    #[test]
+    fn notna_golden_basic() {
+        let s = Series::from_pairs(
+            "vals",
+            vec![
+                (0_i64.into(), Scalar::Float64(1.0)),
+                (1_i64.into(), Scalar::Null(NullKind::Null)),
+                (2_i64.into(), Scalar::Float64(3.0)),
+            ],
+        )
+        .unwrap();
+        let result = s.notna().unwrap();
+        let output = format!("{result}");
+        assert_text_golden("notna_basic.txt", &output);
+    }
+
+    // ── DataFrame sort_values ──
+
+    #[test]
+    fn dataframe_sort_values_single_golden() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(3), Scalar::Int64(1), Scalar::Int64(2)]),
+                (
+                    "b",
+                    vec![
+                        Scalar::Utf8("x".into()),
+                        Scalar::Utf8("y".into()),
+                        Scalar::Utf8("z".into()),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let result = df.sort_values("a", true).unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_sort_values_single_golden.txt", &output);
+    }
+
+    // ── DataFrame nlargest / nsmallest ──
+
+    #[test]
+    fn dataframe_nlargest_golden() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                (
+                    "a",
+                    vec![
+                        Scalar::Int64(3),
+                        Scalar::Int64(1),
+                        Scalar::Int64(4),
+                        Scalar::Int64(2),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Utf8("w".into()),
+                        Scalar::Utf8("x".into()),
+                        Scalar::Utf8("y".into()),
+                        Scalar::Utf8("z".into()),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let result = df.nlargest(2, "a").unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_nlargest_golden.txt", &output);
+    }
+
+    #[test]
+    fn dataframe_nsmallest_golden() {
+        let df = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                (
+                    "a",
+                    vec![
+                        Scalar::Int64(3),
+                        Scalar::Int64(1),
+                        Scalar::Int64(4),
+                        Scalar::Int64(2),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Utf8("w".into()),
+                        Scalar::Utf8("x".into()),
+                        Scalar::Utf8("y".into()),
+                        Scalar::Utf8("z".into()),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let result = df.nsmallest(2, "a").unwrap();
+        let output = format!("{result}");
+        assert_text_golden("dataframe_nsmallest_golden.txt", &output);
+    }
 }
 
 #[cfg(test)]

@@ -1,0 +1,5 @@
+0    false
+1    true
+2    false
+3    true
+Name: vals, Length: 4, dtype: Bool

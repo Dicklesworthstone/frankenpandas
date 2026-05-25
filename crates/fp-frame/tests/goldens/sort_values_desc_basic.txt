@@ -1,0 +1,5 @@
+2    4
+0    3
+3    2
+1    1
+Name: vals, Length: 4, dtype: Int64
