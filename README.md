@@ -84,7 +84,7 @@ AACE is a core identity constraint, not a best-effort optimization. pandas' alig
 | **Fail closed** | Unknown features, incompatible dtypes, and ambiguous coercions produce errors, not silent corruption. Strict mode rejects; hardened mode logs and recovers under a Bayesian expected-loss decision rule. |
 | **Zero unsafe** | Every crate uses `#![forbid(unsafe_code)]`. Memory safety comes from the type system, not audits. |
 | **Test everything differentially** | Conformance packets run FrankenPandas operations and compare against the pandas oracle. 1,252 packet JSON files + 1,265 fixtures + live pandas oracle in CI on every commit. |
-| **Document every divergence** | 14 known semantic divergences from pandas are written up in `crates/fp-conformance/DISCREPANCIES.md` with root-cause analysis, WILL-FIX status, and reproducible test packets. No silent disagreement. |
+| **Document every divergence** | 15 known semantic divergences from pandas are written up in `crates/fp-conformance/DISCREPANCIES.md` with root-cause analysis, resolution status (ACCEPTED / INVESTIGATING / WILL-FIX), and reproducible test packets. No silent disagreement. |
 
 ## What's In The Box
 
@@ -101,7 +101,7 @@ The 2026-05-16 capability surface (~269k LOC of Rust across 12 crates):
 | **IO** | 14+ formats: CSV (with full pandas option matrix incl. `usecols`/`nrows`/`skiprows`/`dtype`/`parse_dates`/`comment`/`on_bad_lines`/`decimal`/`thousands`/`true_values`/`false_values`/`skipfooter`/`lineterminator`/`index_label`/`quote`/`escape`), TSV (`read_table`), Fixed-width (`read_fwf` with colspec inference), JSON (5 orients + Table Schema), JSONL (blank-line tolerant, key-union detection, row-cap protection), Parquet (Arrow RecordBatch), Excel (`.xlsx`/`.xls`/`.xlsb`/`.ods` with full option parity), Feather, Arrow IPC stream, SQL (generic `SqlConnection` trait + `SqlInspector` for SQLAlchemy-shaped introspection), HTML (read + write), XML (read + write + `to_xml` alias), LaTeX (file + string), Markdown (`tablefmt` accepts `"github"` / `"pipe"` / `"grid"` / `"plain"` / `"simple"`), Pickle (round-trip), Stata (round-trip), ORC (round-trip), HDF5 (snapshot, optional feature-gated backend). Deferred surfaces: `to_clipboard`, `to_gbq`, SAS reader. |
 | **Type system** | `Scalar`, `DType`, `NullKind` (Null / NaN / NaT). `Timestamp`, `Timedelta`, `Period`, `Interval`, `PeriodFreq`, `IntervalClosed` as proper value types. `SparseDType` scaffolded. Coercion via `common_dtype()` / `cast_scalar()` matches pandas' Null < Bool < Int64 < Float64 hierarchy. Identity-cast fast path (AG-03) skips clone when source dtype already matches target. |
 | **Runtime** | Bayesian `RuntimePolicy` (Strict / Hardened). `EvidenceLedger` with full decision trace per materialization. `ConformalGuard` for distribution-shift detection. `RaptorQEnvelope` for repair-symbol-protected durable state (conformance fixtures, benchmark baselines, migration manifests). |
-| **Conformance** | 1,252 packet JSON files, 1,265 fixture JSONs, 14 documented divergences in `DISCREPANCIES.md` (2 fully RESOLVED in the "Resolved Divergences" section; the remaining 12 are ACCEPTED / INVESTIGATING / WILL-FIX with full root-cause analysis), live pandas oracle in CI with system-pandas fallback. |
+| **Conformance** | 1,252 packet JSON files, 1,265+ fixture JSONs, 15 documented divergences in `DISCREPANCIES.md` (3 fully RESOLVED; remainder are ACCEPTED / INVESTIGATING / WILL-FIX with root-cause analysis), live pandas oracle in CI. Conformance tests pass (1,586 tests, 0 failures) excluding documented structural divergences. |
 
 ## Architecture
 
@@ -169,7 +169,7 @@ frankenpandas/
 │   └── fp-frankentui/    # Terminal UI dashboard (experimental, 2,755 lines)
 ├── artifacts/perf/       # Optimization round baselines and proofs
 ├── artifacts/phase2c/    # Conformance packet artifacts and drift history
-└── .beads/               # Local-first issue tracker (1,986 closed, 2 open of 1,988 total)
+└── .beads/               # Local-first issue tracker
 ```
 
 ## IO Format Support
@@ -310,7 +310,8 @@ Column
 ├── values: Vec<Scalar>                       ← Typed values
 └── validity: ValidityMask                    ← Bitpacked null bitmap
 
-Scalar  = Null(NullKind) | Bool(bool) | Int64(i64) | Float64(f64) | Utf8(String) | Timedelta64(i64)
+Scalar  = Null(NullKind) | Bool(bool) | Int64(i64) | Float64(f64) | Utf8(String)
+        | Timedelta64(i64) | Datetime64(i64) | Period(i64) | Interval(Interval)
 NullKind = Null | NaN | NaT                   ← Three-way null semantics matching pandas
 
 IndexLabel = Int64(i64) | Utf8(String) | Timedelta64(i64) | Datetime64(i64)
