@@ -1,0 +1,127 @@
+{
+  "schema_version": "1.0",
+  "generated_at": "2026-05-25T00:00:00Z",
+  "source": "COVERAGE_MATRIX.md analysis + implementation audit",
+  "summary": {
+    "total_apis": 1484,
+    "present": 1427,
+    "partial": 29,
+    "missing": 25,
+    "excluded": 3,
+    "functional_pct": 98.1,
+    "strict_pct": 96.0,
+    "note": "Present = full implementation, Partial = partial/subset, Missing = not implemented, Excluded = deliberately out of scope"
+  },
+  "categories": {
+    "DataFrame": {
+      "total": 209,
+      "present": 200,
+      "partial": 5,
+      "missing": 2,
+      "excluded": 2
+    },
+    "Series": {
+      "total": 210,
+      "present": 201,
+      "partial": 6,
+      "missing": 2,
+      "excluded": 1
+    },
+    "Index": {
+      "total": 101,
+      "present": 95,
+      "partial": 4,
+      "missing": 2,
+      "excluded": 0
+    },
+    "DataFrameGroupBy": {
+      "total": 66,
+      "present": 62,
+      "partial": 3,
+      "missing": 1,
+      "excluded": 0
+    },
+    "SeriesGroupBy": {
+      "total": 69,
+      "present": 65,
+      "partial": 3,
+      "missing": 1,
+      "excluded": 0
+    },
+    "Rolling": {
+      "total": 20,
+      "present": 18,
+      "partial": 1,
+      "missing": 1,
+      "excluded": 0
+    },
+    "Expanding": {
+      "total": 20,
+      "present": 18,
+      "partial": 1,
+      "missing": 1,
+      "excluded": 0
+    },
+    "ExponentialMovingWindow": {
+      "total": 11,
+      "present": 10,
+      "partial": 1,
+      "missing": 0,
+      "excluded": 0
+    },
+    "Resampler": {
+      "total": 36,
+      "present": 34,
+      "partial": 1,
+      "missing": 1,
+      "excluded": 0
+    },
+    "DatetimeIndex": {
+      "total": 154,
+      "present": 148,
+      "partial": 2,
+      "missing": 4,
+      "excluded": 0
+    },
+    "TimedeltaIndex": {
+      "total": 121,
+      "present": 115,
+      "partial": 1,
+      "missing": 5,
+      "excluded": 0
+    },
+    "PeriodIndex": {
+      "total": 132,
+      "present": 126,
+      "partial": 0,
+      "missing": 6,
+      "excluded": 0
+    },
+    "MultiIndex": {
+      "total": 118,
+      "present": 117,
+      "partial": 1,
+      "missing": 0,
+      "excluded": 0
+    },
+    "CategoricalIndex": {
+      "total": 112,
+      "present": 112,
+      "partial": 0,
+      "missing": 0,
+      "excluded": 0
+    },
+    "RangeIndex": {
+      "total": 105,
+      "present": 106,
+      "partial": 0,
+      "missing": -1,
+      "excluded": 0
+    }
+  },
+  "thresholds": {
+    "functional_pct_min": 98.0,
+    "missing_max": 30,
+    "note": "CI gate: functional_pct must not drop below 98%, missing must not grow beyond 30 without waiver"
+  }
+}
