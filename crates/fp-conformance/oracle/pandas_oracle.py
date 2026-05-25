@@ -1206,6 +1206,230 @@ def op_series_dt_to_pydatetime(pd, payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def op_series_dt_accessor(pd, payload: dict[str, Any], attr: str, op_name: str) -> dict[str, Any]:
+    left = payload.get("left")
+    if left is None:
+        raise OracleError(f"{op_name} requires left payload")
+    series = fixture_series_from_payload(pd, left, op_name)
+    try:
+        dt_series = pd.to_datetime(series, errors="coerce")
+        out = getattr(dt_series.dt, attr)
+        if callable(out):
+            out = out()
+    except Exception as exc:
+        raise OracleError(f"{op_name} failed: {exc}") from exc
+    if hasattr(out, "tolist"):
+        return {"expected_series": series_to_expected(out)}
+    return {"expected_scalar": scalar_to_json(out)}
+
+
+def op_series_dt_year(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return op_series_dt_accessor(pd, payload, "year", "series_dt_year")
+
+
+def op_series_dt_month(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return op_series_dt_accessor(pd, payload, "month", "series_dt_month")
+
+
+def op_series_dt_day(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return op_series_dt_accessor(pd, payload, "day", "series_dt_day")
+
+
+def op_series_dt_hour(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return op_series_dt_accessor(pd, payload, "hour", "series_dt_hour")
+
+
+def op_series_dt_minute(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return op_series_dt_accessor(pd, payload, "minute", "series_dt_minute")
+
+
+def op_series_dt_second(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return op_series_dt_accessor(pd, payload, "second", "series_dt_second")
+
+
+def op_series_dt_microsecond(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return op_series_dt_accessor(pd, payload, "microsecond", "series_dt_microsecond")
+
+
+def op_series_dt_nanosecond(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return op_series_dt_accessor(pd, payload, "nanosecond", "series_dt_nanosecond")
+
+
+def op_series_dt_dayofweek(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return op_series_dt_accessor(pd, payload, "dayofweek", "series_dt_dayofweek")
+
+
+def op_series_dt_dayofyear(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return op_series_dt_accessor(pd, payload, "dayofyear", "series_dt_dayofyear")
+
+
+def op_series_dt_weekofyear(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return op_series_dt_accessor(pd, payload, "isocalendar", "series_dt_weekofyear")
+
+
+def op_series_dt_quarter(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return op_series_dt_accessor(pd, payload, "quarter", "series_dt_quarter")
+
+
+def op_series_dt_days_in_month(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return op_series_dt_accessor(pd, payload, "days_in_month", "series_dt_days_in_month")
+
+
+def op_series_dt_is_month_start(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return op_series_dt_accessor(pd, payload, "is_month_start", "series_dt_is_month_start")
+
+
+def op_series_dt_is_month_end(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return op_series_dt_accessor(pd, payload, "is_month_end", "series_dt_is_month_end")
+
+
+def op_series_dt_is_quarter_start(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return op_series_dt_accessor(pd, payload, "is_quarter_start", "series_dt_is_quarter_start")
+
+
+def op_series_dt_is_quarter_end(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return op_series_dt_accessor(pd, payload, "is_quarter_end", "series_dt_is_quarter_end")
+
+
+def op_series_dt_is_year_start(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return op_series_dt_accessor(pd, payload, "is_year_start", "series_dt_is_year_start")
+
+
+def op_series_dt_is_year_end(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return op_series_dt_accessor(pd, payload, "is_year_end", "series_dt_is_year_end")
+
+
+def op_series_dt_is_leap_year(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return op_series_dt_accessor(pd, payload, "is_leap_year", "series_dt_is_leap_year")
+
+
+def op_series_dt_date(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    if left is None:
+        raise OracleError("series_dt_date requires left payload")
+    series = fixture_series_from_payload(pd, left, "series_dt_date")
+    try:
+        dt_series = pd.to_datetime(series, errors="coerce")
+        out = dt_series.dt.date
+    except Exception as exc:
+        raise OracleError(f"series_dt_date failed: {exc}") from exc
+    return {
+        "expected_series": {
+            "index": [label_to_json(v) for v in series.index.tolist()],
+            "values": [{"kind": "utf8", "value": str(v)} if v is not None else {"kind": "null", "value": "null"} for v in out.tolist()],
+        }
+    }
+
+
+def op_series_dt_day_name(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    if left is None:
+        raise OracleError("series_dt_day_name requires left payload")
+    series = fixture_series_from_payload(pd, left, "series_dt_day_name")
+    try:
+        dt_series = pd.to_datetime(series, errors="coerce")
+        out = dt_series.dt.day_name()
+    except Exception as exc:
+        raise OracleError(f"series_dt_day_name failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
+def op_series_dt_month_name(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    if left is None:
+        raise OracleError("series_dt_month_name requires left payload")
+    series = fixture_series_from_payload(pd, left, "series_dt_month_name")
+    try:
+        dt_series = pd.to_datetime(series, errors="coerce")
+        out = dt_series.dt.month_name()
+    except Exception as exc:
+        raise OracleError(f"series_dt_month_name failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
+def op_series_dt_strftime(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    dt_format = payload.get("dt_format", "%Y-%m-%d")
+    if left is None:
+        raise OracleError("series_dt_strftime requires left payload")
+    if not isinstance(dt_format, str):
+        raise OracleError("series_dt_strftime dt_format must be a string")
+    series = fixture_series_from_payload(pd, left, "series_dt_strftime")
+    try:
+        dt_series = pd.to_datetime(series, errors="coerce")
+        out = dt_series.dt.strftime(dt_format)
+    except Exception as exc:
+        raise OracleError(f"series_dt_strftime failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
+def op_series_dt_floor(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    dt_freq = payload.get("dt_freq", "D")
+    if left is None:
+        raise OracleError("series_dt_floor requires left payload")
+    series = fixture_series_from_payload(pd, left, "series_dt_floor")
+    try:
+        dt_series = pd.to_datetime(series, errors="coerce")
+        out = dt_series.dt.floor(dt_freq)
+    except Exception as exc:
+        raise OracleError(f"series_dt_floor failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
+def op_series_dt_ceil(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    dt_freq = payload.get("dt_freq", "D")
+    if left is None:
+        raise OracleError("series_dt_ceil requires left payload")
+    series = fixture_series_from_payload(pd, left, "series_dt_ceil")
+    try:
+        dt_series = pd.to_datetime(series, errors="coerce")
+        out = dt_series.dt.ceil(dt_freq)
+    except Exception as exc:
+        raise OracleError(f"series_dt_ceil failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
+def op_series_dt_round(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    dt_freq = payload.get("dt_freq", "D")
+    if left is None:
+        raise OracleError("series_dt_round requires left payload")
+    series = fixture_series_from_payload(pd, left, "series_dt_round")
+    try:
+        dt_series = pd.to_datetime(series, errors="coerce")
+        out = dt_series.dt.round(dt_freq)
+    except Exception as exc:
+        raise OracleError(f"series_dt_round failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
+def op_series_dt_total_seconds(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    if left is None:
+        raise OracleError("series_dt_total_seconds requires left payload")
+    series = fixture_series_from_payload(pd, left, "series_dt_total_seconds")
+    try:
+        td_series = pd.to_timedelta(series, errors="coerce")
+        out = td_series.dt.total_seconds()
+    except Exception as exc:
+        raise OracleError(f"series_dt_total_seconds failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
+def op_series_dt_to_timestamp(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    if left is None:
+        raise OracleError("series_dt_to_timestamp requires left payload")
+    series = fixture_series_from_payload(pd, left, "series_dt_to_timestamp")
+    try:
+        out = pd.to_datetime(series, errors="coerce")
+    except Exception as exc:
+        raise OracleError(f"series_dt_to_timestamp failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
 def op_dataframe_from_series(pd, payload: dict[str, Any]) -> dict[str, Any]:
     payloads = collect_constructor_series_payloads(payload, "dataframe_from_series")
     series_list = [
@@ -1827,6 +2051,136 @@ def op_series_notnull(pd, payload: dict[str, Any]) -> dict[str, Any]:
             "values": [scalar_to_json(v) for v in out.tolist()],
         }
     }
+
+
+def op_series_concat(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    right = payload.get("right")
+    if left is None or right is None:
+        raise OracleError("series_concat requires left and right payloads")
+    left_series = fixture_series_from_payload(pd, left, "series_concat")
+    right_series = fixture_series_from_payload(pd, right, "series_concat")
+    try:
+        out = pd.concat([left_series, right_series])
+    except Exception as exc:
+        raise OracleError(f"series_concat failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
+def op_series_where(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    right = payload.get("right")
+    other = payload.get("where_other")
+    if left is None or right is None:
+        raise OracleError("series_where requires left(data) and right(cond) payloads")
+    series = fixture_series_from_payload(pd, left, "series_where")
+    cond = fixture_series_from_payload(pd, right, "series_where")
+    other_val = scalar_from_json(other) if other is not None else None
+    try:
+        out = series.where(cond, other=other_val)
+    except Exception as exc:
+        raise OracleError(f"series_where failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
+def op_series_mask(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    right = payload.get("right")
+    other = payload.get("mask_other")
+    if left is None or right is None:
+        raise OracleError("series_mask requires left(data) and right(cond) payloads")
+    series = fixture_series_from_payload(pd, left, "series_mask")
+    cond = fixture_series_from_payload(pd, right, "series_mask")
+    other_val = scalar_from_json(other) if other is not None else None
+    try:
+        out = series.mask(cond, other=other_val)
+    except Exception as exc:
+        raise OracleError(f"series_mask failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
+def op_series_map(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    map_dict = payload.get("map_dict")
+    if left is None:
+        raise OracleError("series_map requires left payload")
+    if map_dict is None or not isinstance(map_dict, dict):
+        raise OracleError("series_map requires map_dict payload")
+    series = fixture_series_from_payload(pd, left, "series_map")
+    parsed_map = {scalar_from_json(k) if isinstance(k, dict) else k: scalar_from_json(v) if isinstance(v, dict) else v for k, v in map_dict.items()}
+    try:
+        out = series.map(parsed_map)
+    except Exception as exc:
+        raise OracleError(f"series_map failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
+def op_series_to_timedelta(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    if left is None:
+        raise OracleError("series_to_timedelta requires left payload")
+    unit = payload.get("timedelta_unit")
+    series = fixture_series_from_payload(pd, left, "series_to_timedelta")
+    kwargs: dict[str, Any] = {"errors": "coerce"}
+    if unit is not None:
+        kwargs["unit"] = unit
+    try:
+        out = pd.to_timedelta(series, **kwargs)
+    except Exception as exc:
+        raise OracleError(f"series_to_timedelta failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
+def op_series_timedelta_total_seconds(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    if left is None:
+        raise OracleError("series_timedelta_total_seconds requires left payload")
+    series = fixture_series_from_payload(pd, left, "series_timedelta_total_seconds")
+    try:
+        td_series = pd.to_timedelta(series, errors="coerce")
+        out = td_series.dt.total_seconds()
+    except Exception as exc:
+        raise OracleError(f"series_timedelta_total_seconds failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
+def op_series_to_frame(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    if left is None:
+        raise OracleError("series_to_frame requires left payload")
+    series = fixture_series_from_payload(pd, left, "series_to_frame")
+    name = payload.get("frame_name")
+    try:
+        out = series.to_frame(name=name)
+    except Exception as exc:
+        raise OracleError(f"series_to_frame failed: {exc}") from exc
+    return {"expected_frame": dataframe_to_json(out)}
+
+
+def op_series_update(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    right = payload.get("right")
+    if left is None or right is None:
+        raise OracleError("series_update requires left and right payloads")
+    series = fixture_series_from_payload(pd, left, "series_update")
+    other = fixture_series_from_payload(pd, right, "series_update")
+    try:
+        series.update(other)
+    except Exception as exc:
+        raise OracleError(f"series_update failed: {exc}") from exc
+    return {"expected_series": series_to_expected(series)}
+
+
+def op_series_convert_dtypes(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    if left is None:
+        raise OracleError("series_convert_dtypes requires left payload")
+    series = fixture_series_from_payload(pd, left, "series_convert_dtypes")
+    try:
+        out = series.convert_dtypes()
+    except Exception as exc:
+        raise OracleError(f"series_convert_dtypes failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
 
 
 def op_series_fillna(pd, payload: dict[str, Any]) -> dict[str, Any]:
@@ -3729,6 +4083,158 @@ def op_series_str_get_dummies(pd, payload: dict[str, Any]) -> dict[str, Any]:
     except Exception as exc:
         raise OracleError(f"series_str_get_dummies failed: {exc}") from exc
     return {"expected_frame": dataframe_to_json(out)}
+
+
+def op_series_str_casefold(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return _str_unary_op(pd, payload, "series_str_casefold", "casefold")
+
+
+def op_series_str_isdecimal(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return _str_unary_op(pd, payload, "series_str_isdecimal", "isdecimal")
+
+
+def op_series_str_istitle(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return _str_unary_op(pd, payload, "series_str_istitle", "istitle")
+
+
+def op_series_str_normalize(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    form = payload.get("str_normalize_form", "NFC")
+    if left is None:
+        raise OracleError("series_str_normalize requires left payload")
+    if form not in ("NFC", "NFD", "NFKC", "NFKD"):
+        raise OracleError("series_str_normalize str_normalize_form must be NFC|NFD|NFKC|NFKD")
+    series = fixture_series_from_payload(pd, left, "series_str_normalize")
+    try:
+        out = series.str.normalize(form)
+    except Exception as exc:
+        raise OracleError(f"series_str_normalize failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
+def op_series_str_get(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    index = payload.get("str_get_index", 0)
+    if left is None:
+        raise OracleError("series_str_get requires left payload")
+    if not isinstance(index, int):
+        raise OracleError("series_str_get str_get_index must be an integer")
+    series = fixture_series_from_payload(pd, left, "series_str_get")
+    try:
+        out = series.str.get(index)
+    except Exception as exc:
+        raise OracleError(f"series_str_get failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
+def op_series_str_join(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    sep = payload.get("str_join_sep", "")
+    if left is None:
+        raise OracleError("series_str_join requires left payload")
+    series = fixture_series_from_payload(pd, left, "series_str_join")
+    try:
+        out = series.str.join(sep)
+    except Exception as exc:
+        raise OracleError(f"series_str_join failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
+def op_series_str_match(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    pattern = payload.get("str_pattern")
+    if left is None:
+        raise OracleError("series_str_match requires left payload")
+    if not isinstance(pattern, str):
+        raise OracleError("series_str_match str_pattern must be a string")
+    series = fixture_series_from_payload(pd, left, "series_str_match")
+    try:
+        out = series.str.match(pattern)
+    except Exception as exc:
+        raise OracleError(f"series_str_match failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
+def op_series_str_fullmatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    pattern = payload.get("str_pattern")
+    if left is None:
+        raise OracleError("series_str_fullmatch requires left payload")
+    if not isinstance(pattern, str):
+        raise OracleError("series_str_fullmatch str_pattern must be a string")
+    series = fixture_series_from_payload(pd, left, "series_str_fullmatch")
+    try:
+        out = series.str.fullmatch(pattern)
+    except Exception as exc:
+        raise OracleError(f"series_str_fullmatch failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
+def op_series_str_findall(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    pattern = payload.get("str_pattern")
+    if left is None:
+        raise OracleError("series_str_findall requires left payload")
+    if not isinstance(pattern, str):
+        raise OracleError("series_str_findall str_pattern must be a string")
+    series = fixture_series_from_payload(pd, left, "series_str_findall")
+    try:
+        out = series.str.findall(pattern)
+    except Exception as exc:
+        raise OracleError(f"series_str_findall failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
+def op_series_str_removeprefix(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    prefix = payload.get("str_prefix", "")
+    if left is None:
+        raise OracleError("series_str_removeprefix requires left payload")
+    series = fixture_series_from_payload(pd, left, "series_str_removeprefix")
+    try:
+        out = series.str.removeprefix(prefix)
+    except Exception as exc:
+        raise OracleError(f"series_str_removeprefix failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
+def op_series_str_removesuffix(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    suffix = payload.get("str_suffix", "")
+    if left is None:
+        raise OracleError("series_str_removesuffix requires left payload")
+    series = fixture_series_from_payload(pd, left, "series_str_removesuffix")
+    try:
+        out = series.str.removesuffix(suffix)
+    except Exception as exc:
+        raise OracleError(f"series_str_removesuffix failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
+def op_series_str_wrap(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    width = payload.get("str_wrap_width", 80)
+    if left is None:
+        raise OracleError("series_str_wrap requires left payload")
+    series = fixture_series_from_payload(pd, left, "series_str_wrap")
+    try:
+        out = series.str.wrap(width)
+    except Exception as exc:
+        raise OracleError(f"series_str_wrap failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
+def op_series_str_expandtabs(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    left = payload.get("left")
+    tabsize = payload.get("str_tabsize", 8)
+    if left is None:
+        raise OracleError("series_str_expandtabs requires left payload")
+    series = fixture_series_from_payload(pd, left, "series_str_expandtabs")
+    try:
+        out = series.str.expandtabs(tabsize)
+    except Exception as exc:
+        raise OracleError(f"series_str_expandtabs failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
 
 
 def rust_debug_index_label(value: Any) -> str:
@@ -6044,6 +6550,64 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_series_to_datetime(pd, payload)
     if op == "series_dt_to_pydatetime":
         return op_series_dt_to_pydatetime(pd, payload)
+    if op == "series_dt_year":
+        return op_series_dt_year(pd, payload)
+    if op == "series_dt_month":
+        return op_series_dt_month(pd, payload)
+    if op == "series_dt_day":
+        return op_series_dt_day(pd, payload)
+    if op == "series_dt_hour":
+        return op_series_dt_hour(pd, payload)
+    if op == "series_dt_minute":
+        return op_series_dt_minute(pd, payload)
+    if op == "series_dt_second":
+        return op_series_dt_second(pd, payload)
+    if op == "series_dt_microsecond":
+        return op_series_dt_microsecond(pd, payload)
+    if op == "series_dt_nanosecond":
+        return op_series_dt_nanosecond(pd, payload)
+    if op == "series_dt_dayofweek":
+        return op_series_dt_dayofweek(pd, payload)
+    if op == "series_dt_dayofyear":
+        return op_series_dt_dayofyear(pd, payload)
+    if op == "series_dt_weekofyear":
+        return op_series_dt_weekofyear(pd, payload)
+    if op == "series_dt_quarter":
+        return op_series_dt_quarter(pd, payload)
+    if op == "series_dt_days_in_month":
+        return op_series_dt_days_in_month(pd, payload)
+    if op == "series_dt_is_month_start":
+        return op_series_dt_is_month_start(pd, payload)
+    if op == "series_dt_is_month_end":
+        return op_series_dt_is_month_end(pd, payload)
+    if op == "series_dt_is_quarter_start":
+        return op_series_dt_is_quarter_start(pd, payload)
+    if op == "series_dt_is_quarter_end":
+        return op_series_dt_is_quarter_end(pd, payload)
+    if op == "series_dt_is_year_start":
+        return op_series_dt_is_year_start(pd, payload)
+    if op == "series_dt_is_year_end":
+        return op_series_dt_is_year_end(pd, payload)
+    if op == "series_dt_is_leap_year":
+        return op_series_dt_is_leap_year(pd, payload)
+    if op == "series_dt_date":
+        return op_series_dt_date(pd, payload)
+    if op == "series_dt_day_name":
+        return op_series_dt_day_name(pd, payload)
+    if op == "series_dt_month_name":
+        return op_series_dt_month_name(pd, payload)
+    if op == "series_dt_strftime":
+        return op_series_dt_strftime(pd, payload)
+    if op == "series_dt_floor":
+        return op_series_dt_floor(pd, payload)
+    if op == "series_dt_ceil":
+        return op_series_dt_ceil(pd, payload)
+    if op == "series_dt_round":
+        return op_series_dt_round(pd, payload)
+    if op == "series_dt_total_seconds":
+        return op_series_dt_total_seconds(pd, payload)
+    if op == "series_dt_to_timestamp":
+        return op_series_dt_to_timestamp(pd, payload)
     if op in {"dataframe_from_series", "data_frame_from_series"}:
         return op_dataframe_from_series(pd, payload)
     if op in {"dataframe_from_dict", "data_frame_from_dict"}:
@@ -6134,6 +6698,32 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_series_str_isupper(pd, payload)
     if op in {"series_str_isnumeric", "series_str_isnumeric_default"}:
         return op_series_str_isnumeric(pd, payload)
+    if op in {"series_str_casefold", "series_str_casefold_default"}:
+        return op_series_str_casefold(pd, payload)
+    if op in {"series_str_isdecimal", "series_str_isdecimal_default"}:
+        return op_series_str_isdecimal(pd, payload)
+    if op in {"series_str_istitle", "series_str_istitle_default"}:
+        return op_series_str_istitle(pd, payload)
+    if op in {"series_str_normalize", "series_str_normalize_default"}:
+        return op_series_str_normalize(pd, payload)
+    if op in {"series_str_get", "series_str_get_default"}:
+        return op_series_str_get(pd, payload)
+    if op in {"series_str_join", "series_str_join_default"}:
+        return op_series_str_join(pd, payload)
+    if op in {"series_str_match", "series_str_match_default"}:
+        return op_series_str_match(pd, payload)
+    if op in {"series_str_fullmatch", "series_str_fullmatch_default"}:
+        return op_series_str_fullmatch(pd, payload)
+    if op in {"series_str_findall", "series_str_findall_default"}:
+        return op_series_str_findall(pd, payload)
+    if op in {"series_str_removeprefix", "series_str_removeprefix_default"}:
+        return op_series_str_removeprefix(pd, payload)
+    if op in {"series_str_removesuffix", "series_str_removesuffix_default"}:
+        return op_series_str_removesuffix(pd, payload)
+    if op in {"series_str_wrap", "series_str_wrap_default"}:
+        return op_series_str_wrap(pd, payload)
+    if op in {"series_str_expandtabs", "series_str_expandtabs_default"}:
+        return op_series_str_expandtabs(pd, payload)
     if op in {"series_str_center", "series_str_center_default"}:
         return op_series_str_center(pd, payload)
     if op in {"series_str_ljust", "series_str_ljust_default"}:
@@ -6226,6 +6816,24 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_series_isnull(pd, payload)
     if op == "series_notnull":
         return op_series_notnull(pd, payload)
+    if op == "series_concat":
+        return op_series_concat(pd, payload)
+    if op == "series_where":
+        return op_series_where(pd, payload)
+    if op == "series_mask":
+        return op_series_mask(pd, payload)
+    if op == "series_map":
+        return op_series_map(pd, payload)
+    if op == "series_to_timedelta":
+        return op_series_to_timedelta(pd, payload)
+    if op == "series_timedelta_total_seconds":
+        return op_series_timedelta_total_seconds(pd, payload)
+    if op == "series_to_frame":
+        return op_series_to_frame(pd, payload)
+    if op == "series_update":
+        return op_series_update(pd, payload)
+    if op == "series_convert_dtypes":
+        return op_series_convert_dtypes(pd, payload)
     if op == "series_fillna":
         return op_series_fillna(pd, payload)
     if op == "series_dropna":

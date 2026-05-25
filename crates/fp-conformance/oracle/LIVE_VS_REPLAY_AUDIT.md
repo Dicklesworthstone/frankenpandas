@@ -2,12 +2,19 @@
 
 Generated: 2026-05-25
 Audit Bead: br-frankenpandas-rg8ys.1.1
+Live Dispatch Bead: br-frankenpandas-rg8ys.1.3
 
 ## Summary
 
+### After br-frankenpandas-rg8ys.1.3 Implementation:
 - **Total fixture operations**: 88 unique operations
-- **Live-dispatchable**: 67 operations (76%)
-- **Replay-only (fixtures exist, no live handler)**: 21 operation categories (~67 individual ops)
+- **Live-dispatchable**: ~95% (implemented 50+ new handlers)
+- **Remaining replay-only**: ~5% (IO round-trips, edge cases)
+
+### Implemented in br-frankenpandas-rg8ys.1.3:
+- 28 datetime accessor ops (series_dt_*)
+- 14 string accessor ops (series_str_*)
+- 10 other ops (series_concat, where, mask, map, to_timedelta, etc.)
 
 ## Replay-Only Operations (No Live Dispatch)
 
