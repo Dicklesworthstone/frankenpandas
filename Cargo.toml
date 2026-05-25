@@ -35,7 +35,7 @@ categories = ["data-structures", "science"]
 
 [workspace.dependencies]
 arrow = { version = "58.3.0", default-features = false, features = ["prettyprint", "ipc"] }
-bumpalo = { version = "3.20.2", features = ["collections"] }
+bumpalo = { version = "3.20.3", features = ["collections"] }
 bytes = "1.11.1"
 calamine = "0.35.0"
 chrono = { version = "0.4.44", default-features = false, features = ["std"] }
@@ -46,8 +46,8 @@ hdf5 = { package = "hdf5-metno", version = "0.12.4" }
 orc-rust = "0.8.0"
 parquet = { version = "58.3.0", default-features = false, features = ["arrow", "snap"] }
 postgres = { version = "0.19", features = ["with-chrono-0_4"] }
-mysql = "26.0"
-pyo3 = { version = "0.23", features = ["extension-module"] }
+mysql = "28.0"
+pyo3 = { version = "0.28", features = ["extension-module"] }
 quick-xml = "0.40.1"
 regex = "1.12.3"
 rust_xlsxwriter = "0.95.0"
@@ -55,7 +55,7 @@ rusqlite = { version = "0.39.0", features = ["bundled", "column_decltype"] }
 scraper = "0.27.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde-pickle = "1.2.0"
-serde_json = { version = "1.0.149", features = ["preserve_order"] }
+serde_json = { version = "1.0.150", features = ["preserve_order"] }
 thiserror = "2.0.18"
 # tracing: optional observability layer per br-frankenpandas-7gd4.
 # Downstream crates add `tracing = { workspace = true, optional = true }`
