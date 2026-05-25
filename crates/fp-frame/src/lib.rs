@@ -13691,6 +13691,60 @@ fn parse_resample_freq(freq: &str) -> Option<(i64, String)> {
     Some((mult, unit.to_string()))
 }
 
+/// Convert a datelike index label to nanoseconds since epoch for sub-day
+/// resample bucketing. Per gauntlet CONF-RC2/bead 2.5.
+fn resample_label_to_ns(label: &IndexLabel) -> Option<i64> {
+    match label {
+        IndexLabel::Datetime64(ns) => Some(*ns),
+        IndexLabel::Utf8(s) => {
+            let s = s.as_str();
+            if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f") {
+                return Some(dt.and_utc().timestamp_nanos_opt().unwrap_or(0));
+            }
+            if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f") {
+                return Some(dt.and_utc().timestamp_nanos_opt().unwrap_or(0));
+            }
+            if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S") {
+                return Some(dt.and_utc().timestamp_nanos_opt().unwrap_or(0));
+            }
+            if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S") {
+                return Some(dt.and_utc().timestamp_nanos_opt().unwrap_or(0));
+            }
+            if let Ok(d) = chrono::NaiveDate::parse_from_str(s.split('T').next().unwrap_or(s).split(' ').next().unwrap_or(s), "%Y-%m-%d") {
+                return Some(d.and_hms_opt(0, 0, 0)?.and_utc().timestamp_nanos_opt().unwrap_or(0));
+            }
+            None
+        }
+        IndexLabel::Int64(_) | IndexLabel::Timedelta64(_) => None,
+    }
+}
+
+/// Convert a datelike index label to a month ordinal (year*12 + month-1) for
+/// multiplied-calendar resample bucketing. Per gauntlet bead 2.5.
+fn resample_label_to_month_ordinal(label: &IndexLabel) -> Option<i64> {
+    match label {
+        IndexLabel::Datetime64(ns) => {
+            let secs = ns.div_euclid(1_000_000_000);
+            DateTime::from_timestamp(secs, 0).map(|dt| {
+                let d = dt.naive_utc().date();
+                i64::from(d.year()) * 12 + i64::from(d.month0())
+            })
+        }
+        IndexLabel::Utf8(s) => {
+            let date_part = s.split('T').next().unwrap_or(s).split(' ').next().unwrap_or(s);
+            let parts: Vec<&str> = date_part.split('-').collect();
+            if parts.len() >= 2 {
+                let year: i64 = parts[0].parse().ok()?;
+                let month: i64 = parts[1].parse().ok()?;
+                Some(year * 12 + month - 1)
+            } else {
+                None
+            }
+        }
+        IndexLabel::Int64(_) | IndexLabel::Timedelta64(_) => None,
+    }
+}
+
 /// Convert a datelike index label to a `NaiveDate` (day resolution) for
 /// origin-anchored N-day resample bucketing. Per gauntlet CONF-RC2.
 fn resample_label_to_date(label: &IndexLabel) -> Option<NaiveDate> {
@@ -13719,15 +13773,20 @@ fn resample_label_to_date(label: &IndexLabel) -> Option<NaiveDate> {
 /// original calendar-string bucketing byte-for-byte. For N-day multiples
 /// (`"2D"`, `"3D"`, ...) it produces origin-anchored bins labelled by the bin
 /// start date, matching `pandas.resample("2D")` (anchored at the first
-/// timestamp, label = left edge). Per gauntlet CONF-RC2.
+/// timestamp, label = left edge).
+///
+/// Per gauntlet bead 2.5, also supports:
+/// - Multiplied calendar units: 2M, 2Q, 2Y (month-ordinal bucketing)
+/// - Sub-day units: H, min, s, ms, us, ns with multipliers (nanosecond bucketing)
 fn resample_build_groups(
     labels: &[IndexLabel],
     freq: &str,
 ) -> (Vec<String>, std::collections::HashMap<String, Vec<usize>>) {
     let (mult, unit) = parse_resample_freq(freq).unwrap_or((1, freq.to_string()));
+    let unit_lower = unit.to_lowercase();
 
     // Fast path: unit frequency -> unchanged calendar bucketing.
-    if mult <= 1 || unit != "D" {
+    if mult <= 1 && matches!(unit.as_str(), "Y" | "A" | "M" | "D") {
         let mut order: Vec<String> = Vec::new();
         let mut groups: std::collections::HashMap<String, Vec<usize>> =
             std::collections::HashMap::new();
@@ -13742,39 +13801,120 @@ fn resample_build_groups(
         return (order, groups);
     }
 
-    // N-day multiple: origin-anchored bins, labelled by the bin-start date.
-    let day_ords: Vec<Option<i64>> = labels
-        .iter()
-        .map(|l| resample_label_to_date(l).map(|d| i64::from(d.num_days_from_ce())))
-        .collect();
-    let origin = match day_ords.iter().filter_map(|o| *o).min() {
-        Some(o) => o,
-        None => return (Vec::new(), std::collections::HashMap::new()),
+    // Sub-day units: H, min, s, ms, us, ns - nanosecond-ordinal bucketing
+    let ns_per_unit: Option<i64> = match unit_lower.as_str() {
+        "h" => Some(3_600_000_000_000),
+        "min" | "t" => Some(60_000_000_000),
+        "s" => Some(1_000_000_000),
+        "ms" | "l" => Some(1_000_000),
+        "us" | "u" => Some(1_000),
+        "ns" | "n" => Some(1),
+        _ => None,
     };
-    let mut order: Vec<String> = Vec::new();
-    let mut bin_start_of_key: std::collections::HashMap<String, i64> =
-        std::collections::HashMap::new();
-    let mut groups: std::collections::HashMap<String, Vec<usize>> =
-        std::collections::HashMap::new();
-    for (i, ord) in day_ords.iter().enumerate() {
-        let Some(ord) = *ord else { continue };
-        let bin_index = (ord - origin).div_euclid(mult);
-        let bin_start = origin + bin_index * mult;
-        let Some(start_date) =
-            NaiveDate::from_num_days_from_ce_opt(i32::try_from(bin_start).unwrap_or(i32::MAX))
-        else {
-            continue;
+    if let Some(ns_per) = ns_per_unit {
+        let bucket_ns = mult * ns_per;
+        let ns_ords: Vec<Option<i64>> = labels.iter().map(resample_label_to_ns).collect();
+        let origin = match ns_ords.iter().filter_map(|o| *o).min() {
+            Some(o) => o,
+            None => return (Vec::new(), std::collections::HashMap::new()),
         };
-        let key = start_date.format("%Y-%m-%d").to_string();
-        if !groups.contains_key(&key) {
-            order.push(key.clone());
-            bin_start_of_key.insert(key.clone(), bin_start);
+        let mut order: Vec<String> = Vec::new();
+        let mut bin_start_of_key: std::collections::HashMap<String, i64> =
+            std::collections::HashMap::new();
+        let mut groups: std::collections::HashMap<String, Vec<usize>> =
+            std::collections::HashMap::new();
+        for (i, ns_opt) in ns_ords.iter().enumerate() {
+            let Some(ns) = *ns_opt else { continue };
+            let bin_index = (ns - origin).div_euclid(bucket_ns);
+            let bin_start_ns = origin + bin_index * bucket_ns;
+            let secs = bin_start_ns.div_euclid(1_000_000_000);
+            let nano = (bin_start_ns % 1_000_000_000) as u32;
+            let Some(dt) = DateTime::from_timestamp(secs, nano) else { continue };
+            let key = dt.format("%Y-%m-%dT%H:%M:%S%.f").to_string();
+            if !groups.contains_key(&key) {
+                order.push(key.clone());
+                bin_start_of_key.insert(key.clone(), bin_start_ns);
+            }
+            groups.entry(key).or_default().push(i);
         }
-        groups.entry(key).or_default().push(i);
+        order.sort_by_key(|k| bin_start_of_key.get(k).copied().unwrap_or(i64::MAX));
+        return (order, groups);
     }
-    // pandas returns resample bins in chronological order.
-    order.sort_by_key(|k| bin_start_of_key.get(k).copied().unwrap_or(i64::MAX));
-    (order, groups)
+
+    // Multiplied calendar units: 2M, 2Q, 2Y - month-ordinal bucketing
+    let months_per_unit: Option<i64> = match unit.as_str() {
+        "M" => Some(1),
+        "Q" => Some(3),
+        "Y" | "A" => Some(12),
+        _ => None,
+    };
+    if let Some(months_per) = months_per_unit {
+        let bucket_months = mult * months_per;
+        let month_ords: Vec<Option<i64>> = labels.iter().map(resample_label_to_month_ordinal).collect();
+        let origin = match month_ords.iter().filter_map(|o| *o).min() {
+            Some(o) => o,
+            None => return (Vec::new(), std::collections::HashMap::new()),
+        };
+        let mut order: Vec<String> = Vec::new();
+        let mut bin_start_of_key: std::collections::HashMap<String, i64> =
+            std::collections::HashMap::new();
+        let mut groups: std::collections::HashMap<String, Vec<usize>> =
+            std::collections::HashMap::new();
+        for (i, mo_opt) in month_ords.iter().enumerate() {
+            let Some(mo) = *mo_opt else { continue };
+            let bin_index = (mo - origin).div_euclid(bucket_months);
+            let bin_start_mo = origin + bin_index * bucket_months;
+            let year = bin_start_mo.div_euclid(12);
+            let month = (bin_start_mo % 12) + 1;
+            let key = format!("{:04}-{:02}", year, month);
+            if !groups.contains_key(&key) {
+                order.push(key.clone());
+                bin_start_of_key.insert(key.clone(), bin_start_mo);
+            }
+            groups.entry(key).or_default().push(i);
+        }
+        order.sort_by_key(|k| bin_start_of_key.get(k).copied().unwrap_or(i64::MAX));
+        return (order, groups);
+    }
+
+    // N-day multiple: origin-anchored bins, labelled by the bin-start date.
+    if unit == "D" {
+        let day_ords: Vec<Option<i64>> = labels
+            .iter()
+            .map(|l| resample_label_to_date(l).map(|d| i64::from(d.num_days_from_ce())))
+            .collect();
+        let origin = match day_ords.iter().filter_map(|o| *o).min() {
+            Some(o) => o,
+            None => return (Vec::new(), std::collections::HashMap::new()),
+        };
+        let mut order: Vec<String> = Vec::new();
+        let mut bin_start_of_key: std::collections::HashMap<String, i64> =
+            std::collections::HashMap::new();
+        let mut groups: std::collections::HashMap<String, Vec<usize>> =
+            std::collections::HashMap::new();
+        for (i, ord) in day_ords.iter().enumerate() {
+            let Some(ord) = *ord else { continue };
+            let bin_index = (ord - origin).div_euclid(mult);
+            let bin_start = origin + bin_index * mult;
+            let Some(start_date) =
+                NaiveDate::from_num_days_from_ce_opt(i32::try_from(bin_start).unwrap_or(i32::MAX))
+            else {
+                continue;
+            };
+            let key = start_date.format("%Y-%m-%d").to_string();
+            if !groups.contains_key(&key) {
+                order.push(key.clone());
+                bin_start_of_key.insert(key.clone(), bin_start);
+            }
+            groups.entry(key).or_default().push(i);
+        }
+        // pandas returns resample bins in chronological order.
+        order.sort_by_key(|k| bin_start_of_key.get(k).copied().unwrap_or(i64::MAX));
+        return (order, groups);
+    }
+
+    // Fallback: unknown frequency, return empty
+    (Vec::new(), std::collections::HashMap::new())
 }
 
 /// Time-based resampling view over a Series.
@@ -13791,17 +13931,30 @@ impl Resample<'_> {
     /// supported pandas-style frequency strings. Was silently falling
     /// back to daily bucketing for any unknown input — pandas raises
     /// ValueError instead.
+    ///
+    /// Per gauntlet bead 2.5: extended to support multiplied calendar units
+    /// (2M, 2Q, 2Y) and sub-day units (H, min, s, ms, us, ns).
     fn validate(&self) -> Result<(), FrameError> {
-        // Per gauntlet CONF-RC2: accept integer-multiplied frequency aliases
-        // (e.g. "2D", "3D") in addition to the unit forms, matching pandas
-        // `resample("2D")`. Multipliers > 1 are currently supported for the
-        // day unit only; multiplied calendar units (2M / 2Y) reject with a
-        // clear message rather than silently mis-bucketing.
+        // Per gauntlet CONF-RC2 + bead 2.5: accept integer-multiplied frequency aliases
+        // Calendar units: Y, A, M, Q (and multiples like 2M, 2Q, 2Y)
+        // Day units: D (and multiples like 2D, 3D)
+        // Sub-day units: H, min/T, s, ms/L, us/U, ns/N (and multiples like 3H, 15min)
         match parse_resample_freq(&self.freq) {
-            Some((1, unit)) if matches!(unit.as_str(), "Y" | "A" | "M" | "D") => Ok(()),
-            Some((mult, unit)) if mult > 1 && unit == "D" => Ok(()),
+            Some((_, unit)) => {
+                let unit_lower = unit.to_lowercase();
+                let valid = matches!(unit.as_str(), "Y" | "A" | "M" | "Q" | "D")
+                    || matches!(unit_lower.as_str(), "h" | "min" | "t" | "s" | "ms" | "l" | "us" | "u" | "ns" | "n");
+                if valid {
+                    Ok(())
+                } else {
+                    Err(FrameError::CompatibilityRejected(format!(
+                        "resample: invalid frequency '{}'; supported: Y, A, M, Q, D (+ multiples), H, min, s, ms, us, ns",
+                        self.freq
+                    )))
+                }
+            }
             _ => Err(FrameError::CompatibilityRejected(format!(
-                "resample: invalid frequency '{}'; supported: Y, A, M, D and N-day multiples (e.g. 2D)",
+                "resample: invalid frequency '{}'; supported: Y, A, M, Q, D (+ multiples), H, min, s, ms, us, ns",
                 self.freq
             ))),
         }
