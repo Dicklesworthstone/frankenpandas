@@ -892,6 +892,25 @@ Functions matching pandas top-level API:
 
 ## Performance
 
+### vs-pandas Scorecard
+
+FrankenPandas performance is measured head-to-head against pandas 2.2.3 using identical workloads. See [`artifacts/perf/SCORECARD.md`](artifacts/perf/SCORECARD.md) for the current per-category scorecard.
+
+Benchmarks run on `release-perf` profile (LTO, opt-level=3). Each category geomean must exceed 1.0x to validate the "exceeds pandas" claim for that category. Categories below parity are documented honestly.
+
+```bash
+# Run benchmarks
+python benches/vs_pandas_harness.py --all --sizes 10k,100k
+
+# Generate scorecard
+python scripts/gen_perf_scorecard.py --input artifacts/bench/latest.json --format md
+
+# Apply ratchet gate (CI)
+./scripts/apply_ratchet.sh
+```
+
+### Optimization Rounds
+
 Five named optimization rounds with formal evidence, plus an ongoing complexity sweep that converted dozens of O(n²) hot paths to O(n) or O(n + k) via HashMap/HashSet/IsinIndex.
 
 | Round | Optimization | Speedup |
