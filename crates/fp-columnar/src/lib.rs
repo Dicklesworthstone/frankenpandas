@@ -1416,6 +1416,46 @@ impl Column {
         self.dtype
     }
 
+    /// Returns true if this column contains any null/missing values.
+    #[must_use]
+    pub fn has_nulls(&self) -> bool {
+        self.validity.count_invalid() > 0
+    }
+
+    /// Promote the dtype to its nullable variant if the column has nulls.
+    ///
+    /// For Int64 with nulls → Int64Nullable, Bool with nulls → BoolNullable.
+    /// For already-nullable or other dtypes, returns a clone unchanged.
+    #[must_use]
+    pub fn promote_to_nullable(&self) -> Self {
+        if !self.has_nulls() {
+            return self.clone();
+        }
+        let new_dtype = self.dtype.to_nullable();
+        if new_dtype == self.dtype {
+            return self.clone();
+        }
+        Self {
+            dtype: new_dtype,
+            values: self.values.clone(),
+            validity: self.validity.clone(),
+        }
+    }
+
+    /// Create a new column with a different dtype, preserving the same values.
+    ///
+    /// This is a low-level operation that only changes the dtype metadata
+    /// without converting values. Use only when the values are already valid
+    /// for the target dtype.
+    #[must_use]
+    pub fn with_dtype(&self, dtype: DType) -> Self {
+        Self {
+            dtype,
+            values: self.values.clone(),
+            validity: self.validity.clone(),
+        }
+    }
+
     #[must_use]
     pub fn len(&self) -> usize {
         self.values.len()

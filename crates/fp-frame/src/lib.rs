@@ -15675,7 +15675,11 @@ impl SeriesGroupBy<'_> {
             Some(by_name)
         };
         let index = Index::new(labels).rename_index(idx_name);
-        let column = Column::from_values(values)?;
+        let mut column = Column::from_values(values)?;
+        // Per br-frankenpandas-rg8ys.6.3: preserve nullable dtypes through aggregations.
+        if self.series.dtype().is_nullable() && column.has_nulls() {
+            column = column.with_dtype(self.series.dtype());
+        }
         Series::new(name, index, column)
     }
 
@@ -15704,7 +15708,13 @@ impl SeriesGroupBy<'_> {
             Some(by_name)
         };
         let index = Index::new(labels).rename_index(idx_name);
-        let column = Column::from_values(values)?;
+        let mut column = Column::from_values(values)?;
+        // Per br-frankenpandas-rg8ys.6.3: preserve nullable Int64/Bool dtypes
+        // through aggregations. If source was Int64Nullable and result has nulls,
+        // keep the nullable dtype rather than re-inferring.
+        if self.series.dtype().is_nullable() && column.has_nulls() {
+            column = column.with_dtype(self.series.dtype());
+        }
         Series::new(name, index, column)
     }
 
