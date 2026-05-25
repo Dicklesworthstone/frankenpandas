@@ -34,7 +34,7 @@ categories = ["data-structures", "science"]
 
 [workspace.dependencies]
 arrow = { version = "58.3.0", default-features = false, features = ["prettyprint", "ipc"] }
-bumpalo = { version = "3.20.2", features = ["collections"] }
+bumpalo = { version = "3.20.3", features = ["collections"] }
 bytes = "1.11.1"
 calamine = "0.35.0"
 chrono = { version = "0.4.44", default-features = false, features = ["std"] }
@@ -51,7 +51,7 @@ rusqlite = { version = "0.39.0", features = ["bundled", "column_decltype"] }
 scraper = "0.27.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde-pickle = "1.2.0"
-serde_json = { version = "1.0.149", features = ["preserve_order"] }
+serde_json = { version = "1.0.150", features = ["preserve_order"] }
 thiserror = "2.0.18"
 # tracing: optional observability layer per br-frankenpandas-7gd4.
 # Downstream crates add `tracing = { workspace = true, optional = true }`
