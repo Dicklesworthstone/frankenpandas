@@ -4119,10 +4119,12 @@ impl Series {
             )));
         }
 
-        // Fast path: when indexes are identical, skip alignment entirely.
+        // Fast path: when indexes are identical AND no duplicates, skip alignment.
         // This is the common case for s[s > x].
         // Per br-frankenpandas-axw58 perf optimization.
-        if self.index.identical(&mask.index) {
+        // Per br-frankenpandas-rg8ys.2.8: must NOT use fast path with duplicate
+        // indexes - the duplicate-handling path preserves all matching rows.
+        if self.index.identical(&mask.index) && !self.index.has_duplicates() {
             let mut new_labels = Vec::with_capacity(self.len() / 2);
             let mut new_values = Vec::with_capacity(self.len() / 2);
             for (i, mask_val) in mask.column.values().iter().enumerate() {
@@ -12143,6 +12145,9 @@ impl Rolling<'_> {
     }
 
     /// Rolling count of non-null values.
+    ///
+    /// Per br-frankenpandas-mm77i: pandas emits a value when valid_count >= min_periods,
+    /// even if the window is partial. The count itself is always the number of non-nulls.
     pub fn count(&self) -> Result<Series, FrameError> {
         self.validate()?;
         let vals = self.series.column().values();
@@ -12157,7 +12162,8 @@ impl Rolling<'_> {
                 let window_slice = &vals[start..end];
                 let count = window_slice.iter().filter(|v| !v.is_missing()).count();
 
-                if window_slice.len() < self.min_periods {
+                // min_periods applies to non-null count, not window size
+                if count < self.min_periods {
                     out.push(Scalar::Null(NullKind::NaN));
                 } else {
                     out.push(Scalar::Float64(count as f64));
@@ -12169,7 +12175,8 @@ impl Rolling<'_> {
                 let window_slice = &vals[start..=i];
                 let count = window_slice.iter().filter(|v| !v.is_missing()).count();
 
-                if window_slice.len() < self.min_periods {
+                // min_periods applies to non-null count, not window size
+                if count < self.min_periods {
                     out.push(Scalar::Null(NullKind::NaN));
                 } else {
                     out.push(Scalar::Float64(count as f64));
@@ -13224,6 +13231,9 @@ impl Ewm<'_> {
     /// EWM mean.
     ///
     /// Matches `series.ewm(span=...).mean()`.
+    /// Per br-frankenpandas-mm77i: pandas carries forward the last EWM value
+    /// for missing inputs once at least one observation has been seen
+    /// (default min_periods=1).
     pub fn mean(&self) -> Result<Series, FrameError> {
         let vals = self.series.column().values();
         let mut out = Vec::with_capacity(vals.len());
@@ -13238,7 +13248,12 @@ impl Ewm<'_> {
 
         for val in vals {
             if val.is_missing() || val.to_f64().map_or(true, |v| v.is_nan()) {
-                out.push(Scalar::Null(NullKind::NaN));
+                // If we've seen at least one observation, carry forward last EWM
+                if nobs >= 1 {
+                    out.push(Scalar::Float64(ewm_old));
+                } else {
+                    out.push(Scalar::Null(NullKind::NaN));
+                }
                 continue;
             }
             let x = val.to_f64().unwrap();
@@ -27442,10 +27457,12 @@ impl DataFrame {
     /// The mask must be a Bool-typed Series. Indexes are aligned; missing
     /// mask values are treated as `False`.
     pub fn filter_rows(&self, mask: &Series) -> Result<Self, FrameError> {
-        // Fast path: when indexes are identical, skip alignment entirely.
+        // Fast path: when indexes are identical AND no duplicates, skip alignment.
         // This is the common case for df[df['col'] > x].
         // Per br-frankenpandas-axw58 perf optimization.
-        if self.index.identical(mask.index()) {
+        // Per br-frankenpandas-rg8ys.2.8: must NOT use fast path with duplicate
+        // indexes - the duplicate-handling path preserves all matching rows.
+        if self.index.identical(mask.index()) && !self.index.has_duplicates() {
             if let Some(offending) = mask
                 .column()
                 .values()
@@ -66224,7 +66241,8 @@ mod tests {
 
         let result = s.ewm(Some(3.0), None).mean().unwrap();
         assert_eq!(result.values()[0], Scalar::Float64(1.0));
-        assert!(result.values()[1].is_missing());
+        // Per br-frankenpandas-mm77i: pandas carries forward last EWM for nulls
+        assert_eq!(result.values()[1], Scalar::Float64(1.0));
         // After null, third value: 0.5*3 + 0.5*1 = 2.0
         assert_eq!(result.values()[2], Scalar::Float64(2.0));
     }
