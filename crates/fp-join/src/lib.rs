@@ -1838,69 +1838,52 @@ fn compute_asof_matches(
                     continue;
                 }
 
-                // For nearest, find the closest value
-                // If !allow_exact_matches, exclude exact matches from consideration
-                let pos = right_non_nan_values.partition_point(|rv| *rv <= lv);
-
-                let lower = if pos > 0 { Some(pos - 1) } else { None };
-                let upper = if pos < right_non_nan_values.len() {
-                    Some(pos)
+                // For nearest, pick the closest neighbor on each side. The
+                // candidate window depends on whether exact (equal) keys may
+                // match:
+                //   allow_exact:  lower = last value <= lv, upper = first value >= lv
+                //   !allow_exact: lower = last value <  lv, upper = first value >  lv
+                // Selecting the window up front (rather than excluding exact
+                // matches after the fact) skips over runs of exact-equal keys
+                // when they are disallowed, so a nearer non-equal key beyond
+                // the run is still found — matching pandas merge_asof.
+                let (lower, upper) = if allow_exact_matches {
+                    let lo = right_non_nan_values.partition_point(|rv| *rv <= lv);
+                    let up = right_non_nan_values.partition_point(|rv| *rv < lv);
+                    (
+                        if lo > 0 { Some(lo - 1) } else { None },
+                        if up < right_non_nan_values.len() {
+                            Some(up)
+                        } else {
+                            None
+                        },
+                    )
                 } else {
-                    None
+                    let lo = right_non_nan_values.partition_point(|rv| *rv < lv);
+                    let up = right_non_nan_values.partition_point(|rv| *rv <= lv);
+                    (
+                        if lo > 0 { Some(lo - 1) } else { None },
+                        if up < right_non_nan_values.len() {
+                            Some(up)
+                        } else {
+                            None
+                        },
+                    )
                 };
 
                 let chosen = match (lower, upper) {
                     (Some(l), Some(u)) => {
-                        let lower_val = right_non_nan_values[l];
-                        let upper_val = right_non_nan_values[u];
-                        let lower_exact = (lower_val - lv).abs() < f64::EPSILON;
-                        let upper_exact = (upper_val - lv).abs() < f64::EPSILON;
-
-                        if !allow_exact_matches {
-                            // Exclude exact matches
-                            if lower_exact && upper_exact {
-                                None
-                            } else if lower_exact {
-                                Some(u)
-                            } else if upper_exact {
-                                Some(l)
-                            } else {
-                                let lower_dist = (lower_val - lv).abs();
-                                let upper_dist = (upper_val - lv).abs();
-                                if upper_dist < lower_dist {
-                                    Some(u)
-                                } else {
-                                    Some(l)
-                                }
-                            }
-                        } else {
-                            let lower_dist = (lower_val - lv).abs();
-                            let upper_dist = (upper_val - lv).abs();
-                            if upper_dist < lower_dist {
-                                Some(u)
-                            } else {
-                                Some(l)
-                            }
-                        }
-                    }
-                    (Some(l), None) => {
-                        let val = right_non_nan_values[l];
-                        let exact = (val - lv).abs() < f64::EPSILON;
-                        if !allow_exact_matches && exact {
-                            None
+                        let lower_dist = (right_non_nan_values[l] - lv).abs();
+                        let upper_dist = (right_non_nan_values[u] - lv).abs();
+                        // Ties go to the lower (backward) neighbor, like pandas.
+                        if upper_dist < lower_dist {
+                            Some(u)
                         } else {
                             Some(l)
                         }
                     }
-                    (None, Some(u)) => {
-                        let val = right_non_nan_values[u];
-                        let exact = (val - lv).abs() < f64::EPSILON;
-                        if !allow_exact_matches && exact {
-                            None
-                        } else {
-                            Some(u)
-                        }
-                    }
+                    (Some(l), None) => Some(l),
+                    (None, Some(u)) => Some(u),
                     (None, None) => None,
                 };
 
@@ -4394,6 +4377,50 @@ mod tests {
         // time=7: nearest is 5(dist=2) or 10(dist=3) → ref_val=500
         let ref_col = result.columns.get("ref_val").unwrap();
         assert_eq!(ref_col.values()[1], Scalar::Float64(500.0)); // time=7 → 5 is nearest
+    }
+
+    #[test]
+    fn merge_asof_nearest_excludes_exact_finds_neighbor() {
+        // Regression: with direction=nearest and allow_exact_matches=false,
+        // an exact-equal key must be skipped over to reach the nearest
+        // non-equal key, rather than yielding no match. Verified against
+        // pandas 2.2.3: merge_asof(left=5, right=[3,5,5], nearest,
+        // allow_exact_matches=False) -> matches value 3.
+        use super::{AsofDirection, MergeAsofOptions};
+
+        let left = fp_frame::DataFrame::from_dict(
+            &["time", "val"],
+            vec![
+                ("time", vec![Scalar::Int64(5)]),
+                ("val", vec![Scalar::Int64(1)]),
+            ],
+        )
+        .unwrap();
+        let right = fp_frame::DataFrame::from_dict(
+            &["time", "ref_val"],
+            vec![
+                (
+                    "time",
+                    vec![Scalar::Int64(3), Scalar::Int64(5), Scalar::Int64(5)],
+                ),
+                (
+                    "ref_val",
+                    vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(30.0),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+
+        let opts = MergeAsofOptions::new().allow_exact_matches(false);
+        let result =
+            super::merge_asof_with_options(&left, &right, "time", AsofDirection::Nearest, opts)
+                .unwrap();
+        let ref_col = result.columns.get("ref_val").unwrap();
+        assert_eq!(ref_col.values()[0], Scalar::Float64(10.0)); // value 3 is nearest non-exact
     }
 
     #[test]
