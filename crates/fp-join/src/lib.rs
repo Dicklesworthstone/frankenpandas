@@ -1024,7 +1024,7 @@ pub fn merge_dataframes_on_with_options(
         join_type,
         JoinType::Inner | JoinType::Left | JoinType::Outer
     ) {
-        let mut m = HashMap::<&CompositeJoinKey, Vec<usize>>::new();
+        let mut m = HashMap::<&CompositeJoinKey, Vec<usize>>::with_capacity(right_keys.len());
         for (pos, key) in right_keys.iter().enumerate() {
             m.entry(key).or_default().push(pos);
         }
@@ -1034,7 +1034,7 @@ pub fn merge_dataframes_on_with_options(
     };
 
     let left_map = if matches!(join_type, JoinType::Right | JoinType::Outer) {
-        let mut m = HashMap::<&CompositeJoinKey, Vec<usize>>::new();
+        let mut m = HashMap::<&CompositeJoinKey, Vec<usize>>::with_capacity(left_keys.len());
         for (pos, key) in left_keys.iter().enumerate() {
             m.entry(key).or_default().push(pos);
         }
