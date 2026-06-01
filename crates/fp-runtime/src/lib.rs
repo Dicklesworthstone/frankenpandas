@@ -188,6 +188,10 @@ const JOIN_ADMISSION_LOSS: LossMatrix = LossMatrix {
     repair_if_incompatible: 3.0,
 };
 
+const DEFAULT_CONFORMAL_ALPHA: f64 = 0.1;
+const MIN_CONFORMAL_ALPHA: f64 = 0.01;
+const MAX_CONFORMAL_ALPHA: f64 = 0.5;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DecisionMetrics {
     pub posterior_compatible: f64,
@@ -602,6 +606,14 @@ fn nonconformity_score(record: &DecisionRecord) -> f64 {
     (p / (1.0 - p)).ln().abs()
 }
 
+fn normalize_conformal_alpha(alpha: f64) -> f64 {
+    if alpha.is_finite() {
+        alpha.clamp(MIN_CONFORMAL_ALPHA, MAX_CONFORMAL_ALPHA)
+    } else {
+        DEFAULT_CONFORMAL_ALPHA
+    }
+}
+
 /// Conformal prediction set: which actions are admissible at significance level alpha.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ConformalPredictionSet {
@@ -640,7 +652,7 @@ impl ConformalGuard {
         Self {
             scores: Vec::with_capacity(window_size),
             window_size,
-            alpha: alpha.clamp(0.01, 0.5),
+            alpha: normalize_conformal_alpha(alpha),
             in_set_count: 0,
             total_count: 0,
         }
@@ -656,14 +668,19 @@ impl ConformalGuard {
     /// Returns None if the window has fewer than 2 scores.
     #[must_use]
     pub fn conformal_quantile(&self) -> Option<f64> {
-        if self.scores.len() < 2 {
+        let mut sorted: Vec<f64> = self
+            .scores
+            .iter()
+            .copied()
+            .filter(|score| score.is_finite())
+            .collect();
+        if sorted.len() < 2 {
             return None;
         }
-        let mut sorted: Vec<f64> = self.scores.clone();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        sorted.sort_by(f64::total_cmp);
         // Quantile at level (1 - alpha)(1 + 1/n) per split conformal prediction
         let n = sorted.len() as f64;
-        let level = (1.0 - self.alpha) * (1.0 + 1.0 / n);
+        let level = (1.0 - normalize_conformal_alpha(self.alpha)) * (1.0 + 1.0 / n);
         let idx = (level * n).ceil() as usize;
         let idx = idx.min(sorted.len()).saturating_sub(1);
         Some(sorted[idx])
@@ -672,6 +689,7 @@ impl ConformalGuard {
     /// Evaluate a decision record against the conformal guard.
     /// Returns the prediction set and whether the Bayesian action is admissible.
     pub fn evaluate(&mut self, record: &DecisionRecord) -> ConformalPredictionSet {
+        self.normalize_runtime_config();
         let score = nonconformity_score(record);
 
         let quantile = self.conformal_quantile();
@@ -743,7 +761,7 @@ impl ConformalGuard {
         if self.total_count == 0 {
             return 1.0;
         }
-        self.in_set_count as f64 / self.total_count as f64
+        self.in_set_count.min(self.total_count) as f64 / self.total_count as f64
     }
 
     /// Number of scores in the calibration window.
@@ -755,13 +773,25 @@ impl ConformalGuard {
     /// Whether the calibration window has sufficient data.
     #[must_use]
     pub fn is_calibrated(&self) -> bool {
-        self.scores.len() >= 2
+        self.scores.iter().filter(|score| score.is_finite()).count() >= 2
     }
 
     /// Whether coverage has dropped below target for the alert threshold.
     #[must_use]
     pub fn coverage_alert(&self) -> bool {
-        self.total_count >= 100 && self.empirical_coverage() < (1.0 - self.alpha)
+        self.total_count >= 100
+            && self.empirical_coverage() < (1.0 - normalize_conformal_alpha(self.alpha))
+    }
+
+    fn normalize_runtime_config(&mut self) {
+        self.window_size = self.window_size.max(1);
+        self.alpha = normalize_conformal_alpha(self.alpha);
+        self.scores.retain(|score| score.is_finite());
+        if self.scores.len() > self.window_size {
+            let overflow = self.scores.len() - self.window_size;
+            self.scores.drain(0..overflow);
+        }
+        self.in_set_count = self.in_set_count.min(self.total_count);
     }
 }
 
@@ -1455,6 +1485,45 @@ mod tests {
 
         assert!(set.bayesian_action_in_set);
         assert_eq!(guard.calibration_count(), 1);
+    }
+
+    #[test]
+    fn conformal_guard_non_finite_alpha_uses_default() {
+        let guard = ConformalGuard::new(100, f64::NAN);
+        assert_eq!(guard.alpha, super::DEFAULT_CONFORMAL_ALPHA);
+        assert!(!guard.coverage_alert());
+    }
+
+    #[test]
+    fn conformal_guard_repairs_deserialized_zero_window_before_evaluate() {
+        let mut guard: ConformalGuard = serde_json::from_str(
+            r#"{"scores":[],"window_size":0,"alpha":0.1,"in_set_count":0,"total_count":0}"#,
+        )
+        .expect("deserialize guard");
+        let mut ledger = EvidenceLedger::new();
+        let policy = RuntimePolicy::hardened(Some(100_000));
+
+        policy.decide_join_admission(1000, &mut ledger);
+        let set = guard.evaluate(&ledger.records()[0]);
+
+        assert!(set.bayesian_action_in_set);
+        assert_eq!(guard.window_size, 1);
+        assert_eq!(guard.calibration_count(), 1);
+    }
+
+    #[test]
+    fn conformal_quantile_ignores_non_finite_persisted_scores() {
+        let guard = ConformalGuard {
+            scores: vec![f64::NAN, f64::INFINITY, 1.0, 2.0],
+            window_size: 10,
+            alpha: f64::NAN,
+            in_set_count: 5,
+            total_count: 3,
+        };
+
+        assert!(guard.is_calibrated());
+        assert_eq!(guard.conformal_quantile(), Some(2.0));
+        assert_eq!(guard.empirical_coverage(), 1.0);
     }
 
     #[test]
