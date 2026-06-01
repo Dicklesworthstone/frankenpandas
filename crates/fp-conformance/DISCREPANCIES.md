@@ -77,14 +77,6 @@
 - **Tests affected:** `dataframe_groupby_apply`, `dataframe_groupby_apply_scalar_returns_series_indexed_by_keys`, `dataframe_groupby_apply_series_unions_sparse_result_columns`, `dataframe_groupby_apply_series_stacked_preserves_variable_labels`.
 - **Review date:** 2026-04-25
 
-### DISC-014: Series + Series duplicate-label arithmetic doesn't promote Int64 to Float64
-- **Reference:** Pandas `Series + Series` with duplicate labels on either side performs cross-product alignment that can introduce NaN for the pairings with no match. Pandas promotes the result to `Float64` to accommodate the NaN even when both sources are pure `Int64` and the actual numeric result fits in `Int64`.
-- **Our impl:** Our cross-product alignment preserves `Int64` when no NaN is actually generated (the duplicate-label paired values all match). This is the inverse of DISC-011: there pandas keeps Int64 (extension dtype) where we promote to Float64; here pandas promotes to Float64 where we keep Int64. Both stem from the absence of a nullable extension Int64 dtype on our side.
-- **Impact:** Conformance packet `FP-P2C-001 series_add_duplicate_labels_hardened` fails with `value mismatch at idx=0: actual=Int64(4), expected=Float64(4.0)`. Downstream test `live_oracle_unavailable_falls_back_to_fixture_when_enabled` re-surfaces this via the FP-P2C-001 fallback fixture.
-- **Resolution:** WILL-FIX - aligned with the DISC-011 nullable-extension-Int64 epic. The fix is "always promote to Float64 when duplicate-label alignment can introduce NaN, regardless of whether the specific input avoids it" — that's how pandas does it pre-extension-dtype too. Per br-frankenpandas-9seu (fd90.81).
-- **Tests affected:** `packet_filter_runs::FP-P2C-001/series_add_duplicate_labels_hardened`, `live_oracle_harness_availability::live_oracle_unavailable_falls_back_to_fixture_when_enabled`.
-- **Review date:** 2026-04-26
-
 ### DISC-012: Mixed naive / tz-aware CSV parse_dates bails out and returns raw input strings
 - **Reference:** Pandas handles a CSV column with mixed naive + tz-aware datetime strings by parsing each row independently (the naive rows produce `Timestamp` without tz; the aware rows produce `Timestamp` with tz). When converted to strings, both forms are reformatted into pandas' canonical `YYYY-MM-DD HH:MM:SS[±HH:MM]` shape.
 - **Our impl:** fp-frame's `to_datetime_with_options(infer_mixed_timezone=true)` infers ONE tz pattern (Naive or Aware) from the FIRST non-null row. Rows that don't match that pattern are coerced to `NaT`. fp-io's `parse_csv_datetime_column` then sees the partial-parse failure and returns `None`, leaving the entire column as the raw input strings. So the second row in a mixed-tz column keeps its original `2024-01-15T10:30:00Z` form even though our `format_aware_datetime` would have rendered it correctly as `2024-01-15 10:30:00+00:00`.
@@ -130,6 +122,14 @@
 - **Resolution:** FIXED in br-frankenpandas-cod1d13 by routing unique-label Series arithmetic through sorted union alignment in fp-frame instead of changing the generic fp-index discovery-order helper. NB: the listed strict test still fails today, but for a different root cause (DISC-011 nullable-Int64 dtype promotion); the sort-order issue this entry tracked is no longer present.
 - **Tests affected:** `series_add_aligns_on_union_index`, `series_add_fill_sorts_unique_outer_union_index`, `FP-P2C-001/series_add_alignment_union_strict`.
 - **Review date:** 2026-04-28
+
+### DISC-014: Series + Series duplicate-label arithmetic Int64 promotion (prior WILL-FIX premise was incorrect)
+- **Reference:** Pandas `Series + Series` with duplicate labels performs cross-product alignment per label. The result stays `int64` when every label matches on both sides (no unmatched pairing, so no NaN is introduced); it promotes to `float64` only when an unmatched label actually injects a NaN.
+- **Our impl:** Matches pandas exactly — the duplicate-aware cross-product keeps `Int64` when no NaN is generated and promotes to `Float64` when alignment leaves a position unmatched.
+- **Impact:** None. The earlier entry claimed pandas *always* promotes duplicate-label results to `Float64` even with no NaN; that is false. Verified against the pandas 2.2.3 live oracle: `Series([1,2,3], index=['a','a','b']) + Series([3,4,5], index=['a','a','b'])` returns `int64 [4,6,8]`, while a partial match (`index=['a','a']` + `index=['a','a','b']`) returns `float64` with a trailing `NaN`. The fixture `fp_p2c_001_duplicate_hardened.json` already expects `int64 [4,5]` and the conformance test `conformance_series_add_duplicate_labels` passes. The previously-proposed "always promote to Float64 when alignment *can* introduce NaN" fix would have *broken* parity for the fully-matched case and must not be implemented.
+- **Resolution:** RESOLVED - no code change required; FP already matches pandas. This entry corrects the prior incorrect WILL-FIX premise, which conflated this case with the genuinely-open DISC-011 (Int64 column that actually *receives* a null). Oracle-verified 2026-06-01.
+- **Tests affected:** `conformance_series::conformance_series_add_duplicate_labels` (passing).
+- **Review date:** 2026-06-01
 
 ## Rules
 
