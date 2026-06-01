@@ -51,7 +51,7 @@ pyo3 = { version = "0.28", features = ["extension-module"] }
 quick-xml = "0.40.1"
 regex = "1.12.3"
 rust_xlsxwriter = "0.95.0"
-rusqlite = { version = "0.39.0", features = ["bundled", "column_decltype"] }
+rusqlite = { version = "0.40.0", features = ["bundled", "column_decltype"] }
 scraper = "0.27.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde-pickle = "1.2.0"
