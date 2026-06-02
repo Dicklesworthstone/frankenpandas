@@ -6842,6 +6842,78 @@ def op_dataframe_concat(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return {"expected_frame": expected_frame}
 
 
+# ---------------------------------------------------------------------------
+# Resample handlers (RubyGoose, br-frankenpandas-zozby). These ops had fixtures
+# but no live handler, so they errored under --oracle live. The fixtures carry a
+# date-string index ("YYYY-MM-DD") and expect the resampled bins back in the
+# same string form, so we parse to a DatetimeIndex for the resample and then
+# stringify the result index with %Y-%m-%d (label_to_json would otherwise emit
+# "...  00:00:00"). pandas resample agg defaults are skipna, matching FP.
+# ---------------------------------------------------------------------------
+
+
+def _resample_freq(payload: dict[str, Any], op_name: str) -> str:
+    freq = payload.get("resample_freq") or payload.get("resample_rule")
+    if not isinstance(freq, str) or not freq.strip():
+        raise OracleError(f"{op_name} requires resample_freq")
+    return freq.strip()
+
+
+def _datetime_index_from_json(pd, index_json: list, op_name: str):
+    try:
+        return pd.to_datetime([label_from_json(item) for item in index_json])
+    except Exception as exc:
+        raise OracleError(f"{op_name} could not parse datetime index: {exc}") from exc
+
+
+def _stringify_date_index(out):
+    out = out.copy()
+    out.index = [ts.strftime("%Y-%m-%d") for ts in out.index]
+    return out
+
+
+def op_series_resample(pd, payload: dict[str, Any], agg: str, op_name: str) -> dict[str, Any]:
+    left = payload.get("left")
+    if left is None:
+        raise OracleError(f"{op_name} requires left payload")
+    freq = _resample_freq(payload, op_name)
+    index = _datetime_index_from_json(pd, left["index"], op_name)
+    values = [scalar_from_json(item) for item in left["values"]]
+    series = pd.Series(
+        values, index=index, dtype=series_dtype_for_payload_values(left["values"])
+    )
+    try:
+        out = getattr(series.resample(freq), agg)()
+    except Exception as exc:
+        raise OracleError(f"{op_name} failed: {exc}") from exc
+    return {"expected_series": series_to_expected(_stringify_date_index(out))}
+
+
+def op_dataframe_resample(pd, payload: dict[str, Any], agg: str, op_name: str) -> dict[str, Any]:
+    frame = payload.get("frame")
+    if frame is None:
+        raise OracleError(f"{op_name} requires frame payload")
+    freq = _resample_freq(payload, op_name)
+    index = _datetime_index_from_json(pd, frame["index"], op_name)
+    order = frame.get("column_order") or list(frame["columns"].keys())
+    data = {}
+    for col in order:
+        col_json = frame["columns"][col]
+        data[col] = pd.Series(
+            [scalar_from_json(item) for item in col_json],
+            index=index,
+            dtype=series_dtype_for_payload_values(col_json),
+        )
+    df = pd.DataFrame(data, index=index)[order]
+    try:
+        out = getattr(df.resample(freq), agg)()
+    except Exception as exc:
+        raise OracleError(f"{op_name} failed: {exc}") from exc
+    expected_frame = dataframe_to_json(_stringify_date_index(out))
+    expected_frame["column_order"] = [str(name) for name in out.columns.tolist()]
+    return {"expected_frame": expected_frame}
+
+
 def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
     op = payload.get("operation")
     if op == "series_add":
@@ -7192,6 +7264,16 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_drop_na(pd, payload)
     if op == "fill_na":
         return op_fill_na(pd, payload)
+    if op == "series_resample_sum":
+        return op_series_resample(pd, payload, "sum", op)
+    if op == "series_resample_mean":
+        return op_series_resample(pd, payload, "mean", op)
+    if op == "series_resample_count":
+        return op_series_resample(pd, payload, "count", op)
+    if op == "dataframe_resample_sum":
+        return op_dataframe_resample(pd, payload, "sum", op)
+    if op == "dataframe_resample_mean":
+        return op_dataframe_resample(pd, payload, "mean", op)
     if op == "series_count":
         return op_series_count(pd, payload)
     if op in {"series_first_valid_index", "series_first_valid_index_default"}:
