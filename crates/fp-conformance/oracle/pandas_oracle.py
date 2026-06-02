@@ -4452,11 +4452,18 @@ def op_series_str_get(pd, payload: dict[str, Any]) -> dict[str, Any]:
 def op_series_str_join(pd, payload: dict[str, Any]) -> dict[str, Any]:
     left = payload.get("left")
     sep = payload.get("str_join_sep", "")
+    src = payload.get("str_join_from")
     if left is None:
         raise OracleError("series_str_join requires left payload")
     series = fixture_series_from_payload(pd, left, "series_str_join")
     try:
-        out = series.str.join(sep)
+        if isinstance(src, str):
+            # FP str_join splits each string on `str_join_from` and rejoins with
+            # `str_join_sep` (replace the separator), NOT pandas str.join which
+            # joins a single string's individual characters.
+            out = series.str.split(src).str.join(sep)
+        else:
+            out = series.str.join(sep)
     except Exception as exc:
         raise OracleError(f"series_str_join failed: {exc}") from exc
     return {"expected_series": series_to_expected(out)}
