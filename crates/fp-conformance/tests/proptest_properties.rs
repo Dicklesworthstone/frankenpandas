@@ -10784,3 +10784,110 @@ proptest! {
         }
     }
 }
+
+// =====================================================================
+// METAMORPHIC GAP COVERAGE — DataFrame.transpose (df.T)
+//
+// The pre-existing suite had ZERO metamorphic coverage for transpose
+// (`rg -c transpose` over this file = 0 before this block). These relations
+// are derived from pandas `DataFrame.transpose` semantics but are stated
+// POSITIONALLY rather than via label identity: FrankenPandas column names are
+// `String`, so a transpose cannot round-trip non-string index labels the way
+// pandas' typed Index can. Cell values are compared numerically (Int64(x) ~
+// Float64(x)) because transpose unifies mixed int/float columns to a common
+// dtype. Added by RubyGoose during the metamorphic-gauntlet pass.
+// =====================================================================
+
+/// Numeric-aware scalar equality for transpose/concat value correspondence:
+/// any two missing values match; Int64(x) matches Float64(x); NaN matches NaN;
+/// everything else falls back to semantic equality.
+fn mm_scalar_value_eq(a: &Scalar, b: &Scalar) -> bool {
+    if a.is_missing() || b.is_missing() {
+        return a.is_missing() && b.is_missing();
+    }
+    match (a, b) {
+        (Scalar::Int64(x), Scalar::Int64(y)) => x == y,
+        (Scalar::Float64(x), Scalar::Float64(y)) => x == y || (x.is_nan() && y.is_nan()),
+        (Scalar::Int64(x), Scalar::Float64(y)) | (Scalar::Float64(y), Scalar::Int64(x)) => {
+            (*x as f64) == *y
+        }
+        _ => a.semantic_eq(b),
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    /// MR-T1: transpose swaps axes — df.T has nrows == df.ncols and
+    /// ncols == df.nrows.
+    #[test]
+    fn prop_transpose_swaps_shape(df in arb_numeric_dataframe(8)) {
+        let nrows = df.len();
+        let ncols = df.column_names().len();
+        let t = match df.transpose() { Ok(t) => t, Err(_) => return Ok(()) };
+        prop_assert_eq!(t.len(), ncols);
+        prop_assert_eq!(t.column_names().len(), nrows);
+    }
+
+    /// MR-T2: double transpose restores the original shape and column names
+    /// (column labels survive the round trip even when index labels do not).
+    #[test]
+    fn prop_transpose_involution_shape(df in arb_numeric_dataframe(8)) {
+        let tt = match df.transpose().and_then(|t| t.transpose()) {
+            Ok(tt) => tt,
+            Err(_) => return Ok(()),
+        };
+        prop_assert_eq!(tt.len(), df.len());
+        let orig: Vec<String> = df.column_names().into_iter().cloned().collect();
+        let back: Vec<String> = tt.column_names().into_iter().cloned().collect();
+        prop_assert_eq!(orig, back);
+    }
+
+    /// MR-T3: transpose moves cell (row i, col j) to (row j, col i). Compared
+    /// positionally and numerically so int/float unification is allowed.
+    #[test]
+    fn prop_transpose_cell_correspondence(df in arb_numeric_dataframe(8)) {
+        let t = match df.transpose() { Ok(t) => t, Err(_) => return Ok(()) };
+        let orig_cols: Vec<String> = df.column_names().into_iter().cloned().collect();
+        let t_cols: Vec<String> = t.column_names().into_iter().cloned().collect();
+        for (j, cname) in orig_cols.iter().enumerate() {
+            let vals = df.columns().get(cname).expect("orig column").values();
+            for (i, v) in vals.iter().enumerate() {
+                // t's i-th column corresponds to df's i-th row.
+                let t_col = t.columns().get(&t_cols[i]).expect("t column");
+                let t_val = &t_col.values()[j];
+                prop_assert!(
+                    mm_scalar_value_eq(v, t_val),
+                    "transpose cell (row {}, col {}={}) mismatch: {:?} vs T {:?}",
+                    i, j, cname, v, t_val
+                );
+            }
+        }
+    }
+
+    /// MR-T4: double transpose preserves every cell value (positionally, by
+    /// preserved column name).
+    #[test]
+    fn prop_transpose_involution_preserves_values(df in arb_numeric_dataframe(8)) {
+        let tt = match df.transpose().and_then(|t| t.transpose()) {
+            Ok(tt) => tt,
+            Err(_) => return Ok(()),
+        };
+        let orig_cols: Vec<String> = df.column_names().into_iter().cloned().collect();
+        for cname in &orig_cols {
+            let cv = df.columns().get(cname).expect("orig column").values();
+            let tt_col = match tt.columns().get(cname) {
+                Some(c) => c,
+                None => { prop_assert!(false, "double transpose dropped column {}", cname); unreachable!() }
+            };
+            let tv = tt_col.values();
+            prop_assert_eq!(cv.len(), tv.len());
+            for (v, t) in cv.iter().zip(tv.iter()) {
+                prop_assert!(
+                    mm_scalar_value_eq(v, t),
+                    "involution value mismatch in col {}: {:?} vs {:?}", cname, v, t
+                );
+            }
+        }
+    }
+}
