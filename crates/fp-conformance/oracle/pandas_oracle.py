@@ -2735,15 +2735,32 @@ def op_series_value_counts(pd, payload: dict[str, Any]) -> dict[str, Any]:
 
     normalize = payload.get("value_counts_normalize", False)
     ascending = payload.get("sort_ascending", False)
-    # Build via fixture_series_from_payload so an int column with nulls infers
-    # nullable Int64 (matching FP) rather than numpy float64 — the value_counts
-    # index then stays int64 as the fixtures expect.
-    series = fixture_series_from_payload(pd, left, "series_value_counts")
+    categories_raw = payload.get("categorical_categories")
+    if isinstance(categories_raw, list):
+        # Categorical input: build from codes + categories so value_counts
+        # includes unused categories (count 0), matching FP. left["values"]
+        # holds the integer codes (-1 / null = missing).
+        categories = [scalar_from_json(c) for c in categories_raw]
+        codes = []
+        for item in left["values"]:
+            v = scalar_from_json(item)
+            codes.append(int(v) if isinstance(v, int) and not isinstance(v, bool) else -1)
+        series = pd.Series(
+            pd.Categorical.from_codes(
+                codes, categories=categories, ordered=bool(payload.get("categorical_ordered", False))
+            )
+        )
+        orig = [categories[c] if 0 <= c < len(categories) else None for c in codes]
+    else:
+        # Build via fixture_series_from_payload so an int column with nulls
+        # infers nullable Int64 (matching FP) rather than numpy float64 — the
+        # value_counts index then stays int64 as the fixtures expect.
+        series = fixture_series_from_payload(pd, left, "series_value_counts")
+        orig = [scalar_from_json(item) for item in left["values"]]
     out = series.value_counts(normalize=normalize, sort=True, ascending=ascending, dropna=True)
 
     # FP breaks count ties by the value's FIRST-OCCURRENCE order in the input
     # (pandas uses a different tie break). Re-sort to match.
-    orig = [scalar_from_json(item) for item in left["values"]]
     first_occ: dict[Any, int] = {}
     for i, v in enumerate(orig):
         if v is not None and not (isinstance(v, float) and math.isnan(v)):
