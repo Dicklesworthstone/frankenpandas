@@ -1127,6 +1127,24 @@ pub fn merge_dataframes_on_with_options(
         sort_merge_rows_by_join_keys(out_row_keys, &mut left_positions, &mut right_positions);
     }
 
+    let inner_take_positions = matches!(join_type, JoinType::Inner).then(|| {
+        let left = left_positions
+            .iter()
+            .map(|position| position.expect("inner join emits left positions for every row"))
+            .collect::<Vec<_>>();
+        let right = right_positions
+            .iter()
+            .map(|position| position.expect("inner join emits right positions for every row"))
+            .collect::<Vec<_>>();
+        (left, right)
+    });
+    let inner_left_positions = inner_take_positions
+        .as_ref()
+        .map(|(positions, _)| positions.as_slice());
+    let inner_right_positions = inner_take_positions
+        .as_ref()
+        .map(|(_, positions)| positions.as_slice());
+
     // Build output columns by reindexing.
     let n = left_positions.len();
     let index = Index::new((0..n as i64).map(IndexLabel::from).collect());
@@ -1160,23 +1178,26 @@ pub fn merge_dataframes_on_with_options(
                 // Shared key name: for rows emitted from right-only keys, source key values from
                 // the right frame instead of leaving them null.
                 let left_key_col = left_key_columns[*left_key_idx];
-                let right_key_col = right_key_columns[*right_key_idx];
-                let values = left_positions
-                    .iter()
-                    .zip(right_positions.iter())
-                    .map(|(left_pos, right_pos)| match (left_pos, right_pos) {
-                        (Some(pos), _) => left_key_col.values()[*pos].clone(),
-                        (None, Some(pos)) => right_key_col.values()[*pos].clone(),
-                        (None, None) => fp_types::Scalar::Null(fp_types::NullKind::Null),
-                    })
-                    .collect::<Vec<_>>();
-                insert_merged_output_column(
-                    &mut columns,
-                    name.clone(),
-                    Column::from_values(values)?,
-                )?;
+                let key_column = if let Some(positions) = inner_left_positions {
+                    left_key_col.take_positions(positions)
+                } else {
+                    let right_key_col = right_key_columns[*right_key_idx];
+                    let values = left_positions
+                        .iter()
+                        .zip(right_positions.iter())
+                        .map(|(left_pos, right_pos)| match (left_pos, right_pos) {
+                            (Some(pos), _) => left_key_col.values()[*pos].clone(),
+                            (None, Some(pos)) => right_key_col.values()[*pos].clone(),
+                            (None, None) => fp_types::Scalar::Null(fp_types::NullKind::Null),
+                        })
+                        .collect::<Vec<_>>();
+                    Column::from_values(values)?
+                };
+                insert_merged_output_column(&mut columns, name.clone(), key_column)?;
             } else {
-                let key_column = if matches!(join_type, JoinType::Outer) {
+                let key_column = if let Some(positions) = inner_left_positions {
+                    col.take_positions(positions)
+                } else if matches!(join_type, JoinType::Outer) {
                     reindex_outer_join_column(col, &left_positions)?
                 } else {
                     col.reindex_by_positions(&left_positions)?
@@ -1185,7 +1206,9 @@ pub fn merge_dataframes_on_with_options(
             }
             continue;
         }
-        let reindexed = if matches!(join_type, JoinType::Outer) {
+        let reindexed = if let Some(positions) = inner_left_positions {
+            col.take_positions(positions)
+        } else if matches!(join_type, JoinType::Outer) {
             reindex_outer_join_column(col, &left_positions)?
         } else {
             col.reindex_by_positions(&left_positions)?
@@ -1206,7 +1229,9 @@ pub fn merge_dataframes_on_with_options(
             // Shared same-name key already emitted from the left side.
             continue;
         }
-        let reindexed = if matches!(join_type, JoinType::Outer) {
+        let reindexed = if let Some(positions) = inner_right_positions {
+            col.take_positions(positions)
+        } else if matches!(join_type, JoinType::Outer) {
             reindex_outer_join_column(col, &right_positions)?
         } else {
             col.reindex_by_positions(&right_positions)?
