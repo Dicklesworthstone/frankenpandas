@@ -448,11 +448,20 @@ fn scalar_to_index_label(value: &Scalar) -> Result<IndexLabel, FrameError> {
     match value {
         Scalar::Int64(v) => Ok(IndexLabel::Int64(*v)),
         Scalar::Utf8(v) => Ok(IndexLabel::Utf8(v.clone())),
+        // Datetime/timedelta columns become a DatetimeIndex/TimedeltaIndex with
+        // values preserved — matching `df.set_index('datetime_col')` in pandas,
+        // the canonical time-series workflow. `IndexLabel` carries these kinds
+        // natively (Index::new infers the index dtype from them, same path as
+        // `Index::from_datetime64`/`from_timedelta64`).
+        Scalar::Datetime64(v) => Ok(IndexLabel::Datetime64(*v)),
+        Scalar::Timedelta64(v) => Ok(IndexLabel::Timedelta64(*v)),
         Scalar::Null(_) => Err(FrameError::CompatibilityRejected(
             "set_index does not support missing label values".to_owned(),
         )),
+        // Bool/Float64/Period/Interval indexes need IndexLabel variants that do
+        // not yet exist (tracked separately); reject explicitly for now.
         _ => Err(FrameError::CompatibilityRejected(format!(
-            "set_index currently supports Int64/Utf8 labels; found {:?}",
+            "set_index currently supports Int64/Utf8/Datetime64/Timedelta64 labels; found {:?}",
             value.dtype()
         ))),
     }
@@ -51334,6 +51343,62 @@ mod tests {
         assert_eq!(
             out.column("id").unwrap().values(),
             &[Scalar::Int64(10), Scalar::Int64(20)]
+        );
+    }
+
+    #[test]
+    fn dataframe_set_index_promotes_datetime_column_to_datetime_index() {
+        // df.set_index('t') on a datetime column -> datetime64[ns] index with
+        // values preserved and index name = column. Verified against live
+        // pandas 2.2.3 (index.dtype == datetime64[ns]).
+        let t0 = 1_704_067_200_000_000_000_i64; // 2024-01-01T00:00:00Z in ns
+        let t1 = 1_704_153_600_000_000_000_i64; // 2024-01-02T00:00:00Z in ns
+        let df = DataFrame::from_dict(
+            &["t", "v"],
+            vec![
+                ("t", vec![Scalar::Datetime64(t0), Scalar::Datetime64(t1)]),
+                ("v", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+            ],
+        )
+        .unwrap();
+
+        let out = df.set_index("t", true).unwrap();
+        assert_eq!(
+            out.index().labels(),
+            &[IndexLabel::Datetime64(t0), IndexLabel::Datetime64(t1)]
+        );
+        assert_eq!(out.index().dtype(), "datetime64[ns]");
+        assert_eq!(out.index().name(), Some("t"));
+        let names = out.column_names().into_iter().cloned().collect::<Vec<_>>();
+        assert_eq!(names, vec!["v".to_owned()]);
+        assert!(out.column("t").is_none());
+    }
+
+    #[test]
+    fn dataframe_set_index_promotes_timedelta_column_to_timedelta_index() {
+        // df.set_index('d') on a timedelta column -> timedelta64[ns] index.
+        let d0 = 86_400_000_000_000_i64; // 1 day in ns
+        let d1 = 172_800_000_000_000_i64; // 2 days in ns
+        let df = DataFrame::from_dict(
+            &["d", "v"],
+            vec![
+                ("d", vec![Scalar::Timedelta64(d0), Scalar::Timedelta64(d1)]),
+                ("v", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+            ],
+        )
+        .unwrap();
+
+        // drop=false keeps the source column too, matching pandas.
+        let out = df.set_index("d", false).unwrap();
+        assert_eq!(
+            out.index().labels(),
+            &[IndexLabel::Timedelta64(d0), IndexLabel::Timedelta64(d1)]
+        );
+        assert_eq!(out.index().dtype(), "timedelta64[ns]");
+        assert_eq!(out.index().name(), Some("d"));
+        assert_eq!(
+            out.column("d").unwrap().values(),
+            &[Scalar::Timedelta64(d0), Scalar::Timedelta64(d1)]
         );
     }
 
