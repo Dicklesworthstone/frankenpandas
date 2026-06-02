@@ -2305,6 +2305,17 @@ fn compare_scalars_with_na_position(
     }
 }
 
+fn values_already_sorted_with_na_position(
+    values: &[Scalar],
+    ascending: bool,
+    na_first: bool,
+) -> bool {
+    values.windows(2).all(|pair| {
+        compare_scalars_with_na_position(&pair[0], &pair[1], ascending, na_first)
+            != Ordering::Greater
+    })
+}
+
 fn typed_dense_sort_order(values: &[Scalar], dtype: DType, ascending: bool) -> Option<Vec<usize>> {
     match dtype {
         DType::Int64 | DType::Int64Nullable => {
@@ -28897,6 +28908,10 @@ impl DataFrame {
         }
 
         let na_first = na_position == "first";
+        if values_already_sorted_with_na_position(sort_column.values(), ascending, na_first) {
+            return Ok(self.clone());
+        }
+
         let order = if !na_first
             && let Some(order) =
                 typed_dense_sort_order(sort_column.values(), sort_column.dtype(), ascending)
@@ -52172,6 +52187,65 @@ mod tests {
                 IndexLabel::from("r2"),
                 IndexLabel::from("r4"),
             ]
+        );
+    }
+
+    #[test]
+    fn dataframe_sort_values_already_sorted_preserves_observable_state() {
+        let df = DataFrame::from_dict_with_index(
+            vec![
+                (
+                    "score",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Null(NullKind::NaN),
+                    ],
+                ),
+                (
+                    "tag",
+                    vec![
+                        Scalar::Utf8("first-one".to_owned()),
+                        Scalar::Utf8("second-one".to_owned()),
+                        Scalar::Utf8("two".to_owned()),
+                        Scalar::Utf8("missing".to_owned()),
+                    ],
+                ),
+            ],
+            vec!["r1".into(), "r2".into(), "r3".into(), "r4".into()],
+        )
+        .unwrap();
+
+        let out = df.sort_values("score", true).unwrap();
+        assert_eq!(out.index().labels(), df.index().labels());
+        assert_eq!(out.column_names(), df.column_names());
+        assert_eq!(
+            out.column("score").unwrap().values(),
+            df.column("score").unwrap().values()
+        );
+        assert_eq!(
+            out.column("tag").unwrap().values(),
+            df.column("tag").unwrap().values()
+        );
+
+        let na_first = DataFrame::from_dict_with_index(
+            vec![(
+                "score",
+                vec![
+                    Scalar::Null(NullKind::NaN),
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(2.0),
+                ],
+            )],
+            vec!["missing".into(), "one".into(), "two".into()],
+        )
+        .unwrap();
+        let out = na_first.sort_values_na("score", true, "first").unwrap();
+        assert_eq!(out.index().labels(), na_first.index().labels());
+        assert_eq!(
+            out.column("score").unwrap().values(),
+            na_first.column("score").unwrap().values()
         );
     }
 
