@@ -3877,7 +3877,12 @@ def op_dataframe_get_dummies(pd, payload: dict[str, Any]) -> dict[str, Any]:
 
     frame = dataframe_from_json(pd, frame_payload)
     columns = parse_optional_string_list(payload, "dummy_columns", "dataframe_get_dummies")
-    kwargs: dict[str, Any] = {"dtype": int}
+    # pandas 2.x pd.get_dummies returns BOOL indicator columns (the prior
+    # dtype=int forced uint8/int, which diverged from both pandas 2.x and FP,
+    # whose DataFrame.get_dummies emits bool). diff_dataframe compares column
+    # values by name (sorted BTreeMap keys), so the in-place-vs-appended column
+    # ordering does not matter.
+    kwargs: dict[str, Any] = {"dtype": bool}
     if columns:
         kwargs["columns"] = columns
     try:
