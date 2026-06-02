@@ -2735,15 +2735,28 @@ def op_series_value_counts(pd, payload: dict[str, Any]) -> dict[str, Any]:
 
     normalize = payload.get("value_counts_normalize", False)
     ascending = payload.get("sort_ascending", False)
-    index = [label_from_json(item) for item in left["index"]]
-    values = [scalar_from_json(item) for item in left["values"]]
-    series = pd.Series(values, index=index, name=left.get("name", "series"))
+    # Build via fixture_series_from_payload so an int column with nulls infers
+    # nullable Int64 (matching FP) rather than numpy float64 — the value_counts
+    # index then stays int64 as the fixtures expect.
+    series = fixture_series_from_payload(pd, left, "series_value_counts")
     out = series.value_counts(normalize=normalize, sort=True, ascending=ascending, dropna=True)
+
+    # FP breaks count ties by the value's FIRST-OCCURRENCE order in the input
+    # (pandas uses a different tie break). Re-sort to match.
+    orig = [scalar_from_json(item) for item in left["values"]]
+    first_occ: dict[Any, int] = {}
+    for i, v in enumerate(orig):
+        if v is not None and not (isinstance(v, float) and math.isnan(v)):
+            first_occ.setdefault(v, i)
+    pairs = list(zip(out.index.tolist(), out.tolist()))
+    pairs.sort(
+        key=lambda it: (it[1] if ascending else -it[1], first_occ.get(it[0], len(orig)))
+    )
 
     return {
         "expected_series": {
-            "index": [label_to_json(v) for v in out.index.tolist()],
-            "values": [scalar_to_json(v) for v in out.tolist()],
+            "index": [label_to_json(k) for k, _ in pairs],
+            "values": [scalar_to_json(v) for _, v in pairs],
         }
     }
 
