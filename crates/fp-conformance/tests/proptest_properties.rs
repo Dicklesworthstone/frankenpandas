@@ -11238,3 +11238,98 @@ proptest! {
         }
     }
 }
+
+// =====================================================================
+// METAMORPHIC GAP COVERAGE — cumsum/diff inverse + rank permutation
+// (br-frankenpandas-t8wrc next step: more metamorphic families). These
+// encode algebraic invariants that, like the groupby-kurtosis bug, can catch
+// a wrong computation that self-consistency on other ops would miss. Added by
+// RubyGoose.
+// =====================================================================
+
+/// Numeric value of a scalar as f64, else None (mirrors mm_scalar_f64 but local
+/// helper name to avoid collisions if the earlier one is feature-gated out).
+fn mm_f64(s: &Scalar) -> Option<f64> {
+    if s.is_missing() {
+        return None;
+    }
+    match s {
+        Scalar::Int64(v) => Some(*v as f64),
+        Scalar::Float64(v) if !v.is_nan() => Some(*v),
+        _ => None,
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(300))]
+
+    /// MR-CD1: cumsum then diff(1) reconstructs the original (offset by one):
+    /// cumsum[i]-cumsum[i-1] == x[i]. First element of the diff is missing.
+    /// Restricted to all-numeric, no-null series (nulls change cumsum/diff
+    /// propagation). Compared with a relative float tolerance.
+    #[test]
+    fn prop_cumsum_diff_is_inverse(series in arb_unique_numeric_series("cumdiff", 12)) {
+        let vals: Vec<Scalar> = series.column().values().to_vec();
+        if vals.is_empty() || vals.iter().any(|v| v.is_missing()) {
+            return Ok(());
+        }
+        let nums: Vec<f64> = vals.iter().filter_map(mm_f64).collect();
+        if nums.len() != vals.len() {
+            return Ok(());
+        }
+        let cs = match series.cumsum() { Ok(s) => s, Err(_) => return Ok(()) };
+        let recon = match cs.diff(1) { Ok(s) => s, Err(_) => return Ok(()) };
+        let rv = recon.column().values();
+        prop_assert_eq!(rv.len(), vals.len());
+        prop_assert!(rv[0].is_missing(), "cumsum().diff(1)[0] should be missing");
+        for i in 1..vals.len() {
+            let got = mm_f64(&rv[i]).expect("numeric diff result");
+            let want = nums[i];
+            let tol = 1e-9 * (1.0 + got.abs().max(want.abs()));
+            prop_assert!(
+                (got - want).abs() <= tol,
+                "cumsum/diff inverse mismatch at {}: {} vs {}", i, got, want
+            );
+        }
+    }
+
+    /// MR-RK1: rank (no ties, no nulls) is a permutation of 1..=n — the ranks
+    /// sorted ascending are exactly 1,2,...,n, and therefore sum to n(n+1)/2.
+    #[test]
+    fn prop_rank_no_ties_is_permutation(series in arb_unique_numeric_series("rankperm", 12)) {
+        let vals = series.column().values();
+        if vals.is_empty() || vals.iter().any(|v| v.is_missing()) {
+            return Ok(());
+        }
+        let nums: Vec<f64> = vals.iter().filter_map(mm_f64).collect();
+        if nums.len() != vals.len() {
+            return Ok(());
+        }
+        // skip if there are ties
+        let mut sorted = nums.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        if sorted.windows(2).any(|w| w[0] == w[1]) {
+            return Ok(());
+        }
+        let ranked = match series.rank("average", true, "keep") {
+            Ok(r) => r,
+            Err(_) => return Ok(()),
+        };
+        let mut ranks: Vec<f64> = ranked.column().values().iter().filter_map(mm_f64).collect();
+        prop_assert_eq!(ranks.len(), nums.len());
+        let n = ranks.len();
+        let sum: f64 = ranks.iter().sum();
+        let expected_sum = (n * (n + 1)) as f64 / 2.0;
+        prop_assert!(
+            (sum - expected_sum).abs() < 1e-6,
+            "sum of ranks {} != n(n+1)/2 {}", sum, expected_sum
+        );
+        ranks.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        for (i, &r) in ranks.iter().enumerate() {
+            prop_assert!(
+                (r - (i + 1) as f64).abs() < 1e-9,
+                "rank {} at sorted pos {} not {}", r, i, i + 1
+            );
+        }
+    }
+}
