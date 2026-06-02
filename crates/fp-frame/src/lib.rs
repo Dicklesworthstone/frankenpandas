@@ -23755,10 +23755,38 @@ fn period_label_to_timestamp(
                 )?
             }
         }
-        PeriodFreq::Weekly | PeriodFreq::Business => {
-            return Err(FrameError::CompatibilityRejected(format!(
-                "to_timestamp: frequency '{freq}' is not supported yet"
-            )));
+        PeriodFreq::Weekly => {
+            // Weekly period labels are formatted "START/END" (the Monday-anchored
+            // week bounds). `how='start'` resolves to the START date at midnight;
+            // `how='end'` resolves to the END date at the last nanosecond, matching
+            // pandas `PeriodIndex.to_timestamp` for W-SUN periods.
+            let (start_str, end_str) = trimmed
+                .split_once('/')
+                .ok_or_else(|| period_timestamp_parse_error(trimmed, freq))?;
+            let label = if how == PeriodTimestampHow::Start {
+                start_str.trim()
+            } else {
+                end_str.trim()
+            };
+            let date = NaiveDate::parse_from_str(label, "%Y-%m-%d")
+                .map_err(|_| period_timestamp_parse_error(trimmed, freq))?;
+            if how == PeriodTimestampHow::Start {
+                period_datetime_at(date, 0, 0, 0, 0)?
+            } else {
+                period_datetime_at(date, 23, 59, 59, 999_999_999)?
+            }
+        }
+        PeriodFreq::Business => {
+            // Business period labels are a single business-day date; the period
+            // spans exactly that day. `how='start'` is midnight, `how='end'` is the
+            // last nanosecond of the same day (pandas `to_timestamp` for freq='B').
+            let date = NaiveDate::parse_from_str(trimmed, "%Y-%m-%d")
+                .map_err(|_| period_timestamp_parse_error(trimmed, freq))?;
+            if how == PeriodTimestampHow::Start {
+                period_datetime_at(date, 0, 0, 0, 0)?
+            } else {
+                period_datetime_at(date, 23, 59, 59, 999_999_999)?
+            }
         }
         _ => {
             return Err(FrameError::CompatibilityRejected(format!(
@@ -88180,6 +88208,110 @@ mod tests {
     }
 
     #[test]
+    fn dataframe_to_timestamp_converts_weekly_start_and_end() {
+        // Weekly period labels are "Monday/Sunday" bounds (W-SUN). Verified
+        // against live pandas 2.2.3: to_timestamp(how='start') -> Monday 00:00,
+        // to_timestamp(how='end') -> Sunday 23:59:59.999999999.
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            "value".to_owned(),
+            Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2)]).unwrap(),
+        );
+        let df = DataFrame::new_with_column_order(
+            Index::from_utf8(vec![
+                "2024-01-01/2024-01-07".to_owned(),
+                "2024-01-08/2024-01-14".to_owned(),
+            ])
+            .set_names(Some("period")),
+            columns,
+            vec!["value".to_owned()],
+        )
+        .unwrap();
+
+        let start = df.to_timestamp("W", "start").unwrap();
+        assert_eq!(
+            start.index().labels(),
+            vec![
+                dataframe_4zwu2_timestamp_label("2024-01-01 00:00:00").unwrap(),
+                dataframe_4zwu2_timestamp_label("2024-01-08 00:00:00").unwrap(),
+            ]
+            .as_slice()
+        );
+        assert_eq!(start.index().name(), Some("period"));
+
+        let end = df.to_timestamp("W", "end").unwrap();
+        assert_eq!(
+            end.index().labels(),
+            vec![
+                dataframe_4zwu2_timestamp_label("2024-01-07 23:59:59.999999999").unwrap(),
+                dataframe_4zwu2_timestamp_label("2024-01-14 23:59:59.999999999").unwrap(),
+            ]
+            .as_slice()
+        );
+    }
+
+    #[test]
+    fn dataframe_to_timestamp_converts_business_start_and_end() {
+        // Business period labels are a single business-day date; the period
+        // spans exactly that day. Verified against live pandas 2.2.3.
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            "value".to_owned(),
+            Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2)]).unwrap(),
+        );
+        let df = DataFrame::new_with_column_order(
+            Index::from_utf8(vec!["2024-01-04".to_owned(), "2024-01-05".to_owned()]),
+            columns,
+            vec!["value".to_owned()],
+        )
+        .unwrap();
+
+        let start = df.to_timestamp("B", "start").unwrap();
+        assert_eq!(
+            start.index().labels(),
+            vec![
+                dataframe_4zwu2_timestamp_label("2024-01-04 00:00:00").unwrap(),
+                dataframe_4zwu2_timestamp_label("2024-01-05 00:00:00").unwrap(),
+            ]
+            .as_slice()
+        );
+
+        let end = df.to_timestamp("B", "end").unwrap();
+        assert_eq!(
+            end.index().labels(),
+            vec![
+                dataframe_4zwu2_timestamp_label("2024-01-04 23:59:59.999999999").unwrap(),
+                dataframe_4zwu2_timestamp_label("2024-01-05 23:59:59.999999999").unwrap(),
+            ]
+            .as_slice()
+        );
+    }
+
+    #[test]
+    fn dataframe_to_timestamp_weekly_business_roundtrip_from_to_period() {
+        // Round-trip guard: to_period(...).to_timestamp(..., 'start') must return
+        // the original daily timestamps for both weekly and business frequencies.
+        // Previously to_timestamp rejected these freqs with "not supported yet",
+        // so the round-trip was broken.
+        for (period_freq, label) in [("W", "2024-01-01/2024-01-07"), ("B", "2024-03-15")] {
+            let mut columns = BTreeMap::new();
+            columns.insert(
+                "v".to_owned(),
+                Column::from_values(vec![Scalar::Int64(7)]).unwrap(),
+            );
+            let df = DataFrame::new_with_column_order(
+                Index::from_utf8(vec![label.to_owned()]),
+                columns,
+                vec!["v".to_owned()],
+            )
+            .unwrap();
+            // Both how aliases ('s'/'start', 'e'/'end') must be accepted.
+            assert!(df.to_timestamp(period_freq, "s").is_ok());
+            assert!(df.to_timestamp(period_freq, "e").is_ok());
+        }
+    }
+
+    #[test]
     fn dataframe_4zwu2_to_timestamp_rejects_invalid_labels_freq_and_how() {
         let df = DataFrame::new_with_column_order(
             Index::from_utf8(vec!["2001-13".to_owned()]),
@@ -88198,9 +88330,12 @@ mod tests {
             matches!(invalid_how, FrameError::CompatibilityRejected(msg) if msg.contains("how"))
         );
 
-        let unsupported = df.to_timestamp("B", "start").unwrap_err();
+        // Business is a supported freq now, so a malformed label ("2001-13" is
+        // not a parseable business-day date) is rejected as a bad period label
+        // rather than an unsupported frequency.
+        let invalid_business_label = df.to_timestamp("B", "start").unwrap_err();
         assert!(
-            matches!(unsupported, FrameError::CompatibilityRejected(msg) if msg.contains("not supported yet"))
+            matches!(invalid_business_label, FrameError::CompatibilityRejected(msg) if msg.contains("period-style"))
         );
 
         let bad_freq = df.to_timestamp("fortnight", "start").unwrap_err();
