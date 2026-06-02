@@ -2141,18 +2141,43 @@ def op_series_mask(pd, payload: dict[str, Any]) -> dict[str, Any]:
 
 def op_series_map(pd, payload: dict[str, Any]) -> dict[str, Any]:
     left = payload.get("left")
-    map_dict = payload.get("map_dict")
     if left is None:
         raise OracleError("series_map requires left payload")
-    if map_dict is None or not isinstance(map_dict, dict):
-        raise OracleError("series_map requires map_dict payload")
     series = fixture_series_from_payload(pd, left, "series_map")
-    parsed_map = {scalar_from_json(k) if isinstance(k, dict) else k: scalar_from_json(v) if isinstance(v, dict) else v for k, v in map_dict.items()}
+    # The mapping is supplied as two parallel scalar arrays
+    # (`replace_to_find` -> `replace_to_value`), mirroring how the Rust side
+    # serializes the mapping argument. A legacy `map_dict` object form is still
+    # accepted as a fallback.
+    find = payload.get("replace_to_find")
+    repl = payload.get("replace_to_value")
+
+    def _parse(item: Any) -> Any:
+        return scalar_from_json(item) if isinstance(item, dict) else item
+
+    if isinstance(find, list) and isinstance(repl, list):
+        if len(find) != len(repl):
+            raise OracleError(
+                "series_map replace_to_find/replace_to_value length mismatch"
+            )
+        parsed_map = {_parse(k): _parse(v) for k, v in zip(find, repl)}
+    else:
+        map_dict = payload.get("map_dict")
+        if not isinstance(map_dict, dict):
+            raise OracleError(
+                "series_map requires replace_to_find/replace_to_value (or map_dict) payload"
+            )
+        parsed_map = {_parse(k): _parse(v) for k, v in map_dict.items()}
     try:
         out = series.map(parsed_map)
     except Exception as exc:
         raise OracleError(f"series_map failed: {exc}") from exc
-    return {"expected_series": series_to_expected(out)}
+    expected = series_to_expected(out)
+    # series.map preserves the input name; series_map fixtures pin it (unlike
+    # most ops, whose expected_series omits name). Emit it locally here rather
+    # than globally to avoid perturbing the ~569 fixtures that omit name.
+    if getattr(out, "name", None) is not None:
+        expected["name"] = str(out.name)
+    return {"expected_series": expected}
 
 
 def op_series_to_timedelta(pd, payload: dict[str, Any]) -> dict[str, Any]:
