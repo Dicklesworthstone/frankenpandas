@@ -5152,7 +5152,10 @@ def op_dataframe_groupby_kurtosis(pd, payload: dict[str, Any]) -> dict[str, Any]
 
     frame = dataframe_from_json(pd, frame_payload)
     try:
-        out = frame.groupby(columns).kurt()
+        # DataFrameGroupBy has no .kurt() in this pandas; aggregate with the
+        # Series-level kurtosis (Fisher G2, bias-corrected) per group, which is
+        # what FP's groupby kurtosis now computes (fp_types::nankurt).
+        out = frame.groupby(columns).agg(pd.Series.kurt)
     except Exception as exc:
         raise OracleError(f"dataframe_groupby_kurtosis failed: {exc}") from exc
 
