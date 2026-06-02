@@ -17,6 +17,7 @@ import io
 import json
 import math
 import os
+import re
 import struct
 import sys
 from dataclasses import dataclass
@@ -4109,6 +4110,191 @@ def op_series_str_zfill(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return {"expected_series": series_to_expected(out)}
 
 
+# ---------------------------------------------------------------------------
+# Additional str.* handlers (RubyGoose, br-frankenpandas-zozby). These ops had
+# fixtures but no live-oracle handler, so they errored ("unsupported operation")
+# under --oracle live, blocking differential coverage for a large slice of the
+# string surface. pandas equivalents verified against the stored fixtures.
+# ---------------------------------------------------------------------------
+
+
+def _str_patterns_payload(payload: dict[str, Any], op_name: str) -> list[str]:
+    pats = payload.get("str_patterns")
+    if not isinstance(pats, list) or not all(isinstance(p, str) for p in pats):
+        raise OracleError(f"{op_name} requires str_patterns: list[str]")
+    return pats
+
+
+def _int_payload(payload: dict[str, Any], key: str, op_name: str) -> int:
+    value = payload.get(key)
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise OracleError(f"{op_name} {key} must be an integer")
+    return value
+
+
+def op_series_str_count_literal(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    op_name = "series_str_count_literal"
+    series = _series_for_str_op(pd, payload, op_name)
+    sub = payload.get("str_sub")  # empty pattern is valid (counts gaps -> len+1)
+    if not isinstance(sub, str):
+        raise OracleError(f"{op_name} requires str_sub: str")
+    try:
+        # Literal (non-regex) occurrence count: escape regex metacharacters so
+        # str.count treats the needle literally.
+        out = series.str.count(re.escape(sub))
+    except Exception as exc:
+        raise OracleError(f"{op_name} failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
+def op_series_str_count_matches(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    op_name = "series_str_count_matches"
+    series = _series_for_str_op(pd, payload, op_name)
+    pat = required_string_payload(payload, "regex_pattern", op_name)
+    try:
+        out = series.str.count(pat)
+    except Exception as exc:
+        raise OracleError(f"{op_name} failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
+def _str_any_op(pd, payload: dict[str, Any], op_name: str, method: str) -> dict[str, Any]:
+    """OR-reduce a str predicate (contains/startswith/endswith) over a pattern
+    list — True where the element matches ANY pattern. Empty list -> all False."""
+    series = _series_for_str_op(pd, payload, op_name)
+    pats = _str_patterns_payload(payload, op_name)
+    try:
+        if not pats:
+            out = _PD.Series(False, index=series.index)
+        else:
+            acc = None
+            for p in pats:
+                if method == "contains":
+                    cur = series.str.contains(p, regex=False).fillna(False)
+                else:
+                    cur = getattr(series.str, method)(p).fillna(False)
+                acc = cur if acc is None else (acc | cur)
+            out = acc
+        # Null inputs propagate to a missing result (pandas str predicates
+        # return NA for NaN inputs; the OR-reduce/empty-pattern path above
+        # forces concrete bools, so restore missingness here).
+        out = out.where(series.notna())
+    except Exception as exc:
+        raise OracleError(f"{op_name} failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
+def op_series_str_contains_any(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return _str_any_op(pd, payload, "series_str_contains_any", "contains")
+
+
+def op_series_str_startswith_any(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return _str_any_op(pd, payload, "series_str_startswith_any", "startswith")
+
+
+def op_series_str_endswith_any(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    return _str_any_op(pd, payload, "series_str_endswith_any", "endswith")
+
+
+def _index_of_result(pd, found):
+    """FrankenPandas index_of/rindex_of report a CHAR position or a missing
+    value when absent (unlike pandas .find which returns -1). Build an object
+    Series of ints-and-NaN so present positions serialize as int64 and absent
+    as na_n — matching FP's nullable-int contract for these FP-defined ops
+    (pandas has no NaN-on-absent str.index equivalent)."""
+    cells = [int(x) if pd.notna(x) and x >= 0 else float("nan") for x in found.tolist()]
+    return pd.Series(cells, index=found.index, dtype="object")
+
+
+def op_series_str_index_of(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    op_name = "series_str_index_of"
+    series = _series_for_str_op(pd, payload, op_name)
+    sub = required_string_payload(payload, "str_sub", op_name)
+    try:
+        out = _index_of_result(pd, series.str.find(sub))
+    except Exception as exc:
+        raise OracleError(f"{op_name} failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
+def op_series_str_rindex_of(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    op_name = "series_str_rindex_of"
+    series = _series_for_str_op(pd, payload, op_name)
+    sub = required_string_payload(payload, "str_sub", op_name)
+    try:
+        out = _index_of_result(pd, series.str.rfind(sub))
+    except Exception as exc:
+        raise OracleError(f"{op_name} failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
+def op_series_str_split_count(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    op_name = "series_str_split_count"
+    series = _series_for_str_op(pd, payload, op_name)
+    pat = required_string_payload(payload, "str_split_pat", op_name)
+    try:
+        out = series.str.split(pat).str.len()
+    except Exception as exc:
+        raise OracleError(f"{op_name} failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
+def op_series_str_split_get(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    op_name = "series_str_split_get"
+    series = _series_for_str_op(pd, payload, op_name)
+    pat = required_string_payload(payload, "str_split_pat", op_name)
+    n = _int_payload(payload, "str_split_n", op_name)
+    try:
+        out = series.str.split(pat).str.get(n)
+    except Exception as exc:
+        raise OracleError(f"{op_name} failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
+def op_series_str_split_regex_get(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    op_name = "series_str_split_regex_get"
+    series = _series_for_str_op(pd, payload, op_name)
+    pat = required_string_payload(payload, "regex_pattern", op_name)
+    n = _int_payload(payload, "str_split_n", op_name)
+    try:
+        out = series.str.split(pat, regex=True).str.get(n)
+    except Exception as exc:
+        raise OracleError(f"{op_name} failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
+def op_series_str_translate(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    op_name = "series_str_translate"
+    series = _series_for_str_op(pd, payload, op_name)
+    src = payload.get("str_translate_from")
+    dst = payload.get("str_translate_to")
+    if not isinstance(src, str) or not isinstance(dst, str) or len(src) < len(dst):
+        raise OracleError(
+            f"{op_name} requires str_translate_from/str_translate_to with "
+            "len(from) >= len(to)"
+        )
+    try:
+        # When `from` is longer than `to`, the surplus leading chars map 1:1 and
+        # the trailing surplus is DELETED (FP's delete-tail semantics).
+        keep = src[: len(dst)]
+        delete = src[len(dst):]
+        out = series.str.translate(str.maketrans(keep, dst, delete))
+    except Exception as exc:
+        raise OracleError(f"{op_name} failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
+def op_series_str_encode(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    op_name = "series_str_encode"
+    series = _series_for_str_op(pd, payload, op_name)
+    try:
+        # FP's str.encode reports the UTF-8 byte length of each element.
+        out = series.str.encode("utf-8").str.len()
+    except Exception as exc:
+        raise OracleError(f"{op_name} failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
 def op_series_str_find(pd, payload: dict[str, Any]) -> dict[str, Any]:
     # Per br-frankenpandas-04aaef: live-oracle coverage for the char-position
     # fix in br-frankenpandas-02ae2b. pandas Series.str.find returns CHAR-based
@@ -6729,6 +6915,30 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_series_str_get_dummies(pd, payload)
     if op in {"series_str_find", "series_str_find_default"}:
         return op_series_str_find(pd, payload)
+    if op == "series_str_count_literal":
+        return op_series_str_count_literal(pd, payload)
+    if op == "series_str_count_matches":
+        return op_series_str_count_matches(pd, payload)
+    if op == "series_str_contains_any":
+        return op_series_str_contains_any(pd, payload)
+    if op == "series_str_startswith_any":
+        return op_series_str_startswith_any(pd, payload)
+    if op == "series_str_endswith_any":
+        return op_series_str_endswith_any(pd, payload)
+    if op == "series_str_index_of":
+        return op_series_str_index_of(pd, payload)
+    if op == "series_str_rindex_of":
+        return op_series_str_rindex_of(pd, payload)
+    if op == "series_str_split_count":
+        return op_series_str_split_count(pd, payload)
+    if op == "series_str_split_get":
+        return op_series_str_split_get(pd, payload)
+    if op == "series_str_split_regex_get":
+        return op_series_str_split_regex_get(pd, payload)
+    if op == "series_str_translate":
+        return op_series_str_translate(pd, payload)
+    if op == "series_str_encode":
+        return op_series_str_encode(pd, payload)
     if op in {"series_str_rfind", "series_str_rfind_default"}:
         return op_series_str_rfind(pd, payload)
     if op in {"series_str_zfill", "series_str_zfill_default"}:
