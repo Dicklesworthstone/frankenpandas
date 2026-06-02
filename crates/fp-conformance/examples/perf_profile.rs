@@ -17,7 +17,7 @@ use std::{collections::BTreeMap, time::Instant};
 
 use fp_frame::DataFrame;
 use fp_index::{DuplicateKeep, Index, IndexLabel};
-use fp_join::{merge_dataframes, JoinType};
+use fp_join::{JoinType, merge_dataframes};
 use fp_types::Scalar;
 
 fn build_groupby_frame(n: usize, num_groups: usize) -> DataFrame {
