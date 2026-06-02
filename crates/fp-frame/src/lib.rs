@@ -32143,6 +32143,115 @@ impl DataFrame {
             .collect()
     }
 
+    /// Finalize a pairwise cov/corr cell from accumulated moments.
+    ///
+    /// Arithmetic is bit-identical to the historical per-pair inline form.
+    fn finalize_pairwise_stat(
+        stat: &str,
+        min_periods: usize,
+        count: usize,
+        sum_x: f64,
+        sum_y: f64,
+        sum_xy: f64,
+        sum_x2: f64,
+        sum_y2: f64,
+    ) -> f64 {
+        let threshold = min_periods.max(2);
+        if count < threshold {
+            return f64::NAN;
+        }
+        let n_f = count as f64;
+        let mean_x = sum_x / n_f;
+        let mean_y = sum_y / n_f;
+        let cov_xy = (sum_xy - n_f * mean_x * mean_y) / (n_f - 1.0);
+        match stat {
+            "cov" => cov_xy,
+            "corr" => {
+                let var_x = (sum_x2 - n_f * mean_x * mean_x) / (n_f - 1.0);
+                let var_y = (sum_y2 - n_f * mean_y * mean_y) / (n_f - 1.0);
+                let denom = (var_x * var_y).sqrt();
+                if denom < f64::EPSILON {
+                    f64::NAN
+                } else {
+                    cov_xy / denom
+                }
+            }
+            _ => f64::NAN,
+        }
+    }
+
+    /// Pairwise cov/corr matrix over already-extracted f64 columns.
+    ///
+    /// The expensive `O(M)` moment accumulation is run **once per unordered
+    /// pair** `{i, j}` (`i <= j`) instead of once per ordered pair, halving the
+    /// `O(N^2 · M)` pairwise work. Both the `(i, j)` and `(j, i)` cells are then
+    /// finalized from that single set of moments — the `(j, i)` cell with the
+    /// marginals swapped (`x <-> y`), which reproduces the historical
+    /// independent `(j, i)` computation **bit-for-bit**.
+    ///
+    /// The swap is necessary, not cosmetic: the matrix is *not* exactly
+    /// symmetric in IEEE-754. `cov_xy` contains `n * mean_x * mean_y`, which
+    /// parses as `(n * mean_x) * mean_y`; multiplication is commutative but not
+    /// associative, so `(n*mean_i)*mean_j` and `(n*mean_j)*mean_i` can differ by
+    /// one ULP. Feeding `finalize` the swapped marginals replays the exact
+    /// association the old `(j, i)` pass used, so the golden output is unchanged
+    /// to the last bit. Our own safe-Rust Gram-matrix kernel (no C BLAS).
+    /// `min_periods` semantics are preserved unchanged.
+    fn pairwise_stat_matrix(
+        numeric_cols: &[String],
+        col_data: &[Vec<f64>],
+        stat: &str,
+        min_periods: usize,
+    ) -> Result<BTreeMap<String, Column>, FrameError> {
+        let n = numeric_cols.len();
+
+        let mut mat = vec![0.0_f64; n * n];
+        for j in 0..n {
+            for i in 0..=j {
+                let mut sum_x = 0.0_f64;
+                let mut sum_y = 0.0_f64;
+                let mut sum_xy = 0.0_f64;
+                let mut sum_x2 = 0.0_f64;
+                let mut sum_y2 = 0.0_f64;
+                let mut count = 0_usize;
+                for (&x, &y) in col_data[i].iter().zip(col_data[j].iter()) {
+                    if x.is_nan() || y.is_nan() {
+                        continue;
+                    }
+                    sum_x += x;
+                    sum_y += y;
+                    sum_xy += x * y;
+                    sum_x2 += x * x;
+                    sum_y2 += y * y;
+                    count += 1;
+                }
+                // Cell (i, j): col i is "x", col j is "y" — exactly as before.
+                mat[i * n + j] = Self::finalize_pairwise_stat(
+                    stat, min_periods, count, sum_x, sum_y, sum_xy, sum_x2, sum_y2,
+                );
+                if i != j {
+                    // Cell (j, i): col j is "x", col i is "y" — swap marginals so
+                    // the (n * mean_x * mean_y) association matches the old pass.
+                    mat[j * n + i] = Self::finalize_pairwise_stat(
+                        stat, min_periods, count, sum_y, sum_x, sum_xy, sum_y2, sum_x2,
+                    );
+                }
+            }
+        }
+
+        // Result column `j` holds stat(i, j) at row i — matching the historical
+        // `vals[i]` / insert(col_j) layout exactly.
+        let mut result_cols = BTreeMap::new();
+        for (j, name) in numeric_cols.iter().enumerate() {
+            let mut vals = Vec::with_capacity(n);
+            for i in 0..n {
+                vals.push(Scalar::Float64(mat[i * n + j]));
+            }
+            result_cols.insert(name.clone(), Column::new(DType::Float64, vals)?);
+        }
+        Ok(result_cols)
+    }
+
     fn pairwise_corr_stat_min(
         &self,
         stat: &str,
@@ -32169,57 +32278,8 @@ impl DataFrame {
             })
             .collect();
 
-        let mut result_cols = BTreeMap::new();
-        for (j, col_j_name) in numeric_cols.iter().enumerate() {
-            let mut vals = Vec::with_capacity(n);
-            for (i, _) in numeric_cols.iter().enumerate() {
-                let mut sum_x = 0.0_f64;
-                let mut sum_y = 0.0_f64;
-                let mut sum_xy = 0.0_f64;
-                let mut sum_x2 = 0.0_f64;
-                let mut sum_y2 = 0.0_f64;
-                let mut count = 0_usize;
-
-                for (&x, &y) in col_data[i].iter().zip(col_data[j].iter()) {
-                    if x.is_nan() || y.is_nan() {
-                        continue;
-                    }
-                    sum_x += x;
-                    sum_y += y;
-                    sum_xy += x * y;
-                    sum_x2 += x * x;
-                    sum_y2 += y * y;
-                    count += 1;
-                }
-
-                let threshold = min_periods.max(2);
-                let val = if count < threshold {
-                    f64::NAN
-                } else {
-                    let n_f = count as f64;
-                    let mean_x = sum_x / n_f;
-                    let mean_y = sum_y / n_f;
-                    let cov_xy = (sum_xy - n_f * mean_x * mean_y) / (n_f - 1.0);
-
-                    match stat {
-                        "cov" => cov_xy,
-                        "corr" => {
-                            let var_x = (sum_x2 - n_f * mean_x * mean_x) / (n_f - 1.0);
-                            let var_y = (sum_y2 - n_f * mean_y * mean_y) / (n_f - 1.0);
-                            let denom = (var_x * var_y).sqrt();
-                            if denom < f64::EPSILON {
-                                f64::NAN
-                            } else {
-                                cov_xy / denom
-                            }
-                        }
-                        _ => f64::NAN,
-                    }
-                };
-                vals.push(Scalar::Float64(val));
-            }
-            result_cols.insert(col_j_name.clone(), Column::new(DType::Float64, vals)?);
-        }
+        let _ = n;
+        let result_cols = Self::pairwise_stat_matrix(&numeric_cols, &col_data, stat, min_periods)?;
 
         let labels: Vec<IndexLabel> = numeric_cols
             .iter()
@@ -32268,58 +32328,8 @@ impl DataFrame {
             })
             .collect();
 
-        let mut result_cols = BTreeMap::new();
-        for (j, col_j_name) in numeric_cols.iter().enumerate() {
-            let mut vals = Vec::with_capacity(n);
-            for (i, _col_i_name) in numeric_cols.iter().enumerate() {
-                // Compute pairwise stat between col_i and col_j
-                let mut sum_x = 0.0_f64;
-                let mut sum_y = 0.0_f64;
-                let mut sum_xy = 0.0_f64;
-                let mut sum_x2 = 0.0_f64;
-                let mut sum_y2 = 0.0_f64;
-                let mut count = 0_usize;
-
-                for (&x, &y) in col_data[i].iter().zip(col_data[j].iter()) {
-                    if x.is_nan() || y.is_nan() {
-                        continue;
-                    }
-                    sum_x += x;
-                    sum_y += y;
-                    sum_xy += x * y;
-                    sum_x2 += x * x;
-                    sum_y2 += y * y;
-                    count += 1;
-                }
-
-                let threshold = min_periods.max(2);
-                let val = if count < threshold {
-                    f64::NAN
-                } else {
-                    let n_f = count as f64;
-                    let mean_x = sum_x / n_f;
-                    let mean_y = sum_y / n_f;
-                    let cov_xy = (sum_xy - n_f * mean_x * mean_y) / (n_f - 1.0);
-
-                    match stat {
-                        "cov" => cov_xy,
-                        "corr" => {
-                            let var_x = (sum_x2 - n_f * mean_x * mean_x) / (n_f - 1.0);
-                            let var_y = (sum_y2 - n_f * mean_y * mean_y) / (n_f - 1.0);
-                            let denom = (var_x * var_y).sqrt();
-                            if denom < f64::EPSILON {
-                                f64::NAN
-                            } else {
-                                cov_xy / denom
-                            }
-                        }
-                        _ => f64::NAN,
-                    }
-                };
-                vals.push(Scalar::Float64(val));
-            }
-            result_cols.insert(col_j_name.clone(), Column::new(DType::Float64, vals)?);
-        }
+        let _ = n;
+        let result_cols = Self::pairwise_stat_matrix(&numeric_cols, &col_data, stat, min_periods)?;
 
         let labels: Vec<IndexLabel> = numeric_cols
             .iter()

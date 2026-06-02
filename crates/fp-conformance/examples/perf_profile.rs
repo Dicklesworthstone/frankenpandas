@@ -69,6 +69,37 @@ fn build_numeric_frame(n: usize, cols: usize) -> DataFrame {
     DataFrame::new_with_column_order(index, columns, column_order).expect("frame")
 }
 
+/// Build a many-column, all-finite, non-collinear numeric frame for the
+/// pairwise corr/cov kernel benchmark. Values come from a cheap deterministic
+/// hash so columns are linearly independent (corr != 1 off-diagonal) and
+/// contain no NaN (exercises the all-finite Gram-matrix fast path).
+fn build_corr_frame(n: usize, cols: usize) -> DataFrame {
+    let labels: Vec<IndexLabel> = (0..n).map(|i| IndexLabel::Int64(i as i64)).collect();
+    let index = Index::new(labels);
+    let mut columns = BTreeMap::new();
+    let mut column_order = Vec::with_capacity(cols);
+    for c in 0..cols {
+        let col_name = format!("c{c}");
+        let values: Vec<Scalar> = (0..n)
+            .map(|i| {
+                // Deterministic splitmix-style hash -> finite f64 in ~[-1, 1).
+                let mut z = (i as u64)
+                    .wrapping_mul(0x9e37_79b9_7f4a_7c15)
+                    .wrapping_add((c as u64).wrapping_mul(0xbf58_476d_1ce4_e5b9));
+                z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+                z ^= z >> 31;
+                let unit = (z >> 11) as f64 / (1u64 << 53) as f64; // [0, 1)
+                Scalar::Float64(unit.mul_add(2.0, -1.0))
+            })
+            .collect();
+        let column = fp_columnar::Column::from_values(values).expect("column");
+        columns.insert(col_name.clone(), column);
+        column_order.push(col_name);
+    }
+    DataFrame::new_with_column_order(index, columns, column_order).expect("frame")
+}
+
 fn build_csv_string(n: usize, cols: usize) -> String {
     let mut csv = String::with_capacity(n * cols * 15);
     let header: Vec<String> = (0..cols).map(|c| format!("c{c}")).collect();
@@ -167,6 +198,8 @@ fn run_golden(scenario: &str, n: usize) {
             let mask: Vec<bool> = (0..n).map(|i| i % 2 == 0).collect();
             frame.iloc_bool(&mask).expect("filter")
         }
+        "df_corr" => build_corr_frame(n, 64).corr().expect("corr"),
+        "df_cov" => build_corr_frame(n, 64).cov().expect("cov"),
         "inner_join" => {
             let left = build_join_frame("left_value", n, 512, 7);
             let right = build_join_frame("right_value", n, 512, 13);
@@ -253,6 +286,20 @@ fn main() {
             let mask: Vec<bool> = (0..n).map(|i| i % 2 == 0).collect();
             for _ in 0..iters {
                 let out = frame.iloc_bool(&mask).expect("filter");
+                sink = sink.wrapping_add(out.len());
+            }
+        }
+        "df_corr" => {
+            let frame = build_corr_frame(n, 64);
+            for _ in 0..iters {
+                let out = frame.corr().expect("corr");
+                sink = sink.wrapping_add(out.len());
+            }
+        }
+        "df_cov" => {
+            let frame = build_corr_frame(n, 64);
+            for _ in 0..iters {
+                let out = frame.cov().expect("cov");
                 sink = sink.wrapping_add(out.len());
             }
         }
