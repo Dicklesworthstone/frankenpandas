@@ -2044,6 +2044,20 @@ fn align_union_sorted_unique(left: &Index, right: &Index) -> AlignmentPlan {
     debug_assert!(!left.has_duplicates());
     debug_assert!(!right.has_duplicates());
 
+    // Fast path: when both indexes are already sorted-ascending-unique (the
+    // common case for arithmetic on RangeIndex / DatetimeIndex / any sorted
+    // key), the sorted union + position vectors fall straight out of an O(n+m)
+    // two-cursor merge, without BTreeSet (one tree-node allocation per label) or
+    // two owned HashMaps (a clone of every label). `is_sorted()` is the AG-13
+    // OnceLock-cached "strictly ascending, no duplicates" predicate, so it
+    // agrees with `IndexLabel`'s derived `Ord` for the homogeneous indexes it
+    // recognizes; mixed/unsorted indexes report `false` and fall through to the
+    // general path below. Output is identical to that path (same sorted union,
+    // same Some/None position pattern).
+    if left.is_sorted() && right.is_sorted() {
+        return align_union_merge_sorted(left, right);
+    }
+
     let left_map: HashMap<IndexLabel, usize> = left
         .labels()
         .iter()
@@ -2082,6 +2096,71 @@ fn align_union_sorted_unique(left: &Index, right: &Index) -> AlignmentPlan {
         union_index = union_index.set_names(left.name());
     }
 
+    AlignmentPlan {
+        union_index,
+        left_positions,
+        right_positions,
+    }
+}
+
+/// O(n+m) outer-union alignment for two sorted-ascending-unique indexes.
+///
+/// Two-cursor merge producing the same `(sorted union, left_positions,
+/// right_positions)` triple as the general `align_union_sorted_unique` path,
+/// but with zero `BTreeSet`/`HashMap` allocation. Preconditions (both checked by
+/// the caller): each index is strictly ascending with no duplicates, so a
+/// label's position in its own index equals its cursor offset, and `IndexLabel`'s
+/// total `Ord` defines the merge order, identical to the `BTreeSet<IndexLabel>`
+/// ordering used by the general path.
+fn align_union_merge_sorted(left: &Index, right: &Index) -> AlignmentPlan {
+    let l = left.labels();
+    let r = right.labels();
+    let cap = l.len() + r.len();
+    let mut union_labels: Vec<IndexLabel> = Vec::with_capacity(cap);
+    let mut left_positions: Vec<Option<usize>> = Vec::with_capacity(cap);
+    let mut right_positions: Vec<Option<usize>> = Vec::with_capacity(cap);
+
+    let (mut i, mut j) = (0usize, 0usize);
+    while i < l.len() && j < r.len() {
+        match l[i].cmp(&r[j]) {
+            std::cmp::Ordering::Less => {
+                union_labels.push(l[i].clone());
+                left_positions.push(Some(i));
+                right_positions.push(None);
+                i += 1;
+            }
+            std::cmp::Ordering::Greater => {
+                union_labels.push(r[j].clone());
+                left_positions.push(None);
+                right_positions.push(Some(j));
+                j += 1;
+            }
+            std::cmp::Ordering::Equal => {
+                union_labels.push(l[i].clone());
+                left_positions.push(Some(i));
+                right_positions.push(Some(j));
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    while i < l.len() {
+        union_labels.push(l[i].clone());
+        left_positions.push(Some(i));
+        right_positions.push(None);
+        i += 1;
+    }
+    while j < r.len() {
+        union_labels.push(r[j].clone());
+        left_positions.push(None);
+        right_positions.push(Some(j));
+        j += 1;
+    }
+
+    let mut union_index = Index::new(union_labels);
+    if left.name() == right.name() {
+        union_index = union_index.set_names(left.name());
+    }
     AlignmentPlan {
         union_index,
         left_positions,

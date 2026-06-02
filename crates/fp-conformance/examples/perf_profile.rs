@@ -11,13 +11,14 @@
 //!   samply record ./target/release-perf/examples/perf_profile drop_duplicates 100000 200
 //!
 //! Args: <scenario> <n_rows> <iterations>
-//!   scenario ∈ { drop_duplicates, sort_single, filter_bool, inner_join }
+//!   scenario ∈ { drop_duplicates, sort_single, filter_bool, inner_join, series_add_align }
 
 use std::{collections::BTreeMap, time::Instant};
 
-use fp_frame::DataFrame;
+use fp_frame::{DataFrame, Series};
 use fp_index::{DuplicateKeep, Index, IndexLabel};
-use fp_join::{merge_dataframes, JoinType};
+use fp_join::{JoinType, merge_dataframes};
+use fp_runtime::{EvidenceLedger, RuntimePolicy};
 use fp_types::Scalar;
 
 fn build_groupby_frame(n: usize, num_groups: usize) -> DataFrame {
@@ -76,6 +77,17 @@ fn build_join_frame(
     .expect("join frame")
 }
 
+/// Numeric Series with an integer index shifted by `offset` so two series only
+/// partially overlap — exercises the AACE outer-alignment plan + materialize.
+/// Matches `high_ram_perf_baseline::build_numeric_series` (~21x vs pandas).
+fn build_numeric_series(name: &str, n: usize, offset: usize) -> Series {
+    let labels: Vec<IndexLabel> = (0..n)
+        .map(|i| IndexLabel::Int64((i + offset) as i64))
+        .collect();
+    let values: Vec<Scalar> = (0..n).map(|i| Scalar::Float64(i as f64 * 0.1)).collect();
+    Series::from_values(name.to_owned(), labels, values).expect("series")
+}
+
 /// Deterministic serialization of a frame's observable state (index labels +
 /// per-column dtype and values in column order). Used for the isomorphism
 /// golden-output sha256 proof; it must be stable across the optimization.
@@ -97,7 +109,37 @@ fn golden_dump(df: &DataFrame) -> String {
     s
 }
 
+/// Deterministic serialization for Series outputs used by Series hot-path
+/// golden-output proofs.
+fn golden_series_dump(series: &Series) -> String {
+    let mut s = String::new();
+    s.push_str(&format!("nrows={}\n", series.len()));
+    s.push_str(&format!("name={}\n", series.name()));
+    for label in series.index().labels() {
+        s.push_str(&format!("{label:?}|"));
+    }
+    s.push('\n');
+    s.push_str(&format!("dtype={:?}\n", series.column().dtype()));
+    for v in series.values() {
+        s.push_str(&format!("{v:?};"));
+    }
+    s.push('\n');
+    s
+}
+
 fn run_golden(scenario: &str, n: usize) {
+    if scenario == "series_add_align" {
+        let left = build_numeric_series("left", n, 0);
+        let right = build_numeric_series("right", n, n / 2);
+        let policy = RuntimePolicy::hardened(Some(n * 4));
+        let mut ledger = EvidenceLedger::new();
+        let out = left
+            .add_with_policy(&right, &policy, &mut ledger)
+            .expect("add");
+        print!("{}", golden_series_dump(&out));
+        return;
+    }
+
     let out = match scenario {
         "drop_duplicates" => build_groupby_frame(n, 100)
             .drop_duplicates(None, DuplicateKeep::First, false)
@@ -176,6 +218,19 @@ fn main() {
             for _ in 0..iters {
                 let out = merge_dataframes(&left, &right, "id", JoinType::Inner).expect("join");
                 sink = sink.wrapping_add(out.index.len());
+            }
+        }
+        "series_add_align" => {
+            // 50% index overlap → outer-union alignment plan + reindex/materialize.
+            let left = build_numeric_series("left", n, 0);
+            let right = build_numeric_series("right", n, n / 2);
+            let policy = RuntimePolicy::hardened(Some(n * 4));
+            for _ in 0..iters {
+                let mut ledger = EvidenceLedger::new();
+                let out = left
+                    .add_with_policy(&right, &policy, &mut ledger)
+                    .expect("add");
+                sink = sink.wrapping_add(out.len());
             }
         }
         other => {
