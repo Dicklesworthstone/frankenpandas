@@ -6,6 +6,8 @@
 //! Validates that all AG optimizations work together without interference
 //! across the full FrankenPandas pipeline.
 
+use std::fmt::Write as _;
+
 use fp_columnar::Column;
 use fp_conformance::{
     E2eConfig, ForensicEventKind, HarnessConfig, NoopHooks, OracleMode, SuiteOptions,
@@ -14,9 +16,12 @@ use fp_conformance::{
 use fp_frame::{DataFrame, Series};
 use fp_groupby::{GroupByExecutionOptions, GroupByOptions, groupby_sum, groupby_sum_with_options};
 use fp_index::{Index, IndexLabel, align_union, validate_alignment_plan};
-use fp_join::{JoinExecutionOptions, JoinType, join_series, join_series_with_options};
+use fp_join::{
+    JoinExecutionOptions, JoinType, JoinedSeries, join_series, join_series_with_options,
+};
 use fp_runtime::{EvidenceLedger, RuntimePolicy};
 use fp_types::{NullKind, Scalar};
+use sha2::{Digest, Sha256};
 
 // ---------------------------------------------------------------------------
 // Scenario 1: Full DataFrame Pipeline (alignment + groupby + join)
@@ -212,6 +217,75 @@ fn e2e_scenario1_full_dataframe_pipeline() {
         grouped.values(),
         &[Scalar::Float64(310_000.0), Scalar::Float64(230_000.0)]
     );
+}
+
+#[test]
+fn series_join_golden_outputs_preserve_order_and_nulls() {
+    let left = Series::from_values(
+        "left",
+        vec![
+            IndexLabel::Utf8("a".into()),
+            IndexLabel::Utf8("b".into()),
+            IndexLabel::Utf8("b".into()),
+            IndexLabel::Utf8("c".into()),
+        ],
+        vec![
+            Scalar::Int64(1),
+            Scalar::Int64(2),
+            Scalar::Int64(3),
+            Scalar::Int64(4),
+        ],
+    )
+    .expect("left");
+    let right = Series::from_values(
+        "right",
+        vec![
+            IndexLabel::Utf8("b".into()),
+            IndexLabel::Utf8("d".into()),
+            IndexLabel::Utf8("b".into()),
+        ],
+        vec![Scalar::Int64(20), Scalar::Int64(40), Scalar::Int64(21)],
+    )
+    .expect("right");
+
+    let mut normalized = String::new();
+    for (name, join_type) in [
+        ("inner", JoinType::Inner),
+        ("left", JoinType::Left),
+        ("right", JoinType::Right),
+        ("outer", JoinType::Outer),
+    ] {
+        let joined = join_series(&left, &right, join_type).expect("join");
+        push_join_golden_rows(name, &joined, &mut normalized);
+    }
+
+    assert_eq!(
+        sha256_hex(normalized.as_bytes()),
+        "818864956be98df3d44cdd7fc322c5b4bf4d3410c1014cd813273066e8468c6c",
+        "normalized join output changed:\n{normalized}"
+    );
+}
+
+fn push_join_golden_rows(name: &str, joined: &JoinedSeries, normalized: &mut String) {
+    writeln!(normalized, "{name}:").expect("write section");
+    for ((label, left_value), right_value) in joined
+        .index
+        .labels()
+        .iter()
+        .zip(joined.left_values.values())
+        .zip(joined.right_values.values())
+    {
+        writeln!(normalized, "{label:?}|{left_value:?}|{right_value:?}").expect("write row");
+    }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        write!(hex, "{byte:02x}").expect("write hex");
+    }
+    hex
 }
 
 // ---------------------------------------------------------------------------

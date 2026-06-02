@@ -175,10 +175,15 @@ fn join_series_with_trace(
     options: JoinExecutionOptions,
 ) -> Result<(JoinedSeries, JoinExecutionTrace), JoinError> {
     // AG-02: borrowed-key HashMap eliminates right-index label clones during build phase.
-    let mut right_map = HashMap::<&IndexLabel, Vec<usize>>::new();
-    for (pos, label) in right.index().labels().iter().enumerate() {
-        right_map.entry(label).or_default().push(pos);
-    }
+    let right_map = if matches!(join_type, JoinType::Right) {
+        HashMap::<&IndexLabel, Vec<usize>>::new()
+    } else {
+        let mut m = HashMap::<&IndexLabel, Vec<usize>>::new();
+        for (pos, label) in right.index().labels().iter().enumerate() {
+            m.entry(label).or_default().push(pos);
+        }
+        m
+    };
 
     // For Right/Outer joins, also build a left_map.
     let left_map = if matches!(join_type, JoinType::Right | JoinType::Outer) {
@@ -232,6 +237,18 @@ fn estimate_output_rows(
     left_map: Option<&HashMap<&IndexLabel, Vec<usize>>>,
     join_type: JoinType,
 ) -> usize {
+    if matches!(join_type, JoinType::Right) {
+        return right
+            .index()
+            .labels()
+            .iter()
+            .map(|label| match left_map.as_ref().and_then(|m| m.get(label)) {
+                Some(matches) => matches.len(),
+                None => 1,
+            })
+            .sum();
+    }
+
     let left_matched: usize = left
         .index()
         .labels()
@@ -245,18 +262,7 @@ fn estimate_output_rows(
 
     match join_type {
         JoinType::Inner | JoinType::Left => left_matched,
-        JoinType::Right => {
-            // All right labels, with matches from left
-            right
-                .index()
-                .labels()
-                .iter()
-                .map(|label| match left_map.as_ref().and_then(|m| m.get(label)) {
-                    Some(matches) => matches.len(),
-                    None => 1,
-                })
-                .sum()
-        }
+        JoinType::Right => left_matched,
         JoinType::Cross => left
             .index()
             .labels()
