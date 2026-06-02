@@ -28089,89 +28089,172 @@ impl DataFrame {
         subset: Option<&[String]>,
         keep: DuplicateKeep,
     ) -> Result<Series, FrameError> {
-        use std::{
-            collections::HashMap,
-            hash::{Hash, Hasher},
-        };
+        use std::collections::{HashMap, hash_map::Entry};
 
         let selected_columns = self.resolve_column_selector(subset)?;
+        let selected_column_refs = selected_columns
+            .iter()
+            .map(|col_name| self.columns.get(col_name).expect("column must exist"))
+            .collect::<Vec<_>>();
         let row_count = self.len();
         let mut duplicated = vec![false; row_count];
 
-        // Build row keys for hashing - collect column values per row
-        // Use semantic hashing: all missing values (Null, NaN, NaT) hash to same value
-        let mut row_keys: Vec<Vec<u64>> = Vec::with_capacity(row_count);
-        for i in 0..row_count {
-            let mut key = Vec::with_capacity(selected_columns.len());
-            for col_name in &selected_columns {
-                let col = self.columns.get(col_name).expect("column must exist");
-                let value = &col.values()[i];
-                // Hash each scalar value - missing values hash identically
-                let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                if value.is_missing() {
-                    // All missing values (Null, NaN, NaT, Float64(NaN)) hash identically
-                    0xDEADBEEF_u64.hash(&mut hasher);
-                } else {
-                    match value {
-                        Scalar::Null(_) => 0xDEADBEEF_u64.hash(&mut hasher),
-                        Scalar::Bool(b) => b.hash(&mut hasher),
-                        Scalar::Int64(v) => v.hash(&mut hasher),
-                        Scalar::Float64(f) => f.to_bits().hash(&mut hasher),
-                        Scalar::Utf8(s) => s.hash(&mut hasher),
-                        Scalar::Datetime64(ns) => ns.hash(&mut hasher),
-                        Scalar::Timedelta64(ns) => ns.hash(&mut hasher),
-                        Scalar::Period(ord) => ord.hash(&mut hasher),
-                        Scalar::Interval(iv) => {
-                            iv.left.to_bits().hash(&mut hasher);
-                            iv.right.to_bits().hash(&mut hasher);
-                        }
-                    }
-                }
-                key.push(hasher.finish());
-            }
-            row_keys.push(key);
+        enum RowBucket {
+            Single(usize),
+            Collision(Vec<usize>),
         }
+
+        fn mix_digest(state: &mut u64, value: u64) {
+            let mut mixed = value.wrapping_add(0x9e37_79b9_7f4a_7c15);
+            mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            mixed ^= mixed >> 31;
+            *state ^= mixed;
+            *state = state.rotate_left(27).wrapping_mul(0x3c79_ac49_2ba7_b653);
+        }
+
+        fn bytes_digest(bytes: &[u8]) -> u64 {
+            let mut state = 0xcbf2_9ce4_8422_2325;
+            for &byte in bytes {
+                state ^= u64::from(byte);
+                state = state.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+            state
+        }
+
+        fn scalar_digest(state: &mut u64, value: &Scalar) {
+            if value.is_missing() {
+                mix_digest(state, 0);
+                return;
+            }
+
+            match value {
+                Scalar::Null(_) => mix_digest(state, 0),
+                Scalar::Bool(value) => {
+                    mix_digest(state, 1);
+                    mix_digest(state, u64::from(*value));
+                }
+                Scalar::Int64(value) => {
+                    mix_digest(state, 2);
+                    mix_digest(state, *value as u64);
+                }
+                Scalar::Float64(value) => {
+                    mix_digest(state, 3);
+                    mix_digest(state, value.to_bits());
+                }
+                Scalar::Utf8(value) => {
+                    mix_digest(state, 4);
+                    mix_digest(state, value.len() as u64);
+                    mix_digest(state, bytes_digest(value.as_bytes()));
+                }
+                Scalar::Datetime64(value) => {
+                    mix_digest(state, 5);
+                    mix_digest(state, *value as u64);
+                }
+                Scalar::Timedelta64(value) => {
+                    mix_digest(state, 6);
+                    mix_digest(state, *value as u64);
+                }
+                Scalar::Period(value) => {
+                    mix_digest(state, 7);
+                    mix_digest(state, *value as u64);
+                }
+                Scalar::Interval(value) => {
+                    mix_digest(state, 8);
+                    mix_digest(state, value.left.to_bits());
+                    mix_digest(state, value.right.to_bits());
+                }
+            }
+        }
+
+        let row_digest = |row: usize| {
+            let mut state = 0x517c_c1b7_2722_0a95;
+            mix_digest(&mut state, selected_column_refs.len() as u64);
+            for col in &selected_column_refs {
+                let value = &col.values()[row];
+                scalar_digest(&mut state, value);
+            }
+            state
+        };
 
         match keep {
             DuplicateKeep::First => {
-                // Track first occurrence of each row key
-                let mut seen: HashMap<&[u64], usize> = HashMap::with_capacity(row_count);
-                for i in 0..row_count {
-                    let key = row_keys[i].as_slice();
-                    if let Some(&first_idx) = seen.get(key) {
-                        // Verify actual equality (hash collision check)
-                        if self.rows_equal_on_subset(i, first_idx, &selected_columns) {
-                            duplicated[i] = true;
+                let mut seen: HashMap<u64, RowBucket> = HashMap::with_capacity(row_count);
+                for (i, duplicated_i) in duplicated.iter_mut().enumerate() {
+                    match seen.entry(row_digest(i)) {
+                        Entry::Vacant(entry) => {
+                            entry.insert(RowBucket::Single(i));
                         }
-                    } else {
-                        seen.insert(key, i);
+                        Entry::Occupied(mut entry) => match entry.get_mut() {
+                            RowBucket::Single(first_idx) => {
+                                if self.rows_equal_on_subset(i, *first_idx, &selected_columns) {
+                                    *duplicated_i = true;
+                                } else {
+                                    *entry.get_mut() = RowBucket::Collision(vec![*first_idx, i]);
+                                }
+                            }
+                            RowBucket::Collision(indices) => {
+                                if indices.iter().any(|&first_idx| {
+                                    self.rows_equal_on_subset(i, first_idx, &selected_columns)
+                                }) {
+                                    *duplicated_i = true;
+                                } else {
+                                    indices.push(i);
+                                }
+                            }
+                        },
                     }
                 }
             }
             DuplicateKeep::Last => {
-                // Track last occurrence by iterating backwards
-                let mut seen: HashMap<&[u64], usize> = HashMap::with_capacity(row_count);
-                for i in (0..row_count).rev() {
-                    let key = row_keys[i].as_slice();
-                    if let Some(&last_idx) = seen.get(key) {
-                        // Verify actual equality (hash collision check)
-                        if self.rows_equal_on_subset(i, last_idx, &selected_columns) {
-                            duplicated[i] = true;
+                let mut seen: HashMap<u64, RowBucket> = HashMap::with_capacity(row_count);
+                for (i, duplicated_i) in duplicated.iter_mut().enumerate().rev() {
+                    match seen.entry(row_digest(i)) {
+                        Entry::Vacant(entry) => {
+                            entry.insert(RowBucket::Single(i));
                         }
-                    } else {
-                        seen.insert(key, i);
+                        Entry::Occupied(mut entry) => match entry.get_mut() {
+                            RowBucket::Single(last_idx) => {
+                                if self.rows_equal_on_subset(i, *last_idx, &selected_columns) {
+                                    *duplicated_i = true;
+                                } else {
+                                    *entry.get_mut() = RowBucket::Collision(vec![*last_idx, i]);
+                                }
+                            }
+                            RowBucket::Collision(indices) => {
+                                if indices.iter().any(|&last_idx| {
+                                    self.rows_equal_on_subset(i, last_idx, &selected_columns)
+                                }) {
+                                    *duplicated_i = true;
+                                } else {
+                                    indices.push(i);
+                                }
+                            }
+                        },
                     }
                 }
             }
             DuplicateKeep::None => {
-                // Count occurrences, mark all that appear more than once
-                let mut counts: HashMap<&[u64], Vec<usize>> = HashMap::with_capacity(row_count);
-                for (i, key) in row_keys.iter().enumerate().take(row_count) {
-                    counts.entry(key.as_slice()).or_default().push(i);
+                let mut buckets: HashMap<u64, RowBucket> = HashMap::with_capacity(row_count);
+                for i in 0..row_count {
+                    match buckets.entry(row_digest(i)) {
+                        Entry::Vacant(entry) => {
+                            entry.insert(RowBucket::Single(i));
+                        }
+                        Entry::Occupied(mut entry) => match entry.get_mut() {
+                            RowBucket::Single(first_idx) => {
+                                *entry.get_mut() = RowBucket::Collision(vec![*first_idx, i]);
+                            }
+                            RowBucket::Collision(indices) => indices.push(i),
+                        },
+                    }
                 }
-                for indices in counts.values() {
-                    if indices.len() > 1 {
-                        // Verify actual equality for hash collisions
+
+                for bucket in buckets.values() {
+                    if let RowBucket::Collision(indices) = bucket
+                        && indices.len() > 1
+                    {
+                        // Verify actual equality for hash collisions.
                         for &i in indices {
                             for &j in indices {
                                 if i != j && self.rows_equal_on_subset(i, j, &selected_columns) {
