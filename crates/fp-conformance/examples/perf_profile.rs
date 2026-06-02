@@ -11,12 +11,13 @@
 //!   samply record ./target/release-perf/examples/perf_profile drop_duplicates 100000 200
 //!
 //! Args: <scenario> <n_rows> <iterations>
-//!   scenario ∈ { drop_duplicates, sort_single, filter_bool, inner_join, series_add, series_add_align }
+//!   scenario ∈ { drop_duplicates, sort_single, filter_bool, inner_join, series_add, series_add_align, csv_read, csv_read_options, csv_read_no_na_filter }
 
 use std::{collections::BTreeMap, time::Instant};
 
 use fp_frame::{DataFrame, Series};
 use fp_index::{DuplicateKeep, Index, IndexLabel};
+use fp_io::{CsvReadOptions, read_csv_str, read_csv_with_options};
 use fp_join::{JoinType, merge_dataframes};
 use fp_runtime::{EvidenceLedger, RuntimePolicy};
 use fp_types::Scalar;
@@ -66,6 +67,33 @@ fn build_numeric_frame(n: usize, cols: usize) -> DataFrame {
         column_order.push(col_name);
     }
     DataFrame::new_with_column_order(index, columns, column_order).expect("frame")
+}
+
+fn build_csv_string(n: usize, cols: usize) -> String {
+    let mut csv = String::with_capacity(n * cols * 15);
+    let header: Vec<String> = (0..cols).map(|c| format!("c{c}")).collect();
+    csv.push_str(&header.join(","));
+    csv.push('\n');
+    for i in 0..n {
+        let row: Vec<String> = (0..cols)
+            .map(|c| ((i * (c + 1)) as f64 * 0.1).to_string())
+            .collect();
+        csv.push_str(&row.join(","));
+        csv.push('\n');
+    }
+    csv
+}
+
+fn read_csv_no_na_filter(csv: &str) -> DataFrame {
+    let options = CsvReadOptions {
+        na_filter: false,
+        ..CsvReadOptions::default()
+    };
+    read_csv_with_options(csv, &options).expect("csv read no NA filter")
+}
+
+fn read_csv_options_default(csv: &str) -> DataFrame {
+    read_csv_with_options(csv, &CsvReadOptions::default()).expect("csv read options")
 }
 
 /// Join workload frame: `id` key column at fixed cardinality + one value
@@ -164,6 +192,18 @@ fn run_golden(scenario: &str, n: usize) {
             };
             return print!("{}", golden_dump_series(&out));
         }
+        "csv_read" => {
+            let csv = build_csv_string(n, 10);
+            read_csv_str(&csv).expect("csv read")
+        }
+        "csv_read_options" => {
+            let csv = build_csv_string(n, 10);
+            read_csv_options_default(&csv)
+        }
+        "csv_read_no_na_filter" => {
+            let csv = build_csv_string(n, 10);
+            read_csv_no_na_filter(&csv)
+        }
         other => {
             eprintln!("unknown golden scenario: {other}");
             std::process::exit(2);
@@ -245,6 +285,27 @@ fn main() {
                         std::process::exit(1);
                     }
                 };
+                sink = sink.wrapping_add(out.len());
+            }
+        }
+        "csv_read" => {
+            let csv = build_csv_string(n, 10);
+            for _ in 0..iters {
+                let out = read_csv_str(&csv).expect("csv read");
+                sink = sink.wrapping_add(out.len());
+            }
+        }
+        "csv_read_options" => {
+            let csv = build_csv_string(n, 10);
+            for _ in 0..iters {
+                let out = read_csv_options_default(&csv);
+                sink = sink.wrapping_add(out.len());
+            }
+        }
+        "csv_read_no_na_filter" => {
+            let csv = build_csv_string(n, 10);
+            for _ in 0..iters {
+                let out = read_csv_no_na_filter(&csv);
                 sink = sink.wrapping_add(out.len());
             }
         }

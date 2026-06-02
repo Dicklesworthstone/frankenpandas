@@ -93,6 +93,7 @@
 //! non-SQL formats are needed.
 
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, BTreeSet, HashSet},
     io::Cursor,
     path::Path,
@@ -2493,27 +2494,30 @@ fn parse_scalar_with_options(
     // `thousands` is silently ignored if it equals the decimal separator,
     // matching pandas semantics.
     let thousands_effective = thousands.filter(|t| *t != decimal);
-    let numeric_candidate = if let Some(t) = thousands_effective {
+    let numeric_candidate: Cow<'_, str> = if let Some(t) = thousands_effective {
         let ch = char::from(t);
         if trimmed.contains(ch) {
-            trimmed.replace(ch, "")
+            Cow::Owned(trimmed.replace(ch, ""))
         } else {
-            trimmed.to_owned()
+            Cow::Borrowed(trimmed)
         }
     } else {
-        trimmed.to_owned()
+        Cow::Borrowed(trimmed)
     };
 
-    if let Ok(value) = numeric_candidate.parse::<i64>() {
+    if let Ok(value) = numeric_candidate.as_ref().parse::<i64>() {
         return Scalar::Int64(value);
     }
 
-    let float_candidate = if decimal == b'.' {
-        numeric_candidate.clone()
+    let decimal_ch = char::from(decimal);
+    let float_candidate: Cow<'_, str> = if decimal == b'.' {
+        Cow::Borrowed(numeric_candidate.as_ref())
+    } else if numeric_candidate.contains(decimal_ch) {
+        Cow::Owned(numeric_candidate.replace(decimal_ch, "."))
     } else {
-        numeric_candidate.replace(char::from(decimal), ".")
+        Cow::Borrowed(numeric_candidate.as_ref())
     };
-    if let Ok(value) = float_candidate.parse::<f64>() {
+    if let Ok(value) = float_candidate.as_ref().parse::<f64>() {
         return Scalar::Float64(value);
     }
 
