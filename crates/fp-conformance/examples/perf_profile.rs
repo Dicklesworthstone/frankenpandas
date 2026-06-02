@@ -15,10 +15,24 @@
 
 use std::{collections::BTreeMap, time::Instant};
 
-use fp_frame::DataFrame;
+use fp_frame::{DataFrame, Series};
 use fp_index::{DuplicateKeep, Index, IndexLabel};
 use fp_join::{JoinType, merge_dataframes};
 use fp_types::Scalar;
+
+/// Two Float64 Series whose Int64 indexes overlap but are shifted by one
+/// (left: 0..n, right: 1..=n), so `a + b` exercises the AACE outer-union
+/// alignment path with n-1 matched labels and two unmatched endpoints —
+/// matches br-frankenpandas-b75cc's series_add outer-alignment scenario.
+fn build_series_pair(n: usize) -> (Series, Series) {
+    let left_labels: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
+    let right_labels: Vec<IndexLabel> = (1..=n as i64).map(IndexLabel::Int64).collect();
+    let left_vals: Vec<Scalar> = (0..n).map(|i| Scalar::Float64(i as f64)).collect();
+    let right_vals: Vec<Scalar> = (0..n).map(|i| Scalar::Float64(i as f64 * 2.0)).collect();
+    let left = Series::from_values("l", left_labels, left_vals).expect("left series");
+    let right = Series::from_values("r", right_labels, right_vals).expect("right series");
+    (left, right)
+}
 
 fn build_groupby_frame(n: usize, num_groups: usize) -> DataFrame {
     let keys: Vec<Scalar> = (0..n)
@@ -97,6 +111,20 @@ fn golden_dump(df: &DataFrame) -> String {
     s
 }
 
+fn golden_dump_series(s: &Series) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("len={} dtype={:?}\n", s.len(), s.column().dtype()));
+    for label in s.index().labels() {
+        out.push_str(&format!("{label:?}|"));
+    }
+    out.push('\n');
+    for v in s.column().values() {
+        out.push_str(&format!("{v:?};"));
+    }
+    out.push('\n');
+    out
+}
+
 fn run_golden(scenario: &str, n: usize) {
     let out = match scenario {
         "drop_duplicates" => build_groupby_frame(n, 100)
@@ -115,6 +143,11 @@ fn run_golden(scenario: &str, n: usize) {
             let right = build_join_frame("right_value", n, 512, 13);
             let out = merge_dataframes(&left, &right, "id", JoinType::Inner).expect("join");
             DataFrame::new(out.index, out.columns).expect("join golden frame")
+        }
+        "series_add" => {
+            let (left, right) = build_series_pair(n);
+            let out = left.add(&right).expect("series add");
+            return print!("{}", golden_dump_series(&out));
         }
         other => {
             eprintln!("unknown golden scenario: {other}");
@@ -176,6 +209,13 @@ fn main() {
             for _ in 0..iters {
                 let out = merge_dataframes(&left, &right, "id", JoinType::Inner).expect("join");
                 sink = sink.wrapping_add(out.index.len());
+            }
+        }
+        "series_add" => {
+            let (left, right) = build_series_pair(n);
+            for _ in 0..iters {
+                let out = left.add(&right).expect("series add");
+                sink = sink.wrapping_add(out.len());
             }
         }
         other => {

@@ -2026,6 +2026,13 @@ fn record_alignment_semantic_witness(
     output_index: &Index,
     materialization_reason: &str,
 ) {
+    // Skip the expensive index fingerprinting (serde_json serialize + sha256
+    // over every label, ×3) when the ledger will not be inspected — e.g. the
+    // public arithmetic convenience methods that discard their ledger.
+    // br-frankenpandas-b75cc. Output is unaffected, so this is isomorphic.
+    if !ledger.records_semantic_witnesses() {
+        return;
+    }
     ledger.push_semantic_witness(SemanticWitnessRecord::new(
         operation,
         materialization_reason,
@@ -2880,7 +2887,7 @@ impl Series {
     }
 
     pub fn add(&self, other: &Self) -> Result<Self, FrameError> {
-        let mut ledger = EvidenceLedger::new();
+        let mut ledger = EvidenceLedger::new().without_semantic_witnesses();
         self.add_with_policy(other, &RuntimePolicy::strict(), &mut ledger)
     }
 
@@ -2894,7 +2901,7 @@ impl Series {
     }
 
     pub fn sub(&self, other: &Self) -> Result<Self, FrameError> {
-        let mut ledger = EvidenceLedger::new();
+        let mut ledger = EvidenceLedger::new().without_semantic_witnesses();
         self.sub_with_policy(other, &RuntimePolicy::strict(), &mut ledger)
     }
 
@@ -2908,7 +2915,7 @@ impl Series {
     }
 
     pub fn mul(&self, other: &Self) -> Result<Self, FrameError> {
-        let mut ledger = EvidenceLedger::new();
+        let mut ledger = EvidenceLedger::new().without_semantic_witnesses();
         self.mul_with_policy(other, &RuntimePolicy::strict(), &mut ledger)
     }
 
@@ -2922,7 +2929,7 @@ impl Series {
     }
 
     pub fn div(&self, other: &Self) -> Result<Self, FrameError> {
-        let mut ledger = EvidenceLedger::new();
+        let mut ledger = EvidenceLedger::new().without_semantic_witnesses();
         self.div_with_policy(other, &RuntimePolicy::strict(), &mut ledger)
     }
 
@@ -3117,7 +3124,7 @@ impl Series {
     ///
     /// Matches `s1.mod(s2)` / `s1 % s2` in pandas.
     pub fn modulo(&self, other: &Self) -> Result<Self, FrameError> {
-        let mut ledger = EvidenceLedger::new();
+        let mut ledger = EvidenceLedger::new().without_semantic_witnesses();
         self.modulo_with_policy(other, &RuntimePolicy::strict(), &mut ledger)
     }
 
@@ -3134,7 +3141,7 @@ impl Series {
     ///
     /// Matches `s1.floordiv(s2)` / `s1 // s2` in pandas.
     pub fn floordiv(&self, other: &Self) -> Result<Self, FrameError> {
-        let mut ledger = EvidenceLedger::new();
+        let mut ledger = EvidenceLedger::new().without_semantic_witnesses();
         self.floordiv_with_policy(other, &RuntimePolicy::strict(), &mut ledger)
     }
 
@@ -3151,7 +3158,7 @@ impl Series {
     ///
     /// Matches `s1.pow(s2)` / `s1 ** s2` in pandas.
     pub fn pow(&self, other: &Self) -> Result<Self, FrameError> {
-        let mut ledger = EvidenceLedger::new();
+        let mut ledger = EvidenceLedger::new().without_semantic_witnesses();
         self.pow_with_policy(other, &RuntimePolicy::strict(), &mut ledger)
     }
 

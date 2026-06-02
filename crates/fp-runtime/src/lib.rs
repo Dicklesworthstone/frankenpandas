@@ -290,11 +290,24 @@ pub fn decision_to_card(record: &DecisionRecord) -> GalaxyBrainCard {
     }
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EvidenceLedger {
     records: Vec<DecisionRecord>,
     #[serde(default)]
     semantic_witnesses: Vec<SemanticWitnessRecord>,
+    // Runtime-only switch: when false, callers that build a throwaway ledger
+    // (e.g. the public `Series::add` convenience wrappers that discard the
+    // ledger) can skip the expensive semantic-witness fingerprinting. Not part
+    // of the serialized audit artifact, and `#[serde(skip)]` keeps the on-disk
+    // format unchanged. Per br-frankenpandas-b75cc.
+    #[serde(skip)]
+    record_semantic_witnesses: bool,
+}
+
+impl Default for EvidenceLedger {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl EvidenceLedger {
@@ -303,7 +316,24 @@ impl EvidenceLedger {
         Self {
             records: Vec::new(),
             semantic_witnesses: Vec::new(),
+            record_semantic_witnesses: true,
         }
+    }
+
+    /// Build a ledger that does not record semantic witnesses. Used by the
+    /// public arithmetic convenience methods that discard their ledger, so the
+    /// AACE witness fingerprint (a sha256 over the index) is not computed when
+    /// nothing will read it. Observable operation output is unaffected.
+    #[must_use]
+    pub fn without_semantic_witnesses(mut self) -> Self {
+        self.record_semantic_witnesses = false;
+        self
+    }
+
+    /// Whether this ledger records AACE semantic witnesses (default true).
+    #[must_use]
+    pub fn records_semantic_witnesses(&self) -> bool {
+        self.record_semantic_witnesses
     }
 
     pub fn push(&mut self, record: DecisionRecord) {
