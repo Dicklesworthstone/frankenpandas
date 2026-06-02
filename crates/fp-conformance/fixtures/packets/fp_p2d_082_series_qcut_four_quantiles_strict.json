@@ -35,11 +35,11 @@
       { "kind": "int64", "value": 4 }
     ],
     "values": [
-      { "kind": "utf8", "value": "(0.000, 1.000]" },
-      { "kind": "utf8", "value": "(0.000, 1.000]" },
-      { "kind": "utf8", "value": "(1.000, 2.000]" },
-      { "kind": "utf8", "value": "(2.000, 3.000]" },
-      { "kind": "utf8", "value": "(3.000, 4.000]" }
+      { "kind": "utf8", "value": "(-0.001, 1.0]" },
+      { "kind": "utf8", "value": "(-0.001, 1.0]" },
+      { "kind": "utf8", "value": "(1.0, 2.0]" },
+      { "kind": "utf8", "value": "(2.0, 3.0]" },
+      { "kind": "utf8", "value": "(3.0, 4.0]" }
     ]
   }
 }

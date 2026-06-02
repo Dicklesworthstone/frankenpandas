@@ -29,9 +29,9 @@
       { "kind": "int64", "value": 2 }
     ],
     "values": [
-      { "kind": "utf8", "value": "(1.000, 2.000]" },
+      { "kind": "utf8", "value": "(0.999, 2.0]" },
       { "kind": "null", "value": "na_n" },
-      { "kind": "utf8", "value": "(2.000, 3.000]" }
+      { "kind": "utf8", "value": "(2.0, 3.0]" }
     ]
   }
 }

@@ -32,10 +32,10 @@
       { "kind": "int64", "value": 3 }
     ],
     "values": [
-      { "kind": "utf8", "value": "(1.000, 2.500]" },
-      { "kind": "utf8", "value": "(1.000, 2.500]" },
-      { "kind": "utf8", "value": "(2.500, 4.000]" },
-      { "kind": "utf8", "value": "(2.500, 4.000]" }
+      { "kind": "utf8", "value": "(0.997, 2.5]" },
+      { "kind": "utf8", "value": "(0.997, 2.5]" },
+      { "kind": "utf8", "value": "(2.5, 4.0]" },
+      { "kind": "utf8", "value": "(2.5, 4.0]" }
     ]
   }
 }

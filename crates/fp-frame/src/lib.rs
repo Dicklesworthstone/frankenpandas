@@ -24968,6 +24968,41 @@ pub fn timedelta_total_seconds(series: &Series) -> Result<Series, FrameError> {
 /// Matches `pd.cut(series, bins)`. Creates equal-width bins from the
 /// data range and assigns each value to a bin label.
 /// Returns a Series of string labels like "(a, b]".
+/// Round a bin edge the way pandas' `_round_frac` does (default precision 3):
+/// integers/whole parts keep `precision` decimals, pure fractions keep
+/// `precision` significant digits. br-frankenpandas-4rfy1.
+fn cut_round_frac(x: f64, precision: i32) -> f64 {
+    if !x.is_finite() || x == 0.0 {
+        return x;
+    }
+    let whole = x.trunc();
+    let frac = x - whole;
+    let digits = if whole == 0.0 {
+        (-(frac.abs().log10().floor() as i32) - 1 + precision).max(0)
+    } else {
+        precision
+    };
+    let factor = 10f64.powi(digits);
+    (x * factor).round() / factor
+}
+
+/// Format a cut/qcut bin edge to match pandas' Interval repr: round via
+/// `cut_round_frac`, then use the shortest round-trip float form but always
+/// keep a trailing `.0` for whole numbers (pandas prints `4.0`, not `4`).
+fn cut_format_edge(x: f64) -> String {
+    let rounded = cut_round_frac(x, 3);
+    let s = format!("{rounded}");
+    if s.contains('.')
+        || s.contains('e')
+        || s.contains('E')
+        || !s.bytes().any(|b| b.is_ascii_digit())
+    {
+        s
+    } else {
+        format!("{s}.0")
+    }
+}
+
 pub fn cut(series: &Series, bins: usize) -> Result<Series, FrameError> {
     if bins == 0 {
         return Err(FrameError::CompatibilityRejected(
@@ -24998,8 +25033,20 @@ pub fn cut(series: &Series, bins: usize) -> Result<Series, FrameError> {
     // Per br-frankenpandas-21a14: pre-format bin labels ONCE (one per bin)
     // and compute bucket index in O(1) per value. Was O(n × bins) inner
     // scan plus n redundant String allocations.
+    // pandas widens the first bin's left edge down by 0.1% of the data range
+    // so the minimum value is included in the right-closed first interval, and
+    // formats edges to 3 significant digits (br-frankenpandas-4rfy1). Only the
+    // displayed label changes — bucket assignment below is unchanged.
+    let first_left = min_val - 0.001 * (max_val - min_val);
     let bin_labels: Vec<String> = (0..bins)
-        .map(|i| format!("({:.3}, {:.3}]", edges[i], edges[i + 1]))
+        .map(|i| {
+            let left = if i == 0 { first_left } else { edges[i] };
+            format!(
+                "({}, {}]",
+                cut_format_edge(left),
+                cut_format_edge(edges[i + 1])
+            )
+        })
         .collect();
 
     let labels: Vec<Scalar> = floats
@@ -25083,8 +25130,19 @@ pub fn qcut(series: &Series, q: usize) -> Result<Series, FrameError> {
     // Per br-frankenpandas-e00ce: pre-format labels ONCE (q of them) and
     // resolve the bucket via binary search (O(log q)) per value. Was
     // O(n × q) inner scan + n redundant String allocations.
+    // pandas widens qcut's first left edge down by 10^-precision (0.001 at the
+    // default precision 3) and formats edges to 3 significant digits
+    // (br-frankenpandas-4rfy1). Label-only; bucket assignment is unchanged.
+    let first_left = edges[0] - 0.001;
     let bin_labels: Vec<String> = (0..q)
-        .map(|i| format!("({:.3}, {:.3}]", edges[i], edges[i + 1]))
+        .map(|i| {
+            let left = if i == 0 { first_left } else { edges[i] };
+            format!(
+                "({}, {}]",
+                cut_format_edge(left),
+                cut_format_edge(edges[i + 1])
+            )
+        })
         .collect();
 
     let labels: Vec<Scalar> = floats
