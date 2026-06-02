@@ -1496,8 +1496,24 @@ def op_series_dt_to_timestamp(pd, payload: dict[str, Any]) -> dict[str, Any]:
     if left is None:
         raise OracleError("series_dt_to_timestamp requires left payload")
     series = fixture_series_from_payload(pd, left, "series_dt_to_timestamp")
+    how = "end" if str(payload.get("dt_how", "start")).lower() == "end" else "start"
+
+    def to_ts(s: Any) -> Any:
+        # FP treats a value as a Period and converts to a timestamp at the
+        # period boundary (start/end), formatted with a space separator.
+        # A value that already carries a clock time ("...T..") is a datetime,
+        # not a period: it is echoed verbatim when valid, NaT when malformed.
+        if not isinstance(s, str):
+            return float("nan")
+        if "T" in s:
+            return s if not pd.isna(pd.to_datetime(s, errors="coerce")) else float("nan")
+        try:
+            return str(pd.Period(s).to_timestamp(how=how))
+        except Exception:
+            return float("nan")
+
     try:
-        out = pd.to_datetime(series, errors="coerce")
+        out = series.apply(to_ts)
     except Exception as exc:
         raise OracleError(f"series_dt_to_timestamp failed: {exc}") from exc
     return {"expected_series": series_to_expected(out)}
