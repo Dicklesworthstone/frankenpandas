@@ -11403,3 +11403,120 @@ proptest! {
         prop_assert_eq!(total, expected, "groupby sum total {} != non-null-key value sum {}", total, expected);
     }
 }
+
+// =====================================================================
+// METAMORPHIC GAP COVERAGE — cumulative bounds, cumsum/sum cross-check,
+// drop_duplicates/unique cardinality (br-frankenpandas-1bgc1).
+// Each relation ties two independent code paths (or an op to its own
+// running invariant) so a wrong computation that stays self-consistent
+// on one op alone still gets caught.
+// =====================================================================
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(300))]
+
+    /// MR-CM1: cummax/cummin running-extremum invariants on a no-null numeric
+    /// series. `cummax` is non-decreasing, dominates the input elementwise
+    /// (`cummax[i] >= x[i]`), and equals the prefix maximum `max(x[0..=i])`;
+    /// `cummin` is the symmetric prefix minimum. The terminal element equals
+    /// the global max/min. Catches off-by-one prefix bugs and direction swaps.
+    #[test]
+    fn prop_cummax_cummin_are_prefix_extrema(series in arb_numeric_series("cumextrema", 12)) {
+        let vals = series.column().values();
+        if vals.is_empty() || vals.iter().any(|v| v.is_missing()) {
+            return Ok(());
+        }
+        let nums: Vec<f64> = vals.iter().filter_map(mm_f64).collect();
+        if nums.len() != vals.len() {
+            return Ok(());
+        }
+        let cmax = match series.cummax() { Ok(s) => s, Err(_) => return Ok(()) };
+        let cmin = match series.cummin() { Ok(s) => s, Err(_) => return Ok(()) };
+        let mx: Vec<f64> = cmax.column().values().iter().filter_map(mm_f64).collect();
+        let mn: Vec<f64> = cmin.column().values().iter().filter_map(mm_f64).collect();
+        prop_assert_eq!(mx.len(), nums.len());
+        prop_assert_eq!(mn.len(), nums.len());
+        let mut run_max = f64::NEG_INFINITY;
+        let mut run_min = f64::INFINITY;
+        for i in 0..nums.len() {
+            run_max = run_max.max(nums[i]);
+            run_min = run_min.min(nums[i]);
+            prop_assert!((mx[i] - run_max).abs() < 1e-9, "cummax[{}]={} != prefix max {}", i, mx[i], run_max);
+            prop_assert!((mn[i] - run_min).abs() < 1e-9, "cummin[{}]={} != prefix min {}", i, mn[i], run_min);
+            prop_assert!(mx[i] >= nums[i] - 1e-9, "cummax[{}]={} < x[{}]={}", i, mx[i], i, nums[i]);
+            prop_assert!(mn[i] <= nums[i] + 1e-9, "cummin[{}]={} > x[{}]={}", i, mn[i], i, nums[i]);
+            if i > 0 {
+                prop_assert!(mx[i] >= mx[i - 1] - 1e-9, "cummax not non-decreasing at {}", i);
+                prop_assert!(mn[i] <= mn[i - 1] + 1e-9, "cummin not non-increasing at {}", i);
+            }
+        }
+    }
+
+    /// MR-CS2: on a no-null numeric series the terminal element of `cumsum`
+    /// equals the scalar `sum`. The running-scan path and the reduction path
+    /// are independent implementations, so this is a strong cross-check that
+    /// neither drops or double-counts an element.
+    #[test]
+    fn prop_cumsum_terminal_equals_sum(series in arb_numeric_series("cumsumtotal", 12)) {
+        let vals = series.column().values();
+        if vals.is_empty() || vals.iter().any(|v| v.is_missing()) {
+            return Ok(());
+        }
+        let nums: Vec<f64> = vals.iter().filter_map(mm_f64).collect();
+        if nums.len() != vals.len() {
+            return Ok(());
+        }
+        let cs = match series.cumsum() { Ok(s) => s, Err(_) => return Ok(()) };
+        let terminal = match cs.column().values().last().and_then(mm_f64) {
+            Some(v) => v,
+            None => return Ok(()),
+        };
+        let total = match series.sum() { Ok(s) => mm_f64(&s), Err(_) => return Ok(()) };
+        let total = match total { Some(v) => v, None => return Ok(()) };
+        let tol = 1e-9 * (1.0 + terminal.abs().max(total.abs()));
+        prop_assert!(
+            (terminal - total).abs() <= tol,
+            "cumsum terminal {} != sum {}", terminal, total
+        );
+    }
+
+    /// MR-DD1: `drop_duplicates` is idempotent and never grows the series;
+    /// and on a no-null series its output equals `unique()` value-for-value
+    /// (two independent distinct-value paths, first-occurrence order).
+    ///
+    /// The unique() cross-check is gated on no-missing inputs deliberately:
+    /// `drop_duplicates` keys missing by `NullKind` (so `Null(Null)` and
+    /// `Null(NaN)` are distinct) while `unique()` collapses all missing into
+    /// one, so the two diverge on the (FP-only, see br-frankenpandas-9x4qi)
+    /// mixed-null-kind column that real pandas data can't represent.
+    /// Idempotence and length-non-increasing hold for ALL inputs.
+    #[test]
+    fn prop_drop_duplicates_idempotent_and_matches_unique(series in arb_numeric_series("ddunique", 14)) {
+        let vals = series.column().values().to_vec();
+        let original_len = vals.len();
+        let deduped = match series.drop_duplicates() { Ok(s) => s, Err(_) => return Ok(()) };
+        let dv = deduped.column().values().to_vec();
+        prop_assert!(dv.len() <= original_len, "drop_duplicates grew length");
+
+        // Idempotence holds regardless of nulls: re-deduping a deduped series
+        // is a no-op (its keys are already unique).
+        let again = match deduped.drop_duplicates() { Ok(s) => s, Err(_) => return Ok(()) };
+        let av = again.column().values();
+        prop_assert_eq!(av.len(), dv.len(), "drop_duplicates not idempotent (length)");
+        for (i, (a, b)) in av.iter().zip(dv.iter()).enumerate() {
+            let same = (a.is_missing() && b.is_missing()) || a == b;
+            prop_assert!(same, "drop_duplicates not idempotent at {}: {:?} vs {:?}", i, a, b);
+        }
+
+        // unique() cross-check: only on no-null series, where both paths agree
+        // exactly (cardinality and first-occurrence order).
+        if vals.iter().any(|v| v.is_missing()) {
+            return Ok(());
+        }
+        let uniq = series.unique();
+        prop_assert_eq!(dv.len(), uniq.len(), "drop_duplicates len {} != unique len {}", dv.len(), uniq.len());
+        for (i, (a, b)) in dv.iter().zip(uniq.iter()).enumerate() {
+            prop_assert!(a == b, "drop_duplicates[{}]={:?} != unique[{}]={:?}", i, a, i, b);
+        }
+    }
+}
