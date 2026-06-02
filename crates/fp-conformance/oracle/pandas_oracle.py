@@ -4482,11 +4482,11 @@ def op_series_str_join(pd, payload: dict[str, Any]) -> dict[str, Any]:
 
 def op_series_str_match(pd, payload: dict[str, Any]) -> dict[str, Any]:
     left = payload.get("left")
-    pattern = payload.get("str_pattern")
+    pattern = payload.get("regex_pattern", payload.get("str_pattern"))
     if left is None:
         raise OracleError("series_str_match requires left payload")
     if not isinstance(pattern, str):
-        raise OracleError("series_str_match str_pattern must be a string")
+        raise OracleError("series_str_match requires regex_pattern string")
     series = fixture_series_from_payload(pd, left, "series_str_match")
     try:
         out = series.str.match(pattern)
@@ -4497,11 +4497,11 @@ def op_series_str_match(pd, payload: dict[str, Any]) -> dict[str, Any]:
 
 def op_series_str_fullmatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
     left = payload.get("left")
-    pattern = payload.get("str_pattern")
+    pattern = payload.get("regex_pattern", payload.get("str_pattern"))
     if left is None:
         raise OracleError("series_str_fullmatch requires left payload")
     if not isinstance(pattern, str):
-        raise OracleError("series_str_fullmatch str_pattern must be a string")
+        raise OracleError("series_str_fullmatch requires regex_pattern string")
     series = fixture_series_from_payload(pd, left, "series_str_fullmatch")
     try:
         out = series.str.fullmatch(pattern)
@@ -4512,14 +4512,22 @@ def op_series_str_fullmatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
 
 def op_series_str_findall(pd, payload: dict[str, Any]) -> dict[str, Any]:
     left = payload.get("left")
-    pattern = payload.get("str_pattern")
+    pattern = payload.get("regex_pattern", payload.get("str_pattern"))
+    sep = payload.get("str_findall_sep", ",")
     if left is None:
         raise OracleError("series_str_findall requires left payload")
     if not isinstance(pattern, str):
-        raise OracleError("series_str_findall str_pattern must be a string")
+        raise OracleError("series_str_findall requires regex_pattern string")
     series = fixture_series_from_payload(pd, left, "series_str_findall")
     try:
-        out = series.str.findall(pattern)
+        # FP joins each element's matches with str_findall_sep into a string;
+        # an empty match list becomes missing (not an empty string).
+        raw = series.str.findall(pattern)
+        out = raw.apply(
+            lambda matches: (sep.join(matches) if matches else float("nan"))
+            if isinstance(matches, list)
+            else matches
+        )
     except Exception as exc:
         raise OracleError(f"series_str_findall failed: {exc}") from exc
     return {"expected_series": series_to_expected(out)}
@@ -6382,13 +6390,13 @@ def op_series_factorize(pd, payload: dict[str, Any]) -> dict[str, Any]:
 
 def op_series_astype(pd, payload: dict[str, Any]) -> dict[str, Any]:
     left = payload.get("left")
-    target_dtype = payload.get("astype_dtype")
+    target_dtype = payload.get("astype_dtype", payload.get("constructor_dtype"))
     errors = payload.get("astype_errors", "raise")
 
     if left is None:
         raise OracleError("series_astype requires left payload")
     if target_dtype is None:
-        raise OracleError("series_astype requires astype_dtype payload")
+        raise OracleError("series_astype requires astype_dtype/constructor_dtype payload")
 
     dtype_map = {
         "int64": "int64",
