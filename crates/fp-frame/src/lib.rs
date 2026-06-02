@@ -11774,6 +11774,27 @@ impl Series {
         }
     }
 
+    /// Spearman average-ranks for this series, but only when it has no
+    /// missing/non-numeric cells (and length >= 2).
+    ///
+    /// When complete, the dropped-row set in a pairwise Spearman is empty
+    /// regardless of the partner column, so the ranks are partner-independent
+    /// and can be precomputed once and reused across every pair — turning the
+    /// `O(N^2)` re-ranking in a correlation matrix into `O(N)`. Returns `None`
+    /// (forcing the exact per-pair path) when any cell would be dropped or the
+    /// series is too short, exactly where partner-independence breaks down.
+    pub(crate) fn spearman_ranks_if_complete(&self) -> Option<Vec<f64>> {
+        let vals = self.column().values();
+        if vals.len() < 2 {
+            return None;
+        }
+        let mut fvals = Vec::with_capacity(vals.len());
+        for v in vals {
+            fvals.push(Self::pairwise_numeric_value(v)?);
+        }
+        Some(Self::average_ranks(&fvals))
+    }
+
     /// Compute average ranks for a slice of values (used by Spearman).
     fn average_ranks(values: &[f64]) -> Vec<f64> {
         let n = values.len();
@@ -11799,7 +11820,7 @@ impl Series {
     }
 
     /// Compute Pearson correlation on two f64 slices.
-    fn pearson_on_slices(x: &[f64], y: &[f64]) -> Result<f64, FrameError> {
+    pub(crate) fn pearson_on_slices(x: &[f64], y: &[f64]) -> Result<f64, FrameError> {
         let n = x.len() as f64;
         let mean_x = x.iter().sum::<f64>() / n;
         let mean_y = y.iter().sum::<f64>() / n;
@@ -32363,6 +32384,24 @@ impl DataFrame {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
+        // Spearman fast path: precompute each fully-numeric column's average
+        // ranks once (O(N) rankings) instead of re-ranking both columns inside
+        // every pair (O(N^2) rankings). For a complete column the dropped-row
+        // set is empty regardless of the partner, so its ranks are reusable;
+        // `pearson_on_slices` on the precomputed ranks is bit-identical to
+        // `corr_spearman`, which ranks the same full columns and runs the same
+        // Pearson. Columns with any missing cell yield `None` and fall back to
+        // the exact per-pair `corr_spearman` (where ranks depend on both
+        // columns). Kendall keeps the per-pair path.
+        let spearman_ranks: Vec<Option<Vec<f64>>> = if method == "spearman" {
+            series_list
+                .iter()
+                .map(Series::spearman_ranks_if_complete)
+                .collect()
+        } else {
+            Vec::new()
+        };
+
         // Spearman and Kendall correlation matrices are exactly symmetric to the
         // last bit: spearman routes through `pearson_on_slices`, whose covariance
         // is the deviation sum `Σ(x-x̄)(y-ȳ)` (a single commutative product per
@@ -32377,9 +32416,17 @@ impl DataFrame {
             mat[i * n + i] = 1.0; // self-correlation
             for j in (i + 1)..n {
                 let val = match method {
-                    "spearman" => series_list[i]
-                        .corr_spearman(&series_list[j])
-                        .unwrap_or(f64::NAN),
+                    "spearman" => match (
+                        spearman_ranks.get(i).and_then(Option::as_ref),
+                        spearman_ranks.get(j).and_then(Option::as_ref),
+                    ) {
+                        (Some(ri), Some(rj)) => {
+                            Series::pearson_on_slices(ri, rj).unwrap_or(f64::NAN)
+                        }
+                        _ => series_list[i]
+                            .corr_spearman(&series_list[j])
+                            .unwrap_or(f64::NAN),
+                    },
                     "kendall" => series_list[i]
                         .corr_kendall(&series_list[j])
                         .unwrap_or(f64::NAN),
