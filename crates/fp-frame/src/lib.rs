@@ -24651,7 +24651,9 @@ pub struct ToTimedeltaOptions<'a> {
 /// - "1 days 02:03:04", "1d 2h 30m" (compound durations)
 /// - "02:03:04" (HH:MM:SS)
 /// - "5d", "3h", "30m", "45s" (unit suffixes)
-/// - Int64/Float64: interpreted as seconds by default
+/// - Int64/Float64: interpreted as nanoseconds by default (pandas parity);
+///   pass an explicit `unit` for other resolutions. Sub-ns floats truncate
+///   toward zero.
 ///
 /// Returns a Series with Timedelta64 scalars (nanoseconds).
 /// Missing/unparseable values become NaT.
@@ -24695,7 +24697,9 @@ pub fn to_timedelta_with_options(
                 if v.is_nan() || v.is_infinite() {
                     Scalar::Timedelta64(fp_types::Timedelta::NAT)
                 } else {
-                    let nanos = (*v * nanos_per_unit as f64).round() as i64;
+                    // pandas truncates sub-resolution nanoseconds toward zero
+                    // (to_timedelta(60.5)=60ns, (-1.9)=-1ns) — br-0caxj.
+                    let nanos = (*v * nanos_per_unit as f64) as i64;
                     Scalar::Timedelta64(nanos)
                 }
             }
@@ -24762,7 +24766,7 @@ pub fn to_timedelta_with_options(
 fn resolve_timedelta_unit(unit: Option<&str>) -> Result<i64, FrameError> {
     use fp_types::Timedelta;
     match unit {
-        None | Some("s") | Some("S") | Some("sec") | Some("second") | Some("seconds") => {
+        Some("s") | Some("S") | Some("sec") | Some("second") | Some("seconds") => {
             Ok(Timedelta::NANOS_PER_SEC)
         }
         Some("D") | Some("d") | Some("day") | Some("days") => Ok(Timedelta::NANOS_PER_DAY),
@@ -24776,7 +24780,9 @@ fn resolve_timedelta_unit(unit: Option<&str>) -> Result<i64, FrameError> {
         | Some("milliseconds") => Ok(Timedelta::NANOS_PER_MILLI),
         Some("us") | Some("U") | Some("micro") | Some("micros") | Some("microsecond")
         | Some("microseconds") => Ok(Timedelta::NANOS_PER_MICRO),
-        Some("ns") | Some("N") | Some("nano") | Some("nanos") | Some("nanosecond")
+        // pandas defaults bare numeric `to_timedelta` to nanoseconds (unit=None
+        // == 'ns'), not seconds — br-frankenpandas-0caxj.
+        None | Some("ns") | Some("N") | Some("nano") | Some("nanos") | Some("nanosecond")
         | Some("nanoseconds") => Ok(1),
         Some("W") | Some("w") | Some("week") | Some("weeks") => Ok(Timedelta::NANOS_PER_DAY * 7),
         Some(other) => Err(FrameError::CompatibilityRejected(format!(
@@ -85493,9 +85499,43 @@ mod tests {
             vec![Scalar::Int64(3661)], // 1h 1m 1s
         )
         .unwrap();
-        let result = super::to_timedelta(&s).unwrap();
+        // Explicit unit='s' (default is now nanoseconds — br-0caxj).
+        let result = super::to_timedelta_with_unit(&s, "s").unwrap();
         let expected_ns = 3661 * Timedelta::NANOS_PER_SEC;
         assert_eq!(result.values()[0], Scalar::Timedelta64(expected_ns));
+    }
+
+    #[test]
+    fn to_timedelta_bare_numeric_defaults_to_nanoseconds() {
+        // br-frankenpandas-0caxj: pandas to_timedelta(bare numeric) defaults to
+        // nanoseconds (not seconds), and floats truncate sub-ns toward zero.
+        // Verified against pandas 2.2.3:
+        //   to_timedelta([3661]) -> 3661 ns
+        //   to_timedelta([60.5, 86400.75, -1.9]) -> [60, 86400, -1] ns
+        let ints = Series::from_values(
+            "n",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(3661), Scalar::Int64(-5)],
+        )
+        .unwrap();
+        let r = super::to_timedelta(&ints).unwrap();
+        assert_eq!(r.values()[0], Scalar::Timedelta64(3661));
+        assert_eq!(r.values()[1], Scalar::Timedelta64(-5));
+
+        let floats = Series::from_values(
+            "f",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Float64(60.5),
+                Scalar::Float64(86400.75),
+                Scalar::Float64(-1.9),
+            ],
+        )
+        .unwrap();
+        let rf = super::to_timedelta(&floats).unwrap();
+        assert_eq!(rf.values()[0], Scalar::Timedelta64(60));
+        assert_eq!(rf.values()[1], Scalar::Timedelta64(86400));
+        assert_eq!(rf.values()[2], Scalar::Timedelta64(-1));
     }
 
     #[test]
@@ -85507,7 +85547,7 @@ mod tests {
             vec![Scalar::Int64(90061)], // 1 day + 1h 1m 1s
         )
         .unwrap();
-        let result = super::to_timedelta(&s).unwrap();
+        let result = super::to_timedelta_with_unit(&s, "s").unwrap();
         let expected_ns = 90061 * Timedelta::NANOS_PER_SEC;
         assert_eq!(result.values()[0], Scalar::Timedelta64(expected_ns));
     }
@@ -85521,7 +85561,7 @@ mod tests {
             vec![Scalar::Int64(-3661)], // -(1h 1m 1s)
         )
         .unwrap();
-        let result = super::to_timedelta(&s).unwrap();
+        let result = super::to_timedelta_with_unit(&s, "s").unwrap();
         let expected_ns = -3661 * Timedelta::NANOS_PER_SEC;
         assert_eq!(result.values()[0], Scalar::Timedelta64(expected_ns));
 

@@ -31,9 +31,9 @@
       { "kind": "int64", "value": 3 }
     ],
     "values": [
-      { "kind": "timedelta64", "value": -60000000000 },
+      { "kind": "timedelta64", "value": -60 },
       { "kind": "timedelta64", "value": -9223372036854775808 },
-      { "kind": "timedelta64", "value": -86400000000000 },
+      { "kind": "timedelta64", "value": -86400 },
       { "kind": "timedelta64", "value": -9223372036854775808 }
     ]
   }

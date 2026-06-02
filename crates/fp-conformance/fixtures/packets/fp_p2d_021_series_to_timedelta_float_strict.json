@@ -28,9 +28,9 @@
       { "kind": "int64", "value": 2 }
     ],
     "values": [
-      { "kind": "timedelta64", "value": 60500000000 },
-      { "kind": "timedelta64", "value": 3661000000000 },
-      { "kind": "timedelta64", "value": 86400750000000 }
+      { "kind": "timedelta64", "value": 60 },
+      { "kind": "timedelta64", "value": 3661 },
+      { "kind": "timedelta64", "value": 86400 }
     ]
   }
 }

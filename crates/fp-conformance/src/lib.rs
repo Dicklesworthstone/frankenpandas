@@ -27006,7 +27006,7 @@ test result: ok. 2 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; fini
 
     #[test]
     fn to_timedelta_int64_seconds_converts() {
-        use fp_frame::{Series, to_timedelta};
+        use fp_frame::{Series, to_timedelta_with_unit};
         use fp_index::IndexLabel;
         use fp_types::{NullKind, Scalar};
 
@@ -27025,7 +27025,8 @@ test result: ok. 2 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; fini
         )
         .unwrap();
 
-        let result = to_timedelta(&input).expect("to_timedelta should succeed");
+        // Explicit unit='s' (pandas default is nanoseconds — br-0caxj).
+        let result = to_timedelta_with_unit(&input, "s").expect("to_timedelta should succeed");
         assert_eq!(result.len(), 3);
 
         let values = result.values();
