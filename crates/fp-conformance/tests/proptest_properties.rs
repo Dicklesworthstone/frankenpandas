@@ -11520,3 +11520,131 @@ proptest! {
         }
     }
 }
+
+// =====================================================================
+// METAMORPHIC GAP COVERAGE — clip bounds, fillna completeness, shift
+// round-trip (br-frankenpandas-1bgc1 follow-on). Each is a range/identity
+// invariant on a transform whose own output should satisfy a property the
+// transform itself can check, independent of any reference fixture.
+// =====================================================================
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(300))]
+
+    /// MR-CLIP1: with finite bounds lo <= hi, every non-null output of
+    /// `clip(lo, hi)` lies in [lo, hi]; length and null positions are
+    /// preserved; values already inside the band are unchanged; and clip is
+    /// idempotent. Catches inverted/one-sided clamping.
+    #[test]
+    fn prop_clip_keeps_values_in_band_and_is_idempotent(
+        series in arb_numeric_series("clipband", 12),
+        a in -1e6_f64..1e6,
+        b in -1e6_f64..1e6,
+    ) {
+        let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+        let clipped = match series.clip(Some(lo), Some(hi)) { Ok(s) => s, Err(_) => return Ok(()) };
+        let inp = series.column().values();
+        let out = clipped.column().values();
+        prop_assert_eq!(out.len(), inp.len(), "clip changed length");
+        let tol = 1e-6 * (1.0 + lo.abs().max(hi.abs()));
+        for i in 0..inp.len() {
+            // Null positions stay null.
+            prop_assert_eq!(out[i].is_missing(), inp[i].is_missing(), "clip changed null-ness at {}", i);
+            if let Some(o) = mm_f64(&out[i]) {
+                prop_assert!(o >= lo - tol && o <= hi + tol, "clip[{}]={} outside [{},{}]", i, o, lo, hi);
+                // Values already inside the band must be untouched.
+                if let Some(x) = mm_f64(&inp[i]) {
+                    if x >= lo && x <= hi {
+                        prop_assert!((o - x).abs() <= tol, "clip altered in-band value at {}: {} -> {}", i, x, o);
+                    }
+                }
+            }
+        }
+        // Idempotence: clipping an already-clipped series is a no-op.
+        let twice = match clipped.clip(Some(lo), Some(hi)) { Ok(s) => s, Err(_) => return Ok(()) };
+        let tv = twice.column().values();
+        for i in 0..out.len() {
+            match (mm_f64(&out[i]), mm_f64(&tv[i])) {
+                (Some(x), Some(y)) => prop_assert!((x - y).abs() <= tol, "clip not idempotent at {}", i),
+                (None, None) => {}
+                _ => prop_assert!(false, "clip idempotence null mismatch at {}", i),
+            }
+        }
+    }
+
+    /// MR-FILL1: `fillna(v)` with a finite fill leaves NO missing values, never
+    /// changes length, leaves already-present values untouched, and is
+    /// idempotent (a second fill is a no-op). Catches fills that skip some
+    /// missing positions or corrupt present data.
+    #[test]
+    fn prop_fillna_removes_all_missing_and_preserves_present(
+        series in arb_numeric_series("fillna", 12),
+        fill in -1e6_f64..1e6,
+    ) {
+        let filled = match series.fillna(&Scalar::Float64(fill)) { Ok(s) => s, Err(_) => return Ok(()) };
+        let inp = series.column().values().to_vec();
+        let out = filled.column().values();
+        prop_assert_eq!(out.len(), inp.len(), "fillna changed length");
+        for i in 0..inp.len() {
+            prop_assert!(!out[i].is_missing(), "fillna left a missing value at {}", i);
+            // Present input values are carried through unchanged.
+            if let Some(x) = mm_f64(&inp[i]) {
+                let o = mm_f64(&out[i]).expect("filled present value is numeric");
+                let tol = 1e-9 * (1.0 + x.abs());
+                prop_assert!((o - x).abs() <= tol, "fillna altered present value at {}: {} -> {}", i, x, o);
+            }
+        }
+        // Idempotence: no missing remain, so a second fill changes nothing.
+        let again = match filled.fillna(&Scalar::Float64(fill)) { Ok(s) => s, Err(_) => return Ok(()) };
+        let av = again.column().values();
+        for i in 0..out.len() {
+            match (mm_f64(&out[i]), mm_f64(&av[i])) {
+                (Some(x), Some(y)) => prop_assert!((x - y).abs() <= 1e-9 * (1.0 + x.abs()), "fillna not idempotent at {}", i),
+                (None, None) => {}
+                _ => prop_assert!(false, "fillna idempotence mismatch at {}", i),
+            }
+        }
+    }
+
+    /// MR-SHIFT1: `shift(k).shift(-k)` restores the original values at the
+    /// interior positions that didn't fall off either end (the round-trip
+    /// overlap), for 1 <= k < len. The shifted-in boundary positions become
+    /// missing. Catches off-by-one and wrong-direction shift bugs.
+    #[test]
+    fn prop_shift_then_unshift_restores_interior(
+        series in arb_numeric_series("shiftrt", 12),
+        k in 1i64..6,
+    ) {
+        let inp = series.column().values().to_vec();
+        let n = inp.len() as i64;
+        if k >= n {
+            return Ok(());
+        }
+        let there = match series.shift(k) { Ok(s) => s, Err(_) => return Ok(()) };
+        let back = match there.shift(-k) { Ok(s) => s, Err(_) => return Ok(()) };
+        let out = back.column().values();
+        prop_assert_eq!(out.len(), inp.len(), "shift round-trip changed length");
+        let ku = k as usize;
+        let len = inp.len();
+        // Interior overlap after shift(k).shift(-k) is positions [0, len-k):
+        // those values survive the round trip; [len-k, len) are shifted-in NaN.
+        for i in 0..(len - ku) {
+            match (mm_f64(&inp[i]), mm_f64(&out[i])) {
+                (Some(x), Some(y)) => {
+                    let tol = 1e-9 * (1.0 + x.abs());
+                    prop_assert!((x - y).abs() <= tol, "shift round-trip altered interior at {}: {} -> {}", i, x, y);
+                }
+                (None, None) => {}
+                // input present but output missing (or vice versa) at an interior
+                // position is a real round-trip failure.
+                _ => prop_assert!(
+                    inp[i].is_missing() == out[i].is_missing(),
+                    "shift round-trip null mismatch at interior {}", i
+                ),
+            }
+        }
+        for i in (len - ku)..len {
+            prop_assert!(out[i].is_missing(), "shift round-trip tail {} should be missing", i);
+        }
+    }
+}
