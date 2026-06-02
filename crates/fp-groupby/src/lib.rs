@@ -360,7 +360,7 @@ fn emit_groupby_result<'a>(
         out_index.push(match label {
             Scalar::Int64(v) => IndexLabel::Int64(*v),
             Scalar::Utf8(v) => IndexLabel::Utf8(v.clone()),
-            Scalar::Bool(v) => IndexLabel::Utf8(v.to_string()),
+            Scalar::Bool(v) => IndexLabel::Utf8(if *v { "True" } else { "False" }.to_string()),
             Scalar::Null(NullKind::NaN)
             | Scalar::Null(NullKind::NaT)
             | Scalar::Null(NullKind::Null) => IndexLabel::Utf8("<null>".to_owned()),
@@ -524,7 +524,7 @@ fn groupby_sum_timedelta64(
         out_index.push(match label {
             Scalar::Int64(v) => IndexLabel::Int64(*v),
             Scalar::Utf8(v) => IndexLabel::Utf8(v.clone()),
-            Scalar::Bool(v) => IndexLabel::Utf8(v.to_string()),
+            Scalar::Bool(v) => IndexLabel::Utf8(if *v { "True" } else { "False" }.to_string()),
             Scalar::Null(NullKind::NaN)
             | Scalar::Null(NullKind::NaT)
             | Scalar::Null(NullKind::Null) => IndexLabel::Utf8("<null>".to_owned()),
@@ -829,7 +829,7 @@ pub fn groupby_agg(
         out_index.push(match label {
             Scalar::Int64(v) => IndexLabel::Int64(*v),
             Scalar::Utf8(v) => IndexLabel::Utf8(v.clone()),
-            Scalar::Bool(v) => IndexLabel::Utf8(v.to_string()),
+            Scalar::Bool(v) => IndexLabel::Utf8(if *v { "True" } else { "False" }.to_string()),
             Scalar::Null(NullKind::NaN | NullKind::NaT | NullKind::Null) => {
                 IndexLabel::Utf8("<null>".to_owned())
             }

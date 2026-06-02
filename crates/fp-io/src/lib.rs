@@ -3131,7 +3131,7 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
                 Scalar::Int64(v) => fp_index::IndexLabel::Int64(v),
                 Scalar::Utf8(v) => fp_index::IndexLabel::Utf8(v),
                 Scalar::Float64(v) => fp_index::IndexLabel::Utf8(v.to_string()),
-                Scalar::Bool(v) => fp_index::IndexLabel::Utf8(v.to_string()),
+                Scalar::Bool(v) => fp_index::IndexLabel::Utf8(if matches!(v, true) { "True" } else { "False" }.to_string()),
                 Scalar::Null(_) => fp_index::IndexLabel::Utf8("<null>".to_owned()),
                 Scalar::Timedelta64(v) => {
                     if v == Timedelta::NAT {
@@ -5245,7 +5245,7 @@ fn scalar_to_index_label(scalar: Scalar) -> IndexLabel {
             IndexLabel::Int64(v as i64)
         }
         Scalar::Float64(v) => IndexLabel::Utf8(v.to_string()),
-        Scalar::Bool(b) => IndexLabel::Utf8(b.to_string()),
+        Scalar::Bool(b) => IndexLabel::Utf8(if matches!(b, true) { "True" } else { "False" }.to_string()),
         _ => IndexLabel::Utf8(String::new()),
     }
 }
@@ -9040,7 +9040,7 @@ fn promote_column_to_index(frame: &DataFrame, col_name: &str) -> Result<DataFram
             Scalar::Int64(i) => IndexLabel::Int64(*i),
             Scalar::Utf8(s) => IndexLabel::Utf8(s.clone()),
             Scalar::Float64(f) if !f.is_nan() => IndexLabel::Utf8(f.to_string()),
-            Scalar::Bool(b) => IndexLabel::Utf8(b.to_string()),
+            Scalar::Bool(b) => IndexLabel::Utf8(if matches!(b, true) { "True" } else { "False" }.to_string()),
             Scalar::Timedelta64(ns) => IndexLabel::Timedelta64(*ns),
             _ => IndexLabel::Utf8("NaN".to_owned()),
         })
