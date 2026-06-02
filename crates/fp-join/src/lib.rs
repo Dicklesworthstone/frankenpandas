@@ -1044,10 +1044,18 @@ pub fn merge_dataframes_on_with_options(
     };
 
     // Compute row position mappings.
-    let mut left_positions = Vec::<Option<usize>>::new();
-    let mut right_positions = Vec::<Option<usize>>::new();
+    let row_capacity = match join_type {
+        JoinType::Inner => left_keys.len().min(right_keys.len()),
+        JoinType::Left => left_keys.len(),
+        JoinType::Right => right_keys.len(),
+        JoinType::Outer => left_keys.len().saturating_add(right_keys.len()),
+        JoinType::Cross => left_keys.len().saturating_mul(right_keys.len()),
+    };
+    let mut left_positions = Vec::<Option<usize>>::with_capacity(row_capacity);
+    let mut right_positions = Vec::<Option<usize>>::with_capacity(row_capacity);
     let needs_key_order = sort || matches!(join_type, JoinType::Outer);
-    let mut out_row_keys = needs_key_order.then(Vec::<CompositeJoinKey>::new);
+    let mut out_row_keys =
+        needs_key_order.then(|| Vec::<CompositeJoinKey>::with_capacity(row_capacity));
 
     match join_type {
         JoinType::Inner | JoinType::Left | JoinType::Outer => {
