@@ -2051,6 +2051,12 @@ fn align_union_sorted_unique(left: &Index, right: &Index) -> AlignmentPlan {
     debug_assert!(!left.has_duplicates());
     debug_assert!(!right.has_duplicates());
 
+    // Common AACE path: sorted, unique indexes can produce the same sorted
+    // outer union as the BTreeSet fallback with a two-cursor merge.
+    if left.is_sorted() && right.is_sorted() {
+        return align_union_merge_sorted(left, right);
+    }
+
     let left_map: HashMap<IndexLabel, usize> = left
         .labels()
         .iter()
@@ -2083,6 +2089,65 @@ fn align_union_sorted_unique(left: &Index, right: &Index) -> AlignmentPlan {
         .iter()
         .map(|label| right_map.get(label).copied())
         .collect();
+
+    let mut union_index = Index::new(union_labels);
+    if left.name() == right.name() {
+        union_index = union_index.set_names(left.name());
+    }
+
+    AlignmentPlan {
+        union_index,
+        left_positions,
+        right_positions,
+    }
+}
+
+fn align_union_merge_sorted(left: &Index, right: &Index) -> AlignmentPlan {
+    let left_labels = left.labels();
+    let right_labels = right.labels();
+    let cap = left_labels.len() + right_labels.len();
+    let mut union_labels = Vec::with_capacity(cap);
+    let mut left_positions = Vec::with_capacity(cap);
+    let mut right_positions = Vec::with_capacity(cap);
+
+    let mut left_cursor = 0;
+    let mut right_cursor = 0;
+    while left_cursor < left_labels.len() && right_cursor < right_labels.len() {
+        match left_labels[left_cursor].cmp(&right_labels[right_cursor]) {
+            std::cmp::Ordering::Less => {
+                union_labels.push(left_labels[left_cursor].clone());
+                left_positions.push(Some(left_cursor));
+                right_positions.push(None);
+                left_cursor += 1;
+            }
+            std::cmp::Ordering::Greater => {
+                union_labels.push(right_labels[right_cursor].clone());
+                left_positions.push(None);
+                right_positions.push(Some(right_cursor));
+                right_cursor += 1;
+            }
+            std::cmp::Ordering::Equal => {
+                union_labels.push(left_labels[left_cursor].clone());
+                left_positions.push(Some(left_cursor));
+                right_positions.push(Some(right_cursor));
+                left_cursor += 1;
+                right_cursor += 1;
+            }
+        }
+    }
+
+    while left_cursor < left_labels.len() {
+        union_labels.push(left_labels[left_cursor].clone());
+        left_positions.push(Some(left_cursor));
+        right_positions.push(None);
+        left_cursor += 1;
+    }
+    while right_cursor < right_labels.len() {
+        union_labels.push(right_labels[right_cursor].clone());
+        left_positions.push(None);
+        right_positions.push(Some(right_cursor));
+        right_cursor += 1;
+    }
 
     let mut union_index = Index::new(union_labels);
     if left.name() == right.name() {
@@ -44525,7 +44590,7 @@ mod tests {
     use super::{
         CsvQuoting, DataFrame, DataFrameColumnInput, DataFrameCsvReadOptions,
         DataFrameDictAxisLabels, DropNaHow, DuplicateKeep, FrameError, IndexLabel, Series,
-        TzAmbiguousPolicy, TzLocalizeOptions, TzNonexistentPolicy, cut,
+        TzAmbiguousPolicy, TzLocalizeOptions, TzNonexistentPolicy, align_union_sorted_unique, cut,
         datetime64_label_from_naive, index_to_frame, index_to_series, parse_datetime64_nanos,
         parse_naive_datetime_value, qcut, to_numeric,
     };
@@ -44659,6 +44724,50 @@ mod tests {
                 Scalar::Float64(34.0)
             ]
         );
+    }
+
+    #[test]
+    fn sorted_unique_union_alignment_preserves_positions_and_name() {
+        let left =
+            Index::new(vec![0_i64.into(), 2_i64.into(), 4_i64.into()]).rename_index(Some("idx"));
+        let right =
+            Index::new(vec![1_i64.into(), 2_i64.into(), 5_i64.into()]).rename_index(Some("idx"));
+
+        let plan = align_union_sorted_unique(&left, &right);
+
+        assert_eq!(
+            plan.union_index.labels(),
+            &[
+                0_i64.into(),
+                1_i64.into(),
+                2_i64.into(),
+                4_i64.into(),
+                5_i64.into()
+            ]
+        );
+        assert_eq!(
+            plan.left_positions,
+            vec![Some(0), None, Some(1), Some(2), None]
+        );
+        assert_eq!(
+            plan.right_positions,
+            vec![None, Some(0), Some(1), None, Some(2)]
+        );
+        assert_eq!(plan.union_index.name(), Some("idx"));
+    }
+
+    #[test]
+    fn sorted_unique_union_alignment_drops_mismatched_names() {
+        let left = Index::new(vec![0_i64.into(), 2_i64.into()]).rename_index(Some("left_idx"));
+        let right = Index::new(vec![1_i64.into(), 2_i64.into()]).rename_index(Some("right_idx"));
+
+        let plan = align_union_sorted_unique(&left, &right);
+
+        assert_eq!(
+            plan.union_index.labels(),
+            &[0_i64.into(), 1_i64.into(), 2_i64.into()]
+        );
+        assert_eq!(plan.union_index.name(), None);
     }
 
     #[test]
@@ -63454,6 +63563,38 @@ mod tests {
                 Scalar::Float64(30.0)
             ]
         );
+    }
+
+    #[test]
+    fn series_add_fill_sorted_unique_preserves_shared_index_name()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let s1 = Series::new(
+            "a",
+            Index::new(vec![0_i64.into(), 2_i64.into()]).rename_index(Some("idx")),
+            Column::from_values(vec![Scalar::Float64(10.0), Scalar::Float64(20.0)])?,
+        )?;
+        let s2 = Series::new(
+            "b",
+            Index::new(vec![1_i64.into(), 2_i64.into()]).rename_index(Some("idx")),
+            Column::from_values(vec![Scalar::Float64(1.0), Scalar::Float64(2.0)])?,
+        )?;
+
+        let result = s1.add_fill(&s2, 0.0)?;
+
+        assert_eq!(
+            result.index().labels(),
+            &[0_i64.into(), 1_i64.into(), 2_i64.into()]
+        );
+        assert_eq!(result.index().name(), Some("idx"));
+        assert_eq!(
+            result.values(),
+            &[
+                Scalar::Float64(10.0),
+                Scalar::Float64(1.0),
+                Scalar::Float64(22.0)
+            ]
+        );
+        Ok(())
     }
 
     #[test]

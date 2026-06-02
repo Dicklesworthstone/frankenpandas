@@ -11,13 +11,14 @@
 //!   samply record ./target/release-perf/examples/perf_profile drop_duplicates 100000 200
 //!
 //! Args: <scenario> <n_rows> <iterations>
-//!   scenario ∈ { drop_duplicates, sort_single, filter_bool, inner_join }
+//!   scenario ∈ { drop_duplicates, sort_single, filter_bool, inner_join, series_add, series_add_align }
 
 use std::{collections::BTreeMap, time::Instant};
 
 use fp_frame::{DataFrame, Series};
 use fp_index::{DuplicateKeep, Index, IndexLabel};
 use fp_join::{JoinType, merge_dataframes};
+use fp_runtime::{EvidenceLedger, RuntimePolicy};
 use fp_types::Scalar;
 
 /// Two Float64 Series whose Int64 indexes overlap but are shifted by one
@@ -142,11 +143,25 @@ fn run_golden(scenario: &str, n: usize) {
             let left = build_join_frame("left_value", n, 512, 7);
             let right = build_join_frame("right_value", n, 512, 13);
             let out = merge_dataframes(&left, &right, "id", JoinType::Inner).expect("join");
-            DataFrame::new_with_column_order(out.index, out.columns, out.column_order).expect("join golden frame")
+            DataFrame::new_with_column_order(out.index, out.columns, out.column_order)
+                .expect("join golden frame")
         }
         "series_add" => {
             let (left, right) = build_series_pair(n);
             let out = left.add(&right).expect("series add");
+            return print!("{}", golden_dump_series(&out));
+        }
+        "series_add_align" => {
+            let (left, right) = build_series_pair(n);
+            let policy = RuntimePolicy::strict();
+            let mut ledger = EvidenceLedger::new();
+            let out = match left.add_with_policy(&right, &policy, &mut ledger) {
+                Ok(out) => out,
+                Err(err) => {
+                    eprintln!("series add align golden failed: {err}");
+                    std::process::exit(1);
+                }
+            };
             return print!("{}", golden_dump_series(&out));
         }
         other => {
@@ -215,6 +230,21 @@ fn main() {
             let (left, right) = build_series_pair(n);
             for _ in 0..iters {
                 let out = left.add(&right).expect("series add");
+                sink = sink.wrapping_add(out.len());
+            }
+        }
+        "series_add_align" => {
+            let (left, right) = build_series_pair(n);
+            let policy = RuntimePolicy::strict();
+            for _ in 0..iters {
+                let mut ledger = EvidenceLedger::new();
+                let out = match left.add_with_policy(&right, &policy, &mut ledger) {
+                    Ok(out) => out,
+                    Err(err) => {
+                        eprintln!("series add align failed: {err}");
+                        std::process::exit(1);
+                    }
+                };
                 sink = sink.wrapping_add(out.len());
             }
         }
