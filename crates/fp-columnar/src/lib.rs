@@ -1197,8 +1197,9 @@ impl Column {
     /// groupby row selection). Because every gathered value originates from
     /// `self` it already matches `self.dtype` (no coercion needed), so this
     /// skips the dtype-coercion and object-bucket detection scans that
-    /// `Column::new` performs, folding the missing-normalization and validity
-    /// rebuild into a single pass.
+    /// `Column::new` performs. All-valid source columns clone values directly
+    /// and emit an all-valid mask; missing-bearing columns fold the
+    /// missing-normalization and validity rebuild into a single pass.
     ///
     /// The output is bit-for-bit identical to
     /// `Column::new(self.dtype(), positions.iter().map(|&p| self.values[p].clone()).collect())`
@@ -1214,6 +1215,18 @@ impl Column {
     #[must_use]
     pub fn take_positions(&self, positions: &[usize]) -> Self {
         let n = positions.len();
+        if self.validity.all() {
+            let values = positions
+                .iter()
+                .map(|&pos| self.values[pos].clone())
+                .collect();
+            return Self {
+                dtype: self.dtype,
+                values,
+                validity: ValidityMask::all_valid(n),
+            };
+        }
+
         let mut values = Vec::with_capacity(n);
         let mut words = vec![0_u64; n.div_ceil(64)];
         for (out_idx, &pos) in positions.iter().enumerate() {
