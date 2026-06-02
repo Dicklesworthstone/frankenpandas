@@ -32,6 +32,13 @@ class OracleError(Exception):
         return self.message
 
 
+# Module-level handle to the resolved pandas module. Set once in `main()` after
+# `setup_pandas` so the scalar (de)serializers can construct/inspect typed
+# temporal scalars (Timestamp/Timedelta) without threading `pd` through every
+# op handler. Stays `None` until setup runs (serializers degrade gracefully).
+_PD: Any = None
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="FrankenPandas pandas oracle adapter")
     parser.add_argument("--legacy-root", required=True, help="Path to legacy pandas root")
@@ -175,6 +182,16 @@ def scalar_from_json(value: dict[str, Any]) -> Any:
         return float(raw)
     if kind == "utf8":
         return str(raw)
+    # timedelta64 carries integer nanoseconds (matching Rust
+    # `Scalar::Timedelta64`). Returning a native pandas Timedelta lets the many
+    # `pd.Series(values, ...)` builders auto-infer timedelta64[ns] dtype
+    # without threading an explicit `dtype=`. (datetime64 is intentionally
+    # unsupported as an input kind: no fixture uses it, and the datetime
+    # contract is utf8 — see scalar_to_json.)
+    if kind == "timedelta64":
+        if _PD is None:
+            raise OracleError("pandas not initialized for timedelta scalar parse")
+        return _PD.Timedelta(int(raw))
     raise OracleError(f"unsupported scalar kind: {kind!r}")
 
 
@@ -183,6 +200,25 @@ def scalar_is_pandas_extension_missing(value: Any) -> bool:
 
 
 def scalar_to_json(value: Any) -> dict[str, Any]:
+    # Timedelta scalars must be detected BEFORE the `.item()` coercion below:
+    # a numpy timedelta64[ns] `.item()` returns a bare `int`, which would
+    # mis-serialize as `int64` and lose the dtype. pandas Series iteration
+    # yields `Timedelta` (no `.item()`), which would otherwise fall through to
+    # the `str(value)` utf8 fallback. Both map to the integer-nanosecond
+    # `timedelta64` form matching the Rust `Scalar::Timedelta64`.
+    #
+    # NOTE: `Timestamp`/datetime64 are deliberately NOT intercepted here — the
+    # established (conformance-green) contract for datetime-producing ops
+    # (dt.floor/ceil/round, to_timestamp, csv parse_dates) is the utf8 string
+    # representation, and no fixture uses a `datetime64` value kind. Routing
+    # them through the typed branch regresses those ops.
+    type_name = type(value).__name__
+    if type_name in ("Timedelta", "timedelta64"):
+        if _PD is not None and bool(_PD.isna(value)):
+            return {"kind": "null", "value": "null"}
+        ns = _PD.Timedelta(value).value if _PD is not None else getattr(value, "value", None)
+        if ns is not None:
+            return {"kind": "timedelta64", "value": int(ns)}
     if hasattr(value, "item") and callable(value.item):
         try:
             value = value.item()
@@ -7198,6 +7234,8 @@ def main() -> int:
     pd = None
     try:
         pd = setup_pandas(args)
+        global _PD
+        _PD = pd
         try:
             payload = json.load(sys.stdin)
         except json.JSONDecodeError as exc:
