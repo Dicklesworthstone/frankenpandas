@@ -983,20 +983,12 @@ pub fn cast_scalar_owned(value: Scalar, target: DType) -> Result<Scalar, TypeErr
     match target {
         DType::Null => Ok(Scalar::Null(NullKind::Null)),
         DType::Bool | DType::BoolNullable => match &value {
-            Scalar::Int64(v) => match *v {
-                0 => Ok(Scalar::Bool(false)),
-                1 => Ok(Scalar::Bool(true)),
-                _ => Err(TypeError::InvalidBoolInt { value: *v }),
-            },
-            Scalar::Float64(v) => {
-                if *v == 0.0 {
-                    Ok(Scalar::Bool(false))
-                } else if *v == 1.0 {
-                    Ok(Scalar::Bool(true))
-                } else {
-                    Err(TypeError::InvalidBoolFloat { value: *v })
-                }
-            }
+            // pandas astype(bool): zero -> False, ANY nonzero -> True (it does
+            // not restrict to 0/1). e.g. astype(bool) of -3 / 2.5 is True.
+            Scalar::Int64(v) => Ok(Scalar::Bool(*v != 0)),
+            // 0.0 and -0.0 -> False; every other value, INCLUDING NaN, -> True
+            // (NaN != 0.0 is true), matching numpy/pandas truthiness.
+            Scalar::Float64(v) => Ok(Scalar::Bool(*v != 0.0)),
             _ => Err(TypeError::InvalidCast { from, to: target }),
         },
         DType::Int64 | DType::Int64Nullable => match &value {
@@ -4701,6 +4693,36 @@ mod tests {
         // Int64Nullable -> Int64 is also identity
         let result2 = cast_scalar(&val, DType::Int64).unwrap();
         assert_eq!(result2, Scalar::Int64(42));
+    }
+
+    #[test]
+    fn cast_to_bool_uses_pandas_nonzero_truthiness() {
+        // pandas astype(bool): zero -> False, any nonzero -> True (not just 0/1),
+        // -0.0 -> False. Verified vs live pandas 2.2.3. (NaN is intercepted as
+        // missing upstream by FP's NaN=missing model, so NaN->bool yields a null
+        // rather than pandas' numpy True; that edge is tracked separately.)
+        let cases_int: &[(i64, bool)] = &[(0, false), (1, true), (-3, true), (2, true)];
+        for (v, expected) in cases_int {
+            assert_eq!(
+                cast_scalar(&Scalar::Int64(*v), DType::Bool).unwrap(),
+                Scalar::Bool(*expected),
+                "int {v} -> bool"
+            );
+        }
+        let cases_float: &[(f64, bool)] = &[
+            (0.0, false),
+            (-0.0, false),
+            (0.1, true),
+            (2.5, true),
+            (1.0, true),
+        ];
+        for (v, expected) in cases_float {
+            assert_eq!(
+                cast_scalar(&Scalar::Float64(*v), DType::Bool).unwrap(),
+                Scalar::Bool(*expected),
+                "float {v} -> bool"
+            );
+        }
     }
 
     #[test]
