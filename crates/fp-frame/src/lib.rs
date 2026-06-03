@@ -752,7 +752,26 @@ struct IsinIndex<'a> {
     datetimes: HashSet<i64>,
     periods: HashSet<i64>,
     intervals: HashSet<(u64, u64, fp_types::IntervalClosed)>,
-    any_missing: bool,
+    // Per br-frankenpandas: pandas isin matches a missing value ONLY against a
+    // test value of the SAME missing kind — None (Null) ≠ np.nan (NaN) ≠ NaT.
+    // e.g. Int64 NA matches pd.NA but not np.nan; float NaN matches np.nan but
+    // not None; object None/nan/NaT are mutually distinct. So we track WHICH
+    // NullKinds appear in the needles, not just "any missing present".
+    missing_kinds: HashSet<NullKind>,
+}
+
+/// The missing-value kind a Scalar carries, or None if it is not missing.
+/// Mirrors `scalar_key_allow_missing`'s null normalization (Float64(NaN)->NaN,
+/// Timedelta/Datetime NAT and Period MIN -> NaT, Null(k)->k).
+fn isin_null_kind(v: &Scalar) -> Option<NullKind> {
+    match v {
+        Scalar::Null(k) => Some(*k),
+        Scalar::Float64(f) if f.is_nan() => Some(NullKind::NaN),
+        Scalar::Timedelta64(t) if *t == fp_types::Timedelta::NAT => Some(NullKind::NaT),
+        Scalar::Datetime64(t) if *t == fp_types::Timestamp::NAT => Some(NullKind::NaT),
+        Scalar::Period(p) if *p == i64::MIN => Some(NullKind::NaT),
+        _ => None,
+    }
 }
 
 impl<'a> IsinIndex<'a> {
@@ -766,11 +785,11 @@ impl<'a> IsinIndex<'a> {
             datetimes: HashSet::new(),
             periods: HashSet::new(),
             intervals: HashSet::new(),
-            any_missing: false,
+            missing_kinds: HashSet::new(),
         };
         for tv in test_values {
-            if tv.is_missing() {
-                idx.any_missing = true;
+            if let Some(kind) = isin_null_kind(tv) {
+                idx.missing_kinds.insert(kind);
                 continue;
             }
             match tv {
@@ -810,7 +829,9 @@ impl<'a> IsinIndex<'a> {
 
     fn contains(&self, value: &Scalar) -> bool {
         if value.is_missing() {
-            return self.any_missing;
+            // Kind-sensitive: a missing value matches only if a needle of the
+            // SAME NullKind was supplied (pandas: None/NaN/NaT are distinct).
+            return isin_null_kind(value).is_some_and(|k| self.missing_kinds.contains(&k));
         }
         match value {
             Scalar::Int64(i) => {
@@ -53973,17 +53994,25 @@ mod tests {
         )
         .unwrap();
 
-        // NaN not in test values -> False for null element
+        // No missing in test values -> False for the null element.
         let result = s.isin(&[Scalar::Int64(1)]).unwrap();
         assert_eq!(result.values()[0], Scalar::Bool(true));
         assert_eq!(result.values()[1], Scalar::Bool(false));
         assert_eq!(result.values()[2], Scalar::Bool(false));
 
-        // NaN in test values -> True for null element
-        let result_with_nan = s
+        // Per br-frankenpandas: pandas isin is null-KIND-sensitive. A Null
+        // (None/pd.NA-kind) value is NOT matched by a NaN-kind needle —
+        // verified vs live pandas 2.2.3: Int64 NA .isin([np.nan]) is all False.
+        let result_wrong_kind = s
             .isin(&[Scalar::Int64(1), Scalar::Null(NullKind::NaN)])
             .unwrap();
-        assert_eq!(result_with_nan.values()[1], Scalar::Bool(true));
+        assert_eq!(result_wrong_kind.values()[1], Scalar::Bool(false));
+
+        // A same-kind (Null) needle DOES match the Null value.
+        let result_same_kind = s
+            .isin(&[Scalar::Int64(1), Scalar::Null(NullKind::Null)])
+            .unwrap();
+        assert_eq!(result_same_kind.values()[1], Scalar::Bool(true));
     }
 
     #[test]
