@@ -1,0 +1,161 @@
+profile_target=/data/tmp/cargo-target-blackthrush-azu2u-rchbench/release-perf/examples/perf_profile
+
+warning: 216	library/core/src/num/imp/flt2dec/mod.rs: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-blackthrush-azu2u-rchbench/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-blackthrush-azu2u-rchbench/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-blackthrush-azu2u-rchbench/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-blackthrush-azu2u-rchbench/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-blackthrush-azu2u-rchbench/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-blackthrush-azu2u-rchbench/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-blackthrush-azu2u-rchbench/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-blackthrush-azu2u-rchbench/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-blackthrush-azu2u-rchbench/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-blackthrush-azu2u-rchbench/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-blackthrush-azu2u-rchbench/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-blackthrush-azu2u-rchbench/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-blackthrush-azu2u-rchbench/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-blackthrush-azu2u-rchbench/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-blackthrush-azu2u-rchbench/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-blackthrush-azu2u-rchbench/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-blackthrush-azu2u-rchbench/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-blackthrush-azu2u-rchbench/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-blackthrush-azu2u-rchbench/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-blackthrush-azu2u-rchbench/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+warning: 24	../sysdeps/unix/sysv/linux/brk_call.h: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-blackthrush-azu2u-rchbench/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-blackthrush-azu2u-rchbench/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-blackthrush-azu2u-rchbench/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-blackthrush-azu2u-rchbench/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-blackthrush-azu2u-rchbench/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-blackthrush-azu2u-rchbench/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-blackthrush-azu2u-rchbench/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-blackthrush-azu2u-rchbench/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-blackthrush-azu2u-rchbench/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-blackthrush-azu2u-rchbench/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-blackthrush-azu2u-rchbench/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-blackthrush-azu2u-rchbench/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-blackthrush-azu2u-rchbench/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-blackthrush-azu2u-rchbench/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-blackthrush-azu2u-rchbench/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-blackthrush-azu2u-rchbench/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-blackthrush-azu2u-rchbench/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-blackthrush-azu2u-rchbench/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-blackthrush-azu2u-rchbench/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+warning: 492	../sysdeps/x86_64/multiarch/memmove-vec-unaligned-erms.S: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-blackthrush-azu2u-rchbench/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-blackthrush-azu2u-rchbench/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-blackthrush-azu2u-rchbench/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-blackthrush-azu2u-rchbench/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-blackthrush-azu2u-rchbench/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-blackthrush-azu2u-rchbench/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-blackthrush-azu2u-rchbench/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-blackthrush-azu2u-rchbench/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-blackthrush-azu2u-rchbench/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-blackthrush-azu2u-rchbench/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-blackthrush-azu2u-rchbench/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+program stderr:
+perf_profile: scenario=csv_read n=100000 iters=500
+perf_profile: done 500 iters in 30.981s (61.961 ms/iter), sink=50000000

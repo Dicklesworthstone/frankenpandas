@@ -650,12 +650,10 @@ fn parse_i64_ascii(field: &[u8]) -> Option<i64> {
 }
 
 fn parse_f64_csv_number(field: &[u8]) -> Option<f64> {
-    if !field.is_ascii() {
-        return None;
-    }
     match fast_float2::parse::<f64, _>(field) {
         Ok(value) => Some(value),
-        Err(_) => std::str::from_utf8(field).ok()?.parse::<f64>().ok(),
+        Err(_) if field.is_ascii() => std::str::from_utf8(field).ok()?.parse::<f64>().ok(),
+        Err(_) => None,
     }
 }
 
