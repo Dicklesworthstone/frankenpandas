@@ -3250,28 +3250,19 @@ impl Series {
                         ArithmeticOp::Add => fill_value + r,
                         ArithmeticOp::Sub => fill_value - r,
                         ArithmeticOp::Mul => fill_value * r,
-                        ArithmeticOp::Div => {
-                            if r == 0.0 {
-                                f64::NAN
-                            } else {
-                                fill_value / r
-                            }
-                        }
-                        ArithmeticOp::Mod => {
-                            if r == 0.0 {
-                                f64::NAN
-                            } else {
-                                fill_value % r
-                            }
-                        }
+                        // Per br-frankenpandas: pandas div/floordiv by zero give
+                        // +/-inf (sign of the numerator), NOT NaN — only 0/0 is
+                        // NaN. Rust IEEE division already produces inf/-inf/nan,
+                        // so do NOT special-case a zero divisor. (Mod by zero IS
+                        // NaN in both pandas and Rust.)
+                        ArithmeticOp::Div => fill_value / r,
+                        // pandas mod takes the sign of the DIVISOR (floored
+                        // remainder), unlike Rust's % which takes the dividend's
+                        // sign: 3 % -2 == -1, not 1. Use the floored identity
+                        // l - floor(l/r)*r (also yields NaN for a zero divisor).
+                        ArithmeticOp::Mod => fill_value - (fill_value / r).floor() * r,
                         ArithmeticOp::Pow => fill_value.powf(r),
-                        ArithmeticOp::FloorDiv => {
-                            if r == 0.0 {
-                                f64::NAN
-                            } else {
-                                (fill_value / r).floor()
-                            }
-                        }
+                        ArithmeticOp::FloorDiv => (fill_value / r).floor(),
                     };
                     Scalar::Float64(v)
                 }
@@ -3281,28 +3272,12 @@ impl Series {
                         ArithmeticOp::Add => l + fill_value,
                         ArithmeticOp::Sub => l - fill_value,
                         ArithmeticOp::Mul => l * fill_value,
-                        ArithmeticOp::Div => {
-                            if fill_value == 0.0 {
-                                f64::NAN
-                            } else {
-                                l / fill_value
-                            }
-                        }
-                        ArithmeticOp::Mod => {
-                            if fill_value == 0.0 {
-                                f64::NAN
-                            } else {
-                                l % fill_value
-                            }
-                        }
+                        // div/floordiv by zero -> +/-inf (numerator sign), 0/0 ->
+                        // NaN; rely on Rust IEEE division (see (true,false) arm).
+                        ArithmeticOp::Div => l / fill_value,
+                        ArithmeticOp::Mod => l - (l / fill_value).floor() * fill_value,
                         ArithmeticOp::Pow => l.powf(fill_value),
-                        ArithmeticOp::FloorDiv => {
-                            if fill_value == 0.0 {
-                                f64::NAN
-                            } else {
-                                (l / fill_value).floor()
-                            }
-                        }
+                        ArithmeticOp::FloorDiv => (l / fill_value).floor(),
                     };
                     Scalar::Float64(v)
                 }
@@ -3313,28 +3288,12 @@ impl Series {
                         ArithmeticOp::Add => l + r,
                         ArithmeticOp::Sub => l - r,
                         ArithmeticOp::Mul => l * r,
-                        ArithmeticOp::Div => {
-                            if r == 0.0 {
-                                f64::NAN
-                            } else {
-                                l / r
-                            }
-                        }
-                        ArithmeticOp::Mod => {
-                            if r == 0.0 {
-                                f64::NAN
-                            } else {
-                                l % r
-                            }
-                        }
+                        // div/floordiv by zero -> +/-inf (numerator sign), 0/0 ->
+                        // NaN; rely on Rust IEEE division (see (true,false) arm).
+                        ArithmeticOp::Div => l / r,
+                        ArithmeticOp::Mod => l - (l / r).floor() * r,
                         ArithmeticOp::Pow => l.powf(r),
-                        ArithmeticOp::FloorDiv => {
-                            if r == 0.0 {
-                                f64::NAN
-                            } else {
-                                (l / r).floor()
-                            }
-                        }
+                        ArithmeticOp::FloorDiv => (l / r).floor(),
                     };
                     Scalar::Float64(v)
                 }
@@ -65304,6 +65263,65 @@ mod tests {
         assert_eq!(result.values()[0], Scalar::Float64(11.0)); // 1+10
         assert_eq!(result.values()[1], Scalar::Float64(20.0)); // 0+20 (fill)
         assert_eq!(result.values()[2], Scalar::Float64(3.0)); // 3+0 (fill)
+    }
+
+    #[test]
+    fn series_div_fill_by_zero_is_inf_not_nan() {
+        // pandas div by zero yields +/-inf (sign of the numerator); only 0/0 is
+        // NaN — including the fill_value path. Verified vs live pandas 2.2.3.
+        let s1 = Series::from_values(
+            "a",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Float64(5.0),
+                Scalar::Float64(-5.0),
+                Scalar::Float64(0.0),
+                Scalar::Null(NullKind::NaN), // missing left -> uses fill_value
+            ],
+        )
+        .unwrap();
+        let s2 = Series::from_values(
+            "b",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Float64(0.0),
+                Scalar::Float64(0.0),
+                Scalar::Float64(0.0),
+                Scalar::Float64(0.0),
+            ],
+        )
+        .unwrap();
+        let r = s1.div_fill(&s2, 1.0).unwrap();
+        assert_eq!(r.values()[0], Scalar::Float64(f64::INFINITY)); // 5/0
+        assert_eq!(r.values()[1], Scalar::Float64(f64::NEG_INFINITY)); // -5/0
+        assert!(r.values()[2].is_missing(), "0/0 -> NaN, got {:?}", r.values()[2]);
+        // fill path: left missing -> fill(1) / 0 -> +inf
+        assert_eq!(r.values()[3], Scalar::Float64(f64::INFINITY));
+    }
+
+    #[test]
+    fn series_mod_fill_takes_divisor_sign() {
+        // pandas .mod uses the DIVISOR's sign (floored remainder), not Rust's
+        // dividend-sign %: 3 % -2 == -1. Verified vs live pandas 2.2.3 via the
+        // fill_value path (missing left -> fill_value as the dividend).
+        let s1 = Series::from_values(
+            "a",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Null(NullKind::NaN), Scalar::Float64(-7.0)],
+        )
+        .unwrap();
+        let s2 = Series::from_values(
+            "b",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Float64(-2.0), Scalar::Float64(3.0)],
+        )
+        .unwrap();
+        // idx0: fill(3) % -2 -> -1 ; idx1: -7 % 3 -> 2
+        let r = s1
+            .binary_op_fill(&s2, fp_columnar::ArithmeticOp::Mod, 3.0)
+            .unwrap();
+        assert_eq!(r.values()[0], Scalar::Float64(-1.0));
+        assert_eq!(r.values()[1], Scalar::Float64(2.0));
     }
 
     #[test]
