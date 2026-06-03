@@ -1348,6 +1348,7 @@ dependencies = [
  "fp-frame",
  "fp-index",
  "fp-types",
+ "smallvec",
  "thiserror 2.0.18",
 ]
 
