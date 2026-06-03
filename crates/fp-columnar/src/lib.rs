@@ -8829,6 +8829,56 @@ mod tests {
     }
 
     #[test]
+    fn take_positions_preserves_exact_null_kind_contract() {
+        // Isomorphism contract for the typed-columnar storage epic
+        // (br-frankenpandas-typed-columnar-storage-epic): `take_positions`
+        // reproduces the EXACT scalar stored at each source position, including
+        // the precise `NullKind` at invalid positions — not merely a
+        // valid/invalid bit. `normalize_missing_for_dtype` preserves NaN/NaT
+        // null kinds regardless of dtype, so a Float64/Int64 column can legally
+        // hold `Null(NaT)`. A future migration to typed `ColumnData` +
+        // `ValidityMask` that canonicalizes nulls per dtype would silently
+        // break `values()` parity for such columns; this test must keep passing
+        // through that migration (the typed store must carry per-position null
+        // kind, e.g. a 2-bit NaN/NaT/Null code, not just a validity bit).
+        for (dtype, real) in [
+            (DType::Float64, Scalar::Float64(2.5)),
+            (DType::Int64, Scalar::Int64(7)),
+        ] {
+            let source = Column::new(
+                dtype,
+                vec![
+                    Scalar::Null(NullKind::NaN),
+                    Scalar::Null(NullKind::NaT),
+                    Scalar::Null(NullKind::Null),
+                    real,
+                ],
+            )
+            .expect("column builds");
+            // Compare against what the column actually stored, so the test is
+            // robust to constructor canonicalization yet still pins that the
+            // gather is byte-for-byte faithful to the stored representation.
+            let stored = source.values().to_vec();
+            let positions = [3, 2, 1, 0, 1];
+            let gathered = source.take_positions(&positions);
+            for (out_idx, &pos) in positions.iter().enumerate() {
+                assert_eq!(
+                    gathered.values()[out_idx],
+                    stored[pos],
+                    "dtype {dtype:?}: take_positions must reproduce the exact stored scalar \
+                     (incl. NullKind) for source position {pos}",
+                );
+                // Invalid source positions must stay invalid after the gather.
+                assert_eq!(
+                    gathered.validity().get(out_idx),
+                    source.validity().get(pos),
+                    "dtype {dtype:?}: validity must follow the gathered position {pos}",
+                );
+            }
+        }
+    }
+
+    #[test]
     fn primitive_columns_cache_typed_data_for_take_positions() {
         let column = Column::new(
             DType::Float64,
