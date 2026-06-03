@@ -85,7 +85,7 @@ use std::{
 // so the hasher is observationally invisible. FxHash (rustc-hash, pure safe
 // Rust) replaces the std SipHasher on these hot membership maps; public-return
 // maps (position_map_first, groupby) keep std HashMap to avoid an API change.
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use chrono::Datelike;
 use fp_types::{Period, PeriodFreq, Scalar, Timedelta, TimedeltaComponents};
@@ -11983,47 +11983,45 @@ impl MultiIndex {
         if len == 0 {
             return out;
         }
-        let mut first_seen: FxHashMap<Vec<IndexLabel>, usize> =
-            FxHashMap::with_capacity_and_hasher(len, Default::default());
-        let mut counts: FxHashMap<Vec<IndexLabel>, usize> =
-            FxHashMap::with_capacity_and_hasher(len, Default::default());
-
-        for row in 0..len {
-            let key: Vec<IndexLabel> = self.levels.iter().map(|level| level[row].clone()).collect();
-            *counts.entry(key.clone()).or_insert(0) += 1;
-            first_seen.entry(key).or_insert(row);
-        }
-
+        // Materialize each row's composite key exactly once per pass. The prior
+        // version built BOTH a counts and a first_seen map for every keep mode
+        // (incl. a key.clone()) and then rebuilt the key again in the keep-mode
+        // loop — 3-4 Vec<IndexLabel> allocations per row. Each mode now does the
+        // minimal work; output is positional so marking order is irrelevant.
+        let key_at = |row: usize| -> Vec<IndexLabel> {
+            self.levels.iter().map(|level| level[row].clone()).collect()
+        };
         match keep {
             DuplicateKeep::First => {
+                // First occurrence kept; a key already seen earlier is a dup.
+                let mut seen: FxHashSet<Vec<IndexLabel>> =
+                    FxHashSet::with_capacity_and_hasher(len, Default::default());
                 for row in 0..len {
-                    let key: Vec<IndexLabel> =
-                        self.levels.iter().map(|level| level[row].clone()).collect();
-                    if first_seen[&key] != row {
+                    if !seen.insert(key_at(row)) {
                         out[row] = true;
                     }
                 }
             }
             DuplicateKeep::Last => {
-                let mut last_seen: HashMap<Vec<IndexLabel>, usize> = HashMap::with_capacity(len);
-                for row in 0..len {
-                    let key: Vec<IndexLabel> =
-                        self.levels.iter().map(|level| level[row].clone()).collect();
-                    last_seen.insert(key, row);
-                }
-                for row in 0..len {
-                    let key: Vec<IndexLabel> =
-                        self.levels.iter().map(|level| level[row].clone()).collect();
-                    if last_seen[&key] != row {
+                // Last occurrence kept; scanning in reverse, the first key seen
+                // in reverse is the last forward occurrence (kept = false).
+                let mut seen: FxHashSet<Vec<IndexLabel>> =
+                    FxHashSet::with_capacity_and_hasher(len, Default::default());
+                for row in (0..len).rev() {
+                    if !seen.insert(key_at(row)) {
                         out[row] = true;
                     }
                 }
             }
             DuplicateKeep::None => {
+                // Every occurrence of a key with count > 1 is a dup.
+                let mut counts: FxHashMap<Vec<IndexLabel>, usize> =
+                    FxHashMap::with_capacity_and_hasher(len, Default::default());
                 for row in 0..len {
-                    let key: Vec<IndexLabel> =
-                        self.levels.iter().map(|level| level[row].clone()).collect();
-                    if counts[&key] > 1 {
+                    *counts.entry(key_at(row)).or_insert(0) += 1;
+                }
+                for row in 0..len {
+                    if counts[&key_at(row)] > 1 {
                         out[row] = true;
                     }
                 }
