@@ -545,6 +545,34 @@ pub fn read_fwf_str(input: &str, options: &FwfReadOptions) -> Result<DataFrame, 
     read_csv_with_options(&csv_input, &csv_options)
 }
 
+/// Build a CSV column from per-cell parsed scalars, but preserve original text
+/// when the column infers to object (`Utf8`) dtype.
+///
+/// pandas does column-level inference: a column becomes a single dtype, and when
+/// it falls back to object every non-NA cell keeps its VERBATIM source text. FP
+/// parses per cell (`"true"` → `Bool`, `"01"` → `Int64(1)`), so without this the
+/// object-fallback column would re-stringify those scalars canonically — writing
+/// `"True"`/`"1"` where pandas keeps `"true"`/`"01"`. When the inferred dtype is
+/// `Utf8`, rebuild the column straight from `raw` (NA tokens → null) so the
+/// original literals survive. Native (non-object) columns are unaffected.
+fn build_csv_object_aware_column(values: Vec<Scalar>, raw: &[String]) -> Result<Column, IoError> {
+    let column = Column::from_values(values)?;
+    if column.dtype() == DType::Utf8 {
+        let rebuilt: Vec<Scalar> = raw
+            .iter()
+            .map(|field| {
+                if is_pandas_default_na(field) {
+                    Scalar::Null(NullKind::Null)
+                } else {
+                    Scalar::Utf8(field.clone())
+                }
+            })
+            .collect();
+        return Ok(Column::new(DType::Utf8, rebuilt)?);
+    }
+    Ok(column)
+}
+
 pub fn read_csv_str(input: &str) -> Result<DataFrame, IoError> {
     let mut reader = ReaderBuilder::new()
         .has_headers(true)
@@ -565,13 +593,19 @@ pub fn read_csv_str(input: &str) -> Result<DataFrame, IoError> {
     let mut columns: Vec<Vec<Scalar>> = (0..header_count)
         .map(|_| Vec::with_capacity(row_hint))
         .collect();
+    // Keep each cell's original text so an object-fallback column can preserve
+    // the verbatim literal like pandas (see build_csv_object_aware_column).
+    let mut raw_columns: Vec<Vec<String>> = (0..header_count)
+        .map(|_| Vec::with_capacity(row_hint))
+        .collect();
 
     let mut row_count: i64 = 0;
     for row in reader.records() {
         let record = row?;
-        for (idx, col) in columns.iter_mut().enumerate() {
+        for idx in 0..header_count {
             let field = record.get(idx).unwrap_or_default();
-            col.push(parse_scalar(field));
+            columns[idx].push(parse_scalar(field));
+            raw_columns[idx].push(field.to_owned());
         }
         row_count += 1;
     }
@@ -580,7 +614,8 @@ pub fn read_csv_str(input: &str) -> Result<DataFrame, IoError> {
     let mut column_order = Vec::with_capacity(header_count);
     for (idx, values) in columns.into_iter().enumerate() {
         let name = headers.get(idx).cloned().unwrap_or_default();
-        out_columns.insert(name.clone(), Column::from_values(values)?);
+        let column = build_csv_object_aware_column(values, &raw_columns[idx])?;
+        out_columns.insert(name.clone(), column);
         column_order.push(name);
     }
 
@@ -12746,6 +12781,31 @@ mod tests {
             Scalar::Int64(6)
         );
         eprintln!("[TEST] test_csv_vec_based_column_order | rows=2 cols=3 parse_ok=true | PASS");
+    }
+
+    #[test]
+    fn read_csv_object_fallback_preserves_original_text() {
+        // pandas does column-level inference: when a column falls back to object
+        // dtype, every non-NA cell keeps its VERBATIM source text. A bool-like
+        // token in non-canonical case ("true") or a zero-padded number ("01")
+        // must survive unchanged once the column is object. Verified vs live
+        // pandas 2.2.3: read_csv('c\ntrue\nfalse\nmaybe\n')['c'] is
+        // ['true','false','maybe'] (object), and '01'/'02' stay '01'/'02'.
+        let cases: &[(&str, &str)] = &[
+            // Uniform native columns are unaffected.
+            ("c\n1\n2\n3\n", "c\n1\n2\n3\n"),
+            ("c\ntrue\nfalse\n", "c\nTrue\nFalse\n"), // pure bool -> bool dtype
+            // Object fallbacks keep original literals.
+            ("c\n1\n2\nabc\n", "c\n1\n2\nabc\n"),
+            ("c\ntrue\nfalse\nmaybe\n", "c\ntrue\nfalse\nmaybe\n"),
+            ("c\nTrue\nFalse\nmaybe\n", "c\nTrue\nFalse\nmaybe\n"),
+            ("c\n01\n02\nabc\n", "c\n01\n02\nabc\n"),
+        ];
+        for (input, expected_csv) in cases {
+            let frame = read_csv_str(input).expect("read");
+            let out = write_csv_string(&frame).expect("write");
+            assert_eq!(&out, expected_csv, "round-trip mismatch for input {input:?}");
+        }
     }
 
     #[test]
