@@ -3314,18 +3314,28 @@ pub fn nanptp(values: &[Scalar]) -> Scalar {
         }
         return float_ns_to_timedelta(hi - lo);
     }
-    let nums = collect_finite(values);
-    if nums.is_empty() {
-        return Scalar::Null(NullKind::NaN);
-    }
+    // Fused single-pass min/max (see `nansum`): track lo/hi while filtering, no
+    // intermediate Vec<f64>. Bit-identical to the prior collect_finite two-pass:
+    // `seen` is true exactly when collect_finite would be non-empty, and the
+    // lo/hi comparisons fold the same finite values in the same order.
     let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
-    for x in &nums {
-        if *x < lo {
-            lo = *x;
+    let mut seen = false;
+    for v in values {
+        if v.is_missing() {
+            continue;
         }
-        if *x > hi {
-            hi = *x;
+        if let Ok(x) = v.to_f64() {
+            seen = true;
+            if x < lo {
+                lo = x;
+            }
+            if x > hi {
+                hi = x;
+            }
         }
+    }
+    if !seen {
+        return Scalar::Null(NullKind::NaN);
     }
     Scalar::Float64(hi - lo)
 }
@@ -3387,11 +3397,20 @@ pub fn nanprod(values: &[Scalar]) -> Scalar {
     if is_timedelta_input(values) {
         return Scalar::Null(NullKind::NaN);
     }
-    let nums = collect_finite(values);
-    if nums.is_empty() {
-        return Scalar::Float64(1.0);
+    // Fused single-pass fold (see `nansum`): filter missing / non-coercible and
+    // multiply in one scan, no intermediate Vec<f64>. Bit-identical to
+    // `collect_finite(..).iter().product()`: same finite values, same order,
+    // same f64 `*` (Product for f64 == fold(1.0, *)); empty -> 1.0.
+    let mut prod = 1.0_f64;
+    for v in values {
+        if v.is_missing() {
+            continue;
+        }
+        if let Ok(x) = v.to_f64() {
+            prod *= x;
+        }
     }
-    Scalar::Float64(nums.iter().product())
+    Scalar::Float64(prod)
 }
 
 /// Cumulative sum respecting null propagation.
