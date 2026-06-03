@@ -1,0 +1,82 @@
+{
+  "command": "rch exec -- env CARGO_TARGET_DIR=/data/tmp/cargo-target-rubygoose-w4vff-before cargo bench -p fp-conformance --bench vs_pandas -- io/csv_read",
+  "benchmark": "io/csv_read",
+  "rows10000": {
+    "mean": {
+      "confidence_interval": {
+        "confidence_level": 0.95,
+        "lower_bound": 8867403.676125001,
+        "upper_bound": 9356067.871875001
+      },
+      "point_estimate": 9107263.558333337,
+      "standard_error": 124516.87398800834
+    },
+    "median": {
+      "confidence_interval": {
+        "confidence_level": 0.95,
+        "lower_bound": 8762916.0,
+        "upper_bound": 9269913.333333332
+      },
+      "point_estimate": 9119035.5,
+      "standard_error": 149916.60990264724
+    },
+    "median_abs_dev": {
+      "confidence_interval": {
+        "confidence_level": 0.95,
+        "lower_bound": 793839.6234065294,
+        "upper_bound": 1494824.5046615617
+      },
+      "point_estimate": 1159884.784857929,
+      "standard_error": 188097.84037295025
+    },
+    "slope": null,
+    "std_dev": {
+      "confidence_interval": {
+        "confidence_level": 0.95,
+        "lower_bound": 1063451.1281778116,
+        "upper_bound": 1423049.578544005
+      },
+      "point_estimate": 1255812.8489560762,
+      "standard_error": 91575.1374145322
+    }
+  },
+  "rows100000": {
+    "mean": {
+      "confidence_interval": {
+        "confidence_level": 0.95,
+        "lower_bound": 114454048.88125001,
+        "upper_bound": 122950976.062
+      },
+      "point_estimate": 118628388.38,
+      "standard_error": 2168592.0089489324
+    },
+    "median": {
+      "confidence_interval": {
+        "confidence_level": 0.95,
+        "lower_bound": 107112795.0,
+        "upper_bound": 117212332.0
+      },
+      "point_estimate": 111580290.0,
+      "standard_error": 2764883.402768315
+    },
+    "median_abs_dev": {
+      "confidence_interval": {
+        "confidence_level": 0.95,
+        "lower_bound": 12482836.469185352,
+        "upper_bound": 24268633.008545637
+      },
+      "point_estimate": 17614696.898576617,
+      "standard_error": 3340245.712501739
+    },
+    "slope": null,
+    "std_dev": {
+      "confidence_interval": {
+        "confidence_level": 0.95,
+        "lower_bound": 18829569.68654589,
+        "upper_bound": 24355465.13501499
+      },
+      "point_estimate": 21806150.775456384,
+      "standard_error": 1406725.0030913388
+    }
+  }
+}

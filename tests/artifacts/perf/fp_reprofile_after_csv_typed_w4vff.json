@@ -1,0 +1,148 @@
+{
+  "results": [
+    {
+      "command": "/data/tmp/cargo-target-rubygoose-w4vff-current/release-perf/examples/perf_profile csv_read 100000 20",
+      "mean": 1.00668792456,
+      "stddev": 0.009272290600746046,
+      "median": 1.01231977076,
+      "user": 0.9407936799999999,
+      "system": 0.06439455999999999,
+      "min": 0.9942694407600001,
+      "max": 1.0140166857600001,
+      "times": [
+        1.01231977076,
+        1.0136316867600002,
+        1.0140166857600001,
+        0.99920203876,
+        0.9942694407600001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/tmp/cargo-target-rubygoose-w4vff-current/release-perf/examples/perf_profile series_add_align 100000 100",
+      "mean": 0.96952395956,
+      "stddev": 0.021905422218793862,
+      "median": 0.9612351227600001,
+      "user": 0.5983120799999999,
+      "system": 0.36983475999999993,
+      "min": 0.9545975637600002,
+      "max": 1.00823030676,
+      "times": [
+        0.9595739347600001,
+        0.9612351227600001,
+        0.9545975637600002,
+        0.9639828697600001,
+        1.00823030676
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/tmp/cargo-target-rubygoose-w4vff-current/release-perf/examples/perf_profile join_1to1 100000 50",
+      "mean": 0.5948550109600002,
+      "stddev": 0.04920889843326742,
+      "median": 0.5751905247600001,
+      "user": 0.55380108,
+      "system": 0.039734559999999995,
+      "min": 0.5465838397600001,
+      "max": 0.6728370237600001,
+      "times": [
+        0.5693671587600001,
+        0.6728370237600001,
+        0.5751905247600001,
+        0.5465838397600001,
+        0.6102965077600001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/tmp/cargo-target-rubygoose-w4vff-current/release-perf/examples/perf_profile filter_bool 100000 200",
+      "mean": 0.24277402235999998,
+      "stddev": 0.006347272214026847,
+      "median": 0.24504196276,
+      "user": 0.21483688,
+      "system": 0.027604559999999993,
+      "min": 0.23449649676,
+      "max": 0.25031172976,
+      "times": [
+        0.25031172976,
+        0.24504196276,
+        0.23449649676,
+        0.24585091576,
+        0.23816900676
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/tmp/cargo-target-rubygoose-w4vff-current/release-perf/examples/perf_profile sort_single 100000 200",
+      "mean": 0.07360099016,
+      "stddev": 0.005275387660849984,
+      "median": 0.07160566876,
+      "user": 0.056897279999999995,
+      "system": 0.016344759999999996,
+      "min": 0.06892457776,
+      "max": 0.08084433776,
+      "times": [
+        0.07736729776,
+        0.06926306876,
+        0.08084433776,
+        0.07160566876,
+        0.06892457776
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/tmp/cargo-target-rubygoose-w4vff-current/release-perf/examples/perf_profile drop_duplicates 100000 80",
+      "mean": 0.06704540596,
+      "stddev": 0.0013875947582940756,
+      "median": 0.06655835276,
+      "user": 0.055305080000000006,
+      "system": 0.011424359999999998,
+      "min": 0.06607253176,
+      "max": 0.06947970976,
+      "times": [
+        0.06655835276,
+        0.06631590376,
+        0.06947970976,
+        0.06680053176,
+        0.06607253176
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

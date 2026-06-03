@@ -825,6 +825,10 @@ fn vectorized_binary_i64(
 
 enum ScalarValues {
     Eager(Vec<Scalar>),
+    LazyAllValidInt64 {
+        data: Vec<i64>,
+        values: OnceLock<Vec<Scalar>>,
+    },
     LazyAllValidFloat64 {
         data: Vec<f64>,
         values: OnceLock<Vec<Scalar>>,
@@ -834,6 +838,13 @@ enum ScalarValues {
 impl ScalarValues {
     fn from_vec(values: Vec<Scalar>) -> Self {
         Self::Eager(values)
+    }
+
+    fn lazy_all_valid_int64(data: Vec<i64>) -> Self {
+        Self::LazyAllValidInt64 {
+            data,
+            values: OnceLock::new(),
+        }
     }
 
     fn lazy_all_valid_float64(data: Vec<f64>) -> Self {
@@ -846,6 +857,9 @@ impl ScalarValues {
     fn as_slice(&self) -> &[Scalar] {
         match self {
             Self::Eager(values) => values,
+            Self::LazyAllValidInt64 { data, values } => values
+                .get_or_init(|| data.iter().copied().map(Scalar::Int64).collect())
+                .as_slice(),
             Self::LazyAllValidFloat64 { data, values } => values
                 .get_or_init(|| data.iter().copied().map(Scalar::Float64).collect())
                 .as_slice(),
@@ -855,6 +869,7 @@ impl ScalarValues {
     fn len(&self) -> usize {
         match self {
             Self::Eager(values) => values.len(),
+            Self::LazyAllValidInt64 { data, .. } => data.len(),
             Self::LazyAllValidFloat64 { data, .. } => data.len(),
         }
     }
@@ -868,6 +883,7 @@ impl Clone for ScalarValues {
     fn clone(&self) -> Self {
         match self {
             Self::Eager(values) => Self::Eager(values.clone()),
+            Self::LazyAllValidInt64 { data, .. } => Self::lazy_all_valid_int64(data.clone()),
             Self::LazyAllValidFloat64 { data, .. } => Self::lazy_all_valid_float64(data.clone()),
         }
     }
@@ -1383,6 +1399,38 @@ impl Column {
     pub fn from_values(values: Vec<Scalar>) -> Result<Self, ColumnError> {
         let dtype = infer_dtype(&values)?;
         Self::new(dtype, values)
+    }
+
+    /// Build an all-valid Int64 column from already-typed contiguous values.
+    ///
+    /// This carries parser/vector-kernel dtype proofs directly into the
+    /// columnar representation and delays `Scalar` materialization until a
+    /// caller explicitly asks for scalar values.
+    #[must_use]
+    pub fn from_i64_values(data: Vec<i64>) -> Self {
+        let len = data.len();
+        Self {
+            dtype: DType::Int64,
+            values: ScalarValues::lazy_all_valid_int64(data.clone()),
+            validity: ValidityMask::all_valid(len),
+            data: Some(ColumnData::Int64(data)),
+        }
+    }
+
+    /// Build an all-valid Float64 column from already-typed contiguous values.
+    ///
+    /// This is the typed ingestion counterpart to `Column::new(DType::Float64,
+    /// Vec<Scalar>)` for sources that have already proven every value is a
+    /// valid f64.
+    #[must_use]
+    pub fn from_f64_values(data: Vec<f64>) -> Self {
+        let len = data.len();
+        Self {
+            dtype: DType::Float64,
+            values: ScalarValues::lazy_all_valid_float64(data.clone()),
+            validity: ValidityMask::all_valid(len),
+            data: Some(ColumnData::Float64(data)),
+        }
     }
 
     /// Gather a new column from the given row positions of `self`.
@@ -14409,5 +14457,30 @@ mod tests {
         if let ColumnData::Int64(arr) = data {
             assert_eq!(arr, vec![1, 2, 3]);
         }
+    }
+
+    #[test]
+    fn typed_all_valid_constructors_seed_dense_storage() {
+        let ints = Column::from_i64_values(vec![1, 2, 3]);
+        assert_eq!(ints.dtype(), DType::Int64);
+        assert!(ints.validity.all());
+        assert!(matches!(ints.data, Some(ColumnData::Int64(_))));
+        assert_eq!(
+            ints.values(),
+            &[Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]
+        );
+
+        let floats = Column::from_f64_values(vec![1.5, -0.0, f64::INFINITY]);
+        assert_eq!(floats.dtype(), DType::Float64);
+        assert!(floats.validity.all());
+        assert!(matches!(floats.data, Some(ColumnData::Float64(_))));
+        assert_eq!(
+            floats.values(),
+            &[
+                Scalar::Float64(1.5),
+                Scalar::Float64(-0.0),
+                Scalar::Float64(f64::INFINITY)
+            ]
+        );
     }
 }

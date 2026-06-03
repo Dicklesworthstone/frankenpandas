@@ -581,6 +581,111 @@ fn build_csv_object_aware_column(values: Vec<Scalar>, raw: &[String]) -> Result<
     Ok(column)
 }
 
+enum CsvTypedColumnValues {
+    Int64(Vec<i64>),
+    Float64(Vec<f64>),
+}
+
+fn push_csv_default_numeric_field(values: &mut CsvTypedColumnValues, field: &str) -> bool {
+    if is_pandas_default_na(field) {
+        return false;
+    }
+
+    let trimmed = field.trim();
+    if trimmed.is_empty()
+        || field.eq_ignore_ascii_case("true")
+        || field.eq_ignore_ascii_case("false")
+    {
+        return false;
+    }
+
+    match values {
+        CsvTypedColumnValues::Int64(out) => match trimmed.parse::<i64>() {
+            Ok(value) => {
+                out.push(value);
+                true
+            }
+            Err(_) => match trimmed.parse::<f64>() {
+                Ok(value) if !value.is_nan() => {
+                    let mut promoted = Vec::with_capacity(out.capacity());
+                    promoted.extend(out.iter().copied().map(|value| value as f64));
+                    promoted.push(value);
+                    *values = CsvTypedColumnValues::Float64(promoted);
+                    true
+                }
+                Ok(_) | Err(_) => false,
+            },
+        },
+        CsvTypedColumnValues::Float64(out) => {
+            if let Ok(value) = trimmed.parse::<i64>() {
+                out.push(value as f64);
+                true
+            } else {
+                match trimmed.parse::<f64>() {
+                    Ok(value) if !value.is_nan() => {
+                        out.push(value);
+                        true
+                    }
+                    Ok(_) | Err(_) => false,
+                }
+            }
+        }
+    }
+}
+
+fn try_read_csv_str_typed_numeric(
+    input: &str,
+    headers: &[String],
+) -> Result<Option<DataFrame>, IoError> {
+    let header_count = headers.len();
+    if header_count == 0 {
+        return Ok(None);
+    }
+
+    let mut reader = ReaderBuilder::new()
+        .has_headers(true)
+        .from_reader(input.as_bytes());
+    let _ = reader.headers().map_err(IoError::from)?;
+
+    let row_hint = input.len() / (header_count * 8).max(1);
+    let mut typed_columns: Vec<CsvTypedColumnValues> = (0..header_count)
+        .map(|_| CsvTypedColumnValues::Int64(Vec::with_capacity(row_hint)))
+        .collect();
+    let mut row_count: i64 = 0;
+    for row in reader.records() {
+        let record = row?;
+        for (idx, column) in typed_columns.iter_mut().enumerate() {
+            let field = record.get(idx).unwrap_or_default();
+            if !push_csv_default_numeric_field(column, field) {
+                return Ok(None);
+            }
+        }
+        row_count += 1;
+    }
+
+    if row_count == 0 {
+        return Ok(None);
+    }
+
+    let mut out_columns = BTreeMap::new();
+    let mut column_order = Vec::with_capacity(header_count);
+    for (name, values) in headers.iter().cloned().zip(typed_columns) {
+        let column = match values {
+            CsvTypedColumnValues::Int64(values) => Column::from_i64_values(values),
+            CsvTypedColumnValues::Float64(values) => Column::from_f64_values(values),
+        };
+        out_columns.insert(name.clone(), column);
+        column_order.push(name);
+    }
+
+    let index = Index::from_i64((0..row_count).collect());
+    Ok(Some(DataFrame::new_with_column_order(
+        index,
+        out_columns,
+        column_order,
+    )?))
+}
+
 pub fn read_csv_str(input: &str) -> Result<DataFrame, IoError> {
     let mut reader = ReaderBuilder::new()
         .has_headers(true)
@@ -593,6 +698,10 @@ pub fn read_csv_str(input: &str) -> Result<DataFrame, IoError> {
     }
     let headers: Vec<String> = headers_record.iter().map(ToOwned::to_owned).collect();
     reject_duplicate_headers(&headers)?;
+
+    if let Some(frame) = try_read_csv_str_typed_numeric(input, &headers)? {
+        return Ok(frame);
+    }
 
     // AG-07: Vec-based column accumulation (O(1) per cell vs O(log c) BTreeMap).
     // Capacity hint from byte length avoids reallocation for typical CSVs.
@@ -2445,7 +2554,9 @@ fn datetime_csv_format(column: &Column) -> DatetimeCsvFormat {
     let mut date_only = true;
     let mut subsec_digits = 0u8;
     for value in column.values() {
-        let Scalar::Datetime64(ns) = value else { continue };
+        let Scalar::Datetime64(ns) = value else {
+            continue;
+        };
         if *ns == Timestamp::NAT {
             continue;
         }
@@ -2485,7 +2596,10 @@ fn format_datetime_csv(nanos: i64, fmt: DatetimeCsvFormat) -> String {
     }
     let subsec = (nanos.rem_euclid(1_000_000_000)) as u32;
     let frac = subsec / 10u32.pow(9 - u32::from(fmt.subsec_digits));
-    format!("{base}.{frac:0>width$}", width = usize::from(fmt.subsec_digits))
+    format!(
+        "{base}.{frac:0>width$}",
+        width = usize::from(fmt.subsec_digits)
+    )
 }
 
 fn scalar_to_csv_with_na(scalar: &Scalar, na_rep: &str) -> String {
@@ -3409,7 +3523,9 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
                 Scalar::Int64(v) => fp_index::IndexLabel::Int64(v),
                 Scalar::Utf8(v) => fp_index::IndexLabel::Utf8(v),
                 Scalar::Float64(v) => fp_index::IndexLabel::Utf8(v.to_string()),
-                Scalar::Bool(v) => fp_index::IndexLabel::Utf8(if v { "True" } else { "False" }.to_string()),
+                Scalar::Bool(v) => {
+                    fp_index::IndexLabel::Utf8(if v { "True" } else { "False" }.to_string())
+                }
                 Scalar::Null(_) => fp_index::IndexLabel::Utf8("<null>".to_owned()),
                 Scalar::Timedelta64(v) => {
                     if v == Timedelta::NAT {
@@ -11362,22 +11478,22 @@ mod tests {
     use fp_types::{DType, NullKind, Scalar};
 
     use super::{
-        format_pandas_float,
         CsvWriteOptions, ExcelReadOptions, ExcelWriteOptions, HdfReadOptions, HdfWriteOptions,
         HtmlReadOptions, HtmlWriteOptions, IoError, JsonOrient, LatexWriteOptions,
         MarkdownWriteOptions, PickleProtocol, PickleWriteOptions, StataWriteOptions,
-        XmlReadOptions, XmlWriteOptions, read_csv_str, read_csv_with_index_cols, read_excel_bytes,
-        read_feather_bytes, read_hdf, read_hdf_key, read_hdf_with_options, read_html,
-        read_html_str, read_html_str_with_options, read_json_str, read_orc, read_orc_bytes,
-        read_parquet_bytes, read_pickle, read_pickle_bytes, read_stata, read_stata_bytes, read_xml,
-        read_xml_str, read_xml_str_with_options, write_csv_string, write_csv_string_with_options,
-        write_excel_bytes, write_hdf, write_hdf_key, write_hdf_with_options, write_html,
-        write_html_string, write_html_string_with_options, write_json_string, write_jsonl_string,
-        write_latex, write_latex_string, write_latex_string_with_options, write_latex_with_options,
-        write_markdown, write_markdown_string, write_markdown_string_with_options,
-        write_markdown_with_options, write_orc, write_orc_bytes, write_pickle, write_pickle_bytes,
-        write_stata, write_stata_bytes, write_stata_bytes_with_options, write_xml,
-        write_xml_string, write_xml_string_with_options,
+        XmlReadOptions, XmlWriteOptions, format_pandas_float, read_csv_str,
+        read_csv_with_index_cols, read_excel_bytes, read_feather_bytes, read_hdf, read_hdf_key,
+        read_hdf_with_options, read_html, read_html_str, read_html_str_with_options, read_json_str,
+        read_orc, read_orc_bytes, read_parquet_bytes, read_pickle, read_pickle_bytes, read_stata,
+        read_stata_bytes, read_xml, read_xml_str, read_xml_str_with_options, write_csv_string,
+        write_csv_string_with_options, write_excel_bytes, write_hdf, write_hdf_key,
+        write_hdf_with_options, write_html, write_html_string, write_html_string_with_options,
+        write_json_string, write_jsonl_string, write_latex, write_latex_string,
+        write_latex_string_with_options, write_latex_with_options, write_markdown,
+        write_markdown_string, write_markdown_string_with_options, write_markdown_with_options,
+        write_orc, write_orc_bytes, write_pickle, write_pickle_bytes, write_stata,
+        write_stata_bytes, write_stata_bytes_with_options, write_xml, write_xml_string,
+        write_xml_string_with_options,
     };
 
     #[test]
@@ -11391,6 +11507,39 @@ mod tests {
         let out = write_csv_string(&frame).expect("write");
         assert!(out.contains("id,value"));
         assert!(out.contains("3,3.5"));
+    }
+
+    #[test]
+    fn csv_numeric_fast_path_preserves_default_dtypes_and_values() {
+        let input = "i,f\n1,0.5\n2,3\n";
+        let frame = read_csv_str(input).expect("read");
+
+        let int_col = frame.column("i").expect("i");
+        assert_eq!(int_col.dtype(), DType::Int64);
+        assert_eq!(int_col.values(), &[Scalar::Int64(1), Scalar::Int64(2)]);
+
+        let float_col = frame.column("f").expect("f");
+        assert_eq!(float_col.dtype(), DType::Float64);
+        assert_eq!(
+            float_col.values(),
+            &[Scalar::Float64(0.5), Scalar::Float64(3.0)]
+        );
+    }
+
+    #[test]
+    fn csv_numeric_probe_falls_back_to_preserve_object_raw_text() {
+        let input = "x\n 1 \nabc\n";
+        let frame = read_csv_str(input).expect("read");
+        let column = frame.column("x").expect("x");
+
+        assert_eq!(column.dtype(), DType::Utf8);
+        assert_eq!(
+            column.values(),
+            &[
+                Scalar::Utf8(" 1 ".to_owned()),
+                Scalar::Utf8("abc".to_owned())
+            ]
+        );
     }
 
     #[test]
@@ -13054,8 +13203,116 @@ mod tests {
         for (input, expected_csv) in cases {
             let frame = read_csv_str(input).expect("read");
             let out = write_csv_string(&frame).expect("write");
-            assert_eq!(&out, expected_csv, "round-trip mismatch for input {input:?}");
+            assert_eq!(
+                &out, expected_csv,
+                "round-trip mismatch for input {input:?}"
+            );
         }
+    }
+
+    #[test]
+    fn read_csv_typed_numeric_fast_path_promotes_in_one_pass() {
+        let input = "i,f\n1,0\n2,0.5\n3,1.25\n";
+        let headers = vec!["i".to_owned(), "f".to_owned()];
+
+        let fast = super::try_read_csv_str_typed_numeric(input, &headers)
+            .expect("typed parse")
+            .expect("numeric fast path");
+        assert_eq!(fast.column("i").expect("i").dtype(), DType::Int64);
+        assert_eq!(fast.column("f").expect("f").dtype(), DType::Float64);
+        assert_eq!(fast.column("i").expect("i").values()[2], Scalar::Int64(3));
+        assert_eq!(
+            fast.column("f").expect("f").values()[2],
+            Scalar::Float64(1.25)
+        );
+
+        let object_input = "c\n01\nabc\n";
+        let object_headers = vec!["c".to_owned()];
+        assert!(
+            super::try_read_csv_str_typed_numeric(object_input, &object_headers)
+                .expect("object probe")
+                .is_none()
+        );
+        let object_frame = read_csv_str(object_input).expect("fallback read");
+        assert_eq!(
+            write_csv_string(&object_frame).expect("fallback write"),
+            object_input
+        );
+    }
+
+    #[test]
+    fn read_csv_typed_numeric_fast_path_rejects_non_all_valid_numeric_semantics() {
+        let headers = vec!["x".to_owned()];
+        for input in [
+            "x\nNaN\n1.0\n",
+            "x\nNAN\n1.0\n",
+            "x\n+NaN\n1.0\n",
+            "x\n NaN \n1.0\n",
+            "x\n\"NAN\"\n1.0\n",
+            "x\ntrue\nfalse\n",
+            "x\n \n1\n",
+        ] {
+            assert!(
+                super::try_read_csv_str_typed_numeric(input, &headers)
+                    .expect("probe")
+                    .is_none(),
+                "fast path must reject {input:?}"
+            );
+        }
+
+        let nan_frame = read_csv_str("x\nNaN\n1.0\n").expect("fallback nan");
+        assert_eq!(
+            nan_frame.column("x").expect("x").values(),
+            &[Scalar::Null(NullKind::NaN), Scalar::Float64(1.0)]
+        );
+
+        let bool_frame = read_csv_str("x\ntrue\nfalse\n").expect("fallback bool");
+        assert_eq!(
+            bool_frame.column("x").expect("x").values(),
+            &[Scalar::Bool(true), Scalar::Bool(false)]
+        );
+
+        let padded_nan_frame = read_csv_str("x\n NaN \n1.0\n").expect("fallback padded nan");
+        let padded_nan_column = padded_nan_frame.column("x").expect("x");
+        assert!(padded_nan_column.has_nulls());
+        assert!(!padded_nan_column.validity().get(0));
+        assert!(padded_nan_column.values()[0].is_missing());
+    }
+
+    #[test]
+    fn read_csv_typed_numeric_fast_path_keeps_all_valid_float_edges() {
+        let input = "x\n-0.0\ninf\n-inf\n1\n";
+        let headers = vec!["x".to_owned()];
+        let frame = super::try_read_csv_str_typed_numeric(input, &headers)
+            .expect("typed parse")
+            .expect("numeric fast path");
+        let column = frame.column("x").expect("x");
+
+        assert_eq!(column.dtype(), DType::Float64);
+        assert!(!column.has_nulls());
+        assert!(column.validity().all());
+        let values = column.values();
+        assert_eq!(
+            values,
+            &[
+                Scalar::Float64(-0.0),
+                Scalar::Float64(f64::INFINITY),
+                Scalar::Float64(f64::NEG_INFINITY),
+                Scalar::Float64(1.0)
+            ]
+        );
+        let negative_zero_bits = match values[0] {
+            Scalar::Float64(value) => Some(value.to_bits()),
+            _ => None,
+        };
+        assert_eq!(negative_zero_bits, Some((-0.0f64).to_bits()));
+    }
+
+    #[test]
+    fn read_csv_typed_numeric_fast_path_preserves_ragged_row_errors() {
+        let long_row = "a,b\n1,2,3\n";
+        let err = read_csv_str(long_row).expect_err("long row must reject");
+        assert!(matches!(err, IoError::Csv(_)), "got {err:?}");
     }
 
     #[test]
@@ -13169,8 +13426,7 @@ mod tests {
             na_values: vec!["MISSING".to_string()],
             ..Default::default()
         };
-        let frame4 =
-            read_csv_with_options("c\ntrue\nMISSING\nmaybe\n", &na_opts).expect("read");
+        let frame4 = read_csv_with_options("c\ntrue\nMISSING\nmaybe\n", &na_opts).expect("read");
         let out4 = write_csv_string(&frame4).expect("write");
         // The lone empty NaN field in a single-column object frame is quoted "".
         assert_eq!(out4, "c\ntrue\n\"\"\nmaybe\n");
@@ -13200,7 +13456,11 @@ mod tests {
             (f64::NEG_INFINITY, "-inf"),
         ];
         for (v, expected) in cases {
-            assert_eq!(&format_pandas_float(*v), expected, "format_pandas_float({v})");
+            assert_eq!(
+                &format_pandas_float(*v),
+                expected,
+                "format_pandas_float({v})"
+            );
         }
     }
 
