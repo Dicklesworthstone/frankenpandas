@@ -690,22 +690,13 @@ fn push_csv_default_numeric_field(values: &mut CsvTypedColumnValues, field: &[u8
                 }
             }
         }
-        CsvTypedColumnValues::Float64(out) => {
-            if !has_float_marker(trimmed)
-                && let Some(value) = parse_i64_ascii(trimmed)
-            {
-                out.push(value as f64);
+        CsvTypedColumnValues::Float64(out) => match parse_f64_csv_number(trimmed) {
+            Some(value) if !value.is_nan() => {
+                out.push(value);
                 true
-            } else {
-                match parse_f64_csv_number(trimmed) {
-                    Some(value) if !value.is_nan() => {
-                        out.push(value);
-                        true
-                    }
-                    Some(_) | None => false,
-                }
             }
-        }
+            Some(_) | None => false,
+        },
     }
 }
 
