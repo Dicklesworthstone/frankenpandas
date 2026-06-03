@@ -20355,24 +20355,36 @@ impl StringAccessor<'_> {
 
     /// Replace a positional slice of each string.
     ///
-    /// Matches `pd.Series.str.slice_replace(start, stop, repl)`.
-    /// Replaces characters from `start` to `stop` with `repl`.
+    /// Matches `pd.Series.str.slice_replace(start, stop, repl)`, including
+    /// Python-style NEGATIVE start/stop. The replaced span is `chars[start..]`
+    /// up to `chars[max(start, stop)..]`, i.e. `s[:start] + repl + s[stop:]`
+    /// with `stop` never preceding `start`. Verified vs live pandas 2.2.3:
+    /// "abcde".slice_replace(-2, None, "X") -> "abcX";
+    /// .slice_replace(0, -1, "X") -> "Xe"; .slice_replace(3, 1, "X") -> "abcXde".
     pub fn slice_replace(
         &self,
-        start: usize,
-        stop: Option<usize>,
+        start: Option<i64>,
+        stop: Option<i64>,
         repl: &str,
     ) -> Result<Series, FrameError> {
         let replacement = repl.to_string();
         self.apply_str(
             |s| {
                 let chars: Vec<char> = s.chars().collect();
-                let end = stop.unwrap_or(chars.len()).min(chars.len());
-                let begin = start.min(end);
+                let n = chars.len() as i64;
+                // Resolve a single forward bound (step=1): negatives count from
+                // the end, then clamp to [0, len].
+                let resolve = |idx: i64| -> usize {
+                    let r = if idx < 0 { idx + n } else { idx };
+                    r.clamp(0, n) as usize
+                };
+                let begin = resolve(start.unwrap_or(0));
+                let end = resolve(stop.unwrap_or(n));
+                let tail = begin.max(end);
                 let mut result = String::new();
                 result.extend(&chars[..begin]);
                 result.push_str(&replacement);
-                result.extend(&chars[end..]);
+                result.extend(&chars[tail..]);
                 Scalar::Utf8(result)
             },
             self.series.name(),
@@ -82467,9 +82479,34 @@ mod tests {
             ],
         )
         .unwrap();
-        let result = s.str().slice_replace(5, Some(11), "!").unwrap();
+        let result = s.str().slice_replace(Some(5), Some(11), "!").unwrap();
         assert_eq!(result.column().values()[0], Scalar::Utf8("hello!".into()));
         assert_eq!(result.column().values()[1], Scalar::Utf8("abcde!".into()));
+    }
+
+    #[test]
+    fn test_str_slice_replace_negative() {
+        // pandas str.slice_replace supports Python negative start/stop.
+        // Verified vs live pandas 2.2.3 on "abcde".
+        let s = Series::from_values(
+            "w",
+            vec![0_i64.into()],
+            vec![Scalar::Utf8("abcde".into())],
+        )
+        .unwrap();
+        let check = |start, stop, repl: &str, expect: &str| {
+            let r = s.str().slice_replace(start, stop, repl).unwrap();
+            assert_eq!(
+                r.column().values()[0],
+                Scalar::Utf8(expect.into()),
+                "slice_replace({start:?}, {stop:?}, {repl:?})"
+            );
+        };
+        check(Some(-2), None, "X", "abcX"); // negative start
+        check(Some(0), Some(-1), "X", "Xe"); // negative stop
+        check(None, None, "X", "X"); // both default
+        check(Some(3), Some(1), "X", "abcXde"); // stop < start
+        check(Some(2), None, "X", "abX");
     }
 
     #[test]

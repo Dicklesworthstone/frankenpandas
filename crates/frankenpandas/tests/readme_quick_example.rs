@@ -3646,7 +3646,7 @@ fn readme_string_accessor_compiles_and_runs() -> Result<(), Box<dyn std::error::
     // strip_chars — strip arbitrary chars from both ends.
     let _ = s.str().strip_chars(" *")?;
     // slice_replace — replace [start, stop) with repl string.
-    let _ = s.str().slice_replace(0, Some(2), "**")?;
+    let _ = s.str().slice_replace(Some(0), Some(2), "**")?;
     // replace_regex_all — like replace_regex but global.
     let _ = s.str().replace_regex_all(r"\w", "X")?;
     // extract_to_frame — DataFrame of named captures.
