@@ -2417,25 +2417,30 @@ fn is_pandas_default_na(s: &str) -> bool {
 }
 
 fn parse_scalar(field: &str) -> Scalar {
-    let trimmed = field.trim();
-    if is_pandas_default_na(trimmed) {
+    // pandas read_csv tolerates surrounding whitespace ONLY for numeric
+    // inference. NA markers and booleans must match the field EXACTLY (a
+    // padded " NA " or "true " is NOT null/bool), and plain strings keep their
+    // original whitespace. Verified vs live pandas 2.2.3: " abc " stays
+    // " abc "; "true " / " NA " stay strings; but " 1 " parses to Int64(1).
+    if is_pandas_default_na(field) {
         return Scalar::Null(NullKind::Null);
     }
 
+    let trimmed = field.trim();
     if let Ok(value) = trimmed.parse::<i64>() {
         return Scalar::Int64(value);
     }
     if let Ok(value) = trimmed.parse::<f64>() {
         return Scalar::Float64(value);
     }
-    if trimmed.eq_ignore_ascii_case("true") {
+    if field.eq_ignore_ascii_case("true") {
         return Scalar::Bool(true);
     }
-    if trimmed.eq_ignore_ascii_case("false") {
+    if field.eq_ignore_ascii_case("false") {
         return Scalar::Bool(false);
     }
 
-    Scalar::Utf8(trimmed.to_owned())
+    Scalar::Utf8(field.to_owned())
 }
 
 fn scalar_to_csv(scalar: &Scalar) -> String {
@@ -2496,12 +2501,15 @@ fn parse_scalar_with_options(
     decimal: u8,
     thousands: Option<u8>,
 ) -> Scalar {
+    // pandas only tolerates surrounding whitespace for NUMERIC inference; NA
+    // markers, booleans, and plain strings match/keep the field EXACTLY (a
+    // padded " NA " or "true " stays a string). See parse_scalar.
     let trimmed = field.trim();
 
     // Check NA values only if na_filter is enabled
     if na_filter {
-        let is_default_na = keep_default_na && is_pandas_default_na(trimmed);
-        let is_custom_na = na_set.contains(trimmed);
+        let is_default_na = keep_default_na && is_pandas_default_na(field);
+        let is_custom_na = na_set.contains(field);
         if is_default_na || is_custom_na {
             return Scalar::Null(NullKind::Null);
         }
@@ -2537,20 +2545,20 @@ fn parse_scalar_with_options(
         return Scalar::Float64(value);
     }
 
-    if true_set.contains(trimmed) {
+    if true_set.contains(field) {
         return Scalar::Bool(true);
     }
-    if false_set.contains(trimmed) {
+    if false_set.contains(field) {
         return Scalar::Bool(false);
     }
 
-    if trimmed.eq_ignore_ascii_case("true") {
+    if field.eq_ignore_ascii_case("true") {
         return Scalar::Bool(true);
     }
-    if trimmed.eq_ignore_ascii_case("false") {
+    if field.eq_ignore_ascii_case("false") {
         return Scalar::Bool(false);
     }
-    Scalar::Utf8(trimmed.to_owned())
+    Scalar::Utf8(field.to_owned())
 }
 
 fn reject_duplicate_headers(headers: &[String]) -> Result<(), IoError> {
@@ -3132,7 +3140,7 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
                 Scalar::Int64(v) => fp_index::IndexLabel::Int64(v),
                 Scalar::Utf8(v) => fp_index::IndexLabel::Utf8(v),
                 Scalar::Float64(v) => fp_index::IndexLabel::Utf8(v.to_string()),
-                Scalar::Bool(v) => fp_index::IndexLabel::Utf8(if matches!(v, true) { "True" } else { "False" }.to_string()),
+                Scalar::Bool(v) => fp_index::IndexLabel::Utf8(if v { "True" } else { "False" }.to_string()),
                 Scalar::Null(_) => fp_index::IndexLabel::Utf8("<null>".to_owned()),
                 Scalar::Timedelta64(v) => {
                     if v == Timedelta::NAT {
@@ -5246,7 +5254,7 @@ fn scalar_to_index_label(scalar: Scalar) -> IndexLabel {
             IndexLabel::Int64(v as i64)
         }
         Scalar::Float64(v) => IndexLabel::Utf8(v.to_string()),
-        Scalar::Bool(b) => IndexLabel::Utf8(if matches!(b, true) { "True" } else { "False" }.to_string()),
+        Scalar::Bool(b) => IndexLabel::Utf8(if b { "True" } else { "False" }.to_string()),
         _ => IndexLabel::Utf8(String::new()),
     }
 }
@@ -9041,7 +9049,7 @@ fn promote_column_to_index(frame: &DataFrame, col_name: &str) -> Result<DataFram
             Scalar::Int64(i) => IndexLabel::Int64(*i),
             Scalar::Utf8(s) => IndexLabel::Utf8(s.clone()),
             Scalar::Float64(f) if !f.is_nan() => IndexLabel::Utf8(f.to_string()),
-            Scalar::Bool(b) => IndexLabel::Utf8(if matches!(b, true) { "True" } else { "False" }.to_string()),
+            Scalar::Bool(b) => IndexLabel::Utf8(if *b { "True" } else { "False" }.to_string()),
             Scalar::Timedelta64(ns) => IndexLabel::Timedelta64(*ns),
             _ => IndexLabel::Utf8("NaN".to_owned()),
         })
@@ -13509,10 +13517,19 @@ mod tests {
         assert_eq!(cell("TRUE"), Scalar::Bool(true));
         assert_eq!(cell("true"), Scalar::Bool(true));
         assert_eq!(cell("False"), Scalar::Bool(false));
-        // Surrounding whitespace is trimmed before numeric inference.
+        // Surrounding whitespace is trimmed ONLY for numeric inference.
         assert_eq!(cell(" 1 "), Scalar::Int64(1));
+        assert_eq!(cell("  3.5  "), Scalar::Float64(3.5));
         // Non-numeric, non-bool stays Utf8.
         assert_eq!(cell("hello"), Scalar::Utf8("hello".into()));
+        // NA markers, booleans, and plain strings keep their surrounding
+        // whitespace — a padded value is a STRING, not null/bool. Verified vs
+        // live pandas 2.2.3: " abc "/"true "/" NA " all stay object strings.
+        assert_eq!(cell(" abc "), Scalar::Utf8(" abc ".into()));
+        assert_eq!(cell("true "), Scalar::Utf8("true ".into()));
+        assert_eq!(cell(" True "), Scalar::Utf8(" True ".into()));
+        assert_eq!(cell(" NA "), Scalar::Utf8(" NA ".into()));
+        assert!(!matches!(cell(" NA "), Scalar::Null(_)));
     }
 
     #[test]
