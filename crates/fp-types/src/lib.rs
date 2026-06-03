@@ -1005,7 +1005,13 @@ pub fn cast_scalar_owned(value: Scalar, target: DType) -> Result<Scalar, TypeErr
         DType::Int64 | DType::Int64Nullable => match &value {
             Scalar::Bool(v) => Ok(Scalar::Int64(i64::from(*v))),
             Scalar::Float64(v) => {
-                if !v.is_finite() || *v != v.trunc() {
+                // pandas astype(int64) truncates a finite float toward zero
+                // (1.9 -> 1, -1.9 -> -1, 2.5 -> 2); only non-finite (NaN/±inf)
+                // or out-of-i64-range values raise. Verified vs pandas 2.2.3
+                // (br-frankenpandas-qcutc). NaN is handled as missing above, so
+                // here non-finite means ±inf. `as i64` performs the toward-zero
+                // truncation for in-range finite values.
+                if !v.is_finite() {
                     return Err(TypeError::LossyFloatToInt { value: *v });
                 }
                 if *v < i64::MIN as f64 || *v >= 9223372036854775808.0 {
@@ -1322,11 +1328,12 @@ impl Timedelta {
             return TimedeltaComponents::default();
         }
 
-        let negative = nanos < 0;
-        let abs_nanos = nanos.unsigned_abs() as i64;
-
-        let days = abs_nanos / Self::NANOS_PER_DAY;
-        let rem = abs_nanos % Self::NANOS_PER_DAY;
+        // pandas/Python normalize via FLOOR division (like format()): the days
+        // component can be negative while the time-of-day remainder is always in
+        // [0, 1 day). So pd.Timedelta(-1,'s').components == (-1, 23, 59, 59, 0, 0, 0),
+        // NOT the abs-based (0, 0, 0, 1, 0, 0, 0).
+        let days = nanos.div_euclid(Self::NANOS_PER_DAY);
+        let rem = nanos.rem_euclid(Self::NANOS_PER_DAY);
 
         let hours = rem / Self::NANOS_PER_HOUR;
         let rem = rem % Self::NANOS_PER_HOUR;
@@ -1344,7 +1351,7 @@ impl Timedelta {
         let nanoseconds = rem % Self::NANOS_PER_MICRO;
 
         TimedeltaComponents {
-            days: if negative { -days } else { days },
+            days,
             hours,
             minutes,
             seconds,
@@ -1389,7 +1396,8 @@ impl Timedelta {
         if nanos == Self::NAT {
             return 0; // pandas returns 0 for NaT.days (no error)
         }
-        nanos / Self::NANOS_PER_DAY
+        // FLOOR division like pandas: pd.Timedelta(-1,'s').days == -1, not 0.
+        nanos.div_euclid(Self::NANOS_PER_DAY)
     }
 
     /// Return the seconds component (0-86399). Matches `pd.Timedelta.seconds`.
@@ -1398,8 +1406,8 @@ impl Timedelta {
         if nanos == Self::NAT {
             return 0;
         }
-        let abs_nanos = nanos.abs();
-        (abs_nanos % Self::NANOS_PER_DAY) / Self::NANOS_PER_SEC
+        // Floor-normalized time-of-day remainder: pd.Timedelta(-1,'s').seconds == 86399.
+        nanos.rem_euclid(Self::NANOS_PER_DAY) / Self::NANOS_PER_SEC
     }
 
     /// Return the microseconds component (0-999999). Matches `pd.Timedelta.microseconds`.
@@ -1408,8 +1416,7 @@ impl Timedelta {
         if nanos == Self::NAT {
             return 0;
         }
-        let abs_nanos = nanos.abs();
-        (abs_nanos % Self::NANOS_PER_SEC) / Self::NANOS_PER_MICRO
+        nanos.rem_euclid(Self::NANOS_PER_SEC) / Self::NANOS_PER_MICRO
     }
 
     /// Return the nanoseconds component (0-999). Matches `pd.Timedelta.nanoseconds`.
@@ -1418,8 +1425,7 @@ impl Timedelta {
         if nanos == Self::NAT {
             return 0;
         }
-        let abs_nanos = nanos.abs();
-        abs_nanos % Self::NANOS_PER_MICRO
+        nanos.rem_euclid(Self::NANOS_PER_MICRO)
     }
 
     pub fn format(nanos: i64) -> String {
@@ -5321,6 +5327,36 @@ mod tests {
         assert_eq!(comp.milliseconds, 1);
         assert_eq!(comp.microseconds, 2);
         assert_eq!(comp.nanoseconds, 3);
+    }
+
+    #[test]
+    fn timedelta_negative_components_floor_div() {
+        use super::Timedelta;
+        // pandas floor-normalizes negative timedeltas: pd.Timedelta(-1,'s') has
+        // days=-1, seconds=86399, components=(-1, 23, 59, 59, 0, 0, 0).
+        let neg_1s = -Timedelta::NANOS_PER_SEC;
+        assert_eq!(Timedelta::days(neg_1s), -1);
+        assert_eq!(Timedelta::seconds(neg_1s), 86399);
+        assert_eq!(Timedelta::microseconds(neg_1s), 0);
+        assert_eq!(Timedelta::nanoseconds(neg_1s), 0);
+        let comp = Timedelta::components(neg_1s);
+        assert_eq!(
+            (
+                comp.days,
+                comp.hours,
+                comp.minutes,
+                comp.seconds,
+                comp.milliseconds,
+                comp.microseconds,
+                comp.nanoseconds
+            ),
+            (-1, 23, 59, 59, 0, 0, 0)
+        );
+
+        // pd.Timedelta(-86401,'s'): days=-2, seconds=86399.
+        let neg = -86_401 * Timedelta::NANOS_PER_SEC;
+        assert_eq!(Timedelta::days(neg), -2);
+        assert_eq!(Timedelta::seconds(neg), 86399);
     }
 
     #[test]
