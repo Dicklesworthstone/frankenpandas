@@ -817,13 +817,24 @@ fn vectorized_binary_i64(
     Some((out, combined))
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct Column {
     dtype: DType,
     values: Vec<Scalar>,
     validity: ValidityMask,
     #[serde(skip)]
     data: Option<ColumnData>,
+}
+
+impl Clone for Column {
+    fn clone(&self) -> Self {
+        Self {
+            dtype: self.dtype,
+            values: self.values.clone(),
+            validity: self.validity.clone(),
+            data: None,
+        }
+    }
 }
 
 impl PartialEq for Column {
@@ -8427,6 +8438,21 @@ mod tests {
         assert!(column.data.is_some());
         assert!(roundtrip.data.is_none());
         assert_eq!(column, roundtrip);
+    }
+
+    #[test]
+    fn column_clone_preserves_values_without_copying_private_cache() {
+        let column = Column::new(
+            DType::Int64,
+            vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+        )
+        .expect("column should build");
+
+        let cloned = column.clone();
+
+        assert!(column.data.is_some());
+        assert!(cloned.data.is_none());
+        assert_eq!(column, cloned);
     }
 
     #[test]
