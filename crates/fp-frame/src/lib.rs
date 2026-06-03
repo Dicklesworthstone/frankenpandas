@@ -609,14 +609,20 @@ fn percentile_with_interpolation(sorted: &[f64], q: f64, mode: QuantileInterpola
         QuantileInterpolation::Lower => sorted[lower],
         QuantileInterpolation::Higher => sorted[upper],
         QuantileInterpolation::Nearest => {
-            // Pandas mirrors numpy.percentile: ties go to the lower neighbor
-            // (frac == 0.5 picks lower). Use frac < 0.5 to match.
+            // Pandas mirrors numpy.percentile(method='nearest'): the position
+            // is rounded to the nearest index, and an exact .5 tie rounds the
+            // index to EVEN (banker's rounding on the position) — NOT always to
+            // the lower neighbor. e.g. q=0.5 on [1,2,3,4] -> pos 1.5 -> idx 2
+            // (even) -> 3.0; q=0.25 -> pos 0.75 -> idx 1 -> 2.0. Verified vs
+            // live pandas/numpy 2.2.3.
             if frac < 0.5 {
                 sorted[lower]
             } else if frac > 0.5 {
                 sorted[upper]
-            } else {
+            } else if lower.is_multiple_of(2) {
                 sorted[lower]
+            } else {
+                sorted[upper]
             }
         }
         QuantileInterpolation::Midpoint => 0.5 * (sorted[lower] + sorted[upper]),
@@ -32302,6 +32308,8 @@ impl DataFrame {
     /// Finalize a pairwise cov/corr cell from accumulated moments.
     ///
     /// Arithmetic is bit-identical to the historical per-pair inline form.
+    #[allow(clippy::too_many_arguments)] // moment accumulators; bundling into a
+    // struct would obscure the bit-identical per-pair arithmetic.
     fn finalize_pairwise_stat(
         stat: &str,
         min_periods: usize,
@@ -111068,11 +111076,22 @@ mod test_quantile_interpolation_a56003 {
     }
 
     #[test]
-    fn quantile_nearest_tie_goes_to_lower() {
-        // pos = 0.5 * 3 = 1.5, frac == 0.5: tie -> lower neighbor (2.0).
+    fn quantile_nearest_tie_rounds_index_to_even() {
+        // pos = 0.5 * 3 = 1.5, frac == 0.5: numpy/pandas round the index to
+        // EVEN -> idx 2 -> 3.0 (NOT the lower neighbor 2.0). Verified vs live
+        // pandas 2.2.3: pd.Series([1,2,3,4]).quantile(0.5, 'nearest') == 3.0.
         let series = s(&[1.0, 2.0, 3.0, 4.0]);
         let result = unwrap_f(&series.quantile_with_interpolation(0.5, "nearest").unwrap());
-        assert!((result - 2.0).abs() < 1e-9, "got {result}");
+        assert!((result - 3.0).abs() < 1e-9, "got {result}");
+    }
+
+    #[test]
+    fn quantile_nearest_tie_even_lower_index_stays() {
+        // pos = 0.25 * 8 = 2.0 is exact (no tie); use pos 0.5 on [10,20,30]:
+        // q = 0.25 -> pos 0.5, frac 0.5, lower idx 0 (even) -> 10.0.
+        let series = s(&[10.0, 20.0, 30.0]);
+        let result = unwrap_f(&series.quantile_with_interpolation(0.25, "nearest").unwrap());
+        assert!((result - 10.0).abs() < 1e-9, "got {result}");
     }
 
     #[test]
