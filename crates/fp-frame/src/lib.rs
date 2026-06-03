@@ -23176,7 +23176,29 @@ impl DatetimeAccessor<'_> {
                 let orig_secs = Self::total_secs_approx(s);
                 let d_floor = (orig_secs - floor_secs).abs();
                 let d_ceil = (ceil_secs - orig_secs).abs();
-                if d_floor <= d_ceil { floor } else { ceil }
+                if d_floor < d_ceil {
+                    floor
+                } else if d_ceil < d_floor {
+                    ceil
+                } else {
+                    // Exact tie: pandas dt.round rounds half to EVEN (banker's)
+                    // on the frequency-unit count, NOT half-down. floor and ceil
+                    // are consecutive units (freq_secs apart); pick whichever
+                    // unit index is even. pandas counts units from the Unix
+                    // epoch; total_secs_approx counts from the Julian epoch, but
+                    // JDN(1970-01-01)=2440588 and the per-freq offset are even
+                    // for every fixed freq (s/min/h/D), so the parity matches
+                    // pandas exactly. Verified vs live pandas 2.2.3:
+                    // 00:01:30 -> 00:02:00 (not 00:01:00). (Sub-second ties are
+                    // out of reach here — total_secs_approx is second-granular.)
+                    let freq_secs = ceil_secs - floor_secs;
+                    if freq_secs > 0.0 {
+                        let floor_units = (floor_secs / freq_secs).round() as i64;
+                        if floor_units % 2 == 0 { floor } else { ceil }
+                    } else {
+                        floor
+                    }
+                }
             },
             self.series.name(),
         )
@@ -82976,6 +82998,65 @@ mod tests {
         assert_eq!(
             result.column().values()[1],
             Scalar::Utf8("2023-01-15 15:00:00".to_string())
+        );
+    }
+
+    #[test]
+    fn test_dt_round_ties_to_even() {
+        // pandas dt.round breaks exact ties half-to-EVEN (banker's) on the
+        // frequency-unit count, not half-down. Verified vs live pandas 2.2.3:
+        //   00:00:30 -> 00:00:00  (minute 0, even, kept)
+        //   00:01:30 -> 00:02:00  (minute odd -> rounds UP to even)
+        //   00:02:30 -> 00:02:00  (minute even, kept)
+        let s = Series::from_values(
+            "ts",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("2024-01-01 00:00:30".to_string()),
+                Scalar::Utf8("2024-01-01 00:01:30".to_string()),
+                Scalar::Utf8("2024-01-01 00:02:30".to_string()),
+            ],
+        )
+        .unwrap();
+        let r = s.dt().round("min").unwrap();
+        assert_eq!(
+            r.column().values()[0],
+            Scalar::Utf8("2024-01-01 00:00:00".to_string())
+        );
+        assert_eq!(
+            r.column().values()[1],
+            Scalar::Utf8("2024-01-01 00:02:00".to_string()),
+            "00:01:30 must round half-to-even UP to 00:02:00, not down"
+        );
+        assert_eq!(
+            r.column().values()[2],
+            Scalar::Utf8("2024-01-01 00:02:00".to_string())
+        );
+
+        // Hour ties: 2024-01-01 hour-count is even, so :00 even, :01 odd, :02 even.
+        //   00:30 -> 00:00 ; 01:30 -> 02:00 ; 02:30 -> 02:00
+        let sh = Series::from_values(
+            "ts",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("2024-01-01 00:30:00".to_string()),
+                Scalar::Utf8("2024-01-01 01:30:00".to_string()),
+                Scalar::Utf8("2024-01-01 02:30:00".to_string()),
+            ],
+        )
+        .unwrap();
+        let rh = sh.dt().round("h").unwrap();
+        assert_eq!(
+            rh.column().values()[0],
+            Scalar::Utf8("2024-01-01 00:00:00".to_string())
+        );
+        assert_eq!(
+            rh.column().values()[1],
+            Scalar::Utf8("2024-01-01 02:00:00".to_string())
+        );
+        assert_eq!(
+            rh.column().values()[2],
+            Scalar::Utf8("2024-01-01 02:00:00".to_string())
         );
     }
 
