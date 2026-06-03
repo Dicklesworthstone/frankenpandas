@@ -969,15 +969,26 @@ pub fn write_csv_string_with_options(
         writer.write_record(&header_row)?;
     }
 
+    // Pre-compute each datetime column's column-uniform to_csv format (pandas
+    // renders a datetime column with one date-only/seconds/sub-second form).
+    let dt_formats: Vec<Option<DatetimeCsvFormat>> = headers
+        .iter()
+        .map(|name| {
+            frame.column(name).and_then(|column| {
+                (column.dtype() == DType::Datetime64).then(|| datetime_csv_format(column))
+            })
+        })
+        .collect();
+
     for row_idx in 0..frame.index().len() {
         let mut row = Vec::with_capacity(headers.len() + if options.include_index { 1 } else { 0 });
         if options.include_index {
             row.push(index_label_string(frame, row_idx)?);
         }
-        row.extend(headers.iter().map(|name| {
+        row.extend(headers.iter().enumerate().map(|(col_idx, name)| {
             let value = frame.column(name).and_then(|column| column.value(row_idx));
             match value {
-                Some(scalar) => scalar_to_csv_with_na(scalar, &options.na_rep),
+                Some(scalar) => scalar_to_csv_cell(scalar, &options.na_rep, dt_formats[col_idx]),
                 None => options.na_rep.clone(),
             }
         }));
@@ -2357,6 +2368,66 @@ fn index_label_string(frame: &DataFrame, row_idx: usize) -> Result<String, IoErr
         })
 }
 
+/// Column-uniform datetime rendering spec for `to_csv`, mirroring pandas.
+///
+/// pandas chooses one format for the whole datetime column: a date-only
+/// `YYYY-MM-DD` when every value falls exactly on midnight, otherwise
+/// `YYYY-MM-DD HH:MM:SS` with a fractional-seconds suffix whose width is the
+/// column's finest sub-second resolution (3 = ms, 6 = µs, 9 = ns; 0 = none).
+#[derive(Clone, Copy)]
+struct DatetimeCsvFormat {
+    date_only: bool,
+    subsec_digits: u8,
+}
+
+/// Scan a Datetime64 column and derive its column-uniform `to_csv` format.
+fn datetime_csv_format(column: &Column) -> DatetimeCsvFormat {
+    let mut date_only = true;
+    let mut subsec_digits = 0u8;
+    for value in column.values() {
+        let Scalar::Datetime64(ns) = value else { continue };
+        if *ns == Timestamp::NAT {
+            continue;
+        }
+        let subsec = (ns.rem_euclid(1_000_000_000)) as u32;
+        // Any non-midnight time-of-day OR any sub-second component forces the
+        // full timestamp form for the entire column.
+        if ns.div_euclid(1_000_000_000).rem_euclid(86_400) != 0 || subsec != 0 {
+            date_only = false;
+        }
+        if subsec != 0 {
+            let digits = if !subsec.is_multiple_of(1_000) {
+                9
+            } else if !subsec.is_multiple_of(1_000_000) {
+                6
+            } else {
+                3
+            };
+            subsec_digits = subsec_digits.max(digits);
+        }
+    }
+    DatetimeCsvFormat {
+        date_only,
+        subsec_digits,
+    }
+}
+
+/// Format one datetime (ns since epoch) under a column's `to_csv` spec.
+fn format_datetime_csv(nanos: i64, fmt: DatetimeCsvFormat) -> String {
+    // format_datetime_ns yields "YYYY-MM-DD HH:MM:SS" (ASCII, 19 chars for the
+    // i64-ns datetime range, year always 4 digits). Trim or extend per spec.
+    let base = format_datetime_ns(nanos);
+    if fmt.date_only {
+        return base[..10].to_owned();
+    }
+    if fmt.subsec_digits == 0 {
+        return base;
+    }
+    let subsec = (nanos.rem_euclid(1_000_000_000)) as u32;
+    let frac = subsec / 10u32.pow(9 - u32::from(fmt.subsec_digits));
+    format!("{base}.{frac:0>width$}", width = usize::from(fmt.subsec_digits))
+}
+
 fn scalar_to_csv_with_na(scalar: &Scalar, na_rep: &str) -> String {
     match scalar {
         Scalar::Null(_) => na_rep.to_owned(),
@@ -2369,6 +2440,22 @@ fn scalar_to_csv_with_na(scalar: &Scalar, na_rep: &str) -> String {
         Scalar::Timedelta64(v) if *v == Timedelta::NAT => na_rep.to_owned(),
         other => scalar_to_csv(other),
     }
+}
+
+/// CSV cell formatter that applies a column's datetime spec when present;
+/// otherwise identical to `scalar_to_csv_with_na`.
+fn scalar_to_csv_cell(
+    scalar: &Scalar,
+    na_rep: &str,
+    dt_format: Option<DatetimeCsvFormat>,
+) -> String {
+    if let (Scalar::Datetime64(ns), Some(fmt)) = (scalar, dt_format) {
+        if *ns == Timestamp::NAT {
+            return na_rep.to_owned();
+        }
+        return format_datetime_csv(*ns, fmt);
+    }
+    scalar_to_csv_with_na(scalar, na_rep)
 }
 
 fn scalar_to_table_with_na(scalar: &Scalar, na_rep: &str) -> String {
@@ -12861,6 +12948,48 @@ mod tests {
             let out = write_csv_string(&frame).expect("write");
             assert_eq!(&out, expected_csv, "round-trip mismatch for input {input:?}");
         }
+    }
+
+    #[test]
+    fn to_csv_datetime_is_column_uniform_like_pandas() {
+        // pandas to_csv renders a datetime column with ONE format: date-only
+        // when all values are midnight, else YYYY-MM-DD HH:MM:SS with a
+        // sub-second suffix sized to the column's finest resolution. Verified
+        // vs live pandas 2.2.3. (Previously format_datetime_ns dropped the
+        // sub-second component and always wrote 00:00:00.)
+        fn dt_frame(nanos: &[i64]) -> DataFrame {
+            let values: Vec<Scalar> = nanos.iter().map(|&n| Scalar::Datetime64(n)).collect();
+            let col = Column::new(DType::Datetime64, values).expect("col");
+            let mut cols = BTreeMap::new();
+            cols.insert("d".to_string(), col);
+            let index = Index::from_i64((0..nanos.len() as i64).collect());
+            DataFrame::new_with_column_order(index, cols, vec!["d".to_string()]).expect("frame")
+        }
+        const MIDNIGHT_JAN1: i64 = 1_577_836_800_000_000_000; // 2020-01-01 00:00:00Z
+        const MIDNIGHT_JAN2: i64 = 1_577_923_200_000_000_000; // 2020-01-02 00:00:00Z
+        const JAN2_0300: i64 = 1_577_934_000_000_000_000; // 2020-01-02 03:00:00Z
+        const JAN1_HALF: i64 = 1_577_836_800_500_000_000; // 2020-01-01 00:00:00.5Z
+
+        // All midnight -> date only.
+        assert_eq!(
+            write_csv_string(&dt_frame(&[MIDNIGHT_JAN1, MIDNIGHT_JAN2])).expect("w"),
+            "d\n2020-01-01\n2020-01-02\n"
+        );
+        // Sub-second present -> whole column gets .fff (millis), incl. .000.
+        assert_eq!(
+            write_csv_string(&dt_frame(&[JAN1_HALF, MIDNIGHT_JAN1])).expect("w"),
+            "d\n2020-01-01 00:00:00.500\n2020-01-01 00:00:00.000\n"
+        );
+        // Time present, no sub-second -> HH:MM:SS for all (midnight -> 00:00:00).
+        assert_eq!(
+            write_csv_string(&dt_frame(&[JAN2_0300, MIDNIGHT_JAN1])).expect("w"),
+            "d\n2020-01-02 03:00:00\n2020-01-01 00:00:00\n"
+        );
+        // NaT in an otherwise date-only column -> date only, NaT -> quoted "".
+        assert_eq!(
+            write_csv_string(&dt_frame(&[MIDNIGHT_JAN1, i64::MIN])).expect("w"),
+            "d\n2020-01-01\n\"\"\n"
+        );
     }
 
     #[test]
