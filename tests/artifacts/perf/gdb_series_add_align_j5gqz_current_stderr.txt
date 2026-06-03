@@ -1,0 +1,2 @@
+perf_profile: scenario=series_add_align n=100000 iters=1000
+perf_profile: done 1000 iters in 20.008s (20.008 ms/iter), sink=100001000

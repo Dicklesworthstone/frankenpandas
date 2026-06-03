@@ -2292,20 +2292,8 @@ impl Column {
         debug_assert_eq!(left_positions.len(), right_positions.len());
         let out_len = left_positions.len();
 
-        let ColumnData::Float64(lsrc) = ColumnData::from_scalars(&self.values, DType::Float64)
-        else {
-            return Err(ColumnError::DTypeMismatch {
-                left: self.dtype,
-                right: DType::Float64,
-            });
-        };
-        let ColumnData::Float64(rsrc) = ColumnData::from_scalars(&right.values, DType::Float64)
-        else {
-            return Err(ColumnError::DTypeMismatch {
-                left: right.dtype,
-                right: DType::Float64,
-            });
-        };
+        let lsrc = self.float64_binary_data();
+        let rsrc = right.float64_binary_data();
         let lvalid = self.nan_aware_validity();
         let rvalid = right.nan_aware_validity();
 
@@ -2330,12 +2318,49 @@ impl Column {
         Self::new(DType::Float64, values)
     }
 
+    fn cached_float64_data(&self) -> Option<&[f64]> {
+        match &self.data {
+            Some(ColumnData::Float64(data)) if data.len() == self.values.len() => {
+                return Some(data.as_slice());
+            }
+            _ => {}
+        }
+
+        match &self.values {
+            ScalarValues::LazyAllValidFloat64 { data, .. } if data.len() == self.validity.len() => {
+                Some(data.as_slice())
+            }
+            _ => None,
+        }
+    }
+
+    fn float64_binary_data(&self) -> std::borrow::Cow<'_, [f64]> {
+        if let Some(data) = self.cached_float64_data() {
+            return std::borrow::Cow::Borrowed(data);
+        }
+
+        match ColumnData::from_scalars(&self.values, DType::Float64) {
+            ColumnData::Float64(data) => std::borrow::Cow::Owned(data),
+            _ => unreachable!("Float64 materialization must produce Float64 data"),
+        }
+    }
+
     /// Validity mask that also marks NaN float values as invalid.
     #[must_use]
     fn nan_aware_validity(&self) -> ValidityMask {
         let mut mask = self.validity.clone();
-        for (i, v) in self.values.iter().enumerate() {
-            if matches!(v, Scalar::Float64(f) if f.is_nan()) {
+
+        if let Some(data) = self.cached_float64_data() {
+            for (i, value) in data.iter().enumerate() {
+                if value.is_nan() {
+                    mask.set(i, false);
+                }
+            }
+            return mask;
+        }
+
+        for (i, value) in self.values.iter().enumerate() {
+            if matches!(value, Scalar::Float64(f) if f.is_nan()) {
                 mask.set(i, false);
             }
         }
@@ -9367,6 +9392,45 @@ mod tests {
         assert_eq!(actual.validity().len(), expected.validity().len());
         for idx in 0..actual.len() {
             assert_eq!(actual.validity().get(idx), expected.validity().get(idx));
+        }
+    }
+
+    #[test]
+    fn aligned_binary_f64_borrows_lazy_float64_clone_data() {
+        let left = Column::from_f64_values(vec![1.0, f64::NAN, 4.0]).clone();
+        let right = Column::from_f64_values(vec![10.0, 20.0, 30.0]).clone();
+
+        assert!(left.data.is_none());
+        assert!(right.data.is_none());
+        assert!(matches!(
+            &left.values,
+            ScalarValues::LazyAllValidFloat64 { values, .. } if values.get().is_none()
+        ));
+        assert!(matches!(
+            &right.values,
+            ScalarValues::LazyAllValidFloat64 { values, .. } if values.get().is_none()
+        ));
+
+        let left_positions = [Some(0), Some(1), Some(2), None];
+        let right_positions = [Some(2), Some(1), None, Some(0)];
+        let actual = left
+            .aligned_binary_f64(&right, &left_positions, &right_positions, ArithmeticOp::Add)
+            .expect("aligned add");
+
+        assert_eq!(
+            actual.values(),
+            &[
+                Scalar::Float64(31.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::NaN),
+            ]
+        );
+        if let ScalarValues::LazyAllValidFloat64 { values, .. } = &left.values {
+            assert!(values.get().is_none());
+        }
+        if let ScalarValues::LazyAllValidFloat64 { values, .. } = &right.values {
+            assert!(values.get().is_none());
         }
     }
 
