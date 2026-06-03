@@ -27406,9 +27406,16 @@ impl DataFrame {
             .collect::<Result<Vec<_>, _>>()?;
 
         // Phase 1: Compute global union index across all series.
-        // Use N-way leapfrog triejoin fast-path if no duplicates are present.
         let has_duplicates = materialized_series.iter().any(|s| s.index.has_duplicates());
-        let union_index = if has_duplicates {
+        let first_index = &materialized_series[0].index;
+        let all_identical = materialized_series[1..]
+            .iter()
+            .all(|s| &s.index == first_index);
+        let union_index = if all_identical {
+            // pandas keeps the shared order when every series has the same index
+            // (even if that index is unsorted).
+            first_index.clone()
+        } else if has_duplicates {
             let mut union_index = materialized_series[0].index.clone();
             for series in &materialized_series[1..] {
                 let plan = align_union(&union_index, &series.index);
@@ -27417,9 +27424,16 @@ impl DataFrame {
             }
             union_index
         } else {
-            let indexes: Vec<&Index> = materialized_series.iter().map(|s| &s.index).collect();
-            let plan = fp_index::multi_way_align(&indexes);
-            plan.union_index
+            // pandas DataFrame(dict-of-series) returns the SORTED union when the
+            // series indexes differ (Index.union sorts) — NOT first-appearance.
+            // (br-frankenpandas-tvey8) concat(axis=1) keeps first-appearance and
+            // uses its own union code, so this does not affect it.
+            let mut union_index = first_index.clone();
+            for series in &materialized_series[1..] {
+                union_index =
+                    align_union_sorted_plan(&union_index, &series.index).union_index;
+            }
+            union_index
         };
 
         // Phase 2: Reindex each series column exactly once against the final union index.
@@ -46319,6 +46333,61 @@ mod tests {
                 Scalar::Utf8("a".into()),
                 Scalar::Utf8("a".into()),
                 Scalar::Utf8("b".into())
+            ]
+        );
+    }
+
+    #[test]
+    fn dataframe_from_series_sorts_differing_union_tvey8() {
+        // pandas DataFrame(dict-of-series) sorts the union when the series
+        // indexes differ, but keeps order when they are identical.
+        // (br-frankenpandas-tvey8)
+        let x = Series::from_values(
+            "x",
+            vec!["b".into(), "a".into(), "c".into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+        )
+        .unwrap();
+        let y = Series::from_values(
+            "y",
+            vec!["c".into(), "a".into()],
+            vec![Scalar::Int64(4), Scalar::Int64(5)],
+        )
+        .unwrap();
+
+        // Differing indexes -> SORTED union [a, b, c].
+        let df = DataFrame::from_series(vec![x.clone(), y]).unwrap();
+        assert_eq!(
+            df.index().labels(),
+            &[
+                IndexLabel::Utf8("a".into()),
+                IndexLabel::Utf8("b".into()),
+                IndexLabel::Utf8("c".into()),
+            ]
+        );
+        // Values realign to the sorted index: x@[a,b,c]=[2,1,3]; y@[a,b,c]=[5,NaN,4].
+        assert_eq!(
+            df.column("x").unwrap().values(),
+            &[Scalar::Int64(2), Scalar::Int64(1), Scalar::Int64(3)]
+        );
+        assert_eq!(df.column("y").unwrap().values()[0], Scalar::Int64(5));
+        assert!(df.column("y").unwrap().values()[1].is_missing());
+        assert_eq!(df.column("y").unwrap().values()[2], Scalar::Int64(4));
+
+        // Identical (unsorted) indexes -> keep the shared order [b, a, c].
+        let z = Series::from_values(
+            "z",
+            vec!["b".into(), "a".into(), "c".into()],
+            vec![Scalar::Int64(7), Scalar::Int64(8), Scalar::Int64(9)],
+        )
+        .unwrap();
+        let df2 = DataFrame::from_series(vec![x, z]).unwrap();
+        assert_eq!(
+            df2.index().labels(),
+            &[
+                IndexLabel::Utf8("b".into()),
+                IndexLabel::Utf8("a".into()),
+                IndexLabel::Utf8("c".into()),
             ]
         );
     }
