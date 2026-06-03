@@ -1662,7 +1662,7 @@ impl Index {
     /// order in the returned uniques index.
     #[must_use]
     pub fn factorize(&self) -> (Vec<isize>, Self) {
-        let mut positions = HashMap::<IndexLabel, isize>::new();
+        let mut positions = FxHashMap::<IndexLabel, isize>::default();
         let mut uniques = Vec::<IndexLabel>::new();
         let mut codes = Vec::with_capacity(self.labels.len());
         for label in &self.labels {
@@ -1693,7 +1693,7 @@ impl Index {
     /// ordinal positions are returned separately.
     #[must_use]
     pub fn get_indexer_non_unique(&self, target: &Self) -> (Vec<isize>, Vec<usize>) {
-        let mut positions = HashMap::<IndexLabel, Vec<usize>>::new();
+        let mut positions = FxHashMap::<IndexLabel, Vec<usize>>::default();
         for (position, label) in self.labels.iter().enumerate() {
             positions.entry(label.clone()).or_default().push(position);
         }
@@ -3819,7 +3819,7 @@ impl DatetimeIndex {
     #[must_use]
     pub fn get_indexer_non_unique(&self, targets: &[i64]) -> (Vec<isize>, Vec<usize>) {
         let labels = self.index.labels();
-        let mut by_value = HashMap::<i64, Vec<usize>>::new();
+        let mut by_value = FxHashMap::<i64, Vec<usize>>::default();
         for (i, label) in labels.iter().enumerate() {
             if let IndexLabel::Datetime64(n) = label {
                 by_value.entry(*n).or_default().push(i);
@@ -3855,7 +3855,7 @@ impl DatetimeIndex {
     #[must_use]
     pub fn get_indexer(&self, targets: &[i64]) -> Vec<isize> {
         let labels = self.index.labels();
-        let mut positions = HashMap::<i64, isize>::new();
+        let mut positions = FxHashMap::<i64, isize>::default();
         for (i, label) in labels.iter().enumerate() {
             if let IndexLabel::Datetime64(n) = label {
                 positions
@@ -5060,7 +5060,7 @@ impl TimedeltaIndex {
     #[must_use]
     pub fn get_indexer_non_unique(&self, targets: &[i64]) -> (Vec<isize>, Vec<usize>) {
         let labels = self.index.labels();
-        let mut by_value = HashMap::<i64, Vec<usize>>::new();
+        let mut by_value = FxHashMap::<i64, Vec<usize>>::default();
         for (i, label) in labels.iter().enumerate() {
             if let IndexLabel::Timedelta64(n) = label {
                 by_value.entry(*n).or_default().push(i);
@@ -5095,7 +5095,7 @@ impl TimedeltaIndex {
     #[must_use]
     pub fn get_indexer(&self, targets: &[i64]) -> Vec<isize> {
         let labels = self.index.labels();
-        let mut positions = HashMap::<i64, isize>::new();
+        let mut positions = FxHashMap::<i64, isize>::default();
         for (i, label) in labels.iter().enumerate() {
             if let IndexLabel::Timedelta64(n) = label {
                 positions
