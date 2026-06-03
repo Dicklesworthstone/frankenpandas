@@ -18160,22 +18160,31 @@ impl SeriesGroupBy<'_> {
     }
 
     /// Select first `n` rows per group, preserving original row order.
-    pub fn head(&self, n: usize) -> Result<Series, FrameError> {
+    ///
+    /// Matches `pd.SeriesGroupBy.head(n)`, including pandas' negative `n`:
+    /// `head(-k)` keeps all but the last `k` rows of each group. Verified vs
+    /// live pandas 2.2.3.
+    pub fn head(&self, n: i64) -> Result<Series, FrameError> {
         let (_order, _order_keys, groups) = self.build_groups();
         let mut positions = Vec::new();
         for indices in groups.values() {
-            positions.extend_from_slice(&indices[..indices.len().min(n)]);
+            let take = normalize_head_take(n, indices.len());
+            positions.extend_from_slice(&indices[..take]);
         }
         positions.sort_unstable();
         self.take_positions(&positions)
     }
 
     /// Select last `n` rows per group, preserving original row order.
-    pub fn tail(&self, n: usize) -> Result<Series, FrameError> {
+    ///
+    /// Matches `pd.SeriesGroupBy.tail(n)`, including pandas' negative `n`:
+    /// `tail(-k)` drops the first `k` rows of each group. Verified vs live
+    /// pandas 2.2.3.
+    pub fn tail(&self, n: i64) -> Result<Series, FrameError> {
         let (_order, _order_keys, groups) = self.build_groups();
         let mut positions = Vec::new();
         for indices in groups.values() {
-            let start = indices.len().saturating_sub(n);
+            let (start, _) = normalize_tail_window(n, indices.len());
             positions.extend_from_slice(&indices[start..]);
         }
         positions.sort_unstable();
@@ -43833,13 +43842,15 @@ impl DataFrameGroupBy<'_> {
 
     /// GroupBy head: select first n rows per group.
     ///
-    /// Matches `df.groupby(col).head(n)`.
-    pub fn head(&self, n: usize) -> Result<DataFrame, FrameError> {
+    /// Matches `df.groupby(col).head(n)`, including pandas' negative `n`:
+    /// `head(-k)` keeps all but the last `k` rows of each group. Verified vs
+    /// live pandas 2.2.3.
+    pub fn head(&self, n: i64) -> Result<DataFrame, FrameError> {
         let (_group_order, groups) = self.build_groups();
         let mut keep_indices: Vec<usize> = Vec::new();
 
         for row_indices in groups.values() {
-            let take = row_indices.len().min(n);
+            let take = normalize_head_take(n, row_indices.len());
             keep_indices.extend_from_slice(&row_indices[..take]);
         }
 
@@ -43849,13 +43860,15 @@ impl DataFrameGroupBy<'_> {
 
     /// GroupBy tail: select last n rows per group.
     ///
-    /// Matches `df.groupby(col).tail(n)`.
-    pub fn tail(&self, n: usize) -> Result<DataFrame, FrameError> {
+    /// Matches `df.groupby(col).tail(n)`, including pandas' negative `n`:
+    /// `tail(-k)` drops the first `k` rows of each group. Verified vs live
+    /// pandas 2.2.3.
+    pub fn tail(&self, n: i64) -> Result<DataFrame, FrameError> {
         let (_group_order, groups) = self.build_groups();
         let mut keep_indices: Vec<usize> = Vec::new();
 
         for row_indices in groups.values() {
-            let start = row_indices.len().saturating_sub(n);
+            let (start, _) = normalize_tail_window(n, row_indices.len());
             keep_indices.extend_from_slice(&row_indices[start..]);
         }
 
@@ -69884,6 +69897,23 @@ mod tests {
         let tail_result = df.groupby(&["g"]).unwrap().tail(1).unwrap();
         // a: [3], b: [20] → 2 rows
         assert_eq!(tail_result.len(), 2);
+
+        // Negative n (pandas parity): head(-1) keeps all but the last per group
+        // (a:[1,2], b:[10]) and tail(-1) drops the first per group
+        // (a:[2,3], b:[20]). Verified vs live pandas 2.2.3.
+        let head_neg = df.groupby(&["g"]).unwrap().head(-1).unwrap();
+        assert_eq!(
+            head_neg.column("v").unwrap().values(),
+            &[Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(10)]
+        );
+        let tail_neg = df.groupby(&["g"]).unwrap().tail(-1).unwrap();
+        assert_eq!(
+            tail_neg.column("v").unwrap().values(),
+            &[Scalar::Int64(2), Scalar::Int64(3), Scalar::Int64(20)]
+        );
+        // head(-large) and tail(-large) drop everything -> empty.
+        assert_eq!(df.groupby(&["g"]).unwrap().head(-10).unwrap().len(), 0);
+        assert_eq!(df.groupby(&["g"]).unwrap().tail(-10).unwrap().len(), 0);
     }
 
     // ── Crosstab tests ──
