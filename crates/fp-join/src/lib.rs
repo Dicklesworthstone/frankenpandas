@@ -2781,6 +2781,31 @@ mod tests {
     }
 
     #[test]
+    fn merge_default_suffixes_match_pandas() {
+        // Overlapping non-key column "v" gets pandas default _x/_y suffixes.
+        // Verified vs pandas 2.2.3: left{k:[1,2,3],v:[10,20,30]} merged inner on
+        // k with right{k:[2,3,4],v:[200,300,400]} -> cols [k,v_x,v_y],
+        // k=[2,3], v_x=[20,30], v_y=[200,300].
+        let idx: Vec<_> = (0..3).map(|i| (i as i64).into()).collect();
+        let left = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values("k", idx.clone(), vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]).unwrap(),
+            fp_frame::Series::from_values("v", idx.clone(), vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)]).unwrap(),
+        ])
+        .unwrap();
+        let right = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values("k", idx.clone(), vec![Scalar::Int64(2), Scalar::Int64(3), Scalar::Int64(4)]).unwrap(),
+            fp_frame::Series::from_values("v", idx, vec![Scalar::Int64(200), Scalar::Int64(300), Scalar::Int64(400)]).unwrap(),
+        ])
+        .unwrap();
+        let merged = merge_dataframes(&left, &right, "k", JoinType::Inner).unwrap();
+
+        assert_eq!(merged.columns.get("k").unwrap().values(), &[Scalar::Int64(2), Scalar::Int64(3)], "k");
+        assert_eq!(merged.columns.get("v_x").unwrap().values(), &[Scalar::Int64(20), Scalar::Int64(30)], "v_x");
+        assert_eq!(merged.columns.get("v_y").unwrap().values(), &[Scalar::Int64(200), Scalar::Int64(300)], "v_y");
+        assert!(merged.columns.get("v").is_none(), "bare 'v' should be suffixed away");
+    }
+
+    #[test]
     fn merge_left_preserves_all_left_rows() {
         let left = make_left_df();
         let right = make_right_df();
