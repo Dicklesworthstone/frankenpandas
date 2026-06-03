@@ -22194,6 +22194,51 @@ pub struct DatetimeAccessor<'a> {
     series: &'a Series,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DtRoundMode {
+    Floor,
+    Ceil,
+    Round,
+}
+
+/// Snap a nanosecond timestamp to a frequency boundary. Floor rounds toward
+/// negative infinity, ceil toward positive infinity, and round to the nearest
+/// boundary with half-to-even on the unit count (matching pandas dt.round).
+/// Per br-frankenpandas-cm5fy.
+fn snap_datetime_ns(ns: i64, freq_ns: i64, mode: DtRoundMode) -> i64 {
+    if freq_ns <= 1 {
+        return ns; // nanosecond granularity: already snapped
+    }
+    let floor = ns - ns.rem_euclid(freq_ns);
+    match mode {
+        DtRoundMode::Floor => floor,
+        DtRoundMode::Ceil => {
+            if ns == floor {
+                ns
+            } else {
+                floor + freq_ns
+            }
+        }
+        DtRoundMode::Round => {
+            let rem = ns - floor; // 0..freq_ns
+            let half = freq_ns / 2;
+            if rem < half {
+                floor
+            } else if rem > half {
+                floor + freq_ns
+            } else {
+                // Exact half: round to the even multiple (banker's rounding).
+                let floor_units = floor / freq_ns;
+                if floor_units.rem_euclid(2) == 0 {
+                    floor
+                } else {
+                    floor + freq_ns
+                }
+            }
+        }
+    }
+}
+
 impl DatetimeAccessor<'_> {
     /// Per br-frankenpandas-d14250: pandas raises AttributeError when `.dt` is
     /// called on a non-datetimelike Series. fp-frame stores datetimes as Utf8
@@ -23362,73 +23407,60 @@ impl DatetimeAccessor<'_> {
     /// Round each datetime down (floor) to the given frequency.
     ///
     /// Matches `pd.Series.dt.floor(freq)`. Supported frequencies:
-    /// "D" (day), "h" (hour), "min" (minute), "s" (second).
+    /// "D", "h"/"H", "min"/"T", "s"/"S", "ms", "us", "ns".
     pub fn floor(&self, freq: &str) -> Result<Series, FrameError> {
-        let freq_owned = freq.to_owned();
-        self.extract_component(
-            |s| Self::round_datetime(s, &freq_owned, false),
-            self.series.name(),
-        )
+        self.round_to_freq(freq, DtRoundMode::Floor)
     }
 
     /// Round each datetime up (ceil) to the given frequency.
     ///
-    /// Matches `pd.Series.dt.ceil(freq)`. Supported frequencies:
-    /// "D" (day), "h" (hour), "min" (minute), "s" (second).
+    /// Matches `pd.Series.dt.ceil(freq)`. Same frequencies as `floor`.
     pub fn ceil(&self, freq: &str) -> Result<Series, FrameError> {
-        let freq_owned = freq.to_owned();
-        self.extract_component(
-            |s| Self::round_datetime(s, &freq_owned, true),
-            self.series.name(),
-        )
+        self.round_to_freq(freq, DtRoundMode::Ceil)
     }
 
     /// Round each datetime to the nearest given frequency.
     ///
-    /// Matches `pd.Series.dt.round(freq)`. Rounds to the nearest boundary.
-    /// Supported: "D", "h"/"H", "min"/"T", "s"/"S".
+    /// Matches `pd.Series.dt.round(freq)`. Ties round half-to-even on the
+    /// frequency-unit count, like pandas. Same frequencies as `floor`.
     pub fn round(&self, freq: &str) -> Result<Series, FrameError> {
-        let freq_owned = freq.to_owned();
+        self.round_to_freq(freq, DtRoundMode::Round)
+    }
+
+    /// Internal: floor/ceil/round each datetime to `freq` by working in
+    /// nanoseconds — parse the ISO string to ns, snap to the boundary, format
+    /// back. Operating on the i64-ns value rather than the second-granular
+    /// string repr fixes sub-second frequencies (ms/us/ns) and exact half-unit
+    /// ties at any frequency. Per br-frankenpandas-cm5fy.
+    fn round_to_freq(&self, freq: &str, mode: DtRoundMode) -> Result<Series, FrameError> {
+        use fp_types::{Timedelta, Timestamp};
+        let freq_ns = resolve_timedelta_unit(Some(freq))?;
+        // Sub-second frequencies print a fractional component sized to the unit
+        // (ms -> 3, us -> 6, ns -> 9 digits); second and coarser print none —
+        // matching pandas' str() of the rounded Timestamp.
+        let frac_digits: usize = if freq_ns >= Timedelta::NANOS_PER_SEC {
+            0
+        } else if freq_ns >= Timedelta::NANOS_PER_MILLI {
+            3
+        } else if freq_ns >= Timedelta::NANOS_PER_MICRO {
+            6
+        } else {
+            9
+        };
         self.extract_component(
             |s| {
-                let floor = Self::round_datetime(s, &freq_owned, false);
-                let ceil = Self::round_datetime(s, &freq_owned, true);
-                if floor == ceil {
-                    return floor;
-                }
-                let Scalar::Utf8(ref fs) = floor else {
-                    return floor;
+                let ns = match Timestamp::parse(s) {
+                    Ok(ts) if ts.nanos != Timestamp::NAT => ts.nanos,
+                    _ => return Scalar::Null(NullKind::NaN),
                 };
-                let Scalar::Utf8(ref cs) = ceil else {
-                    return floor;
-                };
-                let floor_secs = Self::total_secs_approx(fs);
-                let ceil_secs = Self::total_secs_approx(cs);
-                let orig_secs = Self::total_secs_approx(s);
-                let d_floor = (orig_secs - floor_secs).abs();
-                let d_ceil = (ceil_secs - orig_secs).abs();
-                if d_floor < d_ceil {
-                    floor
-                } else if d_ceil < d_floor {
-                    ceil
+                let snapped = snap_datetime_ns(ns, freq_ns, mode);
+                let base = format_datetime_ns(snapped);
+                if frac_digits == 0 {
+                    Scalar::Utf8(base)
                 } else {
-                    // Exact tie: pandas dt.round rounds half to EVEN (banker's)
-                    // on the frequency-unit count, NOT half-down. floor and ceil
-                    // are consecutive units (freq_secs apart); pick whichever
-                    // unit index is even. pandas counts units from the Unix
-                    // epoch; total_secs_approx counts from the Julian epoch, but
-                    // JDN(1970-01-01)=2440588 and the per-freq offset are even
-                    // for every fixed freq (s/min/h/D), so the parity matches
-                    // pandas exactly. Verified vs live pandas 2.2.3:
-                    // 00:01:30 -> 00:02:00 (not 00:01:00). (Sub-second ties are
-                    // out of reach here — total_secs_approx is second-granular.)
-                    let freq_secs = ceil_secs - floor_secs;
-                    if freq_secs > 0.0 {
-                        let floor_units = (floor_secs / freq_secs).round() as i64;
-                        if floor_units % 2 == 0 { floor } else { ceil }
-                    } else {
-                        floor
-                    }
+                    let subsec = snapped.rem_euclid(Timedelta::NANOS_PER_SEC);
+                    let frac = subsec / 10_i64.pow(9 - frac_digits as u32);
+                    Scalar::Utf8(format!("{base}.{frac:0width$}", width = frac_digits))
                 }
             },
             self.series.name(),
@@ -23440,128 +23472,6 @@ impl DatetimeAccessor<'_> {
     /// Matches `pd.Series.dt.normalize()`. Equivalent to `floor("D")`.
     pub fn normalize(&self) -> Result<Series, FrameError> {
         self.floor("D")
-    }
-
-    /// Internal: approximate total seconds for datetime comparison.
-    /// Uses proper day counting to handle year/month boundaries correctly.
-    fn total_secs_approx(s: &str) -> f64 {
-        let Some((y, m, d)) = Self::parse_ymd_from_datetime(s) else {
-            return 0.0;
-        };
-        let h = match Self::parse_datetime_component(s, 3) {
-            Scalar::Int64(v) => v,
-            _ => 0,
-        };
-        let mi = match Self::parse_datetime_component(s, 4) {
-            Scalar::Int64(v) => v,
-            _ => 0,
-        };
-        let sec = match Self::parse_datetime_component(s, 5) {
-            Scalar::Int64(v) => v,
-            _ => 0,
-        };
-        // Compute days since epoch using proper calendar math
-        // Julian day number formula (simplified for Gregorian dates after 1582)
-        let a = (14 - m) / 12;
-        let yy = y + 4800 - a;
-        let mm = m + 12 * a - 3;
-        let jdn = d + (153 * mm + 2) / 5 + 365 * yy + yy / 4 - yy / 100 + yy / 400 - 32045;
-        jdn as f64 * 86400.0 + (h * 3600 + mi * 60 + sec) as f64
-    }
-
-    /// Internal: round a datetime string to the given frequency, either floor or ceil.
-    fn round_datetime(s: &str, freq: &str, is_ceil: bool) -> Scalar {
-        let Some((y, m, d)) = Self::parse_ymd_from_datetime(s) else {
-            return Scalar::Null(NullKind::NaN);
-        };
-        let h = match Self::parse_datetime_component(s, 3) {
-            Scalar::Int64(v) => v,
-            _ => 0,
-        };
-        let mi = match Self::parse_datetime_component(s, 4) {
-            Scalar::Int64(v) => v,
-            _ => 0,
-        };
-        let sec = match Self::parse_datetime_component(s, 5) {
-            Scalar::Int64(v) => v,
-            _ => 0,
-        };
-
-        match freq {
-            "D" => {
-                if is_ceil && (h > 0 || mi > 0 || sec > 0) {
-                    // Need to add one day
-                    let dim = Self::days_in_month_val(y, m);
-                    let (ny, nm, nd) = if d + 1 > dim {
-                        if m + 1 > 12 {
-                            (y + 1, 1, 1)
-                        } else {
-                            (y, m + 1, 1)
-                        }
-                    } else {
-                        (y, m, d + 1)
-                    };
-                    Scalar::Utf8(format!("{ny:04}-{nm:02}-{nd:02} 00:00:00"))
-                } else {
-                    Scalar::Utf8(format!("{y:04}-{m:02}-{d:02} 00:00:00"))
-                }
-            }
-            "h" | "H" => {
-                if is_ceil && (mi > 0 || sec > 0) {
-                    let nh = h + 1;
-                    if nh >= 24 {
-                        let dim = Self::days_in_month_val(y, m);
-                        let (ny, nm, nd) = if d + 1 > dim {
-                            if m + 1 > 12 {
-                                (y + 1, 1, 1)
-                            } else {
-                                (y, m + 1, 1)
-                            }
-                        } else {
-                            (y, m, d + 1)
-                        };
-                        Scalar::Utf8(format!("{ny:04}-{nm:02}-{nd:02} 00:00:00"))
-                    } else {
-                        Scalar::Utf8(format!("{y:04}-{m:02}-{d:02} {nh:02}:00:00"))
-                    }
-                } else {
-                    Scalar::Utf8(format!("{y:04}-{m:02}-{d:02} {h:02}:00:00"))
-                }
-            }
-            "min" | "T" => {
-                if is_ceil && sec > 0 {
-                    let nmi = mi + 1;
-                    if nmi >= 60 {
-                        // Cascade to hour
-                        let nh = h + 1;
-                        if nh >= 24 {
-                            let dim = Self::days_in_month_val(y, m);
-                            let (ny, nm, nd) = if d + 1 > dim {
-                                if m + 1 > 12 {
-                                    (y + 1, 1, 1)
-                                } else {
-                                    (y, m + 1, 1)
-                                }
-                            } else {
-                                (y, m, d + 1)
-                            };
-                            Scalar::Utf8(format!("{ny:04}-{nm:02}-{nd:02} 00:00:00"))
-                        } else {
-                            Scalar::Utf8(format!("{y:04}-{m:02}-{d:02} {nh:02}:00:00"))
-                        }
-                    } else {
-                        Scalar::Utf8(format!("{y:04}-{m:02}-{d:02} {h:02}:{nmi:02}:00"))
-                    }
-                } else {
-                    Scalar::Utf8(format!("{y:04}-{m:02}-{d:02} {h:02}:{mi:02}:00"))
-                }
-            }
-            "s" | "S" => {
-                // Already at second precision
-                Scalar::Utf8(format!("{y:04}-{m:02}-{d:02} {h:02}:{mi:02}:{sec:02}"))
-            }
-            _ => Scalar::Null(NullKind::NaN),
-        }
     }
 
     /// Localize tz-naive datetimes to a timezone or remove existing timezone data.
@@ -83755,6 +83665,46 @@ mod tests {
         assert_eq!(
             rh.column().values()[2],
             Scalar::Utf8("2024-01-01 02:00:00".to_string())
+        );
+    }
+
+    #[test]
+    fn test_dt_round_subsecond_cm5fy() {
+        // dt.round/floor/ceil now work in nanoseconds, so sub-second frequencies
+        // (ms/us/ns) and exact half-unit ties are precise. Verified vs live
+        // pandas 2.2.3. Output prints the fraction sized to the freq unit.
+        let s = Series::from_values(
+            "ts",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![
+                Scalar::Utf8("2020-01-01 00:00:01.500500".to_string()),
+                Scalar::Utf8("2020-01-01 00:00:01.500000".to_string()),
+            ],
+        )
+        .unwrap();
+        // floor("us") keeps microsecond precision (6 digits).
+        let f = s.dt().floor("us").unwrap();
+        assert_eq!(
+            f.column().values()[0],
+            Scalar::Utf8("2020-01-01 00:00:01.500500".to_string())
+        );
+        // round("ms"): 1.5005s -> nearest ms = 1.500 (3 digits).
+        let rms = s.dt().round("ms").unwrap();
+        assert_eq!(
+            rms.column().values()[0],
+            Scalar::Utf8("2020-01-01 00:00:01.500".to_string())
+        );
+        // round("s") of an exact half-second tie rounds half-to-even: the
+        // second-count of 00:00:01 is odd, so 1.5s -> 00:00:02 (matches pandas).
+        let half = Series::from_values(
+            "ts",
+            vec![0_i64.into()],
+            vec![Scalar::Utf8("2020-01-01 00:00:01.500000".to_string())],
+        )
+        .unwrap();
+        assert_eq!(
+            half.dt().round("s").unwrap().column().values()[0],
+            Scalar::Utf8("2020-01-01 00:00:02".to_string())
         );
     }
 
