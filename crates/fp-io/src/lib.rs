@@ -321,12 +321,12 @@ impl Default for CsvReadOptions {
     }
 }
 
-fn csv_read_options_match_default_fast_path(options: &CsvReadOptions) -> bool {
+fn csv_read_options_match_default_shape(options: &CsvReadOptions, na_filter: bool) -> bool {
     options.delimiter == b','
         && options.has_headers
         && options.na_values.is_empty()
         && options.keep_default_na
-        && options.na_filter
+        && options.na_filter == na_filter
         && options.index_col.is_none()
         && options.usecols.is_none()
         && options.nrows.is_none()
@@ -346,6 +346,14 @@ fn csv_read_options_match_default_fast_path(options: &CsvReadOptions) -> bool {
         && options.escapechar.is_none()
         && options.doublequote
         && options.lineterminator.is_none()
+}
+
+fn csv_read_options_match_default_fast_path(options: &CsvReadOptions) -> bool {
+    csv_read_options_match_default_shape(options, true)
+}
+
+fn csv_read_options_match_no_na_numeric_fast_path(options: &CsvReadOptions) -> bool {
+    csv_read_options_match_default_shape(options, false)
 }
 
 /// Options for [`read_fwf_str`] and [`read_fwf`].
@@ -1065,6 +1073,23 @@ fn try_read_csv_str_typed_numeric(
     }
 
     build_typed_numeric_csv_frame(headers, typed_columns, row_count).map(Some)
+}
+
+fn try_read_csv_with_options_no_na_numeric_fast_path(
+    input: &str,
+) -> Result<Option<DataFrame>, IoError> {
+    let mut reader = ReaderBuilder::new()
+        .has_headers(true)
+        .from_reader(input.as_bytes());
+
+    let headers_record = reader.headers().cloned().map_err(IoError::from)?;
+    if headers_record.is_empty() {
+        return Err(IoError::MissingHeaders);
+    }
+    let headers: Vec<String> = headers_record.iter().map(ToOwned::to_owned).collect();
+    reject_duplicate_headers(&headers)?;
+
+    try_read_csv_str_simple_typed_numeric(input, &headers)
 }
 
 pub fn read_csv_str(input: &str) -> Result<DataFrame, IoError> {
@@ -3697,6 +3722,12 @@ fn should_skip_bad_csv_record(
 pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<DataFrame, IoError> {
     if csv_read_options_match_default_fast_path(options) {
         return read_csv_str(input);
+    }
+
+    if csv_read_options_match_no_na_numeric_fast_path(options)
+        && let Some(frame) = try_read_csv_with_options_no_na_numeric_fast_path(input)?
+    {
+        return Ok(frame);
     }
 
     let mut builder = ReaderBuilder::new();
@@ -14085,6 +14116,41 @@ mod tests {
         ] {
             assert!(!super::csv_read_options_match_default_fast_path(&options));
         }
+    }
+
+    #[test]
+    fn read_csv_no_na_filter_numeric_fast_path_preserves_numeric_columns() {
+        let options = CsvReadOptions {
+            na_filter: false,
+            ..CsvReadOptions::default()
+        };
+        assert!(super::csv_read_options_match_no_na_numeric_fast_path(
+            &options
+        ));
+
+        let frame = read_csv_with_options("i,f\n1,2.5\n3,4\n", &options).expect("parse");
+        assert_eq!(frame.len(), 2);
+        assert_eq!(frame.column("i").expect("i").dtype(), DType::Int64);
+        assert_eq!(frame.column("f").expect("f").dtype(), DType::Float64);
+        assert_eq!(frame.column("i").expect("i").values()[1], Scalar::Int64(3));
+        assert_eq!(
+            frame.column("f").expect("f").values()[0],
+            Scalar::Float64(2.5)
+        );
+    }
+
+    #[test]
+    fn read_csv_no_na_filter_fast_path_falls_back_for_empty_field() {
+        let options = CsvReadOptions {
+            na_filter: false,
+            ..CsvReadOptions::default()
+        };
+        let frame = read_csv_with_options("x,y\n1,\n2,3\n", &options).expect("parse");
+        let y = frame.column("y").expect("y");
+
+        assert_eq!(y.dtype(), DType::Utf8);
+        assert_eq!(y.values()[0], Scalar::Utf8(String::new()));
+        assert_eq!(y.values()[1], Scalar::Utf8("3".to_owned()));
     }
 
     #[test]
