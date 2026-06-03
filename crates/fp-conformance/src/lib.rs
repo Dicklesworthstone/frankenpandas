@@ -3478,6 +3478,48 @@ struct OracleRequest {
     #[serde(default)]
     str_suffix: Option<String>,
     #[serde(default)]
+    replace_value: Option<String>,
+    #[serde(default)]
+    str_pad_side: Option<String>,
+    #[serde(default)]
+    str_repeat_n: Option<usize>,
+    #[serde(default)]
+    str_normalize_form: Option<String>,
+    #[serde(default)]
+    str_slice_start: Option<usize>,
+    #[serde(default)]
+    str_slice_end: Option<usize>,
+    #[serde(default)]
+    str_split_pat: Option<String>,
+    #[serde(default)]
+    str_split_n: Option<usize>,
+    #[serde(default)]
+    str_sub: Option<String>,
+    #[serde(default)]
+    str_get_index: Option<usize>,
+    #[serde(default)]
+    str_fillchar: Option<char>,
+    #[serde(default)]
+    str_width: Option<usize>,
+    #[serde(default)]
+    str_wrap_width: Option<usize>,
+    #[serde(default)]
+    str_expandtabs_size: Option<usize>,
+    #[serde(default)]
+    str_findall_sep: Option<String>,
+    #[serde(default)]
+    str_join_sep: Option<String>,
+    #[serde(default)]
+    str_translate_from: Option<String>,
+    #[serde(default)]
+    str_translate_to: Option<String>,
+    #[serde(default)]
+    nlargest_n: Option<usize>,
+    #[serde(default)]
+    between_left: Option<Scalar>,
+    #[serde(default)]
+    between_right: Option<Scalar>,
+    #[serde(default)]
     melt_id_vars: Option<Vec<String>>,
     #[serde(default)]
     melt_value_vars: Option<Vec<String>>,
@@ -13025,6 +13067,27 @@ fn capture_live_oracle_expected(
         regex_pattern: fixture.regex_pattern.clone(),
         str_prefix: fixture.str_prefix.clone(),
         str_suffix: fixture.str_suffix.clone(),
+        replace_value: fixture.replace_value.clone(),
+        str_pad_side: fixture.str_pad_side.clone(),
+        str_repeat_n: fixture.str_repeat_n,
+        str_normalize_form: fixture.str_normalize_form.clone(),
+        str_slice_start: fixture.str_slice_start,
+        str_slice_end: fixture.str_slice_end,
+        str_split_pat: fixture.str_split_pat.clone(),
+        str_split_n: fixture.str_split_n,
+        str_sub: fixture.str_sub.clone(),
+        str_get_index: fixture.str_get_index,
+        str_fillchar: fixture.str_fillchar,
+        str_width: fixture.str_width,
+        str_wrap_width: fixture.str_wrap_width,
+        str_expandtabs_size: fixture.str_expandtabs_size,
+        str_findall_sep: fixture.str_findall_sep.clone(),
+        str_join_sep: fixture.str_join_sep.clone(),
+        str_translate_from: fixture.str_translate_from.clone(),
+        str_translate_to: fixture.str_translate_to.clone(),
+        nlargest_n: fixture.nlargest_n,
+        between_left: fixture.between_left.clone(),
+        between_right: fixture.between_right.clone(),
         melt_id_vars: fixture.melt_id_vars.clone(),
         melt_value_vars: fixture.melt_value_vars.clone(),
         melt_var_name: fixture.melt_var_name.clone(),
