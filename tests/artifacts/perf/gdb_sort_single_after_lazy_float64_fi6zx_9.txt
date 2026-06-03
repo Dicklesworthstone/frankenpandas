@@ -1,0 +1,964 @@
+=== sample 01 ===
+2026-06-03T06:09:45-04:00
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+drop_in_place<[fp_types::Scalar]> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+809	pub const unsafe fn drop_in_place<T: PointeeSized>(to_drop: *mut T)
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-after-fi6zx9/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7f45b7a2bc00 (LWP 3405791) "perf_profile"):
+#0  drop_in_place<[fp_types::Scalar]> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#1  drop<fp_types::Scalar, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:4254
+#2  drop_in_place<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#3  drop_in_place<fp_columnar::ScalarValues> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#4  drop_in_place<fp_columnar::Column> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#5  0x0000624aadf3694b in assume_init_drop<fp_columnar::Column> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/mem/maybe_uninit.rs:832
+#6  drop<fp_columnar::Column> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/collections/btree/node.rs:1201
+#7  drop_in_place<alloc::collections::btree::node::{impl#57}::drop_key_val::Dropper<fp_columnar::Column>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#8  drop_key_val<alloc::string::String, fp_columnar::Column, alloc::collections::btree::node::marker::LeafOrInternal> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/collections/btree/node.rs:1214
+#9  drop<alloc::string::String, fp_columnar::Column, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/collections/btree/map.rs:1902
+#10 drop_in_place<alloc::collections::btree::map::IntoIter<alloc::string::String, fp_columnar::Column, alloc::alloc::Global>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#11 drop<alloc::collections::btree::map::IntoIter<alloc::string::String, fp_columnar::Column, alloc::alloc::Global>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/mem/mod.rs:1004
+[Inferior 1 (process 3405791) detached]
+=== sample 02 ===
+2026-06-03T06:09:45-04:00
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+fold<f64, (), core::iter::adapters::copied::copy_fold::{closure_env#0}<f64, (), core::iter::adapters::map::map_fold::{closure_env#0}<f64, fp_types::Scalar, (), fn(f64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:279
+279	                    acc = f(acc, unsafe { & $( $mut_ )? *self.ptr.add(i).as_ptr() });
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-after-fi6zx9/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7f45b7a2bc00 (LWP 3405791) "perf_profile"):
+#0  fold<f64, (), core::iter::adapters::copied::copy_fold::{closure_env#0}<f64, (), core::iter::adapters::map::map_fold::{closure_env#0}<f64, fp_types::Scalar, (), fn(f64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:279
+#1  fold<core::slice::iter::Iter<f64>, f64, (), core::iter::adapters::map::map_fold::{closure_env#0}<f64, fp_types::Scalar, (), fn(f64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/adapters/copied.rs:81
+#2  fold<fp_types::Scalar, core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar, (), core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/adapters/map.rs:128
+#3  for_each<core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/traits/iterator.rs:889
+#4  extend_trusted<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:4031
+#5  spec_extend<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/spec_extend.rs:27
+#6  from_iter<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/spec_from_iter_nested.rs:60
+#7  0x0000624aadec0594 in from_iter<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/spec_from_iter.rs:33
+#8  from_iter<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:3895
+#9  collect<core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>, alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/traits/iterator.rs:2092
+#10 clone_dense_values_from_cache () at crates/fp-columnar/src/lib.rs:1284
+#11 clone () at crates/fp-columnar/src/lib.rs:927
+[Inferior 1 (process 3405791) detached]
+=== sample 03 ===
+2026-06-03T06:09:46-04:00
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x0000624aadebfa0f in write<fp_types::Scalar> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:1920
+1920	        intrinsics::write_via_move(dst, src)
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-after-fi6zx9/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7f45b7a2bc00 (LWP 3405791) "perf_profile"):
+#0  0x0000624aadebfa0f in write<fp_types::Scalar> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:1920
+#1  {closure#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:4032
+#2  {closure#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/traits/iterator.rs:886
+#3  {closure#0}<f64, fp_types::Scalar, (), fn(f64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/adapters/map.rs:88
+#4  {closure#0}<f64, (), core::iter::adapters::map::map_fold::{closure_env#0}<f64, fp_types::Scalar, (), fn(f64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/adapters/copied.rs:36
+#5  fold<f64, (), core::iter::adapters::copied::copy_fold::{closure_env#0}<f64, (), core::iter::adapters::map::map_fold::{closure_env#0}<f64, fp_types::Scalar, (), fn(f64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:279
+#6  fold<core::slice::iter::Iter<f64>, f64, (), core::iter::adapters::map::map_fold::{closure_env#0}<f64, fp_types::Scalar, (), fn(f64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/adapters/copied.rs:81
+#7  fold<fp_types::Scalar, core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar, (), core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/adapters/map.rs:128
+#8  for_each<core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/traits/iterator.rs:889
+#9  extend_trusted<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:4031
+#10 spec_extend<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/spec_extend.rs:27
+#11 from_iter<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/spec_from_iter_nested.rs:60
+[Inferior 1 (process 3405791) detached]
+=== sample 04 ===
+2026-06-03T06:09:46-04:00
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x0000624aadf36b0f in drop_in_place<fp_types::Scalar> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+809	pub const unsafe fn drop_in_place<T: PointeeSized>(to_drop: *mut T)
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-after-fi6zx9/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7f45b7a2bc00 (LWP 3405791) "perf_profile"):
+#0  0x0000624aadf36b0f in drop_in_place<fp_types::Scalar> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#1  drop_in_place<[fp_types::Scalar]> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#2  drop<fp_types::Scalar, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:4254
+#3  drop_in_place<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#4  drop_in_place<fp_columnar::ScalarValues> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#5  drop_in_place<fp_columnar::Column> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#6  0x0000624aadf3694b in assume_init_drop<fp_columnar::Column> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/mem/maybe_uninit.rs:832
+#7  drop<fp_columnar::Column> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/collections/btree/node.rs:1201
+#8  drop_in_place<alloc::collections::btree::node::{impl#57}::drop_key_val::Dropper<fp_columnar::Column>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#9  drop_key_val<alloc::string::String, fp_columnar::Column, alloc::collections::btree::node::marker::LeafOrInternal> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/collections/btree/node.rs:1214
+#10 drop<alloc::string::String, fp_columnar::Column, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/collections/btree/map.rs:1902
+#11 drop_in_place<alloc::collections::btree::map::IntoIter<alloc::string::String, fp_columnar::Column, alloc::alloc::Global>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+[Inferior 1 (process 3405791) detached]
+=== sample 05 ===
+2026-06-03T06:09:46-04:00
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x0000624aadf36b0f in drop_in_place<fp_types::Scalar> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+809	pub const unsafe fn drop_in_place<T: PointeeSized>(to_drop: *mut T)
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-after-fi6zx9/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7f45b7a2bc00 (LWP 3405791) "perf_profile"):
+#0  0x0000624aadf36b0f in drop_in_place<fp_types::Scalar> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#1  drop_in_place<[fp_types::Scalar]> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#2  drop<fp_types::Scalar, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:4254
+#3  drop_in_place<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#4  drop_in_place<fp_columnar::ScalarValues> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#5  drop_in_place<fp_columnar::Column> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#6  0x0000624aadf3694b in assume_init_drop<fp_columnar::Column> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/mem/maybe_uninit.rs:832
+#7  drop<fp_columnar::Column> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/collections/btree/node.rs:1201
+#8  drop_in_place<alloc::collections::btree::node::{impl#57}::drop_key_val::Dropper<fp_columnar::Column>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#9  drop_key_val<alloc::string::String, fp_columnar::Column, alloc::collections::btree::node::marker::LeafOrInternal> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/collections/btree/node.rs:1214
+#10 drop<alloc::string::String, fp_columnar::Column, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/collections/btree/map.rs:1902
+#11 drop_in_place<alloc::collections::btree::map::IntoIter<alloc::string::String, fp_columnar::Column, alloc::alloc::Global>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+[Inferior 1 (process 3405791) detached]
+=== sample 06 ===
+2026-06-03T06:09:47-04:00
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x0000624aadef996a in to_vec<fp_index::IndexLabel, alloc::alloc::Global> () at crates/fp-index/src/lib.rs:95
+95	#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-after-fi6zx9/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7f45b7a2bc00 (LWP 3405791) "perf_profile"):
+#0  0x0000624aadef996a in to_vec<fp_index::IndexLabel, alloc::alloc::Global> () at crates/fp-index/src/lib.rs:95
+#1  to_vec_in<fp_index::IndexLabel, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/slice.rs:400
+#2  clone<fp_index::IndexLabel, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:3777
+#3  0x0000624aadef5436 in clone () at crates/fp-index/src/lib.rs:272
+#4  0x0000624aadef51f9 in clone () at crates/fp-frame/src/lib.rs:25950
+#5  0x0000624aadee3b81 in sort_values_na () at crates/fp-frame/src/lib.rs:29144
+#6  0x0000624aadf3cb9d in sort_values () at crates/fp-frame/src/lib.rs:29108
+#7  main () at crates/fp-conformance/examples/perf_profile.rs:293
+#8  0x0000624aadf37ce3 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#9  __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#10 0x0000624aadf37d79 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#11 0x0000624aadf7656e in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+[Inferior 1 (process 3405791) detached]
+=== sample 07 ===
+2026-06-03T06:09:47-04:00
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x0000624aadf36b0f in drop_in_place<fp_types::Scalar> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+809	pub const unsafe fn drop_in_place<T: PointeeSized>(to_drop: *mut T)
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-after-fi6zx9/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7f45b7a2bc00 (LWP 3405791) "perf_profile"):
+#0  0x0000624aadf36b0f in drop_in_place<fp_types::Scalar> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#1  drop_in_place<[fp_types::Scalar]> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#2  drop<fp_types::Scalar, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:4254
+#3  drop_in_place<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#4  drop_in_place<fp_columnar::ScalarValues> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#5  drop_in_place<fp_columnar::Column> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#6  0x0000624aadf3694b in assume_init_drop<fp_columnar::Column> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/mem/maybe_uninit.rs:832
+#7  drop<fp_columnar::Column> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/collections/btree/node.rs:1201
+#8  drop_in_place<alloc::collections::btree::node::{impl#57}::drop_key_val::Dropper<fp_columnar::Column>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#9  drop_key_val<alloc::string::String, fp_columnar::Column, alloc::collections::btree::node::marker::LeafOrInternal> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/collections/btree/node.rs:1214
+#10 drop<alloc::string::String, fp_columnar::Column, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/collections/btree/map.rs:1902
+#11 drop_in_place<alloc::collections::btree::map::IntoIter<alloc::string::String, fp_columnar::Column, alloc::alloc::Global>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+[Inferior 1 (process 3405791) detached]
+=== sample 08 ===
+2026-06-03T06:09:47-04:00
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x0000624aadf36b0f in drop_in_place<fp_types::Scalar> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+809	pub const unsafe fn drop_in_place<T: PointeeSized>(to_drop: *mut T)
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-after-fi6zx9/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7f45b7a2bc00 (LWP 3405791) "perf_profile"):
+#0  0x0000624aadf36b0f in drop_in_place<fp_types::Scalar> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#1  drop_in_place<[fp_types::Scalar]> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#2  drop<fp_types::Scalar, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:4254
+#3  drop_in_place<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#4  drop_in_place<fp_columnar::ScalarValues> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#5  drop_in_place<fp_columnar::Column> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#6  0x0000624aadf3694b in assume_init_drop<fp_columnar::Column> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/mem/maybe_uninit.rs:832
+#7  drop<fp_columnar::Column> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/collections/btree/node.rs:1201
+#8  drop_in_place<alloc::collections::btree::node::{impl#57}::drop_key_val::Dropper<fp_columnar::Column>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#9  drop_key_val<alloc::string::String, fp_columnar::Column, alloc::collections::btree::node::marker::LeafOrInternal> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/collections/btree/node.rs:1214
+#10 drop<alloc::string::String, fp_columnar::Column, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/collections/btree/map.rs:1902
+#11 drop_in_place<alloc::collections::btree::map::IntoIter<alloc::string::String, fp_columnar::Column, alloc::alloc::Global>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+[Inferior 1 (process 3405791) detached]
+=== sample 09 ===
+2026-06-03T06:09:48-04:00
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+fold<f64, (), core::iter::adapters::copied::copy_fold::{closure_env#0}<f64, (), core::iter::adapters::map::map_fold::{closure_env#0}<f64, fp_types::Scalar, (), fn(f64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:279
+279	                    acc = f(acc, unsafe { & $( $mut_ )? *self.ptr.add(i).as_ptr() });
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-after-fi6zx9/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7f45b7a2bc00 (LWP 3405791) "perf_profile"):
+#0  fold<f64, (), core::iter::adapters::copied::copy_fold::{closure_env#0}<f64, (), core::iter::adapters::map::map_fold::{closure_env#0}<f64, fp_types::Scalar, (), fn(f64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:279
+#1  fold<core::slice::iter::Iter<f64>, f64, (), core::iter::adapters::map::map_fold::{closure_env#0}<f64, fp_types::Scalar, (), fn(f64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/adapters/copied.rs:81
+#2  fold<fp_types::Scalar, core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar, (), core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/adapters/map.rs:128
+#3  for_each<core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/traits/iterator.rs:889
+#4  extend_trusted<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:4031
+#5  spec_extend<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/spec_extend.rs:27
+#6  from_iter<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/spec_from_iter_nested.rs:60
+#7  0x0000624aadec0594 in from_iter<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/spec_from_iter.rs:33
+#8  from_iter<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:3895
+#9  collect<core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>, alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/traits/iterator.rs:2092
+#10 clone_dense_values_from_cache () at crates/fp-columnar/src/lib.rs:1284
+#11 clone () at crates/fp-columnar/src/lib.rs:927
+[Inferior 1 (process 3405791) detached]
+=== sample 10 ===
+2026-06-03T06:09:48-04:00
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x0000624aadf36b0f in drop_in_place<fp_types::Scalar> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+809	pub const unsafe fn drop_in_place<T: PointeeSized>(to_drop: *mut T)
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-after-fi6zx9/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7f45b7a2bc00 (LWP 3405791) "perf_profile"):
+#0  0x0000624aadf36b0f in drop_in_place<fp_types::Scalar> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#1  drop_in_place<[fp_types::Scalar]> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#2  drop<fp_types::Scalar, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:4254
+#3  drop_in_place<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#4  drop_in_place<fp_columnar::ScalarValues> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#5  drop_in_place<fp_columnar::Column> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#6  0x0000624aadf3694b in assume_init_drop<fp_columnar::Column> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/mem/maybe_uninit.rs:832
+#7  drop<fp_columnar::Column> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/collections/btree/node.rs:1201
+#8  drop_in_place<alloc::collections::btree::node::{impl#57}::drop_key_val::Dropper<fp_columnar::Column>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#9  drop_key_val<alloc::string::String, fp_columnar::Column, alloc::collections::btree::node::marker::LeafOrInternal> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/collections/btree/node.rs:1214
+#10 drop<alloc::string::String, fp_columnar::Column, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/collections/btree/map.rs:1902
+#11 drop_in_place<alloc::collections::btree::map::IntoIter<alloc::string::String, fp_columnar::Column, alloc::alloc::Global>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+[Inferior 1 (process 3405791) detached]
+=== sample 11 ===
+2026-06-03T06:09:48-04:00
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+fold<f64, (), core::iter::adapters::copied::copy_fold::{closure_env#0}<f64, (), core::iter::adapters::map::map_fold::{closure_env#0}<f64, fp_types::Scalar, (), fn(f64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:279
+279	                    acc = f(acc, unsafe { & $( $mut_ )? *self.ptr.add(i).as_ptr() });
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-after-fi6zx9/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7f45b7a2bc00 (LWP 3405791) "perf_profile"):
+#0  fold<f64, (), core::iter::adapters::copied::copy_fold::{closure_env#0}<f64, (), core::iter::adapters::map::map_fold::{closure_env#0}<f64, fp_types::Scalar, (), fn(f64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:279
+#1  fold<core::slice::iter::Iter<f64>, f64, (), core::iter::adapters::map::map_fold::{closure_env#0}<f64, fp_types::Scalar, (), fn(f64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/adapters/copied.rs:81
+#2  fold<fp_types::Scalar, core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar, (), core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/adapters/map.rs:128
+#3  for_each<core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/traits/iterator.rs:889
+#4  extend_trusted<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:4031
+#5  spec_extend<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/spec_extend.rs:27
+#6  from_iter<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/spec_from_iter_nested.rs:60
+#7  0x0000624aadec0594 in from_iter<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/spec_from_iter.rs:33
+#8  from_iter<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:3895
+#9  collect<core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>, alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/traits/iterator.rs:2092
+#10 clone_dense_values_from_cache () at crates/fp-columnar/src/lib.rs:1284
+#11 clone () at crates/fp-columnar/src/lib.rs:927
+[Inferior 1 (process 3405791) detached]
+=== sample 12 ===
+2026-06-03T06:09:49-04:00
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+fold<f64, (), core::iter::adapters::copied::copy_fold::{closure_env#0}<f64, (), core::iter::adapters::map::map_fold::{closure_env#0}<f64, fp_types::Scalar, (), fn(f64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:279
+279	                    acc = f(acc, unsafe { & $( $mut_ )? *self.ptr.add(i).as_ptr() });
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-after-fi6zx9/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7f45b7a2bc00 (LWP 3405791) "perf_profile"):
+#0  fold<f64, (), core::iter::adapters::copied::copy_fold::{closure_env#0}<f64, (), core::iter::adapters::map::map_fold::{closure_env#0}<f64, fp_types::Scalar, (), fn(f64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:279
+#1  fold<core::slice::iter::Iter<f64>, f64, (), core::iter::adapters::map::map_fold::{closure_env#0}<f64, fp_types::Scalar, (), fn(f64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/adapters/copied.rs:81
+#2  fold<fp_types::Scalar, core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar, (), core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/adapters/map.rs:128
+#3  for_each<core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/traits/iterator.rs:889
+#4  extend_trusted<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:4031
+#5  spec_extend<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/spec_extend.rs:27
+#6  from_iter<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/spec_from_iter_nested.rs:60
+#7  0x0000624aadec0594 in from_iter<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/spec_from_iter.rs:33
+#8  from_iter<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:3895
+#9  collect<core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>, alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/traits/iterator.rs:2092
+#10 clone_dense_values_from_cache () at crates/fp-columnar/src/lib.rs:1284
+#11 clone () at crates/fp-columnar/src/lib.rs:927
+[Inferior 1 (process 3405791) detached]
+=== sample 13 ===
+2026-06-03T06:09:49-04:00
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x0000624aadebf9eb in write<fp_types::Scalar> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:1920
+1920	        intrinsics::write_via_move(dst, src)
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-after-fi6zx9/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7f45b7a2bc00 (LWP 3405791) "perf_profile"):
+#0  0x0000624aadebf9eb in write<fp_types::Scalar> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:1920
+#1  {closure#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:4032
+#2  {closure#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/traits/iterator.rs:886
+#3  {closure#0}<f64, fp_types::Scalar, (), fn(f64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/adapters/map.rs:88
+#4  {closure#0}<f64, (), core::iter::adapters::map::map_fold::{closure_env#0}<f64, fp_types::Scalar, (), fn(f64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/adapters/copied.rs:36
+#5  fold<f64, (), core::iter::adapters::copied::copy_fold::{closure_env#0}<f64, (), core::iter::adapters::map::map_fold::{closure_env#0}<f64, fp_types::Scalar, (), fn(f64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:279
+#6  fold<core::slice::iter::Iter<f64>, f64, (), core::iter::adapters::map::map_fold::{closure_env#0}<f64, fp_types::Scalar, (), fn(f64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/adapters/copied.rs:81
+#7  fold<fp_types::Scalar, core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar, (), core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/adapters/map.rs:128
+#8  for_each<core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/traits/iterator.rs:889
+#9  extend_trusted<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:4031
+#10 spec_extend<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/spec_extend.rs:27
+#11 from_iter<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/spec_from_iter_nested.rs:60
+[Inferior 1 (process 3405791) detached]
+=== sample 14 ===
+2026-06-03T06:09:49-04:00
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x0000624aadef9976 in write<fp_index::IndexLabel> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/mem/maybe_uninit.rs:574
+574	        *self = MaybeUninit::new(val);
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-after-fi6zx9/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7f45b7a2bc00 (LWP 3405791) "perf_profile"):
+#0  0x0000624aadef9976 in write<fp_index::IndexLabel> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/mem/maybe_uninit.rs:574
+#1  to_vec<fp_index::IndexLabel, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/slice.rs:432
+#2  to_vec_in<fp_index::IndexLabel, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/slice.rs:400
+#3  clone<fp_index::IndexLabel, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:3777
+#4  0x0000624aadef5436 in clone () at crates/fp-index/src/lib.rs:272
+#5  0x0000624aadef51f9 in clone () at crates/fp-frame/src/lib.rs:25950
+#6  0x0000624aadee3b81 in sort_values_na () at crates/fp-frame/src/lib.rs:29144
+#7  0x0000624aadf3cb9d in sort_values () at crates/fp-frame/src/lib.rs:29108
+#8  main () at crates/fp-conformance/examples/perf_profile.rs:293
+#9  0x0000624aadf37ce3 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#10 __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#11 0x0000624aadf37d79 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+[Inferior 1 (process 3405791) detached]
+=== sample 15 ===
+2026-06-03T06:09:50-04:00
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x0000624aadebfa21 in write<fp_types::Scalar> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:1920
+1920	        intrinsics::write_via_move(dst, src)
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-after-fi6zx9/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7f45b7a2bc00 (LWP 3405791) "perf_profile"):
+#0  0x0000624aadebfa21 in write<fp_types::Scalar> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:1920
+#1  {closure#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:4032
+#2  {closure#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/traits/iterator.rs:886
+#3  {closure#0}<f64, fp_types::Scalar, (), fn(f64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/adapters/map.rs:88
+#4  {closure#0}<f64, (), core::iter::adapters::map::map_fold::{closure_env#0}<f64, fp_types::Scalar, (), fn(f64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/adapters/copied.rs:36
+#5  fold<f64, (), core::iter::adapters::copied::copy_fold::{closure_env#0}<f64, (), core::iter::adapters::map::map_fold::{closure_env#0}<f64, fp_types::Scalar, (), fn(f64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:279
+#6  fold<core::slice::iter::Iter<f64>, f64, (), core::iter::adapters::map::map_fold::{closure_env#0}<f64, fp_types::Scalar, (), fn(f64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/adapters/copied.rs:81
+#7  fold<fp_types::Scalar, core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar, (), core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/adapters/map.rs:128
+#8  for_each<core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/traits/iterator.rs:889
+#9  extend_trusted<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:4031
+#10 spec_extend<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/spec_extend.rs:27
+#11 from_iter<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/spec_from_iter_nested.rs:60
+[Inferior 1 (process 3405791) detached]
+=== sample 16 ===
+2026-06-03T06:09:50-04:00
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x0000624aadef9976 in write<fp_index::IndexLabel> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/mem/maybe_uninit.rs:574
+574	        *self = MaybeUninit::new(val);
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-after-fi6zx9/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7f45b7a2bc00 (LWP 3405791) "perf_profile"):
+#0  0x0000624aadef9976 in write<fp_index::IndexLabel> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/mem/maybe_uninit.rs:574
+#1  to_vec<fp_index::IndexLabel, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/slice.rs:432
+#2  to_vec_in<fp_index::IndexLabel, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/slice.rs:400
+#3  clone<fp_index::IndexLabel, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:3777
+#4  0x0000624aadef5436 in clone () at crates/fp-index/src/lib.rs:272
+#5  0x0000624aadef51f9 in clone () at crates/fp-frame/src/lib.rs:25950
+#6  0x0000624aadee3b81 in sort_values_na () at crates/fp-frame/src/lib.rs:29144
+#7  0x0000624aadf3cb9d in sort_values () at crates/fp-frame/src/lib.rs:29108
+#8  main () at crates/fp-conformance/examples/perf_profile.rs:293
+#9  0x0000624aadf37ce3 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#10 __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#11 0x0000624aadf37d79 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+[Inferior 1 (process 3405791) detached]
+=== sample 17 ===
+2026-06-03T06:09:50-04:00
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x0000624aadee3af6 in typed_dense_values_already_sorted () at crates/fp-frame/src/lib.rs:2389
+2389	                let current = match value {
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-after-fi6zx9/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7f45b7a2bc00 (LWP 3405791) "perf_profile"):
+#0  0x0000624aadee3af6 in typed_dense_values_already_sorted () at crates/fp-frame/src/lib.rs:2389
+#1  sort_values_na () at crates/fp-frame/src/lib.rs:29135
+#2  0x0000624aadf3cb9d in sort_values () at crates/fp-frame/src/lib.rs:29108
+#3  main () at crates/fp-conformance/examples/perf_profile.rs:293
+#4  0x0000624aadf37ce3 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#5  __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#6  0x0000624aadf37d79 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#7  0x0000624aadf7656e in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#8  std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#9  std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#10 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#11 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+[Inferior 1 (process 3405791) detached]
+=== sample 18 ===
+2026-06-03T06:09:51-04:00
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x0000624aadf36b07 in drop_in_place<[fp_types::Scalar]> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+809	pub const unsafe fn drop_in_place<T: PointeeSized>(to_drop: *mut T)
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-after-fi6zx9/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7f45b7a2bc00 (LWP 3405791) "perf_profile"):
+#0  0x0000624aadf36b07 in drop_in_place<[fp_types::Scalar]> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#1  drop<fp_types::Scalar, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:4254
+#2  drop_in_place<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#3  drop_in_place<fp_columnar::ScalarValues> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#4  drop_in_place<fp_columnar::Column> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#5  0x0000624aadf3694b in assume_init_drop<fp_columnar::Column> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/mem/maybe_uninit.rs:832
+#6  drop<fp_columnar::Column> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/collections/btree/node.rs:1201
+#7  drop_in_place<alloc::collections::btree::node::{impl#57}::drop_key_val::Dropper<fp_columnar::Column>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#8  drop_key_val<alloc::string::String, fp_columnar::Column, alloc::collections::btree::node::marker::LeafOrInternal> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/collections/btree/node.rs:1214
+#9  drop<alloc::string::String, fp_columnar::Column, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/collections/btree/map.rs:1902
+#10 drop_in_place<alloc::collections::btree::map::IntoIter<alloc::string::String, fp_columnar::Column, alloc::alloc::Global>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#11 drop<alloc::collections::btree::map::IntoIter<alloc::string::String, fp_columnar::Column, alloc::alloc::Global>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/mem/mod.rs:1004
+[Inferior 1 (process 3405791) detached]
+=== sample 19 ===
+2026-06-03T06:09:51-04:00
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+write<fp_types::Scalar> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:1920
+1920	        intrinsics::write_via_move(dst, src)
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-after-fi6zx9/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7f45b7a2bc00 (LWP 3405791) "perf_profile"):
+#0  write<fp_types::Scalar> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:1920
+#1  {closure#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:4032
+#2  {closure#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/traits/iterator.rs:886
+#3  {closure#0}<f64, fp_types::Scalar, (), fn(f64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/adapters/map.rs:88
+#4  {closure#0}<f64, (), core::iter::adapters::map::map_fold::{closure_env#0}<f64, fp_types::Scalar, (), fn(f64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/adapters/copied.rs:36
+#5  fold<f64, (), core::iter::adapters::copied::copy_fold::{closure_env#0}<f64, (), core::iter::adapters::map::map_fold::{closure_env#0}<f64, fp_types::Scalar, (), fn(f64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:279
+#6  fold<core::slice::iter::Iter<f64>, f64, (), core::iter::adapters::map::map_fold::{closure_env#0}<f64, fp_types::Scalar, (), fn(f64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/adapters/copied.rs:81
+#7  fold<fp_types::Scalar, core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar, (), core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/adapters/map.rs:128
+#8  for_each<core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/traits/iterator.rs:889
+#9  extend_trusted<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:4031
+#10 spec_extend<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/spec_extend.rs:27
+#11 from_iter<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/spec_from_iter_nested.rs:60
+[Inferior 1 (process 3405791) detached]
+=== sample 20 ===
+2026-06-03T06:09:51-04:00
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x0000624aadf36b0f in drop_in_place<fp_types::Scalar> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+809	pub const unsafe fn drop_in_place<T: PointeeSized>(to_drop: *mut T)
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-after-fi6zx9/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7f45b7a2bc00 (LWP 3405791) "perf_profile"):
+#0  0x0000624aadf36b0f in drop_in_place<fp_types::Scalar> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#1  drop_in_place<[fp_types::Scalar]> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#2  drop<fp_types::Scalar, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:4254
+#3  drop_in_place<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#4  drop_in_place<fp_columnar::ScalarValues> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#5  drop_in_place<fp_columnar::Column> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#6  0x0000624aadf3694b in assume_init_drop<fp_columnar::Column> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/mem/maybe_uninit.rs:832
+#7  drop<fp_columnar::Column> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/collections/btree/node.rs:1201
+#8  drop_in_place<alloc::collections::btree::node::{impl#57}::drop_key_val::Dropper<fp_columnar::Column>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#9  drop_key_val<alloc::string::String, fp_columnar::Column, alloc::collections::btree::node::marker::LeafOrInternal> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/collections/btree/node.rs:1214
+#10 drop<alloc::string::String, fp_columnar::Column, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/collections/btree/map.rs:1902
+#11 drop_in_place<alloc::collections::btree::map::IntoIter<alloc::string::String, fp_columnar::Column, alloc::alloc::Global>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+[Inferior 1 (process 3405791) detached]
+=== sample 21 ===
+2026-06-03T06:09:52-04:00
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x0000624aadee3af6 in typed_dense_values_already_sorted () at crates/fp-frame/src/lib.rs:2389
+2389	                let current = match value {
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-after-fi6zx9/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7f45b7a2bc00 (LWP 3405791) "perf_profile"):
+#0  0x0000624aadee3af6 in typed_dense_values_already_sorted () at crates/fp-frame/src/lib.rs:2389
+#1  sort_values_na () at crates/fp-frame/src/lib.rs:29135
+#2  0x0000624aadf3cb9d in sort_values () at crates/fp-frame/src/lib.rs:29108
+#3  main () at crates/fp-conformance/examples/perf_profile.rs:293
+#4  0x0000624aadf37ce3 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#5  __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#6  0x0000624aadf37d79 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#7  0x0000624aadf7656e in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#8  std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#9  std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#10 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#11 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+[Inferior 1 (process 3405791) detached]
+=== sample 22 ===
+2026-06-03T06:09:52-04:00
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+typed_dense_values_already_sorted () at crates/fp-frame/src/lib.rs:2390
+2390	                    Scalar::Float64(value) if !value.is_nan() => *value,
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-after-fi6zx9/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7f45b7a2bc00 (LWP 3405791) "perf_profile"):
+#0  typed_dense_values_already_sorted () at crates/fp-frame/src/lib.rs:2390
+#1  sort_values_na () at crates/fp-frame/src/lib.rs:29135
+#2  0x0000624aadf3cb9d in sort_values () at crates/fp-frame/src/lib.rs:29108
+#3  main () at crates/fp-conformance/examples/perf_profile.rs:293
+#4  0x0000624aadf37ce3 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#5  __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#6  0x0000624aadf37d79 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#7  0x0000624aadf7656e in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#8  std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#9  std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#10 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#11 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+[Inferior 1 (process 3405791) detached]
+=== sample 23 ===
+2026-06-03T06:09:52-04:00
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x0000624aadf36b0f in drop_in_place<fp_types::Scalar> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+809	pub const unsafe fn drop_in_place<T: PointeeSized>(to_drop: *mut T)
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-after-fi6zx9/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7f45b7a2bc00 (LWP 3405791) "perf_profile"):
+#0  0x0000624aadf36b0f in drop_in_place<fp_types::Scalar> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#1  drop_in_place<[fp_types::Scalar]> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#2  drop<fp_types::Scalar, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:4254
+#3  drop_in_place<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#4  drop_in_place<fp_columnar::ScalarValues> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#5  drop_in_place<fp_columnar::Column> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#6  0x0000624aadf3694b in assume_init_drop<fp_columnar::Column> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/mem/maybe_uninit.rs:832
+#7  drop<fp_columnar::Column> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/collections/btree/node.rs:1201
+#8  drop_in_place<alloc::collections::btree::node::{impl#57}::drop_key_val::Dropper<fp_columnar::Column>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#9  drop_key_val<alloc::string::String, fp_columnar::Column, alloc::collections::btree::node::marker::LeafOrInternal> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/collections/btree/node.rs:1214
+#10 drop<alloc::string::String, fp_columnar::Column, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/collections/btree/map.rs:1902
+#11 drop_in_place<alloc::collections::btree::map::IntoIter<alloc::string::String, fp_columnar::Column, alloc::alloc::Global>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+[Inferior 1 (process 3405791) detached]
+=== sample 24 ===
+2026-06-03T06:09:53-04:00
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x0000624aadef9965 in clone () at crates/fp-index/src/lib.rs:95
+95	#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-after-fi6zx9/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7f45b7a2bc00 (LWP 3405791) "perf_profile"):
+#0  0x0000624aadef9965 in clone () at crates/fp-index/src/lib.rs:95
+#1  to_vec<fp_index::IndexLabel, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/slice.rs:432
+#2  to_vec_in<fp_index::IndexLabel, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/slice.rs:400
+#3  clone<fp_index::IndexLabel, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:3777
+#4  0x0000624aadef5436 in clone () at crates/fp-index/src/lib.rs:272
+#5  0x0000624aadef51f9 in clone () at crates/fp-frame/src/lib.rs:25950
+#6  0x0000624aadee3b81 in sort_values_na () at crates/fp-frame/src/lib.rs:29144
+#7  0x0000624aadf3cb9d in sort_values () at crates/fp-frame/src/lib.rs:29108
+#8  main () at crates/fp-conformance/examples/perf_profile.rs:293
+#9  0x0000624aadf37ce3 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#10 __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#11 0x0000624aadf37d79 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+[Inferior 1 (process 3405791) detached]
+=== sample 25 ===
+2026-06-03T06:09:53-04:00
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x0000624aadebfa31 in fold<f64, (), core::iter::adapters::copied::copy_fold::{closure_env#0}<f64, (), core::iter::adapters::map::map_fold::{closure_env#0}<f64, fp_types::Scalar, (), fn(f64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:284
+284	                    if i == len {
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-after-fi6zx9/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7f45b7a2bc00 (LWP 3405791) "perf_profile"):
+#0  0x0000624aadebfa31 in fold<f64, (), core::iter::adapters::copied::copy_fold::{closure_env#0}<f64, (), core::iter::adapters::map::map_fold::{closure_env#0}<f64, fp_types::Scalar, (), fn(f64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:284
+#1  fold<core::slice::iter::Iter<f64>, f64, (), core::iter::adapters::map::map_fold::{closure_env#0}<f64, fp_types::Scalar, (), fn(f64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/adapters/copied.rs:81
+#2  fold<fp_types::Scalar, core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar, (), core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/adapters/map.rs:128
+#3  for_each<core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/traits/iterator.rs:889
+#4  extend_trusted<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:4031
+#5  spec_extend<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/spec_extend.rs:27
+#6  from_iter<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/spec_from_iter_nested.rs:60
+#7  0x0000624aadec0594 in from_iter<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/spec_from_iter.rs:33
+#8  from_iter<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:3895
+#9  collect<core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>, alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/traits/iterator.rs:2092
+#10 clone_dense_values_from_cache () at crates/fp-columnar/src/lib.rs:1284
+#11 clone () at crates/fp-columnar/src/lib.rs:927
+[Inferior 1 (process 3405791) detached]
+=== sample 26 ===
+2026-06-03T06:09:53-04:00
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x0000624aadf36b0f in drop_in_place<fp_types::Scalar> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+809	pub const unsafe fn drop_in_place<T: PointeeSized>(to_drop: *mut T)
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-after-fi6zx9/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7f45b7a2bc00 (LWP 3405791) "perf_profile"):
+#0  0x0000624aadf36b0f in drop_in_place<fp_types::Scalar> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#1  drop_in_place<[fp_types::Scalar]> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#2  drop<fp_types::Scalar, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:4254
+#3  drop_in_place<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#4  drop_in_place<fp_columnar::ScalarValues> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#5  drop_in_place<fp_columnar::Column> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#6  0x0000624aadf3694b in assume_init_drop<fp_columnar::Column> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/mem/maybe_uninit.rs:832
+#7  drop<fp_columnar::Column> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/collections/btree/node.rs:1201
+#8  drop_in_place<alloc::collections::btree::node::{impl#57}::drop_key_val::Dropper<fp_columnar::Column>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#9  drop_key_val<alloc::string::String, fp_columnar::Column, alloc::collections::btree::node::marker::LeafOrInternal> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/collections/btree/node.rs:1214
+#10 drop<alloc::string::String, fp_columnar::Column, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/collections/btree/map.rs:1902
+#11 drop_in_place<alloc::collections::btree::map::IntoIter<alloc::string::String, fp_columnar::Column, alloc::alloc::Global>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+[Inferior 1 (process 3405791) detached]
+=== sample 27 ===
+2026-06-03T06:09:54-04:00
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x0000624aadebfa0f in write<fp_types::Scalar> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:1920
+1920	        intrinsics::write_via_move(dst, src)
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-after-fi6zx9/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7f45b7a2bc00 (LWP 3405791) "perf_profile"):
+#0  0x0000624aadebfa0f in write<fp_types::Scalar> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:1920
+#1  {closure#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:4032
+#2  {closure#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/traits/iterator.rs:886
+#3  {closure#0}<f64, fp_types::Scalar, (), fn(f64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/adapters/map.rs:88
+#4  {closure#0}<f64, (), core::iter::adapters::map::map_fold::{closure_env#0}<f64, fp_types::Scalar, (), fn(f64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/adapters/copied.rs:36
+#5  fold<f64, (), core::iter::adapters::copied::copy_fold::{closure_env#0}<f64, (), core::iter::adapters::map::map_fold::{closure_env#0}<f64, fp_types::Scalar, (), fn(f64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:279
+#6  fold<core::slice::iter::Iter<f64>, f64, (), core::iter::adapters::map::map_fold::{closure_env#0}<f64, fp_types::Scalar, (), fn(f64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/adapters/copied.rs:81
+#7  fold<fp_types::Scalar, core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar, (), core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/adapters/map.rs:128
+#8  for_each<core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/traits/iterator.rs:889
+#9  extend_trusted<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:4031
+#10 spec_extend<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/spec_extend.rs:27
+#11 from_iter<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/spec_from_iter_nested.rs:60
+[Inferior 1 (process 3405791) detached]
+=== sample 28 ===
+2026-06-03T06:09:54-04:00
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x0000624aadebf9eb in write<fp_types::Scalar> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:1920
+1920	        intrinsics::write_via_move(dst, src)
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-after-fi6zx9/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7f45b7a2bc00 (LWP 3405791) "perf_profile"):
+#0  0x0000624aadebf9eb in write<fp_types::Scalar> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:1920
+#1  {closure#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:4032
+#2  {closure#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/traits/iterator.rs:886
+#3  {closure#0}<f64, fp_types::Scalar, (), fn(f64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/adapters/map.rs:88
+#4  {closure#0}<f64, (), core::iter::adapters::map::map_fold::{closure_env#0}<f64, fp_types::Scalar, (), fn(f64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/adapters/copied.rs:36
+#5  fold<f64, (), core::iter::adapters::copied::copy_fold::{closure_env#0}<f64, (), core::iter::adapters::map::map_fold::{closure_env#0}<f64, fp_types::Scalar, (), fn(f64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:279
+#6  fold<core::slice::iter::Iter<f64>, f64, (), core::iter::adapters::map::map_fold::{closure_env#0}<f64, fp_types::Scalar, (), fn(f64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/adapters/copied.rs:81
+#7  fold<fp_types::Scalar, core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar, (), core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/adapters/map.rs:128
+#8  for_each<core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/traits/iterator.rs:889
+#9  extend_trusted<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:4031
+#10 spec_extend<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/spec_extend.rs:27
+#11 from_iter<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/spec_from_iter_nested.rs:60
+[Inferior 1 (process 3405791) detached]
+=== sample 29 ===
+2026-06-03T06:09:54-04:00
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x0000624aadf36b0f in drop_in_place<fp_types::Scalar> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+809	pub const unsafe fn drop_in_place<T: PointeeSized>(to_drop: *mut T)
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-after-fi6zx9/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7f45b7a2bc00 (LWP 3405791) "perf_profile"):
+#0  0x0000624aadf36b0f in drop_in_place<fp_types::Scalar> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#1  drop_in_place<[fp_types::Scalar]> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#2  drop<fp_types::Scalar, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:4254
+#3  drop_in_place<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#4  drop_in_place<fp_columnar::ScalarValues> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#5  drop_in_place<fp_columnar::Column> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#6  0x0000624aadf3694b in assume_init_drop<fp_columnar::Column> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/mem/maybe_uninit.rs:832
+#7  drop<fp_columnar::Column> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/collections/btree/node.rs:1201
+#8  drop_in_place<alloc::collections::btree::node::{impl#57}::drop_key_val::Dropper<fp_columnar::Column>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#9  drop_key_val<alloc::string::String, fp_columnar::Column, alloc::collections::btree::node::marker::LeafOrInternal> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/collections/btree/node.rs:1214
+#10 drop<alloc::string::String, fp_columnar::Column, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/collections/btree/map.rs:1902
+#11 drop_in_place<alloc::collections::btree::map::IntoIter<alloc::string::String, fp_columnar::Column, alloc::alloc::Global>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+[Inferior 1 (process 3405791) detached]
+=== sample 30 ===
+2026-06-03T06:09:55-04:00
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+drop_in_place<[fp_types::Scalar]> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+809	pub const unsafe fn drop_in_place<T: PointeeSized>(to_drop: *mut T)
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-after-fi6zx9/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7f45b7a2bc00 (LWP 3405791) "perf_profile"):
+#0  drop_in_place<[fp_types::Scalar]> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#1  drop<fp_types::Scalar, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:4254
+#2  drop_in_place<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#3  drop_in_place<fp_columnar::ScalarValues> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#4  drop_in_place<fp_columnar::Column> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#5  0x0000624aadf3694b in assume_init_drop<fp_columnar::Column> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/mem/maybe_uninit.rs:832
+#6  drop<fp_columnar::Column> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/collections/btree/node.rs:1201
+#7  drop_in_place<alloc::collections::btree::node::{impl#57}::drop_key_val::Dropper<fp_columnar::Column>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#8  drop_key_val<alloc::string::String, fp_columnar::Column, alloc::collections::btree::node::marker::LeafOrInternal> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/collections/btree/node.rs:1214
+#9  drop<alloc::string::String, fp_columnar::Column, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/collections/btree/map.rs:1902
+#10 drop_in_place<alloc::collections::btree::map::IntoIter<alloc::string::String, fp_columnar::Column, alloc::alloc::Global>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#11 drop<alloc::collections::btree::map::IntoIter<alloc::string::String, fp_columnar::Column, alloc::alloc::Global>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/mem/mod.rs:1004
+[Inferior 1 (process 3405791) detached]
+=== sample 31 ===
+2026-06-03T06:09:55-04:00
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x0000624aadf36b0f in drop_in_place<fp_types::Scalar> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+809	pub const unsafe fn drop_in_place<T: PointeeSized>(to_drop: *mut T)
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-after-fi6zx9/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7f45b7a2bc00 (LWP 3405791) "perf_profile"):
+#0  0x0000624aadf36b0f in drop_in_place<fp_types::Scalar> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#1  drop_in_place<[fp_types::Scalar]> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#2  drop<fp_types::Scalar, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:4254
+#3  drop_in_place<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#4  drop_in_place<fp_columnar::ScalarValues> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#5  drop_in_place<fp_columnar::Column> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#6  0x0000624aadf3694b in assume_init_drop<fp_columnar::Column> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/mem/maybe_uninit.rs:832
+#7  drop<fp_columnar::Column> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/collections/btree/node.rs:1201
+#8  drop_in_place<alloc::collections::btree::node::{impl#57}::drop_key_val::Dropper<fp_columnar::Column>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#9  drop_key_val<alloc::string::String, fp_columnar::Column, alloc::collections::btree::node::marker::LeafOrInternal> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/collections/btree/node.rs:1214
+#10 drop<alloc::string::String, fp_columnar::Column, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/collections/btree/map.rs:1902
+#11 drop_in_place<alloc::collections::btree::map::IntoIter<alloc::string::String, fp_columnar::Column, alloc::alloc::Global>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+[Inferior 1 (process 3405791) detached]
+=== sample 32 ===
+2026-06-03T06:09:55-04:00
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x0000624aadf36b0f in drop_in_place<fp_types::Scalar> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+809	pub const unsafe fn drop_in_place<T: PointeeSized>(to_drop: *mut T)
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-after-fi6zx9/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7f45b7a2bc00 (LWP 3405791) "perf_profile"):
+#0  0x0000624aadf36b0f in drop_in_place<fp_types::Scalar> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#1  drop_in_place<[fp_types::Scalar]> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#2  drop<fp_types::Scalar, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:4254
+#3  drop_in_place<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#4  drop_in_place<fp_columnar::ScalarValues> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#5  drop_in_place<fp_columnar::Column> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#6  0x0000624aadf3694b in assume_init_drop<fp_columnar::Column> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/mem/maybe_uninit.rs:832
+#7  drop<fp_columnar::Column> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/collections/btree/node.rs:1201
+#8  drop_in_place<alloc::collections::btree::node::{impl#57}::drop_key_val::Dropper<fp_columnar::Column>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#9  drop_key_val<alloc::string::String, fp_columnar::Column, alloc::collections::btree::node::marker::LeafOrInternal> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/collections/btree/node.rs:1214
+#10 drop<alloc::string::String, fp_columnar::Column, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/collections/btree/map.rs:1902
+#11 drop_in_place<alloc::collections::btree::map::IntoIter<alloc::string::String, fp_columnar::Column, alloc::alloc::Global>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+[Inferior 1 (process 3405791) detached]
+=== sample 33 ===
+2026-06-03T06:09:55-04:00
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x0000624aadebf9fd in write<fp_types::Scalar> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:1920
+1920	        intrinsics::write_via_move(dst, src)
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-after-fi6zx9/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7f45b7a2bc00 (LWP 3405791) "perf_profile"):
+#0  0x0000624aadebf9fd in write<fp_types::Scalar> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:1920
+#1  {closure#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:4032
+#2  {closure#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/traits/iterator.rs:886
+#3  {closure#0}<f64, fp_types::Scalar, (), fn(f64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/adapters/map.rs:88
+#4  {closure#0}<f64, (), core::iter::adapters::map::map_fold::{closure_env#0}<f64, fp_types::Scalar, (), fn(f64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/adapters/copied.rs:36
+#5  fold<f64, (), core::iter::adapters::copied::copy_fold::{closure_env#0}<f64, (), core::iter::adapters::map::map_fold::{closure_env#0}<f64, fp_types::Scalar, (), fn(f64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:279
+#6  fold<core::slice::iter::Iter<f64>, f64, (), core::iter::adapters::map::map_fold::{closure_env#0}<f64, fp_types::Scalar, (), fn(f64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/adapters/copied.rs:81
+#7  fold<fp_types::Scalar, core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar, (), core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/adapters/map.rs:128
+#8  for_each<core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/traits/iterator.rs:889
+#9  extend_trusted<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:4031
+#10 spec_extend<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/spec_extend.rs:27
+#11 from_iter<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/spec_from_iter_nested.rs:60
+[Inferior 1 (process 3405791) detached]
+=== sample 34 ===
+2026-06-03T06:09:56-04:00
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x0000624aadee3af6 in typed_dense_values_already_sorted () at crates/fp-frame/src/lib.rs:2389
+2389	                let current = match value {
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-after-fi6zx9/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7f45b7a2bc00 (LWP 3405791) "perf_profile"):
+#0  0x0000624aadee3af6 in typed_dense_values_already_sorted () at crates/fp-frame/src/lib.rs:2389
+#1  sort_values_na () at crates/fp-frame/src/lib.rs:29135
+#2  0x0000624aadf3cb9d in sort_values () at crates/fp-frame/src/lib.rs:29108
+#3  main () at crates/fp-conformance/examples/perf_profile.rs:293
+#4  0x0000624aadf37ce3 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#5  __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#6  0x0000624aadf37d79 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#7  0x0000624aadf7656e in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#8  std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#9  std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#10 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#11 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+[Inferior 1 (process 3405791) detached]
+=== sample 35 ===
+2026-06-03T06:09:56-04:00
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+write<fp_types::Scalar> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:1920
+1920	        intrinsics::write_via_move(dst, src)
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-after-fi6zx9/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7f45b7a2bc00 (LWP 3405791) "perf_profile"):
+#0  write<fp_types::Scalar> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:1920
+#1  {closure#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:4032
+#2  {closure#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/traits/iterator.rs:886
+#3  {closure#0}<f64, fp_types::Scalar, (), fn(f64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/adapters/map.rs:88
+#4  {closure#0}<f64, (), core::iter::adapters::map::map_fold::{closure_env#0}<f64, fp_types::Scalar, (), fn(f64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/adapters/copied.rs:36
+#5  fold<f64, (), core::iter::adapters::copied::copy_fold::{closure_env#0}<f64, (), core::iter::adapters::map::map_fold::{closure_env#0}<f64, fp_types::Scalar, (), fn(f64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:279
+#6  fold<core::slice::iter::Iter<f64>, f64, (), core::iter::adapters::map::map_fold::{closure_env#0}<f64, fp_types::Scalar, (), fn(f64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/adapters/copied.rs:81
+#7  fold<fp_types::Scalar, core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar, (), core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/adapters/map.rs:128
+#8  for_each<core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/traits/iterator.rs:889
+#9  extend_trusted<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:4031
+#10 spec_extend<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/spec_extend.rs:27
+#11 from_iter<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/spec_from_iter_nested.rs:60
+[Inferior 1 (process 3405791) detached]
+=== sample 36 ===
+2026-06-03T06:09:56-04:00
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+write<fp_types::Scalar> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:1920
+1920	        intrinsics::write_via_move(dst, src)
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-after-fi6zx9/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7f45b7a2bc00 (LWP 3405791) "perf_profile"):
+#0  write<fp_types::Scalar> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:1920
+#1  {closure#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:4032
+#2  {closure#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/traits/iterator.rs:886
+#3  {closure#0}<f64, fp_types::Scalar, (), fn(f64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/adapters/map.rs:88
+#4  {closure#0}<f64, (), core::iter::adapters::map::map_fold::{closure_env#0}<f64, fp_types::Scalar, (), fn(f64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/adapters/copied.rs:36
+#5  fold<f64, (), core::iter::adapters::copied::copy_fold::{closure_env#0}<f64, (), core::iter::adapters::map::map_fold::{closure_env#0}<f64, fp_types::Scalar, (), fn(f64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:279
+#6  fold<core::slice::iter::Iter<f64>, f64, (), core::iter::adapters::map::map_fold::{closure_env#0}<f64, fp_types::Scalar, (), fn(f64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/adapters/copied.rs:81
+#7  fold<fp_types::Scalar, core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar, (), core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/adapters/map.rs:128
+#8  for_each<core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/traits/iterator.rs:889
+#9  extend_trusted<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:4031
+#10 spec_extend<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/spec_extend.rs:27
+#11 from_iter<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/spec_from_iter_nested.rs:60
+[Inferior 1 (process 3405791) detached]
+=== sample 37 ===
+2026-06-03T06:09:57-04:00
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+drop_in_place<[fp_index::IndexLabel]> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+809	pub const unsafe fn drop_in_place<T: PointeeSized>(to_drop: *mut T)
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-after-fi6zx9/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7f45b7a2bc00 (LWP 3405791) "perf_profile"):
+#0  drop_in_place<[fp_index::IndexLabel]> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#1  drop<fp_index::IndexLabel, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:4254
+#2  drop_in_place<alloc::vec::Vec<fp_index::IndexLabel, alloc::alloc::Global>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#3  drop_in_place<fp_index::Index> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#4  0x0000624aadf37ac1 in drop_in_place<fp_frame::DataFrame> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#5  0x0000624aadf3cbd9 in main () at crates/fp-conformance/examples/perf_profile.rs:295
+#6  0x0000624aadf37ce3 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#7  __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#8  0x0000624aadf37d79 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#9  0x0000624aadf7656e in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#10 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#11 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+[Inferior 1 (process 3405791) detached]
+=== sample 38 ===
+2026-06-03T06:09:57-04:00
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x0000624aadef996a in to_vec<fp_index::IndexLabel, alloc::alloc::Global> () at crates/fp-index/src/lib.rs:95
+95	#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-after-fi6zx9/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7f45b7a2bc00 (LWP 3405791) "perf_profile"):
+#0  0x0000624aadef996a in to_vec<fp_index::IndexLabel, alloc::alloc::Global> () at crates/fp-index/src/lib.rs:95
+#1  to_vec_in<fp_index::IndexLabel, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/slice.rs:400
+#2  clone<fp_index::IndexLabel, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:3777
+#3  0x0000624aadef5436 in clone () at crates/fp-index/src/lib.rs:272
+#4  0x0000624aadef51f9 in clone () at crates/fp-frame/src/lib.rs:25950
+#5  0x0000624aadee3b81 in sort_values_na () at crates/fp-frame/src/lib.rs:29144
+#6  0x0000624aadf3cb9d in sort_values () at crates/fp-frame/src/lib.rs:29108
+#7  main () at crates/fp-conformance/examples/perf_profile.rs:293
+#8  0x0000624aadf37ce3 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#9  __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#10 0x0000624aadf37d79 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#11 0x0000624aadf7656e in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+[Inferior 1 (process 3405791) detached]
+=== sample 39 ===
+2026-06-03T06:09:58-04:00
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+write<fp_types::Scalar> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:1920
+1920	        intrinsics::write_via_move(dst, src)
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-after-fi6zx9/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7f45b7a2bc00 (LWP 3405791) "perf_profile"):
+#0  write<fp_types::Scalar> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:1920
+#1  {closure#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:4032
+#2  {closure#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/traits/iterator.rs:886
+#3  {closure#0}<f64, fp_types::Scalar, (), fn(f64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/adapters/map.rs:88
+#4  {closure#0}<f64, (), core::iter::adapters::map::map_fold::{closure_env#0}<f64, fp_types::Scalar, (), fn(f64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/adapters/copied.rs:36
+#5  fold<f64, (), core::iter::adapters::copied::copy_fold::{closure_env#0}<f64, (), core::iter::adapters::map::map_fold::{closure_env#0}<f64, fp_types::Scalar, (), fn(f64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:279
+#6  fold<core::slice::iter::Iter<f64>, f64, (), core::iter::adapters::map::map_fold::{closure_env#0}<f64, fp_types::Scalar, (), fn(f64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/adapters/copied.rs:81
+#7  fold<fp_types::Scalar, core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar, (), core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/adapters/map.rs:128
+#8  for_each<core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/traits/iterator.rs:889
+#9  extend_trusted<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:4031
+#10 spec_extend<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/spec_extend.rs:27
+#11 from_iter<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/spec_from_iter_nested.rs:60
+[Inferior 1 (process 3405791) detached]
+=== sample 40 ===
+2026-06-03T06:09:58-04:00
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x0000624aadebf9fd in write<fp_types::Scalar> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:1920
+1920	        intrinsics::write_via_move(dst, src)
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-after-fi6zx9/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7f45b7a2bc00 (LWP 3405791) "perf_profile"):
+#0  0x0000624aadebf9fd in write<fp_types::Scalar> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:1920
+#1  {closure#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:4032
+#2  {closure#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/traits/iterator.rs:886
+#3  {closure#0}<f64, fp_types::Scalar, (), fn(f64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/adapters/map.rs:88
+#4  {closure#0}<f64, (), core::iter::adapters::map::map_fold::{closure_env#0}<f64, fp_types::Scalar, (), fn(f64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/adapters/copied.rs:36
+#5  fold<f64, (), core::iter::adapters::copied::copy_fold::{closure_env#0}<f64, (), core::iter::adapters::map::map_fold::{closure_env#0}<f64, fp_types::Scalar, (), fn(f64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:279
+#6  fold<core::slice::iter::Iter<f64>, f64, (), core::iter::adapters::map::map_fold::{closure_env#0}<f64, fp_types::Scalar, (), fn(f64) -> fp_types::Scalar, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/adapters/copied.rs:81
+#7  fold<fp_types::Scalar, core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar, (), core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<fp_types::Scalar, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/adapters/map.rs:128
+#8  for_each<core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/traits/iterator.rs:889
+#9  extend_trusted<fp_types::Scalar, alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:4031
+#10 spec_extend<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/spec_extend.rs:27
+#11 from_iter<fp_types::Scalar, core::iter::adapters::map::Map<core::iter::adapters::copied::Copied<core::slice::iter::Iter<f64>>, fn(f64) -> fp_types::Scalar>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/spec_from_iter_nested.rs:60
+[Inferior 1 (process 3405791) detached]
+
+=== workload output ===
+perf_profile: scenario=sort_single n=100000 iters=5000
+perf_profile: done 5000 iters in 13.718s (2.744 ms/iter), sink=500000000

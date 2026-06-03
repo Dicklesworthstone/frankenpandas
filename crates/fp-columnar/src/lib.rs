@@ -925,7 +925,7 @@ impl Clone for Column {
             dtype: self.dtype,
             values: self
                 .clone_dense_values_from_cache()
-                .map_or_else(|| self.values.clone(), ScalarValues::from_vec),
+                .unwrap_or_else(|| self.values.clone()),
             validity: self.validity.clone(),
             data: None,
         }
@@ -1260,7 +1260,7 @@ fn round_i64_negative_decimals(value: i64, decimals: i32) -> i64 {
 }
 
 impl Column {
-    fn clone_dense_values_from_cache(&self) -> Option<Vec<Scalar>> {
+    fn clone_dense_values_from_cache(&self) -> Option<ScalarValues> {
         if self.validity.len() != self.values.len()
             || self.validity.count_valid() != self.values.len()
         {
@@ -1271,30 +1271,40 @@ impl Column {
             (Some(ColumnData::Bool(data)), DType::Bool | DType::BoolNullable)
                 if data.len() == self.values.len() =>
             {
-                Some(data.iter().copied().map(Scalar::Bool).collect())
+                Some(ScalarValues::from_vec(
+                    data.iter().copied().map(Scalar::Bool).collect(),
+                ))
             }
             (Some(ColumnData::Int64(data)), DType::Int64 | DType::Int64Nullable)
                 if data.len() == self.values.len() =>
             {
-                Some(data.iter().copied().map(Scalar::Int64).collect())
+                Some(ScalarValues::from_vec(
+                    data.iter().copied().map(Scalar::Int64).collect(),
+                ))
             }
             (Some(ColumnData::Float64(data)), DType::Float64)
                 if data.len() == self.values.len() =>
             {
-                Some(data.iter().copied().map(Scalar::Float64).collect())
+                Some(ScalarValues::lazy_all_valid_float64(data.clone()))
             }
             (Some(ColumnData::Timedelta64(data)), DType::Timedelta64)
                 if data.len() == self.values.len() =>
             {
-                Some(data.iter().copied().map(Scalar::Timedelta64).collect())
+                Some(ScalarValues::from_vec(
+                    data.iter().copied().map(Scalar::Timedelta64).collect(),
+                ))
             }
             (Some(ColumnData::Datetime64(data)), DType::Datetime64)
                 if data.len() == self.values.len() =>
             {
-                Some(data.iter().copied().map(Scalar::Datetime64).collect())
+                Some(ScalarValues::from_vec(
+                    data.iter().copied().map(Scalar::Datetime64).collect(),
+                ))
             }
             (Some(ColumnData::Period(data)), DType::Period) if data.len() == self.values.len() => {
-                Some(data.iter().copied().map(Scalar::Period).collect())
+                Some(ScalarValues::from_vec(
+                    data.iter().copied().map(Scalar::Period).collect(),
+                ))
             }
             _ => None,
         }
@@ -8688,7 +8698,7 @@ mod tests {
     }
 
     #[test]
-    fn dense_primitive_clone_materializes_values_from_typed_cache() {
+    fn dense_primitive_clone_defers_float64_scalar_materialization_from_typed_cache() {
         let column = Column::new(
             DType::Float64,
             vec![
@@ -8699,17 +8709,33 @@ mod tests {
         )
         .expect("column should build");
 
-        assert_eq!(
-            column.clone_dense_values_from_cache(),
-            Some(vec![
-                Scalar::Float64(1.5),
-                Scalar::Float64(-0.0),
-                Scalar::Float64(3.25),
-            ])
+        let cloned_values = column
+            .clone_dense_values_from_cache()
+            .expect("all-valid Float64 typed cache should clone");
+        assert!(
+            matches!(&cloned_values, ScalarValues::LazyAllValidFloat64 { .. }),
+            "Float64 clone should defer scalar materialization"
         );
+        if let ScalarValues::LazyAllValidFloat64 { data, values } = &cloned_values {
+            assert_eq!(
+                data.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+                vec![1.5f64.to_bits(), (-0.0f64).to_bits(), 3.25f64.to_bits()]
+            );
+            assert!(values.get().is_none());
+        }
 
         let cloned = column.clone();
+        assert!(
+            matches!(&cloned.values, ScalarValues::LazyAllValidFloat64 { .. }),
+            "Column::clone should keep all-valid Float64 clone values lazy"
+        );
+        if let ScalarValues::LazyAllValidFloat64 { values, .. } = &cloned.values {
+            assert!(values.get().is_none());
+        }
         assert_eq!(cloned.values(), column.values());
+        if let ScalarValues::LazyAllValidFloat64 { values, .. } = &cloned.values {
+            assert!(values.get().is_some());
+        }
         assert_eq!(cloned.validity(), column.validity());
         assert!(cloned.data.is_none());
     }
