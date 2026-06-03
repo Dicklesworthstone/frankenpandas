@@ -12377,18 +12377,23 @@ impl MultiIndex {
     #[must_use]
     pub fn isin(&self, values: &[Vec<IndexLabel>]) -> Vec<bool> {
         let nlevels = self.nlevels();
-        let lookup: std::collections::HashSet<&Vec<IndexLabel>> =
+        let lookup: FxHashSet<&Vec<IndexLabel>> =
             values.iter().filter(|v| v.len() == nlevels).collect();
         if lookup.is_empty() {
             return vec![false; self.len()];
         }
-        (0..self.len())
-            .map(|row| {
-                let key: Vec<IndexLabel> =
-                    self.levels.iter().map(|level| level[row].clone()).collect();
-                lookup.contains(&key)
-            })
-            .collect()
+        // Reuse one key buffer across rows: clear + extend refills the composite
+        // lookup key in place, so membership is tested without allocating a fresh
+        // Vec<IndexLabel> per row. Result is identical (value-based membership,
+        // positional bool output).
+        let mut key: Vec<IndexLabel> = Vec::with_capacity(nlevels);
+        let mut out = Vec::with_capacity(self.len());
+        for row in 0..self.len() {
+            key.clear();
+            key.extend(self.levels.iter().map(|level| level[row].clone()));
+            out.push(lookup.contains(&key));
+        }
+        out
     }
 
     /// Per-row membership test against values for a single level.
