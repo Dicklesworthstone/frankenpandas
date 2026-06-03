@@ -34646,7 +34646,12 @@ fn live_oracle_series_str_removeprefix_unicode_exactness() {
     };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
-    let actual = series.str().removeprefix("é").expect("removeprefix");
+    // Use the fixture's own str_prefix (the same value the oracle removes with)
+    // so both sides operate on byte-identical prefixes — otherwise a source
+    // literal can differ from the fixture in Unicode normalization (precomposed
+    // vs decomposed é) and the comparison tests two different operations.
+    let prefix = fixture.str_prefix.as_deref().expect("str_prefix");
+    let actual = series.str().removeprefix(prefix).expect("removeprefix");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
 
@@ -34690,7 +34695,8 @@ fn live_oracle_series_str_removesuffix_unicode() {
     };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
-    let actual = series.str().removesuffix("é").expect("removesuffix");
+    let suffix = fixture.str_suffix.as_deref().expect("str_suffix");
+    let actual = series.str().removesuffix(suffix).expect("removesuffix");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
 
@@ -34738,7 +34744,8 @@ fn live_oracle_series_str_removesuffix_unicode_exactness() {
     };
 
     let series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
-    let actual = series.str().removesuffix("é").expect("removesuffix");
+    let suffix = fixture.str_suffix.as_deref().expect("str_suffix");
+    let actual = series.str().removesuffix(suffix).expect("removesuffix");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");
 }
 

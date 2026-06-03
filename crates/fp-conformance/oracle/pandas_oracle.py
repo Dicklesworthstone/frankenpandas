@@ -4077,6 +4077,28 @@ def op_series_str_replace(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return {"expected_series": series_to_expected(out)}
 
 
+def op_series_str_removeprefix(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    op_name = "series_str_removeprefix"
+    series = _series_for_str_op(pd, payload, op_name)
+    prefix = required_string_payload(payload, "str_prefix", op_name)
+    try:
+        out = series.str.removeprefix(prefix)
+    except Exception as exc:
+        raise OracleError(f"{op_name} failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
+def op_series_str_removesuffix(pd, payload: dict[str, Any]) -> dict[str, Any]:
+    op_name = "series_str_removesuffix"
+    series = _series_for_str_op(pd, payload, op_name)
+    suffix = required_string_payload(payload, "str_suffix", op_name)
+    try:
+        out = series.str.removesuffix(suffix)
+    except Exception as exc:
+        raise OracleError(f"{op_name} failed: {exc}") from exc
+    return {"expected_series": series_to_expected(out)}
+
+
 def op_series_str_lower(pd, payload: dict[str, Any]) -> dict[str, Any]:
     return _str_unary_op(pd, payload, "series_str_lower", "lower")
 
@@ -7259,6 +7281,10 @@ def dispatch(pd, payload: dict[str, Any]) -> dict[str, Any]:
         return op_series_str_endswith(pd, payload)
     if op in {"series_str_replace", "series_str_replace_default"}:
         return op_series_str_replace(pd, payload)
+    if op in {"series_str_removeprefix", "series_str_removeprefix_default"}:
+        return op_series_str_removeprefix(pd, payload)
+    if op in {"series_str_removesuffix", "series_str_removesuffix_default"}:
+        return op_series_str_removesuffix(pd, payload)
     if op in {"series_str_capitalize", "series_str_capitalize_default"}:
         return op_series_str_capitalize(pd, payload)
     if op in {"series_str_title", "series_str_title_default"}:
