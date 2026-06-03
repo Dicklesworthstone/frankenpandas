@@ -11611,13 +11611,21 @@ impl MultiIndex {
         for label in labels_to_drop {
             self.validate_key_arity(label, false)?;
         }
-        let drop_set: std::collections::HashSet<&Vec<IndexLabel>> = labels_to_drop.iter().collect();
-        let mut found = std::collections::HashSet::<&Vec<IndexLabel>>::new();
+        // Reuse one key buffer across rows instead of materializing every row
+        // tuple via to_list() (which allocates a Vec per row). `found` stores
+        // references into `labels_to_drop` (stable across iterations) — obtained
+        // from drop_set.get() — so the reused buffer never escapes. FxHashSet
+        // replaces the std SipHash set. Bit-identical: same retained positions
+        // and same missing-key detection (value-based membership).
+        let drop_set: FxHashSet<&Vec<IndexLabel>> = labels_to_drop.iter().collect();
+        let mut found: FxHashSet<&Vec<IndexLabel>> = FxHashSet::default();
         let mut positions = Vec::new();
-        let tuples = self.to_list();
-        for (row, tuple) in tuples.iter().enumerate() {
-            if drop_set.contains(tuple) {
-                found.insert(tuple);
+        let mut key: Vec<IndexLabel> = Vec::with_capacity(self.nlevels());
+        for row in 0..self.len() {
+            key.clear();
+            key.extend(self.levels.iter().map(|level| level[row].clone()));
+            if let Some(matched) = drop_set.get(&key) {
+                found.insert(*matched);
             } else {
                 positions.push(row);
             }
