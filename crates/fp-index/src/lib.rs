@@ -535,8 +535,9 @@ impl Index {
         positions
     }
 
-    fn position_map_first_ref(&self) -> HashMap<&IndexLabel, usize> {
-        let mut positions = HashMap::with_capacity(self.labels.len());
+    fn position_map_first_ref(&self) -> FxHashMap<&IndexLabel, usize> {
+        let mut positions =
+            FxHashMap::with_capacity_and_hasher(self.labels.len(), Default::default());
         for (idx, label) in self.labels.iter().enumerate() {
             positions.entry(label).or_insert(idx);
         }
@@ -9971,7 +9972,7 @@ pub fn multi_way_align(indexes: &[&Index]) -> MultiAlignmentPlan {
     union.name = shared_name;
 
     // Build position maps for each input
-    let maps: Vec<HashMap<&IndexLabel, usize>> = indexes
+    let maps: Vec<FxHashMap<&IndexLabel, usize>> = indexes
         .iter()
         .map(|idx| idx.position_map_first_ref())
         .collect();
