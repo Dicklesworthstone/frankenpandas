@@ -11840,3 +11840,46 @@ proptest! {
         }
     }
 }
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(300))]
+
+    /// MR-FILTER1: iloc_bool(mask) materializes exactly the true-mask rows in
+    /// order — for the k-th true position p, output[c][k] == source[c][p]
+    /// (value, null kind, and order). Hardens the boolean-filter gather path
+    /// (the filter_bool primitive-gather kernel, fi6zx).
+    #[test]
+    fn prop_dataframe_iloc_bool_gathers_true_rows(
+        (df, mask) in arb_numeric_dataframe(10).prop_flat_map(|df| {
+            let n = df.index().len();
+            (Just(df), proptest::collection::vec(proptest::bool::ANY, n..=n))
+        })
+    ) {
+        let n = df.index().len();
+        if n == 0 {
+            return Ok(());
+        }
+        let filtered = match df.iloc_bool(&mask) {
+            Ok(f) => f,
+            Err(_) => return Ok(()),
+        };
+        let true_positions: Vec<usize> =
+            mask.iter().enumerate().filter_map(|(i, &b)| b.then_some(i)).collect();
+        prop_assert_eq!(filtered.index().len(), true_positions.len(), "filter output row count");
+        for name in df.column_names() {
+            let src = df.column(name.as_str()).expect("src col").values().to_vec();
+            let out = filtered.column(name.as_str()).expect("out col").values().to_vec();
+            for (k, &p) in true_positions.iter().enumerate() {
+                let s = &src[p];
+                let o = &out[k];
+                let same = s == o
+                    || (matches!(s, Scalar::Float64(f) if f.is_nan()) && o.is_missing());
+                prop_assert!(
+                    same,
+                    "iloc_bool col {} out row {} (src pos {}): {:?} != {:?}",
+                    name, k, p, o, s
+                );
+            }
+        }
+    }
+}
