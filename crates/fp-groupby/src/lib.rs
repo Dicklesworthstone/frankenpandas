@@ -2712,6 +2712,45 @@ mod tests {
     }
 
     #[test]
+    fn groupby_var_std_match_pandas() {
+        // groups a=[1,2,4,8], b=[1,1,1,5,9]; verified vs pandas 2.2.3
+        // var (ddof=1): a=9.583333..., b=12.8; std: a=3.0956959..., b=3.5777088...
+        let mut ledger = EvidenceLedger::new();
+        let idx: Vec<_> = (0..9).map(|i| (i as i64).into()).collect();
+        let mut kvals = vec![Scalar::Utf8("a".into()); 4];
+        kvals.extend(vec![Scalar::Utf8("b".into()); 5]);
+        let keys = Series::from_values("g", idx.clone(), kvals).unwrap();
+        let values = Series::from_values(
+            "v",
+            idx,
+            [1.0, 2.0, 4.0, 8.0, 1.0, 1.0, 1.0, 5.0, 9.0]
+                .iter()
+                .map(|x| Scalar::Float64(*x))
+                .collect(),
+        )
+        .unwrap();
+        let nums = |s: &Series| -> Vec<f64> {
+            s.values()
+                .iter()
+                .filter_map(|v| if let Scalar::Float64(f) = v { Some(*f) } else { None })
+                .collect()
+        };
+        let approx = |a: f64, b: f64, ctx: &str| {
+            assert!((a - b).abs() < 1e-9, "{ctx}: got {a}, expected {b}");
+        };
+
+        let var = groupby_var(&keys, &values, GroupByOptions::default(), &RuntimePolicy::strict(), &mut ledger).unwrap();
+        let vv = nums(&var);
+        approx(vv[0], 9.583333333333334, "var a");
+        approx(vv[1], 12.8, "var b");
+
+        let std = groupby_std(&keys, &values, GroupByOptions::default(), &RuntimePolicy::strict(), &mut ledger).unwrap();
+        let sv = nums(&std);
+        approx(sv[0], 3.0956959368821988, "std a");
+        approx(sv[1], 3.5777087639996634, "std b");
+    }
+
+    #[test]
     fn groupby_median_basic() {
         let keys = Series::from_values(
             "key",
