@@ -4477,9 +4477,10 @@ def op_series_str_rsplit_get(pd, payload: dict[str, Any]) -> dict[str, Any]:
     def pick(s: Any) -> Any:
         if not isinstance(s, str):
             return float("nan")
-        # FP indexes Rust str::rsplit, which yields parts in reverse order, so
-        # n counts from the END of the forward split. Out of range -> missing.
-        parts = s.split(pat)[::-1]
+        # pandas str.rsplit(pat) without a maxsplit returns parts left-to-right
+        # (identical to split), so rsplit(pat).str[n] indexes the FORWARD list.
+        # Out of range -> missing.
+        parts = s.split(pat)
         return parts[n] if 0 <= n < len(parts) else float("nan")
 
     try:

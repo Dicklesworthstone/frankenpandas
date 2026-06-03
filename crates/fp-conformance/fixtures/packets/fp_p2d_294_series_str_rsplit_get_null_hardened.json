@@ -13,30 +13,78 @@
   "left": {
     "name": "paths",
     "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 2 },
-      { "kind": "int64", "value": 3 }
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      },
+      {
+        "kind": "int64",
+        "value": 2
+      },
+      {
+        "kind": "int64",
+        "value": 3
+      }
     ],
     "values": [
-      { "kind": "utf8", "value": "a/b/c" },
-      { "kind": "null", "value": "null" },
-      { "kind": "utf8", "value": "" },
-      { "kind": "utf8", "value": "no_slash" }
+      {
+        "kind": "utf8",
+        "value": "a/b/c"
+      },
+      {
+        "kind": "null",
+        "value": "null"
+      },
+      {
+        "kind": "utf8",
+        "value": ""
+      },
+      {
+        "kind": "utf8",
+        "value": "no_slash"
+      }
     ]
   },
   "expected_series": {
     "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 2 },
-      { "kind": "int64", "value": 3 }
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      },
+      {
+        "kind": "int64",
+        "value": 2
+      },
+      {
+        "kind": "int64",
+        "value": 3
+      }
     ],
     "values": [
-      { "kind": "utf8", "value": "c" },
-      { "kind": "null", "value": "null" },
-      { "kind": "utf8", "value": "" },
-      { "kind": "utf8", "value": "no_slash" }
+      {
+        "kind": "utf8",
+        "value": "a"
+      },
+      {
+        "kind": "null",
+        "value": "null"
+      },
+      {
+        "kind": "utf8",
+        "value": ""
+      },
+      {
+        "kind": "utf8",
+        "value": "no_slash"
+      }
     ]
   }
 }

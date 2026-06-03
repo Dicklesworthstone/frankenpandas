@@ -20385,9 +20385,15 @@ impl StringAccessor<'_> {
     ///
     /// Matches `pd.Series.str.rsplit(pat).str[n]`.
     pub fn rsplit_get(&self, pat: &str, n: usize) -> Result<Series, FrameError> {
+        // pandas str.rsplit(pat) without a maxsplit yields the parts in
+        // left-to-right (forward) order — identical to split — so
+        // rsplit(pat).str[n] indexes the FORWARD list. Rust's str::rsplit
+        // yields parts in reverse, which previously made rsplit_get("-", 0) on
+        // "a-b-c" return "c" instead of pandas' "a". Use the forward split.
+        // Verified vs live pandas 2.2.3.
         self.apply_str(
             |s| {
-                let parts: Vec<&str> = s.rsplit(pat).collect();
+                let parts: Vec<&str> = s.split(pat).collect();
                 if n < parts.len() {
                     Scalar::Utf8(parts[n].to_string())
                 } else {
