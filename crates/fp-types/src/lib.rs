@@ -2980,11 +2980,20 @@ pub fn nansum(values: &[Scalar]) -> Scalar {
         let clamped = sum.clamp(i128::from(i64::MIN), i128::from(i64::MAX));
         return Scalar::Timedelta64(clamped as i64);
     }
-    let nums = collect_finite(values);
-    if nums.is_empty() {
-        return Scalar::Float64(0.0);
+    // Fused single-pass fold: filter missing / non-f64-coercible and accumulate
+    // in one scan, avoiding the intermediate `collect_finite` Vec<f64> and its
+    // second pass. Bit-identical to `collect_finite(..).iter().sum()`: same
+    // finite values in the same order, same left-fold f64 `+` (empty -> 0.0).
+    let mut sum = 0.0_f64;
+    for v in values {
+        if v.is_missing() {
+            continue;
+        }
+        if let Ok(x) = v.to_f64() {
+            sum += x;
+        }
     }
-    Scalar::Float64(nums.iter().sum())
+    Scalar::Float64(sum)
 }
 
 pub fn nanmean(values: &[Scalar]) -> Scalar {
@@ -2996,12 +3005,24 @@ pub fn nanmean(values: &[Scalar]) -> Scalar {
         let clamped = mean.clamp(i128::from(i64::MIN), i128::from(i64::MAX));
         return Scalar::Timedelta64(clamped as i64);
     }
-    let nums = collect_finite(values);
-    if nums.is_empty() {
+    // Fused single-pass fold (see `nansum`): accumulate sum + count of finite
+    // values in one scan. Bit-identical to the prior `collect_finite` two-pass:
+    // count == nums.len(), sum folds the same values in the same order.
+    let mut sum = 0.0_f64;
+    let mut count = 0usize;
+    for v in values {
+        if v.is_missing() {
+            continue;
+        }
+        if let Ok(x) = v.to_f64() {
+            sum += x;
+            count += 1;
+        }
+    }
+    if count == 0 {
         return Scalar::Null(NullKind::NaN);
     }
-    let sum: f64 = nums.iter().sum();
-    Scalar::Float64(sum / nums.len() as f64)
+    Scalar::Float64(sum / count as f64)
 }
 
 pub fn nanany(values: &[Scalar]) -> Scalar {
