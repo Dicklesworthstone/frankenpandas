@@ -2502,6 +2502,27 @@ fn range_index(len: usize) -> Result<Index, FrameError> {
     Ok(Index::new((0..len_i64).map(IndexLabel::from).collect()))
 }
 
+/// Forward-fill missing values, carrying the last valid observation forward.
+/// Leading missing values (before the first valid) stay missing. Used by the
+/// pandas-default `fill_method='pad'`/`'ffill'` path of pct_change.
+/// (br-frankenpandas-c3zld)
+fn forward_fill_scalars(vals: &[Scalar]) -> Vec<Scalar> {
+    let mut out = Vec::with_capacity(vals.len());
+    let mut last_valid: Option<&Scalar> = None;
+    for val in vals {
+        if val.is_missing() {
+            match last_valid {
+                Some(fill) => out.push(fill.clone()),
+                None => out.push(val.clone()),
+            }
+        } else {
+            last_valid = Some(val);
+            out.push(val.clone());
+        }
+    }
+    out
+}
+
 fn compare_non_missing_scalars_for_sort(left: &Scalar, right: &Scalar) -> Ordering {
     match (left, right) {
         (Scalar::Bool(lhs), Scalar::Bool(rhs)) => lhs.cmp(rhs),
@@ -17791,6 +17812,9 @@ impl SeriesGroupBy<'_> {
     /// GroupBy percentage change within each group.
     pub fn pct_change(&self, periods: usize) -> Result<Series, FrameError> {
         self.transform_groups(|vals| {
+            // pandas groupby.pct_change default fill_method='ffill' forward-fills
+            // within each group before computing. (br-frankenpandas-c3zld)
+            let vals = forward_fill_scalars(vals);
             vals.iter()
                 .enumerate()
                 .map(|(idx, value)| {
@@ -38201,6 +38225,9 @@ impl DataFrame {
         let n_cols = self.column_order.len();
         let n_rows = self.len();
         let mut out_cols = BTreeMap::new();
+        // pandas pct_change(axis=1) default fill_method='pad' forward-fills
+        // across columns (per row) before computing. (br-frankenpandas-c3zld)
+        let src = self.ffill_axis1(None)?;
 
         for (j, name) in self.column_order.iter().enumerate() {
             let mut vals = Vec::with_capacity(n_rows);
@@ -38216,8 +38243,8 @@ impl DataFrame {
 
             if let Some(p_idx) = prev_idx {
                 let prev_name = &self.column_order[p_idx];
-                let current_col = &self.columns[name];
-                let prev_col = &self.columns[prev_name];
+                let current_col = &src.columns[name];
+                let prev_col = &src.columns[prev_name];
 
                 for i in 0..n_rows {
                     let curr_val = &current_col.values()[i];
@@ -44060,6 +44087,9 @@ impl DataFrameGroupBy<'_> {
     /// Matches `df.groupby(col).pct_change()`.
     pub fn pct_change(&self, periods: usize) -> Result<DataFrame, FrameError> {
         self.transform_groups(|vals| {
+            // pandas groupby.pct_change default fill_method='ffill' forward-fills
+            // within each group before computing. (br-frankenpandas-c3zld)
+            let vals = forward_fill_scalars(vals);
             vals.iter()
                 .enumerate()
                 .map(|(i, v)| {
@@ -71259,6 +71289,66 @@ mod tests {
         assert!((f1 - 1.0).abs() < 1e-10); // (2h-1h)/1h = 1.0
         let f2 = expect_float64(&v.values()[2]);
         assert!((f2 - 1.0).abs() < 1e-10); // (4h-2h)/2h = 1.0
+    }
+
+    #[test]
+    fn groupby_pct_change_forward_fills_within_group_c3zld() {
+        // pandas groupby.pct_change default ffills within each group:
+        // group x=[1,nan,4] -> filled [1,1,4] -> [NaN,0,3]; group y=[10] -> [NaN].
+        // (br-frankenpandas-c3zld)
+        let df = DataFrame::from_dict(
+            &["k", "v"],
+            vec![
+                (
+                    "k",
+                    vec![
+                        Scalar::Utf8("x".to_owned()),
+                        Scalar::Utf8("x".to_owned()),
+                        Scalar::Utf8("x".to_owned()),
+                        Scalar::Utf8("y".to_owned()),
+                    ],
+                ),
+                (
+                    "v",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Null(NullKind::NaN),
+                        Scalar::Float64(4.0),
+                        Scalar::Float64(10.0),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let result = df.groupby(&["k"]).unwrap().pct_change(1).unwrap();
+        let v = result.column_as_series("v").unwrap();
+        assert!(v.values()[0].is_missing());
+        assert!((expect_float64(&v.values()[1]) - 0.0).abs() < 1e-10);
+        assert!((expect_float64(&v.values()[2]) - 3.0).abs() < 1e-10);
+        assert!(v.values()[3].is_missing());
+    }
+
+    #[test]
+    fn pct_change_axis1_forward_fills_across_columns_c3zld() {
+        // pandas pct_change(axis=1) default ffills across columns per row:
+        // row [1, nan, 3] -> filled [1, 1, 3] -> [NaN, 0, 2]. (br-frankenpandas-c3zld)
+        let df = DataFrame::from_dict(
+            &["a", "b", "c"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0)]),
+                ("b", vec![Scalar::Null(NullKind::NaN)]),
+                ("c", vec![Scalar::Float64(3.0)]),
+            ],
+        )
+        .unwrap();
+        let result = df.pct_change_axis1(1).unwrap();
+        assert!(result.column_as_series("a").unwrap().values()[0].is_missing());
+        assert!(
+            (expect_float64(&result.column_as_series("b").unwrap().values()[0]) - 0.0).abs() < 1e-10
+        );
+        assert!(
+            (expect_float64(&result.column_as_series("c").unwrap().values()[0]) - 2.0).abs() < 1e-10
+        );
     }
 
     #[test]
