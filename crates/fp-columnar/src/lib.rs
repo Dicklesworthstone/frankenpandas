@@ -3395,6 +3395,28 @@ impl Column {
             });
         }
 
+        // Typed fast path (br-frankenpandas-lei31 family): gather the contiguous
+        // f64/i64 buffer by the mask directly, skipping the 32-byte Scalar clone
+        // and the dtype-coercion scan in Column::new. Bit-identical — selects the
+        // same positions in the same order, and an all-valid source yields an
+        // all-valid result, exactly as the Scalar path + Column::new would.
+        if let Some(data) = self.as_f64_slice() {
+            let gathered: Vec<f64> = data
+                .iter()
+                .zip(mask.values.iter())
+                .filter_map(|(&v, m)| matches!(m, Scalar::Bool(true)).then_some(v))
+                .collect();
+            return Ok(Self::from_f64_values(gathered));
+        }
+        if let Some(data) = self.as_i64_slice() {
+            let gathered: Vec<i64> = data
+                .iter()
+                .zip(mask.values.iter())
+                .filter_map(|(&v, m)| matches!(m, Scalar::Bool(true)).then_some(v))
+                .collect();
+            return Ok(Self::from_i64_values(gathered));
+        }
+
         let values = self
             .values
             .iter()
@@ -10343,6 +10365,32 @@ mod tests {
             assert_eq!(result.len(), 2);
             assert_eq!(result.values()[0], Scalar::Int64(10));
             assert_eq!(result.values()[1], Scalar::Int64(30));
+        }
+
+        #[test]
+        fn filter_by_mask_float64_typed_path_matches_scalar() {
+            // The Float64 typed gather (as_f64_slice + from_f64_values) must be
+            // bit-identical to the Scalar clone path: same selected values, same
+            // order, all-valid result.
+            let col = Column::from_f64_values(vec![1.5, -0.0, 2.5, f64::INFINITY, 0.0]);
+            let mask = Column::from_values(vec![
+                Scalar::Bool(true),
+                Scalar::Bool(true),
+                Scalar::Bool(false),
+                Scalar::Bool(true),
+                Scalar::Null(NullKind::Null), // missing -> not selected
+            ])
+            .expect("mask");
+            let result = col.filter_by_mask(&mask).expect("filter");
+            assert_eq!(result.dtype(), DType::Float64);
+            assert_eq!(
+                result.values(),
+                &[
+                    Scalar::Float64(1.5),
+                    Scalar::Float64(-0.0),
+                    Scalar::Float64(f64::INFINITY),
+                ]
+            );
         }
 
         #[test]
