@@ -80,6 +80,13 @@ use std::{
     sync::OnceLock,
 };
 
+// Dedup / set-op seen-sets key on &IndexLabel and read output order from the
+// INPUT scan (first-seen filter / positional bool), never from map iteration —
+// so the hasher is observationally invisible. FxHash (rustc-hash, pure safe
+// Rust) replaces the std SipHasher on these hot membership maps; public-return
+// maps (position_map_first, groupby) keep std HashMap to avoid an API change.
+use rustc_hash::FxHashMap;
+
 use chrono::Datelike;
 use fp_types::{Period, PeriodFreq, Scalar, Timedelta, TimedeltaComponents};
 use serde::{Deserialize, Serialize};
@@ -282,7 +289,7 @@ impl PartialEq for Index {
 impl Eq for Index {}
 
 fn detect_duplicates(labels: &[IndexLabel]) -> bool {
-    let mut seen = HashMap::<&IndexLabel, ()>::new();
+    let mut seen = FxHashMap::<&IndexLabel, ()>::default();
     for label in labels {
         if seen.insert(label, ()).is_some() {
             return true;
@@ -555,7 +562,7 @@ impl Index {
 
     #[must_use]
     pub fn isin(&self, values: &[IndexLabel]) -> Vec<bool> {
-        let set: HashMap<&IndexLabel, ()> = values.iter().map(|v| (v, ())).collect();
+        let set: FxHashMap<&IndexLabel, ()> = values.iter().map(|v| (v, ())).collect();
         self.labels.iter().map(|l| set.contains_key(l)).collect()
     }
 
@@ -595,7 +602,7 @@ impl Index {
 
     #[must_use]
     pub fn unique(&self) -> Self {
-        let mut seen = HashMap::<&IndexLabel, ()>::new();
+        let mut seen = FxHashMap::<&IndexLabel, ()>::default();
         let labels: Vec<IndexLabel> = self
             .labels
             .iter()
@@ -610,7 +617,7 @@ impl Index {
         let mut result = vec![false; self.labels.len()];
         match keep {
             DuplicateKeep::First => {
-                let mut seen = HashMap::<&IndexLabel, ()>::new();
+                let mut seen = FxHashMap::<&IndexLabel, ()>::default();
                 for (i, label) in self.labels.iter().enumerate() {
                     if seen.insert(label, ()).is_some() {
                         result[i] = true;
@@ -618,7 +625,7 @@ impl Index {
                 }
             }
             DuplicateKeep::Last => {
-                let mut seen = HashMap::<&IndexLabel, ()>::new();
+                let mut seen = FxHashMap::<&IndexLabel, ()>::default();
                 for (i, label) in self.labels.iter().enumerate().rev() {
                     if seen.insert(label, ()).is_some() {
                         result[i] = true;
@@ -626,7 +633,7 @@ impl Index {
                 }
             }
             DuplicateKeep::None => {
-                let mut counts = HashMap::<&IndexLabel, usize>::new();
+                let mut counts = FxHashMap::<&IndexLabel, usize>::default();
                 for label in &self.labels {
                     *counts.entry(label).or_insert(0) += 1;
                 }
@@ -666,7 +673,7 @@ impl Index {
     #[must_use]
     pub fn intersection(&self, other: &Self) -> Self {
         let other_set = other.position_map_first_ref();
-        let mut seen = HashMap::<&IndexLabel, ()>::new();
+        let mut seen = FxHashMap::<&IndexLabel, ()>::default();
         let labels: Vec<IndexLabel> = self
             .labels
             .iter()
@@ -680,7 +687,7 @@ impl Index {
 
     #[must_use]
     pub fn union_with(&self, other: &Self) -> Self {
-        let mut seen = HashMap::<&IndexLabel, ()>::new();
+        let mut seen = FxHashMap::<&IndexLabel, ()>::default();
         let mut labels = Vec::with_capacity(self.labels.len() + other.labels.len());
         for label in self.labels.iter().chain(other.labels.iter()) {
             if seen.insert(label, ()).is_none() {
@@ -695,7 +702,7 @@ impl Index {
     #[must_use]
     pub fn difference(&self, other: &Self) -> Self {
         let other_set = other.position_map_first_ref();
-        let mut seen = HashMap::<&IndexLabel, ()>::new();
+        let mut seen = FxHashMap::<&IndexLabel, ()>::default();
         let labels: Vec<IndexLabel> = self
             .labels
             .iter()
@@ -709,7 +716,7 @@ impl Index {
     pub fn symmetric_difference(&self, other: &Self) -> Self {
         let self_set = self.position_map_first_ref();
         let other_set = other.position_map_first_ref();
-        let mut seen = HashMap::<&IndexLabel, ()>::new();
+        let mut seen = FxHashMap::<&IndexLabel, ()>::default();
         let mut labels = Vec::new();
         for label in &self.labels {
             if !other_set.contains_key(label) && seen.insert(label, ()).is_none() {
@@ -10954,7 +10961,7 @@ impl MultiIndex {
             .iter()
             .enumerate()
             .map(|(level_idx, level)| {
-                let mut seen = HashMap::<&IndexLabel, ()>::new();
+                let mut seen = FxHashMap::<&IndexLabel, ()>::default();
                 let labels = level
                     .iter()
                     .filter(|label| !label.is_missing() && seen.insert(label, ()).is_none())
