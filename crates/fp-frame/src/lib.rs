@@ -3600,7 +3600,14 @@ impl Series {
                 if b == 0 {
                     fp_types::Timedelta::NAT
                 } else {
-                    a % b
+                    // pandas Timedelta mod is floored (sign of the divisor):
+                    // (-7s) % 3s == 2s, not Rust's -1s. (br 5btt1.)
+                    let r = a % b;
+                    if r != 0 && (r < 0) != (b < 0) {
+                        r + b
+                    } else {
+                        r
+                    }
                 }
             },
             "td_mod",
@@ -38687,7 +38694,10 @@ impl DataFrame {
 
     /// Modulo all numeric columns by a scalar.
     pub fn mod_scalar(&self, value: f64) -> Result<Self, FrameError> {
-        self.apply_scalar_op(value, |a, b| a % b)
+        // pandas mod takes the DIVISOR's sign (floored remainder), not Rust's
+        // dividend-sign %: (-7) % 3 == 2. Floored identity a - floor(a/b)*b
+        // (also NaN for a zero divisor). Sibling of br 5btt1.
+        self.apply_scalar_op(value, |a, b| a - (a / b).floor() * b)
     }
 
     /// Add another DataFrame or scalar with pandas' canonical method name.
@@ -38875,7 +38885,12 @@ impl DataFrame {
     {
         match other.into() {
             DataFrameArithmeticOperand::DataFrame(frame) => frame.mod_df(self),
-            DataFrameArithmeticOperand::Scalar(value) => self.apply_scalar_op(value, |a, b| b % a),
+            // rmod: scalar % column. pandas mod takes the DIVISOR's (column's)
+            // sign via the floored remainder b - floor(b/a)*a, not Rust's
+            // dividend-sign %. (br 5btt1.)
+            DataFrameArithmeticOperand::Scalar(value) => {
+                self.apply_scalar_op(value, |a, b| b - (b / a).floor() * a)
+            }
         }
     }
 
@@ -39029,7 +39044,9 @@ impl DataFrame {
     ///
     /// Matches `pd.DataFrame.mod(other)`.
     pub fn mod_df(&self, other: &Self) -> Result<Self, FrameError> {
-        self.binary_df_op(other, |a, b| a % b, "mod")
+        // pandas mod takes the DIVISOR's sign (floored), not Rust's % dividend
+        // sign: (-7) % 3 == 2. Floored identity a - floor(a/b)*b. (br 5btt1.)
+        self.binary_df_op(other, |a, b| a - (a / b).floor() * b, "mod")
     }
 
     /// Raise another DataFrame element-wise to the power with index alignment.
@@ -39126,33 +39143,28 @@ impl DataFrame {
     ///
     /// Matches `pd.DataFrame.div(other, fill_value=X)`.
     pub fn div_df_fill(&self, other: &Self, fill_value: f64) -> Result<Self, FrameError> {
-        self.binary_df_op_fill(
-            other,
-            |a, b| if b == 0.0 { f64::NAN } else { a / b },
-            fill_value,
-        )
+        // pandas div by zero -> +/-inf (numerator sign), 0/0 -> NaN; Rust IEEE
+        // division already does this, so do NOT special-case a zero divisor.
+        // (Sibling of the Series fix 457ad27b / br 5btt1.)
+        self.binary_df_op_fill(other, |a, b| a / b, fill_value)
     }
 
     /// Floor-divide by another DataFrame element-wise with fill_value for NaN handling.
     ///
     /// Matches `pd.DataFrame.floordiv(other, fill_value=X)`.
     pub fn floordiv_df_fill(&self, other: &Self, fill_value: f64) -> Result<Self, FrameError> {
-        self.binary_df_op_fill(
-            other,
-            |a, b| if b == 0.0 { f64::NAN } else { (a / b).floor() },
-            fill_value,
-        )
+        // floor(a/b): +/-inf for a non-zero numerator over zero, NaN for 0/0.
+        self.binary_df_op_fill(other, |a, b| (a / b).floor(), fill_value)
     }
 
     /// Modulo with another DataFrame element-wise with fill_value for NaN handling.
     ///
     /// Matches `pd.DataFrame.mod(other, fill_value=X)`.
     pub fn mod_df_fill(&self, other: &Self, fill_value: f64) -> Result<Self, FrameError> {
-        self.binary_df_op_fill(
-            other,
-            |a, b| if b == 0.0 { f64::NAN } else { a % b },
-            fill_value,
-        )
+        // pandas mod takes the DIVISOR's sign (floored remainder), unlike Rust's
+        // % (dividend sign): 3 % -2 == -1. Floored identity a - floor(a/b)*b
+        // also yields NaN for a zero divisor.
+        self.binary_df_op_fill(other, |a, b| a - (a / b).floor() * b, fill_value)
     }
 
     /// Floor-divide all numeric columns by a scalar.
@@ -76600,6 +76612,41 @@ mod tests {
         // 7 % 3 = 1.0, 10 % 4 = 2.0
         assert_eq!(result.columns["a"].values()[0], Scalar::Float64(1.0));
         assert_eq!(result.columns["a"].values()[1], Scalar::Float64(2.0));
+    }
+
+    #[test]
+    fn df_mod_and_div_match_pandas_sign_and_inf() {
+        // pandas DataFrame mod uses the DIVISOR's sign (floored), and div/
+        // floordiv by zero give +/-inf (numerator sign), not NaN. Verified vs
+        // live pandas 2.2.3. (Sibling cluster of br 5btt1.)
+        let df = DataFrame::from_dict(
+            &["a"],
+            vec![(
+                "a",
+                vec![Scalar::Float64(-7.0), Scalar::Float64(7.0)],
+            )],
+        )
+        .unwrap();
+
+        // mod_scalar: -7 % 3 == 2, 7 % 3 == 1 (floored).
+        let m = df.mod_scalar(3.0).unwrap();
+        assert_eq!(m.columns()["a"].values()[0], Scalar::Float64(2.0));
+        assert_eq!(m.columns()["a"].values()[1], Scalar::Float64(1.0));
+
+        // mod_scalar with a negative divisor: -7 % -3 == -1, 7 % -3 == -2.
+        let mn = df.mod_scalar(-3.0).unwrap();
+        assert_eq!(mn.columns()["a"].values()[0], Scalar::Float64(-1.0));
+        assert_eq!(mn.columns()["a"].values()[1], Scalar::Float64(-2.0));
+
+        // rmod scalar: 3 % column -> 3 % -7 == -4 (divisor sign), 3 % 7 == 3.
+        let rm = df.rmod(3.0).unwrap();
+        assert_eq!(rm.columns()["a"].values()[0], Scalar::Float64(-4.0));
+        assert_eq!(rm.columns()["a"].values()[1], Scalar::Float64(3.0));
+
+        // div by zero -> +/-inf (sign of numerator).
+        let d = df.div_scalar(0.0).unwrap();
+        assert_eq!(d.columns()["a"].values()[0], Scalar::Float64(f64::NEG_INFINITY));
+        assert_eq!(d.columns()["a"].values()[1], Scalar::Float64(f64::INFINITY));
     }
 
     #[test]
