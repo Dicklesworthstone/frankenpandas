@@ -1216,10 +1216,14 @@ impl Column {
     pub fn take_positions(&self, positions: &[usize]) -> Self {
         let n = positions.len();
         if self.validity.all() {
-            let values = positions
-                .iter()
-                .map(|&pos| self.values[pos].clone())
-                .collect();
+            let values = self
+                .take_all_valid_primitive_positions(positions)
+                .unwrap_or_else(|| {
+                    positions
+                        .iter()
+                        .map(|&pos| self.values[pos].clone())
+                        .collect()
+                });
             return Self {
                 dtype: self.dtype,
                 values,
@@ -1241,6 +1245,62 @@ impl Column {
             values,
             validity: ValidityMask { words, len: n },
         }
+    }
+
+    fn take_all_valid_primitive_positions(&self, positions: &[usize]) -> Option<Vec<Scalar>> {
+        let mut values = Vec::with_capacity(positions.len());
+        match self.dtype {
+            DType::Bool | DType::BoolNullable => {
+                for &pos in positions {
+                    match &self.values[pos] {
+                        Scalar::Bool(value) => values.push(Scalar::Bool(*value)),
+                        _ => return None,
+                    }
+                }
+            }
+            DType::Int64 | DType::Int64Nullable => {
+                for &pos in positions {
+                    match &self.values[pos] {
+                        Scalar::Int64(value) => values.push(Scalar::Int64(*value)),
+                        _ => return None,
+                    }
+                }
+            }
+            DType::Float64 => {
+                for &pos in positions {
+                    match &self.values[pos] {
+                        Scalar::Float64(value) => values.push(Scalar::Float64(*value)),
+                        _ => return None,
+                    }
+                }
+            }
+            DType::Timedelta64 => {
+                for &pos in positions {
+                    match &self.values[pos] {
+                        Scalar::Timedelta64(value) => values.push(Scalar::Timedelta64(*value)),
+                        _ => return None,
+                    }
+                }
+            }
+            DType::Datetime64 => {
+                for &pos in positions {
+                    match &self.values[pos] {
+                        Scalar::Datetime64(value) => values.push(Scalar::Datetime64(*value)),
+                        _ => return None,
+                    }
+                }
+            }
+            DType::Period => {
+                for &pos in positions {
+                    match &self.values[pos] {
+                        Scalar::Period(value) => values.push(Scalar::Period(*value)),
+                        _ => return None,
+                    }
+                }
+            }
+            _ => return None,
+        }
+        Some(values)
     }
 
     /// Create a column filled with zeros.
@@ -8182,6 +8242,64 @@ mod tests {
         assert_eq!(empty.dtype(), column.dtype());
         assert!(empty.values().is_empty());
         assert_eq!(empty.validity(), &ValidityMask::all_invalid(0));
+    }
+
+    #[test]
+    fn take_positions_all_valid_primitives_match_validated_materialization() {
+        let cases = [
+            (
+                DType::Bool,
+                vec![Scalar::Bool(false), Scalar::Bool(true), Scalar::Bool(false)],
+            ),
+            (
+                DType::Int64,
+                vec![Scalar::Int64(10), Scalar::Int64(-5), Scalar::Int64(42)],
+            ),
+            (
+                DType::Float64,
+                vec![
+                    Scalar::Float64(1.25),
+                    Scalar::Float64(-0.0),
+                    Scalar::Float64(9.5),
+                ],
+            ),
+            (
+                DType::Timedelta64,
+                vec![
+                    Scalar::Timedelta64(10),
+                    Scalar::Timedelta64(-5),
+                    Scalar::Timedelta64(42),
+                ],
+            ),
+            (
+                DType::Datetime64,
+                vec![
+                    Scalar::Datetime64(10),
+                    Scalar::Datetime64(-5),
+                    Scalar::Datetime64(42),
+                ],
+            ),
+            (
+                DType::Period,
+                vec![Scalar::Period(10), Scalar::Period(-5), Scalar::Period(42)],
+            ),
+        ];
+
+        let positions = [2, 0, 2, 1];
+        for (dtype, values) in cases {
+            let column = Column::new(dtype, values).expect("column should build");
+            let gathered = column.take_positions(&positions);
+            let expected_values = positions
+                .iter()
+                .map(|&position| column.values()[position].clone())
+                .collect::<Vec<_>>();
+            let expected =
+                Column::new(column.dtype(), expected_values).expect("validated materialization");
+
+            assert_eq!(gathered.dtype(), expected.dtype());
+            assert_eq!(gathered.values(), expected.values());
+            assert_eq!(gathered.validity(), expected.validity());
+        }
     }
 
     #[test]
