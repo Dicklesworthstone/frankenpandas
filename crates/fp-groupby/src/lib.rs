@@ -242,6 +242,14 @@ fn groupby_sum_with_global_allocator(
     if is_utf8_values(aligned_values_values) {
         return groupby_sum_utf8(aligned_keys_values, aligned_values_values, options);
     }
+    // Per br-frankenpandas-l75ms: pandas groupby.sum() preserves the integer
+    // dtype — Int64 (and Bool, summed as 0/1) stay Int64, like Series::sum. The
+    // f64 accumulator paths below would emit Float64. Route uniformly-Int64/Bool
+    // values to a dtype-preserving i128 accumulator (saturating to Float64 only
+    // on i64 overflow, matching fp-frame's groupby sum).
+    if is_int64_or_bool_values(aligned_values_values) {
+        return groupby_sum_int64(aligned_keys_values, aligned_values_values, options);
+    }
     if let Some((out_index, out_values)) = try_groupby_sum_dense_int64(
         aligned_keys_values,
         aligned_values_values,
@@ -308,6 +316,14 @@ fn groupby_sum_with_arena(
     // group (see global-allocator path). Reuse the same typed string path.
     if is_utf8_values(aligned_values_values) {
         return groupby_sum_utf8(aligned_keys_values, aligned_values_values, options);
+    }
+    // Per br-frankenpandas-l75ms: pandas groupby.sum() preserves the integer
+    // dtype — Int64 (and Bool, summed as 0/1) stay Int64, like Series::sum. The
+    // f64 accumulator paths below would emit Float64. Route uniformly-Int64/Bool
+    // values to a dtype-preserving i128 accumulator (saturating to Float64 only
+    // on i64 overflow, matching fp-frame's groupby sum).
+    if is_int64_or_bool_values(aligned_values_values) {
+        return groupby_sum_int64(aligned_keys_values, aligned_values_values, options);
     }
     // AG-06: Arena-backed dense path intermediates.
     if let Some((out_index, out_values)) = try_groupby_sum_dense_int64_arena(
@@ -639,6 +655,90 @@ fn groupby_sum_utf8(
     Ok(Series::new("sum", Index::new(out_index), out_column)?)
 }
 
+/// Detect uniformly-Int64-or-Bool value input (allowing Null missing markers).
+/// Mirrors `is_timedelta_values`/`is_utf8_values`. A pandas integer/boolean
+/// column sums dtype-preservingly to Int64, so route it to `groupby_sum_int64`
+/// instead of the f64 accumulator paths that emit Float64.
+fn is_int64_or_bool_values(values: &[Scalar]) -> bool {
+    let mut saw = false;
+    for v in values {
+        if v.is_missing() {
+            continue;
+        }
+        match v {
+            Scalar::Int64(_) | Scalar::Bool(_) => saw = true,
+            _ => return false,
+        }
+    }
+    saw
+}
+
+/// Per br-frankenpandas-l75ms: dtype-preserving groupby sum for Int64/Bool
+/// columns. Accumulates each group in i128 (Bool counted as 0/1, matching
+/// pandas) and emits `Scalar::Int64`, falling back to `Scalar::Float64` only
+/// when a group total overflows i64 — identical to fp-frame's `sum_group_vals`.
+fn groupby_sum_int64(
+    keys: &[Scalar],
+    values: &[Scalar],
+    options: GroupByOptions,
+) -> Result<Series, GroupByError> {
+    let mut ordering = Vec::<GroupKeyRef<'_>>::new();
+    let mut slot = FxHashMap::<GroupKeyRef<'_>, (usize, i128)>::default();
+
+    for (pos, (key, value)) in keys.iter().zip(values.iter()).enumerate() {
+        if options.dropna && key.is_missing() {
+            continue;
+        }
+        let key_id = GroupKeyRef::from_scalar(key);
+        let entry = slot.entry(key_id.clone()).or_insert_with(|| {
+            ordering.push(key_id.clone());
+            (pos, 0_i128)
+        });
+        match value {
+            Scalar::Int64(v) => entry.1 += i128::from(*v),
+            Scalar::Bool(b) => entry.1 += i128::from(*b),
+            _ => {} // missing / null skipped (skipna=True)
+        }
+    }
+
+    if options.sort {
+        sort_group_ordering_by(keys, &mut ordering, |key| {
+            slot.get(key)
+                .expect("ordering references only inserted keys")
+                .0
+        });
+    }
+
+    let mut out_index = Vec::with_capacity(ordering.len());
+    let mut out_values = Vec::with_capacity(ordering.len());
+    for key in &ordering {
+        let (source_idx, total) = slot
+            .remove(key)
+            .expect("ordering references only inserted keys");
+        let label = &keys[source_idx];
+        out_index.push(match label {
+            Scalar::Int64(v) => IndexLabel::Int64(*v),
+            Scalar::Utf8(v) => IndexLabel::Utf8(v.clone()),
+            Scalar::Bool(v) => IndexLabel::Utf8(if *v { "True" } else { "False" }.to_string()),
+            Scalar::Null(NullKind::NaN)
+            | Scalar::Null(NullKind::NaT)
+            | Scalar::Null(NullKind::Null) => IndexLabel::Utf8("<null>".to_owned()),
+            Scalar::Float64(v) => IndexLabel::Utf8(v.to_string()),
+            Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
+            Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
+            Scalar::Period(v) => IndexLabel::Utf8(format!("Period[{v}]")),
+            Scalar::Interval(iv) => IndexLabel::Utf8(format!("{iv}")),
+        });
+        out_values.push(match i64::try_from(total) {
+            Ok(v) => Scalar::Int64(v),
+            Err(_) => Scalar::Float64(total as f64),
+        });
+    }
+
+    let out_column = Column::from_values(out_values)?;
+    Ok(Series::new("sum", Index::new(out_index), out_column)?)
+}
+
 const DENSE_INT_KEY_RANGE_LIMIT: i128 = 65_536;
 
 /// Scan keys and return (min, max, saw_any_int). Returns None if a non-Int64,
@@ -918,6 +1018,9 @@ pub fn groupby_agg(
 
     let mut out_index = Vec::with_capacity(ordering.len());
     let mut out_values = Vec::with_capacity(ordering.len());
+    // Per br-frankenpandas-l75ms: keep groupby_agg(Sum) consistent with the
+    // dedicated groupby_sum — pandas preserves the integer dtype for sum.
+    let value_dtype = values.column().dtype();
 
     for key in &ordering {
         let (source_idx, vals, total_count) = groups
@@ -939,6 +1042,20 @@ pub fn groupby_agg(
         });
 
         let agg_value = match func {
+            AggFunc::Sum if matches!(value_dtype, DType::Int64 | DType::Bool) => {
+                let mut total = 0_i128;
+                for v in vals {
+                    match v {
+                        Scalar::Int64(x) => total += i128::from(*x),
+                        Scalar::Bool(b) => total += i128::from(*b),
+                        _ => {}
+                    }
+                }
+                match i64::try_from(total) {
+                    Ok(x) => Scalar::Int64(x),
+                    Err(_) => Scalar::Float64(total as f64),
+                }
+            }
             AggFunc::Sum => fp_types::nansum(vals),
             AggFunc::Mean => fp_types::nanmean(vals),
             AggFunc::Count => fp_types::nancount(vals),
@@ -1570,7 +1687,7 @@ mod tests {
         .expect("groupby");
 
         assert_eq!(out.index().labels(), &["a".into(), "b".into()]);
-        assert_eq!(out.values(), &[Scalar::Float64(6.0), Scalar::Float64(4.0)]);
+        assert_eq!(out.values(), &[Scalar::Int64(6), Scalar::Int64(4)]);
     }
 
     #[test]
@@ -1663,7 +1780,7 @@ mod tests {
         .expect("groupby");
 
         assert_eq!(out.index().labels(), &["b".into(), "a".into()]);
-        assert_eq!(out.values(), &[Scalar::Float64(4.0), Scalar::Float64(6.0)]);
+        assert_eq!(out.values(), &[Scalar::Int64(4), Scalar::Int64(6)]);
     }
 
     #[test]
@@ -1696,7 +1813,7 @@ mod tests {
         )
         .expect("groupby");
 
-        assert_eq!(out.values(), &[Scalar::Float64(4.0), Scalar::Float64(2.0)]);
+        assert_eq!(out.values(), &[Scalar::Int64(4), Scalar::Int64(2)]);
         assert_eq!(ledger.records().len(), 1);
     }
 
@@ -1735,7 +1852,7 @@ mod tests {
 
         assert_eq!(out.index().labels().len(), 2);
         assert_eq!(out.index().labels()[1], "1".into());
-        assert_eq!(out.values(), &[Scalar::Float64(5.0), Scalar::Float64(2.0)]);
+        assert_eq!(out.values(), &[Scalar::Int64(5), Scalar::Int64(2)]);
     }
 
     #[test]
@@ -1808,7 +1925,7 @@ mod tests {
 
         // Duplicate-label alignment expands to a cartesian product of duplicate positions.
         assert_eq!(out.index().labels(), &["a".into(), "b".into()]);
-        assert_eq!(out.values(), &[Scalar::Float64(6.0), Scalar::Float64(3.0)]);
+        assert_eq!(out.values(), &[Scalar::Int64(6), Scalar::Int64(3)]);
     }
 
     #[test]
@@ -1854,9 +1971,9 @@ mod tests {
         assert_eq!(
             out.values(),
             &[
-                Scalar::Float64(4.0),
-                Scalar::Float64(2.0),
-                Scalar::Float64(4.0),
+                Scalar::Int64(4),
+                Scalar::Int64(2),
+                Scalar::Int64(4),
             ]
         );
     }
@@ -1907,9 +2024,9 @@ mod tests {
         assert_eq!(
             out.values(),
             &[
-                Scalar::Float64(4.0),
-                Scalar::Float64(2.0),
-                Scalar::Float64(4.0)
+                Scalar::Int64(4),
+                Scalar::Int64(2),
+                Scalar::Int64(4)
             ]
         );
     }
@@ -1948,7 +2065,7 @@ mod tests {
         .expect("groupby");
 
         assert_eq!(out.index().labels(), &[10_i64.into(), "<null>".into()]);
-        assert_eq!(out.values(), &[Scalar::Float64(5.0), Scalar::Float64(1.0)]);
+        assert_eq!(out.values(), &[Scalar::Int64(5), Scalar::Int64(1)]);
     }
 
     // --- AG-08-T: GroupBy Clone Elimination Tests ---
@@ -1994,7 +2111,7 @@ mod tests {
         .expect("groupby");
 
         assert_eq!(out.index().labels(), &[0_i64.into(), 100_000_i64.into()]);
-        assert_eq!(out.values(), &[Scalar::Float64(4.0), Scalar::Float64(6.0)]);
+        assert_eq!(out.values(), &[Scalar::Int64(4), Scalar::Int64(6)]);
     }
 
     /// AG-08-T #4: All rows have same key -> single output group.
@@ -2029,7 +2146,7 @@ mod tests {
         .expect("groupby");
 
         assert_eq!(out.index().labels(), &["only".into()]);
-        assert_eq!(out.values(), &[Scalar::Float64(60.0)]);
+        assert_eq!(out.values(), &[Scalar::Int64(60)]);
     }
 
     /// AG-08-T #5: No rows -> empty output Series.
@@ -2093,7 +2210,7 @@ mod tests {
 
         assert_eq!(out.index().labels(), &["a".into(), "b".into()]);
         // "a": 5 + missing = 5.0; "b": missing + missing = 0.0
-        assert_eq!(out.values(), &[Scalar::Float64(5.0), Scalar::Float64(0.0)]);
+        assert_eq!(out.values(), &[Scalar::Int64(5), Scalar::Int64(0)]);
     }
 
     /// AG-08-T #7: 10000 unique keys -> all groups present, sums correct.
@@ -2123,9 +2240,9 @@ mod tests {
         assert_eq!(out.index().labels().len(), n);
         assert_eq!(out.values().len(), n);
         // Verify a few spot checks
-        assert_eq!(out.values()[0], Scalar::Float64(0.0));
-        assert_eq!(out.values()[999], Scalar::Float64(999.0));
-        assert_eq!(out.values()[9999], Scalar::Float64(9999.0));
+        assert_eq!(out.values()[0], Scalar::Int64(0));
+        assert_eq!(out.values()[999], Scalar::Int64(999));
+        assert_eq!(out.values()[9999], Scalar::Int64(9999));
     }
 
     /// AG-08-T #9: Generic path and dense path produce identical output
@@ -2410,7 +2527,7 @@ mod tests {
             assert_eq!(out.index().labels().len(), 2);
             assert_eq!(
                 out.values(),
-                &[Scalar::Float64(10.0), Scalar::Float64(20.0)]
+                &[Scalar::Int64(10), Scalar::Int64(20)]
             );
         }
     }
