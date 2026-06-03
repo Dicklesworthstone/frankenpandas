@@ -4151,18 +4151,21 @@ fn scalar_to_json(scalar: &Scalar) -> serde_json::Value {
             }
         }
         Scalar::Utf8(s) => serde_json::Value::String(s.clone()),
+        // pandas to_json (default date_format='epoch', date_unit='ms') serializes
+        // datetime64 and timedelta64 as epoch-MILLISECOND integers, not strings.
+        // (br-frankenpandas-lb0iu)
         Scalar::Timedelta64(v) => {
             if *v == Timedelta::NAT {
                 serde_json::Value::Null
             } else {
-                serde_json::Value::String(Timedelta::format(*v))
+                serde_json::json!(*v / 1_000_000)
             }
         }
         Scalar::Datetime64(v) => {
             if *v == Timestamp::NAT {
                 serde_json::Value::Null
             } else {
-                serde_json::Value::String(format_datetime_ns(*v))
+                serde_json::json!(*v / 1_000_000)
             }
         }
         Scalar::Period(v) => {
@@ -4228,8 +4231,23 @@ fn index_label_to_json(label: &IndexLabel) -> serde_json::Value {
     match label {
         IndexLabel::Int64(v) => serde_json::json!(*v),
         IndexLabel::Utf8(v) => serde_json::Value::String(v.clone()),
-        IndexLabel::Timedelta64(ns) => serde_json::json!(*ns),
-        IndexLabel::Datetime64(ns) => serde_json::json!(*ns),
+        // Epoch-millisecond ints, matching pandas to_json (date_unit='ms') and
+        // the value path above — previously emitted raw nanoseconds, which
+        // matched neither pandas nor FP's own value serialization.
+        // (br-frankenpandas-lb0iu)
+        IndexLabel::Timedelta64(ns) => serde_json::json!(*ns / 1_000_000),
+        IndexLabel::Datetime64(ns) => serde_json::json!(*ns / 1_000_000),
+    }
+}
+
+/// Stringified index label for use as a JSON object key (columns/index orients).
+/// Temporal labels become epoch-millisecond strings, matching pandas to_json
+/// (e.g. a 2020-01-01 index key is "1577836800000", not "2020-01-01 00:00:00").
+/// (br-frankenpandas-lb0iu)
+fn index_label_json_key(label: &IndexLabel) -> String {
+    match label {
+        IndexLabel::Datetime64(ns) | IndexLabel::Timedelta64(ns) => (*ns / 1_000_000).to_string(),
+        other => other.to_string(),
     }
 }
 
@@ -4689,7 +4707,7 @@ pub fn write_json_string(frame: &DataFrame, orient: JsonOrient) -> Result<String
                 let mut col_obj = serde_json::Map::new();
                 if let Some(col) = frame.column(name) {
                     for (label, val) in frame.index().labels().iter().zip(col.values()) {
-                        let key = label.to_string();
+                        let key = index_label_json_key(label);
                         if col_obj
                             .insert(
                                 key.clone(),
@@ -4724,7 +4742,7 @@ pub fn write_json_string(frame: &DataFrame, orient: JsonOrient) -> Result<String
                     row_obj.insert(name.clone(), val);
                 }
 
-                let row_label = frame.index().labels()[row_idx].to_string();
+                let row_label = index_label_json_key(&frame.index().labels()[row_idx]);
                 if outer
                     .insert(row_label.clone(), serde_json::Value::Object(row_obj))
                     .is_some()
@@ -14655,6 +14673,47 @@ mod tests {
         assert_eq!(
             frame.column("b").unwrap().values()[1],
             Scalar::Null(NullKind::Null)
+        );
+    }
+
+    #[test]
+    fn json_temporal_values_and_index_are_epoch_millis() {
+        // pandas to_json (date_unit='ms') serializes datetime64/timedelta64 as
+        // epoch-millisecond integers for both values and index — not ISO/format
+        // strings (values) nor raw nanoseconds (index). (br-frankenpandas-lb0iu)
+        // 2020-01-01T00:00:00 == 1_577_836_800_000 ms; 1s timedelta == 1000 ms.
+        let dt_ns = 1_577_836_800_000_000_000_i64;
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            "d".to_owned(),
+            Column::from_values(vec![Scalar::Datetime64(dt_ns)]).expect("d"),
+        );
+        columns.insert(
+            "t".to_owned(),
+            Column::from_values(vec![Scalar::Timedelta64(1_000_000_000)]).expect("t"),
+        );
+        let index = Index::new(vec![IndexLabel::Datetime64(dt_ns)]);
+        let frame =
+            DataFrame::new_with_column_order(index, columns, vec!["d".to_owned(), "t".to_owned()])
+                .expect("frame");
+
+        let out = write_json_string(&frame, JsonOrient::Columns).expect("json");
+        assert!(
+            out.contains("1577836800000"),
+            "datetime value/index should be epoch-millis int, got {out}"
+        );
+        assert!(
+            out.contains("1000"),
+            "timedelta value should be epoch-millis int (1000), got {out}"
+        );
+        // Must NOT contain the old ISO string or raw-nanosecond forms.
+        assert!(
+            !out.contains("2020-01-01"),
+            "should not emit ISO string: {out}"
+        );
+        assert!(
+            !out.contains("1577836800000000000"),
+            "should not emit raw nanoseconds: {out}"
         );
     }
 
