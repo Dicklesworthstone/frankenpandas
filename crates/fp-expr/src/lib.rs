@@ -6151,6 +6151,51 @@ mod tests {
         // Tracked separately; not asserted here.
     }
 
+    fn surviving_a(frame: &fp_frame::DataFrame, expr: &str) -> Result<Vec<i64>, String> {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+        let r = super::query_str(expr, frame, &policy, &mut ledger).map_err(|e| format!("{e:?}"))?;
+        Ok(r
+            .column("a")
+            .unwrap()
+            .values()
+            .iter()
+            .filter_map(|s| if let Scalar::Int64(v) = s { Some(*v) } else { None })
+            .collect())
+    }
+
+    #[test]
+    fn query_str_operators_probe_vs_pandas() {
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "a",
+                (0..5).map(|i| (i as i64).into()).collect(),
+                (1..=5).map(Scalar::Int64).collect(),
+            )
+            .unwrap(),
+            fp_frame::Series::from_values(
+                "s",
+                (0..5).map(|i| (i as i64).into()).collect(),
+                ["x", "y", "x", "z", "y"].iter().map(|s| Scalar::Utf8((*s).into())).collect(),
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        // Each verified vs pandas 2.2.3 df.query(...)["a"].tolist().
+        assert_eq!(surviving_a(&frame, "a in [1, 3, 5]"), Ok(vec![1, 3, 5]), "a in list");
+        assert_eq!(surviving_a(&frame, "a not in [1, 3, 5]"), Ok(vec![2, 4]), "a not in list");
+        assert_eq!(surviving_a(&frame, "s == 'x'"), Ok(vec![1, 3]), "str eq");
+        assert_eq!(surviving_a(&frame, "s in ['x', 'z']"), Ok(vec![1, 3, 4]), "str in list");
+        assert_eq!(surviving_a(&frame, "a > 1 and a < 4"), Ok(vec![2, 3]), "logical and");
+        assert_eq!(surviving_a(&frame, "not (a > 3)"), Ok(vec![1, 2, 3]), "unary not");
+        assert_eq!(surviving_a(&frame, "a + 1 > 3"), Ok(vec![3, 4, 5]), "arith precedence");
+        // pandas treats &/| in query as element-wise and/or with
+        // comparison-level precedence: `a > 1 & a < 4` == `(a>1) & (a<4)`.
+        assert_eq!(surviving_a(&frame, "a > 1 & a < 4"), Ok(vec![2, 3]), "bitwise &");
+        assert_eq!(surviving_a(&frame, "a == 1 | a == 5"), Ok(vec![1, 5]), "bitwise |");
+    }
+
     #[test]
     fn eval_str_with_locals_broadcasts_scalar_bindings() {
         let policy = RuntimePolicy::hardened(Some(100));
