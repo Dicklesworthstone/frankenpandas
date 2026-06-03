@@ -6179,7 +6179,7 @@ impl PeriodIndex {
     #[must_use]
     pub fn value_counts(&self) -> Vec<(Period, usize)> {
         let mut order = Vec::<&Period>::new();
-        let mut counts = HashMap::<&Period, usize>::new();
+        let mut counts = FxHashMap::<&Period, usize>::default();
         for period in &self.values {
             let entry = counts.entry(period).or_insert_with(|| {
                 order.push(period);
