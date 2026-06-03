@@ -5585,20 +5585,19 @@ impl Series {
         // a drop-in for the linear-scan iter().any(semantic_eq) — within
         // a single Column the values are homogeneous so ScalarKey
         // equivalence matches semantic_eq for in-column pairs.
+        // Per br-frankenpandas-9x4qi: key missing values by NullKind via
+        // scalar_key_allow_missing, exactly as drop_duplicates does, so the two
+        // AGREE and both match pandas. pandas never disagrees between unique()
+        // and drop_duplicates(): an object column keeps None vs NaN distinct
+        // (unique([None,nan]) -> [None, nan]) while float/Int64/string collapse
+        // all missing to one (the column only holds a single NullKind there).
+        // The previous single missing_seen flag collapsed ALL kinds, diverging
+        // from drop_duplicates' NullKind-aware keying. Verified vs live pandas
+        // 2.2.3.
         let mut seen: Vec<Scalar> = Vec::new();
         let mut seen_keys: HashMap<ScalarKey<'_>, ()> = HashMap::new();
-        let mut missing_seen = false;
         for value in self.column.values() {
-            if value.is_missing() {
-                if !missing_seen {
-                    seen.push(value.clone());
-                    missing_seen = true;
-                }
-                continue;
-            }
-            let Some(key) = scalar_key_skip_missing(value) else {
-                continue;
-            };
+            let key = scalar_key_allow_missing(value);
             if seen_keys.insert(key, ()).is_none() {
                 seen.push(value.clone());
             }
@@ -5624,21 +5623,20 @@ impl Series {
         // ScalarKey equivalence matches grouped_scalar_eq for in-column
         // pairs. The cross-dtype case (DataFrame::nunique_axis_with_dropna)
         // still uses the linear-scan distinct_values helper.
+        //
+        // Per br-frankenpandas-9x4qi: with dropna=false, count distinct missing
+        // values by NullKind (the same scalar_key_allow_missing keying as
+        // unique()/drop_duplicates), so e.g. an object column holding both None
+        // and NaN reports nunique(dropna=False)=2, matching pandas. float/Int64
+        // columns hold a single NullKind so all missing still collapse to one.
         let mut seen_keys: HashMap<ScalarKey<'_>, ()> = HashMap::new();
-        let mut missing_seen = false;
         for value in self.column.values() {
-            if value.is_missing() {
-                if dropna {
-                    continue;
-                }
-                missing_seen = true;
+            if value.is_missing() && dropna {
                 continue;
             }
-            if let Some(key) = scalar_key_skip_missing(value) {
-                seen_keys.insert(key, ());
-            }
+            seen_keys.insert(scalar_key_allow_missing(value), ());
         }
-        seen_keys.len() + usize::from(missing_seen)
+        seen_keys.len()
     }
 
     /// Map values using a dict-like mapping. Unmapped values become NaN.
@@ -48819,7 +48817,15 @@ mod tests {
     }
 
     #[test]
-    fn series_unique_retains_one_null_when_only_nulls() {
+    fn series_unique_keeps_distinct_null_kinds_like_drop_duplicates() {
+        // Per br-frankenpandas-9x4qi: a column holding distinct NullKinds
+        // (None vs NaN) is the object-dtype case in pandas, where unique() and
+        // drop_duplicates() AGREE and both keep them distinct. Verified vs live
+        // pandas 2.2.3: pd.Series([None,None,nan],dtype=object).unique() ->
+        // [None, nan] (len 2); .drop_duplicates() -> same; nunique(dropna=False)
+        // == 2. unique() now shares drop_duplicates' NullKind-aware keying, so
+        // the previous single-marker collapse (which disagreed with
+        // drop_duplicates) is fixed.
         let s = Series::from_values(
             "nulls",
             vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
@@ -48831,10 +48837,12 @@ mod tests {
         )
         .unwrap();
         let uniq = s.unique();
-        // pandas emits a single NaN marker; semantic_eq treats different
-        // missing kinds as equal, so the NaN variant dedupes against Null.
-        assert_eq!(uniq.len(), 1);
-        assert!(uniq[0].is_missing());
+        assert_eq!(uniq.len(), 2, "got {uniq:?}");
+        assert!(uniq.iter().all(Scalar::is_missing));
+        assert_eq!(uniq[0], Scalar::Null(NullKind::Null));
+        assert_eq!(uniq[1], Scalar::Null(NullKind::NaN));
+        // unique() and nunique(dropna=false) agree, both NullKind-aware.
+        assert_eq!(s.nunique_with_dropna(false), 2);
     }
 
     #[test]
