@@ -20526,7 +20526,14 @@ impl StringAccessor<'_> {
                     "left" => Scalar::Utf8(format!("{padding}{s}")),
                     "right" => Scalar::Utf8(format!("{s}{padding}")),
                     "both" => {
-                        let left = pad_len / 2;
+                        // pandas str.pad(side='both') (and str.center) mirror
+                        // CPython str.center: for an odd padding count the extra
+                        // fill char goes LEFT when the width is also odd —
+                        // left = marg//2 + (marg & width & 1). FP previously used
+                        // only marg/2, sending the extra char right, e.g.
+                        // pad("ab", 5, both) gave "*ab**" vs pandas "**ab*".
+                        // Verified vs live pandas 2.2.3 across all width/len parities.
+                        let left = pad_len / 2 + (pad_len & width & 1);
                         let right = pad_len - left;
                         let lpad: String = std::iter::repeat_n(fillchar, left).collect();
                         let rpad: String = std::iter::repeat_n(fillchar, right).collect();
@@ -106110,8 +106117,39 @@ mod tests {
         let right = s.str().pad(5, "right", '*').unwrap();
         assert_eq!(right.column().values()[0], Scalar::Utf8("hi***".into()));
         let both = s.str().pad(5, "both", '*').unwrap();
-        // pad_len=3, left=1, right=2 → "*hi**"
-        assert_eq!(both.column().values()[0], Scalar::Utf8("*hi**".into()));
+        // pad_len=3, width=5 (both odd) → CPython center sends the extra char
+        // LEFT: left=2, right=1 → "**hi*". Verified vs live pandas 2.2.3:
+        // pd.Series(["hi"]).str.pad(5, side="both", fillchar="*") == "**hi*".
+        assert_eq!(both.column().values()[0], Scalar::Utf8("**hi*".into()));
+    }
+
+    #[test]
+    fn series_str_pad_both_center_parity_gh_center() {
+        // pandas str.pad(both)/str.center mirror CPython str.center exactly,
+        // including the odd-padding tie. Verified vs live pandas 2.2.3:
+        //   "ab" w5 -> "**ab*" (extra left, width odd)
+        //   "a"  w4 -> "*a**"  (extra right, width even)
+        //   "ab" w6 -> "**ab**" (even padding, symmetric)
+        let mk = |v: &str| {
+            Series::from_values("x", vec![0_i64.into()], vec![Scalar::Utf8(v.into())]).unwrap()
+        };
+        assert_eq!(
+            mk("ab").str().pad(5, "both", '*').unwrap().column().values()[0],
+            Scalar::Utf8("**ab*".into())
+        );
+        assert_eq!(
+            mk("a").str().pad(4, "both", '*').unwrap().column().values()[0],
+            Scalar::Utf8("*a**".into())
+        );
+        assert_eq!(
+            mk("ab").str().pad(6, "both", '*').unwrap().column().values()[0],
+            Scalar::Utf8("**ab**".into())
+        );
+        // center() delegates to pad(both) and must agree.
+        assert_eq!(
+            mk("ab").str().center(5, '*').unwrap().column().values()[0],
+            Scalar::Utf8("**ab*".into())
+        );
     }
 
     #[test]
