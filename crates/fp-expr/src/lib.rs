@@ -6108,6 +6108,50 @@ mod tests {
     }
 
     #[test]
+    fn query_str_chained_comparison_and_ops_match_pandas() {
+        let policy = RuntimePolicy::hardened(Some(100));
+        let mut ledger = EvidenceLedger::new();
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "a",
+                (0..5).map(|i| (i as i64).into()).collect(),
+                (1..=5).map(Scalar::Int64).collect(),
+            )
+            .unwrap(),
+            fp_frame::Series::from_values(
+                "b",
+                (0..5).map(|i| (i as i64).into()).collect(),
+                vec![Scalar::Int64(2); 5],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        // Python chained comparison: `1 < a < 4` == `(1 < a) and (a < 4)` -> a in {2,3}.
+        let q = super::query_str("1 < a < 4", &frame, &policy, &mut ledger).unwrap();
+        let qa: Vec<_> = q.column("a").unwrap().values().to_vec();
+        assert_eq!(
+            qa,
+            vec![Scalar::Int64(2), Scalar::Int64(3)],
+            "chained comparison 1<a<4 should keep a in {{2,3}}; got {:?}",
+            qa
+        );
+
+        // Floor-division and modulo on int operands: pandas keeps int64.
+        // (verified vs pandas 2.2.3: a//b == [0,1,1,2,2], a%b == [1,0,1,0,1])
+        let fdiv = super::eval_str("a // b", &frame, &policy, &mut ledger).unwrap();
+        let fv: Vec<_> = fdiv.values().to_vec();
+        assert_eq!(fv[3], Scalar::Int64(2), "4 // 2 should be Int64(2); got {:?}", fv[3]);
+        let md = super::eval_str("a % b", &frame, &policy, &mut ledger).unwrap();
+        let mv: Vec<_> = md.values().to_vec();
+        assert_eq!(mv[0], Scalar::Int64(1), "1 % 2 should be Int64(1); got {:?}", mv[0]);
+
+        // NOTE: `a ** 2` (int**int) currently returns Float64 in FrankenPandas
+        // (fp-columnar Pow kernel uses powf), diverging from pandas's int64.
+        // Tracked separately; not asserted here.
+    }
+
+    #[test]
     fn eval_str_with_locals_broadcasts_scalar_bindings() {
         let policy = RuntimePolicy::hardened(Some(100));
         let mut ledger = EvidenceLedger::new();
