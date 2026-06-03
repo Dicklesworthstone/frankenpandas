@@ -833,6 +833,10 @@ enum ScalarValues {
         data: Vec<f64>,
         values: OnceLock<Vec<Scalar>>,
     },
+    LazyAllValidBool {
+        data: Vec<bool>,
+        values: OnceLock<Vec<Scalar>>,
+    },
 }
 
 impl ScalarValues {
@@ -854,6 +858,13 @@ impl ScalarValues {
         }
     }
 
+    fn lazy_all_valid_bool(data: Vec<bool>) -> Self {
+        Self::LazyAllValidBool {
+            data,
+            values: OnceLock::new(),
+        }
+    }
+
     fn as_slice(&self) -> &[Scalar] {
         match self {
             Self::Eager(values) => values,
@@ -863,6 +874,9 @@ impl ScalarValues {
             Self::LazyAllValidFloat64 { data, values } => values
                 .get_or_init(|| data.iter().copied().map(Scalar::Float64).collect())
                 .as_slice(),
+            Self::LazyAllValidBool { data, values } => values
+                .get_or_init(|| data.iter().copied().map(Scalar::Bool).collect())
+                .as_slice(),
         }
     }
 
@@ -871,6 +885,7 @@ impl ScalarValues {
             Self::Eager(values) => values.len(),
             Self::LazyAllValidInt64 { data, .. } => data.len(),
             Self::LazyAllValidFloat64 { data, .. } => data.len(),
+            Self::LazyAllValidBool { data, .. } => data.len(),
         }
     }
 
@@ -885,6 +900,7 @@ impl Clone for ScalarValues {
             Self::Eager(values) => Self::Eager(values.clone()),
             Self::LazyAllValidInt64 { data, .. } => Self::lazy_all_valid_int64(data.clone()),
             Self::LazyAllValidFloat64 { data, .. } => Self::lazy_all_valid_float64(data.clone()),
+            Self::LazyAllValidBool { data, .. } => Self::lazy_all_valid_bool(data.clone()),
         }
     }
 }
@@ -1457,6 +1473,35 @@ impl Column {
         if self.dtype == DType::Int64
             && self.validity.all()
             && let Some(ColumnData::Int64(data)) = &self.data
+        {
+            return Some(data.as_slice());
+        }
+        None
+    }
+
+    /// Build an all-valid `Bool` column from already-typed contiguous values.
+    ///
+    /// The typed-ingestion counterpart for boolean results (comparison masks,
+    /// predicates) — see [`Column::from_f64_values`]. Defers `Scalar`
+    /// materialization until a caller asks for scalar values.
+    #[must_use]
+    pub fn from_bool_values(data: Vec<bool>) -> Self {
+        let len = data.len();
+        Self {
+            dtype: DType::Bool,
+            values: ScalarValues::lazy_all_valid_bool(data.clone()),
+            validity: ValidityMask::all_valid(len),
+            data: Some(ColumnData::Bool(data)),
+        }
+    }
+
+    /// Borrow the column's contiguous `bool` buffer when this is an all-valid
+    /// `Bool` column. See [`Column::as_f64_slice`].
+    #[must_use]
+    pub fn as_bool_slice(&self) -> Option<&[bool]> {
+        if self.dtype == DType::Bool
+            && self.validity.all()
+            && let Some(ColumnData::Bool(data)) = &self.data
         {
             return Some(data.as_slice());
         }
@@ -3363,6 +3408,50 @@ impl Column {
             // Comparing against missing always produces all-missing.
             let values = vec![Scalar::Null(NullKind::Null); self.len()];
             return Self::new(DType::Bool, values);
+        }
+
+        // Typed fast path (br-frankenpandas-2kpwa): when self is an all-valid
+        // contiguous numeric buffer, compare against the scalar directly over the
+        // typed slice and build the Bool result via from_bool_values, skipping the
+        // per-element Scalar dispatch in scalar_compare and the 32-byte Scalar alloc
+        // for every output cell. Bit-identical to the scalar path:
+        //   * Float64 self vs any numeric scalar reduces in scalar_compare to the
+        //     final "convert both to f64" branch, i.e. `v <op> scalar.to_f64()`.
+        //   * Int64 self vs Int64 scalar takes scalar_compare's both-Int64 branch,
+        //     i.e. the i64 comparison. (Int64 vs float scalar still uses the AoS
+        //     path so f64-promotion semantics stay identical.)
+        if let Some(data) = self.as_f64_slice()
+            && let Ok(s) = scalar.to_f64()
+        {
+            let bools: Vec<bool> = data
+                .iter()
+                .map(|&v| match op {
+                    ComparisonOp::Gt => v > s,
+                    ComparisonOp::Lt => v < s,
+                    ComparisonOp::Eq => v == s,
+                    ComparisonOp::Ne => v != s,
+                    ComparisonOp::Ge => v >= s,
+                    ComparisonOp::Le => v <= s,
+                })
+                .collect();
+            return Ok(Self::from_bool_values(bools));
+        }
+        if let Some(data) = self.as_i64_slice()
+            && let Scalar::Int64(s) = scalar
+        {
+            let s = *s;
+            let bools: Vec<bool> = data
+                .iter()
+                .map(|&v| match op {
+                    ComparisonOp::Gt => v > s,
+                    ComparisonOp::Lt => v < s,
+                    ComparisonOp::Eq => v == s,
+                    ComparisonOp::Ne => v != s,
+                    ComparisonOp::Ge => v >= s,
+                    ComparisonOp::Le => v <= s,
+                })
+                .collect();
+            return Ok(Self::from_bool_values(bools));
         }
 
         let values = self
@@ -10390,6 +10479,98 @@ mod tests {
                     Scalar::Float64(-0.0),
                     Scalar::Float64(f64::INFINITY),
                 ]
+            );
+        }
+
+        #[test]
+        fn compare_scalar_typed_path_matches_scalar_compare() {
+            // Isomorphism proof for br-frankenpandas-2kpwa: the typed f64/i64
+            // compare_scalar fast paths must be bit-identical to the per-element
+            // scalar_compare reference for every op and operand combination.
+            let f64_vals = vec![1.5f64, -0.0, 0.0, 2.5, -3.0, f64::INFINITY, 100.0];
+            let i64_vals = vec![1i64, -2, 0, 5, 100, -7];
+            let ops = [
+                ComparisonOp::Gt,
+                ComparisonOp::Lt,
+                ComparisonOp::Eq,
+                ComparisonOp::Ne,
+                ComparisonOp::Ge,
+                ComparisonOp::Le,
+            ];
+            for op in ops {
+                // Float64 column vs Float64 scalar.
+                for &probe in &[0.0f64, 1.5, 2.5, -3.0, f64::INFINITY] {
+                    let got = Column::from_f64_values(f64_vals.clone())
+                        .compare_scalar(&Scalar::Float64(probe), op)
+                        .expect("f64 cmp");
+                    let expected: Vec<Scalar> = f64_vals
+                        .iter()
+                        .map(|&v| {
+                            Scalar::Bool(
+                                scalar_compare(&Scalar::Float64(v), &Scalar::Float64(probe), op)
+                                    .unwrap(),
+                            )
+                        })
+                        .collect();
+                    assert_eq!(got.values(), expected.as_slice(), "f64 op {op:?} probe {probe}");
+                }
+                // Float64 column vs Int64 scalar (f64-promotion branch).
+                let got = Column::from_f64_values(f64_vals.clone())
+                    .compare_scalar(&Scalar::Int64(2), op)
+                    .expect("f64-vs-i64 cmp");
+                let expected: Vec<Scalar> = f64_vals
+                    .iter()
+                    .map(|&v| {
+                        Scalar::Bool(
+                            scalar_compare(&Scalar::Float64(v), &Scalar::Int64(2), op).unwrap(),
+                        )
+                    })
+                    .collect();
+                assert_eq!(got.values(), expected.as_slice(), "f64-vs-i64 op {op:?}");
+                // Int64 column vs Int64 scalar (both-Int64 branch).
+                let got = Column::from_i64_values(i64_vals.clone())
+                    .compare_scalar(&Scalar::Int64(0), op)
+                    .expect("i64 cmp");
+                let expected: Vec<Scalar> = i64_vals
+                    .iter()
+                    .map(|&v| {
+                        Scalar::Bool(scalar_compare(&Scalar::Int64(v), &Scalar::Int64(0), op).unwrap())
+                    })
+                    .collect();
+                assert_eq!(got.values(), expected.as_slice(), "i64 op {op:?}");
+            }
+        }
+
+        #[test]
+        #[ignore = "perf timing harness, run with --ignored"]
+        fn compare_scalar_typed_vs_aos_timing() {
+            use std::time::Instant;
+            let n = 5_000_000usize;
+            let raw: Vec<f64> = (0..n).map(|i| (i % 1000) as f64 - 500.0).collect();
+            let scalars: Vec<Scalar> = raw.iter().map(|&v| Scalar::Float64(v)).collect();
+            let probe = Scalar::Float64(0.0);
+            let op = ComparisonOp::Gt;
+
+            // AoS reference: per-element scalar_compare + Scalar::Bool alloc.
+            let t = Instant::now();
+            let aos: Vec<Scalar> = scalars
+                .iter()
+                .map(|v| Scalar::Bool(scalar_compare(v, &probe, op).unwrap()))
+                .collect();
+            let aos_ns = t.elapsed().as_nanos();
+            std::hint::black_box(&aos);
+
+            // Typed path through compare_scalar (as_f64_slice -> from_bool_values).
+            let col = Column::from_f64_values(raw.clone());
+            let t = Instant::now();
+            let typed = col.compare_scalar(&probe, op).expect("typed cmp");
+            let typed_ns = t.elapsed().as_nanos();
+            std::hint::black_box(&typed);
+
+            assert_eq!(typed.values(), aos.as_slice(), "typed must match AoS");
+            let ratio = aos_ns as f64 / typed_ns as f64;
+            println!(
+                "compare_scalar Gt n={n}: AoS {aos_ns}ns  typed {typed_ns}ns  Score={ratio:.2}x"
             );
         }
 
