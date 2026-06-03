@@ -16728,7 +16728,7 @@ fn execute_series_module_utility_fixture_operation(
                 .ok_or_else(|| "str_split_n required for series_str_split_get".to_owned())?;
             series
                 .str()
-                .split_get(pat, n)
+                .split_get(pat, n as i64)
                 .map_err(|err| err.to_string())
         }
         FixtureOperation::SeriesStrJoin => {
@@ -16787,7 +16787,7 @@ fn execute_series_module_utility_fixture_operation(
             let n = fixture.str_split_n.unwrap_or(0);
             series
                 .str()
-                .rsplit_get(pat, n)
+                .rsplit_get(pat, n as i64)
                 .map_err(|err| err.to_string())
         }
         FixtureOperation::SeriesStrSplitRegexGet => {
@@ -16795,7 +16795,7 @@ fn execute_series_module_utility_fixture_operation(
             let n = fixture.str_split_n.unwrap_or(0);
             series
                 .str()
-                .split_regex_get(pat, n)
+                .split_regex_get(pat, n as i64)
                 .map_err(|err| err.to_string())
         }
         FixtureOperation::SeriesStrCountMatches => {

@@ -20091,6 +20091,19 @@ pub struct StringAccessor<'a> {
     series: &'a Series,
 }
 
+/// Index into a split-parts list with pandas `.str[n]` semantics: a negative
+/// `n` counts from the end (`-1` is the last part), and any out-of-range index
+/// yields a missing value. Per br-frankenpandas-7evu8.
+fn split_part_at(parts: &[&str], n: i64) -> Scalar {
+    let len = parts.len() as i64;
+    let idx = if n < 0 { len + n } else { n };
+    if idx >= 0 && idx < len {
+        Scalar::Utf8(parts[idx as usize].to_string())
+    } else {
+        Scalar::Null(NullKind::NaN)
+    }
+}
+
 impl StringAccessor<'_> {
     /// Helper: apply a string transformation to each value.
     fn apply_str<F>(&self, func: F, name: &str) -> Result<Series, FrameError>
@@ -20483,15 +20496,11 @@ impl StringAccessor<'_> {
     }
 
     /// Split each string by a separator and return the n-th element.
-    pub fn split_get(&self, pat: &str, n: usize) -> Result<Series, FrameError> {
+    pub fn split_get(&self, pat: &str, n: i64) -> Result<Series, FrameError> {
         self.apply_str(
             |s| {
                 let parts: Vec<&str> = s.split(pat).collect();
-                if n < parts.len() {
-                    Scalar::Utf8(parts[n].to_string())
-                } else {
-                    Scalar::Null(NullKind::NaN)
-                }
+                split_part_at(&parts, n)
             },
             self.series.name(),
         )
@@ -20500,7 +20509,7 @@ impl StringAccessor<'_> {
     /// Split each string from the right and return the n-th element.
     ///
     /// Matches `pd.Series.str.rsplit(pat).str[n]`.
-    pub fn rsplit_get(&self, pat: &str, n: usize) -> Result<Series, FrameError> {
+    pub fn rsplit_get(&self, pat: &str, n: i64) -> Result<Series, FrameError> {
         // pandas str.rsplit(pat) without a maxsplit yields the parts in
         // left-to-right (forward) order — identical to split — so
         // rsplit(pat).str[n] indexes the FORWARD list. Rust's str::rsplit
@@ -20510,11 +20519,7 @@ impl StringAccessor<'_> {
         self.apply_str(
             |s| {
                 let parts: Vec<&str> = s.split(pat).collect();
-                if n < parts.len() {
-                    Scalar::Utf8(parts[n].to_string())
-                } else {
-                    Scalar::Null(NullKind::NaN)
-                }
+                split_part_at(&parts, n)
             },
             self.series.name(),
         )
@@ -21209,18 +21214,14 @@ impl StringAccessor<'_> {
     /// Split each string by a regex pattern and return the n-th element.
     ///
     /// Analogous to `pandas.Series.str.split(pat, regex=True).str[n]`.
-    pub fn split_regex_get(&self, pat: &str, n: usize) -> Result<Series, FrameError> {
+    pub fn split_regex_get(&self, pat: &str, n: i64) -> Result<Series, FrameError> {
         let re = Regex::new(pat).map_err(|e| {
             FrameError::CompatibilityRejected(format!("invalid regex pattern: {e}"))
         })?;
         self.apply_str(
             |s| {
                 let parts: Vec<&str> = re.split(s).collect();
-                if n < parts.len() {
-                    Scalar::Utf8(parts[n].to_string())
-                } else {
-                    Scalar::Null(NullKind::NaN)
-                }
+                split_part_at(&parts, n)
             },
             self.series.name(),
         )
@@ -58480,6 +58481,40 @@ mod tests {
             .unwrap();
         let result = s.str().split_get("-", 1).unwrap();
         assert_eq!(result.values()[0], Scalar::Utf8("b".into()));
+    }
+
+    #[test]
+    fn str_split_get_negative_index_7evu8() {
+        // pandas Series.str.split(pat).str[n] supports negative n (from the end).
+        // "a-b-c".split("-") = ["a","b","c"]: [-1]="c", [-2]="b", [-3]="a",
+        // [-4]=NaN (out of range). Verified vs live pandas 2.2.3.
+        let s = Series::from_values("x", vec![0_i64.into()], vec![Scalar::Utf8("a-b-c".into())])
+            .unwrap();
+        assert_eq!(
+            s.str().split_get("-", -1).unwrap().values()[0],
+            Scalar::Utf8("c".into())
+        );
+        assert_eq!(
+            s.str().split_get("-", -2).unwrap().values()[0],
+            Scalar::Utf8("b".into())
+        );
+        assert_eq!(
+            s.str().split_get("-", -3).unwrap().values()[0],
+            Scalar::Utf8("a".into())
+        );
+        assert_eq!(
+            s.str().split_get("-", -4).unwrap().values()[0],
+            Scalar::Null(NullKind::NaN)
+        );
+        // rsplit_get and split_regex_get share the same negative-index logic.
+        assert_eq!(
+            s.str().rsplit_get("-", -1).unwrap().values()[0],
+            Scalar::Utf8("c".into())
+        );
+        assert_eq!(
+            s.str().split_regex_get("-", -1).unwrap().values()[0],
+            Scalar::Utf8("c".into())
+        );
     }
 
     #[test]
