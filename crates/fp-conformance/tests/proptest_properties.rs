@@ -11927,3 +11927,61 @@ proptest! {
         }
     }
 }
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(300))]
+
+    /// MR-DD2: drop_duplicates on a frame whose rows are all distinct is the
+    /// identity — every row preserved in original order, value-for-value. A
+    /// guaranteed-unique "id" column forces the all-unique case. Hardens the
+    /// "skip gather for all-unique drop_duplicates" fast path (3e32e534).
+    #[test]
+    fn prop_drop_duplicates_all_unique_is_identity(
+        vals in (1_usize..=12).prop_flat_map(arb_numeric_values)
+    ) {
+        let n = vals.len();
+        if n == 0 {
+            return Ok(());
+        }
+        let idx: Vec<IndexLabel> = (0..n).map(|i| (i as i64).into()).collect();
+        let id = match Series::from_values(
+            "id".to_owned(),
+            idx.clone(),
+            (0..n as i64).map(Scalar::Int64).collect(),
+        ) {
+            Ok(s) => s,
+            Err(_) => return Ok(()),
+        };
+        let v = match Series::from_values("v".to_owned(), idx, vals) {
+            Ok(s) => s,
+            Err(_) => return Ok(()),
+        };
+        let df = match DataFrame::from_series(vec![id, v]) {
+            Ok(d) => d,
+            Err(_) => return Ok(()),
+        };
+        // Every row is distinct (id differs), so drop_duplicates keeps all.
+        let deduped = match df.drop_duplicates(None, DuplicateKeep::First, false) {
+            Ok(d) => d,
+            Err(_) => return Ok(()),
+        };
+        prop_assert_eq!(deduped.index().len(), n, "all-unique drop_duplicates dropped rows");
+        for name in df.column_names() {
+            let a: Vec<String> = df
+                .column(name.as_str())
+                .unwrap()
+                .values()
+                .iter()
+                .map(|x| format!("{x:?}"))
+                .collect();
+            let b: Vec<String> = deduped
+                .column(name.as_str())
+                .unwrap()
+                .values()
+                .iter()
+                .map(|x| format!("{x:?}"))
+                .collect();
+            prop_assert_eq!(a, b, "all-unique drop_duplicates altered column {} (order/values)", name);
+        }
+    }
+}
