@@ -1,0 +1,196 @@
+{
+  "results": [
+    {
+      "command": "/data/tmp/cargo-target-blackthrush-x0dns-candidate/release-perf/examples/perf_profile csv_read 100000 20",
+      "mean": 0.7731896434200001,
+      "stddev": 0.025528693302485646,
+      "median": 0.7640574896200001,
+      "user": 1.0664157399999996,
+      "system": 0.24326232,
+      "min": 0.7467888626200001,
+      "max": 0.80157454662,
+      "times": [
+        0.7544566046200001,
+        0.7640574896200001,
+        0.79907071362,
+        0.80157454662,
+        0.7467888626200001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/tmp/cargo-target-blackthrush-x0dns-candidate/release-perf/examples/perf_profile csv_read_options 100000 20",
+      "mean": 0.75577161242,
+      "stddev": 0.03576295541765831,
+      "median": 0.75280823362,
+      "user": 1.06582714,
+      "system": 0.23711851999999997,
+      "min": 0.7145466366200001,
+      "max": 0.8089106516200001,
+      "times": [
+        0.8089106516200001,
+        0.7145466366200001,
+        0.7348059576200001,
+        0.75280823362,
+        0.7677865826200001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/tmp/cargo-target-blackthrush-x0dns-candidate/release-perf/examples/perf_profile csv_read_no_na_filter 100000 20",
+      "mean": 0.7525915600200002,
+      "stddev": 0.03282776269582732,
+      "median": 0.7515751596200001,
+      "user": 1.06174174,
+      "system": 0.23530091999999997,
+      "min": 0.7187868286200001,
+      "max": 0.7910226516200001,
+      "times": [
+        0.7217745966200001,
+        0.7910226516200001,
+        0.7515751596200001,
+        0.7187868286200001,
+        0.7797985636200001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/tmp/cargo-target-blackthrush-x0dns-candidate/release-perf/examples/perf_profile series_add_align 100000 100",
+      "mean": 0.6415899082200001,
+      "stddev": 0.01052558995104194,
+      "median": 0.63764237162,
+      "user": 0.36282513999999993,
+      "system": 0.26878272000000003,
+      "min": 0.63081210462,
+      "max": 0.6577840506200001,
+      "times": [
+        0.6457585236200001,
+        0.6577840506200001,
+        0.63081210462,
+        0.63595249062,
+        0.63764237162
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/tmp/cargo-target-blackthrush-x0dns-candidate/release-perf/examples/perf_profile filter_bool 100000 200",
+      "mean": 0.37673747542,
+      "stddev": 0.008113982019078201,
+      "median": 0.37481753362000003,
+      "user": 0.32894594,
+      "system": 0.03508452,
+      "min": 0.36856614262000004,
+      "max": 0.38947665762000006,
+      "times": [
+        0.37173265962,
+        0.36856614262000004,
+        0.37909438362000003,
+        0.38947665762000006,
+        0.37481753362000003
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/tmp/cargo-target-blackthrush-x0dns-candidate/release-perf/examples/perf_profile drop_duplicates 100000 200",
+      "mean": 0.24545104382000002,
+      "stddev": 0.009334334206684558,
+      "median": 0.25144107862000004,
+      "user": 0.22311193999999998,
+      "system": 0.01319372,
+      "min": 0.23114869562,
+      "max": 0.25217024962,
+      "times": [
+        0.24069490562,
+        0.23114869562,
+        0.25144107862000004,
+        0.25180028962000006,
+        0.25217024962
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/tmp/cargo-target-blackthrush-x0dns-candidate/release-perf/examples/perf_profile join_1to1 100000 100",
+      "mean": 0.12977108902,
+      "stddev": 0.004035463607177469,
+      "median": 0.12782601362,
+      "user": 0.10045953999999999,
+      "system": 0.025574720000000002,
+      "min": 0.12641271562,
+      "max": 0.13572280962,
+      "times": [
+        0.13572280962,
+        0.12641271562,
+        0.13213440262,
+        0.12782601362,
+        0.12675950362
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/tmp/cargo-target-blackthrush-x0dns-candidate/release-perf/examples/perf_profile sort_single 100000 100",
+      "mean": 0.07284437402000002,
+      "stddev": 0.0014300382213676389,
+      "median": 0.07306030662000002,
+      "user": 0.05142774,
+      "system": 0.019333319999999998,
+      "min": 0.07140921961999999,
+      "max": 0.07476417462000001,
+      "times": [
+        0.07476417462000001,
+        0.07306030662000002,
+        0.07352914562000001,
+        0.07140921961999999,
+        0.07145902362
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}
