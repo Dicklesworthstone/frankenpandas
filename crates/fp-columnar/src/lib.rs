@@ -656,15 +656,7 @@ fn vectorized_binary_f64(
     let combined = left_validity.and_mask(right_validity);
 
     // Zip iterators over contiguous slices — auto-vectorizable by LLVM.
-    let apply: fn(f64, f64) -> f64 = match op {
-        ArithmeticOp::Add => |a, b| a + b,
-        ArithmeticOp::Sub => |a, b| a - b,
-        ArithmeticOp::Mul => |a, b| a * b,
-        ArithmeticOp::Div => |a, b| a / b,
-        ArithmeticOp::Mod => python_mod_f64,
-        ArithmeticOp::Pow => |a, b| a.powf(b),
-        ArithmeticOp::FloorDiv => python_floor_div_f64,
-    };
+    let apply = binary_f64_apply(op);
 
     let out: Vec<f64> = left
         .iter()
@@ -680,6 +672,18 @@ fn vectorized_binary_f64(
         .collect();
 
     (out, combined)
+}
+
+fn binary_f64_apply(op: ArithmeticOp) -> fn(f64, f64) -> f64 {
+    match op {
+        ArithmeticOp::Add => |a, b| a + b,
+        ArithmeticOp::Sub => |a, b| a - b,
+        ArithmeticOp::Mul => |a, b| a * b,
+        ArithmeticOp::Div => |a, b| a / b,
+        ArithmeticOp::Mod => python_mod_f64,
+        ArithmeticOp::Pow => |a, b| a.powf(b),
+        ArithmeticOp::FloorDiv => python_floor_div_f64,
+    }
 }
 
 fn python_mod_f64(lhs: f64, rhs: f64) -> f64 {
@@ -2257,43 +2261,24 @@ impl Column {
         let lvalid = self.nan_aware_validity();
         let rvalid = right.nan_aware_validity();
 
-        let mut l = vec![0.0_f64; out_len];
-        let mut r = vec![0.0_f64; out_len];
-        let mut lmask = ValidityMask::all_invalid(out_len);
-        let mut rmask = ValidityMask::all_invalid(out_len);
-        for (k, slot) in left_positions.iter().enumerate() {
-            if let Some(i) = slot {
-                l[k] = lsrc[*i];
-                if lvalid.get(*i) {
-                    lmask.set(k, true);
-                }
-            } else {
-                l[k] = f64::NAN;
-            }
-        }
-        for (k, slot) in right_positions.iter().enumerate() {
-            if let Some(j) = slot {
-                r[k] = rsrc[*j];
-                if rvalid.get(*j) {
-                    rmask.set(k, true);
-                }
-            } else {
-                r[k] = f64::NAN;
-            }
-        }
+        let apply = binary_f64_apply(op);
+        let mut values = Vec::with_capacity(out_len);
+        for (k, left_slot) in left_positions.iter().enumerate() {
+            let Some(i) = *left_slot else {
+                values.push(Scalar::Null(NullKind::NaN));
+                continue;
+            };
+            let Some(j) = right_positions.get(k).copied().flatten() else {
+                values.push(Scalar::Null(NullKind::NaN));
+                continue;
+            };
 
-        let (result_data, result_validity) = vectorized_binary_f64(&l, &r, &lmask, &rmask, op);
-        let values: Vec<Scalar> = result_data
-            .iter()
-            .enumerate()
-            .map(|(i, v)| {
-                if result_validity.get(i) {
-                    Scalar::Float64(*v)
-                } else {
-                    Scalar::Null(NullKind::NaN)
-                }
-            })
-            .collect();
+            if lvalid.get(i) && rvalid.get(j) {
+                values.push(Scalar::Float64(apply(lsrc[i], rsrc[j])));
+            } else {
+                values.push(Scalar::Null(NullKind::NaN));
+            }
+        }
         Self::new(DType::Float64, values)
     }
 

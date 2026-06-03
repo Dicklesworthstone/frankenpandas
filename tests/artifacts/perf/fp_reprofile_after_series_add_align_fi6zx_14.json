@@ -1,0 +1,124 @@
+{
+  "results": [
+    {
+      "command": "/data/tmp/cargo-target-rubygoose-fi6zx14-after/release-perf/examples/perf_profile series_add_align 100000 100",
+      "mean": 1.11571066482,
+      "stddev": 0.01820232986189355,
+      "median": 1.12276172222,
+      "user": 0.75296188,
+      "system": 0.36131018,
+      "min": 1.09534950622,
+      "max": 1.13846965522,
+      "times": [
+        1.09877162522,
+        1.12320081522,
+        1.09534950622,
+        1.12276172222,
+        1.13846965522
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/tmp/cargo-target-rubygoose-fi6zx14-after/release-perf/examples/perf_profile join_1to1 100000 50",
+      "mean": 0.53924963822,
+      "stddev": 0.04990609838377396,
+      "median": 0.5065026892200001,
+      "user": 0.49654728,
+      "system": 0.04156557999999999,
+      "min": 0.4999441602200001,
+      "max": 0.6079993692200001,
+      "times": [
+        0.5065026892200001,
+        0.6079993692200001,
+        0.50475398122,
+        0.5770479912200001,
+        0.4999441602200001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/tmp/cargo-target-rubygoose-fi6zx14-after/release-perf/examples/perf_profile filter_bool 100000 200",
+      "mean": 0.23163255342000003,
+      "stddev": 0.006602651719496587,
+      "median": 0.22956221722,
+      "user": 0.20197607999999997,
+      "system": 0.027901979999999993,
+      "min": 0.22640679522,
+      "max": 0.24297816822,
+      "times": [
+        0.22956221722,
+        0.24297816822,
+        0.23131994322,
+        0.22789564322,
+        0.22640679522
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/tmp/cargo-target-rubygoose-fi6zx14-after/release-perf/examples/perf_profile sort_single 100000 200",
+      "mean": 0.06953790362000001,
+      "stddev": 0.0036660078374270858,
+      "median": 0.07024730622000001,
+      "user": 0.052612479999999996,
+      "system": 0.01664758,
+      "min": 0.06392870722,
+      "max": 0.07410973622000001,
+      "times": [
+        0.06392870722,
+        0.07024730622000001,
+        0.07034867822,
+        0.06905509022,
+        0.07410973622000001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/tmp/cargo-target-rubygoose-fi6zx14-after/release-perf/examples/perf_profile drop_duplicates 100000 80",
+      "mean": 0.06262488142,
+      "stddev": 0.0026437136104908755,
+      "median": 0.06192283022,
+      "user": 0.05063588,
+      "system": 0.011588379999999999,
+      "min": 0.060104680220000005,
+      "max": 0.06711156122,
+      "times": [
+        0.06192283022,
+        0.06711156122,
+        0.060104680220000005,
+        0.061690250220000006,
+        0.062295085220000004
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}
