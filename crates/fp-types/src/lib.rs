@@ -1418,7 +1418,21 @@ impl Timedelta {
         let frac = comp.milliseconds * 1_000_000 + comp.microseconds * 1_000 + comp.nanoseconds;
 
         if frac > 0 {
-            format!("{}{} days {}.{:09}", sign, comp.days.abs(), time_part, frac)
+            // pandas renders the sub-second part with microsecond precision
+            // (6 digits) unless a sub-microsecond (nanosecond) component is
+            // present, in which case it widens to 9 digits. FP previously
+            // always used 9, so e.g. 1.5s printed ".500000000" not ".500000".
+            if frac % 1_000 == 0 {
+                format!(
+                    "{}{} days {}.{:06}",
+                    sign,
+                    comp.days.abs(),
+                    time_part,
+                    frac / 1_000
+                )
+            } else {
+                format!("{}{} days {}.{:09}", sign, comp.days.abs(), time_part, frac)
+            }
         } else {
             format!("{}{} days {}", sign, comp.days.abs(), time_part)
         }
@@ -5250,6 +5264,35 @@ mod tests {
         assert_eq!(
             Timedelta::format(Timedelta::NANOS_PER_DAY + 2 * Timedelta::NANOS_PER_HOUR),
             "1 days 02:00:00"
+        );
+    }
+
+    #[test]
+    fn timedelta_format_subsecond_matches_pandas() {
+        use super::Timedelta;
+        // pandas str(Timedelta) uses 6 fractional digits (microseconds) unless a
+        // sub-microsecond (nanosecond) component is present, then 9 digits.
+        // Verified vs live pandas 2.2.3.
+        assert_eq!(
+            Timedelta::format(1_500_000_000), // 1.5s
+            "0 days 00:00:01.500000"
+        );
+        assert_eq!(
+            Timedelta::format(1_000_000), // 1ms
+            "0 days 00:00:00.001000"
+        );
+        assert_eq!(
+            Timedelta::format(123_456_000), // 123456us
+            "0 days 00:00:00.123456"
+        );
+        // Nanosecond component -> 9 digits.
+        assert_eq!(
+            Timedelta::format(500), // 500ns
+            "0 days 00:00:00.000000500"
+        );
+        assert_eq!(
+            Timedelta::format(123_456_789),
+            "0 days 00:00:00.123456789"
         );
     }
 
