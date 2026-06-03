@@ -5407,11 +5407,27 @@ impl Series {
         // value_counts above for rationale.
         let mut counts: Vec<(Scalar, usize)> = Vec::new();
         let mut index_map: HashMap<ScalarKey<'_>, usize> = HashMap::new();
-        let mut null_count = 0_usize;
 
         for value in self.column.values() {
             if value.is_missing() {
-                null_count += 1;
+                if dropna {
+                    continue;
+                }
+                // Per br-frankenpandas-joeff: missing values collapse into ONE
+                // null bucket (IndexLabel cannot yet represent distinct
+                // None/NaN/NaT kinds). Track that bucket through index_map so it
+                // lands at its FIRST-SEEN position rather than pinned to the
+                // end — pandas value_counts orders the null group strictly by
+                // count with a first-seen tiebreak (sort=True), and at first
+                // appearance (sort=False). Verified vs live pandas 2.2.3.
+                let null_key = ScalarKey::Null(NullKind::NaN);
+                match index_map.get(&null_key) {
+                    Some(&idx) => counts[idx].1 += 1,
+                    None => {
+                        index_map.insert(null_key, counts.len());
+                        counts.push((Scalar::Null(NullKind::NaN), 1));
+                    }
+                }
                 continue;
             }
             let Some(key) = scalar_key_skip_missing(value) else {
@@ -5424,10 +5440,6 @@ impl Series {
                     counts.push((value.clone(), 1));
                 }
             }
-        }
-
-        if !dropna && null_count > 0 {
-            counts.push((Scalar::Null(NullKind::NaN), null_count));
         }
 
         if sort {
@@ -48670,6 +48682,75 @@ mod tests {
         assert_eq!(
             out.values(),
             &[Scalar::Int64(2), Scalar::Int64(2), Scalar::Int64(1)]
+        );
+    }
+
+    #[test]
+    fn series_value_counts_null_bucket_at_first_seen_position_joeff() {
+        // Per br-frankenpandas-joeff: the (collapsed) null bucket must sit at its
+        // first-seen position, not pinned to the end. Verified vs live pandas
+        // 2.2.3: pd.Series([1, nan, 2]).value_counts(sort=False, dropna=False)
+        // -> [(1.0, 1), (nan, 1), (2.0, 1)] (null in the MIDDLE).
+        let s = Series::from_values(
+            "v",
+            vec![
+                IndexLabel::from("r1"),
+                IndexLabel::from("r2"),
+                IndexLabel::from("r3"),
+            ],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(2.0),
+            ],
+        )
+        .unwrap();
+        let unsorted = s
+            .value_counts_with_options(false, false, false, false)
+            .unwrap();
+        assert_eq!(
+            unsorted.index().labels(),
+            &[
+                IndexLabel::from("1.0"),
+                IndexLabel::from("<null>"),
+                IndexLabel::from("2.0"),
+            ]
+        );
+
+        // sort=True breaks count ties by first-seen, so the null group (seen
+        // first) sorts before a later, equally-counted value. pandas 2.2.3:
+        // pd.Series([nan, 5, 5, 3]).value_counts(dropna=False)
+        // -> [(5.0, 2), (nan, 1), (3.0, 1)].
+        let s2 = Series::from_values(
+            "v",
+            vec![
+                IndexLabel::from("a"),
+                IndexLabel::from("b"),
+                IndexLabel::from("c"),
+                IndexLabel::from("d"),
+            ],
+            vec![
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(5.0),
+                Scalar::Float64(5.0),
+                Scalar::Float64(3.0),
+            ],
+        )
+        .unwrap();
+        let sorted = s2
+            .value_counts_with_options(false, true, false, false)
+            .unwrap();
+        assert_eq!(
+            sorted.index().labels(),
+            &[
+                IndexLabel::from("5.0"),
+                IndexLabel::from("<null>"),
+                IndexLabel::from("3.0"),
+            ]
+        );
+        assert_eq!(
+            sorted.values(),
+            &[Scalar::Int64(2), Scalar::Int64(1), Scalar::Int64(1)]
         );
     }
 
