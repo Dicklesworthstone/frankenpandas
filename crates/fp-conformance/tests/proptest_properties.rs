@@ -12072,3 +12072,83 @@ proptest! {
         }
     }
 }
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    /// MR-FACT1: Index::factorize is a faithful, first-seen encoding —
+    /// uniques[codes[i]] == labels[i] for every row, codes are dense ordinals
+    /// assigned in first-seen order, and uniques == unique(). Hardens the
+    /// FxHash-swapped factorize (0a3285e4).
+    #[test]
+    fn prop_index_factorize_faithful_encoding(
+        raw in prop::collection::vec(0i64..18, 1..60)
+    ) {
+        let labels: Vec<IndexLabel> = raw.iter().map(|v| IndexLabel::from(*v)).collect();
+        let idx = Index::new(labels.clone());
+        let (codes, uniques) = idx.factorize();
+        prop_assert_eq!(codes.len(), labels.len());
+        let uniq_labels: Vec<IndexLabel> = uniques.labels().to_vec();
+        let uniq_via_unique: Vec<IndexLabel> = idx.unique().labels().to_vec();
+        prop_assert_eq!(&uniq_labels, &uniq_via_unique);
+        for (i, code) in codes.iter().enumerate() {
+            prop_assert!(*code >= 0, "non-missing label must have code >= 0");
+            let c = *code as usize;
+            prop_assert!(c < uniq_labels.len());
+            prop_assert_eq!(&uniq_labels[c], &labels[i]);
+        }
+        // codes assigned densely in first-seen order
+        let mut next = 0isize;
+        for code in &codes {
+            prop_assert!(*code <= next, "codes must follow first-seen order");
+            if *code == next {
+                next += 1;
+            }
+        }
+        prop_assert_eq!(next as usize, uniq_labels.len());
+    }
+
+    /// MR-VC1: Index::value_counts multiset matches brute-force per-label counts,
+    /// the label set equals unique(), counts sum to len, and pairs are sorted
+    /// descending by count. Hardens FxHash-swapped value_counts (aea8a9bf).
+    #[test]
+    fn prop_index_value_counts_multiset(
+        raw in prop::collection::vec(0i64..18, 1..60)
+    ) {
+        let labels: Vec<IndexLabel> = raw.iter().map(|v| IndexLabel::from(*v)).collect();
+        let idx = Index::new(labels.clone());
+        let vc = idx.value_counts();
+        let total: usize = vc.iter().map(|(_, c)| *c).sum();
+        prop_assert_eq!(total, labels.len());
+        let mut seen = std::collections::HashSet::new();
+        for (label, count) in &vc {
+            prop_assert!(seen.insert(label.clone()), "value_counts labels must be distinct");
+            let actual = labels.iter().filter(|l| *l == label).count();
+            prop_assert_eq!(*count, actual);
+        }
+        prop_assert_eq!(vc.len(), idx.unique().len());
+        for w in vc.windows(2) {
+            prop_assert!(w[0].1 >= w[1].1, "value_counts must be descending by count");
+        }
+    }
+
+    /// MR-DUP1: Index::duplicated(First)[i] is true iff the label occurred at an
+    /// earlier position; the false-count equals the unique count. Hardens the
+    /// FxHash-swapped dedup seen-sets (19e312cb).
+    #[test]
+    fn prop_index_duplicated_first_matches_naive(
+        raw in prop::collection::vec(0i64..18, 1..60)
+    ) {
+        let labels: Vec<IndexLabel> = raw.iter().map(|v| IndexLabel::from(*v)).collect();
+        let idx = Index::new(labels.clone());
+        let dup = idx.duplicated(DuplicateKeep::First);
+        prop_assert_eq!(dup.len(), labels.len());
+        let mut seen = std::collections::HashSet::new();
+        for (i, label) in labels.iter().enumerate() {
+            let naive = !seen.insert(label.clone());
+            prop_assert_eq!(dup[i], naive, "duplicated(First) mismatch at row {}", i);
+        }
+        let false_count = dup.iter().filter(|b| !**b).count();
+        prop_assert_eq!(false_count, idx.unique().len());
+    }
+}
