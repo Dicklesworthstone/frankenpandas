@@ -979,11 +979,17 @@ pub fn write_csv_string_with_options(
             })
         })
         .collect();
+    // A DatetimeIndex follows the same column-uniform rule when written.
+    let index_dt_format = if options.include_index {
+        index_datetime_csv_format(frame)
+    } else {
+        None
+    };
 
     for row_idx in 0..frame.index().len() {
         let mut row = Vec::with_capacity(headers.len() + if options.include_index { 1 } else { 0 });
         if options.include_index {
-            row.push(index_label_string(frame, row_idx)?);
+            row.push(index_label_csv_string(frame, row_idx, index_dt_format)?);
         }
         row.extend(headers.iter().enumerate().map(|(col_idx, name)| {
             let value = frame.column(name).and_then(|column| column.value(row_idx));
@@ -2366,6 +2372,60 @@ fn index_label_string(frame: &DataFrame, row_idx: usize) -> Result<String, IoErr
                 frame.index().len()
             )))
         })
+}
+
+/// Derive the column-uniform `to_csv` datetime spec for a DatetimeIndex.
+///
+/// Returns `None` unless every label is `Datetime64` (a homogeneous datetime
+/// index), so non-datetime / mixed indexes keep their default rendering.
+fn index_datetime_csv_format(frame: &DataFrame) -> Option<DatetimeCsvFormat> {
+    let labels = frame.index().labels();
+    let mut any_datetime = false;
+    let mut date_only = true;
+    let mut subsec_digits = 0u8;
+    for label in labels {
+        let IndexLabel::Datetime64(ns) = label else {
+            return None;
+        };
+        any_datetime = true;
+        if *ns == i64::MIN {
+            continue; // NaT
+        }
+        let subsec = (ns.rem_euclid(1_000_000_000)) as u32;
+        if ns.div_euclid(1_000_000_000).rem_euclid(86_400) != 0 || subsec != 0 {
+            date_only = false;
+        }
+        if subsec != 0 {
+            let digits = if !subsec.is_multiple_of(1_000) {
+                9
+            } else if !subsec.is_multiple_of(1_000_000) {
+                6
+            } else {
+                3
+            };
+            subsec_digits = subsec_digits.max(digits);
+        }
+    }
+    any_datetime.then_some(DatetimeCsvFormat {
+        date_only,
+        subsec_digits,
+    })
+}
+
+/// CSV index-cell formatter: applies a DatetimeIndex's column-uniform spec when
+/// present, otherwise identical to `index_label_string`.
+fn index_label_csv_string(
+    frame: &DataFrame,
+    row_idx: usize,
+    dt_format: Option<DatetimeCsvFormat>,
+) -> Result<String, IoError> {
+    if let Some(fmt) = dt_format
+        && let Some(IndexLabel::Datetime64(ns)) = frame.index().labels().get(row_idx)
+        && *ns != i64::MIN
+    {
+        return Ok(format_datetime_csv(*ns, fmt));
+    }
+    index_label_string(frame, row_idx)
 }
 
 /// Column-uniform datetime rendering spec for `to_csv`, mirroring pandas.
@@ -12989,6 +13049,45 @@ mod tests {
         assert_eq!(
             write_csv_string(&dt_frame(&[MIDNIGHT_JAN1, i64::MIN])).expect("w"),
             "d\n2020-01-01\n\"\"\n"
+        );
+    }
+
+    #[test]
+    fn to_csv_datetime_index_is_column_uniform_like_pandas() {
+        use super::{CsvWriteOptions, write_csv_string_with_options};
+        // A DatetimeIndex written with index=True follows the same column-
+        // uniform rule as a datetime column. Verified vs live pandas 2.2.3.
+        fn dt_index_frame(nanos: &[i64]) -> DataFrame {
+            let labels: Vec<IndexLabel> =
+                nanos.iter().map(|&n| IndexLabel::Datetime64(n)).collect();
+            let index = Index::new(labels);
+            let values: Vec<Scalar> = (0..nanos.len() as i64).map(Scalar::Int64).collect();
+            let col = Column::new(DType::Int64, values).expect("col");
+            let mut cols = BTreeMap::new();
+            cols.insert("v".to_string(), col);
+            DataFrame::new_with_column_order(index, cols, vec!["v".to_string()]).expect("frame")
+        }
+        let opts = CsvWriteOptions {
+            include_index: true,
+            ..Default::default()
+        };
+        // All midnight -> date only.
+        assert_eq!(
+            write_csv_string_with_options(
+                &dt_index_frame(&[1_577_836_800_000_000_000, 1_577_923_200_000_000_000]),
+                &opts
+            )
+            .expect("w"),
+            ",v\n2020-01-01,0\n2020-01-02,1\n"
+        );
+        // Sub-second (ms) -> .fff on every label.
+        assert_eq!(
+            write_csv_string_with_options(
+                &dt_index_frame(&[1_577_836_800_500_000_000, 1_577_836_800_250_000_000]),
+                &opts
+            )
+            .expect("w"),
+            ",v\n2020-01-01 00:00:00.500,0\n2020-01-01 00:00:00.250,1\n"
         );
     }
 
