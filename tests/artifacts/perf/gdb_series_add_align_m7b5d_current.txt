@@ -1,0 +1,1049 @@
+
+=== sample 1 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+drop_in_place<[fp_index::IndexLabel]> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+809	pub const unsafe fn drop_in_place<T: PointeeSized>(to_drop: *mut T)
+
+Thread 1 (Thread 0x75d867caec00 (LWP 3036639) "perf_profile"):
+#0  drop_in_place<[fp_index::IndexLabel]> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#1  drop<fp_index::IndexLabel, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:4254
+#2  drop_in_place<alloc::vec::Vec<fp_index::IndexLabel, alloc::alloc::Global>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#3  drop_in_place<fp_index::Index> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#4  0x000064430069c8e2 in align_union_merge_sorted () at crates/fp-frame/src/lib.rs:2371
+#5  align_union_sorted_unique () at crates/fp-frame/src/lib.rs:2274
+#6  binary_op_with_policy () at crates/fp-frame/src/lib.rs:3160
+#7  0x00006443006f2028 in add_with_policy () at crates/fp-frame/src/lib.rs:3239
+#8  main () at crates/fp-conformance/examples/perf_profile.rs:367
+#9  0x00006443006ed223 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#10 __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#11 0x00006443006ed2b9 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#12 0x000064430072b2de in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#13 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#14 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#15 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#16 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#17 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:581
+#18 std::panicking::catch_unwind<isize, std::rt::lang_start_internal::{closure_env#0}> () at library/std/src/panicking.rs:544
+#19 std::panic::catch_unwind<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panic.rs:359
+#20 std::rt::lang_start_internal () at library/std/src/rt.rs:171
+#21 0x00006443006fb2ac in main ()
+[Inferior 1 (process 3036639) detached]
+
+=== sample 2 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+set_pos<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UTerm, typenum::bit::B1>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>> () at /tmp/rch-cargo-home-vmi1153651-2095290-1780510675323048719/registry/src/index.crates.io-1949cf8c6b5b557f/block-buffer-0.12.0/src/sealed.rs:56
+
+Thread 1 (Thread 0x75d867caec00 (LWP 3036639) "perf_profile"):
+#0  set_pos<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UTerm, typenum::bit::B1>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>> () at /tmp/rch-cargo-home-vmi1153651-2095290-1780510675323048719/registry/src/index.crates.io-1949cf8c6b5b557f/block-buffer-0.12.0/src/sealed.rs:56
+#1  set_pos_unchecked<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UTerm, typenum::bit::B1>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>, block_buffer::Eager> () at /tmp/rch-cargo-home-vmi1153651-2095290-1780510675323048719/registry/src/index.crates.io-1949cf8c6b5b557f/block-buffer-0.12.0/src/lib.rs:288
+#2  digest_blocks<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UTerm, typenum::bit::B1>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>, block_buffer::Eager, sha2::{impl#5}::update::{closure_env#0}> () at /tmp/rch-cargo-home-vmi1153651-2095290-1780510675323048719/registry/src/index.crates.io-1949cf8c6b5b557f/block-buffer-0.12.0/src/lib.rs:180
+#3  update () at /tmp/rch-cargo-home-vmi1153651-2095290-1780510675323048719/registry/src/index.crates.io-1949cf8c6b5b557f/digest-0.11.2/src/buffer_macros/fixed.rs:204
+#4  update<sha2::Sha256, &[u8]> () at /tmp/rch-cargo-home-vmi1153651-2095290-1780510675323048719/registry/src/index.crates.io-1949cf8c6b5b557f/digest-0.11.2/src/digest.rs:77
+#5  update () at crates/fp-runtime/src/lib.rs:635
+#6  semantic_integer_index_labels_fingerprint () at crates/fp-frame/src/lib.rs:2201
+#7  semantic_index_labels_fingerprint () at crates/fp-frame/src/lib.rs:2184
+#8  call_once<fn(&[fp_index::IndexLabel]) -> alloc::string::String, (&[fp_index::IndexLabel])> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#9  {closure#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String> () at crates/fp-index/src/lib.rs:364
+#10 {closure#0}<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once_lock.rs:321
+#11 {closure#0}<alloc::string::String, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>>, !> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once_lock.rs:543
+#12 {closure#0}<std::sync::once_lock::{impl#0}::initialize::{closure_env#0}<alloc::string::String, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>>, !>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once.rs:226
+#13 0x000064430071dff9 in std::sys::sync::once::futex::Once::call () at library/std/src/sys/sync/once/futex.rs:183
+#14 0x000064430066c6d3 in call_once_force<std::sync::once_lock::{impl#0}::initialize::{closure_env#0}<alloc::string::String, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>>, !>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once.rs:226
+#15 initialize<alloc::string::String, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>>, !> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once_lock.rs:542
+#16 0x00006443006858f7 in get_or_try_init<alloc::string::String, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>>, !> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once_lock.rs:410
+#17 get_or_init<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once_lock.rs:321
+#18 semantic_labels_fingerprint_with<fn(&[fp_index::IndexLabel]) -> alloc::string::String> () at crates/fp-index/src/lib.rs:364
+#19 semantic_index_identity () at crates/fp-frame/src/lib.rs:2174
+#20 0x000064430069902f in record_alignment_semantic_witness () at crates/fp-frame/src/lib.rs:2261
+#21 binary_op_with_policy () at crates/fp-frame/src/lib.rs:3165
+#22 0x00006443006f2028 in add_with_policy () at crates/fp-frame/src/lib.rs:3239
+#23 main () at crates/fp-conformance/examples/perf_profile.rs:367
+#24 0x00006443006ed223 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#25 __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#26 0x00006443006ed2b9 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#27 0x000064430072b2de in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#28 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#29 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#30 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#31 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#32 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:581
+#33 std::panicking::catch_unwind<isize, std::rt::lang_start_internal::{closure_env#0}> () at library/std/src/panicking.rs:544
+#34 std::panic::catch_unwind<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panic.rs:359
+#35 std::rt::lang_start_internal () at library/std/src/rt.rs:171
+#36 0x00006443006fb2ac in main ()
+[Inferior 1 (process 3036639) detached]
+
+=== sample 3 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x00006443006b1061 in write<fp_index::IndexLabel> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/mem/maybe_uninit.rs:574
+574	        *self = MaybeUninit::new(val);
+
+Thread 1 (Thread 0x75d867caec00 (LWP 3036639) "perf_profile"):
+#0  0x00006443006b1061 in write<fp_index::IndexLabel> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/mem/maybe_uninit.rs:574
+#1  to_vec<fp_index::IndexLabel, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/slice.rs:432
+#2  to_vec_in<fp_index::IndexLabel, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/slice.rs:400
+#3  clone<fp_index::IndexLabel, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:3777
+#4  0x00006443006b0a71 in clone () at crates/fp-index/src/lib.rs:266
+#5  0x00006443006afede in set_names () at crates/fp-index/src/lib.rs:377
+#6  0x000064430069c8d5 in align_union_merge_sorted () at crates/fp-frame/src/lib.rs:2371
+#7  align_union_sorted_unique () at crates/fp-frame/src/lib.rs:2274
+#8  binary_op_with_policy () at crates/fp-frame/src/lib.rs:3160
+#9  0x00006443006f2028 in add_with_policy () at crates/fp-frame/src/lib.rs:3239
+#10 main () at crates/fp-conformance/examples/perf_profile.rs:367
+#11 0x00006443006ed223 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#12 __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#13 0x00006443006ed2b9 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#14 0x000064430072b2de in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#15 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#16 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#17 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#18 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#19 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:581
+#20 std::panicking::catch_unwind<isize, std::rt::lang_start_internal::{closure_env#0}> () at library/std/src/panicking.rs:544
+#21 std::panic::catch_unwind<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panic.rs:359
+#22 std::rt::lang_start_internal () at library/std/src/rt.rs:171
+#23 0x00006443006fb2ac in main ()
+[Inferior 1 (process 3036639) detached]
+
+=== sample 4 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+__brk (addr=0x64432e13f000) at ../sysdeps/unix/sysv/linux/brk_call.h:24
+
+Thread 1 (Thread 0x75d867caec00 (LWP 3036639) "perf_profile"):
+#0  __brk (addr=0x64432e13f000) at ../sysdeps/unix/sysv/linux/brk_call.h:24
+#1  0x000075d867b34278 in __GI___sbrk (increment=increment@entry=-9564160) at ./misc/sbrk.c:74
+#2  0x000075d867ab2166 in __glibc_morecore (increment=increment@entry=-9564160) at ./malloc/morecore.c:29
+#3  0x000075d867ab2200 in systrim (pad=<optimized out>, av=0x75d867c34ac0 <main_arena>) at ./malloc/malloc.c:3011
+#4  0x000075d867ab299d in _int_free_chunk (av=<optimized out>, p=<optimized out>, size=<optimized out>, have_lock=<optimized out>) at ./malloc/malloc.c:4729
+#5  0x00006443006ec2a9 in std::sys::alloc::unix::{impl#0}::dealloc () at /rustc/9ec5d5f32e19d250c7fbeaa90978c79105b39dee/library/std/src/sys/alloc/unix.rs:48
+#6  std::alloc::__default_lib_allocator::__rdl_dealloc () at /rustc/9ec5d5f32e19d250c7fbeaa90978c79105b39dee/library/std/src/alloc.rs:463
+#7  dealloc_nonnull () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/alloc.rs:128
+#8  deallocate_impl_runtime () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/alloc.rs:229
+#9  deallocate_impl () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/alloc.rs:344
+#10 deallocate () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/alloc.rs:462
+#11 deallocate<alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:876
+#12 drop<fp_index::IndexLabel, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:424
+#13 drop_in_place<alloc::raw_vec::RawVec<fp_index::IndexLabel, alloc::alloc::Global>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#14 drop_in_place<alloc::vec::Vec<fp_index::IndexLabel, alloc::alloc::Global>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#15 drop_in_place<fp_index::Index> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#16 0x00006443006ecf01 in drop_in_place<fp_frame::Series> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#17 0x00006443006f205c in main () at crates/fp-conformance/examples/perf_profile.rs:375
+#18 0x00006443006ed223 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#19 __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#20 0x00006443006ed2b9 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#21 0x000064430072b2de in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#22 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#23 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#24 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#25 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#26 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:581
+#27 std::panicking::catch_unwind<isize, std::rt::lang_start_internal::{closure_env#0}> () at library/std/src/panicking.rs:544
+#28 std::panic::catch_unwind<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panic.rs:359
+#29 std::rt::lang_start_internal () at library/std/src/rt.rs:171
+#30 0x00006443006fb2ac in main ()
+[Inferior 1 (process 3036639) detached]
+
+=== sample 5 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x000064430069a245 in write<core::option::Option<usize>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:1920
+1920	        intrinsics::write_via_move(dst, src)
+
+Thread 1 (Thread 0x75d867caec00 (LWP 3036639) "perf_profile"):
+#0  0x000064430069a245 in write<core::option::Option<usize>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:1920
+#1  push_mut<core::option::Option<usize>, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:1045
+#2  push<core::option::Option<usize>, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:1004
+#3  align_union_merge_sorted () at crates/fp-frame/src/lib.rs:2349
+#4  align_union_sorted_unique () at crates/fp-frame/src/lib.rs:2274
+#5  binary_op_with_policy () at crates/fp-frame/src/lib.rs:3160
+#6  0x00006443006f2028 in add_with_policy () at crates/fp-frame/src/lib.rs:3239
+#7  main () at crates/fp-conformance/examples/perf_profile.rs:367
+#8  0x00006443006ed223 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#9  __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#10 0x00006443006ed2b9 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#11 0x000064430072b2de in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#12 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#13 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#14 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#15 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#16 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:581
+#17 std::panicking::catch_unwind<isize, std::rt::lang_start_internal::{closure_env#0}> () at library/std/src/panicking.rs:544
+#18 std::panic::catch_unwind<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panic.rs:359
+#19 std::rt::lang_start_internal () at library/std/src/rt.rs:171
+#20 0x00006443006fb2ac in main ()
+[Inferior 1 (process 3036639) detached]
+
+=== sample 6 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+write<core::option::Option<usize>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:1920
+1920	        intrinsics::write_via_move(dst, src)
+
+Thread 1 (Thread 0x75d867caec00 (LWP 3036639) "perf_profile"):
+#0  write<core::option::Option<usize>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:1920
+#1  push_mut<core::option::Option<usize>, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:1045
+#2  push<core::option::Option<usize>, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:1004
+#3  align_union_merge_sorted () at crates/fp-frame/src/lib.rs:2348
+#4  align_union_sorted_unique () at crates/fp-frame/src/lib.rs:2274
+#5  binary_op_with_policy () at crates/fp-frame/src/lib.rs:3160
+#6  0x00006443006f2028 in add_with_policy () at crates/fp-frame/src/lib.rs:3239
+#7  main () at crates/fp-conformance/examples/perf_profile.rs:367
+#8  0x00006443006ed223 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#9  __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#10 0x00006443006ed2b9 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#11 0x000064430072b2de in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#12 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#13 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#14 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#15 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#16 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:581
+#17 std::panicking::catch_unwind<isize, std::rt::lang_start_internal::{closure_env#0}> () at library/std/src/panicking.rs:544
+#18 std::panic::catch_unwind<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panic.rs:359
+#19 std::rt::lang_start_internal () at library/std/src/rt.rs:171
+#20 0x00006443006fb2ac in main ()
+[Inferior 1 (process 3036639) detached]
+
+=== sample 7 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x0000644300704649 in _mm_alignr_epi8<8> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/../../stdarch/crates/core_arch/src/macros.rs:173
+173	        $crate::intrinsics::simd::simd_shuffle(
+
+Thread 1 (Thread 0x75d867caec00 (LWP 3036639) "perf_profile"):
+#0  0x0000644300704649 in _mm_alignr_epi8<8> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/../../stdarch/crates/core_arch/src/macros.rs:173
+#1  compress () at src/sha256/x86_sha.rs:59
+#2  0x0000644300681994 in update_blocks () at /tmp/rch-cargo-home-vmi1153651-2095290-1780510675323048719/registry/src/index.crates.io-1949cf8c6b5b557f/sha2-0.11.0/src/block_api.rs:41
+#3  update_blocks<sha2::block_api::Sha256VarCore, typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UTerm, typenum::bit::B1>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>> () at /tmp/rch-cargo-home-vmi1153651-2095290-1780510675323048719/registry/src/index.crates.io-1949cf8c6b5b557f/digest-0.11.2/src/block_api/ct_variable.rs:77
+#4  {closure#0} () at /tmp/rch-cargo-home-vmi1153651-2095290-1780510675323048719/registry/src/index.crates.io-1949cf8c6b5b557f/digest-0.11.2/src/buffer_macros/fixed.rs:205
+#5  digest_blocks<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UTerm, typenum::bit::B1>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>, block_buffer::Eager, sha2::{impl#5}::update::{closure_env#0}> () at /tmp/rch-cargo-home-vmi1153651-2095290-1780510675323048719/registry/src/index.crates.io-1949cf8c6b5b557f/block-buffer-0.12.0/src/lib.rs:194
+#6  update () at /tmp/rch-cargo-home-vmi1153651-2095290-1780510675323048719/registry/src/index.crates.io-1949cf8c6b5b557f/digest-0.11.2/src/buffer_macros/fixed.rs:204
+#7  update<sha2::Sha256, &[u8]> () at /tmp/rch-cargo-home-vmi1153651-2095290-1780510675323048719/registry/src/index.crates.io-1949cf8c6b5b557f/digest-0.11.2/src/digest.rs:77
+#8  update () at crates/fp-runtime/src/lib.rs:635
+#9  semantic_integer_index_labels_fingerprint () at crates/fp-frame/src/lib.rs:2199
+#10 semantic_index_labels_fingerprint () at crates/fp-frame/src/lib.rs:2184
+#11 call_once<fn(&[fp_index::IndexLabel]) -> alloc::string::String, (&[fp_index::IndexLabel])> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#12 {closure#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String> () at crates/fp-index/src/lib.rs:364
+#13 {closure#0}<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once_lock.rs:321
+#14 {closure#0}<alloc::string::String, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>>, !> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once_lock.rs:543
+#15 {closure#0}<std::sync::once_lock::{impl#0}::initialize::{closure_env#0}<alloc::string::String, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>>, !>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once.rs:226
+#16 0x000064430071dff9 in std::sys::sync::once::futex::Once::call () at library/std/src/sys/sync/once/futex.rs:183
+#17 0x000064430066c6d3 in call_once_force<std::sync::once_lock::{impl#0}::initialize::{closure_env#0}<alloc::string::String, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>>, !>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once.rs:226
+#18 initialize<alloc::string::String, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>>, !> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once_lock.rs:542
+#19 0x00006443006858f7 in get_or_try_init<alloc::string::String, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>>, !> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once_lock.rs:410
+#20 get_or_init<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once_lock.rs:321
+#21 semantic_labels_fingerprint_with<fn(&[fp_index::IndexLabel]) -> alloc::string::String> () at crates/fp-index/src/lib.rs:364
+#22 semantic_index_identity () at crates/fp-frame/src/lib.rs:2174
+#23 0x000064430069902f in record_alignment_semantic_witness () at crates/fp-frame/src/lib.rs:2261
+#24 binary_op_with_policy () at crates/fp-frame/src/lib.rs:3165
+#25 0x00006443006f2028 in add_with_policy () at crates/fp-frame/src/lib.rs:3239
+#26 main () at crates/fp-conformance/examples/perf_profile.rs:367
+#27 0x00006443006ed223 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#28 __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#29 0x00006443006ed2b9 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#30 0x000064430072b2de in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#31 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#32 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#33 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#34 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#35 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:581
+#36 std::panicking::catch_unwind<isize, std::rt::lang_start_internal::{closure_env#0}> () at library/std/src/panicking.rs:544
+#37 std::panic::catch_unwind<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panic.rs:359
+#38 std::rt::lang_start_internal () at library/std/src/rt.rs:171
+#39 0x00006443006fb2ac in main ()
+[Inferior 1 (process 3036639) detached]
+
+=== sample 8 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x000064430069a24a in write<core::option::Option<usize>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:1920
+1920	        intrinsics::write_via_move(dst, src)
+
+Thread 1 (Thread 0x75d867caec00 (LWP 3036639) "perf_profile"):
+#0  0x000064430069a24a in write<core::option::Option<usize>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:1920
+#1  push_mut<core::option::Option<usize>, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:1045
+#2  push<core::option::Option<usize>, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:1004
+#3  align_union_merge_sorted () at crates/fp-frame/src/lib.rs:2349
+#4  align_union_sorted_unique () at crates/fp-frame/src/lib.rs:2274
+#5  binary_op_with_policy () at crates/fp-frame/src/lib.rs:3160
+#6  0x00006443006f2028 in add_with_policy () at crates/fp-frame/src/lib.rs:3239
+#7  main () at crates/fp-conformance/examples/perf_profile.rs:367
+#8  0x00006443006ed223 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#9  __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#10 0x00006443006ed2b9 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#11 0x000064430072b2de in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#12 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#13 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#14 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#15 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#16 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:581
+#17 std::panicking::catch_unwind<isize, std::rt::lang_start_internal::{closure_env#0}> () at library/std/src/panicking.rs:544
+#18 std::panic::catch_unwind<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panic.rs:359
+#19 std::rt::lang_start_internal () at library/std/src/rt.rs:171
+#20 0x00006443006fb2ac in main ()
+[Inferior 1 (process 3036639) detached]
+
+=== sample 9 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+__memcpy_avx_unaligned_erms () at ../sysdeps/x86_64/multiarch/memmove-vec-unaligned-erms.S:262
+
+Thread 1 (Thread 0x75d867caec00 (LWP 3036639) "perf_profile"):
+#0  __memcpy_avx_unaligned_erms () at ../sysdeps/x86_64/multiarch/memmove-vec-unaligned-erms.S:262
+#1  0x0000644300681a62 in copy_nonoverlapping<u8> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:551
+#2  set_data_unchecked<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UTerm, typenum::bit::B1>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>, block_buffer::Eager> () at /tmp/rch-cargo-home-vmi1153651-2095290-1780510675323048719/registry/src/index.crates.io-1949cf8c6b5b557f/block-buffer-0.12.0/src/lib.rs:302
+#3  digest_blocks<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UTerm, typenum::bit::B1>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>, block_buffer::Eager, sha2::{impl#5}::update::{closure_env#0}> () at /tmp/rch-cargo-home-vmi1153651-2095290-1780510675323048719/registry/src/index.crates.io-1949cf8c6b5b557f/block-buffer-0.12.0/src/lib.rs:205
+#4  update () at /tmp/rch-cargo-home-vmi1153651-2095290-1780510675323048719/registry/src/index.crates.io-1949cf8c6b5b557f/digest-0.11.2/src/buffer_macros/fixed.rs:204
+#5  update<sha2::Sha256, &[u8]> () at /tmp/rch-cargo-home-vmi1153651-2095290-1780510675323048719/registry/src/index.crates.io-1949cf8c6b5b557f/digest-0.11.2/src/digest.rs:77
+#6  update () at crates/fp-runtime/src/lib.rs:635
+#7  semantic_integer_index_labels_fingerprint () at crates/fp-frame/src/lib.rs:2201
+#8  semantic_index_labels_fingerprint () at crates/fp-frame/src/lib.rs:2184
+#9  call_once<fn(&[fp_index::IndexLabel]) -> alloc::string::String, (&[fp_index::IndexLabel])> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#10 {closure#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String> () at crates/fp-index/src/lib.rs:364
+#11 {closure#0}<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once_lock.rs:321
+#12 {closure#0}<alloc::string::String, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>>, !> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once_lock.rs:543
+#13 {closure#0}<std::sync::once_lock::{impl#0}::initialize::{closure_env#0}<alloc::string::String, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>>, !>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once.rs:226
+#14 0x000064430071dff9 in std::sys::sync::once::futex::Once::call () at library/std/src/sys/sync/once/futex.rs:183
+#15 0x000064430066c6d3 in call_once_force<std::sync::once_lock::{impl#0}::initialize::{closure_env#0}<alloc::string::String, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>>, !>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once.rs:226
+#16 initialize<alloc::string::String, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>>, !> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once_lock.rs:542
+#17 0x00006443006858f7 in get_or_try_init<alloc::string::String, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>>, !> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once_lock.rs:410
+#18 get_or_init<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once_lock.rs:321
+#19 semantic_labels_fingerprint_with<fn(&[fp_index::IndexLabel]) -> alloc::string::String> () at crates/fp-index/src/lib.rs:364
+#20 semantic_index_identity () at crates/fp-frame/src/lib.rs:2174
+#21 0x000064430069902f in record_alignment_semantic_witness () at crates/fp-frame/src/lib.rs:2261
+#22 binary_op_with_policy () at crates/fp-frame/src/lib.rs:3165
+#23 0x00006443006f2028 in add_with_policy () at crates/fp-frame/src/lib.rs:3239
+#24 main () at crates/fp-conformance/examples/perf_profile.rs:367
+#25 0x00006443006ed223 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#26 __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#27 0x00006443006ed2b9 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#28 0x000064430072b2de in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#29 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#30 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#31 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#32 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#33 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:581
+#34 std::panicking::catch_unwind<isize, std::rt::lang_start_internal::{closure_env#0}> () at library/std/src/panicking.rs:544
+#35 std::panic::catch_unwind<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panic.rs:359
+#36 std::rt::lang_start_internal () at library/std/src/rt.rs:171
+#37 0x00006443006fb2ac in main ()
+[Inferior 1 (process 3036639) detached]
+
+=== sample 10 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+write<core::option::Option<usize>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:1920
+1920	        intrinsics::write_via_move(dst, src)
+
+Thread 1 (Thread 0x75d867caec00 (LWP 3036639) "perf_profile"):
+#0  write<core::option::Option<usize>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:1920
+#1  push_mut<core::option::Option<usize>, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:1045
+#2  push<core::option::Option<usize>, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:1004
+#3  align_union_merge_sorted () at crates/fp-frame/src/lib.rs:2348
+#4  align_union_sorted_unique () at crates/fp-frame/src/lib.rs:2274
+#5  binary_op_with_policy () at crates/fp-frame/src/lib.rs:3160
+#6  0x00006443006f2028 in add_with_policy () at crates/fp-frame/src/lib.rs:3239
+#7  main () at crates/fp-conformance/examples/perf_profile.rs:367
+#8  0x00006443006ed223 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#9  __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#10 0x00006443006ed2b9 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#11 0x000064430072b2de in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#12 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#13 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#14 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#15 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#16 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:581
+#17 std::panicking::catch_unwind<isize, std::rt::lang_start_internal::{closure_env#0}> () at library/std/src/panicking.rs:544
+#18 std::panic::catch_unwind<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panic.rs:359
+#19 std::rt::lang_start_internal () at library/std/src/rt.rs:171
+#20 0x00006443006fb2ac in main ()
+[Inferior 1 (process 3036639) detached]
+
+=== sample 11 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+__brk (addr=0x64432e13f000) at ../sysdeps/unix/sysv/linux/brk_call.h:24
+
+Thread 1 (Thread 0x75d867caec00 (LWP 3036639) "perf_profile"):
+#0  __brk (addr=0x64432e13f000) at ../sysdeps/unix/sysv/linux/brk_call.h:24
+#1  0x000075d867b34278 in __GI___sbrk (increment=increment@entry=-9564160) at ./misc/sbrk.c:74
+#2  0x000075d867ab2166 in __glibc_morecore (increment=increment@entry=-9564160) at ./malloc/morecore.c:29
+#3  0x000075d867ab2200 in systrim (pad=<optimized out>, av=0x75d867c34ac0 <main_arena>) at ./malloc/malloc.c:3011
+#4  0x000075d867ab299d in _int_free_chunk (av=<optimized out>, p=<optimized out>, size=<optimized out>, have_lock=<optimized out>) at ./malloc/malloc.c:4729
+#5  0x00006443006ec2a9 in std::sys::alloc::unix::{impl#0}::dealloc () at /rustc/9ec5d5f32e19d250c7fbeaa90978c79105b39dee/library/std/src/sys/alloc/unix.rs:48
+#6  std::alloc::__default_lib_allocator::__rdl_dealloc () at /rustc/9ec5d5f32e19d250c7fbeaa90978c79105b39dee/library/std/src/alloc.rs:463
+#7  dealloc_nonnull () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/alloc.rs:128
+#8  deallocate_impl_runtime () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/alloc.rs:229
+#9  deallocate_impl () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/alloc.rs:344
+#10 deallocate () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/alloc.rs:462
+#11 deallocate<alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:876
+#12 drop<fp_index::IndexLabel, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:424
+#13 drop_in_place<alloc::raw_vec::RawVec<fp_index::IndexLabel, alloc::alloc::Global>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#14 drop_in_place<alloc::vec::Vec<fp_index::IndexLabel, alloc::alloc::Global>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#15 drop_in_place<fp_index::Index> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#16 0x00006443006ecf01 in drop_in_place<fp_frame::Series> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#17 0x00006443006f205c in main () at crates/fp-conformance/examples/perf_profile.rs:375
+#18 0x00006443006ed223 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#19 __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#20 0x00006443006ed2b9 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#21 0x000064430072b2de in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#22 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#23 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#24 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#25 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#26 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:581
+#27 std::panicking::catch_unwind<isize, std::rt::lang_start_internal::{closure_env#0}> () at library/std/src/panicking.rs:544
+#28 std::panic::catch_unwind<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panic.rs:359
+#29 std::rt::lang_start_internal () at library/std/src/rt.rs:171
+#30 0x00006443006fb2ac in main ()
+[Inferior 1 (process 3036639) detached]
+
+=== sample 12 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+write<core::option::Option<usize>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:1920
+1920	        intrinsics::write_via_move(dst, src)
+
+Thread 1 (Thread 0x75d867caec00 (LWP 3036639) "perf_profile"):
+#0  write<core::option::Option<usize>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:1920
+#1  push_mut<core::option::Option<usize>, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:1045
+#2  push<core::option::Option<usize>, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:1004
+#3  align_union_merge_sorted () at crates/fp-frame/src/lib.rs:2348
+#4  align_union_sorted_unique () at crates/fp-frame/src/lib.rs:2274
+#5  binary_op_with_policy () at crates/fp-frame/src/lib.rs:3160
+#6  0x00006443006f2028 in add_with_policy () at crates/fp-frame/src/lib.rs:3239
+#7  main () at crates/fp-conformance/examples/perf_profile.rs:367
+#8  0x00006443006ed223 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#9  __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#10 0x00006443006ed2b9 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#11 0x000064430072b2de in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#12 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#13 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#14 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#15 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#16 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:581
+#17 std::panicking::catch_unwind<isize, std::rt::lang_start_internal::{closure_env#0}> () at library/std/src/panicking.rs:544
+#18 std::panic::catch_unwind<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panic.rs:359
+#19 std::rt::lang_start_internal () at library/std/src/rt.rs:171
+#20 0x00006443006fb2ac in main ()
+[Inferior 1 (process 3036639) detached]
+
+=== sample 13 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+write<core::option::Option<usize>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:1920
+1920	        intrinsics::write_via_move(dst, src)
+
+Thread 1 (Thread 0x75d867caec00 (LWP 3036639) "perf_profile"):
+#0  write<core::option::Option<usize>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:1920
+#1  push_mut<core::option::Option<usize>, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:1045
+#2  push<core::option::Option<usize>, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:1004
+#3  align_union_merge_sorted () at crates/fp-frame/src/lib.rs:2349
+#4  align_union_sorted_unique () at crates/fp-frame/src/lib.rs:2274
+#5  binary_op_with_policy () at crates/fp-frame/src/lib.rs:3160
+#6  0x00006443006f2028 in add_with_policy () at crates/fp-frame/src/lib.rs:3239
+#7  main () at crates/fp-conformance/examples/perf_profile.rs:367
+#8  0x00006443006ed223 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#9  __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#10 0x00006443006ed2b9 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#11 0x000064430072b2de in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#12 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#13 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#14 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#15 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#16 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:581
+#17 std::panicking::catch_unwind<isize, std::rt::lang_start_internal::{closure_env#0}> () at library/std/src/panicking.rs:544
+#18 std::panic::catch_unwind<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panic.rs:359
+#19 std::rt::lang_start_internal () at library/std/src/rt.rs:171
+#20 0x00006443006fb2ac in main ()
+[Inferior 1 (process 3036639) detached]
+
+=== sample 14 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+__memcpy_avx_unaligned_erms () at ../sysdeps/x86_64/multiarch/memmove-vec-unaligned-erms.S:332
+
+Thread 1 (Thread 0x75d867caec00 (LWP 3036639) "perf_profile"):
+#0  __memcpy_avx_unaligned_erms () at ../sysdeps/x86_64/multiarch/memmove-vec-unaligned-erms.S:332
+#1  0x0000644300682170 in copy_nonoverlapping<u8> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:551
+#2  digest_blocks<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UTerm, typenum::bit::B1>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>, block_buffer::Eager, sha2::{impl#5}::update::{closure_env#0}> () at /tmp/rch-cargo-home-vmi1153651-2095290-1780510675323048719/registry/src/index.crates.io-1949cf8c6b5b557f/block-buffer-0.12.0/src/lib.rs:179
+#3  update () at /tmp/rch-cargo-home-vmi1153651-2095290-1780510675323048719/registry/src/index.crates.io-1949cf8c6b5b557f/digest-0.11.2/src/buffer_macros/fixed.rs:204
+#4  update<sha2::Sha256, &[u8]> () at /tmp/rch-cargo-home-vmi1153651-2095290-1780510675323048719/registry/src/index.crates.io-1949cf8c6b5b557f/digest-0.11.2/src/digest.rs:77
+#5  update () at crates/fp-runtime/src/lib.rs:635
+#6  update_i64_decimal () at crates/fp-frame/src/lib.rs:2234
+#7  semantic_integer_index_labels_fingerprint () at crates/fp-frame/src/lib.rs:2202
+#8  semantic_index_labels_fingerprint () at crates/fp-frame/src/lib.rs:2184
+#9  call_once<fn(&[fp_index::IndexLabel]) -> alloc::string::String, (&[fp_index::IndexLabel])> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#10 {closure#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String> () at crates/fp-index/src/lib.rs:364
+#11 {closure#0}<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once_lock.rs:321
+#12 {closure#0}<alloc::string::String, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>>, !> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once_lock.rs:543
+#13 {closure#0}<std::sync::once_lock::{impl#0}::initialize::{closure_env#0}<alloc::string::String, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>>, !>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once.rs:226
+#14 0x000064430071dff9 in std::sys::sync::once::futex::Once::call () at library/std/src/sys/sync/once/futex.rs:183
+#15 0x000064430066c6d3 in call_once_force<std::sync::once_lock::{impl#0}::initialize::{closure_env#0}<alloc::string::String, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>>, !>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once.rs:226
+#16 initialize<alloc::string::String, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>>, !> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once_lock.rs:542
+#17 0x00006443006858f7 in get_or_try_init<alloc::string::String, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>>, !> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once_lock.rs:410
+#18 get_or_init<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once_lock.rs:321
+#19 semantic_labels_fingerprint_with<fn(&[fp_index::IndexLabel]) -> alloc::string::String> () at crates/fp-index/src/lib.rs:364
+#20 semantic_index_identity () at crates/fp-frame/src/lib.rs:2174
+#21 0x000064430069902f in record_alignment_semantic_witness () at crates/fp-frame/src/lib.rs:2261
+#22 binary_op_with_policy () at crates/fp-frame/src/lib.rs:3165
+#23 0x00006443006f2028 in add_with_policy () at crates/fp-frame/src/lib.rs:3239
+#24 main () at crates/fp-conformance/examples/perf_profile.rs:367
+#25 0x00006443006ed223 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#26 __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#27 0x00006443006ed2b9 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#28 0x000064430072b2de in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#29 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#30 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#31 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#32 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#33 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:581
+#34 std::panicking::catch_unwind<isize, std::rt::lang_start_internal::{closure_env#0}> () at library/std/src/panicking.rs:544
+#35 std::panic::catch_unwind<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panic.rs:359
+#36 std::rt::lang_start_internal () at library/std/src/rt.rs:171
+#37 0x00006443006fb2ac in main ()
+[Inferior 1 (process 3036639) detached]
+
+=== sample 15 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x000064430069a022 in cmp () at crates/fp-index/src/lib.rs:89
+89	#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+
+Thread 1 (Thread 0x75d867caec00 (LWP 3036639) "perf_profile"):
+#0  0x000064430069a022 in cmp () at crates/fp-index/src/lib.rs:89
+#1  align_union_merge_sorted () at crates/fp-frame/src/lib.rs:2333
+#2  align_union_sorted_unique () at crates/fp-frame/src/lib.rs:2274
+#3  binary_op_with_policy () at crates/fp-frame/src/lib.rs:3160
+#4  0x00006443006f2028 in add_with_policy () at crates/fp-frame/src/lib.rs:3239
+#5  main () at crates/fp-conformance/examples/perf_profile.rs:367
+#6  0x00006443006ed223 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#7  __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#8  0x00006443006ed2b9 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#9  0x000064430072b2de in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#10 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#11 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#12 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#13 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#14 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:581
+#15 std::panicking::catch_unwind<isize, std::rt::lang_start_internal::{closure_env#0}> () at library/std/src/panicking.rs:544
+#16 std::panic::catch_unwind<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panic.rs:359
+#17 std::rt::lang_start_internal () at library/std/src/rt.rs:171
+#18 0x00006443006fb2ac in main ()
+[Inferior 1 (process 3036639) detached]
+
+=== sample 16 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+_mm_shuffle_epi32<14> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/../../stdarch/crates/core_arch/src/macros.rs:173
+173	        $crate::intrinsics::simd::simd_shuffle(
+
+Thread 1 (Thread 0x75d867caec00 (LWP 3036639) "perf_profile"):
+#0  _mm_shuffle_epi32<14> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/../../stdarch/crates/core_arch/src/macros.rs:173
+#1  compress () at src/sha256/x86_sha.rs:27
+#2  0x00006443006821bf in update_blocks () at /tmp/rch-cargo-home-vmi1153651-2095290-1780510675323048719/registry/src/index.crates.io-1949cf8c6b5b557f/sha2-0.11.0/src/block_api.rs:41
+#3  update_blocks<sha2::block_api::Sha256VarCore, typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UTerm, typenum::bit::B1>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>> () at /tmp/rch-cargo-home-vmi1153651-2095290-1780510675323048719/registry/src/index.crates.io-1949cf8c6b5b557f/digest-0.11.2/src/block_api/ct_variable.rs:77
+#4  {closure#0} () at /tmp/rch-cargo-home-vmi1153651-2095290-1780510675323048719/registry/src/index.crates.io-1949cf8c6b5b557f/digest-0.11.2/src/buffer_macros/fixed.rs:205
+#5  digest_blocks<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UTerm, typenum::bit::B1>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>, block_buffer::Eager, sha2::{impl#5}::update::{closure_env#0}> () at /tmp/rch-cargo-home-vmi1153651-2095290-1780510675323048719/registry/src/index.crates.io-1949cf8c6b5b557f/block-buffer-0.12.0/src/lib.rs:194
+#6  update () at /tmp/rch-cargo-home-vmi1153651-2095290-1780510675323048719/registry/src/index.crates.io-1949cf8c6b5b557f/digest-0.11.2/src/buffer_macros/fixed.rs:204
+#7  update<sha2::Sha256, &[u8]> () at /tmp/rch-cargo-home-vmi1153651-2095290-1780510675323048719/registry/src/index.crates.io-1949cf8c6b5b557f/digest-0.11.2/src/digest.rs:77
+#8  update () at crates/fp-runtime/src/lib.rs:635
+#9  update_i64_decimal () at crates/fp-frame/src/lib.rs:2234
+#10 semantic_integer_index_labels_fingerprint () at crates/fp-frame/src/lib.rs:2202
+#11 semantic_index_labels_fingerprint () at crates/fp-frame/src/lib.rs:2184
+#12 call_once<fn(&[fp_index::IndexLabel]) -> alloc::string::String, (&[fp_index::IndexLabel])> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#13 {closure#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String> () at crates/fp-index/src/lib.rs:364
+#14 {closure#0}<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once_lock.rs:321
+#15 {closure#0}<alloc::string::String, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>>, !> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once_lock.rs:543
+#16 {closure#0}<std::sync::once_lock::{impl#0}::initialize::{closure_env#0}<alloc::string::String, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>>, !>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once.rs:226
+#17 0x000064430071dff9 in std::sys::sync::once::futex::Once::call () at library/std/src/sys/sync/once/futex.rs:183
+#18 0x000064430066c6d3 in call_once_force<std::sync::once_lock::{impl#0}::initialize::{closure_env#0}<alloc::string::String, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>>, !>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once.rs:226
+#19 initialize<alloc::string::String, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>>, !> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once_lock.rs:542
+#20 0x00006443006858f7 in get_or_try_init<alloc::string::String, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>>, !> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once_lock.rs:410
+#21 get_or_init<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once_lock.rs:321
+#22 semantic_labels_fingerprint_with<fn(&[fp_index::IndexLabel]) -> alloc::string::String> () at crates/fp-index/src/lib.rs:364
+#23 semantic_index_identity () at crates/fp-frame/src/lib.rs:2174
+#24 0x000064430069902f in record_alignment_semantic_witness () at crates/fp-frame/src/lib.rs:2261
+#25 binary_op_with_policy () at crates/fp-frame/src/lib.rs:3165
+#26 0x00006443006f2028 in add_with_policy () at crates/fp-frame/src/lib.rs:3239
+#27 main () at crates/fp-conformance/examples/perf_profile.rs:367
+#28 0x00006443006ed223 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#29 __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#30 0x00006443006ed2b9 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#31 0x000064430072b2de in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#32 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#33 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#34 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#35 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#36 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:581
+#37 std::panicking::catch_unwind<isize, std::rt::lang_start_internal::{closure_env#0}> () at library/std/src/panicking.rs:544
+#38 std::panic::catch_unwind<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panic.rs:359
+#39 std::rt::lang_start_internal () at library/std/src/rt.rs:171
+#40 0x00006443006fb2ac in main ()
+[Inferior 1 (process 3036639) detached]
+
+=== sample 17 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x00006443006b1061 in write<fp_index::IndexLabel> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/mem/maybe_uninit.rs:574
+574	        *self = MaybeUninit::new(val);
+
+Thread 1 (Thread 0x75d867caec00 (LWP 3036639) "perf_profile"):
+#0  0x00006443006b1061 in write<fp_index::IndexLabel> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/mem/maybe_uninit.rs:574
+#1  to_vec<fp_index::IndexLabel, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/slice.rs:432
+#2  to_vec_in<fp_index::IndexLabel, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/slice.rs:400
+#3  clone<fp_index::IndexLabel, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:3777
+#4  0x00006443006b0a71 in clone () at crates/fp-index/src/lib.rs:266
+#5  0x00006443006afede in set_names () at crates/fp-index/src/lib.rs:377
+#6  0x000064430069c8d5 in align_union_merge_sorted () at crates/fp-frame/src/lib.rs:2371
+#7  align_union_sorted_unique () at crates/fp-frame/src/lib.rs:2274
+#8  binary_op_with_policy () at crates/fp-frame/src/lib.rs:3160
+#9  0x00006443006f2028 in add_with_policy () at crates/fp-frame/src/lib.rs:3239
+#10 main () at crates/fp-conformance/examples/perf_profile.rs:367
+#11 0x00006443006ed223 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#12 __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#13 0x00006443006ed2b9 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#14 0x000064430072b2de in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#15 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#16 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#17 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#18 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#19 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:581
+#20 std::panicking::catch_unwind<isize, std::rt::lang_start_internal::{closure_env#0}> () at library/std/src/panicking.rs:544
+#21 std::panic::catch_unwind<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panic.rs:359
+#22 std::rt::lang_start_internal () at library/std/src/rt.rs:171
+#23 0x00006443006fb2ac in main ()
+[Inferior 1 (process 3036639) detached]
+
+=== sample 18 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+_mm_alignr_epi8<4> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/../../stdarch/crates/core_arch/src/macros.rs:173
+173	        $crate::intrinsics::simd::simd_shuffle(
+
+Thread 1 (Thread 0x75d867caec00 (LWP 3036639) "perf_profile"):
+#0  _mm_alignr_epi8<4> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/../../stdarch/crates/core_arch/src/macros.rs:173
+#1  schedule () at src/sha256/x86_sha.rs:16
+#2  compress () at src/sha256/x86_sha.rs:38
+#3  0x0000644300681994 in update_blocks () at /tmp/rch-cargo-home-vmi1153651-2095290-1780510675323048719/registry/src/index.crates.io-1949cf8c6b5b557f/sha2-0.11.0/src/block_api.rs:41
+#4  update_blocks<sha2::block_api::Sha256VarCore, typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UTerm, typenum::bit::B1>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>> () at /tmp/rch-cargo-home-vmi1153651-2095290-1780510675323048719/registry/src/index.crates.io-1949cf8c6b5b557f/digest-0.11.2/src/block_api/ct_variable.rs:77
+#5  {closure#0} () at /tmp/rch-cargo-home-vmi1153651-2095290-1780510675323048719/registry/src/index.crates.io-1949cf8c6b5b557f/digest-0.11.2/src/buffer_macros/fixed.rs:205
+#6  digest_blocks<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UTerm, typenum::bit::B1>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>, block_buffer::Eager, sha2::{impl#5}::update::{closure_env#0}> () at /tmp/rch-cargo-home-vmi1153651-2095290-1780510675323048719/registry/src/index.crates.io-1949cf8c6b5b557f/block-buffer-0.12.0/src/lib.rs:194
+#7  update () at /tmp/rch-cargo-home-vmi1153651-2095290-1780510675323048719/registry/src/index.crates.io-1949cf8c6b5b557f/digest-0.11.2/src/buffer_macros/fixed.rs:204
+#8  update<sha2::Sha256, &[u8]> () at /tmp/rch-cargo-home-vmi1153651-2095290-1780510675323048719/registry/src/index.crates.io-1949cf8c6b5b557f/digest-0.11.2/src/digest.rs:77
+#9  update () at crates/fp-runtime/src/lib.rs:635
+#10 semantic_integer_index_labels_fingerprint () at crates/fp-frame/src/lib.rs:2199
+#11 semantic_index_labels_fingerprint () at crates/fp-frame/src/lib.rs:2184
+#12 call_once<fn(&[fp_index::IndexLabel]) -> alloc::string::String, (&[fp_index::IndexLabel])> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#13 {closure#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String> () at crates/fp-index/src/lib.rs:364
+#14 {closure#0}<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once_lock.rs:321
+#15 {closure#0}<alloc::string::String, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>>, !> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once_lock.rs:543
+#16 {closure#0}<std::sync::once_lock::{impl#0}::initialize::{closure_env#0}<alloc::string::String, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>>, !>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once.rs:226
+#17 0x000064430071dff9 in std::sys::sync::once::futex::Once::call () at library/std/src/sys/sync/once/futex.rs:183
+#18 0x000064430066c6d3 in call_once_force<std::sync::once_lock::{impl#0}::initialize::{closure_env#0}<alloc::string::String, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>>, !>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once.rs:226
+#19 initialize<alloc::string::String, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>>, !> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once_lock.rs:542
+#20 0x00006443006858f7 in get_or_try_init<alloc::string::String, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>>, !> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once_lock.rs:410
+#21 get_or_init<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once_lock.rs:321
+#22 semantic_labels_fingerprint_with<fn(&[fp_index::IndexLabel]) -> alloc::string::String> () at crates/fp-index/src/lib.rs:364
+#23 semantic_index_identity () at crates/fp-frame/src/lib.rs:2174
+#24 0x000064430069902f in record_alignment_semantic_witness () at crates/fp-frame/src/lib.rs:2261
+#25 binary_op_with_policy () at crates/fp-frame/src/lib.rs:3165
+#26 0x00006443006f2028 in add_with_policy () at crates/fp-frame/src/lib.rs:3239
+#27 main () at crates/fp-conformance/examples/perf_profile.rs:367
+#28 0x00006443006ed223 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#29 __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#30 0x00006443006ed2b9 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#31 0x000064430072b2de in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#32 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#33 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#34 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#35 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#36 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:581
+#37 std::panicking::catch_unwind<isize, std::rt::lang_start_internal::{closure_env#0}> () at library/std/src/panicking.rs:544
+#38 std::panic::catch_unwind<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panic.rs:359
+#39 std::rt::lang_start_internal () at library/std/src/rt.rs:171
+#40 0x00006443006fb2ac in main ()
+[Inferior 1 (process 3036639) detached]
+
+=== sample 19 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+__memcpy_avx_unaligned_erms () at ../sysdeps/x86_64/multiarch/memmove-vec-unaligned-erms.S:332
+
+Thread 1 (Thread 0x75d867caec00 (LWP 3036639) "perf_profile"):
+#0  __memcpy_avx_unaligned_erms () at ../sysdeps/x86_64/multiarch/memmove-vec-unaligned-erms.S:332
+#1  0x0000644300682170 in copy_nonoverlapping<u8> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:551
+#2  digest_blocks<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UTerm, typenum::bit::B1>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>, block_buffer::Eager, sha2::{impl#5}::update::{closure_env#0}> () at /tmp/rch-cargo-home-vmi1153651-2095290-1780510675323048719/registry/src/index.crates.io-1949cf8c6b5b557f/block-buffer-0.12.0/src/lib.rs:179
+#3  update () at /tmp/rch-cargo-home-vmi1153651-2095290-1780510675323048719/registry/src/index.crates.io-1949cf8c6b5b557f/digest-0.11.2/src/buffer_macros/fixed.rs:204
+#4  update<sha2::Sha256, &[u8]> () at /tmp/rch-cargo-home-vmi1153651-2095290-1780510675323048719/registry/src/index.crates.io-1949cf8c6b5b557f/digest-0.11.2/src/digest.rs:77
+#5  update () at crates/fp-runtime/src/lib.rs:635
+#6  update_i64_decimal () at crates/fp-frame/src/lib.rs:2234
+#7  semantic_integer_index_labels_fingerprint () at crates/fp-frame/src/lib.rs:2202
+#8  semantic_index_labels_fingerprint () at crates/fp-frame/src/lib.rs:2184
+#9  call_once<fn(&[fp_index::IndexLabel]) -> alloc::string::String, (&[fp_index::IndexLabel])> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#10 {closure#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String> () at crates/fp-index/src/lib.rs:364
+#11 {closure#0}<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once_lock.rs:321
+#12 {closure#0}<alloc::string::String, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>>, !> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once_lock.rs:543
+#13 {closure#0}<std::sync::once_lock::{impl#0}::initialize::{closure_env#0}<alloc::string::String, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>>, !>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once.rs:226
+#14 0x000064430071dff9 in std::sys::sync::once::futex::Once::call () at library/std/src/sys/sync/once/futex.rs:183
+#15 0x000064430066c6d3 in call_once_force<std::sync::once_lock::{impl#0}::initialize::{closure_env#0}<alloc::string::String, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>>, !>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once.rs:226
+#16 initialize<alloc::string::String, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>>, !> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once_lock.rs:542
+#17 0x00006443006858f7 in get_or_try_init<alloc::string::String, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>>, !> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once_lock.rs:410
+#18 get_or_init<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once_lock.rs:321
+#19 semantic_labels_fingerprint_with<fn(&[fp_index::IndexLabel]) -> alloc::string::String> () at crates/fp-index/src/lib.rs:364
+#20 semantic_index_identity () at crates/fp-frame/src/lib.rs:2174
+#21 0x000064430069902f in record_alignment_semantic_witness () at crates/fp-frame/src/lib.rs:2261
+#22 binary_op_with_policy () at crates/fp-frame/src/lib.rs:3165
+#23 0x00006443006f2028 in add_with_policy () at crates/fp-frame/src/lib.rs:3239
+#24 main () at crates/fp-conformance/examples/perf_profile.rs:367
+#25 0x00006443006ed223 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#26 __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#27 0x00006443006ed2b9 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#28 0x000064430072b2de in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#29 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#30 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#31 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#32 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#33 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:581
+#34 std::panicking::catch_unwind<isize, std::rt::lang_start_internal::{closure_env#0}> () at library/std/src/panicking.rs:544
+#35 std::panic::catch_unwind<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panic.rs:359
+#36 std::rt::lang_start_internal () at library/std/src/rt.rs:171
+#37 0x00006443006fb2ac in main ()
+[Inferior 1 (process 3036639) detached]
+
+=== sample 20 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+_mm_sha256msg1_epu32 () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/../../stdarch/crates/core_arch/src/x86/sha.rs:110
+110	    unsafe { transmute(sha256msg1(a.as_i32x4(), b.as_i32x4())) }
+
+Thread 1 (Thread 0x75d867caec00 (LWP 3036639) "perf_profile"):
+#0  _mm_sha256msg1_epu32 () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/../../stdarch/crates/core_arch/src/x86/sha.rs:110
+#1  schedule () at src/sha256/x86_sha.rs:15
+#2  compress () at src/sha256/x86_sha.rs:38
+#3  0x0000644300681994 in update_blocks () at /tmp/rch-cargo-home-vmi1153651-2095290-1780510675323048719/registry/src/index.crates.io-1949cf8c6b5b557f/sha2-0.11.0/src/block_api.rs:41
+#4  update_blocks<sha2::block_api::Sha256VarCore, typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UTerm, typenum::bit::B1>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>> () at /tmp/rch-cargo-home-vmi1153651-2095290-1780510675323048719/registry/src/index.crates.io-1949cf8c6b5b557f/digest-0.11.2/src/block_api/ct_variable.rs:77
+#5  {closure#0} () at /tmp/rch-cargo-home-vmi1153651-2095290-1780510675323048719/registry/src/index.crates.io-1949cf8c6b5b557f/digest-0.11.2/src/buffer_macros/fixed.rs:205
+#6  digest_blocks<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UTerm, typenum::bit::B1>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>, block_buffer::Eager, sha2::{impl#5}::update::{closure_env#0}> () at /tmp/rch-cargo-home-vmi1153651-2095290-1780510675323048719/registry/src/index.crates.io-1949cf8c6b5b557f/block-buffer-0.12.0/src/lib.rs:194
+#7  update () at /tmp/rch-cargo-home-vmi1153651-2095290-1780510675323048719/registry/src/index.crates.io-1949cf8c6b5b557f/digest-0.11.2/src/buffer_macros/fixed.rs:204
+#8  update<sha2::Sha256, &[u8]> () at /tmp/rch-cargo-home-vmi1153651-2095290-1780510675323048719/registry/src/index.crates.io-1949cf8c6b5b557f/digest-0.11.2/src/digest.rs:77
+#9  update () at crates/fp-runtime/src/lib.rs:635
+#10 semantic_integer_index_labels_fingerprint () at crates/fp-frame/src/lib.rs:2199
+#11 semantic_index_labels_fingerprint () at crates/fp-frame/src/lib.rs:2184
+#12 call_once<fn(&[fp_index::IndexLabel]) -> alloc::string::String, (&[fp_index::IndexLabel])> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#13 {closure#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String> () at crates/fp-index/src/lib.rs:364
+#14 {closure#0}<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once_lock.rs:321
+#15 {closure#0}<alloc::string::String, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>>, !> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once_lock.rs:543
+#16 {closure#0}<std::sync::once_lock::{impl#0}::initialize::{closure_env#0}<alloc::string::String, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>>, !>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once.rs:226
+#17 0x000064430071dff9 in std::sys::sync::once::futex::Once::call () at library/std/src/sys/sync/once/futex.rs:183
+#18 0x000064430066c6d3 in call_once_force<std::sync::once_lock::{impl#0}::initialize::{closure_env#0}<alloc::string::String, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>>, !>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once.rs:226
+#19 initialize<alloc::string::String, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>>, !> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once_lock.rs:542
+#20 0x00006443006858f7 in get_or_try_init<alloc::string::String, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>>, !> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once_lock.rs:410
+#21 get_or_init<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once_lock.rs:321
+#22 semantic_labels_fingerprint_with<fn(&[fp_index::IndexLabel]) -> alloc::string::String> () at crates/fp-index/src/lib.rs:364
+#23 semantic_index_identity () at crates/fp-frame/src/lib.rs:2174
+#24 0x000064430069902f in record_alignment_semantic_witness () at crates/fp-frame/src/lib.rs:2261
+#25 binary_op_with_policy () at crates/fp-frame/src/lib.rs:3165
+#26 0x00006443006f2028 in add_with_policy () at crates/fp-frame/src/lib.rs:3239
+#27 main () at crates/fp-conformance/examples/perf_profile.rs:367
+#28 0x00006443006ed223 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#29 __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#30 0x00006443006ed2b9 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#31 0x000064430072b2de in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#32 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#33 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#34 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#35 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#36 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:581
+#37 std::panicking::catch_unwind<isize, std::rt::lang_start_internal::{closure_env#0}> () at library/std/src/panicking.rs:544
+#38 std::panic::catch_unwind<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panic.rs:359
+#39 std::rt::lang_start_internal () at library/std/src/rt.rs:171
+#40 0x00006443006fb2ac in main ()
+[Inferior 1 (process 3036639) detached]
+
+=== sample 21 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+drop_in_place<[fp_types::Scalar]> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+809	pub const unsafe fn drop_in_place<T: PointeeSized>(to_drop: *mut T)
+
+Thread 1 (Thread 0x75d867caec00 (LWP 3036639) "perf_profile"):
+#0  drop_in_place<[fp_types::Scalar]> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#1  drop<fp_types::Scalar, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:4254
+#2  drop_in_place<alloc::vec::Vec<fp_types::Scalar, alloc::alloc::Global>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#3  drop_in_place<fp_columnar::ScalarValues> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#4  drop_in_place<fp_columnar::Column> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#5  0x00006443006ecf09 in drop_in_place<fp_frame::Series> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#6  0x00006443006f205c in main () at crates/fp-conformance/examples/perf_profile.rs:375
+#7  0x00006443006ed223 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#8  __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#9  0x00006443006ed2b9 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#10 0x000064430072b2de in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#11 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#12 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#13 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#14 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#15 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:581
+#16 std::panicking::catch_unwind<isize, std::rt::lang_start_internal::{closure_env#0}> () at library/std/src/panicking.rs:544
+#17 std::panic::catch_unwind<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panic.rs:359
+#18 std::rt::lang_start_internal () at library/std/src/rt.rs:171
+#19 0x00006443006fb2ac in main ()
+[Inferior 1 (process 3036639) detached]
+
+=== sample 22 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x0000644300681b7b in update_i64_decimal () at crates/fp-frame/src/lib.rs:2229
+2229	        remaining /= 10;
+
+Thread 1 (Thread 0x75d867caec00 (LWP 3036639) "perf_profile"):
+#0  0x0000644300681b7b in update_i64_decimal () at crates/fp-frame/src/lib.rs:2229
+#1  semantic_integer_index_labels_fingerprint () at crates/fp-frame/src/lib.rs:2202
+#2  semantic_index_labels_fingerprint () at crates/fp-frame/src/lib.rs:2184
+#3  call_once<fn(&[fp_index::IndexLabel]) -> alloc::string::String, (&[fp_index::IndexLabel])> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#4  {closure#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String> () at crates/fp-index/src/lib.rs:364
+#5  {closure#0}<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once_lock.rs:321
+#6  {closure#0}<alloc::string::String, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>>, !> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once_lock.rs:543
+#7  {closure#0}<std::sync::once_lock::{impl#0}::initialize::{closure_env#0}<alloc::string::String, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>>, !>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once.rs:226
+#8  0x000064430071dff9 in std::sys::sync::once::futex::Once::call () at library/std/src/sys/sync/once/futex.rs:183
+#9  0x000064430066c6d3 in call_once_force<std::sync::once_lock::{impl#0}::initialize::{closure_env#0}<alloc::string::String, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>>, !>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once.rs:226
+#10 initialize<alloc::string::String, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>>, !> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once_lock.rs:542
+#11 0x00006443006858f7 in get_or_try_init<alloc::string::String, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>>, !> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once_lock.rs:410
+#12 get_or_init<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once_lock.rs:321
+#13 semantic_labels_fingerprint_with<fn(&[fp_index::IndexLabel]) -> alloc::string::String> () at crates/fp-index/src/lib.rs:364
+#14 semantic_index_identity () at crates/fp-frame/src/lib.rs:2174
+#15 0x000064430069902f in record_alignment_semantic_witness () at crates/fp-frame/src/lib.rs:2261
+#16 binary_op_with_policy () at crates/fp-frame/src/lib.rs:3165
+#17 0x00006443006f2028 in add_with_policy () at crates/fp-frame/src/lib.rs:3239
+#18 main () at crates/fp-conformance/examples/perf_profile.rs:367
+#19 0x00006443006ed223 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#20 __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#21 0x00006443006ed2b9 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#22 0x000064430072b2de in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#23 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#24 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#25 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#26 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#27 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:581
+#28 std::panicking::catch_unwind<isize, std::rt::lang_start_internal::{closure_env#0}> () at library/std/src/panicking.rs:544
+#29 std::panic::catch_unwind<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panic.rs:359
+#30 std::rt::lang_start_internal () at library/std/src/rt.rs:171
+#31 0x00006443006fb2ac in main ()
+[Inferior 1 (process 3036639) detached]
+
+=== sample 23 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+_mm_add_epi32 () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/../../stdarch/crates/core_arch/src/x86/sse2.rs:105
+105	    unsafe { transmute(simd_add(a.as_i32x4(), b.as_i32x4())) }
+
+Thread 1 (Thread 0x75d867caec00 (LWP 3036639) "perf_profile"):
+#0  _mm_add_epi32 () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/../../stdarch/crates/core_arch/src/x86/sse2.rs:105
+#1  compress () at src/sha256/x86_sha.rs:90
+#2  0x00006443006821bf in update_blocks () at /tmp/rch-cargo-home-vmi1153651-2095290-1780510675323048719/registry/src/index.crates.io-1949cf8c6b5b557f/sha2-0.11.0/src/block_api.rs:41
+#3  update_blocks<sha2::block_api::Sha256VarCore, typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UTerm, typenum::bit::B1>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>> () at /tmp/rch-cargo-home-vmi1153651-2095290-1780510675323048719/registry/src/index.crates.io-1949cf8c6b5b557f/digest-0.11.2/src/block_api/ct_variable.rs:77
+#4  {closure#0} () at /tmp/rch-cargo-home-vmi1153651-2095290-1780510675323048719/registry/src/index.crates.io-1949cf8c6b5b557f/digest-0.11.2/src/buffer_macros/fixed.rs:205
+#5  digest_blocks<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UTerm, typenum::bit::B1>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>, block_buffer::Eager, sha2::{impl#5}::update::{closure_env#0}> () at /tmp/rch-cargo-home-vmi1153651-2095290-1780510675323048719/registry/src/index.crates.io-1949cf8c6b5b557f/block-buffer-0.12.0/src/lib.rs:194
+#6  update () at /tmp/rch-cargo-home-vmi1153651-2095290-1780510675323048719/registry/src/index.crates.io-1949cf8c6b5b557f/digest-0.11.2/src/buffer_macros/fixed.rs:204
+#7  update<sha2::Sha256, &[u8]> () at /tmp/rch-cargo-home-vmi1153651-2095290-1780510675323048719/registry/src/index.crates.io-1949cf8c6b5b557f/digest-0.11.2/src/digest.rs:77
+#8  update () at crates/fp-runtime/src/lib.rs:635
+#9  update_i64_decimal () at crates/fp-frame/src/lib.rs:2234
+#10 semantic_integer_index_labels_fingerprint () at crates/fp-frame/src/lib.rs:2202
+#11 semantic_index_labels_fingerprint () at crates/fp-frame/src/lib.rs:2184
+#12 call_once<fn(&[fp_index::IndexLabel]) -> alloc::string::String, (&[fp_index::IndexLabel])> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#13 {closure#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String> () at crates/fp-index/src/lib.rs:364
+#14 {closure#0}<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once_lock.rs:321
+#15 {closure#0}<alloc::string::String, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>>, !> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once_lock.rs:543
+#16 {closure#0}<std::sync::once_lock::{impl#0}::initialize::{closure_env#0}<alloc::string::String, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>>, !>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once.rs:226
+#17 0x000064430071dff9 in std::sys::sync::once::futex::Once::call () at library/std/src/sys/sync/once/futex.rs:183
+#18 0x000064430066c6d3 in call_once_force<std::sync::once_lock::{impl#0}::initialize::{closure_env#0}<alloc::string::String, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>>, !>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once.rs:226
+#19 initialize<alloc::string::String, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>>, !> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once_lock.rs:542
+#20 0x00006443006858f7 in get_or_try_init<alloc::string::String, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>>, !> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once_lock.rs:410
+#21 get_or_init<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once_lock.rs:321
+#22 semantic_labels_fingerprint_with<fn(&[fp_index::IndexLabel]) -> alloc::string::String> () at crates/fp-index/src/lib.rs:364
+#23 semantic_index_identity () at crates/fp-frame/src/lib.rs:2174
+#24 0x000064430069902f in record_alignment_semantic_witness () at crates/fp-frame/src/lib.rs:2261
+#25 binary_op_with_policy () at crates/fp-frame/src/lib.rs:3165
+#26 0x00006443006f2028 in add_with_policy () at crates/fp-frame/src/lib.rs:3239
+#27 main () at crates/fp-conformance/examples/perf_profile.rs:367
+#28 0x00006443006ed223 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#29 __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#30 0x00006443006ed2b9 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#31 0x000064430072b2de in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#32 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#33 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#34 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#35 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#36 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:581
+#37 std::panicking::catch_unwind<isize, std::rt::lang_start_internal::{closure_env#0}> () at library/std/src/panicking.rs:544
+#38 std::panic::catch_unwind<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panic.rs:359
+#39 std::rt::lang_start_internal () at library/std/src/rt.rs:171
+#40 0x00006443006fb2ac in main ()
+[Inferior 1 (process 3036639) detached]
+
+=== sample 24 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+_mm_sha256msg1_epu32 () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/../../stdarch/crates/core_arch/src/x86/sha.rs:110
+110	    unsafe { transmute(sha256msg1(a.as_i32x4(), b.as_i32x4())) }
+
+Thread 1 (Thread 0x75d867caec00 (LWP 3036639) "perf_profile"):
+#0  _mm_sha256msg1_epu32 () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/../../stdarch/crates/core_arch/src/x86/sha.rs:110
+#1  schedule () at src/sha256/x86_sha.rs:15
+#2  compress () at src/sha256/x86_sha.rs:38
+#3  0x0000644300681994 in update_blocks () at /tmp/rch-cargo-home-vmi1153651-2095290-1780510675323048719/registry/src/index.crates.io-1949cf8c6b5b557f/sha2-0.11.0/src/block_api.rs:41
+#4  update_blocks<sha2::block_api::Sha256VarCore, typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UTerm, typenum::bit::B1>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>> () at /tmp/rch-cargo-home-vmi1153651-2095290-1780510675323048719/registry/src/index.crates.io-1949cf8c6b5b557f/digest-0.11.2/src/block_api/ct_variable.rs:77
+#5  {closure#0} () at /tmp/rch-cargo-home-vmi1153651-2095290-1780510675323048719/registry/src/index.crates.io-1949cf8c6b5b557f/digest-0.11.2/src/buffer_macros/fixed.rs:205
+#6  digest_blocks<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UTerm, typenum::bit::B1>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>, block_buffer::Eager, sha2::{impl#5}::update::{closure_env#0}> () at /tmp/rch-cargo-home-vmi1153651-2095290-1780510675323048719/registry/src/index.crates.io-1949cf8c6b5b557f/block-buffer-0.12.0/src/lib.rs:194
+#7  update () at /tmp/rch-cargo-home-vmi1153651-2095290-1780510675323048719/registry/src/index.crates.io-1949cf8c6b5b557f/digest-0.11.2/src/buffer_macros/fixed.rs:204
+#8  update<sha2::Sha256, &[u8]> () at /tmp/rch-cargo-home-vmi1153651-2095290-1780510675323048719/registry/src/index.crates.io-1949cf8c6b5b557f/digest-0.11.2/src/digest.rs:77
+#9  update () at crates/fp-runtime/src/lib.rs:635
+#10 semantic_integer_index_labels_fingerprint () at crates/fp-frame/src/lib.rs:2199
+#11 semantic_index_labels_fingerprint () at crates/fp-frame/src/lib.rs:2184
+#12 call_once<fn(&[fp_index::IndexLabel]) -> alloc::string::String, (&[fp_index::IndexLabel])> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#13 {closure#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String> () at crates/fp-index/src/lib.rs:364
+#14 {closure#0}<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once_lock.rs:321
+#15 {closure#0}<alloc::string::String, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>>, !> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once_lock.rs:543
+#16 {closure#0}<std::sync::once_lock::{impl#0}::initialize::{closure_env#0}<alloc::string::String, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>>, !>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once.rs:226
+#17 0x000064430071dff9 in std::sys::sync::once::futex::Once::call () at library/std/src/sys/sync/once/futex.rs:183
+#18 0x000064430066c6d3 in call_once_force<std::sync::once_lock::{impl#0}::initialize::{closure_env#0}<alloc::string::String, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>>, !>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once.rs:226
+#19 initialize<alloc::string::String, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>>, !> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once_lock.rs:542
+#20 0x00006443006858f7 in get_or_try_init<alloc::string::String, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>>, !> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once_lock.rs:410
+#21 get_or_init<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once_lock.rs:321
+#22 semantic_labels_fingerprint_with<fn(&[fp_index::IndexLabel]) -> alloc::string::String> () at crates/fp-index/src/lib.rs:364
+#23 semantic_index_identity () at crates/fp-frame/src/lib.rs:2174
+#24 0x000064430069902f in record_alignment_semantic_witness () at crates/fp-frame/src/lib.rs:2261
+#25 binary_op_with_policy () at crates/fp-frame/src/lib.rs:3165
+#26 0x00006443006f2028 in add_with_policy () at crates/fp-frame/src/lib.rs:3239
+#27 main () at crates/fp-conformance/examples/perf_profile.rs:367
+#28 0x00006443006ed223 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#29 __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#30 0x00006443006ed2b9 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#31 0x000064430072b2de in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#32 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#33 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#34 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#35 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#36 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:581
+#37 std::panicking::catch_unwind<isize, std::rt::lang_start_internal::{closure_env#0}> () at library/std/src/panicking.rs:544
+#38 std::panic::catch_unwind<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panic.rs:359
+#39 std::rt::lang_start_internal () at library/std/src/rt.rs:171
+#40 0x00006443006fb2ac in main ()
+[Inferior 1 (process 3036639) detached]
+
+=== sample 25 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+_mm_alignr_epi8<4> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/../../stdarch/crates/core_arch/src/macros.rs:173
+173	        $crate::intrinsics::simd::simd_shuffle(
+
+Thread 1 (Thread 0x75d867caec00 (LWP 3036639) "perf_profile"):
+#0  _mm_alignr_epi8<4> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/../../stdarch/crates/core_arch/src/macros.rs:173
+#1  schedule () at src/sha256/x86_sha.rs:16
+#2  compress () at src/sha256/x86_sha.rs:38
+#3  0x00006443006821bf in update_blocks () at /tmp/rch-cargo-home-vmi1153651-2095290-1780510675323048719/registry/src/index.crates.io-1949cf8c6b5b557f/sha2-0.11.0/src/block_api.rs:41
+#4  update_blocks<sha2::block_api::Sha256VarCore, typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UTerm, typenum::bit::B1>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>> () at /tmp/rch-cargo-home-vmi1153651-2095290-1780510675323048719/registry/src/index.crates.io-1949cf8c6b5b557f/digest-0.11.2/src/block_api/ct_variable.rs:77
+#5  {closure#0} () at /tmp/rch-cargo-home-vmi1153651-2095290-1780510675323048719/registry/src/index.crates.io-1949cf8c6b5b557f/digest-0.11.2/src/buffer_macros/fixed.rs:205
+#6  digest_blocks<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UInt<typenum::uint::UTerm, typenum::bit::B1>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>, typenum::bit::B0>, block_buffer::Eager, sha2::{impl#5}::update::{closure_env#0}> () at /tmp/rch-cargo-home-vmi1153651-2095290-1780510675323048719/registry/src/index.crates.io-1949cf8c6b5b557f/block-buffer-0.12.0/src/lib.rs:194
+#7  update () at /tmp/rch-cargo-home-vmi1153651-2095290-1780510675323048719/registry/src/index.crates.io-1949cf8c6b5b557f/digest-0.11.2/src/buffer_macros/fixed.rs:204
+#8  update<sha2::Sha256, &[u8]> () at /tmp/rch-cargo-home-vmi1153651-2095290-1780510675323048719/registry/src/index.crates.io-1949cf8c6b5b557f/digest-0.11.2/src/digest.rs:77
+#9  update () at crates/fp-runtime/src/lib.rs:635
+#10 update_i64_decimal () at crates/fp-frame/src/lib.rs:2234
+#11 semantic_integer_index_labels_fingerprint () at crates/fp-frame/src/lib.rs:2202
+#12 semantic_index_labels_fingerprint () at crates/fp-frame/src/lib.rs:2184
+#13 call_once<fn(&[fp_index::IndexLabel]) -> alloc::string::String, (&[fp_index::IndexLabel])> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#14 {closure#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String> () at crates/fp-index/src/lib.rs:364
+#15 {closure#0}<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once_lock.rs:321
+#16 {closure#0}<alloc::string::String, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>>, !> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once_lock.rs:543
+#17 {closure#0}<std::sync::once_lock::{impl#0}::initialize::{closure_env#0}<alloc::string::String, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>>, !>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once.rs:226
+#18 0x000064430071dff9 in std::sys::sync::once::futex::Once::call () at library/std/src/sys/sync/once/futex.rs:183
+#19 0x000064430066c6d3 in call_once_force<std::sync::once_lock::{impl#0}::initialize::{closure_env#0}<alloc::string::String, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>>, !>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once.rs:226
+#20 initialize<alloc::string::String, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>>, !> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once_lock.rs:542
+#21 0x00006443006858f7 in get_or_try_init<alloc::string::String, std::sync::once_lock::{impl#0}::get_or_init::{closure_env#0}<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>>, !> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once_lock.rs:410
+#22 get_or_init<alloc::string::String, fp_index::{impl#7}::semantic_labels_fingerprint_with::{closure_env#0}<fn(&[fp_index::IndexLabel]) -> alloc::string::String>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sync/once_lock.rs:321
+#23 semantic_labels_fingerprint_with<fn(&[fp_index::IndexLabel]) -> alloc::string::String> () at crates/fp-index/src/lib.rs:364
+#24 semantic_index_identity () at crates/fp-frame/src/lib.rs:2174
+#25 0x000064430069902f in record_alignment_semantic_witness () at crates/fp-frame/src/lib.rs:2261
+#26 binary_op_with_policy () at crates/fp-frame/src/lib.rs:3165
+#27 0x00006443006f2028 in add_with_policy () at crates/fp-frame/src/lib.rs:3239
+#28 main () at crates/fp-conformance/examples/perf_profile.rs:367
+#29 0x00006443006ed223 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#30 __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#31 0x00006443006ed2b9 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#32 0x000064430072b2de in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#33 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#34 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#35 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#36 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#37 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:581
+#38 std::panicking::catch_unwind<isize, std::rt::lang_start_internal::{closure_env#0}> () at library/std/src/panicking.rs:544
+#39 std::panic::catch_unwind<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panic.rs:359
+#40 std::rt::lang_start_internal () at library/std/src/rt.rs:171
+#41 0x00006443006fb2ac in main ()
+[Inferior 1 (process 3036639) detached]
+
+=== sample 26 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+write<fp_index::IndexLabel> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/mem/maybe_uninit.rs:574
+574	        *self = MaybeUninit::new(val);
+
+Thread 1 (Thread 0x75d867caec00 (LWP 3036639) "perf_profile"):
+#0  write<fp_index::IndexLabel> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/mem/maybe_uninit.rs:574
+#1  to_vec<fp_index::IndexLabel, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/slice.rs:432
+#2  to_vec_in<fp_index::IndexLabel, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/slice.rs:400
+#3  clone<fp_index::IndexLabel, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:3777
+#4  0x00006443006b0a71 in clone () at crates/fp-index/src/lib.rs:266
+#5  0x00006443006afede in set_names () at crates/fp-index/src/lib.rs:377
+#6  0x000064430069c8d5 in align_union_merge_sorted () at crates/fp-frame/src/lib.rs:2371
+#7  align_union_sorted_unique () at crates/fp-frame/src/lib.rs:2274
+#8  binary_op_with_policy () at crates/fp-frame/src/lib.rs:3160
+#9  0x00006443006f2028 in add_with_policy () at crates/fp-frame/src/lib.rs:3239
+#10 main () at crates/fp-conformance/examples/perf_profile.rs:367
+#11 0x00006443006ed223 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#12 __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#13 0x00006443006ed2b9 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#14 0x000064430072b2de in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#15 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#16 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#17 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#18 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#19 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:581
+#20 std::panicking::catch_unwind<isize, std::rt::lang_start_internal::{closure_env#0}> () at library/std/src/panicking.rs:544
+#21 std::panic::catch_unwind<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panic.rs:359
+#22 std::rt::lang_start_internal () at library/std/src/rt.rs:171
+#23 0x00006443006fb2ac in main ()
+[Inferior 1 (process 3036639) detached]
+
+=== sample 27 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+write<core::option::Option<usize>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:1920
+1920	        intrinsics::write_via_move(dst, src)
+
+Thread 1 (Thread 0x75d867caec00 (LWP 3036639) "perf_profile"):
+#0  write<core::option::Option<usize>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:1920
+#1  push_mut<core::option::Option<usize>, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:1045
+#2  push<core::option::Option<usize>, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:1004
+#3  align_union_merge_sorted () at crates/fp-frame/src/lib.rs:2348
+#4  align_union_sorted_unique () at crates/fp-frame/src/lib.rs:2274
+#5  binary_op_with_policy () at crates/fp-frame/src/lib.rs:3160
+#6  0x00006443006f2028 in add_with_policy () at crates/fp-frame/src/lib.rs:3239
+#7  main () at crates/fp-conformance/examples/perf_profile.rs:367
+#8  0x00006443006ed223 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#9  __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#10 0x00006443006ed2b9 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#11 0x000064430072b2de in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#12 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#13 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#14 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#15 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#16 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:581
+#17 std::panicking::catch_unwind<isize, std::rt::lang_start_internal::{closure_env#0}> () at library/std/src/panicking.rs:544
+#18 std::panic::catch_unwind<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panic.rs:359
+#19 std::rt::lang_start_internal () at library/std/src/rt.rs:171
+#20 0x00006443006fb2ac in main ()
+[Inferior 1 (process 3036639) detached]

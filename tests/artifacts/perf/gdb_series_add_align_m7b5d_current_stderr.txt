@@ -1,0 +1,97 @@
+perf_profile: scenario=series_add_align n=100000 iters=1000
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-n921e-candidate/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+warning: 56	/tmp/rch-cargo-home-vmi1153651-2095290-1780510675323048719/registry/src/index.crates.io-1949cf8c6b5b557f/block-buffer-0.12.0/src/sealed.rs: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-n921e-candidate/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-n921e-candidate/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+warning: 24	../sysdeps/unix/sysv/linux/brk_call.h: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-n921e-candidate/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-n921e-candidate/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-n921e-candidate/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-n921e-candidate/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-n921e-candidate/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+warning: 262	../sysdeps/x86_64/multiarch/memmove-vec-unaligned-erms.S: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-n921e-candidate/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-n921e-candidate/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+warning: 24	../sysdeps/unix/sysv/linux/brk_call.h: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-n921e-candidate/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-n921e-candidate/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-n921e-candidate/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+warning: 332	../sysdeps/x86_64/multiarch/memmove-vec-unaligned-erms.S: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-n921e-candidate/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-n921e-candidate/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-n921e-candidate/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-n921e-candidate/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-n921e-candidate/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+warning: 332	../sysdeps/x86_64/multiarch/memmove-vec-unaligned-erms.S: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-n921e-candidate/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-n921e-candidate/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-n921e-candidate/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+warning: Source file is more recent than executable.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-n921e-candidate/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-n921e-candidate/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-n921e-candidate/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-n921e-candidate/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-n921e-candidate/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-n921e-candidate/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+perf_profile: done 1000 iters in 14.873s (14.873 ms/iter), sink=100001000
