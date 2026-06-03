@@ -553,15 +553,23 @@ pub fn read_fwf_str(input: &str, options: &FwfReadOptions) -> Result<DataFrame, 
 /// parses per cell (`"true"` → `Bool`, `"01"` → `Int64(1)`), so without this the
 /// object-fallback column would re-stringify those scalars canonically — writing
 /// `"True"`/`"1"` where pandas keeps `"true"`/`"01"`. When the inferred dtype is
-/// `Utf8`, rebuild the column straight from `raw` (NA tokens → null) so the
+/// `Utf8`, rebuild the column straight from `raw` (NA cells stay null) so the
 /// original literals survive. Native (non-object) columns are unaffected.
+///
+/// Missingness is read back from the parsed column's own values rather than
+/// re-detecting NA tokens, so this works for both the default reader and the
+/// options reader (which honors a configurable na/keep_default_na token set):
+/// a cell is null in the rebuilt column iff it parsed to a missing scalar.
+/// `raw` must be positionally aligned with `values` (same length).
 fn build_csv_object_aware_column(values: Vec<Scalar>, raw: &[String]) -> Result<Column, IoError> {
     let column = Column::from_values(values)?;
-    if column.dtype() == DType::Utf8 {
-        let rebuilt: Vec<Scalar> = raw
+    if column.dtype() == DType::Utf8 && column.values().len() == raw.len() {
+        let rebuilt: Vec<Scalar> = column
+            .values()
             .iter()
-            .map(|field| {
-                if is_pandas_default_na(field) {
+            .zip(raw)
+            .map(|(parsed, field)| {
+                if parsed.is_missing() {
                     Scalar::Null(NullKind::Null)
                 } else {
                     Scalar::Utf8(field.clone())
@@ -2977,6 +2985,7 @@ fn apply_parse_date_combinations_named(
 
 fn append_csv_record(
     columns: &mut [Vec<Scalar>],
+    raw_columns: &mut [Vec<String>],
     record: &StringRecord,
     options: &CsvReadOptions,
     na_set: &HashSet<&str>,
@@ -2995,6 +3004,9 @@ fn append_csv_record(
             options.decimal,
             options.thousands,
         ));
+        // Keep the verbatim field so an object-fallback column can preserve the
+        // original literal like pandas (see build_csv_object_aware_column).
+        raw_columns[idx].push(field.to_owned());
     }
 }
 
@@ -3059,7 +3071,10 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
     let false_set: HashSet<&str> = options.false_values.iter().map(String::as_str).collect();
 
     let mut row_count: i64 = 0;
-    let (headers, mut columns) = if options.has_headers {
+    // raw_columns shadows columns with each cell's verbatim text so an
+    // object-fallback column can preserve original literals (see the final
+    // build step and build_csv_object_aware_column).
+    let (headers, mut columns, mut raw_columns) = if options.has_headers {
         let headers_record = records.next().transpose()?.ok_or(IoError::MissingHeaders)?;
         if headers_record.is_empty() {
             return Err(IoError::MissingHeaders);
@@ -3070,6 +3085,9 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
         let columns: Vec<Vec<Scalar>> = (0..header_count)
             .map(|_| Vec::with_capacity(row_hint))
             .collect();
+        let raw_columns: Vec<Vec<String>> = (0..header_count)
+            .map(|_| Vec::with_capacity(row_hint))
+            .collect();
 
         (
             headers_record
@@ -3077,6 +3095,7 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
                 .map(ToOwned::to_owned)
                 .collect::<Vec<_>>(),
             columns,
+            raw_columns,
         )
     } else {
         let first_record = records.next().transpose()?.ok_or(IoError::MissingHeaders)?;
@@ -3089,10 +3108,14 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
         let mut columns: Vec<Vec<Scalar>> = (0..header_count)
             .map(|_| Vec::with_capacity(row_hint))
             .collect();
+        let mut raw_columns: Vec<Vec<String>> = (0..header_count)
+            .map(|_| Vec::with_capacity(row_hint))
+            .collect();
 
         if (row_count as usize) < max_rows {
             append_csv_record(
                 &mut columns,
+                &mut raw_columns,
                 &first_record,
                 options,
                 &na_set,
@@ -3107,6 +3130,7 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
                 .map(|idx| format!("column_{idx}"))
                 .collect(),
             columns,
+            raw_columns,
         )
     };
 
@@ -3120,6 +3144,7 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
         }
         append_csv_record(
             &mut columns,
+            &mut raw_columns,
             &record,
             options,
             &na_set,
@@ -3137,6 +3162,10 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
             let new_len = col.len().saturating_sub(drop);
             col.truncate(new_len);
         }
+        for col in raw_columns.iter_mut() {
+            let new_len = col.len().saturating_sub(drop);
+            col.truncate(new_len);
+        }
         row_count -= drop as i64;
     }
     reject_duplicate_headers(&headers)?;
@@ -3145,18 +3174,20 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
     }
 
     // Apply usecols filter: keep only selected columns.
-    let (mut headers, mut columns) = if let Some(ref usecols) = options.usecols {
+    let (mut headers, mut columns, raw_columns) = if let Some(ref usecols) = options.usecols {
         let mut fh = Vec::new();
         let mut fc = Vec::new();
-        for (h, c) in headers.into_iter().zip(columns) {
+        let mut fr = Vec::new();
+        for ((h, c), r) in headers.into_iter().zip(columns).zip(raw_columns) {
             if usecols.contains(&h) {
                 fh.push(h);
                 fc.push(c);
+                fr.push(r);
             }
         }
-        (fh, fc)
+        (fh, fc, fr)
     } else {
-        (headers, columns)
+        (headers, columns, raw_columns)
     };
 
     if let Some(ref parse_date_combinations) = options.parse_date_combinations {
@@ -3188,6 +3219,20 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
     }
 
     let header_count = headers.len();
+
+    // Object-fallback columns should keep verbatim source text (pandas parity,
+    // see build_csv_object_aware_column). Only safe when no parse-date transform
+    // rewrote/added columns (which would desync raw_columns from columns); a
+    // per-column dtype override is also excluded so explicit astype wins.
+    let preserve_object_text = options.parse_dates.is_none()
+        && options.parse_date_combinations.is_none()
+        && options.parse_date_combinations_named.is_none();
+    let dtype_forced = |name: &str| -> bool {
+        options
+            .dtype
+            .as_ref()
+            .is_some_and(|map| map.contains_key(name))
+    };
 
     // If index_col is set, extract that column as the index
     if let Some(ref idx_col_name) = options.index_col {
@@ -3241,7 +3286,12 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
                 continue;
             }
             let name = headers.get(orig_idx).cloned().unwrap_or_default();
-            out_columns.insert(name.clone(), Column::from_values(columns[col_idx].clone())?);
+            let column = if preserve_object_text && !dtype_forced(&name) {
+                build_csv_object_aware_column(columns[col_idx].clone(), &raw_columns[orig_idx])?
+            } else {
+                Column::from_values(columns[col_idx].clone())?
+            };
+            out_columns.insert(name.clone(), column);
             column_order.push(name);
             col_idx += 1;
         }
@@ -3255,7 +3305,12 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
         let mut column_order = Vec::with_capacity(header_count);
         for (idx, values) in columns.into_iter().enumerate() {
             let name = headers.get(idx).cloned().unwrap_or_default();
-            out_columns.insert(name.clone(), Column::from_values(values)?);
+            let column = if preserve_object_text && !dtype_forced(&name) {
+                build_csv_object_aware_column(values, &raw_columns[idx])?
+            } else {
+                Column::from_values(values)?
+            };
+            out_columns.insert(name.clone(), column);
             column_order.push(name);
         }
         let index = Index::from_i64((0..row_count).collect());
@@ -12806,6 +12861,43 @@ mod tests {
             let out = write_csv_string(&frame).expect("write");
             assert_eq!(&out, expected_csv, "round-trip mismatch for input {input:?}");
         }
+    }
+
+    #[test]
+    fn read_csv_with_options_object_fallback_preserves_text() {
+        use super::{CsvReadOptions, read_csv_with_options};
+        // Same pandas object-fallback rule on the options reader (custom
+        // delimiter / na_values etc.): non-canonical bool casing and zero-padded
+        // numbers survive once the column is object. Verified vs pandas 2.2.3.
+        let tsv = CsvReadOptions {
+            delimiter: b'\t',
+            ..Default::default()
+        };
+        let frame = read_csv_with_options("c\ntrue\nfalse\nmaybe\n", &tsv).expect("read");
+        let out = write_csv_string(&frame).expect("write");
+        assert_eq!(out, "c\ntrue\nfalse\nmaybe\n");
+
+        let frame2 = read_csv_with_options("c\n01\n02\nabc\n", &tsv).expect("read");
+        let out2 = write_csv_string(&frame2).expect("write");
+        assert_eq!(out2, "c\n01\n02\nabc\n");
+
+        // Pure-bool column still infers bool dtype (writes True/False).
+        let frame3 = read_csv_with_options("c\ntrue\nfalse\n", &tsv).expect("read");
+        let out3 = write_csv_string(&frame3).expect("write");
+        assert_eq!(out3, "c\nTrue\nFalse\n");
+
+        // Custom na_values: an NA cell in an object column stays missing while
+        // the surrounding original literals are preserved.
+        let na_opts = CsvReadOptions {
+            delimiter: b'\t',
+            na_values: vec!["MISSING".to_string()],
+            ..Default::default()
+        };
+        let frame4 =
+            read_csv_with_options("c\ntrue\nMISSING\nmaybe\n", &na_opts).expect("read");
+        let out4 = write_csv_string(&frame4).expect("write");
+        // The lone empty NaN field in a single-column object frame is quoted "".
+        assert_eq!(out4, "c\ntrue\n\"\"\nmaybe\n");
     }
 
     #[test]
