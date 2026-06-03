@@ -2121,6 +2121,30 @@ fn align_union_plan(left: &Index, right: &Index) -> AlignmentPlan {
     }
 }
 
+/// Like [`align_union_plan`], but returns the SORTED union when the two unique
+/// indexes differ — matching pandas, whose `Index.union` sorts. Identical
+/// indexes keep their original order (so an unsorted-but-identical index is not
+/// reordered), and duplicate labels keep the cartesian alignment. This is the
+/// alignment pandas uses for outer-aligned elementwise ops (arithmetic, logical
+/// `&`/`|`, combine/combine_first). Verified vs live pandas 2.2.3.
+fn align_union_sorted_plan(left: &Index, right: &Index) -> AlignmentPlan {
+    if left.has_duplicates() || right.has_duplicates() {
+        let (union_index, left_positions, right_positions) =
+            align_union_duplicate_aware(left, right);
+        AlignmentPlan {
+            union_index,
+            left_positions,
+            right_positions,
+        }
+    } else if left == right {
+        // Identical indexes: keep order (align_union over identical unique
+        // indexes returns the left labels unchanged).
+        align_union(left, right)
+    } else {
+        align_union_sorted_unique(left, right)
+    }
+}
+
 fn align_mode_name(mode: AlignMode) -> &'static str {
     match mode {
         AlignMode::Inner => "inner",
@@ -4316,7 +4340,7 @@ impl Series {
         self.ensure_boolean_series("and")?;
         other.ensure_boolean_series("and")?;
 
-        let plan = align_union_plan(&self.index, &other.index);
+        let plan = align_union_sorted_plan(&self.index, &other.index);
         validate_alignment_plan(&plan)?;
 
         let left = self.column.reindex_by_positions(&plan.left_positions)?;
@@ -4355,7 +4379,7 @@ impl Series {
         self.ensure_boolean_series("or")?;
         other.ensure_boolean_series("or")?;
 
-        let plan = align_union_plan(&self.index, &other.index);
+        let plan = align_union_sorted_plan(&self.index, &other.index);
         validate_alignment_plan(&plan)?;
 
         let left = self.column.reindex_by_positions(&plan.left_positions)?;
@@ -33901,27 +33925,19 @@ impl DataFrame {
     where
         F: Fn(&Scalar, &Scalar) -> Scalar,
     {
-        let has_duplicate_labels = self.index.has_duplicates() || other.index.has_duplicates();
-        let plan = if has_duplicate_labels {
-            let (union_index, left_positions, right_positions) =
-                align_union_duplicate_aware(&self.index, &other.index);
-            AlignmentPlan {
-                union_index,
-                left_positions,
-                right_positions,
-            }
-        } else {
-            align_union(&self.index, &other.index)
-        };
+        // pandas df.combine returns the SORTED union of the indexes (and of the
+        // columns). Verified vs live pandas 2.2.3.
+        let plan = align_union_sorted_plan(&self.index, &other.index);
         validate_alignment_plan(&plan)?;
 
-        // Union of columns (self first, then new from other).
+        // Union of columns, sorted (pandas combine sorts the column union).
         let mut col_order = self.column_order.clone();
         for name in &other.column_order {
             if !self.columns.contains_key(name) {
                 col_order.push(name.clone());
             }
         }
+        col_order.sort();
 
         let null = Scalar::Null(NullKind::NaN);
         let mut result_cols = BTreeMap::new();
@@ -48193,6 +48209,30 @@ mod tests {
                 Scalar::Null(NullKind::Null)
             ]
         );
+    }
+
+    #[test]
+    fn series_and_or_sort_differing_union_index() {
+        // pandas &/| return the SORTED union index when the indexes differ
+        // (Index.union sorts), like arithmetic. Verified vs live pandas 2.2.3:
+        // index [2,1] op [2,1,0] -> [0,1,2]. (Three-valued null handling for the
+        // alignment-introduced gaps is FP's existing semantics, tested above;
+        // here we lock the index ORDER only.)
+        let left = Series::from_values(
+            "m1",
+            vec![2_i64.into(), 1_i64.into()],
+            vec![Scalar::Bool(true), Scalar::Bool(false)],
+        )
+        .unwrap();
+        let right = Series::from_values(
+            "m2",
+            vec![2_i64.into(), 1_i64.into(), 0_i64.into()],
+            vec![Scalar::Bool(true), Scalar::Bool(true), Scalar::Bool(true)],
+        )
+        .unwrap();
+        let sorted = vec![0_i64.into(), 1_i64.into(), 2_i64.into()];
+        assert_eq!(left.and(&right).unwrap().index().labels(), &sorted);
+        assert_eq!(left.or(&right).unwrap().index().labels(), &sorted);
     }
 
     #[test]
@@ -79679,24 +79719,26 @@ mod tests {
             })
             .unwrap();
 
+        // pandas df.combine returns the SORTED union index [0,1,2] (not the
+        // self-first-then-new [0,2,1]). Verified vs live pandas 2.2.3.
         assert_eq!(
             result.index().labels(),
-            &vec![0_i64.into(), 2_i64.into(), 1_i64.into()]
+            &vec![0_i64.into(), 1_i64.into(), 2_i64.into()]
         );
         assert_eq!(
             result.columns["a"].values(),
             &[
                 Scalar::Float64(1.0),
-                Scalar::Float64(2.0),
-                Scalar::Null(NullKind::NaN)
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(2.0)
             ]
         );
         assert_eq!(
             result.columns["b"].values(),
             &[
                 Scalar::Null(NullKind::NaN),
-                Scalar::Float64(20.0),
-                Scalar::Float64(10.0)
+                Scalar::Float64(10.0),
+                Scalar::Float64(20.0)
             ]
         );
     }
