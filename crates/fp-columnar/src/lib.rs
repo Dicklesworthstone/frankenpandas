@@ -817,11 +817,29 @@ fn vectorized_binary_i64(
     Some((out, combined))
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Column {
     dtype: DType,
     values: Vec<Scalar>,
     validity: ValidityMask,
+    #[serde(skip)]
+    data: Option<ColumnData>,
+}
+
+impl PartialEq for Column {
+    fn eq(&self, other: &Self) -> bool {
+        self.dtype == other.dtype && self.values == other.values && self.validity == other.validity
+    }
+}
+
+impl std::fmt::Debug for Column {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Column")
+            .field("dtype", &self.dtype)
+            .field("values", &self.values)
+            .field("validity", &self.validity)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1134,6 +1152,20 @@ fn round_i64_negative_decimals(value: i64, decimals: i32) -> i64 {
 }
 
 impl Column {
+    fn cached_data_for_values(dtype: DType, values: &[Scalar]) -> Option<ColumnData> {
+        match dtype {
+            DType::Bool
+            | DType::BoolNullable
+            | DType::Int64
+            | DType::Int64Nullable
+            | DType::Float64
+            | DType::Timedelta64
+            | DType::Datetime64
+            | DType::Period => Some(ColumnData::from_scalars(values, dtype)),
+            _ => None,
+        }
+    }
+
     fn normalize_missing_for_dtype(value: Scalar, dtype: DType) -> Scalar {
         match value {
             Scalar::Null(NullKind::NaN) => Scalar::Null(NullKind::NaN),
@@ -1180,8 +1212,9 @@ impl Column {
 
         Ok(Self {
             dtype,
-            values: coerced,
             validity,
+            data: Self::cached_data_for_values(dtype, &coerced),
+            values: coerced,
         })
     }
 
@@ -1228,6 +1261,7 @@ impl Column {
                 dtype: self.dtype,
                 values,
                 validity: ValidityMask::all_valid(n),
+                data: None,
             };
         }
 
@@ -1244,10 +1278,15 @@ impl Column {
             dtype: self.dtype,
             values,
             validity: ValidityMask { words, len: n },
+            data: None,
         }
     }
 
     fn take_all_valid_primitive_positions(&self, positions: &[usize]) -> Option<Vec<Scalar>> {
+        if let Some(values) = self.take_cached_all_valid_primitive_positions(positions) {
+            return Some(values);
+        }
+
         let mut values = Vec::with_capacity(positions.len());
         match self.dtype {
             DType::Bool | DType::BoolNullable => {
@@ -1296,6 +1335,48 @@ impl Column {
                         Scalar::Period(value) => values.push(Scalar::Period(*value)),
                         _ => return None,
                     }
+                }
+            }
+            _ => return None,
+        }
+        Some(values)
+    }
+
+    fn take_cached_all_valid_primitive_positions(
+        &self,
+        positions: &[usize],
+    ) -> Option<Vec<Scalar>> {
+        let data = self.data.as_ref()?;
+        let mut values = Vec::with_capacity(positions.len());
+        match (self.dtype, data) {
+            (DType::Bool | DType::BoolNullable, ColumnData::Bool(data)) => {
+                for &pos in positions {
+                    values.push(Scalar::Bool(data[pos]));
+                }
+            }
+            (DType::Int64 | DType::Int64Nullable, ColumnData::Int64(data)) => {
+                for &pos in positions {
+                    values.push(Scalar::Int64(data[pos]));
+                }
+            }
+            (DType::Float64, ColumnData::Float64(data)) => {
+                for &pos in positions {
+                    values.push(Scalar::Float64(data[pos]));
+                }
+            }
+            (DType::Timedelta64, ColumnData::Timedelta64(data)) => {
+                for &pos in positions {
+                    values.push(Scalar::Timedelta64(data[pos]));
+                }
+            }
+            (DType::Datetime64, ColumnData::Datetime64(data)) => {
+                for &pos in positions {
+                    values.push(Scalar::Datetime64(data[pos]));
+                }
+            }
+            (DType::Period, ColumnData::Period(data)) => {
+                for &pos in positions {
+                    values.push(Scalar::Period(data[pos]));
                 }
             }
             _ => return None,
@@ -1552,6 +1633,7 @@ impl Column {
             dtype: new_dtype,
             values: self.values.clone(),
             validity: self.validity.clone(),
+            data: self.data.clone(),
         }
     }
 
@@ -1566,6 +1648,7 @@ impl Column {
             dtype,
             values: self.values.clone(),
             validity: self.validity.clone(),
+            data: None,
         }
     }
 
@@ -8192,7 +8275,7 @@ impl CrackIndex {
 mod tests {
     use fp_types::{DType, Interval, IntervalClosed, NullKind, Scalar, SparseDType};
 
-    use super::{ArithmeticOp, Column, SparseColumn, ValidityMask};
+    use super::{ArithmeticOp, Column, ColumnData, SparseColumn, ValidityMask};
 
     #[test]
     fn reindex_injects_missing_values() {
@@ -8300,6 +8383,50 @@ mod tests {
             assert_eq!(gathered.values(), expected.values());
             assert_eq!(gathered.validity(), expected.validity());
         }
+    }
+
+    #[test]
+    fn primitive_columns_cache_typed_data_for_take_positions() {
+        let column = Column::new(
+            DType::Float64,
+            vec![
+                Scalar::Float64(1.25),
+                Scalar::Float64(-0.0),
+                Scalar::Float64(9.5),
+            ],
+        )
+        .expect("column should build");
+
+        assert!(matches!(column.data, Some(ColumnData::Float64(_))));
+        let positions = [2, 0, 1, 2];
+        let gathered = column.take_positions(&positions);
+        let expected = Column::new(
+            DType::Float64,
+            positions
+                .iter()
+                .map(|&position| column.values()[position].clone())
+                .collect(),
+        )
+        .expect("validated materialization");
+
+        assert_eq!(gathered.values(), expected.values());
+        assert_eq!(gathered.validity(), expected.validity());
+    }
+
+    #[test]
+    fn column_equality_ignores_skipped_typed_cache() {
+        let column = Column::new(
+            DType::Int64,
+            vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+        )
+        .expect("column should build");
+
+        let json = serde_json::to_string(&column).expect("serialize");
+        let roundtrip: Column = serde_json::from_str(&json).expect("deserialize");
+
+        assert!(column.data.is_some());
+        assert!(roundtrip.data.is_none());
+        assert_eq!(column, roundtrip);
     }
 
     #[test]
