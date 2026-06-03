@@ -11985,3 +11985,52 @@ proptest! {
         }
     }
 }
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(300))]
+
+    /// MR-REINDEX1: reindex over a unique index is a label-keyed gather — for
+    /// each target label present in the source, the output row equals the
+    /// source row at that label (value, null kind); for an absent label, the
+    /// output row is all-null. Hardens the label-lookup gather path that the
+    /// primitive-gather kernel (fi6zx) also feeds.
+    #[test]
+    fn prop_dataframe_reindex_gathers_present_nulls_absent(
+        (labels, vals) in (2_usize..=10)
+            .prop_flat_map(|n| (arb_unique_index_labels(n), arb_numeric_values(n)))
+    ) {
+        let v = match Series::from_values("v".to_owned(), labels.clone(), vals) {
+            Ok(s) => s,
+            Err(_) => return Ok(()),
+        };
+        let df = match DataFrame::from_series(vec![v]) {
+            Ok(d) => d,
+            Err(_) => return Ok(()),
+        };
+        // Target: source labels reversed (a permutation) plus one absent label.
+        let absent = fresh_missing_index_label(&labels, 0);
+        let mut target: Vec<IndexLabel> = labels.iter().rev().cloned().collect();
+        target.push(absent);
+        let reixed = match df.reindex(target.clone()) {
+            Ok(r) => r,
+            Err(_) => return Ok(()),
+        };
+        prop_assert_eq!(reixed.index().len(), target.len(), "reindex output row count");
+        let src = df.column("v").unwrap().values().to_vec();
+        let out = reixed.column("v").unwrap().values().to_vec();
+        for (i, lab) in target.iter().enumerate() {
+            match labels.iter().position(|l| l == lab) {
+                Some(pos) => {
+                    let s = &src[pos];
+                    let o = &out[i];
+                    let same = s == o
+                        || (matches!(s, Scalar::Float64(f) if f.is_nan()) && o.is_missing());
+                    prop_assert!(same, "reindex present {:?}: {:?} != src {:?}", lab, o, s);
+                }
+                None => {
+                    prop_assert!(out[i].is_missing(), "reindex absent {:?} should be null, got {:?}", lab, out[i]);
+                }
+            }
+        }
+    }
+}
