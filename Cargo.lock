@@ -1323,6 +1323,7 @@ dependencies = [
  "chrono",
  "csv",
  "dta",
+ "fast-float2",
  "fp-columnar",
  "fp-frame",
  "fp-index",

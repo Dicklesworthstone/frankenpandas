@@ -1,0 +1,1406 @@
+pid=738850
+=== sample 1 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x0000565204b7c79f in grow_amortized<alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/intrinsics/mod.rs:459
+459	    if b {
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-w4vff-current/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7aa7d0b17c00 (LWP 738850) "perf_profile"):
+#0  0x0000565204b7c79f in grow_amortized<alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/intrinsics/mod.rs:459
+#1  do_reserve_and_handle<alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:668
+#2  0x0000565204b897a3 in reserve<alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:675
+#3  reserve<u8, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:341
+#4  reserve<u8, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:1471
+#5  append_elements<u8, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:2905
+#6  spec_extend<u8, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/spec_extend.rs:56
+#7  extend_from_slice<u8, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:3526
+#8  push_str () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/string.rs:1102
+#9  write_str () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/string.rs:3345
+#10 0x0000565204aee590 in core::fmt::{impl#12}::write_formatted_parts::write_bytes () at library/core/src/fmt/mod.rs:2037
+#11 0x0000565204aee590 in core::fmt::Formatter::write_formatted_parts ()
+#12 0x0000565204aec71e in core::fmt::float::float_to_decimal_common_shortest<f64> () at library/core/src/fmt/float.rs:84
+#13 0x0000565204b7d55e in core::fmt::float::float_to_decimal_display<f64> () at /rustc/9ec5d5f32e19d250c7fbeaa90978c79105b39dee/library/core/src/fmt/float.rs:101
+#14 core::fmt::float::{impl#9}::fmt () at /rustc/9ec5d5f32e19d250c7fbeaa90978c79105b39dee/library/core/src/fmt/float.rs:218
+#15 spec_to_string<f64> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/string.rs:2915
+#16 to_string<f64> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/string.rs:2894
+#17 {closure#1} () at crates/fp-conformance/examples/perf_profile.rs:110
+#18 {closure#0}<usize, alloc::string::String, (), perf_profile::build_csv_string::{closure_env#1}, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<alloc::string::String, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<alloc::string::String, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_csv_string::{closure_env#1}>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/adapters/map.rs:88
+#19 fold<core::ops::range::Range<usize>, (), core::iter::adapters::map::map_fold::{closure_env#0}<usize, alloc::string::String, (), perf_profile::build_csv_string::{closure_env#1}, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<alloc::string::String, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<alloc::string::String, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_csv_string::{closure_env#1}>>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/traits/iterator.rs:2673
+#20 fold<alloc::string::String, core::ops::range::Range<usize>, perf_profile::build_csv_string::{closure_env#1}, (), core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<alloc::string::String, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<alloc::string::String, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_csv_string::{closure_env#1}>>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/adapters/map.rs:128
+#21 for_each<core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_csv_string::{closure_env#1}>, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<alloc::string::String, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_csv_string::{closure_env#1}>>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/traits/iterator.rs:889
+#22 extend_trusted<alloc::string::String, alloc::alloc::Global, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_csv_string::{closure_env#1}>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:4031
+#23 spec_extend<alloc::string::String, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_csv_string::{closure_env#1}>, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/spec_extend.rs:27
+#24 from_iter<alloc::string::String, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_csv_string::{closure_env#1}>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/spec_from_iter_nested.rs:60
+#25 from_iter<alloc::string::String, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_csv_string::{closure_env#1}>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/spec_from_iter.rs:33
+#26 from_iter<alloc::string::String, core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_csv_string::{closure_env#1}>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:3895
+#27 collect<core::iter::adapters::map::Map<core::ops::range::Range<usize>, perf_profile::build_csv_string::{closure_env#1}>, alloc::vec::Vec<alloc::string::String, alloc::alloc::Global>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/traits/iterator.rs:2092
+#28 build_csv_string () at crates/fp-conformance/examples/perf_profile.rs:111
+#29 0x0000565204b80c6a in main () at crates/fp-conformance/examples/perf_profile.rs:380
+#30 0x0000565204b7c783 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#31 __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#32 0x0000565204b7c819 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#33 0x0000565204bba83e in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#34 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#35 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#36 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#37 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#38 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:581
+#39 std::panicking::catch_unwind<isize, std::rt::lang_start_internal::{closure_env#0}> () at library/std/src/panicking.rs:544
+#40 std::panic::catch_unwind<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panic.rs:359
+#41 std::rt::lang_start_internal () at library/std/src/rt.rs:171
+#42 0x0000565204b8a80c in main ()
+[Inferior 1 (process 738850) detached]
+=== sample 2 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x0000565204b5a9fa in read_byte_record_impl<&[u8]> () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/reader.rs:1632
+
+warning: 1632	/tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/reader.rs: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-w4vff-current/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7aa7d0b17c00 (LWP 738850) "perf_profile"):
+#0  0x0000565204b5a9fa in read_byte_record_impl<&[u8]> () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/reader.rs:1632
+#1  read_byte_record<&[u8]> () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/reader.rs:1595
+#2  read<&[u8]> () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/string_record.rs:637
+#3  read_record<&[u8]> () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/reader.rs:1531
+#4  next<&[u8]> () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/reader.rs:2080
+#5  0x0000565204b4bef2 in try_read_csv_str_typed_numeric () at crates/fp-io/src/lib.rs:655
+#6  read_csv_str () at crates/fp-io/src/lib.rs:702
+#7  0x0000565204b80caf in main () at crates/fp-conformance/examples/perf_profile.rs:382
+#8  0x0000565204b7c783 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#9  __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#10 0x0000565204b7c819 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#11 0x0000565204bba83e in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#12 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#13 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#14 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#15 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#16 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:581
+#17 std::panicking::catch_unwind<isize, std::rt::lang_start_internal::{closure_env#0}> () at library/std/src/panicking.rs:544
+#18 std::panic::catch_unwind<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panic.rs:359
+#19 std::rt::lang_start_internal () at library/std/src/rt.rs:171
+#20 0x0000565204b8a80c in main ()
+[Inferior 1 (process 738850) detached]
+=== sample 3 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x0000565204af1330 in core::slice::{impl#0}::split_first<u8> () at library/core/src/slice/mod.rs:199
+
+warning: 199	library/core/src/slice/mod.rs: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-w4vff-current/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7aa7d0b17c00 (LWP 738850) "perf_profile"):
+#0  0x0000565204af1330 in core::slice::{impl#0}::split_first<u8> () at library/core/src/slice/mod.rs:199
+#1  core::num::imp::dec2flt::common::{impl#0}::parse_digits<core::num::imp::dec2flt::parse::try_parse_digits::{closure_env#0}> () at library/core/src/num/imp/dec2flt/common.rs:42
+#2  core::num::imp::dec2flt::parse::try_parse_digits () at library/core/src/num/imp/dec2flt/parse.rs:43
+#3  core::num::imp::dec2flt::parse::parse_partial_number () at library/core/src/num/imp/dec2flt/parse.rs:110
+#4  core::num::imp::dec2flt::parse::parse_number () at library/core/src/num/imp/dec2flt/parse.rs:190
+#5  0x0000565204af53f1 in core::num::imp::dec2flt::dec2flt<f64> () at library/core/src/num/imp/dec2flt/mod.rs:222
+#6  core::num::float_parse::{impl#4}::from_str () at library/core/src/num/float_parse.rs:69
+#7  0x0000565204b4c0eb in parse<f64> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/str/mod.rs:2766
+#8  push_csv_default_numeric_field () at crates/fp-io/src/lib.rs:624
+#9  try_read_csv_str_typed_numeric () at crates/fp-io/src/lib.rs:659
+#10 read_csv_str () at crates/fp-io/src/lib.rs:702
+#11 0x0000565204b80caf in main () at crates/fp-conformance/examples/perf_profile.rs:382
+#12 0x0000565204b7c783 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#13 __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#14 0x0000565204b7c819 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#15 0x0000565204bba83e in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#16 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#17 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#18 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#19 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#20 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:581
+#21 std::panicking::catch_unwind<isize, std::rt::lang_start_internal::{closure_env#0}> () at library/std/src/panicking.rs:544
+#22 std::panic::catch_unwind<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panic.rs:359
+#23 std::rt::lang_start_internal () at library/std/src/rt.rs:171
+#24 0x0000565204b8a80c in main ()
+[Inferior 1 (process 738850) detached]
+=== sample 4 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+__memcpy_avx_unaligned_erms () at ../sysdeps/x86_64/multiarch/memmove-vec-unaligned-erms.S:490
+
+warning: 490	../sysdeps/x86_64/multiarch/memmove-vec-unaligned-erms.S: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-w4vff-current/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7aa7d0b17c00 (LWP 738850) "perf_profile"):
+#0  __memcpy_avx_unaligned_erms () at ../sysdeps/x86_64/multiarch/memmove-vec-unaligned-erms.S:490
+#1  0x0000565204afe134 in copy_nonoverlapping<f64> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:551
+#2  copy_to_nonoverlapping<f64> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/const_ptr.rs:1252
+#3  to_vec<f64, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/slice.rs:454
+#4  to_vec_in<f64, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/slice.rs:400
+#5  clone<f64, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:3777
+#6  from_f64_values () at crates/fp-columnar/src/lib.rs:1430
+#7  0x0000565204b4cc9b in try_read_csv_str_typed_numeric () at crates/fp-io/src/lib.rs:675
+#8  read_csv_str () at crates/fp-io/src/lib.rs:702
+#9  0x0000565204b80caf in main () at crates/fp-conformance/examples/perf_profile.rs:382
+#10 0x0000565204b7c783 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#11 __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#12 0x0000565204b7c819 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#13 0x0000565204bba83e in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#14 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#15 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#16 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#17 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#18 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:581
+#19 std::panicking::catch_unwind<isize, std::rt::lang_start_internal::{closure_env#0}> () at library/std/src/panicking.rs:544
+#20 std::panic::catch_unwind<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panic.rs:359
+#21 std::rt::lang_start_internal () at library/std/src/rt.rs:171
+#22 0x0000565204b8a80c in main ()
+[Inferior 1 (process 738850) detached]
+=== sample 5 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x0000565204b5b219 in clone_truncated () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/byte_record.rs:509
+
+warning: 509	/tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/byte_record.rs: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-w4vff-current/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7aa7d0b17c00 (LWP 738850) "perf_profile"):
+#0  0x0000565204b5b219 in clone_truncated () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/byte_record.rs:509
+#1  clone_truncated () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/string_record.rs:618
+#2  next<&[u8]> () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/reader.rs:2082
+#3  0x0000565204b4bef2 in try_read_csv_str_typed_numeric () at crates/fp-io/src/lib.rs:655
+#4  read_csv_str () at crates/fp-io/src/lib.rs:702
+#5  0x0000565204b80caf in main () at crates/fp-conformance/examples/perf_profile.rs:382
+#6  0x0000565204b7c783 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#7  __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#8  0x0000565204b7c819 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#9  0x0000565204bba83e in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#10 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#11 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#12 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#13 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#14 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:581
+#15 std::panicking::catch_unwind<isize, std::rt::lang_start_internal::{closure_env#0}> () at library/std/src/panicking.rs:544
+#16 std::panic::catch_unwind<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panic.rs:359
+#17 std::rt::lang_start_internal () at library/std/src/rt.rs:171
+#18 0x0000565204b8a80c in main ()
+[Inferior 1 (process 738850) detached]
+=== sample 6 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+read_record_dfa () at src/reader.rs:679
+
+warning: 679	src/reader.rs: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-w4vff-current/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7aa7d0b17c00 (LWP 738850) "perf_profile"):
+#0  read_record_dfa () at src/reader.rs:679
+#1  read_record () at src/reader.rs:601
+#2  0x0000565204b5a9e6 in read_byte_record_impl<&[u8]> () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/reader.rs:1639
+#3  read_byte_record<&[u8]> () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/reader.rs:1595
+#4  read<&[u8]> () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/string_record.rs:637
+#5  read_record<&[u8]> () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/reader.rs:1531
+#6  next<&[u8]> () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/reader.rs:2080
+#7  0x0000565204b4bef2 in try_read_csv_str_typed_numeric () at crates/fp-io/src/lib.rs:655
+#8  read_csv_str () at crates/fp-io/src/lib.rs:702
+#9  0x0000565204b80caf in main () at crates/fp-conformance/examples/perf_profile.rs:382
+#10 0x0000565204b7c783 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#11 __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#12 0x0000565204b7c819 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#13 0x0000565204bba83e in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#14 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#15 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#16 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#17 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#18 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:581
+#19 std::panicking::catch_unwind<isize, std::rt::lang_start_internal::{closure_env#0}> () at library/std/src/panicking.rs:544
+#20 std::panic::catch_unwind<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panic.rs:359
+#21 std::rt::lang_start_internal () at library/std/src/rt.rs:171
+#22 0x0000565204b8a80c in main ()
+[Inferior 1 (process 738850) detached]
+=== sample 7 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+scan_and_copy () at src/reader.rs:1261
+
+warning: 1261	src/reader.rs: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-w4vff-current/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7aa7d0b17c00 (LWP 738850) "perf_profile"):
+#0  scan_and_copy () at src/reader.rs:1261
+#1  read_record_dfa () at src/reader.rs:682
+#2  read_record () at src/reader.rs:601
+#3  0x0000565204b5a9e6 in read_byte_record_impl<&[u8]> () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/reader.rs:1639
+#4  read_byte_record<&[u8]> () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/reader.rs:1595
+#5  read<&[u8]> () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/string_record.rs:637
+#6  read_record<&[u8]> () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/reader.rs:1531
+#7  next<&[u8]> () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/reader.rs:2080
+#8  0x0000565204b4bef2 in try_read_csv_str_typed_numeric () at crates/fp-io/src/lib.rs:655
+#9  read_csv_str () at crates/fp-io/src/lib.rs:702
+#10 0x0000565204b80caf in main () at crates/fp-conformance/examples/perf_profile.rs:382
+#11 0x0000565204b7c783 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#12 __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#13 0x0000565204b7c819 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#14 0x0000565204bba83e in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#15 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#16 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#17 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#18 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#19 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:581
+#20 std::panicking::catch_unwind<isize, std::rt::lang_start_internal::{closure_env#0}> () at library/std/src/panicking.rs:544
+#21 std::panic::catch_unwind<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panic.rs:359
+#22 std::rt::lang_start_internal () at library/std/src/rt.rs:171
+#23 0x0000565204b8a80c in main ()
+[Inferior 1 (process 738850) detached]
+=== sample 8 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x0000565204af53a1 in core::num::float_parse::{impl#4}::from_str () at library/core/src/num/float_parse.rs:68
+
+warning: 68	library/core/src/num/float_parse.rs: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-w4vff-current/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7aa7d0b17c00 (LWP 738850) "perf_profile"):
+#0  0x0000565204af53a1 in core::num::float_parse::{impl#4}::from_str () at library/core/src/num/float_parse.rs:68
+#1  0x0000565204b4c0eb in parse<f64> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/str/mod.rs:2766
+#2  push_csv_default_numeric_field () at crates/fp-io/src/lib.rs:624
+#3  try_read_csv_str_typed_numeric () at crates/fp-io/src/lib.rs:659
+#4  read_csv_str () at crates/fp-io/src/lib.rs:702
+#5  0x0000565204b80caf in main () at crates/fp-conformance/examples/perf_profile.rs:382
+#6  0x0000565204b7c783 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#7  __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#8  0x0000565204b7c819 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#9  0x0000565204bba83e in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#10 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#11 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#12 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#13 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#14 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:581
+#15 std::panicking::catch_unwind<isize, std::rt::lang_start_internal::{closure_env#0}> () at library/std/src/panicking.rs:544
+#16 std::panic::catch_unwind<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panic.rs:359
+#17 std::rt::lang_start_internal () at library/std/src/rt.rs:171
+#18 0x0000565204b8a80c in main ()
+[Inferior 1 (process 738850) detached]
+=== sample 9 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x0000565204af5649 in core::num::imp::dec2flt::dec2flt<f64> () at library/core/src/ops/arith.rs:515
+
+warning: 515	library/core/src/ops/arith.rs: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-w4vff-current/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7aa7d0b17c00 (LWP 738850) "perf_profile"):
+#0  0x0000565204af5649 in core::num::imp::dec2flt::dec2flt<f64> () at library/core/src/ops/arith.rs:515
+#1  core::num::float_parse::{impl#4}::from_str () at library/core/src/num/float_parse.rs:69
+#2  0x0000565204b4c0eb in parse<f64> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/str/mod.rs:2766
+#3  push_csv_default_numeric_field () at crates/fp-io/src/lib.rs:624
+#4  try_read_csv_str_typed_numeric () at crates/fp-io/src/lib.rs:659
+#5  read_csv_str () at crates/fp-io/src/lib.rs:702
+#6  0x0000565204b80caf in main () at crates/fp-conformance/examples/perf_profile.rs:382
+#7  0x0000565204b7c783 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#8  __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#9  0x0000565204b7c819 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#10 0x0000565204bba83e in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#11 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#12 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#13 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#14 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#15 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:581
+#16 std::panicking::catch_unwind<isize, std::rt::lang_start_internal::{closure_env#0}> () at library/std/src/panicking.rs:544
+#17 std::panic::catch_unwind<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panic.rs:359
+#18 std::rt::lang_start_internal () at library/std/src/rt.rs:171
+#19 0x0000565204b8a80c in main ()
+[Inferior 1 (process 738850) detached]
+=== sample 10 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+is_pandas_default_na () at crates/fp-io/src/lib.rs:2740
+
+warning: Source file is more recent than executable.
+2740	}
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-w4vff-current/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7aa7d0b17c00 (LWP 738850) "perf_profile"):
+#0  is_pandas_default_na () at crates/fp-io/src/lib.rs:2740
+#1  0x0000565204b4bf79 in push_csv_default_numeric_field () at crates/fp-io/src/lib.rs:590
+#2  try_read_csv_str_typed_numeric () at crates/fp-io/src/lib.rs:659
+#3  read_csv_str () at crates/fp-io/src/lib.rs:702
+#4  0x0000565204b80caf in main () at crates/fp-conformance/examples/perf_profile.rs:382
+#5  0x0000565204b7c783 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#6  __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#7  0x0000565204b7c819 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#8  0x0000565204bba83e in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#9  std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#10 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#11 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#12 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#13 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:581
+#14 std::panicking::catch_unwind<isize, std::rt::lang_start_internal::{closure_env#0}> () at library/std/src/panicking.rs:544
+#15 std::panic::catch_unwind<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panic.rs:359
+#16 std::rt::lang_start_internal () at library/std/src/rt.rs:171
+#17 0x0000565204b8a80c in main ()
+[Inferior 1 (process 738850) detached]
+=== sample 11 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+eq<u8> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/non_null.rs:1714
+1714	        self.as_ptr() == other.as_ptr()
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-w4vff-current/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7aa7d0b17c00 (LWP 738850) "perf_profile"):
+#0  eq<u8> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/non_null.rs:1714
+#1  next<u8> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:180
+#2  all<u8, core::slice::ascii::is_ascii_sse2::{closure_env#0}> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:314
+#3  is_ascii_sse2 () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/ascii.rs:584
+#4  runtime () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/ascii.rs:616
+#5  is_ascii () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/intrinsics/mod.rs:2450
+#6  is_ascii () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/ascii.rs:19
+#7  validate () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/byte_record.rs:547
+#8  0x0000565204b5b087 in read<&[u8]> () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/string_record.rs:638
+#9  read_record<&[u8]> () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/reader.rs:1531
+#10 next<&[u8]> () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/reader.rs:2080
+#11 0x0000565204b4bef2 in try_read_csv_str_typed_numeric () at crates/fp-io/src/lib.rs:655
+#12 read_csv_str () at crates/fp-io/src/lib.rs:702
+#13 0x0000565204b80caf in main () at crates/fp-conformance/examples/perf_profile.rs:382
+#14 0x0000565204b7c783 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#15 __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#16 0x0000565204b7c819 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#17 0x0000565204bba83e in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#18 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#19 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#20 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#21 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#22 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:581
+#23 std::panicking::catch_unwind<isize, std::rt::lang_start_internal::{closure_env#0}> () at library/std/src/panicking.rs:544
+#24 std::panic::catch_unwind<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panic.rs:359
+#25 std::rt::lang_start_internal () at library/std/src/rt.rs:171
+#26 0x0000565204b8a80c in main ()
+[Inferior 1 (process 738850) detached]
+=== sample 12 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+read_record_dfa () at src/reader.rs:665
+
+warning: 665	src/reader.rs: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-w4vff-current/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7aa7d0b17c00 (LWP 738850) "perf_profile"):
+#0  read_record_dfa () at src/reader.rs:665
+#1  read_record () at src/reader.rs:601
+#2  0x0000565204b5a9e6 in read_byte_record_impl<&[u8]> () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/reader.rs:1639
+#3  read_byte_record<&[u8]> () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/reader.rs:1595
+#4  read<&[u8]> () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/string_record.rs:637
+#5  read_record<&[u8]> () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/reader.rs:1531
+#6  next<&[u8]> () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/reader.rs:2080
+#7  0x0000565204b4bef2 in try_read_csv_str_typed_numeric () at crates/fp-io/src/lib.rs:655
+#8  read_csv_str () at crates/fp-io/src/lib.rs:702
+#9  0x0000565204b80caf in main () at crates/fp-conformance/examples/perf_profile.rs:382
+#10 0x0000565204b7c783 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#11 __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#12 0x0000565204b7c819 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#13 0x0000565204bba83e in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#14 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#15 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#16 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#17 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#18 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:581
+#19 std::panicking::catch_unwind<isize, std::rt::lang_start_internal::{closure_env#0}> () at library/std/src/panicking.rs:544
+#20 std::panic::catch_unwind<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panic.rs:359
+#21 std::rt::lang_start_internal () at library/std/src/rt.rs:171
+#22 0x0000565204b8a80c in main ()
+[Inferior 1 (process 738850) detached]
+=== sample 13 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+push_mut<f64, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:1046
+1046	            self.len = len + 1;
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-w4vff-current/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7aa7d0b17c00 (LWP 738850) "perf_profile"):
+#0  push_mut<f64, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:1046
+#1  push<f64, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:1004
+#2  push_csv_default_numeric_field () at crates/fp-io/src/lib.rs:626
+#3  try_read_csv_str_typed_numeric () at crates/fp-io/src/lib.rs:659
+#4  read_csv_str () at crates/fp-io/src/lib.rs:702
+#5  0x0000565204b80caf in main () at crates/fp-conformance/examples/perf_profile.rs:382
+#6  0x0000565204b7c783 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#7  __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#8  0x0000565204b7c819 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#9  0x0000565204bba83e in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#10 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#11 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#12 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#13 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#14 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:581
+#15 std::panicking::catch_unwind<isize, std::rt::lang_start_internal::{closure_env#0}> () at library/std/src/panicking.rs:544
+#16 std::panic::catch_unwind<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panic.rs:359
+#17 std::rt::lang_start_internal () at library/std/src/rt.rs:171
+#18 0x0000565204b8a80c in main ()
+[Inferior 1 (process 738850) detached]
+=== sample 14 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+write<f64> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:1920
+1920	        intrinsics::write_via_move(dst, src)
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-w4vff-current/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7aa7d0b17c00 (LWP 738850) "perf_profile"):
+#0  write<f64> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:1920
+#1  push_mut<f64, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:1045
+#2  push<f64, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:1004
+#3  push_csv_default_numeric_field () at crates/fp-io/src/lib.rs:626
+#4  try_read_csv_str_typed_numeric () at crates/fp-io/src/lib.rs:659
+#5  read_csv_str () at crates/fp-io/src/lib.rs:702
+#6  0x0000565204b80caf in main () at crates/fp-conformance/examples/perf_profile.rs:382
+#7  0x0000565204b7c783 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#8  __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#9  0x0000565204b7c819 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#10 0x0000565204bba83e in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#11 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#12 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#13 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#14 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#15 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:581
+#16 std::panicking::catch_unwind<isize, std::rt::lang_start_internal::{closure_env#0}> () at library/std/src/panicking.rs:544
+#17 std::panic::catch_unwind<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panic.rs:359
+#18 std::rt::lang_start_internal () at library/std/src/rt.rs:171
+#19 0x0000565204b8a80c in main ()
+[Inferior 1 (process 738850) detached]
+=== sample 15 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x0000565204af822e in scan_and_copy () at src/reader.rs:1263
+
+warning: 1263	src/reader.rs: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-w4vff-current/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7aa7d0b17c00 (LWP 738850) "perf_profile"):
+#0  0x0000565204af822e in scan_and_copy () at src/reader.rs:1263
+#1  read_record_dfa () at src/reader.rs:682
+#2  read_record () at src/reader.rs:601
+#3  0x0000565204b5a9e6 in read_byte_record_impl<&[u8]> () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/reader.rs:1639
+#4  read_byte_record<&[u8]> () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/reader.rs:1595
+#5  read<&[u8]> () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/string_record.rs:637
+#6  read_record<&[u8]> () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/reader.rs:1531
+#7  next<&[u8]> () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/reader.rs:2080
+#8  0x0000565204b4bef2 in try_read_csv_str_typed_numeric () at crates/fp-io/src/lib.rs:655
+#9  read_csv_str () at crates/fp-io/src/lib.rs:702
+#10 0x0000565204b80caf in main () at crates/fp-conformance/examples/perf_profile.rs:382
+#11 0x0000565204b7c783 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#12 __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#13 0x0000565204b7c819 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#14 0x0000565204bba83e in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#15 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#16 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#17 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#18 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#19 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:581
+#20 std::panicking::catch_unwind<isize, std::rt::lang_start_internal::{closure_env#0}> () at library/std/src/panicking.rs:544
+#21 std::panic::catch_unwind<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panic.rs:359
+#22 std::rt::lang_start_internal () at library/std/src/rt.rs:171
+#23 0x0000565204b8a80c in main ()
+[Inferior 1 (process 738850) detached]
+=== sample 16 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x0000565204b4c107 in push_csv_default_numeric_field () at crates/fp-io/src/lib.rs:625
+
+warning: Source file is more recent than executable.
+625	                    Ok(value) if !value.is_nan() => {
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-w4vff-current/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7aa7d0b17c00 (LWP 738850) "perf_profile"):
+#0  0x0000565204b4c107 in push_csv_default_numeric_field () at crates/fp-io/src/lib.rs:625
+#1  try_read_csv_str_typed_numeric () at crates/fp-io/src/lib.rs:659
+#2  read_csv_str () at crates/fp-io/src/lib.rs:702
+#3  0x0000565204b80caf in main () at crates/fp-conformance/examples/perf_profile.rs:382
+#4  0x0000565204b7c783 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#5  __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#6  0x0000565204b7c819 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#7  0x0000565204bba83e in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#8  std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#9  std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#10 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#11 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#12 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:581
+#13 std::panicking::catch_unwind<isize, std::rt::lang_start_internal::{closure_env#0}> () at library/std/src/panicking.rs:544
+#14 std::panic::catch_unwind<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panic.rs:359
+#15 std::rt::lang_start_internal () at library/std/src/rt.rs:171
+#16 0x0000565204b8a80c in main ()
+[Inferior 1 (process 738850) detached]
+=== sample 17 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x0000565204aecc48 in core::num::imp::dec2flt::lemire::compute_float<f64> () at library/core/src/num/imp/dec2flt/lemire.rs:100
+
+warning: 100	library/core/src/num/imp/dec2flt/lemire.rs: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-w4vff-current/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7aa7d0b17c00 (LWP 738850) "perf_profile"):
+#0  0x0000565204aecc48 in core::num::imp::dec2flt::lemire::compute_float<f64> () at library/core/src/num/imp/dec2flt/lemire.rs:100
+#1  0x0000565204af5488 in core::num::imp::dec2flt::dec2flt<f64> () at library/core/src/num/imp/dec2flt/mod.rs:238
+#2  core::num::float_parse::{impl#4}::from_str () at library/core/src/num/float_parse.rs:69
+#3  0x0000565204b4c0eb in parse<f64> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/str/mod.rs:2766
+#4  push_csv_default_numeric_field () at crates/fp-io/src/lib.rs:624
+#5  try_read_csv_str_typed_numeric () at crates/fp-io/src/lib.rs:659
+#6  read_csv_str () at crates/fp-io/src/lib.rs:702
+#7  0x0000565204b80caf in main () at crates/fp-conformance/examples/perf_profile.rs:382
+#8  0x0000565204b7c783 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#9  __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#10 0x0000565204b7c819 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#11 0x0000565204bba83e in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#12 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#13 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#14 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#15 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#16 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:581
+#17 std::panicking::catch_unwind<isize, std::rt::lang_start_internal::{closure_env#0}> () at library/std/src/panicking.rs:544
+#18 std::panic::catch_unwind<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panic.rs:359
+#19 std::rt::lang_start_internal () at library/std/src/rt.rs:171
+#20 0x0000565204b8a80c in main ()
+[Inferior 1 (process 738850) detached]
+=== sample 18 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x0000565204b46823 in eq<u8> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/non_null.rs:1714
+1714	        self.as_ptr() == other.as_ptr()
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-w4vff-current/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7aa7d0b17c00 (LWP 738850) "perf_profile"):
+#0  0x0000565204b46823 in eq<u8> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/non_null.rs:1714
+#1  next_back<u8> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:44
+#2  next_code_point_reverse<core::slice::iter::Iter<u8>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/str/validations.rs:83
+#3  next_back () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/str/iter.rs:128
+#4  next_back () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/str/iter.rs:216
+#5  next_back<fn(char) -> bool> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/str/pattern.rs:714
+#6  next_reject_back<core::str::pattern::MultiCharEqSearcher<fn(char) -> bool>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/str/pattern.rs:330
+#7  next_reject_back<fn(char) -> bool> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/str/pattern.rs:803
+#8  trim_matches<fn(char) -> bool> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/str/mod.rs:2374
+#9  0x0000565204b4bf8c in trim () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/str/mod.rs:2172
+#10 push_csv_default_numeric_field () at crates/fp-io/src/lib.rs:594
+#11 try_read_csv_str_typed_numeric () at crates/fp-io/src/lib.rs:659
+#12 read_csv_str () at crates/fp-io/src/lib.rs:702
+#13 0x0000565204b80caf in main () at crates/fp-conformance/examples/perf_profile.rs:382
+#14 0x0000565204b7c783 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#15 __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#16 0x0000565204b7c819 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#17 0x0000565204bba83e in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#18 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#19 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#20 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#21 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#22 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:581
+#23 std::panicking::catch_unwind<isize, std::rt::lang_start_internal::{closure_env#0}> () at library/std/src/panicking.rs:544
+#24 std::panic::catch_unwind<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panic.rs:359
+#25 std::rt::lang_start_internal () at library/std/src/rt.rs:171
+#26 0x0000565204b8a80c in main ()
+[Inferior 1 (process 738850) detached]
+=== sample 19 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x0000565204af822e in scan_and_copy () at src/reader.rs:1263
+
+warning: 1263	src/reader.rs: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-w4vff-current/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7aa7d0b17c00 (LWP 738850) "perf_profile"):
+#0  0x0000565204af822e in scan_and_copy () at src/reader.rs:1263
+#1  read_record_dfa () at src/reader.rs:682
+#2  read_record () at src/reader.rs:601
+#3  0x0000565204b5a9e6 in read_byte_record_impl<&[u8]> () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/reader.rs:1639
+#4  read_byte_record<&[u8]> () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/reader.rs:1595
+#5  read<&[u8]> () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/string_record.rs:637
+#6  read_record<&[u8]> () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/reader.rs:1531
+#7  next<&[u8]> () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/reader.rs:2080
+#8  0x0000565204b4bef2 in try_read_csv_str_typed_numeric () at crates/fp-io/src/lib.rs:655
+#9  read_csv_str () at crates/fp-io/src/lib.rs:702
+#10 0x0000565204b80caf in main () at crates/fp-conformance/examples/perf_profile.rs:382
+#11 0x0000565204b7c783 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#12 __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#13 0x0000565204b7c819 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#14 0x0000565204bba83e in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#15 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#16 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#17 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#18 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#19 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:581
+#20 std::panicking::catch_unwind<isize, std::rt::lang_start_internal::{closure_env#0}> () at library/std/src/panicking.rs:544
+#21 std::panic::catch_unwind<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panic.rs:359
+#22 std::rt::lang_start_internal () at library/std/src/rt.rs:171
+#23 0x0000565204b8a80c in main ()
+[Inferior 1 (process 738850) detached]
+=== sample 20 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x0000565204b46861 in next_code_point_reverse<core::slice::iter::Iter<u8>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/str/validations.rs:84
+84	        next_byte if next_byte < 128 => return Some(next_byte as u32),
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-w4vff-current/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7aa7d0b17c00 (LWP 738850) "perf_profile"):
+#0  0x0000565204b46861 in next_code_point_reverse<core::slice::iter::Iter<u8>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/str/validations.rs:84
+#1  next_back () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/str/iter.rs:128
+#2  next_back () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/str/iter.rs:216
+#3  next_back<fn(char) -> bool> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/str/pattern.rs:714
+#4  next_reject_back<core::str::pattern::MultiCharEqSearcher<fn(char) -> bool>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/str/pattern.rs:330
+#5  next_reject_back<fn(char) -> bool> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/str/pattern.rs:803
+#6  trim_matches<fn(char) -> bool> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/str/mod.rs:2374
+#7  0x0000565204b4bf8c in trim () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/str/mod.rs:2172
+#8  push_csv_default_numeric_field () at crates/fp-io/src/lib.rs:594
+#9  try_read_csv_str_typed_numeric () at crates/fp-io/src/lib.rs:659
+#10 read_csv_str () at crates/fp-io/src/lib.rs:702
+#11 0x0000565204b80caf in main () at crates/fp-conformance/examples/perf_profile.rs:382
+#12 0x0000565204b7c783 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#13 __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#14 0x0000565204b7c819 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#15 0x0000565204bba83e in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#16 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#17 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#18 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#19 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#20 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:581
+#21 std::panicking::catch_unwind<isize, std::rt::lang_start_internal::{closure_env#0}> () at library/std/src/panicking.rs:544
+#22 std::panic::catch_unwind<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panic.rs:359
+#23 std::rt::lang_start_internal () at library/std/src/rt.rs:171
+#24 0x0000565204b8a80c in main ()
+[Inferior 1 (process 738850) detached]
+=== sample 21 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+map<&[u8], &str, csv::string_record::{impl#7}::get::{closure_env#0}> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/option.rs:1164
+1164	        match self {
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-w4vff-current/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7aa7d0b17c00 (LWP 738850) "perf_profile"):
+#0  map<&[u8], &str, csv::string_record::{impl#7}::get::{closure_env#0}> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/option.rs:1164
+#1  get () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/string_record.rs:333
+#2  try_read_csv_str_typed_numeric () at crates/fp-io/src/lib.rs:658
+#3  read_csv_str () at crates/fp-io/src/lib.rs:702
+#4  0x0000565204b80caf in main () at crates/fp-conformance/examples/perf_profile.rs:382
+#5  0x0000565204b7c783 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#6  __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#7  0x0000565204b7c819 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#8  0x0000565204bba83e in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#9  std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#10 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#11 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#12 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#13 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:581
+#14 std::panicking::catch_unwind<isize, std::rt::lang_start_internal::{closure_env#0}> () at library/std/src/panicking.rs:544
+#15 std::panic::catch_unwind<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panic.rs:359
+#16 std::rt::lang_start_internal () at library/std/src/rt.rs:171
+#17 0x0000565204b8a80c in main ()
+[Inferior 1 (process 738850) detached]
+=== sample 22 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x0000565204b5a75c in clone () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/byte_record.rs:590
+
+warning: 590	/tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/byte_record.rs: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-w4vff-current/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7aa7d0b17c00 (LWP 738850) "perf_profile"):
+#0  0x0000565204b5a75c in clone () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/byte_record.rs:590
+#1  read<&[u8]> () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/string_record.rs:636
+#2  read_record<&[u8]> () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/reader.rs:1531
+#3  next<&[u8]> () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/reader.rs:2080
+#4  0x0000565204b4bef2 in try_read_csv_str_typed_numeric () at crates/fp-io/src/lib.rs:655
+#5  read_csv_str () at crates/fp-io/src/lib.rs:702
+#6  0x0000565204b80caf in main () at crates/fp-conformance/examples/perf_profile.rs:382
+#7  0x0000565204b7c783 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#8  __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#9  0x0000565204b7c819 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#10 0x0000565204bba83e in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#11 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#12 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#13 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#14 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#15 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:581
+#16 std::panicking::catch_unwind<isize, std::rt::lang_start_internal::{closure_env#0}> () at library/std/src/panicking.rs:544
+#17 std::panic::catch_unwind<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panic.rs:359
+#18 std::rt::lang_start_internal () at library/std/src/rt.rs:171
+#19 0x0000565204b8a80c in main ()
+[Inferior 1 (process 738850) detached]
+=== sample 23 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x0000565204b467a1 in is_whitespace () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/char/methods.rs:995
+995	        match self {
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-w4vff-current/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7aa7d0b17c00 (LWP 738850) "perf_profile"):
+#0  0x0000565204b467a1 in is_whitespace () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/char/methods.rs:995
+#1  call_mut<fn(char) -> bool, (char)> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:166
+#2  matches<fn(char) -> bool> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/str/pattern.rs:639
+#3  next<fn(char) -> bool> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/str/pattern.rs:697
+#4  next_reject<core::str::pattern::MultiCharEqSearcher<fn(char) -> bool>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/str/pattern.rs:265
+#5  next_reject<fn(char) -> bool> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/str/pattern.rs:789
+#6  trim_matches<fn(char) -> bool> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/str/mod.rs:2369
+#7  0x0000565204b4bf8c in trim () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/str/mod.rs:2172
+#8  push_csv_default_numeric_field () at crates/fp-io/src/lib.rs:594
+#9  try_read_csv_str_typed_numeric () at crates/fp-io/src/lib.rs:659
+#10 read_csv_str () at crates/fp-io/src/lib.rs:702
+#11 0x0000565204b80caf in main () at crates/fp-conformance/examples/perf_profile.rs:382
+#12 0x0000565204b7c783 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#13 __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#14 0x0000565204b7c819 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#15 0x0000565204bba83e in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#16 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#17 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#18 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#19 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#20 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:581
+#21 std::panicking::catch_unwind<isize, std::rt::lang_start_internal::{closure_env#0}> () at library/std/src/panicking.rs:544
+#22 std::panic::catch_unwind<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panic.rs:359
+#23 std::rt::lang_start_internal () at library/std/src/rt.rs:171
+#24 0x0000565204b8a80c in main ()
+[Inferior 1 (process 738850) detached]
+=== sample 24 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x0000565204b5726d in validate () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/byte_record.rs:558
+
+warning: 558	/tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/byte_record.rs: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-w4vff-current/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7aa7d0b17c00 (LWP 738850) "perf_profile"):
+#0  0x0000565204b5726d in validate () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/byte_record.rs:558
+#1  0x0000565204b5b087 in read<&[u8]> () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/string_record.rs:638
+#2  read_record<&[u8]> () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/reader.rs:1531
+#3  next<&[u8]> () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/reader.rs:2080
+#4  0x0000565204b4bef2 in try_read_csv_str_typed_numeric () at crates/fp-io/src/lib.rs:655
+#5  read_csv_str () at crates/fp-io/src/lib.rs:702
+#6  0x0000565204b80caf in main () at crates/fp-conformance/examples/perf_profile.rs:382
+#7  0x0000565204b7c783 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#8  __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#9  0x0000565204b7c819 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#10 0x0000565204bba83e in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#11 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#12 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#13 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#14 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#15 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:581
+#16 std::panicking::catch_unwind<isize, std::rt::lang_start_internal::{closure_env#0}> () at library/std/src/panicking.rs:544
+#17 std::panic::catch_unwind<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panic.rs:359
+#18 std::rt::lang_start_internal () at library/std/src/rt.rs:171
+#19 0x0000565204b8a80c in main ()
+[Inferior 1 (process 738850) detached]
+=== sample 25 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+core::slice::{impl#0}::split_first<u8> () at library/core/src/slice/mod.rs:199
+
+warning: 199	library/core/src/slice/mod.rs: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-w4vff-current/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7aa7d0b17c00 (LWP 738850) "perf_profile"):
+#0  core::slice::{impl#0}::split_first<u8> () at library/core/src/slice/mod.rs:199
+#1  core::num::imp::dec2flt::common::{impl#0}::parse_digits<core::num::imp::dec2flt::parse::try_parse_digits::{closure_env#0}> () at library/core/src/num/imp/dec2flt/common.rs:42
+#2  core::num::imp::dec2flt::parse::try_parse_digits () at library/core/src/num/imp/dec2flt/parse.rs:43
+#3  core::num::imp::dec2flt::parse::parse_partial_number () at library/core/src/num/imp/dec2flt/parse.rs:123
+#4  core::num::imp::dec2flt::parse::parse_number () at library/core/src/num/imp/dec2flt/parse.rs:190
+#5  0x0000565204af53f1 in core::num::imp::dec2flt::dec2flt<f64> () at library/core/src/num/imp/dec2flt/mod.rs:222
+#6  core::num::float_parse::{impl#4}::from_str () at library/core/src/num/float_parse.rs:69
+#7  0x0000565204b4c0eb in parse<f64> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/str/mod.rs:2766
+#8  push_csv_default_numeric_field () at crates/fp-io/src/lib.rs:624
+#9  try_read_csv_str_typed_numeric () at crates/fp-io/src/lib.rs:659
+#10 read_csv_str () at crates/fp-io/src/lib.rs:702
+#11 0x0000565204b80caf in main () at crates/fp-conformance/examples/perf_profile.rs:382
+#12 0x0000565204b7c783 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#13 __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#14 0x0000565204b7c819 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#15 0x0000565204bba83e in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#16 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#17 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#18 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#19 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#20 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:581
+#21 std::panicking::catch_unwind<isize, std::rt::lang_start_internal::{closure_env#0}> () at library/std/src/panicking.rs:544
+#22 std::panic::catch_unwind<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panic.rs:359
+#23 std::rt::lang_start_internal () at library/std/src/rt.rs:171
+#24 0x0000565204b8a80c in main ()
+[Inferior 1 (process 738850) detached]
+=== sample 26 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x0000565204af822e in scan_and_copy () at src/reader.rs:1263
+
+warning: 1263	src/reader.rs: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-w4vff-current/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7aa7d0b17c00 (LWP 738850) "perf_profile"):
+#0  0x0000565204af822e in scan_and_copy () at src/reader.rs:1263
+#1  read_record_dfa () at src/reader.rs:682
+#2  read_record () at src/reader.rs:601
+#3  0x0000565204b5a9e6 in read_byte_record_impl<&[u8]> () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/reader.rs:1639
+#4  read_byte_record<&[u8]> () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/reader.rs:1595
+#5  read<&[u8]> () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/string_record.rs:637
+#6  read_record<&[u8]> () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/reader.rs:1531
+#7  next<&[u8]> () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/reader.rs:2080
+#8  0x0000565204b4bef2 in try_read_csv_str_typed_numeric () at crates/fp-io/src/lib.rs:655
+#9  read_csv_str () at crates/fp-io/src/lib.rs:702
+#10 0x0000565204b80caf in main () at crates/fp-conformance/examples/perf_profile.rs:382
+#11 0x0000565204b7c783 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#12 __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#13 0x0000565204b7c819 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#14 0x0000565204bba83e in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#15 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#16 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#17 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#18 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#19 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:581
+#20 std::panicking::catch_unwind<isize, std::rt::lang_start_internal::{closure_env#0}> () at library/std/src/panicking.rs:544
+#21 std::panic::catch_unwind<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panic.rs:359
+#22 std::rt::lang_start_internal () at library/std/src/rt.rs:171
+#23 0x0000565204b8a80c in main ()
+[Inferior 1 (process 738850) detached]
+=== sample 27 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+__brk (addr=0x565222781000) at ../sysdeps/unix/sysv/linux/brk_call.h:24
+
+warning: 24	../sysdeps/unix/sysv/linux/brk_call.h: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-w4vff-current/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7aa7d0b17c00 (LWP 738850) "perf_profile"):
+#0  __brk (addr=0x565222781000) at ../sysdeps/unix/sysv/linux/brk_call.h:24
+#1  0x00007aa7d0934278 in __GI___sbrk (increment=increment@entry=-5599232) at ./misc/sbrk.c:74
+#2  0x00007aa7d08b2166 in __glibc_morecore (increment=increment@entry=-5599232) at ./malloc/morecore.c:29
+#3  0x00007aa7d08b2200 in systrim (pad=<optimized out>, av=0x7aa7d0a34ac0 <main_arena>) at ./malloc/malloc.c:3011
+#4  0x00007aa7d08b299d in _int_free_chunk (av=<optimized out>, p=<optimized out>, size=<optimized out>, have_lock=<optimized out>) at ./malloc/malloc.c:4729
+#5  0x0000565204b7b4b2 in std::sys::alloc::unix::{impl#0}::dealloc () at /rustc/9ec5d5f32e19d250c7fbeaa90978c79105b39dee/library/std/src/sys/alloc/unix.rs:48
+#6  std::alloc::__default_lib_allocator::__rdl_dealloc () at /rustc/9ec5d5f32e19d250c7fbeaa90978c79105b39dee/library/std/src/alloc.rs:463
+#7  dealloc_nonnull () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/alloc.rs:128
+#8  deallocate_impl_runtime () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/alloc.rs:229
+#9  deallocate_impl () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/alloc.rs:344
+#10 deallocate () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/alloc.rs:462
+#11 deallocate<alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:876
+#12 drop<i64, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:424
+#13 drop_in_place<alloc::raw_vec::RawVec<i64, alloc::alloc::Global>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#14 drop_in_place<alloc::vec::Vec<i64, alloc::alloc::Global>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#15 drop_in_place<fp_columnar::ScalarValues> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#16 drop_in_place<fp_columnar::Column> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#17 0x0000565204b7b302 in assume_init_drop<fp_columnar::Column> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/mem/maybe_uninit.rs:832
+#18 drop<fp_columnar::Column> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/collections/btree/node.rs:1201
+#19 drop_in_place<alloc::collections::btree::node::{impl#57}::drop_key_val::Dropper<fp_columnar::Column>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#20 drop_key_val<alloc::string::String, fp_columnar::Column, alloc::collections::btree::node::marker::LeafOrInternal> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/collections/btree/node.rs:1214
+#21 drop<alloc::string::String, fp_columnar::Column, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/collections/btree/map.rs:1902
+#22 drop_in_place<alloc::collections::btree::map::IntoIter<alloc::string::String, fp_columnar::Column, alloc::alloc::Global>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#23 drop<alloc::collections::btree::map::IntoIter<alloc::string::String, fp_columnar::Column, alloc::alloc::Global>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/mem/mod.rs:1004
+#24 drop<alloc::string::String, fp_columnar::Column, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/collections/btree/map.rs:208
+#25 drop_in_place<alloc::collections::btree::map::BTreeMap<alloc::string::String, fp_columnar::Column, alloc::alloc::Global>> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#26 0x0000565204b7c576 in drop_in_place<fp_frame::DataFrame> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:809
+#27 0x0000565204b80cea in main () at crates/fp-conformance/examples/perf_profile.rs:384
+#28 0x0000565204b7c783 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#29 __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#30 0x0000565204b7c819 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#31 0x0000565204bba83e in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#32 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#33 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#34 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#35 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#36 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:581
+#37 std::panicking::catch_unwind<isize, std::rt::lang_start_internal::{closure_env#0}> () at library/std/src/panicking.rs:544
+#38 std::panic::catch_unwind<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panic.rs:359
+#39 std::rt::lang_start_internal () at library/std/src/rt.rs:171
+#40 0x0000565204b8a80c in main ()
+[Inferior 1 (process 738850) detached]
+=== sample 28 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+__memcpy_avx_unaligned_erms () at ../sysdeps/x86_64/multiarch/memmove-vec-unaligned-erms.S:489
+
+warning: 489	../sysdeps/x86_64/multiarch/memmove-vec-unaligned-erms.S: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-w4vff-current/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7aa7d0b17c00 (LWP 738850) "perf_profile"):
+#0  __memcpy_avx_unaligned_erms () at ../sysdeps/x86_64/multiarch/memmove-vec-unaligned-erms.S:489
+#1  0x0000565204afe334 in copy_nonoverlapping<i64> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:551
+#2  copy_to_nonoverlapping<i64> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/const_ptr.rs:1252
+#3  to_vec<i64, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/slice.rs:454
+#4  to_vec_in<i64, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/slice.rs:400
+#5  clone<i64, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:3777
+#6  from_i64_values () at crates/fp-columnar/src/lib.rs:1414
+#7  0x0000565204b4ccc7 in try_read_csv_str_typed_numeric () at crates/fp-io/src/lib.rs:674
+#8  read_csv_str () at crates/fp-io/src/lib.rs:702
+#9  0x0000565204b80caf in main () at crates/fp-conformance/examples/perf_profile.rs:382
+#10 0x0000565204b7c783 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#11 __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#12 0x0000565204b7c819 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#13 0x0000565204bba83e in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#14 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#15 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#16 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#17 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#18 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:581
+#19 std::panicking::catch_unwind<isize, std::rt::lang_start_internal::{closure_env#0}> () at library/std/src/panicking.rs:544
+#20 std::panic::catch_unwind<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panic.rs:359
+#21 std::rt::lang_start_internal () at library/std/src/rt.rs:171
+#22 0x0000565204b8a80c in main ()
+[Inferior 1 (process 738850) detached]
+=== sample 29 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x0000565204af560e in core::num::imp::dec2flt::dec2flt<f64> () at library/core/src/num/imp/dec2flt/mod.rs:252
+
+warning: 252	library/core/src/num/imp/dec2flt/mod.rs: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-w4vff-current/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7aa7d0b17c00 (LWP 738850) "perf_profile"):
+#0  0x0000565204af560e in core::num::imp::dec2flt::dec2flt<f64> () at library/core/src/num/imp/dec2flt/mod.rs:252
+#1  core::num::float_parse::{impl#4}::from_str () at library/core/src/num/float_parse.rs:69
+#2  0x0000565204b4c0eb in parse<f64> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/str/mod.rs:2766
+#3  push_csv_default_numeric_field () at crates/fp-io/src/lib.rs:624
+#4  try_read_csv_str_typed_numeric () at crates/fp-io/src/lib.rs:659
+#5  read_csv_str () at crates/fp-io/src/lib.rs:702
+#6  0x0000565204b80caf in main () at crates/fp-conformance/examples/perf_profile.rs:382
+#7  0x0000565204b7c783 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#8  __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#9  0x0000565204b7c819 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#10 0x0000565204bba83e in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#11 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#12 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#13 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#14 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#15 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:581
+#16 std::panicking::catch_unwind<isize, std::rt::lang_start_internal::{closure_env#0}> () at library/std/src/panicking.rs:544
+#17 std::panic::catch_unwind<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panic.rs:359
+#18 std::rt::lang_start_internal () at library/std/src/rt.rs:171
+#19 0x0000565204b8a80c in main ()
+[Inferior 1 (process 738850) detached]
+=== sample 30 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+from_ascii_radix () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/num/mod.rs:1758
+1758	                                result = result $unchecked_additive_op (x as $int_ty);
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-w4vff-current/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7aa7d0b17c00 (LWP 738850) "perf_profile"):
+#0  from_ascii_radix () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/num/mod.rs:1758
+#1  from_str_radix () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/num/mod.rs:1631
+#2  from_str () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/num/mod.rs:1580
+#3  parse<i64> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/str/mod.rs:2766
+#4  push_csv_default_numeric_field () at crates/fp-io/src/lib.rs:620
+#5  try_read_csv_str_typed_numeric () at crates/fp-io/src/lib.rs:659
+#6  read_csv_str () at crates/fp-io/src/lib.rs:702
+#7  0x0000565204b80caf in main () at crates/fp-conformance/examples/perf_profile.rs:382
+#8  0x0000565204b7c783 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#9  __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#10 0x0000565204b7c819 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#11 0x0000565204bba83e in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#12 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#13 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#14 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#15 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#16 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:581
+#17 std::panicking::catch_unwind<isize, std::rt::lang_start_internal::{closure_env#0}> () at library/std/src/panicking.rs:544
+#18 std::panic::catch_unwind<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panic.rs:359
+#19 std::rt::lang_start_internal () at library/std/src/rt.rs:171
+#20 0x0000565204b8a80c in main ()
+[Inferior 1 (process 738850) detached]
+=== sample 31 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+get_output () at src/reader.rs:1155
+
+warning: 1155	src/reader.rs: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-w4vff-current/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7aa7d0b17c00 (LWP 738850) "perf_profile"):
+#0  get_output () at src/reader.rs:1155
+#1  read_record_dfa () at src/reader.rs:664
+#2  read_record () at src/reader.rs:601
+#3  0x0000565204b5a9e6 in read_byte_record_impl<&[u8]> () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/reader.rs:1639
+#4  read_byte_record<&[u8]> () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/reader.rs:1595
+#5  read<&[u8]> () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/string_record.rs:637
+#6  read_record<&[u8]> () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/reader.rs:1531
+#7  next<&[u8]> () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/reader.rs:2080
+#8  0x0000565204b4bef2 in try_read_csv_str_typed_numeric () at crates/fp-io/src/lib.rs:655
+#9  read_csv_str () at crates/fp-io/src/lib.rs:702
+#10 0x0000565204b80caf in main () at crates/fp-conformance/examples/perf_profile.rs:382
+#11 0x0000565204b7c783 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#12 __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#13 0x0000565204b7c819 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#14 0x0000565204bba83e in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#15 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#16 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#17 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#18 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#19 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:581
+#20 std::panicking::catch_unwind<isize, std::rt::lang_start_internal::{closure_env#0}> () at library/std/src/panicking.rs:544
+#21 std::panic::catch_unwind<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panic.rs:359
+#22 std::rt::lang_start_internal () at library/std/src/rt.rs:171
+#23 0x0000565204b8a80c in main ()
+[Inferior 1 (process 738850) detached]
+=== sample 32 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+__memcpy_avx_unaligned_erms () at ../sysdeps/x86_64/multiarch/memmove-vec-unaligned-erms.S:379
+
+warning: 379	../sysdeps/x86_64/multiarch/memmove-vec-unaligned-erms.S: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-w4vff-current/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7aa7d0b17c00 (LWP 738850) "perf_profile"):
+#0  __memcpy_avx_unaligned_erms () at ../sysdeps/x86_64/multiarch/memmove-vec-unaligned-erms.S:379
+#1  0x0000565204b5b260 in copy_nonoverlapping<usize> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:551
+#2  copy_to_nonoverlapping<usize> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/const_ptr.rs:1252
+#3  to_vec<usize, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/slice.rs:454
+#4  to_vec_in<usize, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/slice.rs:400
+#5  clone<usize, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:3777
+#6  clone () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/byte_record.rs:646
+#7  clone_truncated () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/byte_record.rs:510
+#8  clone_truncated () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/string_record.rs:618
+#9  next<&[u8]> () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/reader.rs:2082
+#10 0x0000565204b4bef2 in try_read_csv_str_typed_numeric () at crates/fp-io/src/lib.rs:655
+#11 read_csv_str () at crates/fp-io/src/lib.rs:702
+#12 0x0000565204b80caf in main () at crates/fp-conformance/examples/perf_profile.rs:382
+#13 0x0000565204b7c783 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#14 __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#15 0x0000565204b7c819 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#16 0x0000565204bba83e in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#17 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#18 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#19 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#20 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#21 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:581
+#22 std::panicking::catch_unwind<isize, std::rt::lang_start_internal::{closure_env#0}> () at library/std/src/panicking.rs:544
+#23 std::panic::catch_unwind<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panic.rs:359
+#24 std::rt::lang_start_internal () at library/std/src/rt.rs:171
+#25 0x0000565204b8a80c in main ()
+[Inferior 1 (process 738850) detached]
+=== sample 33 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x0000565204aecc57 in core::num::imp::dec2flt::lemire::compute_float<f64> () at library/core/src/num/imp/dec2flt/lemire.rs:109
+
+warning: 109	library/core/src/num/imp/dec2flt/lemire.rs: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-w4vff-current/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7aa7d0b17c00 (LWP 738850) "perf_profile"):
+#0  0x0000565204aecc57 in core::num::imp::dec2flt::lemire::compute_float<f64> () at library/core/src/num/imp/dec2flt/lemire.rs:109
+#1  0x0000565204af5488 in core::num::imp::dec2flt::dec2flt<f64> () at library/core/src/num/imp/dec2flt/mod.rs:238
+#2  core::num::float_parse::{impl#4}::from_str () at library/core/src/num/float_parse.rs:69
+#3  0x0000565204b4c0eb in parse<f64> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/str/mod.rs:2766
+#4  push_csv_default_numeric_field () at crates/fp-io/src/lib.rs:624
+#5  try_read_csv_str_typed_numeric () at crates/fp-io/src/lib.rs:659
+#6  read_csv_str () at crates/fp-io/src/lib.rs:702
+#7  0x0000565204b80caf in main () at crates/fp-conformance/examples/perf_profile.rs:382
+#8  0x0000565204b7c783 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#9  __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#10 0x0000565204b7c819 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#11 0x0000565204bba83e in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#12 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#13 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#14 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#15 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#16 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:581
+#17 std::panicking::catch_unwind<isize, std::rt::lang_start_internal::{closure_env#0}> () at library/std/src/panicking.rs:544
+#18 std::panic::catch_unwind<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panic.rs:359
+#19 std::rt::lang_start_internal () at library/std/src/rt.rs:171
+#20 0x0000565204b8a80c in main ()
+[Inferior 1 (process 738850) detached]
+=== sample 34 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x0000565204af5488 in core::num::imp::dec2flt::dec2flt<f64> () at library/core/src/num/imp/dec2flt/mod.rs:238
+
+warning: 238	library/core/src/num/imp/dec2flt/mod.rs: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-w4vff-current/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7aa7d0b17c00 (LWP 738850) "perf_profile"):
+#0  0x0000565204af5488 in core::num::imp::dec2flt::dec2flt<f64> () at library/core/src/num/imp/dec2flt/mod.rs:238
+#1  core::num::float_parse::{impl#4}::from_str () at library/core/src/num/float_parse.rs:69
+#2  0x0000565204b4c0eb in parse<f64> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/str/mod.rs:2766
+#3  push_csv_default_numeric_field () at crates/fp-io/src/lib.rs:624
+#4  try_read_csv_str_typed_numeric () at crates/fp-io/src/lib.rs:659
+#5  read_csv_str () at crates/fp-io/src/lib.rs:702
+#6  0x0000565204b80caf in main () at crates/fp-conformance/examples/perf_profile.rs:382
+#7  0x0000565204b7c783 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#8  __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#9  0x0000565204b7c819 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#10 0x0000565204bba83e in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#11 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#12 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#13 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#14 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#15 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:581
+#16 std::panicking::catch_unwind<isize, std::rt::lang_start_internal::{closure_env#0}> () at library/std/src/panicking.rs:544
+#17 std::panic::catch_unwind<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panic.rs:359
+#18 std::rt::lang_start_internal () at library/std/src/rt.rs:171
+#19 0x0000565204b8a80c in main ()
+[Inferior 1 (process 738850) detached]
+=== sample 35 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x0000565204b4c277 in from_ascii_radix () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/num/mod.rs:1755
+1755	                            while let [c, rest @ ..] = digits {
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-w4vff-current/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7aa7d0b17c00 (LWP 738850) "perf_profile"):
+#0  0x0000565204b4c277 in from_ascii_radix () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/num/mod.rs:1755
+#1  from_str_radix () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/num/mod.rs:1631
+#2  from_str () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/num/mod.rs:1580
+#3  parse<i64> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/str/mod.rs:2766
+#4  push_csv_default_numeric_field () at crates/fp-io/src/lib.rs:620
+#5  try_read_csv_str_typed_numeric () at crates/fp-io/src/lib.rs:659
+#6  read_csv_str () at crates/fp-io/src/lib.rs:702
+#7  0x0000565204b80caf in main () at crates/fp-conformance/examples/perf_profile.rs:382
+#8  0x0000565204b7c783 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#9  __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#10 0x0000565204b7c819 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#11 0x0000565204bba83e in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#12 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#13 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#14 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#15 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#16 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:581
+#17 std::panicking::catch_unwind<isize, std::rt::lang_start_internal::{closure_env#0}> () at library/std/src/panicking.rs:544
+#18 std::panic::catch_unwind<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panic.rs:359
+#19 std::rt::lang_start_internal () at library/std/src/rt.rs:171
+#20 0x0000565204b8a80c in main ()
+[Inferior 1 (process 738850) detached]
+=== sample 36 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x0000565204af81a6 in get_output () at src/reader.rs:1155
+
+warning: 1155	src/reader.rs: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-w4vff-current/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7aa7d0b17c00 (LWP 738850) "perf_profile"):
+#0  0x0000565204af81a6 in get_output () at src/reader.rs:1155
+#1  read_record_dfa () at src/reader.rs:664
+#2  read_record () at src/reader.rs:601
+#3  0x0000565204b5a9e6 in read_byte_record_impl<&[u8]> () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/reader.rs:1639
+#4  read_byte_record<&[u8]> () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/reader.rs:1595
+#5  read<&[u8]> () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/string_record.rs:637
+#6  read_record<&[u8]> () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/reader.rs:1531
+#7  next<&[u8]> () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/reader.rs:2080
+#8  0x0000565204b4bef2 in try_read_csv_str_typed_numeric () at crates/fp-io/src/lib.rs:655
+#9  read_csv_str () at crates/fp-io/src/lib.rs:702
+#10 0x0000565204b80caf in main () at crates/fp-conformance/examples/perf_profile.rs:382
+#11 0x0000565204b7c783 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#12 __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#13 0x0000565204b7c819 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#14 0x0000565204bba83e in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#15 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#16 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#17 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#18 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#19 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:581
+#20 std::panicking::catch_unwind<isize, std::rt::lang_start_internal::{closure_env#0}> () at library/std/src/panicking.rs:544
+#21 std::panic::catch_unwind<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panic.rs:359
+#22 std::rt::lang_start_internal () at library/std/src/rt.rs:171
+#23 0x0000565204b8a80c in main ()
+[Inferior 1 (process 738850) detached]
+=== sample 37 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+__memcpy_avx_unaligned_erms () at ../sysdeps/x86_64/multiarch/memmove-vec-unaligned-erms.S:256
+
+warning: 256	../sysdeps/x86_64/multiarch/memmove-vec-unaligned-erms.S: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-w4vff-current/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7aa7d0b17c00 (LWP 738850) "perf_profile"):
+#0  __memcpy_avx_unaligned_erms () at ../sysdeps/x86_64/multiarch/memmove-vec-unaligned-erms.S:256
+#1  0x0000565204b5b308 in copy_nonoverlapping<u8> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:551
+#2  copy_to_nonoverlapping<u8> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/const_ptr.rs:1252
+#3  to_vec<u8, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/slice.rs:454
+#4  to_vec_in<u8, alloc::alloc::Global> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/slice.rs:400
+#5  to_vec<u8> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/slice.rs:376
+#6  clone_truncated () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/byte_record.rs:511
+#7  clone_truncated () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/string_record.rs:618
+#8  next<&[u8]> () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/reader.rs:2082
+#9  0x0000565204b4bef2 in try_read_csv_str_typed_numeric () at crates/fp-io/src/lib.rs:655
+#10 read_csv_str () at crates/fp-io/src/lib.rs:702
+#11 0x0000565204b80caf in main () at crates/fp-conformance/examples/perf_profile.rs:382
+#12 0x0000565204b7c783 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#13 __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#14 0x0000565204b7c819 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#15 0x0000565204bba83e in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#16 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#17 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#18 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#19 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#20 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:581
+#21 std::panicking::catch_unwind<isize, std::rt::lang_start_internal::{closure_env#0}> () at library/std/src/panicking.rs:544
+#22 std::panic::catch_unwind<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panic.rs:359
+#23 std::rt::lang_start_internal () at library/std/src/rt.rs:171
+#24 0x0000565204b8a80c in main ()
+[Inferior 1 (process 738850) detached]
+=== sample 38 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+get_output () at src/reader.rs:1154
+
+warning: 1154	src/reader.rs: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-w4vff-current/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7aa7d0b17c00 (LWP 738850) "perf_profile"):
+#0  get_output () at src/reader.rs:1154
+#1  read_record_dfa () at src/reader.rs:664
+#2  read_record () at src/reader.rs:601
+#3  0x0000565204b5a9e6 in read_byte_record_impl<&[u8]> () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/reader.rs:1639
+#4  read_byte_record<&[u8]> () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/reader.rs:1595
+#5  read<&[u8]> () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/string_record.rs:637
+#6  read_record<&[u8]> () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/reader.rs:1531
+#7  next<&[u8]> () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/reader.rs:2080
+#8  0x0000565204b4bef2 in try_read_csv_str_typed_numeric () at crates/fp-io/src/lib.rs:655
+#9  read_csv_str () at crates/fp-io/src/lib.rs:702
+#10 0x0000565204b80caf in main () at crates/fp-conformance/examples/perf_profile.rs:382
+#11 0x0000565204b7c783 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#12 __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#13 0x0000565204b7c819 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#14 0x0000565204bba83e in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#15 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#16 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#17 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#18 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#19 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:581
+#20 std::panicking::catch_unwind<isize, std::rt::lang_start_internal::{closure_env#0}> () at library/std/src/panicking.rs:544
+#21 std::panic::catch_unwind<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panic.rs:359
+#22 std::rt::lang_start_internal () at library/std/src/rt.rs:171
+#23 0x0000565204b8a80c in main ()
+[Inferior 1 (process 738850) detached]
+=== sample 39 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+get_output () at src/reader.rs:1155
+
+warning: 1155	src/reader.rs: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-w4vff-current/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7aa7d0b17c00 (LWP 738850) "perf_profile"):
+#0  get_output () at src/reader.rs:1155
+#1  read_record_dfa () at src/reader.rs:664
+#2  read_record () at src/reader.rs:601
+#3  0x0000565204b5a9e6 in read_byte_record_impl<&[u8]> () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/reader.rs:1639
+#4  read_byte_record<&[u8]> () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/reader.rs:1595
+#5  read<&[u8]> () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/string_record.rs:637
+#6  read_record<&[u8]> () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/reader.rs:1531
+#7  next<&[u8]> () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/reader.rs:2080
+#8  0x0000565204b4bef2 in try_read_csv_str_typed_numeric () at crates/fp-io/src/lib.rs:655
+#9  read_csv_str () at crates/fp-io/src/lib.rs:702
+#10 0x0000565204b80caf in main () at crates/fp-conformance/examples/perf_profile.rs:382
+#11 0x0000565204b7c783 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#12 __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#13 0x0000565204b7c819 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#14 0x0000565204bba83e in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#15 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#16 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#17 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#18 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#19 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:581
+#20 std::panicking::catch_unwind<isize, std::rt::lang_start_internal::{closure_env#0}> () at library/std/src/panicking.rs:544
+#21 std::panic::catch_unwind<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panic.rs:359
+#22 std::rt::lang_start_internal () at library/std/src/rt.rs:171
+#23 0x0000565204b8a80c in main ()
+[Inferior 1 (process 738850) detached]
+=== sample 40 ===
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+scan_and_copy () at src/reader.rs:1265
+
+warning: 1265	src/reader.rs: No such file or directory
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /data/tmp/cargo-target-rubygoose-w4vff-current/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+Thread 1 (Thread 0x7aa7d0b17c00 (LWP 738850) "perf_profile"):
+#0  scan_and_copy () at src/reader.rs:1265
+#1  read_record_dfa () at src/reader.rs:682
+#2  read_record () at src/reader.rs:601
+#3  0x0000565204b5a9e6 in read_byte_record_impl<&[u8]> () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/reader.rs:1639
+#4  read_byte_record<&[u8]> () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/reader.rs:1595
+#5  read<&[u8]> () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/string_record.rs:637
+#6  read_record<&[u8]> () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/reader.rs:1531
+#7  next<&[u8]> () at /tmp/rch-cargo-home-vmi1156319-288941-1780504677225723018/registry/src/index.crates.io-1949cf8c6b5b557f/csv-1.4.0/src/reader.rs:2080
+#8  0x0000565204b4bef2 in try_read_csv_str_typed_numeric () at crates/fp-io/src/lib.rs:655
+#9  read_csv_str () at crates/fp-io/src/lib.rs:702
+#10 0x0000565204b80caf in main () at crates/fp-conformance/examples/perf_profile.rs:382
+#11 0x0000565204b7c783 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#12 __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#13 0x0000565204b7c819 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#14 0x0000565204bba83e in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#15 std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#16 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#17 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
+#18 std::rt::lang_start_internal::{closure#0} () at library/std/src/rt.rs:175
+#19 std::panicking::catch_unwind::do_call<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panicking.rs:581
+#20 std::panicking::catch_unwind<isize, std::rt::lang_start_internal::{closure_env#0}> () at library/std/src/panicking.rs:544
+#21 std::panic::catch_unwind<std::rt::lang_start_internal::{closure_env#0}, isize> () at library/std/src/panic.rs:359
+#22 std::rt::lang_start_internal () at library/std/src/rt.rs:171
+#23 0x0000565204b8a80c in main ()
+[Inferior 1 (process 738850) detached]
+sampled_rc=0

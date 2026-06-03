@@ -586,51 +586,235 @@ enum CsvTypedColumnValues {
     Float64(Vec<f64>),
 }
 
-fn push_csv_default_numeric_field(values: &mut CsvTypedColumnValues, field: &str) -> bool {
-    if is_pandas_default_na(field) {
+fn trim_ascii_field(mut field: &[u8]) -> &[u8] {
+    while let Some((first, rest)) = field.split_first() {
+        if first.is_ascii_whitespace() {
+            field = rest;
+        } else {
+            break;
+        }
+    }
+    while let Some((last, rest)) = field.split_last() {
+        if last.is_ascii_whitespace() {
+            field = rest;
+        } else {
+            break;
+        }
+    }
+    field
+}
+
+fn is_pandas_default_na_bytes(field: &[u8]) -> bool {
+    const DEFAULT_NA_VALUES: &[&[u8]] = &[
+        b"",
+        b"#N/A",
+        b"#N/A N/A",
+        b"#NA",
+        b"-1.#IND",
+        b"-1.#QNAN",
+        b"-NaN",
+        b"-nan",
+        b"1.#IND",
+        b"1.#QNAN",
+        b"<NA>",
+        b"N/A",
+        b"NA",
+        b"NULL",
+        b"NaN",
+        b"None",
+        b"n/a",
+        b"nan",
+        b"null",
+    ];
+    DEFAULT_NA_VALUES.contains(&field)
+}
+
+fn eq_ignore_ascii_case_bytes(field: &[u8], expected: &[u8]) -> bool {
+    field.len() == expected.len()
+        && field
+            .iter()
+            .zip(expected)
+            .all(|(lhs, rhs)| lhs.eq_ignore_ascii_case(rhs))
+}
+
+fn has_float_marker(field: &[u8]) -> bool {
+    field.iter().any(|byte| matches!(byte, b'.' | b'e' | b'E'))
+}
+
+fn parse_i64_ascii(field: &[u8]) -> Option<i64> {
+    if field.is_ascii() {
+        std::str::from_utf8(field).ok()?.parse::<i64>().ok()
+    } else {
+        None
+    }
+}
+
+fn parse_f64_csv_number(field: &[u8]) -> Option<f64> {
+    if !field.is_ascii() {
+        return None;
+    }
+    match fast_float2::parse::<f64, _>(field) {
+        Ok(value) => Some(value),
+        Err(_) => std::str::from_utf8(field).ok()?.parse::<f64>().ok(),
+    }
+}
+
+fn push_csv_default_numeric_field(values: &mut CsvTypedColumnValues, field: &[u8]) -> bool {
+    if is_pandas_default_na_bytes(field) {
         return false;
     }
 
-    let trimmed = field.trim();
+    let trimmed = trim_ascii_field(field);
     if trimmed.is_empty()
-        || field.eq_ignore_ascii_case("true")
-        || field.eq_ignore_ascii_case("false")
+        || eq_ignore_ascii_case_bytes(field, b"true")
+        || eq_ignore_ascii_case_bytes(field, b"false")
     {
         return false;
     }
 
     match values {
-        CsvTypedColumnValues::Int64(out) => match trimmed.parse::<i64>() {
-            Ok(value) => {
+        CsvTypedColumnValues::Int64(out) => {
+            if !has_float_marker(trimmed)
+                && let Some(value) = parse_i64_ascii(trimmed)
+            {
                 out.push(value);
                 true
-            }
-            Err(_) => match trimmed.parse::<f64>() {
-                Ok(value) if !value.is_nan() => {
-                    let mut promoted = Vec::with_capacity(out.capacity());
-                    promoted.extend(out.iter().copied().map(|value| value as f64));
-                    promoted.push(value);
-                    *values = CsvTypedColumnValues::Float64(promoted);
-                    true
+            } else {
+                match parse_f64_csv_number(trimmed) {
+                    Some(value) if !value.is_nan() => {
+                        let mut promoted = Vec::with_capacity(out.capacity());
+                        promoted.extend(out.iter().copied().map(|value| value as f64));
+                        promoted.push(value);
+                        *values = CsvTypedColumnValues::Float64(promoted);
+                        true
+                    }
+                    Some(_) | None => false,
                 }
-                Ok(_) | Err(_) => false,
-            },
-        },
+            }
+        }
         CsvTypedColumnValues::Float64(out) => {
-            if let Ok(value) = trimmed.parse::<i64>() {
+            if !has_float_marker(trimmed)
+                && let Some(value) = parse_i64_ascii(trimmed)
+            {
                 out.push(value as f64);
                 true
             } else {
-                match trimmed.parse::<f64>() {
-                    Ok(value) if !value.is_nan() => {
+                match parse_f64_csv_number(trimmed) {
+                    Some(value) if !value.is_nan() => {
                         out.push(value);
                         true
                     }
-                    Ok(_) | Err(_) => false,
+                    Some(_) | None => false,
                 }
             }
         }
     }
+}
+
+fn build_typed_numeric_csv_frame(
+    headers: &[String],
+    typed_columns: Vec<CsvTypedColumnValues>,
+    row_count: i64,
+) -> Result<DataFrame, IoError> {
+    let mut out_columns = BTreeMap::new();
+    let mut column_order = Vec::with_capacity(headers.len());
+    for (name, values) in headers.iter().cloned().zip(typed_columns) {
+        let column = match values {
+            CsvTypedColumnValues::Int64(values) => Column::from_i64_values(values),
+            CsvTypedColumnValues::Float64(values) => Column::from_f64_values(values),
+        };
+        out_columns.insert(name.clone(), column);
+        column_order.push(name);
+    }
+
+    let index = Index::from_i64((0..row_count).collect());
+    DataFrame::new_with_column_order(index, out_columns, column_order).map_err(IoError::from)
+}
+
+fn try_read_csv_str_simple_typed_numeric(
+    input: &str,
+    headers: &[String],
+) -> Result<Option<DataFrame>, IoError> {
+    let header_count = headers.len();
+    if header_count == 0 {
+        return Ok(None);
+    }
+
+    let bytes = input.as_bytes();
+    let Some(header_end) = bytes.iter().position(|byte| *byte == b'\n') else {
+        return Ok(None);
+    };
+    if bytes[..header_end]
+        .iter()
+        .any(|byte| matches!(byte, b'"' | b'\r'))
+    {
+        return Ok(None);
+    }
+
+    let data = &bytes[header_end + 1..];
+    if data.is_empty() {
+        return Ok(None);
+    }
+
+    let row_hint = input.len() / (header_count * 8).max(1);
+    let mut typed_columns: Vec<CsvTypedColumnValues> = (0..header_count)
+        .map(|_| CsvTypedColumnValues::Int64(Vec::with_capacity(row_hint)))
+        .collect();
+    let mut row_count: i64 = 0;
+    let mut column_idx = 0usize;
+    let mut field_start = 0usize;
+
+    for (idx, byte) in data.iter().copied().enumerate() {
+        match byte {
+            b'"' => return Ok(None),
+            b'\r' if data.get(idx + 1).copied() != Some(b'\n') => return Ok(None),
+            b',' | b'\n' => {
+                if column_idx >= header_count {
+                    return Ok(None);
+                }
+                let field = &data[field_start..idx];
+                if !push_csv_default_numeric_field(&mut typed_columns[column_idx], field) {
+                    return Ok(None);
+                }
+
+                if byte == b',' {
+                    column_idx += 1;
+                    if column_idx >= header_count {
+                        return Ok(None);
+                    }
+                } else {
+                    if column_idx + 1 != header_count {
+                        return Ok(None);
+                    }
+                    row_count += 1;
+                    column_idx = 0;
+                }
+                field_start = idx + 1;
+            }
+            _ => {}
+        }
+    }
+
+    if field_start < data.len() {
+        if column_idx >= header_count {
+            return Ok(None);
+        }
+        let field = &data[field_start..];
+        if !push_csv_default_numeric_field(&mut typed_columns[column_idx], field)
+            || column_idx + 1 != header_count
+        {
+            return Ok(None);
+        }
+        row_count += 1;
+    } else if column_idx != 0 {
+        return Ok(None);
+    }
+
+    if row_count == 0 {
+        return Ok(None);
+    }
+
+    build_typed_numeric_csv_frame(headers, typed_columns, row_count).map(Some)
 }
 
 fn try_read_csv_str_typed_numeric(
@@ -652,7 +836,7 @@ fn try_read_csv_str_typed_numeric(
         .map(|_| CsvTypedColumnValues::Int64(Vec::with_capacity(row_hint)))
         .collect();
     let mut row_count: i64 = 0;
-    for row in reader.records() {
+    for row in reader.byte_records() {
         let record = row?;
         for (idx, column) in typed_columns.iter_mut().enumerate() {
             let field = record.get(idx).unwrap_or_default();
@@ -667,23 +851,7 @@ fn try_read_csv_str_typed_numeric(
         return Ok(None);
     }
 
-    let mut out_columns = BTreeMap::new();
-    let mut column_order = Vec::with_capacity(header_count);
-    for (name, values) in headers.iter().cloned().zip(typed_columns) {
-        let column = match values {
-            CsvTypedColumnValues::Int64(values) => Column::from_i64_values(values),
-            CsvTypedColumnValues::Float64(values) => Column::from_f64_values(values),
-        };
-        out_columns.insert(name.clone(), column);
-        column_order.push(name);
-    }
-
-    let index = Index::from_i64((0..row_count).collect());
-    Ok(Some(DataFrame::new_with_column_order(
-        index,
-        out_columns,
-        column_order,
-    )?))
+    build_typed_numeric_csv_frame(headers, typed_columns, row_count).map(Some)
 }
 
 pub fn read_csv_str(input: &str) -> Result<DataFrame, IoError> {
@@ -698,6 +866,10 @@ pub fn read_csv_str(input: &str) -> Result<DataFrame, IoError> {
     }
     let headers: Vec<String> = headers_record.iter().map(ToOwned::to_owned).collect();
     reject_duplicate_headers(&headers)?;
+
+    if let Some(frame) = try_read_csv_str_simple_typed_numeric(input, &headers)? {
+        return Ok(frame);
+    }
 
     if let Some(frame) = try_read_csv_str_typed_numeric(input, &headers)? {
         return Ok(frame);
@@ -13237,6 +13409,61 @@ mod tests {
         assert_eq!(
             write_csv_string(&object_frame).expect("fallback write"),
             object_input
+        );
+    }
+
+    #[test]
+    fn read_csv_simple_typed_numeric_fast_path_builds_typed_columns() {
+        let input = "i,f\n1,0\n2,0.5\n3,1.25\n";
+        let headers = vec!["i".to_owned(), "f".to_owned()];
+
+        let fast = super::try_read_csv_str_simple_typed_numeric(input, &headers)
+            .expect("simple typed parse")
+            .expect("simple numeric fast path");
+
+        assert_eq!(fast.column("i").expect("i").dtype(), DType::Int64);
+        assert_eq!(fast.column("f").expect("f").dtype(), DType::Float64);
+        assert_eq!(fast.index().labels()[2], IndexLabel::Int64(2));
+        assert_eq!(fast.column("i").expect("i").values()[2], Scalar::Int64(3));
+        assert_eq!(
+            fast.column("f").expect("f").values()[2],
+            Scalar::Float64(1.25)
+        );
+    }
+
+    #[test]
+    fn read_csv_simple_typed_numeric_fast_path_rejects_quoted_fields() {
+        let input = "x\n\"1.5\"\n";
+        let headers = vec!["x".to_owned()];
+
+        assert!(
+            super::try_read_csv_str_simple_typed_numeric(input, &headers)
+                .expect("simple probe")
+                .is_none()
+        );
+
+        let frame = read_csv_str(input).expect("fallback read");
+        assert_eq!(frame.column("x").expect("x").dtype(), DType::Float64);
+        assert_eq!(
+            frame.column("x").expect("x").values(),
+            &[Scalar::Float64(1.5)]
+        );
+    }
+
+    #[test]
+    fn read_csv_simple_typed_numeric_fast_path_accepts_crlf_rows() {
+        let input = "i,f\n1,0\r\n2,0.5\r\n";
+        let headers = vec!["i".to_owned(), "f".to_owned()];
+
+        let fast = super::try_read_csv_str_simple_typed_numeric(input, &headers)
+            .expect("simple typed parse")
+            .expect("simple numeric fast path");
+
+        assert_eq!(fast.len(), 2);
+        assert_eq!(fast.column("i").expect("i").values()[1], Scalar::Int64(2));
+        assert_eq!(
+            fast.column("f").expect("f").values()[1],
+            Scalar::Float64(0.5)
         );
     }
 

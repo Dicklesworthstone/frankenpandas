@@ -1,0 +1,2 @@
+perf_profile: scenario=csv_read n=100000 iters=2000
+perf_profile: done 2000 iters in 100.043s (50.021 ms/iter), sink=200000000
