@@ -2630,6 +2630,36 @@ fn int_needle_membership_bitset(test_values: &[Scalar]) -> Option<(i64, Vec<bool
     Some((min, bits))
 }
 
+/// Apply an isin membership test to one column, choosing the hash-free dense
+/// bitset (all-valid Int64 column + a precomputed Int64-needle bitset) or the
+/// `IsinIndex` HashSet otherwise. The bitset path also emits a typed Bool
+/// column (1B/elem) instead of a Vec<Scalar::Bool> (32B/elem). Bit-identical:
+/// with only Int64 needles `IsinIndex::contains(Int64)` reduces to
+/// `ints.contains`, exactly what the bitset encodes.
+fn isin_apply_column(
+    col: &Column,
+    idx: &IsinIndex<'_>,
+    bitset: Option<&(i64, Vec<bool>)>,
+) -> Result<Column, FrameError> {
+    if let (Some(data), Some((min, bits))) = (col.as_i64_slice(), bitset) {
+        let len = bits.len() as i128;
+        let flags: Vec<bool> = data
+            .iter()
+            .map(|&v| {
+                let off = v as i128 - *min as i128;
+                off >= 0 && off < len && bits[off as usize]
+            })
+            .collect();
+        return Ok(Column::from_bool_values(flags));
+    }
+    let bools: Vec<Scalar> = col
+        .values()
+        .iter()
+        .map(|value| Scalar::Bool(idx.contains(value)))
+        .collect();
+    Ok(Column::from_values(bools)?)
+}
+
 fn compare_scalars_with_na_position(
     left: &Scalar,
     right: &Scalar,
@@ -41584,15 +41614,13 @@ impl DataFrame {
         // reuse across all columns. Was N_cols × O(n × m); now
         // N_cols × O(n + m) with one shared index build.
         let idx = IsinIndex::build(values);
+        // Shared across columns: a dense Int64-needle bitset (when applicable)
+        // lets all-valid Int64 columns probe hash-free with typed Bool output.
+        let bitset = int_needle_membership_bitset(values);
         let mut new_cols = BTreeMap::new();
         for name in &self.column_order {
             let col = &self.columns[name];
-            let bools: Vec<Scalar> = col
-                .values()
-                .iter()
-                .map(|value| Scalar::Bool(idx.contains(value)))
-                .collect();
-            new_cols.insert(name.clone(), Column::from_values(bools)?);
+            new_cols.insert(name.clone(), isin_apply_column(col, &idx, bitset.as_ref())?);
         }
         Self::new_with_column_order(self.index.clone(), new_cols, self.column_order.clone())
     }
@@ -41611,16 +41639,14 @@ impl DataFrame {
         let mut new_cols = BTreeMap::new();
         for name in &self.column_order {
             let col = &self.columns[name];
-            let bools: Vec<Scalar> = if let Some(allowed) = per_column.get(name) {
+            let column = if let Some(allowed) = per_column.get(name) {
                 let idx = IsinIndex::build(allowed);
-                col.values()
-                    .iter()
-                    .map(|value| Scalar::Bool(idx.contains(value)))
-                    .collect()
+                let bitset = int_needle_membership_bitset(allowed);
+                isin_apply_column(col, &idx, bitset.as_ref())?
             } else {
-                vec![Scalar::Bool(false); col.len()]
+                Column::from_bool_values(vec![false; col.len()])
             };
-            new_cols.insert(name.clone(), Column::from_values(bools)?);
+            new_cols.insert(name.clone(), column);
         }
         Self::new_with_column_order(self.index.clone(), new_cols, self.column_order.clone())
     }
@@ -115464,6 +115490,113 @@ mod test_select_columns_perf_76e1fd {
              op-only ratio={:.2}x (full {:.2}x, chk {chk}/{chk2}/{sink})",
             scalar_op / typed_op,
             scalar.as_secs_f64() / typed.as_secs_f64()
+        );
+    }
+
+    #[test]
+    fn dataframe_isin_int_bitset_matches_reference() {
+        // df.isin over all-Int64 columns + Int64 needles must be bit-identical
+        // to per-cell needle membership (the bitset/typed-output fast path).
+        let mut state: u64 = 0x8F3A_71C5_2D9E_6B04;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            state
+        };
+        for trial in 0..120 {
+            let n = (next() % 60) as usize + 1;
+            let col_a: Vec<i64> = (0..n).map(|_| (next() % 18) as i64 - 9).collect();
+            let col_b: Vec<i64> = (0..n).map(|_| (next() % 18) as i64 - 9).collect();
+            let m = (next() % 10) as usize;
+            let needle_vals: Vec<i64> = (0..m).map(|_| (next() % 14) as i64 - 5).collect();
+            let needles: Vec<Scalar> = needle_vals.iter().map(|&v| Scalar::Int64(v)).collect();
+
+            let df = DataFrame::from_dict(
+                &["a", "b"],
+                vec![
+                    ("a", col_a.iter().map(|&v| Scalar::Int64(v)).collect()),
+                    ("b", col_b.iter().map(|&v| Scalar::Int64(v)).collect()),
+                ],
+            )
+            .unwrap();
+            let out = df.isin(&needles).unwrap();
+            for (name, src) in [("a", &col_a), ("b", &col_b)] {
+                let got: Vec<bool> = out
+                    .column(name)
+                    .unwrap()
+                    .values()
+                    .iter()
+                    .map(|v| matches!(v, Scalar::Bool(true)))
+                    .collect();
+                let want: Vec<bool> = src.iter().map(|v| needle_vals.contains(v)).collect();
+                assert_eq!(got, want, "trial {trial} col {name}");
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "timing benchmark; run with --ignored --nocapture on the rch VM"]
+    fn dataframe_isin_bitset_timing_vs_hashset() {
+        use std::time::Instant;
+        let rows = 1_000_000usize;
+        let ncols = 5usize;
+        let iters = 10;
+        let mut state: u64 = 0x1357_9BDF_2468_ACE0;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            state
+        };
+        let span = 1_000_000u64;
+        let names = ["c0", "c1", "c2", "c3", "c4"];
+        let cols: Vec<(&str, Vec<Scalar>)> = (0..ncols)
+            .map(|c| {
+                (
+                    names[c],
+                    (0..rows)
+                        .map(|_| Scalar::Int64((next() % span) as i64))
+                        .collect(),
+                )
+            })
+            .collect();
+        let df = DataFrame::from_dict(&names[..ncols], cols).unwrap();
+        let needles: Vec<Scalar> = (0..50_000)
+            .map(|_| Scalar::Int64((next() % span) as i64))
+            .collect();
+
+        let t0 = Instant::now();
+        let mut chk = 0usize;
+        for _ in 0..iters {
+            chk ^= df.isin(&needles).unwrap().shape().0;
+        }
+        let bitset = t0.elapsed();
+
+        // OLD full path: one shared IsinIndex (SipHash) + Vec<Scalar::Bool> per col.
+        let t1 = Instant::now();
+        let mut chk2 = 0usize;
+        for _ in 0..iters {
+            let idx = IsinIndex::build(&needles);
+            let mut newc = std::collections::BTreeMap::new();
+            for name in &df.column_order {
+                let col = &df.columns[name];
+                let bools: Vec<Scalar> = col
+                    .values()
+                    .iter()
+                    .map(|v| Scalar::Bool(idx.contains(v)))
+                    .collect();
+                newc.insert(name.clone(), Column::from_values(bools).unwrap());
+            }
+            let out =
+                DataFrame::new_with_column_order(df.index.clone(), newc, df.column_order.clone())
+                    .unwrap();
+            chk2 ^= out.shape().0;
+        }
+        let hashset = t1.elapsed();
+        eprintln!(
+            "df.isin {rows}x{ncols} i64 needles=50k x{iters}: bitset={bitset:?} hashset={hashset:?} ratio={:.2}x (chk {chk}/{chk2})",
+            hashset.as_secs_f64() / bitset.as_secs_f64()
         );
     }
 
