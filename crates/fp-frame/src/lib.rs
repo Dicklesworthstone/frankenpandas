@@ -12114,6 +12114,10 @@ impl Series {
             return Ok(f64::NAN);
         }
 
+        if let Some(tau) = Self::kendall_no_tie_fast(&pairs) {
+            return Ok(tau);
+        }
+
         // Count concordant and discordant pairs, plus tied pairs
         let mut concordant = 0_i64;
         let mut discordant = 0_i64;
@@ -12148,6 +12152,94 @@ impl Series {
         } else {
             Ok((concordant - discordant) as f64 / denom)
         }
+    }
+
+    fn kendall_no_tie_fast(pairs: &[(f64, f64)]) -> Option<f64> {
+        if pairs.iter().any(|(x, y)| !x.is_finite() || !y.is_finite()) {
+            return None;
+        }
+
+        let mut by_x = pairs.to_vec();
+        by_x.sort_by(|left, right| {
+            left.0
+                .partial_cmp(&right.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        if by_x
+            .windows(2)
+            .any(|window| (window[1].0 - window[0].0).abs() < f64::EPSILON)
+        {
+            return None;
+        }
+
+        let mut y_order: Vec<f64> = by_x.iter().map(|(_, y)| *y).collect();
+        let mut y_sorted = y_order.clone();
+        y_sorted
+            .sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
+
+        if y_sorted
+            .windows(2)
+            .any(|window| (window[1] - window[0]).abs() < f64::EPSILON)
+        {
+            return None;
+        }
+
+        let discordant = Self::count_f64_inversions(&mut y_order) as f64;
+        let n = pairs.len() as f64;
+        let n_pairs = n * (n - 1.0) / 2.0;
+        if n_pairs < f64::EPSILON {
+            Some(f64::NAN)
+        } else {
+            Some((n_pairs - 2.0 * discordant) / n_pairs)
+        }
+    }
+
+    fn count_f64_inversions(values: &mut [f64]) -> u64 {
+        let mut scratch = values.to_vec();
+        Self::count_f64_inversions_recursive(values, &mut scratch)
+    }
+
+    fn count_f64_inversions_recursive(values: &mut [f64], scratch: &mut [f64]) -> u64 {
+        let len = values.len();
+        if len < 2 {
+            return 0;
+        }
+
+        let mid = len / 2;
+        let mut inversions = {
+            let (left, right) = values.split_at_mut(mid);
+            let (scratch_left, scratch_right) = scratch.split_at_mut(mid);
+            Self::count_f64_inversions_recursive(left, scratch_left)
+                + Self::count_f64_inversions_recursive(right, scratch_right)
+        };
+
+        let mut left = 0;
+        let mut right = mid;
+        let mut out = 0;
+
+        while left < mid && right < len {
+            if values[left] <= values[right] {
+                scratch[out] = values[left];
+                left += 1;
+            } else {
+                scratch[out] = values[right];
+                inversions += (mid - left) as u64;
+                right += 1;
+            }
+            out += 1;
+        }
+
+        if left < mid {
+            scratch[out..out + (mid - left)].copy_from_slice(&values[left..mid]);
+            out += mid - left;
+        }
+        if right < len {
+            scratch[out..out + (len - right)].copy_from_slice(&values[right..len]);
+        }
+
+        values.copy_from_slice(&scratch[..len]);
+        inversions
     }
 
     /// Spearman average-ranks for this series, but only when it has no
@@ -27430,8 +27522,7 @@ impl DataFrame {
             // uses its own union code, so this does not affect it.
             let mut union_index = first_index.clone();
             for series in &materialized_series[1..] {
-                union_index =
-                    align_union_sorted_plan(&union_index, &series.index).union_index;
+                union_index = align_union_sorted_plan(&union_index, &series.index).union_index;
             }
             union_index
         };
@@ -27446,6 +27537,18 @@ impl DataFrame {
             // this plan equals our pre-computed union. We use right_positions to
             // locate each series's values within the union.
             let aligned_column = series.column.reindex_by_positions(&plan.right_positions)?;
+            // pandas promotes a non-nullable int column to Float64 when alignment
+            // introduces missing values (np.int64 cannot hold NaN), e.g. building
+            // a frame from series with differing indexes. Mirrors the
+            // arithmetic-alignment promotion above. Bool promotes to object in
+            // pandas (left as-is here). (br-frankenpandas-33d1h)
+            let aligned_column = if plan.right_positions.iter().any(Option::is_none)
+                && aligned_column.dtype() == DType::Int64
+            {
+                aligned_column.astype(DType::Float64)?
+            } else {
+                aligned_column
+            };
             column_order.push(series.name.clone());
             columns.insert(series.name, aligned_column);
         }
@@ -60714,6 +60817,36 @@ mod tests {
     }
 
     #[test]
+    fn kendall_no_tie_fast_matches_quadratic_counts() {
+        let pairs = vec![(1.0, 3.0), (2.0, 1.0), (3.0, 4.0), (4.0, 2.0)];
+        let fast = Series::kendall_no_tie_fast(&pairs).unwrap();
+
+        let mut concordant = 0_i64;
+        let mut discordant = 0_i64;
+        for i in 0..pairs.len() {
+            for j in (i + 1)..pairs.len() {
+                let dx = pairs[i].0 - pairs[j].0;
+                let dy = pairs[i].1 - pairs[j].1;
+                if (dx > 0.0 && dy > 0.0) || (dx < 0.0 && dy < 0.0) {
+                    concordant += 1;
+                } else {
+                    discordant += 1;
+                }
+            }
+        }
+
+        let n_pairs = (pairs.len() * (pairs.len() - 1)) as f64 / 2.0;
+        let expected = (concordant - discordant) as f64 / n_pairs;
+        assert!((fast - expected).abs() < 1e-12);
+    }
+
+    #[test]
+    fn kendall_no_tie_fast_declines_ties_and_non_finite_values() {
+        assert!(Series::kendall_no_tie_fast(&[(1.0, 1.0), (1.0, 2.0)]).is_none());
+        assert!(Series::kendall_no_tie_fast(&[(1.0, 1.0), (f64::INFINITY, 2.0)]).is_none());
+    }
+
+    #[test]
     fn dataframe_corr_spearman() {
         let df = DataFrame::from_series(vec![
             Series::from_values(
@@ -71413,10 +71546,12 @@ mod tests {
         let result = df.pct_change_axis1(1).unwrap();
         assert!(result.column_as_series("a").unwrap().values()[0].is_missing());
         assert!(
-            (expect_float64(&result.column_as_series("b").unwrap().values()[0]) - 0.0).abs() < 1e-10
+            (expect_float64(&result.column_as_series("b").unwrap().values()[0]) - 0.0).abs()
+                < 1e-10
         );
         assert!(
-            (expect_float64(&result.column_as_series("c").unwrap().values()[0]) - 2.0).abs() < 1e-10
+            (expect_float64(&result.column_as_series("c").unwrap().values()[0]) - 2.0).abs()
+                < 1e-10
         );
     }
 
