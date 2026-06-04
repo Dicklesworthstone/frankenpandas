@@ -918,6 +918,24 @@ fn ordered_identity_int64_keys_match(left_key: &Column, right_key: &Column) -> b
         return false;
     }
 
+    if let (Some(left), Some(right)) = (left_key.as_i64_slice(), right_key.as_i64_slice()) {
+        let mut previous = None;
+        let mut strictly_increasing = true;
+        for (&left_value, &right_value) in left.iter().zip(right) {
+            if left_value != right_value {
+                return false;
+            }
+            if previous.is_some_and(|previous| left_value <= previous) {
+                strictly_increasing = false;
+                break;
+            }
+            previous = Some(left_value);
+        }
+        if strictly_increasing {
+            return true;
+        }
+    }
+
     // The identity fast path emits a 1:1 positional merge, which is only correct
     // when keys are UNIQUE. With duplicate keys pandas multiplies cardinality
     // (each duplicate on the left cross-joins every duplicate on the right), so
@@ -3962,6 +3980,7 @@ mod tests {
     use super::{
         JoinError, MergeExecutionOptions, MergeValidateMode, MergedDataFrame, merge_dataframes,
         merge_dataframes_on, merge_dataframes_on_with, merge_dataframes_on_with_options,
+        ordered_identity_int64_keys_match,
     };
 
     fn make_left_df() -> DataFrame {
@@ -5461,6 +5480,27 @@ mod tests {
     }
 
     #[test]
+    fn ordered_identity_int64_guard_uses_strict_unique_certificate() {
+        let left = fp_columnar::Column::from_i64_values(vec![1, 2, 3, 4]);
+        let right = fp_columnar::Column::from_i64_values(vec![1, 2, 3, 4]);
+        assert!(ordered_identity_int64_keys_match(&left, &right));
+
+        let duplicate_left = fp_columnar::Column::from_i64_values(vec![1, 1, 2]);
+        let duplicate_right = fp_columnar::Column::from_i64_values(vec![1, 1, 2]);
+        assert!(!ordered_identity_int64_keys_match(
+            &duplicate_left,
+            &duplicate_right
+        ));
+
+        let unsorted_left = fp_columnar::Column::from_i64_values(vec![2, 1, 3]);
+        let unsorted_right = fp_columnar::Column::from_i64_values(vec![2, 1, 3]);
+        assert!(ordered_identity_int64_keys_match(
+            &unsorted_left,
+            &unsorted_right
+        ));
+    }
+
+    #[test]
     fn merge_identical_duplicate_keys_cross_join_values_jdupk() {
         // Identical left/right key columns that contain duplicates must NOT take
         // the identity 1:1 fast path: pandas cross-joins each duplicate, so a=10
@@ -5529,7 +5569,10 @@ mod tests {
                 &["id", "a"],
                 vec![
                     ("id", lk.iter().map(|&k| Scalar::Int64(k)).collect()),
-                    ("a", (0..nl).map(|i| Scalar::Int64(i as i64 + 1000)).collect()),
+                    (
+                        "a",
+                        (0..nl).map(|i| Scalar::Int64(i as i64 + 1000)).collect(),
+                    ),
                 ],
             )
             .unwrap();
@@ -5537,7 +5580,10 @@ mod tests {
                 &["id", "b"],
                 vec![
                     ("id", rk.iter().map(|&k| Scalar::Int64(k)).collect()),
-                    ("b", (0..nr).map(|j| Scalar::Int64(j as i64 + 2000)).collect()),
+                    (
+                        "b",
+                        (0..nr).map(|j| Scalar::Int64(j as i64 + 2000)).collect(),
+                    ),
                 ],
             )
             .unwrap();
