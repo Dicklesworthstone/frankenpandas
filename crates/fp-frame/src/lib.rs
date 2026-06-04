@@ -2171,6 +2171,93 @@ fn arithmetic_op_name(op: ArithmeticOp) -> &'static str {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ContiguousInt64IndexRange {
+    start: i64,
+    len: usize,
+}
+
+impl ContiguousInt64IndexRange {
+    fn end(self) -> Option<i64> {
+        self.start
+            .checked_add(i64::try_from(self.len.checked_sub(1)?).ok()?)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ContiguousInt64OuterAlignment {
+    output_start: i64,
+    output_len: usize,
+    left_output_offset: usize,
+    right_output_offset: usize,
+}
+
+fn contiguous_i64_index_range(index: &Index) -> Option<ContiguousInt64IndexRange> {
+    let labels = index.labels();
+    let IndexLabel::Int64(start) = labels.first()? else {
+        return None;
+    };
+
+    for (offset, label) in labels.iter().enumerate() {
+        let expected = start.checked_add(i64::try_from(offset).ok()?)?;
+        if label != &IndexLabel::Int64(expected) {
+            return None;
+        }
+    }
+
+    Some(ContiguousInt64IndexRange {
+        start: *start,
+        len: labels.len(),
+    })
+}
+
+fn contiguous_i64_outer_alignment(
+    left: &Index,
+    right: &Index,
+) -> Option<ContiguousInt64OuterAlignment> {
+    let left_range = contiguous_i64_index_range(left)?;
+    let right_range = contiguous_i64_index_range(right)?;
+    let left_end = left_range.end()?;
+    let right_end = right_range.end()?;
+
+    let gap = if left_range.start <= right_range.start {
+        right_range.start.checked_sub(left_end)?
+    } else {
+        left_range.start.checked_sub(right_end)?
+    };
+    if gap > 1 {
+        return None;
+    }
+
+    let output_start = left_range.start.min(right_range.start);
+    let output_end = left_end.max(right_end);
+    let output_len = usize::try_from(output_end.checked_sub(output_start)?.checked_add(1)?).ok()?;
+    let left_output_offset = usize::try_from(left_range.start.checked_sub(output_start)?).ok()?;
+    let right_output_offset = usize::try_from(right_range.start.checked_sub(output_start)?).ok()?;
+
+    Some(ContiguousInt64OuterAlignment {
+        output_start,
+        output_len,
+        left_output_offset,
+        right_output_offset,
+    })
+}
+
+fn contiguous_i64_union_index(
+    left: &Index,
+    right: &Index,
+    alignment: ContiguousInt64OuterAlignment,
+) -> Index {
+    let labels = (0..alignment.output_len)
+        .map(|offset| IndexLabel::Int64(alignment.output_start + offset as i64))
+        .collect::<Vec<_>>();
+    let mut union_index = Index::new_known_unique(labels);
+    if left.name() == right.name() {
+        union_index = union_index.set_names(left.name());
+    }
+    union_index
+}
+
 fn semantic_index_identity(role: &str, index: &Index) -> SemanticIndexIdentity {
     let fingerprint = index.semantic_labels_fingerprint_with(semantic_index_labels_fingerprint);
     semantic_index_identity_from_fingerprint(role, index, fingerprint)
@@ -2590,6 +2677,48 @@ fn typed_median_f64(mut v: Vec<f64>) -> f64 {
         (lo + kth) / 2.0
     } else {
         kth
+    }
+}
+
+/// Quantile of a non-empty `f64` buffer via O(n) quickselect — bit-identical to
+/// sorting then `percentile_with_interpolation`. Only the `lower`/`upper` order
+/// statistics (upper-lower <= 1) are needed: `select_nth_unstable_by(upper)`
+/// yields the upper one and leaves earlier elements <= it, so the lower one is
+/// `max(lower_partition)`. The interpolation match mirrors
+/// `percentile_with_interpolation` exactly (incl `Nearest`'s banker's rounding).
+fn typed_quantile_f64(mut v: Vec<f64>, q: f64, mode: QuantileInterpolation) -> f64 {
+    let n = v.len();
+    if n == 1 {
+        return v[0];
+    }
+    let pos = q * (n - 1) as f64;
+    let lower = pos.floor() as usize;
+    let upper = pos.ceil() as usize;
+    let (lo_part, kth, _) = v.select_nth_unstable_by(upper, |a, b| {
+        a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let s_upper = *kth;
+    if lower == upper {
+        return s_upper;
+    }
+    let s_lower = lo_part.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let frac = pos - lower as f64;
+    match mode {
+        QuantileInterpolation::Linear => s_lower * (1.0 - frac) + s_upper * frac,
+        QuantileInterpolation::Lower => s_lower,
+        QuantileInterpolation::Higher => s_upper,
+        QuantileInterpolation::Nearest => {
+            if frac < 0.5 {
+                s_lower
+            } else if frac > 0.5 {
+                s_upper
+            } else if lower.is_multiple_of(2) {
+                s_lower
+            } else {
+                s_upper
+            }
+        }
+        QuantileInterpolation::Midpoint => 0.5 * (s_lower + s_upper),
     }
 }
 
@@ -3389,6 +3518,57 @@ impl Series {
         ledger: &mut EvidenceLedger,
     ) -> Result<Self, FrameError> {
         let has_duplicate_labels = self.index.has_duplicates() || other.index.has_duplicates();
+        let contiguous_range_fast_path = (!has_duplicate_labels
+            && matches!(self.column.dtype(), DType::Float64)
+            && matches!(other.column.dtype(), DType::Float64))
+        .then(|| contiguous_i64_outer_alignment(&self.index, &other.index))
+        .flatten();
+
+        if let Some(range_alignment) = contiguous_range_fast_path {
+            let union_index =
+                contiguous_i64_union_index(&self.index, &other.index, range_alignment);
+            record_alignment_semantic_witness(
+                ledger,
+                &format!("series.{}", arithmetic_op_name(op)),
+                AlignMode::Outer,
+                &self.index,
+                &other.index,
+                &union_index,
+                "series_binary_arithmetic_materialization",
+            );
+
+            let action = policy.decide_join_admission(union_index.len(), ledger);
+            if matches!(action, DecisionAction::Reject) {
+                return Err(FrameError::CompatibilityRejected(
+                    "runtime policy rejected alignment admission".to_owned(),
+                ));
+            }
+
+            let column = self.column.aligned_binary_f64_contiguous_offsets(
+                &other.column,
+                range_alignment.output_len,
+                range_alignment.left_output_offset,
+                range_alignment.right_output_offset,
+                op,
+            )?;
+            let op_symbol = match op {
+                ArithmeticOp::Add => "+",
+                ArithmeticOp::Sub => "-",
+                ArithmeticOp::Mul => "*",
+                ArithmeticOp::Div => "/",
+                ArithmeticOp::Mod => "%",
+                ArithmeticOp::Pow => "**",
+                ArithmeticOp::FloorDiv => "//",
+            };
+            let out_name = if self.name == other.name {
+                self.name.clone()
+            } else {
+                format!("{}{op_symbol}{}", self.name, other.name)
+            };
+
+            return Self::new(out_name, union_index, column);
+        }
+
         let exact_index_fast_path = self.index == other.index;
 
         let (union_index, left_positions, right_positions) = if exact_index_fast_path {
@@ -6361,6 +6541,26 @@ impl Series {
                 )));
             }
         };
+        // Typed quickselect fast path: an all-valid Int64/Float64 column finds
+        // the 1-2 needed order statistics in O(n) (vs the O(n log n) sort) with
+        // no Scalar materialization. Bit-identical to the sort + percentile_
+        // with_interpolation path (typed_quantile_f64 mirrors it). Int64 → f64
+        // → Float64, matching the general to_f64 path.
+        if let Some(data) = self.column.as_f64_slice()
+            && !data.is_empty()
+        {
+            return Ok(Scalar::Float64(typed_quantile_f64(data.to_vec(), q, mode)));
+        }
+        if let Some(data) = self.column.as_i64_slice()
+            && !data.is_empty()
+        {
+            return Ok(Scalar::Float64(typed_quantile_f64(
+                data.iter().map(|&x| x as f64).collect(),
+                q,
+                mode,
+            )));
+        }
+
         // Per br-frankenpandas-ppc2r: pandas pd.Series([td1, td2,
         // td3]).quantile() returns a Timedelta scalar. Detect uniformly-
         // Timedelta64 column and run percentile interpolation in ns-f64
@@ -46988,6 +47188,72 @@ mod tests {
                 Scalar::Float64(34.0)
             ]
         );
+    }
+
+    #[test]
+    fn series_add_shifted_contiguous_range_matches_generic_float_alignment() {
+        let left = Series::from_values(
+            "left",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(4.0),
+            ],
+        )
+        .expect("left");
+        let right = Series::from_values(
+            "right",
+            vec![1_i64.into(), 2_i64.into(), 3_i64.into(), 4_i64.into()],
+            vec![
+                Scalar::Float64(10.0),
+                Scalar::Float64(20.0),
+                Scalar::Float64(30.0),
+                Scalar::Float64(40.0),
+            ],
+        )
+        .expect("right");
+
+        let generic_plan = align_union_merge_sorted(&left.index, &right.index);
+        let generic_column = left
+            .column
+            .aligned_binary_f64(
+                &right.column,
+                &generic_plan.left_positions,
+                &generic_plan.right_positions,
+                ArithmeticOp::Add,
+            )
+            .expect("generic aligned add");
+
+        let out = left
+            .add_with_policy(
+                &right,
+                &RuntimePolicy::hardened(Some(100)),
+                &mut EvidenceLedger::new(),
+            )
+            .expect("add should pass");
+
+        assert_eq!(out.index().labels(), generic_plan.union_index.labels());
+        assert_eq!(out.values(), generic_column.values());
+        assert_eq!(
+            out.values(),
+            &[
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(12.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(34.0),
+                Scalar::Null(NullKind::NaN),
+            ]
+        );
+    }
+
+    #[test]
+    fn contiguous_range_alignment_rejects_integer_gaps() {
+        let left = Index::new_known_unique(vec![0_i64.into(), 1_i64.into()]);
+        let right = Index::new_known_unique(vec![3_i64.into(), 4_i64.into()]);
+
+        assert!(contiguous_i64_outer_alignment(&left, &right).is_none());
     }
 
     #[test]
