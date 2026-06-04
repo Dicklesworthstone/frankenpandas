@@ -8202,6 +8202,26 @@ impl Series {
             Scalar::Float64(v) => v,
             _ => return Ok(Scalar::Float64(f64::NAN)),
         };
+        // Typed second pass over the contiguous all-valid buffer (count == n).
+        // mean_val is reused from the typed self.mean(); the (v-mean)^2 row-order
+        // fold matches the Scalar loop below exactly — bit-identical, no Scalar
+        // materialization.
+        if let Some(data) = self.column.as_f64_slice() {
+            let mut sum_sq_diff = 0.0_f64;
+            for &v in data {
+                let diff = v - mean_val;
+                sum_sq_diff += diff * diff;
+            }
+            return Ok(Scalar::Float64(sum_sq_diff / (count as f64 - 1.0)));
+        }
+        if let Some(data) = self.column.as_i64_slice() {
+            let mut sum_sq_diff = 0.0_f64;
+            for &v in data {
+                let diff = v as f64 - mean_val;
+                sum_sq_diff += diff * diff;
+            }
+            return Ok(Scalar::Float64(sum_sq_diff / (count as f64 - 1.0)));
+        }
         let mut sum_sq_diff = 0.0_f64;
         for val in self.column.values() {
             if !val.is_missing() {
@@ -8255,6 +8275,24 @@ impl Series {
             Scalar::Float64(v) => v,
             _ => return Ok(Scalar::Float64(f64::NAN)),
         };
+        // Typed second pass over the contiguous all-valid buffer (count == n);
+        // bit-identical row-order fold, no Scalar materialization (see var()).
+        if let Some(data) = self.column.as_f64_slice() {
+            let mut sum_sq_diff = 0.0_f64;
+            for &v in data {
+                let diff = v - mean_val;
+                sum_sq_diff += diff * diff;
+            }
+            return Ok(Scalar::Float64(sum_sq_diff / (count as f64 - ddof as f64)));
+        }
+        if let Some(data) = self.column.as_i64_slice() {
+            let mut sum_sq_diff = 0.0_f64;
+            for &v in data {
+                let diff = v as f64 - mean_val;
+                sum_sq_diff += diff * diff;
+            }
+            return Ok(Scalar::Float64(sum_sq_diff / (count as f64 - ddof as f64)));
+        }
         let mut sum_sq_diff = 0.0_f64;
         for val in self.column.values() {
             if !val.is_missing() {
