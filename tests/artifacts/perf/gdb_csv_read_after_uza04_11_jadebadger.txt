@@ -1,0 +1,74 @@
+profile_target=/data/tmp/cargo-target-jadebadger-uza04-11-after/release-perf/examples/perf_profile
+pid=3126813
+
+=== sample 1 ===
+Could not attach to process.  If your uid matches the uid of the target
+process, check the setting of /proc/sys/kernel/yama/ptrace_scope, or try
+again as the root user.  For more details, see /etc/sysctl.d/10-ptrace.conf
+ptrace: Inappropriate ioctl for device.
+
+=== sample 2 ===
+Could not attach to process.  If your uid matches the uid of the target
+process, check the setting of /proc/sys/kernel/yama/ptrace_scope, or try
+again as the root user.  For more details, see /etc/sysctl.d/10-ptrace.conf
+ptrace: Inappropriate ioctl for device.
+
+=== sample 3 ===
+Could not attach to process.  If your uid matches the uid of the target
+process, check the setting of /proc/sys/kernel/yama/ptrace_scope, or try
+again as the root user.  For more details, see /etc/sysctl.d/10-ptrace.conf
+ptrace: Inappropriate ioctl for device.
+
+=== sample 4 ===
+Could not attach to process.  If your uid matches the uid of the target
+process, check the setting of /proc/sys/kernel/yama/ptrace_scope, or try
+again as the root user.  For more details, see /etc/sysctl.d/10-ptrace.conf
+ptrace: Inappropriate ioctl for device.
+
+=== sample 5 ===
+Could not attach to process.  If your uid matches the uid of the target
+process, check the setting of /proc/sys/kernel/yama/ptrace_scope, or try
+again as the root user.  For more details, see /etc/sysctl.d/10-ptrace.conf
+ptrace: Inappropriate ioctl for device.
+
+=== sample 6 ===
+Could not attach to process.  If your uid matches the uid of the target
+process, check the setting of /proc/sys/kernel/yama/ptrace_scope, or try
+again as the root user.  For more details, see /etc/sysctl.d/10-ptrace.conf
+ptrace: Inappropriate ioctl for device.
+
+=== sample 7 ===
+Could not attach to process.  If your uid matches the uid of the target
+process, check the setting of /proc/sys/kernel/yama/ptrace_scope, or try
+again as the root user.  For more details, see /etc/sysctl.d/10-ptrace.conf
+ptrace: Inappropriate ioctl for device.
+
+=== sample 8 ===
+Could not attach to process.  If your uid matches the uid of the target
+process, check the setting of /proc/sys/kernel/yama/ptrace_scope, or try
+again as the root user.  For more details, see /etc/sysctl.d/10-ptrace.conf
+ptrace: Inappropriate ioctl for device.
+
+=== sample 9 ===
+Could not attach to process.  If your uid matches the uid of the target
+process, check the setting of /proc/sys/kernel/yama/ptrace_scope, or try
+again as the root user.  For more details, see /etc/sysctl.d/10-ptrace.conf
+ptrace: Inappropriate ioctl for device.
+
+=== sample 10 ===
+Could not attach to process.  If your uid matches the uid of the target
+process, check the setting of /proc/sys/kernel/yama/ptrace_scope, or try
+again as the root user.  For more details, see /etc/sysctl.d/10-ptrace.conf
+ptrace: Inappropriate ioctl for device.
+
+=== sample 11 ===
+Could not attach to process.  If your uid matches the uid of the target
+process, check the setting of /proc/sys/kernel/yama/ptrace_scope, or try
+again as the root user.  For more details, see /etc/sysctl.d/10-ptrace.conf
+ptrace: Inappropriate ioctl for device.
+
+=== sample 12 ===
+Could not attach to process.  If your uid matches the uid of the target
+process, check the setting of /proc/sys/kernel/yama/ptrace_scope, or try
+again as the root user.  For more details, see /etc/sysctl.d/10-ptrace.conf
+ptrace: Inappropriate ioctl for device.
