@@ -2573,6 +2573,26 @@ fn compare_scalars_with_na_last(left: &Scalar, right: &Scalar, ascending: bool) 
 /// when the value span is too wide (sparse) to be worth a dense table. Mirrors
 /// fp-columnar's `i64_direct_address_range`: cap the table at 16M entries and
 /// at most ~16x the row count. Used by the hash-free value_counts fast path.
+/// Median of a non-empty `f64` buffer via O(n) quickselect — bit-identical to
+/// sorting then taking the middle (odd) / averaging the two middle (even).
+/// `select_nth_unstable_by(mid)` places the mid-th order statistic at `mid`
+/// with all earlier elements <= it, so for even lengths the (mid-1)th order
+/// statistic is `max(lower_partition)`. Callers guarantee no NaN.
+fn typed_median_f64(mut v: Vec<f64>) -> f64 {
+    let n = v.len();
+    let mid = n / 2;
+    let (lower, kth, _) = v.select_nth_unstable_by(mid, |a, b| {
+        a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let kth = *kth;
+    if n.is_multiple_of(2) {
+        let lo = lower.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        (lo + kth) / 2.0
+    } else {
+        kth
+    }
+}
+
 fn i64_dense_histogram_range(data: &[i64]) -> Option<(i64, usize)> {
     let mut min = *data.first()?;
     let mut max = min;
@@ -8211,6 +8231,24 @@ impl Series {
     ///
     /// Matches `pd.Series.median()`.
     pub fn median(&self) -> Result<Scalar, FrameError> {
+        // Typed quickselect fast path: an all-valid Int64/Float64 column finds
+        // the median over its contiguous buffer in O(n) (vs the O(n log n) sort
+        // below) with no Scalar materialization. Bit-identical to the sort path
+        // (same order statistics; Int64 coerces to f64 → Float64, matching the
+        // general `to_f64` path). Empty falls through (returns NaN there).
+        if let Some(data) = self.column.as_f64_slice()
+            && !data.is_empty()
+        {
+            return Ok(Scalar::Float64(typed_median_f64(data.to_vec())));
+        }
+        if let Some(data) = self.column.as_i64_slice()
+            && !data.is_empty()
+        {
+            return Ok(Scalar::Float64(typed_median_f64(
+                data.iter().map(|&x| x as f64).collect(),
+            )));
+        }
+
         // Per br-frankenpandas-rbt10: pandas pd.Series([td1, td2,
         // td3]).median() returns a Timedelta scalar. Sister to
         // Series::quantile br-ppc2r and fp-types nanmedian br-j8ntk.
@@ -115914,6 +115952,128 @@ mod test_select_columns_perf_76e1fd {
         assert_eq!(xa.data.len(), 2);
         assert_eq!(xa.name, Some("vals".to_owned()));
         assert!(xa.coord("idx").is_some());
+    }
+
+    #[test]
+    fn median_typed_quickselect_matches_sort() {
+        // The typed quickselect median must equal the sort-based reference for
+        // all-valid Int64/Float64, across odd/even lengths and heavy duplicates.
+        let mut state: u64 = 0x71B0_CE38_4A5F_2D19;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            state
+        };
+        let sort_median = |mut v: Vec<f64>| -> f64 {
+            v.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let mid = v.len() / 2;
+            if v.len() % 2 == 0 {
+                (v[mid - 1] + v[mid]) / 2.0
+            } else {
+                v[mid]
+            }
+        };
+        for trial in 0..200 {
+            let n = (next() % 400) as usize + 1;
+            // Narrow range → many duplicate medians.
+            let raw: Vec<i64> = (0..n).map(|_| (next() % 15) as i64 - 7).collect();
+            let labels: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
+
+            let si = Series::new(
+                "s".to_owned(),
+                Index::new(labels.clone()),
+                Column::from_i64_values(raw.clone()),
+            )
+            .unwrap();
+            let want_i = sort_median(raw.iter().map(|&v| v as f64).collect());
+            match si.median().unwrap() {
+                Scalar::Float64(g) => {
+                    assert_eq!(g.to_bits(), want_i.to_bits(), "trial {trial} int median")
+                }
+                o => panic!("{o:?}"),
+            }
+
+            let fraw: Vec<f64> = raw.iter().map(|&v| v as f64 / 3.0).collect();
+            let sf = Series::new(
+                "s".to_owned(),
+                Index::new(labels),
+                Column::from_f64_values(fraw.clone()),
+            )
+            .unwrap();
+            let want_f = sort_median(fraw.clone());
+            match sf.median().unwrap() {
+                Scalar::Float64(g) => {
+                    assert_eq!(g.to_bits(), want_f.to_bits(), "trial {trial} float median")
+                }
+                o => panic!("{o:?}"),
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "timing benchmark; run with --ignored --nocapture on the rch VM"]
+    fn median_typed_quickselect_timing() {
+        use std::time::Instant;
+        let n = 5_000_000usize;
+        let iters = 10;
+        let mut state: u64 = 0x53C2_99DA_2C8E_71B0;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            state
+        };
+        let data: Vec<f64> = (0..n).map(|_| (next() % 1_000_000) as f64).collect();
+        let labels: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
+        let mk = || {
+            Series::new(
+                "s".to_owned(),
+                Index::new(labels.clone()),
+                Column::from_f64_values(data.clone()),
+            )
+            .unwrap()
+        };
+        let t0 = Instant::now();
+        let mut chk = 0u64;
+        for _ in 0..iters {
+            if let Scalar::Float64(m) = mk().median().unwrap() {
+                chk ^= m.to_bits();
+            }
+        }
+        let typed = t0.elapsed();
+        // OLD: materialize f64 (to_f64) + full sort + middle.
+        let t1 = Instant::now();
+        let mut chk2 = 0u64;
+        for _ in 0..iters {
+            let s = mk();
+            let mut vals: Vec<f64> = s
+                .column
+                .values()
+                .iter()
+                .map(|v| v.to_f64().unwrap())
+                .collect();
+            vals.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let mid = vals.len() / 2;
+            let m = if vals.len() % 2 == 0 {
+                (vals[mid - 1] + vals[mid]) / 2.0
+            } else {
+                vals[mid]
+            };
+            chk2 ^= m.to_bits();
+        }
+        let scalar = t1.elapsed();
+        let t2 = Instant::now();
+        let mut sink = 0usize;
+        for _ in 0..iters {
+            sink ^= mk().len();
+        }
+        let build = t2.elapsed();
+        eprintln!(
+            "median 5M f64 x{iters}: typed={typed:?} scalar_sort={scalar:?} build={build:?} op-only={:.2}x (full {:.2}x, chk {chk}/{chk2}/{sink})",
+            scalar.saturating_sub(build).as_secs_f64() / typed.saturating_sub(build).as_secs_f64(),
+            scalar.as_secs_f64() / typed.as_secs_f64()
+        );
     }
 
     #[test]
