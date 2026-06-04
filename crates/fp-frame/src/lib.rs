@@ -13465,37 +13465,29 @@ impl Rolling<'_> {
     /// Rolling minimum.
     pub fn min(&self) -> Result<Series, FrameError> {
         self.validate()?;
+        // Trailing (non-center) windows slide monotonically, so an O(n)
+        // monotonic deque replaces the O(n·window) per-window re-scan with
+        // bit-identical output (see `rolling_extremum_noncenter`).
+        if !self.center {
+            return self.rolling_extremum_noncenter(false);
+        }
+
         let vals = self.series.column().values();
         let len = vals.len();
         let mut out = Vec::with_capacity(len);
 
-        if self.center {
-            let half = self.window / 2;
-            for i in 0..len {
-                let start = i.saturating_sub(half);
-                let end = (i + half + self.window % 2).min(len);
-                let nums = Self::window_values(&vals[start..end]);
+        let half = self.window / 2;
+        for i in 0..len {
+            let start = i.saturating_sub(half);
+            let end = (i + half + self.window % 2).min(len);
+            let nums = Self::window_values(&vals[start..end]);
 
-                if nums.len() < self.min_periods || nums.is_empty() {
-                    out.push(Scalar::Null(NullKind::NaN));
-                } else {
-                    out.push(Scalar::Float64(
-                        nums.iter().copied().fold(f64::INFINITY, f64::min),
-                    ));
-                }
-            }
-        } else {
-            for i in 0..len {
-                let start = (i + 1).saturating_sub(self.window);
-                let nums = Self::window_values(&vals[start..=i]);
-
-                if nums.len() < self.min_periods || nums.is_empty() {
-                    out.push(Scalar::Null(NullKind::NaN));
-                } else {
-                    out.push(Scalar::Float64(
-                        nums.iter().copied().fold(f64::INFINITY, f64::min),
-                    ));
-                }
+            if nums.len() < self.min_periods || nums.is_empty() {
+                out.push(Scalar::Null(NullKind::NaN));
+            } else {
+                out.push(Scalar::Float64(
+                    nums.iter().copied().fold(f64::INFINITY, f64::min),
+                ));
             }
         }
 
@@ -13510,6 +13502,10 @@ impl Rolling<'_> {
 
     /// Rolling maximum.
     pub fn max(&self) -> Result<Series, FrameError> {
+        self.validate()?;
+        if !self.center {
+            return self.rolling_extremum_noncenter(true);
+        }
         // Per br-frankenpandas-5m7r1: with min_periods=0, an all-missing
         // window reaches the fold with empty `nums`, where the identity
         // f64::NEG_INFINITY would be returned. Pandas returns NaN for that
@@ -13525,6 +13521,135 @@ impl Rolling<'_> {
             },
             self.series.name(),
         )
+    }
+
+    /// O(n) trailing-window rolling min/max via a monotonic deque.
+    ///
+    /// Bit-identical to the historical per-window `fold(±INF, f64::min/max)`:
+    /// the deque is keyed by `f64::total_cmp`, and for non-NaN inputs the
+    /// `total_cmp` extremum has the *same bit pattern* as the corresponding
+    /// `f64::min`/`f64::max` fold — including signed-zero ties (`min` yields
+    /// `-0.0`, `max` yields `+0.0`, order-independently, which `total_cmp`
+    /// reproduces). NaN/missing cells are excluded exactly as `window_values`
+    /// does (`is_missing()` first, then `to_f64().ok()`), so they never enter
+    /// the deque. Emission matches each caller's historical surface: `min`
+    /// emits `Null(NaN)` for an empty-but-allowed window, `max` emits
+    /// `Float64(NaN)` (its old `apply_rolling` identity), and both emit
+    /// `Null(NaN)` when the non-null count is below `min_periods`.
+    fn rolling_extremum_noncenter(&self, want_max: bool) -> Result<Series, FrameError> {
+        let vals = self.series.column().values();
+        let len = vals.len();
+        let window = self.window;
+        let min_periods = self.min_periods;
+
+        let value_at = |idx: usize| -> Option<f64> {
+            let v = &vals[idx];
+            if v.is_missing() {
+                None
+            } else {
+                v.to_f64().ok()
+            }
+        };
+
+        // total_cmp matches the runtime `f64::min`/`f64::max` fold for every
+        // input EXCEPT a tie that involves a negative zero: at runtime LLVM's
+        // minnum/maxnum is order-dependent on ±0 (it returns the later operand),
+        // so the deque's order-independent total_cmp pick can differ by the sign
+        // bit. Negative zeros essentially never occur in real columns; when one
+        // is present, fall back to the exact per-window fold so the output stays
+        // bit-identical.
+        let has_neg_zero = vals
+            .iter()
+            .any(|v| matches!(v, Scalar::Float64(f) if *f == 0.0 && f.is_sign_negative()));
+        if has_neg_zero {
+            let mut out = Vec::with_capacity(len);
+            for i in 0..len {
+                let start = (i + 1).saturating_sub(window);
+                let nums = Self::window_values(&vals[start..=i]);
+                if want_max {
+                    if nums.len() < min_periods {
+                        out.push(Scalar::Null(NullKind::NaN));
+                    } else if nums.is_empty() {
+                        out.push(Scalar::Float64(f64::NAN));
+                    } else {
+                        out.push(Scalar::Float64(
+                            nums.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+                        ));
+                    }
+                } else if nums.len() < min_periods || nums.is_empty() {
+                    out.push(Scalar::Null(NullKind::NaN));
+                } else {
+                    out.push(Scalar::Float64(
+                        nums.iter().copied().fold(f64::INFINITY, f64::min),
+                    ));
+                }
+            }
+            let index = Index::new(self.series.index().labels().to_vec())
+                .rename_index(self.series.index().name());
+            let column = Column::from_values(out)?;
+            return Series::new(self.series.name(), index, column);
+        }
+
+        let mut out = Vec::with_capacity(len);
+        // Deque of indices into `vals`, holding only non-null positions whose
+        // values are monotonic (increasing for min, decreasing for max) from
+        // front to back; the front is the current window extremum.
+        let mut dq: std::collections::VecDeque<usize> = std::collections::VecDeque::new();
+        let mut nonnull = 0_usize;
+
+        for i in 0..len {
+            // The position leaving the trailing window of width `window`.
+            if i >= window {
+                let leaving = i - window;
+                if value_at(leaving).is_some() {
+                    nonnull -= 1;
+                }
+            }
+            if let Some(x) = value_at(i) {
+                while let Some(&b) = dq.back() {
+                    let bv = value_at(b).expect("deque holds only non-null positions");
+                    let drop_back = if want_max {
+                        bv.total_cmp(&x) == std::cmp::Ordering::Less
+                    } else {
+                        bv.total_cmp(&x) == std::cmp::Ordering::Greater
+                    };
+                    if drop_back {
+                        dq.pop_back();
+                    } else {
+                        break;
+                    }
+                }
+                dq.push_back(i);
+                nonnull += 1;
+            }
+            let start_i = (i + 1).saturating_sub(window);
+            while let Some(&f) = dq.front() {
+                if f < start_i {
+                    dq.pop_front();
+                } else {
+                    break;
+                }
+            }
+
+            if nonnull < min_periods {
+                out.push(Scalar::Null(NullKind::NaN));
+            } else if nonnull == 0 {
+                // Window meets min_periods (so min_periods == 0) but is empty.
+                if want_max {
+                    out.push(Scalar::Float64(f64::NAN));
+                } else {
+                    out.push(Scalar::Null(NullKind::NaN));
+                }
+            } else {
+                let extremum = value_at(*dq.front().expect("non-empty window")).expect("non-null");
+                out.push(Scalar::Float64(extremum));
+            }
+        }
+
+        let index = Index::new(self.series.index().labels().to_vec())
+            .rename_index(self.series.index().name());
+        let column = Column::from_values(out)?;
+        Series::new(self.series.name(), index, column)
     }
 
     /// Rolling sample standard deviation (ddof=1).
