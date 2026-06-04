@@ -1,0 +1,28 @@
+warning: Missing auto-load script at offset 0 in section .debug_gdb_scripts
+of file /tmp/cargo-target-cod-pandas-corr-gdb/release-perf/examples/perf_profile.
+Use `info auto-load python-scripts [REGEXP]' to list them.
+
+This GDB supports auto-downloading debuginfo from the following URLs:
+  <https://debuginfod.ubuntu.com>
+Enable debuginfod for this session? (y or [n]) [answered N; input not from terminal]
+Debuginfod has been disabled.
+To make this setting permanent, add 'set debuginfod enabled off' to .gdbinit.
+Breakpoint 1 at 0x1658be: file crates/fp-frame/src/lib.rs, line 32854.
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+perf_profile: scenario=df_corr n=5000 iters=1
+
+Breakpoint 1, pairwise_stat_matrix () at crates/fp-frame/src/lib.rs:32854
+32854	        let mut mat = vec![0.0_f64; n * n];
+#0  pairwise_stat_matrix () at crates/fp-frame/src/lib.rs:32854
+#1  0x00005555556ba9b3 in pairwise_corr_stat_min () at crates/fp-frame/src/lib.rs:32942
+#2  0x000055555571d890 in corr_with_numeric_only () at crates/fp-frame/src/lib.rs:32714
+#3  corr () at crates/fp-frame/src/lib.rs:32706
+#4  main () at crates/fp-conformance/examples/perf_profile.rs:308
+#5  0x0000555555719013 in call_once<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250
+#6  __rust_begin_short_backtrace<fn(), ()> () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166
+#7  0x00005555557190a9 in std::rt::lang_start::<()>::{closure#0} () at /home/ubuntu/.rustup/toolchains/nightly-2026-04-22-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/rt.rs:206
+#8  0x0000555555758c4e in core::ops::function::impls::{impl#2}::call_once<(), (dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/core/src/ops/function.rs:287
+#9  std::panicking::catch_unwind::do_call<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panicking.rs:581
+#10 std::panicking::catch_unwind<i32, &(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe)> () at library/std/src/panicking.rs:544
+#11 std::panic::catch_unwind<&(dyn core::ops::function::Fn<(), Output=i32> + core::marker::Sync + core::panic::unwind_safe::RefUnwindSafe), i32> () at library/std/src/panic.rs:359
