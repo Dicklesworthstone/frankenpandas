@@ -1196,8 +1196,67 @@ impl Timedelta {
             return Ok(if negative { -nanos } else { nanos });
         }
 
+        if let Some(nanos) = Self::try_parse_iso8601_duration(s) {
+            return Ok(if negative { -nanos } else { nanos });
+        }
+
         let nanos = Self::parse_compound(s)?;
         Ok(if negative { -nanos } else { nanos })
+    }
+
+    /// Parse an ISO-8601 duration the way pandas `Timedelta` accepts it:
+    /// a leading uppercase `P`, an optional `T` separator that is otherwise
+    /// ignored, and unit letters `W`/`D`/`H`/`M`/`S` in any position. `M` is
+    /// always MINUTES (never months), and only seconds may be fractional —
+    /// years/months and lowercase units are rejected, matching pandas.
+    /// (pandas mis-handles fractional non-second components; those are rejected
+    /// here rather than reproducing the buggy value.) (br-frankenpandas-c3p8b)
+    fn try_parse_iso8601_duration(s: &str) -> Option<i64> {
+        let mut rest = s.strip_prefix('P')?;
+        if rest.is_empty() {
+            return None;
+        }
+        let mut total: i64 = 0;
+        let mut saw_component = false;
+        while !rest.is_empty() {
+            if let Some(after_t) = rest.strip_prefix('T') {
+                rest = after_t;
+                continue;
+            }
+            let num_end = rest.find(|c: char| !c.is_ascii_digit() && c != '.')?;
+            if num_end == 0 {
+                return None;
+            }
+            let num_str = &rest[..num_end];
+            let unit = rest.as_bytes()[num_end];
+            let is_fractional = num_str.contains('.');
+            rest = &rest[num_end + 1..];
+
+            let (multiplier, frac_ok) = match unit {
+                b'W' => (Self::NANOS_PER_WEEK, false),
+                b'D' => (Self::NANOS_PER_DAY, false),
+                b'H' => (Self::NANOS_PER_HOUR, false),
+                b'M' => (Self::NANOS_PER_MIN, false),
+                b'S' => (Self::NANOS_PER_SEC, true),
+                _ => return None,
+            };
+            if is_fractional {
+                if !frac_ok {
+                    return None;
+                }
+                let value: f64 = num_str.parse().ok()?;
+                let product = value * multiplier as f64;
+                if !product.is_finite() || product.abs() >= 9223372036854775808.0 {
+                    return None;
+                }
+                total = total.checked_add(product.round() as i64)?;
+            } else {
+                let value: i64 = num_str.parse().ok()?;
+                total = total.checked_add(value.checked_mul(multiplier)?)?;
+            }
+            saw_component = true;
+        }
+        saw_component.then_some(total)
     }
 
     fn try_parse_time_format(s: &str) -> Option<i64> {
@@ -5290,6 +5349,29 @@ mod tests {
             + 30 * Timedelta::NANOS_PER_MIN;
         assert_eq!(Timedelta::parse("1d 2h 30m").unwrap(), expected);
         assert_eq!(Timedelta::parse("1d2h30m").unwrap(), expected);
+    }
+
+    #[test]
+    fn timedelta_parse_iso8601_matches_pandas_tdiso() {
+        use super::Timedelta;
+        // Verified vs pandas 2.2.3 Timedelta(...).value.
+        assert_eq!(Timedelta::parse("P1DT2H3M4S").unwrap(), 93_784_000_000_000);
+        assert_eq!(Timedelta::parse("PT1H").unwrap(), 3_600_000_000_000);
+        assert_eq!(Timedelta::parse("PT1H30M").unwrap(), 5_400_000_000_000);
+        assert_eq!(Timedelta::parse("P1D").unwrap(), 86_400_000_000_000);
+        assert_eq!(Timedelta::parse("P2W").unwrap(), 1_209_600_000_000_000);
+        assert_eq!(Timedelta::parse("PT0.5S").unwrap(), 500_000_000);
+        // pandas quirks: T ignored, M is minutes everywhere, units in any order.
+        assert_eq!(Timedelta::parse("P1M").unwrap(), 60_000_000_000);
+        assert_eq!(Timedelta::parse("P1H").unwrap(), 3_600_000_000_000);
+        assert_eq!(Timedelta::parse("PT1D").unwrap(), 86_400_000_000_000);
+        assert_eq!(Timedelta::parse("P1D1H").unwrap(), 90_000_000_000_000);
+        assert_eq!(Timedelta::parse("-P1DT2H").unwrap(), -93_600_000_000_000);
+        // Rejected like pandas: years, lowercase, bare P/PT.
+        assert!(Timedelta::parse("P1Y").is_err());
+        assert!(Timedelta::parse("p1d").is_err());
+        assert!(Timedelta::parse("P").is_err());
+        assert!(Timedelta::parse("PT").is_err());
     }
 
     #[test]

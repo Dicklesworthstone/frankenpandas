@@ -1,0 +1,3 @@
+Thu Jun  4 05:31:45 UTC 2026
+join_bench join_type=right rows=50000 right_rows=50000 key_cardinality=10000 ordered_unique=false force_generic=true warmup=3 iters=20 output_rows=250000 mean_ms=47.021 p50_ms=46.661 p95_ms=50.537 p99_ms=50.896 checksum=49997155700.000
+join_bench join_type=right rows=50000 right_rows=50000 key_cardinality=10000 ordered_unique=false force_generic=false warmup=3 iters=20 output_rows=250000 mean_ms=35.610 p50_ms=34.086 p95_ms=40.063 p99_ms=49.153 checksum=49997155700.000

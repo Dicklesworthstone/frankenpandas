@@ -1,0 +1,72 @@
+{
+  "results": [
+    {
+      "command": "/data/projects/.cargo-target/frankenpandas-blackthrush-sn0yn-joinbench/release-perf/join-bench --join-type right --rows 50000 --right-rows 50000 --key-cardinality 10000 --force-generic --iters 1 --warmup 0",
+      "mean": 0.07129018904,
+      "stddev": 0.00416927200677756,
+      "median": 0.07099966214,
+      "user": 0.032297559999999996,
+      "system": 0.0350532,
+      "min": 0.06429317514,
+      "max": 0.07920542814,
+      "times": [
+        0.07460601714000001,
+        0.07380053114,
+        0.07314412814,
+        0.06837235014000001,
+        0.06821187714,
+        0.07920542814,
+        0.07196378314,
+        0.06429317514,
+        0.06926905914,
+        0.07003554114
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/projects/.cargo-target/frankenpandas-blackthrush-sn0yn-joinbench/release-perf/join-bench --join-type right --rows 50000 --right-rows 50000 --key-cardinality 10000 --iters 1 --warmup 0",
+      "mean": 0.05554862974000001,
+      "stddev": 0.00253621679870455,
+      "median": 0.05502179564000001,
+      "user": 0.02363866,
+      "system": 0.0311452,
+      "min": 0.05191915014,
+      "max": 0.06119143114,
+      "times": [
+        0.05482137614,
+        0.06119143114,
+        0.05357505614000001,
+        0.05796158314000001,
+        0.054243713140000004,
+        0.05191915014,
+        0.055575053140000004,
+        0.055068063140000005,
+        0.05615534314000001,
+        0.05497552814000001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}
