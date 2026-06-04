@@ -1,0 +1,100 @@
+{
+  "results": [
+    {
+      "command": "/data/projects/.cargo-target/frankenpandas-cod-spearman-centered-after/release-perf/examples/perf_profile df_spearman 2000 5",
+      "mean": 0.051835892360000003,
+      "stddev": 0.003185877752986029,
+      "median": 0.05172169796000001,
+      "user": 0.04184748,
+      "system": 0.009333719999999998,
+      "min": 0.04701968296,
+      "max": 0.05482521596000001,
+      "times": [
+        0.04701968296,
+        0.054618944960000006,
+        0.05172169796000001,
+        0.05099391996,
+        0.05482521596000001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/projects/.cargo-target/frankenpandas-cod-spearman-centered-after/release-perf/examples/perf_profile df_kendall 512 5",
+      "mean": 0.10080963816000002,
+      "stddev": 0.0032616781518682537,
+      "median": 0.09969532396000001,
+      "user": 0.09652828,
+      "system": 0.00347792,
+      "min": 0.09733570496,
+      "max": 0.10569299296000001,
+      "times": [
+        0.10229817296,
+        0.10569299296000001,
+        0.09733570496,
+        0.09969532396000001,
+        0.09902599596
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/projects/.cargo-target/frankenpandas-cod-spearman-centered-after/release-perf/examples/perf_profile df_corr 5000 10",
+      "mean": 0.11100507876000001,
+      "stddev": 0.0043746521865163975,
+      "median": 0.11260995196000001,
+      "user": 0.09963588000000001,
+      "system": 0.01067612,
+      "min": 0.10581464296000001,
+      "max": 0.11617847996000001,
+      "times": [
+        0.11329412796,
+        0.10581464296000001,
+        0.11260995196000001,
+        0.11617847996000001,
+        0.10712819096000001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/projects/.cargo-target/frankenpandas-cod-spearman-centered-after/release-perf/examples/perf_profile df_cov 5000 10",
+      "mean": 0.10918342116000002,
+      "stddev": 0.006525318931801238,
+      "median": 0.10571682796000001,
+      "user": 0.09841807999999999,
+      "system": 0.01035972,
+      "min": 0.10304264296000001,
+      "max": 0.11848215396,
+      "times": [
+        0.10304264296000001,
+        0.10520986796000001,
+        0.10571682796000001,
+        0.11346561296,
+        0.11848215396
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

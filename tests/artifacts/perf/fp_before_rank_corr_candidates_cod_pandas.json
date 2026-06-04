@@ -1,0 +1,60 @@
+{
+  "results": [
+    {
+      "command": "/data/projects/.cargo-target/frankenpandas-cod-dotmarginal-before/release-perf/examples/perf_profile df_spearman 2000 5",
+      "mean": 0.07675280368000001,
+      "stddev": 0.00335866144599933,
+      "median": 0.07621998368,
+      "user": 0.06684059714285714,
+      "system": 0.009584654285714284,
+      "min": 0.07286747068,
+      "max": 0.08305694068,
+      "times": [
+        0.07286747068,
+        0.07838571268,
+        0.07748986668,
+        0.07500924268,
+        0.07621998368,
+        0.08305694068,
+        0.07424040868000001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/projects/.cargo-target/frankenpandas-cod-dotmarginal-before/release-perf/examples/perf_profile df_kendall 512 5",
+      "mean": 0.09864456096571428,
+      "stddev": 0.002437345363983235,
+      "median": 0.09890459668,
+      "user": 0.09500316857142857,
+      "system": 0.0030429400000000005,
+      "min": 0.09592721368,
+      "max": 0.10256931168,
+      "times": [
+        0.09645274768,
+        0.09906319768,
+        0.09682732668,
+        0.09890459668,
+        0.10076753268000001,
+        0.09592721368,
+        0.10256931168
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}

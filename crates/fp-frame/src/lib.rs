@@ -33060,6 +33060,33 @@ impl DataFrame {
         } else {
             Vec::new()
         };
+        struct CenteredRankVector {
+            centered: Vec<f64>,
+            variance_sum: f64,
+        }
+        let spearman_centered: Vec<Option<CenteredRankVector>> = if method == "spearman" {
+            spearman_ranks
+                .iter()
+                .map(|ranks| {
+                    ranks.as_ref().map(|ranks| {
+                        let mean = ranks.iter().sum::<f64>() / ranks.len() as f64;
+                        let mut centered = Vec::with_capacity(ranks.len());
+                        let mut variance_sum = 0.0_f64;
+                        for &rank in ranks {
+                            let value = rank - mean;
+                            variance_sum += value * value;
+                            centered.push(value);
+                        }
+                        CenteredRankVector {
+                            centered,
+                            variance_sum,
+                        }
+                    })
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         let kendall_values: Vec<Option<Vec<f64>>> = if method == "kendall" {
             series_list
                 .iter()
@@ -33084,11 +33111,20 @@ impl DataFrame {
             for j in (i + 1)..n {
                 let val = match method {
                     "spearman" => match (
-                        spearman_ranks.get(i).and_then(Option::as_ref),
-                        spearman_ranks.get(j).and_then(Option::as_ref),
+                        spearman_centered.get(i).and_then(Option::as_ref),
+                        spearman_centered.get(j).and_then(Option::as_ref),
                     ) {
                         (Some(ri), Some(rj)) => {
-                            Series::pearson_on_slices(ri, rj).unwrap_or(f64::NAN)
+                            let mut covariance_sum = 0.0_f64;
+                            for (&left, &right) in ri.centered.iter().zip(rj.centered.iter()) {
+                                covariance_sum += left * right;
+                            }
+                            let denom = (ri.variance_sum * rj.variance_sum).sqrt();
+                            if denom < f64::EPSILON {
+                                f64::NAN
+                            } else {
+                                covariance_sum / denom
+                            }
                         }
                         _ => series_list[i]
                             .corr_spearman(&series_list[j])
