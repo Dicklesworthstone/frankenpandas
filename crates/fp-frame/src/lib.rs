@@ -8945,6 +8945,42 @@ impl Series {
     ///
     /// Matches `pd.Series.cumprod(skipna=True)`.
     pub fn cumprod(&self) -> Result<Self, FrameError> {
+        // Typed prefix-product fast path (see cumsum): all-valid Int64
+        // (wrapping_mul) / Float64 (acc*=v), bit-identical, no Scalar materialize.
+        if let Some(data) = self.column.as_i64_slice()
+            && !data.is_empty()
+        {
+            let mut acc = 1_i64;
+            let out: Vec<i64> = data
+                .iter()
+                .map(|&v| {
+                    acc = acc.wrapping_mul(v);
+                    acc
+                })
+                .collect();
+            return Series::new(
+                self.name.clone(),
+                self.index.clone(),
+                Column::from_i64_values(out),
+            );
+        }
+        if let Some(data) = self.column.as_f64_slice()
+            && !data.is_empty()
+        {
+            let mut acc = 1.0_f64;
+            let out: Vec<f64> = data
+                .iter()
+                .map(|&v| {
+                    acc *= v;
+                    acc
+                })
+                .collect();
+            return Series::new(
+                self.name.clone(),
+                self.index.clone(),
+                Column::from_f64_values(out),
+            );
+        }
         let values = self.column.values();
         if !values.is_empty() && values.iter().all(|value| matches!(value, Scalar::Int64(_))) {
             let mut acc = 1_i64;
@@ -9004,6 +9040,44 @@ impl Series {
     ///
     /// Matches `pd.Series.cummin(skipna=True)`.
     pub fn cummin(&self) -> Result<Self, FrameError> {
+        // Typed prefix-min fast path: Int64 acc.min(v); Float64 strict `v<acc`
+        // seeded +inf (matches the general path; all-valid ⇒ no NaN).
+        if let Some(data) = self.column.as_i64_slice()
+            && !data.is_empty()
+        {
+            let mut acc = i64::MAX;
+            let out: Vec<i64> = data
+                .iter()
+                .map(|&v| {
+                    acc = acc.min(v);
+                    acc
+                })
+                .collect();
+            return Series::new(
+                self.name.clone(),
+                self.index.clone(),
+                Column::from_i64_values(out),
+            );
+        }
+        if let Some(data) = self.column.as_f64_slice()
+            && !data.is_empty()
+        {
+            let mut acc = f64::INFINITY;
+            let out: Vec<f64> = data
+                .iter()
+                .map(|&v| {
+                    if v < acc {
+                        acc = v;
+                    }
+                    acc
+                })
+                .collect();
+            return Series::new(
+                self.name.clone(),
+                self.index.clone(),
+                Column::from_f64_values(out),
+            );
+        }
         let values = self.column.values();
         if !values.is_empty() && values.iter().all(|value| matches!(value, Scalar::Int64(_))) {
             let mut acc = i64::MAX;
@@ -9100,6 +9174,44 @@ impl Series {
     ///
     /// Matches `pd.Series.cummax(skipna=True)`.
     pub fn cummax(&self) -> Result<Self, FrameError> {
+        // Typed prefix-max fast path: Int64 acc.max(v); Float64 strict `v>acc`
+        // seeded -inf (matches the general path; all-valid ⇒ no NaN).
+        if let Some(data) = self.column.as_i64_slice()
+            && !data.is_empty()
+        {
+            let mut acc = i64::MIN;
+            let out: Vec<i64> = data
+                .iter()
+                .map(|&v| {
+                    acc = acc.max(v);
+                    acc
+                })
+                .collect();
+            return Series::new(
+                self.name.clone(),
+                self.index.clone(),
+                Column::from_i64_values(out),
+            );
+        }
+        if let Some(data) = self.column.as_f64_slice()
+            && !data.is_empty()
+        {
+            let mut acc = f64::NEG_INFINITY;
+            let out: Vec<f64> = data
+                .iter()
+                .map(|&v| {
+                    if v > acc {
+                        acc = v;
+                    }
+                    acc
+                })
+                .collect();
+            return Series::new(
+                self.name.clone(),
+                self.index.clone(),
+                Column::from_f64_values(out),
+            );
+        }
         let values = self.column.values();
         if !values.is_empty() && values.iter().all(|value| matches!(value, Scalar::Int64(_))) {
             let mut acc = i64::MIN;
@@ -115849,6 +115961,110 @@ mod test_select_columns_perf_76e1fd {
             for (g, w) in got_f.iter().zip(&want_f) {
                 assert_eq!(g.to_bits(), w.to_bits(), "trial {trial} cumsum float");
             }
+
+            // cumprod / cummin / cummax — Int64 + Float64, bit-exact prefix scans.
+            let geti = |s: &Series| -> Vec<i64> {
+                s.values()
+                    .iter()
+                    .map(|v| match v {
+                        Scalar::Int64(x) => *x,
+                        o => panic!("{o:?}"),
+                    })
+                    .collect()
+            };
+            let getf = |s: &Series| -> Vec<u64> {
+                s.values()
+                    .iter()
+                    .map(|v| match v {
+                        Scalar::Float64(x) => x.to_bits(),
+                        o => panic!("{o:?}"),
+                    })
+                    .collect()
+            };
+            // Int64 references.
+            let mut a = 1i64;
+            let wp_i: Vec<i64> = raw
+                .iter()
+                .map(|&v| {
+                    a = a.wrapping_mul(v);
+                    a
+                })
+                .collect();
+            let mut a = i64::MAX;
+            let wmin_i: Vec<i64> = raw
+                .iter()
+                .map(|&v| {
+                    a = a.min(v);
+                    a
+                })
+                .collect();
+            let mut a = i64::MIN;
+            let wmax_i: Vec<i64> = raw
+                .iter()
+                .map(|&v| {
+                    a = a.max(v);
+                    a
+                })
+                .collect();
+            assert_eq!(
+                geti(&si.cumprod().unwrap()),
+                wp_i,
+                "trial {trial} cumprod int"
+            );
+            assert_eq!(
+                geti(&si.cummin().unwrap()),
+                wmin_i,
+                "trial {trial} cummin int"
+            );
+            assert_eq!(
+                geti(&si.cummax().unwrap()),
+                wmax_i,
+                "trial {trial} cummax int"
+            );
+            // Float64 references.
+            let mut a = 1.0f64;
+            let wp_f: Vec<u64> = fraw
+                .iter()
+                .map(|&v| {
+                    a *= v;
+                    a.to_bits()
+                })
+                .collect();
+            let mut a = f64::INFINITY;
+            let wmin_f: Vec<u64> = fraw
+                .iter()
+                .map(|&v| {
+                    if v < a {
+                        a = v;
+                    }
+                    a.to_bits()
+                })
+                .collect();
+            let mut a = f64::NEG_INFINITY;
+            let wmax_f: Vec<u64> = fraw
+                .iter()
+                .map(|&v| {
+                    if v > a {
+                        a = v;
+                    }
+                    a.to_bits()
+                })
+                .collect();
+            assert_eq!(
+                getf(&sf.cumprod().unwrap()),
+                wp_f,
+                "trial {trial} cumprod float"
+            );
+            assert_eq!(
+                getf(&sf.cummin().unwrap()),
+                wmin_f,
+                "trial {trial} cummin float"
+            );
+            assert_eq!(
+                getf(&sf.cummax().unwrap()),
+                wmax_f,
+                "trial {trial} cummax float"
+            );
         }
     }
 
