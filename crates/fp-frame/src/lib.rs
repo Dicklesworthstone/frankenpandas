@@ -2569,6 +2569,28 @@ fn compare_scalars_with_na_last(left: &Scalar, right: &Scalar, ascending: bool) 
     compare_scalars_with_na_position(left, right, ascending, false)
 }
 
+/// Min and dense-table size for a direct-address integer histogram, or `None`
+/// when the value span is too wide (sparse) to be worth a dense table. Mirrors
+/// fp-columnar's `i64_direct_address_range`: cap the table at 16M entries and
+/// at most ~16x the row count. Used by the hash-free value_counts fast path.
+fn i64_dense_histogram_range(data: &[i64]) -> Option<(i64, usize)> {
+    let mut min = *data.first()?;
+    let mut max = min;
+    for &v in &data[1..] {
+        if v < min {
+            min = v;
+        } else if v > max {
+            max = v;
+        }
+    }
+    let range = (max as i128 - min as i128 + 1) as u128;
+    if range <= (1u128 << 24) && range <= (data.len() as u128).saturating_mul(16) {
+        Some((min, range as usize))
+    } else {
+        None
+    }
+}
+
 fn compare_scalars_with_na_position(
     left: &Scalar,
     right: &Scalar,
@@ -5661,38 +5683,62 @@ impl Series {
         // Per br-frankenpandas-7c7d0: O(n) HashMap-driven counter; see
         // value_counts above for rationale.
         let mut counts: Vec<(Scalar, usize)> = Vec::new();
-        let mut index_map: HashMap<ScalarKey<'_>, usize> = HashMap::new();
 
-        for value in self.column.values() {
-            if value.is_missing() {
-                if dropna {
+        // Hash-free direct-address fast path: a bounded-range all-valid Int64
+        // column histograms into a dense count Vec indexed by (v-min) in O(n)
+        // with no hashing, recording first-seen slot order. All-valid ⇒ no
+        // null bucket, so this is bit-identical to the HashMap path's
+        // first-seen counts that the subsequent stable sort consumes.
+        let dense = self.column.as_i64_slice().and_then(|data| {
+            i64_dense_histogram_range(data).map(|(min, range)| (data, min, range))
+        });
+        if let Some((data, min, range)) = dense {
+            let mut bucket_counts = vec![0usize; range];
+            let mut first_seen: Vec<usize> = Vec::new();
+            for &v in data {
+                let slot = (v as i128 - min as i128) as usize;
+                if bucket_counts[slot] == 0 {
+                    first_seen.push(slot);
+                }
+                bucket_counts[slot] += 1;
+            }
+            counts = first_seen
+                .into_iter()
+                .map(|slot| (Scalar::Int64(min + slot as i64), bucket_counts[slot]))
+                .collect();
+        } else {
+            let mut index_map: HashMap<ScalarKey<'_>, usize> = HashMap::new();
+            for value in self.column.values() {
+                if value.is_missing() {
+                    if dropna {
+                        continue;
+                    }
+                    // Per br-frankenpandas-joeff: missing values collapse into ONE
+                    // null bucket (IndexLabel cannot yet represent distinct
+                    // None/NaN/NaT kinds). Track that bucket through index_map so it
+                    // lands at its FIRST-SEEN position rather than pinned to the
+                    // end — pandas value_counts orders the null group strictly by
+                    // count with a first-seen tiebreak (sort=True), and at first
+                    // appearance (sort=False). Verified vs live pandas 2.2.3.
+                    let null_key = ScalarKey::Null(NullKind::NaN);
+                    match index_map.get(&null_key) {
+                        Some(&idx) => counts[idx].1 += 1,
+                        None => {
+                            index_map.insert(null_key, counts.len());
+                            counts.push((Scalar::Null(NullKind::NaN), 1));
+                        }
+                    }
                     continue;
                 }
-                // Per br-frankenpandas-joeff: missing values collapse into ONE
-                // null bucket (IndexLabel cannot yet represent distinct
-                // None/NaN/NaT kinds). Track that bucket through index_map so it
-                // lands at its FIRST-SEEN position rather than pinned to the
-                // end — pandas value_counts orders the null group strictly by
-                // count with a first-seen tiebreak (sort=True), and at first
-                // appearance (sort=False). Verified vs live pandas 2.2.3.
-                let null_key = ScalarKey::Null(NullKind::NaN);
-                match index_map.get(&null_key) {
+                let Some(key) = scalar_key_skip_missing(value) else {
+                    continue;
+                };
+                match index_map.get(&key) {
                     Some(&idx) => counts[idx].1 += 1,
                     None => {
-                        index_map.insert(null_key, counts.len());
-                        counts.push((Scalar::Null(NullKind::NaN), 1));
+                        index_map.insert(key, counts.len());
+                        counts.push((value.clone(), 1));
                     }
-                }
-                continue;
-            }
-            let Some(key) = scalar_key_skip_missing(value) else {
-                continue;
-            };
-            match index_map.get(&key) {
-                Some(&idx) => counts[idx].1 += 1,
-                None => {
-                    index_map.insert(key, counts.len());
-                    counts.push((value.clone(), 1));
                 }
             }
         }
@@ -115033,5 +115079,146 @@ mod test_select_columns_perf_76e1fd {
             "series.sort_values 5M i64 x{iters}: radix={radix:?} scalar_cmp={scalar:?} ratio={:.2}x (chk {chk}/{chk2})",
             scalar.as_secs_f64() / radix.as_secs_f64()
         );
+    }
+
+    #[test]
+    fn value_counts_dense_matches_reference() {
+        // Independent reference: first-seen counts via linear scan, then the
+        // same stable sort-by-count the impl applies. The direct-address dense
+        // histogram fast path must be bit-identical (index labels + counts)
+        // across sort/ascending modes for bounded-range all-valid Int64.
+        let mut state: u64 = 0x77E1_5C44_9A2B_3D16;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            state
+        };
+        for trial in 0..120 {
+            let n = (next() % 250) as usize + 1;
+            let data: Vec<i64> = (0..n).map(|_| (next() % 11) as i64 - 5).collect();
+            let labels: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
+            let series = Series::new(
+                "s".to_owned(),
+                Index::new(labels),
+                Column::from_i64_values(data.clone()),
+            )
+            .unwrap();
+
+            for sort in [false, true] {
+                for ascending in [false, true] {
+                    // Reference first-seen counts.
+                    let mut order: Vec<i64> = Vec::new();
+                    let mut cnt: Vec<usize> = Vec::new();
+                    for &v in &data {
+                        match order.iter().position(|&u| u == v) {
+                            Some(p) => cnt[p] += 1,
+                            None => {
+                                order.push(v);
+                                cnt.push(1);
+                            }
+                        }
+                    }
+                    let mut pairs: Vec<(i64, usize)> = order.into_iter().zip(cnt).collect();
+                    if sort {
+                        if ascending {
+                            pairs.sort_by_key(|&(_, c)| c);
+                        } else {
+                            pairs.sort_by_key(|&(_, c)| std::cmp::Reverse(c));
+                        }
+                    }
+
+                    let vc = series
+                        .value_counts_with_options(false, sort, ascending, true)
+                        .unwrap();
+                    let got_labels: Vec<i64> = vc
+                        .index()
+                        .labels()
+                        .iter()
+                        .map(|l| match l {
+                            IndexLabel::Int64(v) => *v,
+                            other => panic!("unexpected label {other:?}"),
+                        })
+                        .collect();
+                    let got_counts: Vec<i64> = vc
+                        .values()
+                        .iter()
+                        .map(|v| match v {
+                            Scalar::Int64(c) => *c,
+                            other => panic!("unexpected count {other:?}"),
+                        })
+                        .collect();
+                    let want_labels: Vec<i64> = pairs.iter().map(|&(v, _)| v).collect();
+                    let want_counts: Vec<i64> = pairs.iter().map(|&(_, c)| c as i64).collect();
+                    assert_eq!(
+                        got_labels, want_labels,
+                        "trial {trial} sort={sort} asc={ascending} labels"
+                    );
+                    assert_eq!(
+                        got_counts, want_counts,
+                        "trial {trial} sort={sort} asc={ascending} counts"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "timing benchmark; run with --ignored --nocapture on the rch VM"]
+    fn value_counts_dense_timing_vs_hashmap() {
+        use std::{collections::HashMap, time::Instant};
+        let n = 5_000_000usize;
+        let iters = 10;
+        for cardinality in [1_000u64, 2_000_000u64] {
+            let mut state: u64 = 0x13AB_57CD_9E02_46F8 ^ cardinality;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            let data: Vec<i64> = (0..n).map(|_| (next() % cardinality) as i64).collect();
+            let labels: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
+            let series = Series::new(
+                "s".to_owned(),
+                Index::new(labels),
+                Column::from_i64_values(data.clone()),
+            )
+            .unwrap();
+
+            let t0 = Instant::now();
+            let mut chk = 0usize;
+            for _ in 0..iters {
+                let vc = series
+                    .value_counts_with_options(false, true, false, true)
+                    .unwrap();
+                chk ^= vc.len();
+            }
+            let dense = t0.elapsed();
+
+            // OLD: HashMap<i64,usize> first-seen counter over the values.
+            let vals = series.values().to_vec();
+            let t1 = Instant::now();
+            let mut chk2 = 0usize;
+            for _ in 0..iters {
+                let mut map: HashMap<i64, usize> = HashMap::new();
+                let mut order = 0usize;
+                for v in &vals {
+                    if let Scalar::Int64(i) = v {
+                        let e = map.entry(*i).or_insert_with(|| {
+                            order += 1;
+                            0
+                        });
+                        *e += 1;
+                    }
+                }
+                chk2 ^= map.len();
+            }
+            let scalar = t1.elapsed();
+            eprintln!(
+                "value_counts 5M i64 card={cardinality} x{iters}: dense={dense:?} hashmap={scalar:?} ratio={:.2}x (chk {chk}/{chk2})",
+                scalar.as_secs_f64() / dense.as_secs_f64()
+            );
+        }
     }
 }
