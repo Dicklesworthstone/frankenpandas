@@ -12240,6 +12240,44 @@ impl Series {
         }
     }
 
+    fn kendall_no_tie_order(values: &[f64]) -> Option<Vec<usize>> {
+        if values.iter().any(|value| !value.is_finite()) {
+            return None;
+        }
+
+        let mut order: Vec<usize> = (0..values.len()).collect();
+        order.sort_by(|left, right| {
+            values[*left]
+                .partial_cmp(&values[*right])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        if order
+            .windows(2)
+            .any(|window| (values[window[1]] - values[window[0]]).abs() < f64::EPSILON)
+        {
+            return None;
+        }
+
+        Some(order)
+    }
+
+    fn kendall_no_tie_fast_with_order(x_order: &[usize], y: &[f64]) -> Option<f64> {
+        if x_order.len() != y.len() {
+            return None;
+        }
+
+        let mut y_order: Vec<f64> = x_order.iter().map(|idx| y[*idx]).collect();
+        let discordant = Self::count_f64_inversions(&mut y_order) as f64;
+        let n = y.len() as f64;
+        let n_pairs = n * (n - 1.0) / 2.0;
+        if n_pairs < f64::EPSILON {
+            Some(f64::NAN)
+        } else {
+            Some((n_pairs - 2.0 * discordant) / n_pairs)
+        }
+    }
+
     fn count_f64_inversions(values: &mut [f64]) -> u64 {
         let mut scratch = values.to_vec();
         Self::count_f64_inversions_recursive(values, &mut scratch)
@@ -33095,6 +33133,14 @@ impl DataFrame {
         } else {
             Vec::new()
         };
+        let kendall_orders: Vec<Option<Vec<usize>>> = if method == "kendall" {
+            kendall_values
+                .iter()
+                .map(|values| values.as_deref().and_then(Series::kendall_no_tie_order))
+                .collect()
+        } else {
+            Vec::new()
+        };
 
         // Spearman and Kendall correlation matrices are exactly symmetric to the
         // last bit: spearman routes through `pearson_on_slices`, whose covariance
@@ -33133,8 +33179,18 @@ impl DataFrame {
                     "kendall" => match (
                         kendall_values.get(i).and_then(Option::as_ref),
                         kendall_values.get(j).and_then(Option::as_ref),
+                        kendall_orders.get(i).and_then(Option::as_ref),
+                        kendall_orders.get(j).and_then(Option::as_ref),
                     ) {
-                        (Some(left), Some(right)) => {
+                        (Some(_left), Some(right), Some(left_order), Some(_right_order)) => {
+                            Series::kendall_no_tie_fast_with_order(left_order, right)
+                                .unwrap_or_else(|| {
+                                    series_list[i]
+                                        .corr_kendall(&series_list[j])
+                                        .unwrap_or(f64::NAN)
+                                })
+                        }
+                        (Some(left), Some(right), _, _) => {
                             Series::kendall_no_tie_fast_slices(left, right).unwrap_or_else(|| {
                                 series_list[i]
                                     .corr_kendall(&series_list[j])
@@ -60983,6 +61039,8 @@ mod tests {
         let x: Vec<f64> = pairs.iter().map(|(x, _)| *x).collect();
         let y: Vec<f64> = pairs.iter().map(|(_, y)| *y).collect();
         let slice_fast = Series::kendall_no_tie_fast_slices(&x, &y).unwrap();
+        let x_order = Series::kendall_no_tie_order(&x).unwrap();
+        let ordered_fast = Series::kendall_no_tie_fast_with_order(&x_order, &y).unwrap();
 
         let mut concordant = 0_i64;
         let mut discordant = 0_i64;
@@ -61002,6 +61060,7 @@ mod tests {
         let expected = (concordant - discordant) as f64 / n_pairs;
         assert!((fast - expected).abs() < 1e-12);
         assert_eq!(slice_fast.to_bits(), fast.to_bits());
+        assert_eq!(ordered_fast.to_bits(), fast.to_bits());
     }
 
     #[test]

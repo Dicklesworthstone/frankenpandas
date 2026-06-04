@@ -1,0 +1,100 @@
+{
+  "results": [
+    {
+      "command": "/data/projects/.cargo-target/frankenpandas-cod-kendall-dce50-after/release-perf/examples/perf_profile df_spearman 2000 5",
+      "mean": 0.05062144116,
+      "stddev": 0.005244964334686864,
+      "median": 0.049429790960000004,
+      "user": 0.041346879999999996,
+      "system": 0.009687439999999999,
+      "min": 0.045913808960000004,
+      "max": 0.05889032796000001,
+      "times": [
+        0.049429790960000004,
+        0.05889032796000001,
+        0.05220022096000001,
+        0.045913808960000004,
+        0.04667305696000001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/projects/.cargo-target/frankenpandas-cod-kendall-dce50-after/release-perf/examples/perf_profile df_kendall 512 5",
+      "mean": 0.06425252876000001,
+      "stddev": 0.002295446811132574,
+      "median": 0.06404235096,
+      "user": 0.06126348,
+      "system": 0.0037146399999999995,
+      "min": 0.06211457796000001,
+      "max": 0.06807412996000001,
+      "times": [
+        0.06807412996000001,
+        0.06289486596,
+        0.06413671896,
+        0.06404235096,
+        0.06211457796000001
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/projects/.cargo-target/frankenpandas-cod-kendall-dce50-after/release-perf/examples/perf_profile df_corr 5000 10",
+      "mean": 0.11597508836,
+      "stddev": 0.01610443226699977,
+      "median": 0.10923796196,
+      "user": 0.10513968,
+      "system": 0.011261039999999998,
+      "min": 0.10386226596,
+      "max": 0.14227636696,
+      "times": [
+        0.14227636696,
+        0.10431900096,
+        0.10386226596,
+        0.12017984596,
+        0.10923796196
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "command": "/data/projects/.cargo-target/frankenpandas-cod-kendall-dce50-after/release-perf/examples/perf_profile df_cov 5000 10",
+      "mean": 0.11943773596,
+      "stddev": 0.014273846567125917,
+      "median": 0.12270040196,
+      "user": 0.10744547999999998,
+      "system": 0.012051239999999998,
+      "min": 0.10182562696,
+      "max": 0.13625596896000003,
+      "times": [
+        0.10799944496,
+        0.12270040196,
+        0.12840723696,
+        0.13625596896000003,
+        0.10182562696
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}
