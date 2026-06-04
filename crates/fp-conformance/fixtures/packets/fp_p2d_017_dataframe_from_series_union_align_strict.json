@@ -11,41 +11,92 @@
   "left": {
     "name": "a",
     "index": [
-      { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 3 }
+      {
+        "kind": "int64",
+        "value": 1
+      },
+      {
+        "kind": "int64",
+        "value": 3
+      }
     ],
     "values": [
-      { "kind": "int64", "value": 10 },
-      { "kind": "int64", "value": 30 }
+      {
+        "kind": "int64",
+        "value": 10
+      },
+      {
+        "kind": "int64",
+        "value": 30
+      }
     ]
   },
   "right": {
     "name": "b",
     "index": [
-      { "kind": "int64", "value": 2 },
-      { "kind": "int64", "value": 3 }
+      {
+        "kind": "int64",
+        "value": 2
+      },
+      {
+        "kind": "int64",
+        "value": 3
+      }
     ],
     "values": [
-      { "kind": "int64", "value": 20 },
-      { "kind": "int64", "value": 300 }
+      {
+        "kind": "int64",
+        "value": 20
+      },
+      {
+        "kind": "int64",
+        "value": 300
+      }
     ]
   },
   "expected_frame": {
     "index": [
-      { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 3 },
-      { "kind": "int64", "value": 2 }
+      {
+        "kind": "int64",
+        "value": 1
+      },
+      {
+        "kind": "int64",
+        "value": 2
+      },
+      {
+        "kind": "int64",
+        "value": 3
+      }
     ],
     "columns": {
       "a": [
-        { "kind": "int64", "value": 10 },
-        { "kind": "int64", "value": 30 },
-        { "kind": "null", "value": "null" }
+        {
+          "kind": "int64",
+          "value": 10
+        },
+        {
+          "kind": "null",
+          "value": "null"
+        },
+        {
+          "kind": "int64",
+          "value": 30
+        }
       ],
       "b": [
-        { "kind": "null", "value": "null" },
-        { "kind": "int64", "value": 300 },
-        { "kind": "int64", "value": 20 }
+        {
+          "kind": "null",
+          "value": "null"
+        },
+        {
+          "kind": "int64",
+          "value": 20
+        },
+        {
+          "kind": "int64",
+          "value": 300
+        }
       ]
     }
   }
