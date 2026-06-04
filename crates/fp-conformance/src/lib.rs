@@ -14528,7 +14528,10 @@ fn collect_dict_constructor_payloads<'a>(
 fn parse_constructor_dtype_spec(dtype_spec: &str) -> Result<DType, String> {
     let normalized = dtype_spec.trim().to_ascii_lowercase();
     match normalized.as_str() {
-        "bool" | "boolean" => Ok(DType::Bool),
+        // numpy bool (nonzero-truthy) vs pandas nullable Boolean (strict 0/1).
+        // (br-frankenpandas-tjomg)
+        "bool" => Ok(DType::Bool),
+        "boolean" => Ok(DType::BoolNullable),
         "int64" | "int" | "i64" => Ok(DType::Int64),
         "float64" | "float" | "f64" => Ok(DType::Float64),
         "utf8" | "string" | "str" => Ok(DType::Utf8),

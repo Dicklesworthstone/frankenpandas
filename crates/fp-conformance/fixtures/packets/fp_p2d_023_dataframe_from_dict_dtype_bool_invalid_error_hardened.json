@@ -11,9 +11,38 @@
   "constructor_dtype": "bool",
   "dict_columns": {
     "flag": [
-      { "kind": "int64", "value": 2 },
-      { "kind": "int64", "value": 0 }
+      {
+        "kind": "int64",
+        "value": 2
+      },
+      {
+        "kind": "int64",
+        "value": 0
+      }
     ]
   },
-  "expected_error_contains": "expected 0/1 for bool cast from int64 but found 2"
+  "expected_frame": {
+    "index": [
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      }
+    ],
+    "columns": {
+      "flag": [
+        {
+          "kind": "bool",
+          "value": true
+        },
+        {
+          "kind": "bool",
+          "value": false
+        }
+      ]
+    }
+  }
 }

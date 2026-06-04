@@ -993,13 +993,27 @@ pub fn cast_scalar_owned(value: Scalar, target: DType) -> Result<Scalar, TypeErr
     // arms are omitted from the match below.
     match target {
         DType::Null => Ok(Scalar::Null(NullKind::Null)),
-        DType::Bool | DType::BoolNullable => match &value {
-            // pandas astype(bool): zero -> False, ANY nonzero -> True (it does
-            // not restrict to 0/1). e.g. astype(bool) of -3 / 2.5 is True.
+        DType::Bool => match &value {
+            // numpy bool: zero -> False, ANY nonzero -> True (it does not
+            // restrict to 0/1). e.g. bool of -3 / 2.5 is True.
             Scalar::Int64(v) => Ok(Scalar::Bool(*v != 0)),
             // 0.0 and -0.0 -> False; every other value, INCLUDING NaN, -> True
             // (NaN != 0.0 is true), matching numpy/pandas truthiness.
             Scalar::Float64(v) => Ok(Scalar::Bool(*v != 0.0)),
+            _ => Err(TypeError::InvalidCast { from, to: target }),
+        },
+        DType::BoolNullable => match &value {
+            // pandas nullable Boolean ('boolean') is STRICT: only 0/1 (or
+            // True/False) are accepted — any other value raises "Need to pass
+            // bool-like values", UNLIKE numpy bool which is nonzero-truthy.
+            // (br-frankenpandas-tjomg)
+            Scalar::Bool(b) => Ok(Scalar::Bool(*b)),
+            Scalar::Int64(0) => Ok(Scalar::Bool(false)),
+            Scalar::Int64(1) => Ok(Scalar::Bool(true)),
+            Scalar::Int64(v) => Err(TypeError::InvalidBoolInt { value: *v }),
+            Scalar::Float64(v) if *v == 0.0 => Ok(Scalar::Bool(false)),
+            Scalar::Float64(v) if *v == 1.0 => Ok(Scalar::Bool(true)),
+            Scalar::Float64(v) => Err(TypeError::InvalidBoolFloat { value: *v }),
             _ => Err(TypeError::InvalidCast { from, to: target }),
         },
         DType::Int64 | DType::Int64Nullable => match &value {
