@@ -468,3 +468,63 @@ fn dataframe_corr_cov_pairwise_nan_deletion_matches_pandas() {
     assert!((cval("a", 0) - 1.0).abs() < 1e-9);
     assert!((cval("b", 0) - 1.0).abs() < 1e-9, "pairwise corr(a,b) must be 1.0");
 }
+
+#[test]
+fn dataframe_corr_spearman_kendall_ties_and_nan_match_pandas() {
+    // Rank-correlation fast paths (avg-rank precompute) must match pandas 2.2.3
+    // under (a) tied ranks and (b) pairwise-NaN deletion. Verified vs pandas:
+    //   df {a:[1,2,2,NaN,5], b:[3,1,1,4,2]}: spearman a-b=-1/3, kendall a-b=-0.2
+    //   df {x:[1,1,1,2,2], y:[5,5,3,3,3]}:   spearman x-y=kendall x-y=-2/3
+    use fp_frame::DataFrame;
+    use fp_types::{NullKind, Scalar};
+    let f = Scalar::Float64;
+    let nan = Scalar::Null(NullKind::NaN);
+
+    let df = DataFrame::from_dict(
+        &["a", "b"],
+        vec![
+            ("a", vec![f(1.0), f(2.0), f(2.0), nan.clone(), f(5.0)]),
+            ("b", vec![f(3.0), f(1.0), f(1.0), f(4.0), f(2.0)]),
+        ],
+    )
+    .expect("frame");
+    let off = |m: &str, df: &DataFrame| {
+        df.corr_method_with_numeric_only(m, false)
+            .expect("corr")
+            .column("b")
+            .unwrap()
+            .values()[0]
+            .to_f64()
+            .unwrap()
+    };
+    assert!(
+        (off("spearman", &df) - (-1.0 / 3.0)).abs() < 1e-9,
+        "spearman ties+NaN: got {}",
+        off("spearman", &df)
+    );
+    assert!(
+        (off("kendall", &df) - (-0.2)).abs() < 1e-9,
+        "kendall ties+NaN: got {}",
+        off("kendall", &df)
+    );
+
+    let df2 = DataFrame::from_dict(
+        &["x", "y"],
+        vec![
+            ("x", vec![f(1.0), f(1.0), f(1.0), f(2.0), f(2.0)]),
+            ("y", vec![f(5.0), f(5.0), f(3.0), f(3.0), f(3.0)]),
+        ],
+    )
+    .expect("frame2");
+    let off2 = |m: &str| {
+        df2.corr_method_with_numeric_only(m, false)
+            .expect("corr2")
+            .column("y")
+            .unwrap()
+            .values()[0]
+            .to_f64()
+            .unwrap()
+    };
+    assert!((off2("spearman") - (-2.0 / 3.0)).abs() < 1e-9, "spearman heavy ties: got {}", off2("spearman"));
+    assert!((off2("kendall") - (-2.0 / 3.0)).abs() < 1e-9, "kendall heavy ties: got {}", off2("kendall"));
+}
