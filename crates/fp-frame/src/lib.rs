@@ -2591,6 +2591,45 @@ fn i64_dense_histogram_range(data: &[i64]) -> Option<(i64, usize)> {
     }
 }
 
+/// Build a dense membership bitset over the value span of `test_values` when
+/// they are ALL non-missing `Int64` and the span fits the direct-address cap
+/// (16M entries). Returns `(min, bits)` such that `value ∈ set` iff
+/// `min <= value <= min+bits.len()-1 && bits[value-min]`. Returns `None` for
+/// empty needles, any non-Int64 needle, or a too-wide span — callers fall back
+/// to the `IsinIndex` HashSet. With only Int64 needles, `IsinIndex::contains`
+/// for an Int64 value reduces to `ints.contains`, so the bitset is bit-identical.
+fn int_needle_membership_bitset(test_values: &[Scalar]) -> Option<(i64, Vec<bool>)> {
+    if test_values.is_empty() {
+        return None;
+    }
+    let mut min = i64::MAX;
+    let mut max = i64::MIN;
+    for tv in test_values {
+        match tv {
+            Scalar::Int64(i) => {
+                if *i < min {
+                    min = *i;
+                }
+                if *i > max {
+                    max = *i;
+                }
+            }
+            _ => return None,
+        }
+    }
+    let range = (max as i128 - min as i128 + 1) as u128;
+    if range > (1u128 << 24) {
+        return None;
+    }
+    let mut bits = vec![false; range as usize];
+    for tv in test_values {
+        if let Scalar::Int64(i) = tv {
+            bits[(*i as i128 - min as i128) as usize] = true;
+        }
+    }
+    Some((min, bits))
+}
+
 fn compare_scalars_with_na_position(
     left: &Scalar,
     right: &Scalar,
@@ -9211,6 +9250,32 @@ impl Series {
     }
 
     pub fn isin(&self, test_values: &[Scalar]) -> Result<Self, FrameError> {
+        // Direct-address membership fast path: an all-valid Int64 column tested
+        // against all-Int64 needles in a bounded span probes a dense bitset
+        // (1 load/elem) instead of the SipHash HashSet. Bit-identical because
+        // with only Int64 needles IsinIndex::contains(Int64) == ints.contains.
+        if let Some(data) = self.column.as_i64_slice()
+            && let Some((min, bits)) = int_needle_membership_bitset(test_values)
+        {
+            let len = bits.len() as i128;
+            // Typed Bool output (1 byte/elem) instead of Vec<Scalar::Bool>
+            // (32 bytes/elem) — isin is output-bound at large n, so this cut
+            // matters as much as the hash-free probe. from_bool_values yields
+            // the same Bool column as Column::from_values over Scalar::Bool.
+            let flags: Vec<bool> = data
+                .iter()
+                .map(|&v| {
+                    let off = v as i128 - min as i128;
+                    off >= 0 && off < len && bits[off as usize]
+                })
+                .collect();
+            return Series::new(
+                self.name.clone(),
+                self.index.clone(),
+                Column::from_bool_values(flags),
+            );
+        }
+
         // Per br-frankenpandas-f7201: O(n + m) — build the membership
         // index ONCE, then do O(1) lookup per element.
         let idx = IsinIndex::build(test_values);
@@ -115200,6 +115265,117 @@ mod test_select_columns_perf_76e1fd {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn isin_int_bitset_matches_reference() {
+        // Independent reference: membership via a plain Vec scan over the
+        // needles. The dense-bitset fast path (all-Int64 needles, bounded span)
+        // must be bit-identical for an all-valid Int64 column — including self
+        // values OUTSIDE the needle span (→ false) and duplicate needles.
+        let mut state: u64 = 0xB5C0_FBCF_EC4D_3B2F;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            state
+        };
+        for trial in 0..150 {
+            let n = (next() % 250) as usize + 1;
+            let data: Vec<i64> = (0..n).map(|_| (next() % 20) as i64 - 8).collect();
+            let m = (next() % 12) as usize;
+            let needle_vals: Vec<i64> = (0..m).map(|_| (next() % 16) as i64 - 6).collect();
+            let needles: Vec<Scalar> = needle_vals.iter().map(|&v| Scalar::Int64(v)).collect();
+
+            let labels: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
+            let series = Series::new(
+                "s".to_owned(),
+                Index::new(labels),
+                Column::from_i64_values(data.clone()),
+            )
+            .unwrap();
+
+            let got: Vec<bool> = series
+                .isin(&needles)
+                .unwrap()
+                .values()
+                .iter()
+                .map(|v| matches!(v, Scalar::Bool(true)))
+                .collect();
+            let want: Vec<bool> = data.iter().map(|v| needle_vals.contains(v)).collect();
+            assert_eq!(got, want, "trial {trial} isin (needles={needle_vals:?})");
+        }
+    }
+
+    #[test]
+    #[ignore = "timing benchmark; run with --ignored --nocapture on the rch VM"]
+    fn isin_bitset_timing_vs_hashset() {
+        use std::time::Instant;
+        let n = 5_000_000usize;
+        let iters = 10;
+        // Large-ish needle set within a bounded span (the regime where the
+        // SipHash HashSet spills cache and the bitset wins).
+        for needle_count in [64usize, 100_000usize] {
+            let mut state: u64 = 0x9E37_79B9_7F4A_7C15 ^ needle_count as u64;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            let span = 2_000_000i64;
+            let data: Vec<i64> = (0..n).map(|_| (next() % span as u64) as i64).collect();
+            let needles: Vec<Scalar> = (0..needle_count)
+                .map(|_| Scalar::Int64((next() % span as u64) as i64))
+                .collect();
+            let labels: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
+            let series = Series::new(
+                "s".to_owned(),
+                Index::new(labels),
+                Column::from_i64_values(data.clone()),
+            )
+            .unwrap();
+
+            let t0 = Instant::now();
+            let mut chk = 0usize;
+            for _ in 0..iters {
+                let r = series.isin(&needles).unwrap();
+                chk ^= r
+                    .values()
+                    .iter()
+                    .filter(|v| matches!(v, Scalar::Bool(true)))
+                    .count();
+            }
+            let bitset = t0.elapsed();
+
+            // OLD full path: IsinIndex (std SipHash HashSet) probe + a
+            // Vec<Scalar::Bool> (32B/elem) output + Column::from_values + Series
+            // build — the same work the fast path replaces end-to-end.
+            let t1 = Instant::now();
+            let mut chk2 = 0usize;
+            for _ in 0..iters {
+                let idx = IsinIndex::build(&needles);
+                let values: Vec<Scalar> = series
+                    .column
+                    .values()
+                    .iter()
+                    .map(|value| Scalar::Bool(idx.contains(value)))
+                    .collect();
+                let out = series
+                    .with_labels_and_values_preserving_name(series.index.labels().to_vec(), values)
+                    .unwrap();
+                chk2 ^= out
+                    .values()
+                    .iter()
+                    .filter(|v| matches!(v, Scalar::Bool(true)))
+                    .count();
+            }
+            let hashset = t1.elapsed();
+            eprintln!(
+                "isin 5M i64 needles={needle_count} x{iters}: bitset={bitset:?} hashset={hashset:?} ratio={:.2}x (chk {chk}/{chk2})",
+                hashset.as_secs_f64() / bitset.as_secs_f64()
+            );
         }
     }
 
