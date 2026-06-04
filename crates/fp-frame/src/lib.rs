@@ -42856,7 +42856,7 @@ impl DataFrameGroupBy<'_> {
         // group size. Other funcs / non-Float64 / multi-col keys fall through.
         let dense: Option<(Vec<usize>, Vec<usize>, usize)> = if matches!(
             func_name,
-            "sum" | "mean" | "count" | "min" | "max"
+            "sum" | "mean" | "count" | "min" | "max" | "var" | "std"
         ) && self.by.len() == 1
         {
             self.df.columns[&self.by[0]]
@@ -42940,6 +42940,33 @@ impl DataFrameGroupBy<'_> {
                         }
                         agg_vals.extend(go_gid.iter().map(|&g| Scalar::Float64(cur[g])));
                     }
+                    "var" | "std" => {
+                        // Two-pass per group exactly like nanvar(.,ddof=1):
+                        // mean = row-order sum/count, then sum_sq =
+                        // Σ(x-mean).powi(2) in row order, /(n-1). n<=1 ⇒ Null.
+                        let want_std = func_name == "std";
+                        let mut sum = vec![0.0_f64; ng];
+                        let mut cnt = vec![0u64; ng];
+                        for (row, &v) in vals.iter().enumerate() {
+                            let g = gid_per_row[row];
+                            sum[g] += v;
+                            cnt[g] += 1;
+                        }
+                        let means: Vec<f64> = (0..ng).map(|g| sum[g] / cnt[g] as f64).collect();
+                        let mut sumsq = vec![0.0_f64; ng];
+                        for (row, &v) in vals.iter().enumerate() {
+                            let g = gid_per_row[row];
+                            sumsq[g] += (v - means[g]).powi(2);
+                        }
+                        agg_vals.extend(go_gid.iter().map(|&g| {
+                            if cnt[g] <= 1 {
+                                Scalar::Null(NullKind::NaN)
+                            } else {
+                                let var = sumsq[g] / (cnt[g] - 1) as f64;
+                                Scalar::Float64(if want_std { var.sqrt() } else { var })
+                            }
+                        }));
+                    }
                     _ => {
                         // mean
                         let mut acc = vec![0.0_f64; ng];
@@ -42965,30 +42992,59 @@ impl DataFrameGroupBy<'_> {
             // (sum/mean need i128 accumulation / nanmean dtype rules). Int64
             // min/max preserve dtype; nanmin/nanmax seed-first + strict compare.
             if let Some((go_gid, gid_per_row, ngroups)) = &dense
-                && matches!(func_name, "min" | "max" | "count")
+                && matches!(func_name, "min" | "max" | "count" | "var" | "std")
                 && let Some(vals) = col.as_i64_slice()
             {
                 let ng = *ngroups;
-                if func_name == "count" {
-                    let mut cnt = vec![0i64; ng];
-                    for &g in gid_per_row {
-                        cnt[g] += 1;
-                    }
-                    agg_vals.extend(go_gid.iter().map(|&g| Scalar::Int64(cnt[g])));
-                } else {
-                    let want_min = func_name == "min";
-                    let mut cur = vec![0i64; ng];
-                    let mut seen = vec![false; ng];
-                    for (row, &v) in vals.iter().enumerate() {
-                        let g = gid_per_row[row];
-                        if !seen[g] {
-                            cur[g] = v;
-                            seen[g] = true;
-                        } else if (want_min && v < cur[g]) || (!want_min && v > cur[g]) {
-                            cur[g] = v;
+                match func_name {
+                    "count" => {
+                        let mut cnt = vec![0i64; ng];
+                        for &g in gid_per_row {
+                            cnt[g] += 1;
                         }
+                        agg_vals.extend(go_gid.iter().map(|&g| Scalar::Int64(cnt[g])));
                     }
-                    agg_vals.extend(go_gid.iter().map(|&g| Scalar::Int64(cur[g])));
+                    "min" | "max" => {
+                        let want_min = func_name == "min";
+                        let mut cur = vec![0i64; ng];
+                        let mut seen = vec![false; ng];
+                        for (row, &v) in vals.iter().enumerate() {
+                            let g = gid_per_row[row];
+                            if !seen[g] {
+                                cur[g] = v;
+                                seen[g] = true;
+                            } else if (want_min && v < cur[g]) || (!want_min && v > cur[g]) {
+                                cur[g] = v;
+                            }
+                        }
+                        agg_vals.extend(go_gid.iter().map(|&g| Scalar::Int64(cur[g])));
+                    }
+                    _ => {
+                        // var/std: nanvar coerces Int64 to f64 (collect_finite),
+                        // so compute in f64 exactly as the Float64 path. ddof=1.
+                        let want_std = func_name == "std";
+                        let mut sum = vec![0.0_f64; ng];
+                        let mut cnt = vec![0u64; ng];
+                        for (row, &v) in vals.iter().enumerate() {
+                            let g = gid_per_row[row];
+                            sum[g] += v as f64;
+                            cnt[g] += 1;
+                        }
+                        let means: Vec<f64> = (0..ng).map(|g| sum[g] / cnt[g] as f64).collect();
+                        let mut sumsq = vec![0.0_f64; ng];
+                        for (row, &v) in vals.iter().enumerate() {
+                            let g = gid_per_row[row];
+                            sumsq[g] += (v as f64 - means[g]).powi(2);
+                        }
+                        agg_vals.extend(go_gid.iter().map(|&g| {
+                            if cnt[g] <= 1 {
+                                Scalar::Null(NullKind::NaN)
+                            } else {
+                                let var = sumsq[g] / (cnt[g] - 1) as f64;
+                                Scalar::Float64(if want_std { var.sqrt() } else { var })
+                            }
+                        }));
+                    }
                 }
                 result_cols.insert(col_name.clone(), Column::from_values(agg_vals)?);
                 col_order.push(col_name.clone());
@@ -115728,6 +115784,48 @@ mod test_select_columns_perf_76e1fd {
             }
             for (g, w) in f64_of(&gb.max().unwrap()).iter().zip(&want_max) {
                 assert_eq!(g.to_bits(), w.to_bits(), "trial {trial} max");
+            }
+            // var/std: two-pass mean then Σ(x-mean)^2 / (n-1), ddof=1, n<=1→Null.
+            let nan_of = |res: &DataFrame| -> Vec<Option<f64>> {
+                res.column("v")
+                    .unwrap()
+                    .values()
+                    .iter()
+                    .map(|v| match v {
+                        Scalar::Float64(x) => Some(*x),
+                        Scalar::Null(_) => None,
+                        other => panic!("{other:?}"),
+                    })
+                    .collect()
+            };
+            let want_var: Vec<Option<f64>> = distinct
+                .iter()
+                .map(|&g| {
+                    let gv = group_f64(g);
+                    if gv.len() <= 1 {
+                        None
+                    } else {
+                        let mean = gv.iter().sum::<f64>() / gv.len() as f64;
+                        let ss: f64 = gv.iter().map(|x| (x - mean).powi(2)).sum();
+                        Some(ss / (gv.len() - 1) as f64)
+                    }
+                })
+                .collect();
+            for (g, w) in nan_of(&gb.var().unwrap()).iter().zip(&want_var) {
+                match (g, w) {
+                    (Some(a), Some(b)) => assert_eq!(a.to_bits(), b.to_bits(), "trial {trial} var"),
+                    (None, None) => {}
+                    _ => panic!("trial {trial} var null mismatch {g:?} {w:?}"),
+                }
+            }
+            for (g, w) in nan_of(&gb.std().unwrap()).iter().zip(&want_var) {
+                match (g, w) {
+                    (Some(a), Some(b)) => {
+                        assert_eq!(a.to_bits(), b.sqrt().to_bits(), "trial {trial} std")
+                    }
+                    (None, None) => {}
+                    _ => panic!("trial {trial} std null mismatch"),
+                }
             }
         }
     }
