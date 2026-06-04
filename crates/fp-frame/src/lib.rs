@@ -42937,38 +42937,88 @@ impl DataFrameGroupBy<'_> {
         let dense: Option<(Vec<usize>, Vec<usize>, usize)> = if matches!(
             func_name,
             "sum" | "mean" | "count" | "min" | "max" | "var" | "std"
-        ) && self.by.len() == 1
+        ) && !self.by.is_empty()
         {
-            self.df.columns[&self.by[0]]
-                .as_i64_slice()
-                .and_then(|keys| {
-                    i64_dense_histogram_range(keys).map(|(min, range)| {
-                        let mut gid_table = vec![usize::MAX; range];
-                        let mut gid_per_row = vec![0usize; keys.len()];
-                        let mut ngroups = 0usize;
-                        for (row, &k) in keys.iter().enumerate() {
-                            let slot = (k as i128 - min as i128) as usize;
-                            let g = if gid_table[slot] == usize::MAX {
-                                gid_table[slot] = ngroups;
-                                ngroups += 1;
-                                ngroups - 1
-                            } else {
-                                gid_table[slot]
-                            };
-                            gid_per_row[row] = g;
+            // Gather all-valid Int64 key slices + per-column (min, span). Bail
+            // unless every key column is Int64 and the product of spans fits the
+            // direct-address cap (mirrors build_groups' dense gate).
+            let mut slices: Vec<&[i64]> = Vec::with_capacity(self.by.len());
+            let mut mins: Vec<i64> = Vec::with_capacity(self.by.len());
+            let mut ranges: Vec<usize> = Vec::with_capacity(self.by.len());
+            let mut ok = true;
+            for name in &self.by {
+                if let Some(s) = self.df.columns[name].as_i64_slice()
+                    && !s.is_empty()
+                {
+                    let mut mn = s[0];
+                    let mut mx = s[0];
+                    for &v in s {
+                        if v < mn {
+                            mn = v;
+                        } else if v > mx {
+                            mx = v;
                         }
-                        let go_gid: Vec<usize> = group_order
-                            .iter()
-                            .map(|gk| match gk[0] {
+                    }
+                    slices.push(s);
+                    mins.push(mn);
+                    ranges.push((mx as i128 - mn as i128 + 1) as usize);
+                } else {
+                    ok = false;
+                    break;
+                }
+            }
+            let combined: u128 = if ok {
+                ranges
+                    .iter()
+                    .fold(1u128, |a, &r| a.saturating_mul(r as u128))
+            } else {
+                u128::MAX
+            };
+            let nrows = if ok { slices[0].len() } else { 0 };
+            if ok && combined <= (1u128 << 24) && combined <= (nrows as u128).saturating_mul(16) {
+                let combined = combined as usize;
+                let ncol = ranges.len();
+                let mut strides = vec![1usize; ncol];
+                for c in (0..ncol - 1).rev() {
+                    strides[c] = strides[c + 1] * ranges[c + 1];
+                }
+                let mut gid_table = vec![usize::MAX; combined];
+                let mut gid_per_row = vec![0usize; nrows];
+                let mut ngroups = 0usize;
+                #[allow(clippy::needless_range_loop)] // row indexes every key slice
+                for row in 0..nrows {
+                    let mut slot = 0usize;
+                    for c in 0..ncol {
+                        slot += (slices[c][row] as i128 - mins[c] as i128) as usize * strides[c];
+                    }
+                    let g = if gid_table[slot] == usize::MAX {
+                        gid_table[slot] = ngroups;
+                        ngroups += 1;
+                        ngroups - 1
+                    } else {
+                        gid_table[slot]
+                    };
+                    gid_per_row[row] = g;
+                }
+                let go_gid: Vec<usize> = group_order
+                    .iter()
+                    .map(|gk| {
+                        let mut slot = 0usize;
+                        for c in 0..ncol {
+                            match gk[c] {
                                 ScalarKey::Int64(v) => {
-                                    gid_table[(v as i128 - min as i128) as usize]
+                                    slot += (v as i128 - mins[c] as i128) as usize * strides[c];
                                 }
-                                _ => unreachable!("single Int64 key"),
-                            })
-                            .collect();
-                        (go_gid, gid_per_row, ngroups)
+                                _ => unreachable!("dense gate guarantees Int64 keys"),
+                            }
+                        }
+                        gid_table[slot]
                     })
-                })
+                    .collect();
+                Some((go_gid, gid_per_row, ngroups))
+            } else {
+                None
+            }
         } else {
             None
         };
@@ -116148,6 +116198,48 @@ mod test_select_columns_perf_76e1fd {
                 .collect();
             assert_eq!(got, want_sum, "trial {trial} multicol sum (n={n})");
             assert_eq!(res.shape().0, pairs.len(), "trial {trial} group count");
+
+            // Float64 value column → multi-col dense agg (mean), bit-exact.
+            let fvals: Vec<f64> = vals.iter().map(|&v| v as f64 / 4.0).collect();
+            let dff = DataFrame::from_dict(
+                &["a", "b", "v"],
+                vec![
+                    ("a", ka.iter().map(|&v| Scalar::Int64(v)).collect()),
+                    ("b", kb.iter().map(|&v| Scalar::Int64(v)).collect()),
+                    ("v", fvals.iter().map(|&v| Scalar::Float64(v)).collect()),
+                ],
+            )
+            .unwrap();
+            let want_mean: Vec<f64> = pairs
+                .iter()
+                .map(|&(a, b)| {
+                    let gv: Vec<f64> = ka
+                        .iter()
+                        .zip(&kb)
+                        .zip(&fvals)
+                        .filter(|((x, y), _)| **x == a && **y == b)
+                        .map(|(_, &v)| v)
+                        .collect();
+                    gv.iter().sum::<f64>() / gv.len() as f64
+                })
+                .collect();
+            let got_mean: Vec<f64> = dff
+                .groupby(&["a", "b"])
+                .unwrap()
+                .mean()
+                .unwrap()
+                .column("v")
+                .unwrap()
+                .values()
+                .iter()
+                .map(|v| match v {
+                    Scalar::Float64(x) => *x,
+                    other => panic!("{other:?}"),
+                })
+                .collect();
+            for (g, w) in got_mean.iter().zip(&want_mean) {
+                assert_eq!(g.to_bits(), w.to_bits(), "trial {trial} multicol mean");
+            }
         }
     }
 
