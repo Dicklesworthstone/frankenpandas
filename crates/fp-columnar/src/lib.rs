@@ -1125,6 +1125,69 @@ fn compare_scalars_na_last(left: &Scalar, right: &Scalar, ascending: bool) -> st
     }
 }
 
+/// Map an `i64` to an order-preserving `u64` radix key (flip the sign bit so
+/// two's-complement negatives sort below non-negatives in unsigned order).
+#[inline]
+fn i64_radix_key(value: i64) -> u64 {
+    (value as u64) ^ (1u64 << 63)
+}
+
+/// Map an `f64` to an order-preserving `u64` radix key. For a non-negative
+/// value flip only the sign bit; for a negative value flip every bit. This is
+/// the standard IEEE-754 "sortable bits" transform and is monotonic across the
+/// whole finite range (callers guarantee no NaN — `as_f64_slice` only yields
+/// all-valid buffers and FP models NaN as missing). `-0.0` and `+0.0` map to
+/// distinct keys but compare equal under the comparator path; we normalize
+/// `-0.0`→`+0.0` first so the radix order matches `partial_cmp` exactly.
+#[inline]
+fn f64_radix_key(value: f64) -> u64 {
+    let bits = (if value == 0.0 { 0.0 } else { value }).to_bits();
+    if bits & (1u64 << 63) != 0 {
+        !bits
+    } else {
+        bits | (1u64 << 63)
+    }
+}
+
+/// Stable LSD radix argsort over pre-computed `u64` keys (8 passes of 8-bit
+/// counting sort). Returns the permutation `perm` such that
+/// `keys[perm[0]] <= keys[perm[1]] <= ...`, with equal keys keeping their
+/// original relative order (stability == the comparator path's tie behavior).
+/// O(n) per pass, comparison-free — replaces the O(n log n) `Scalar`-enum
+/// comparator for all-valid numeric columns.
+fn radix_argsort_u64(keys: &[u64]) -> Vec<usize> {
+    let n = keys.len();
+    let mut idx: Vec<usize> = (0..n).collect();
+    if n < 2 {
+        return idx;
+    }
+    let mut scratch: Vec<usize> = vec![0; n];
+    for shift in (0..64).step_by(8) {
+        let mut count = [0usize; 256];
+        for &k in keys {
+            count[((k >> shift) & 0xff) as usize] += 1;
+        }
+        // Skip a pass whose byte is constant across the whole column (common
+        // for clustered / small-magnitude data) — keeps `idx` in place.
+        if count.contains(&n) {
+            continue;
+        }
+        let mut running = 0usize;
+        for slot in &mut count {
+            let c = *slot;
+            *slot = running;
+            running += c;
+        }
+        for &i in &idx {
+            let bucket = ((keys[i] >> shift) & 0xff) as usize;
+            scratch[count[bucket]] = i;
+            count[bucket] += 1;
+        }
+        std::mem::swap(&mut idx, &mut scratch);
+    }
+    idx
+}
+
 fn normalized_float_bits(value: f64) -> u64 {
     let normalized = if value == 0.0 { 0.0 } else { value };
     normalized.to_bits()
@@ -6231,7 +6294,50 @@ impl Column {
     /// Matches `pd.Series.sort_values(ascending=...)`. Missing values
     /// are placed at the end (pandas `na_position='last'` default).
     /// Stable sort.
+    /// Stable sorting permutation for an all-valid numeric column via radix
+    /// sort over the typed buffer, or `None` when the typed fast path does not
+    /// apply (non-numeric dtype, or any missing value — those go through the
+    /// `Scalar` comparator which alone reasons about na-last placement). The
+    /// permutation is bit-identical to the stable comparator path: monotonic
+    /// radix keys preserve `<` order and stable counting-sort preserves ties.
+    fn typed_radix_perm(&self, ascending: bool) -> Option<Vec<usize>> {
+        if let Some(data) = self.as_i64_slice() {
+            let keys: Vec<u64> = if ascending {
+                data.iter().map(|&v| i64_radix_key(v)).collect()
+            } else {
+                data.iter().map(|&v| !i64_radix_key(v)).collect()
+            };
+            return Some(radix_argsort_u64(&keys));
+        }
+        if let Some(data) = self.as_f64_slice() {
+            let keys: Vec<u64> = if ascending {
+                data.iter().map(|&v| f64_radix_key(v)).collect()
+            } else {
+                data.iter().map(|&v| !f64_radix_key(v)).collect()
+            };
+            return Some(radix_argsort_u64(&keys));
+        }
+        None
+    }
+
     pub fn sort_values(&self, ascending: bool) -> Result<Self, ColumnError> {
+        // Typed radix fast path: all-valid Int64/Float64 columns sort their
+        // contiguous buffer comparison-free, then re-ingest typed (no 32B
+        // Scalar clone or enum-match per comparison).
+        if let Some(data) = self.as_i64_slice() {
+            let perm = self
+                .typed_radix_perm(ascending)
+                .expect("i64 slice yields perm");
+            let sorted: Vec<i64> = perm.iter().map(|&i| data[i]).collect();
+            return Ok(Self::from_i64_values(sorted));
+        }
+        if let Some(data) = self.as_f64_slice() {
+            let perm = self
+                .typed_radix_perm(ascending)
+                .expect("f64 slice yields perm");
+            let sorted: Vec<f64> = perm.iter().map(|&i| data[i]).collect();
+            return Ok(Self::from_f64_values(sorted));
+        }
         let mut indexed: Vec<(usize, &Scalar)> = self.values.iter().enumerate().collect();
         indexed.sort_by(|a, b| compare_scalars_na_last(a.1, b.1, ascending));
         let sorted: Vec<Scalar> = indexed.into_iter().map(|(_, v)| v.clone()).collect();
@@ -6245,6 +6351,9 @@ impl Column {
     /// sort to the end; stable.
     #[must_use]
     pub fn argsort(&self) -> Vec<usize> {
+        if let Some(perm) = self.typed_radix_perm(true) {
+            return perm;
+        }
         let mut indexed: Vec<(usize, &Scalar)> = self.values.iter().enumerate().collect();
         indexed.sort_by(|a, b| compare_scalars_na_last(a.1, b.1, true));
         indexed.into_iter().map(|(i, _)| i).collect()
@@ -11612,6 +11721,125 @@ mod tests {
             let via_take = col.take(&positions).expect("take");
             let via_sort = col.sort_values(true).expect("sort");
             assert_eq!(via_take.values(), via_sort.values());
+        }
+
+        // Naive comparator reference (the pre-radix Scalar path) for isomorphism
+        // proofs: rebuilds the sorted Scalar vec exactly as the old code did.
+        fn scalar_sort_reference(values: &[Scalar], ascending: bool) -> Vec<Scalar> {
+            let mut indexed: Vec<(usize, &Scalar)> = values.iter().enumerate().collect();
+            indexed.sort_by(|a, b| crate::compare_scalars_na_last(a.1, b.1, ascending));
+            indexed.into_iter().map(|(_, v)| v.clone()).collect()
+        }
+
+        #[test]
+        fn radix_sort_matches_scalar_reference_i64_and_f64() {
+            // Deterministic LCG covering negatives, zero, duplicates (tie
+            // stability), and large magnitudes — the typed radix path must be
+            // BIT-IDENTICAL to the stable Scalar comparator path, both orders.
+            let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            for trial in 0..200 {
+                let n = (next() % 400) as usize + 1;
+                let i64_vals: Vec<Scalar> = (0..n)
+                    .map(|_| {
+                        // Narrow range forces frequent ties; occasional wide value.
+                        let r = next();
+                        let v = if r % 7 == 0 {
+                            (r as i64) // full-width incl negatives via wraparound
+                        } else {
+                            (r % 11) as i64 - 5
+                        };
+                        Scalar::Int64(v)
+                    })
+                    .collect();
+                let f64_vals: Vec<Scalar> = i64_vals
+                    .iter()
+                    .map(|s| match s {
+                        Scalar::Int64(v) => {
+                            // Map into floats incl negatives, zero, fractional ties.
+                            let f = (*v as f64) / 4.0;
+                            Scalar::Float64(if f == 0.0 { 0.0 } else { f })
+                        }
+                        _ => unreachable!(),
+                    })
+                    .collect();
+                for (vals, label) in [(&i64_vals, "i64"), (&f64_vals, "f64")] {
+                    let col = Column::from_values(vals.clone()).expect("col");
+                    // Skip if any value became missing (NaN guard not exercised here).
+                    assert!(
+                        col.validity.all(),
+                        "{label} trial {trial}: unexpected missing"
+                    );
+                    for ascending in [true, false] {
+                        let got = col.sort_values(ascending).expect("sort").values().to_vec();
+                        let want = scalar_sort_reference(vals, ascending);
+                        assert_eq!(
+                            got, want,
+                            "{label} trial {trial} asc={ascending} sort mismatch"
+                        );
+                    }
+                    // argsort (ascending) must reproduce the stable permutation.
+                    let perm = col.argsort();
+                    let via_perm: Vec<Scalar> = perm.iter().map(|&i| vals[i].clone()).collect();
+                    assert_eq!(
+                        via_perm,
+                        scalar_sort_reference(vals, true),
+                        "{label} trial {trial} argsort mismatch"
+                    );
+                }
+            }
+        }
+
+        #[test]
+        #[ignore = "timing benchmark; run with --ignored --nocapture on the rch VM"]
+        fn radix_sort_timing_vs_scalar() {
+            use std::time::Instant;
+            let n = 5_000_000usize;
+            let mut state: u64 = 0x1234_5678_9ABC_DEF0;
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                state
+            };
+            let data: Vec<i64> = (0..n).map(|_| next() as i64).collect();
+            let col = Column::from_i64_values(data.clone());
+
+            let iters = 10;
+            let t0 = Instant::now();
+            let mut checksum = 0i64;
+            for _ in 0..iters {
+                let sorted = col.sort_values(true).expect("radix");
+                checksum ^= match &sorted.values()[0] {
+                    Scalar::Int64(v) => *v,
+                    _ => 0,
+                };
+            }
+            let radix = t0.elapsed();
+
+            // Old Scalar comparator path, reproduced inline for the A/B.
+            let scalar_col = Column::from_values(data.iter().map(|&v| Scalar::Int64(v)).collect())
+                .expect("scalar col");
+            let t1 = Instant::now();
+            let mut checksum2 = 0i64;
+            for _ in 0..iters {
+                let mut indexed: Vec<(usize, &Scalar)> =
+                    scalar_col.values().iter().enumerate().collect();
+                indexed.sort_by(|a, b| crate::compare_scalars_na_last(a.1, b.1, true));
+                if let Scalar::Int64(v) = indexed[0].1 {
+                    checksum2 ^= *v;
+                }
+            }
+            let scalar = t1.elapsed();
+            eprintln!(
+                "sort_single 5M i64 x{iters}: radix={radix:?} scalar={scalar:?} ratio={:.2}x (chk {checksum}/{checksum2})",
+                scalar.as_secs_f64() / radix.as_secs_f64()
+            );
         }
 
         #[test]
