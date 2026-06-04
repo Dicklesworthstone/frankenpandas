@@ -633,3 +633,51 @@ fn series_quantile_all_interpolations_with_nan_match_pandas() {
         }
     }
 }
+
+#[test]
+fn series_mode_and_nlargest_nsmallest_keep_match_pandas() {
+    // Differential guard vs pandas 2.2.3 for tie-sensitive selection ops.
+    use fp_columnar::Column;
+    use fp_frame::Series;
+    use fp_index::{Index, IndexLabel};
+    use fp_types::{NullKind, Scalar};
+
+    let mk = |labels: Vec<i64>, vals: Vec<Scalar>| {
+        Series::new(
+            "s",
+            Index::new(labels.into_iter().map(IndexLabel::Int64).collect()),
+            Column::from_values(vals).unwrap(),
+        )
+        .expect("series")
+    };
+    let f = Scalar::Float64;
+    let vals_of = |r: &Series| -> Vec<f64> {
+        r.column().values().iter().filter_map(|v| v.to_f64().ok()).collect()
+    };
+    let labels_of = |r: &Series| -> Vec<i64> {
+        r.index()
+            .labels()
+            .iter()
+            .map(|l| match l {
+                IndexLabel::Int64(v) => *v,
+                _ => panic!("non-int label"),
+            })
+            .collect()
+    };
+
+    // mode(): multimodal -> ascending-sorted modal values [1, 2].
+    let m = mk(
+        (0..6).collect(),
+        vec![f(2.0), f(2.0), f(1.0), f(1.0), f(3.0), Scalar::Null(NullKind::NaN)],
+    );
+    assert_eq!(vals_of(&m.mode().expect("mode")), vec![1.0, 2.0]);
+
+    // nlargest/nsmallest keep semantics. t = [5,3,5,1,3,5] at labels 0..5.
+    let t = mk((0..6).collect(), vec![f(5.0), f(3.0), f(5.0), f(1.0), f(3.0), f(5.0)]);
+    // keep='first': ties resolved by original position -> labels 0,2,5.
+    assert_eq!(labels_of(&t.nlargest_keep(3, "first").expect("nl-first")), vec![0, 2, 5]);
+    // keep='last': ties resolved reverse -> labels 5,2,0.
+    assert_eq!(labels_of(&t.nlargest_keep(3, "last").expect("nl-last")), vec![5, 2, 0]);
+    // nsmallest keep='first': 1 (label 3) then first 3 (label 1).
+    assert_eq!(labels_of(&t.nsmallest_keep(2, "first").expect("ns-first")), vec![3, 1]);
+}
