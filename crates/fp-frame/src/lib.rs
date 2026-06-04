@@ -43127,7 +43127,17 @@ impl DataFrameGroupBy<'_> {
         // group size. Other funcs / non-Float64 / multi-col keys fall through.
         let dense: Option<(Vec<usize>, Vec<usize>, usize)> = if matches!(
             func_name,
-            "sum" | "mean" | "count" | "min" | "max" | "var" | "std" | "first" | "last" | "prod"
+            "sum"
+                | "mean"
+                | "count"
+                | "min"
+                | "max"
+                | "var"
+                | "std"
+                | "first"
+                | "last"
+                | "prod"
+                | "median"
         ) && !self.by.is_empty()
         {
             // Gather all-valid Int64 key slices + per-column (min, span). Bail
@@ -43314,6 +43324,18 @@ impl DataFrameGroupBy<'_> {
                         }
                         agg_vals.extend(go_gid.iter().map(|&g| Scalar::Float64(acc[g])));
                     }
+                    "median" => {
+                        // Bucket each group's values, then O(n) quickselect
+                        // median per group (= nanmedian's sort result, proven
+                        // bit-identical by typed_median_f64). All-valid ⇒ every
+                        // group non-empty.
+                        let mut buckets: Vec<Vec<f64>> = vec![Vec::new(); ng];
+                        for (row, &v) in vals.iter().enumerate() {
+                            buckets[gid_per_row[row]].push(v);
+                        }
+                        let meds: Vec<f64> = buckets.into_iter().map(typed_median_f64).collect();
+                        agg_vals.extend(go_gid.iter().map(|&g| Scalar::Float64(meds[g])));
+                    }
                     _ => {
                         // mean
                         let mut acc = vec![0.0_f64; ng];
@@ -43351,6 +43373,7 @@ impl DataFrameGroupBy<'_> {
                         | "first"
                         | "last"
                         | "prod"
+                        | "median"
                 )
                 && let Some(vals) = col.as_i64_slice()
             {
@@ -43428,6 +43451,16 @@ impl DataFrameGroupBy<'_> {
                             acc[gid_per_row[row]] *= v as f64;
                         }
                         agg_vals.extend(go_gid.iter().map(|&g| Scalar::Float64(acc[g])));
+                    }
+                    "median" => {
+                        // nanmedian coerces Int64→f64 → Float64 median; quickselect
+                        // per group, bit-identical to the sort.
+                        let mut buckets: Vec<Vec<f64>> = vec![Vec::new(); ng];
+                        for (row, &v) in vals.iter().enumerate() {
+                            buckets[gid_per_row[row]].push(v as f64);
+                        }
+                        let meds: Vec<f64> = buckets.into_iter().map(typed_median_f64).collect();
+                        agg_vals.extend(go_gid.iter().map(|&g| Scalar::Float64(meds[g])));
                     }
                     _ => {
                         // var/std: nanvar coerces Int64 to f64 (collect_finite),
@@ -116642,6 +116675,25 @@ mod test_select_columns_perf_76e1fd {
                 .collect();
             for (g, w) in f64_of(&gb.prod().unwrap()).iter().zip(&want_prod) {
                 assert_eq!(g.to_bits(), w.to_bits(), "trial {trial} prod");
+            }
+            // median: sort-based reference (per group), bit-exact.
+            let want_median: Vec<f64> = distinct
+                .iter()
+                .map(|&g| {
+                    let mut gv = group_f64(g);
+                    gv.sort_unstable_by(|a, b| {
+                        a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    let mid = gv.len() / 2;
+                    if gv.len() % 2 == 0 {
+                        (gv[mid - 1] + gv[mid]) / 2.0
+                    } else {
+                        gv[mid]
+                    }
+                })
+                .collect();
+            for (g, w) in f64_of(&gb.median().unwrap()).iter().zip(&want_median) {
+                assert_eq!(g.to_bits(), w.to_bits(), "trial {trial} median");
             }
         }
     }
